@@ -167,6 +167,7 @@ def reader() -> None:
 def writer(forced_syms: set[str], deadline: float | None) -> None:
     global running
     last_refresh = 0.0
+    last_prune = 0.0
     ins = sa.text(
         "INSERT INTO iqfeed_depth_snapshots (symbol, observed_at, bid_top, ask_top, "
         "bid_top_size, ask_top_size, bid5_size, ask5_size, imbalance5, venues) "
@@ -174,6 +175,17 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
     )
     while running and (deadline is None or time.monotonic() < deadline):
         time.sleep(SNAP_INTERVAL_S)
+        if time.monotonic() - last_prune >= 3600.0:
+            # retention prune (the exit_parity_log bloat lesson): depth snapshots
+            # are a rolling research window, not an archive — keep 7 days
+            try:
+                with engine.begin() as c:
+                    c.execute(sa.text(
+                        "DELETE FROM iqfeed_depth_snapshots "
+                        "WHERE observed_at < (now() at time zone 'utc') - interval '7 days'"))
+            except Exception as e:
+                log.debug("retention prune failed: %s", e)
+            last_prune = time.monotonic()
         if time.monotonic() - last_refresh >= REFRESH_S:
             target = forced_syms or _live_symbols()
             fresh = target - watched

@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 
@@ -104,6 +105,13 @@ class PaperRunnerLoop:
     def __init__(self) -> None:
         self._tracker = _SessionTracker()
         self._running = False
+        # WS-THREAD PROTECTION (2026-06-11): tick/candle callbacks fire on the
+        # massive-ws RECEIVE thread; running tick_paper_session (DB + compute)
+        # inline there serializes the QUOTE STREAM for every consumer — incl.
+        # the LIVE lane's event exits — exactly during a hot-name tick storm.
+        # Dispatch to a small bounded pool instead; drops fall back to the
+        # 60s heartbeat.
+        self._pool: ThreadPoolExecutor | None = None
         self._heartbeat_thread: threading.Thread | None = None
         self._subscribed_symbols: set[str] = set()
         self._last_refresh = 0.0
@@ -113,6 +121,7 @@ class PaperRunnerLoop:
         if self._running:
             return
         self._running = True
+        self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="paper-loop-tick")
         self._tracker.refresh()
         self._subscribe_active_symbols()
         self._heartbeat_thread = threading.Thread(
@@ -123,6 +132,9 @@ class PaperRunnerLoop:
 
     def stop(self) -> None:
         self._running = False
+        if self._pool is not None:
+            self._pool.shutdown(wait=False)
+            self._pool = None
         _log.info("[runner_loop] stopped")
 
     def _subscribe_active_symbols(self) -> None:
@@ -178,7 +190,7 @@ class PaperRunnerLoop:
                 triggered = True
 
             if triggered:
-                self._tick_session(s["session_id"], quote)
+                self._dispatch(s["session_id"], quote)
 
     # ── candle close handler (entry signal evaluation) ───────────────
 
@@ -189,7 +201,7 @@ class PaperRunnerLoop:
         sessions = self._tracker.get_sessions_for_symbol(symbol)
         for s in sessions:
             if s.get("state") in _ENTRY_SIGNAL_STATES:
-                self._tick_session(s["session_id"])
+                self._dispatch(s["session_id"])
 
     # ── heartbeat (safety net) ───────────────────────────────────────
 
@@ -208,6 +220,18 @@ class PaperRunnerLoop:
                 if not self._running:
                     break
                 self._tick_session(sid)
+
+    def _dispatch(self, session_id: int, quote=None) -> None:
+        """Off-thread tick execution — never on the WS receive thread."""
+        pool = self._pool
+        if pool is None:
+            return
+        try:
+            if pool._work_queue.qsize() > 50:  # storm guard: heartbeat covers drops
+                return
+            pool.submit(self._tick_session, session_id, quote)
+        except Exception:
+            pass
 
     # ── tick execution ───────────────────────────────────────────────
 
