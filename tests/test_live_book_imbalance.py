@@ -60,3 +60,38 @@ def test_crypto_empty_buffer_returns_none(monkeypatch):
 
 def test_blank_symbol_safe():
     assert _live_book_imbalance("") is None
+
+
+class _FakeDb:
+    def __init__(self, row):
+        self._row = row
+
+    def execute(self, *a, **k):
+        class _R:
+            def __init__(self, row): self._row = row
+            def fetchone(self): return self._row
+        return _R(self._row)
+
+
+def test_equity_prefers_fresh_iqfeed_depth_over_l1():
+    with mc._ws_cache_lock:
+        mc._ws_cache["DEEPX"] = mc.QuoteSnapshot(
+            price=5.0, bid=4.99, ask=5.01, bid_size=900, ask_size=300, timestamp=time.time())
+    # L1 would say +0.5; the fresh depth row says -0.31 -> depth wins
+    assert _live_book_imbalance("DEEPX", db=_FakeDb((-0.31,))) == pytest.approx(-0.31)
+
+
+def test_equity_no_depth_row_falls_back_to_l1():
+    with mc._ws_cache_lock:
+        mc._ws_cache["DEEPY"] = mc.QuoteSnapshot(
+            price=5.0, bid=4.99, ask=5.01, bid_size=900, ask_size=300, timestamp=time.time())
+    assert _live_book_imbalance("DEEPY", db=_FakeDb(None)) == pytest.approx(0.5)
+
+
+def test_equity_depth_query_error_fails_open():
+    class _BoomDb:
+        def execute(self, *a, **k): raise RuntimeError("no table")
+    with mc._ws_cache_lock:
+        mc._ws_cache["DEEPZ"] = mc.QuoteSnapshot(
+            price=5.0, bid=4.99, ask=5.01, bid_size=600, ask_size=600, timestamp=time.time())
+    assert _live_book_imbalance("DEEPZ", db=_BoomDb()) == pytest.approx(0.0)
