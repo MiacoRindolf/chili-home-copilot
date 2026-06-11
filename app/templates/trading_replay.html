@@ -252,7 +252,7 @@ function rlChartSVG(sym) {
   window._rlView = window._rlView || {};
   if (!window._rlView[cid]) window._rlView[cid] = { t0: 13*60+30, t1: T1 };  // default RTH; drag left to reveal pre-market
   const meta = ((rlCur.trades)||[]).filter(t => t.sym === sym).map(t => 'P/L $'+Number(t.usd).toLocaleString()+' · spread '+t.spread_bps+'bps · qty '+Number(t.qty).toLocaleString()).join(' | ');
-  return '<div class="rl-chart-meta">'+rlEsc(sym)+' — 5m · ET · <span style="color:#58a6ff;">EMA9</span> · <span style="color:#e8b339;">VWAP</span> · scroll=zoom time · shift+scroll=zoom price · drag=pan · dbl-click=reset'+(meta ? ' · '+meta : ' · watched, no fill')+'</div>' +
+  return '<div class="rl-chart-meta">'+rlEsc(sym)+' — '+rlEsc((rlCur&&rlCur.entry_interval)||'5m')+' · ET · <span style="color:#58a6ff;">EMA9</span> · <span style="color:#e8b339;">VWAP</span> · scroll=zoom time · shift+scroll=zoom price · drag=pan · dbl-click=reset'+(meta ? ' · '+meta : ' · watched, no fill')+'</div>' +
          '<div style="position:relative;">' +
          '<svg class="rl-chart" id="'+cid+'" viewBox="0 0 1040 252" preserveAspectRatio="none">'+rlChartBody(sym, cid)+'</svg>' +
          '<div id="'+cid+'-tip" style="position:absolute;top:6px;left:8px;background:rgba(8,12,20,.92);border:1px solid var(--border);border-radius:6px;padding:5px 9px;font-size:11px;display:none;pointer-events:none;"></div></div>';
@@ -294,7 +294,8 @@ function rlChartBody(sym, cid) {
   const span = (dHi - dLo) || 1, y = p => padT + (dHi - p) / span * (H-padT-padB);
   const dec = span < 0.35 ? 3 : (dHi >= 100 ? 1 : 2);
   const x = t => padL + (Math.max(V0, Math.min(V1, tMin(t))) - V0) / (V1-V0) * (W-padL-padR);
-  const bw = Math.max(1.5, (W-padL-padR) / ((V1-V0)/5) - 2);
+  const barMin = (rlCur && rlCur.bar_interval_min) || 5;
+  const bw = Math.max(1.2, (W-padL-padR) / ((V1-V0)/barMin) - (barMin >= 5 ? 2 : 0.6));
   const fmtET = t => { const m = (tMin(t)-240+1440)%1440; return String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0'); };
   let g = '';
   const range = V1 - V0;
