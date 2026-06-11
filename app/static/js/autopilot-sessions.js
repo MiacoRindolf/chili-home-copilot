@@ -84,7 +84,7 @@
     meta = meta || {};
     var cls = 'ap-btn';
     if (action === 'run' || action === 'resume') cls += ' ap-btn-primary';
-    if (action === 'stop') cls += ' ap-btn-live';
+    if (action === 'stop' || action === 'flatten') cls += ' ap-btn-live';
     if (action === 'delete') cls += ' ap-btn-danger';
     return '<button type="button" class="' + cls + '" '
       + (meta.enabled ? '' : 'disabled ')
@@ -131,6 +131,7 @@
       + renderSessionControlButton(row.id, 'pause', controls.pause)
       + renderSessionControlButton(row.id, 'resume', controls.resume)
       + renderSessionControlButton(row.id, 'stop', controls.stop)
+      + renderSessionControlButton(row.id, 'flatten', controls.flatten)
       + renderSessionControlButton(row.id, 'delete', controls.delete)
       + '    </div>'
       + '  </div>'
@@ -732,6 +733,9 @@
 
   window.apSessionAction = function(sessionId, action) {
     if (!sessionId || !action) return;
+    if (action === 'flatten' && !window.confirm('Flatten this position now? The system will market-exit through its own order chain.')) {
+      return;
+    }
     if ((action === 'delete' || action === 'stop') && !window.confirm('Are you sure you want to ' + action + ' this session?')) {
       return;
     }

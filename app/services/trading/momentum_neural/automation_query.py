@@ -501,11 +501,17 @@ def _controls_for_session(
     resume_enabled = paused and runner_enabled
     stop_enabled = sess.state != STATE_ARCHIVED and sess.state not in TERMINAL_STATES
     delete_enabled = sess.state != STATE_ARCHIVED
+    # System-mediated manual exit (2026-06-11 CPSH/SNDG: manual closes in the
+    # broker app race the system's own orders) — only for a LIVE held position.
+    flatten_enabled = sess.mode == "live" and sess.state in (
+        "live_entered", "live_scaling_out", "live_trailing", "live_bailout",
+    )
     return {
         "run": {"enabled": run_enabled, "label": "Run again" if is_terminal else "Run"},
         "pause": {"enabled": pause_enabled, "label": "Pause"},
         "resume": {"enabled": resume_enabled, "label": "Resume"},
         "stop": {"enabled": stop_enabled, "label": "Stop"},
+        "flatten": {"enabled": flatten_enabled, "label": "Flatten"},
         "delete": {"enabled": delete_enabled, "label": "Delete"},
     }
 
@@ -1466,6 +1472,52 @@ def run_automation_session(db: Session, *, user_id: int, session_id: int) -> dic
         "state": target.state,
         "tick_result": tick_result,
     }
+
+
+def request_flatten_session(db: Session, *, user_id: int, session_id: int) -> dict[str, Any]:
+    """Operator FLATTEN: request a system-mediated market exit of a held LIVE
+    position. Sets a flag the runner honors on its next tick (<=15s) so the exit
+    flows through the ONE chokepoint chain — cancel scale-out, clamp to broker
+    qty, place, confirm, reconcile — instead of a manual broker-app sell racing
+    the system's own resting orders (2026-06-11 CPSH/SNDG lesson)."""
+    sess = (
+        db.query(TradingAutomationSession)
+        .filter(
+            TradingAutomationSession.id == int(session_id),
+            TradingAutomationSession.user_id == int(user_id),
+        )
+        .one_or_none()
+    )
+    if not sess:
+        return {"ok": False, "error": "not_found"}
+    if sess.mode != "live" or sess.state not in (
+        "live_entered", "live_scaling_out", "live_trailing", "live_bailout",
+    ):
+        return {"ok": False, "error": "not_flattenable", "state": sess.state}
+    snap = dict(sess.risk_snapshot_json or {})
+    le = dict(snap.get("momentum_live_execution") or {})
+    le["operator_flatten_requested_utc"] = datetime.utcnow().isoformat()
+    snap["momentum_live_execution"] = le
+    sess.risk_snapshot_json = snap
+    try:
+        from sqlalchemy.orm.attributes import flag_modified
+
+        flag_modified(sess, "risk_snapshot_json")
+    except Exception:
+        pass
+    sess.updated_at = datetime.utcnow()
+    from .persistence import append_trading_automation_event
+
+    append_trading_automation_event(
+        db,
+        sess.id,
+        "operator_flatten_requested",
+        {"by": "operator", "state": sess.state},
+        correlation_id=sess.correlation_id,
+        source_node_id="momentum_automation_monitor",
+    )
+    return {"ok": True, "session_id": int(sess.id), "state": sess.state,
+            "message": "Flatten requested — the runner exits through the system on its next tick."}
 
 
 def pause_automation_session(db: Session, *, user_id: int, session_id: int) -> dict[str, Any]:
