@@ -576,7 +576,12 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                 continue
             max_notional = min(NOTIONAL_CAP_USD, LIQ_FRACTION * mid * dvol)
             want_qty = min(RISK_PER_TRADE_USD / max(fill_px - stop, 1e-9), max_notional / fill_px)
-            minute_vol = max(0.0, float(nxt[4]) - dvol)  # day-volume diff = shares printed next minute
+            # shares printed over the next ~minute: diff day-volume against the row
+            # ~55s ahead — on the dense WS tape (rows every ~1s) the immediate next
+            # row would show a near-zero diff and falsely reject for no liquidity
+            _vol_row = tape.first_after(s, _aware(now) + timedelta(seconds=55))
+            _ref_dvol = float(_vol_row[4]) if _vol_row is not None else float(nxt[4])
+            minute_vol = max(0.0, _ref_dvol - dvol)
             qty = min(want_qty, PARTICIPATION_CAP * minute_vol)
             if qty <= 0:
                 _tr(s, "gate_fail:no_liquidity_printed", now)

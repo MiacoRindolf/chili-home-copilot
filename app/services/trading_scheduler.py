@@ -5940,6 +5940,12 @@ def start_scheduler():
                     logger.info("[scheduler] Event-driven LIVE runner loop started (exit-speed ticks)")
                 except Exception as e:
                     logger.warning("[scheduler] Event-driven LIVE runner loop failed to start: %s", e)
+                try:
+                    from .trading.momentum_neural.tape_ws_recorder import start_tape_ws_recorder
+                    start_tape_ws_recorder()
+                    logger.info("[scheduler] WS tape recorder started (second-scale NBBO for traded names)")
+                except Exception as e:
+                    logger.warning("[scheduler] WS tape recorder failed to start: %s", e)
 
         # Auto-arm-live: autonomously arm the surging Ross candidate (one live
         # session at a time). Only runs when the live runner is also on (no point
