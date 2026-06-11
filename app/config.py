@@ -2668,6 +2668,22 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_MAX_REST_BARS"),
         description="Backstop: entry-interval bars a submitted entry limit may rest before cancel + re-watch (invalidation/runaway cancels fire first, event-driven).",
     )
+    # SPREAD STABILITY (2026-06-11 INDP): one clean BBO instant inside a hostile
+    # flickering spread regime passed the gate; the MEDIAN of the recent tape is
+    # the market. Window in entry-interval BARS (derived); fails open below the
+    # sample floor.
+    chili_momentum_spread_stability_window_bars: float = Field(
+        default=1.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_STABILITY_WINDOW_BARS"),
+        description="Entry-interval bars of tape whose MEDIAN spread must also pass the adaptive max (0 disables).",
+    )
+    chili_momentum_spread_stability_min_samples: int = Field(
+        default=5,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_STABILITY_MIN_SAMPLES"),
+        description="Minimum tape samples in the window before the stability gate may block (below = fail open).",
+    )
     # Volume spike required on the break/reclaim bar (a FLOOR, not a magic cutoff).
     chili_momentum_pullback_volume_spike_multiple: float = Field(
         default=1.5,
@@ -2889,17 +2905,26 @@ class Settings(BaseSettings):
     # Global daily-loss halt (P0.2) — single source of truth spanning both
     # AutoTrader v1 and momentum_neural paths. The more conservative of the
     # two limits (usd vs pct-of-equity) wins. Set pct to 0 to disable that leg.
+    # ADAPTIVE daily-loss cap (operator 2026-06-11): pct-of-equity governs; the
+    # fixed-USD leg is an explicit OVERRIDE only (0 = disabled). If equity cannot
+    # be resolved, the failsafe floor below applies (fail closed, never uncapped).
     chili_global_max_daily_loss_usd: float = Field(
-        default=300.0,
+        default=0.0,
         ge=0.0,
         le=1_000_000.0,
         validation_alias=AliasChoices("CHILI_GLOBAL_MAX_DAILY_LOSS_USD"),
     )
     chili_global_max_daily_loss_pct_of_equity: float = Field(
-        default=0.02,
+        default=0.015,
         ge=0.0,
         le=1.0,
         validation_alias=AliasChoices("CHILI_GLOBAL_MAX_DAILY_LOSS_PCT_OF_EQUITY"),
+    )
+    chili_global_daily_loss_failsafe_usd: float = Field(
+        default=300.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_GLOBAL_DAILY_LOSS_FAILSAFE_USD"),
+        description="Daily-loss floor used ONLY when pct-of-equity is configured but equity cannot be resolved (fail closed).",
     )
 
     # Cross-process kill switch. API and scheduler run in separate processes,

@@ -561,6 +561,7 @@ def pullback_break_confirmation(
     allow_runaway_break: bool = False,
     runaway_min_volume_spike: float = 2.0,
     live_price: float | None = None,
+    symbol: str | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Ross-style pullback-break entry on intraday (1m/5m) bars.
 
@@ -855,7 +856,8 @@ def hurst_proxy_from_closes(close: pd.Series) -> float:
 
 
 def momentum_pullback_trigger(
-    df: pd.DataFrame, *, entry_interval: str, live_price: float | None = None
+    df: pd.DataFrame, *, entry_interval: str, live_price: float | None = None,
+    symbol: str | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """The Ross pullback-break trigger resolved from live settings — the SINGLE
     source BOTH the live runner and the paper runner call, so the two paths make
@@ -870,6 +872,7 @@ def momentum_pullback_trigger(
         df,
         entry_interval=entry_interval,
         live_price=live_price,
+        symbol=symbol,
         volume_spike_multiple=float(
             getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5
         ),
@@ -1085,7 +1088,7 @@ def run_paper_entry_gates(
         df_entry = None
     if df_entry is None or getattr(df_entry, "empty", True):
         return False, "no_entry_data", {"interval": _interval}
-    ok_t, reason_t, pb = momentum_pullback_trigger(df_entry, entry_interval=_interval)
+    ok_t, reason_t, pb = momentum_pullback_trigger(df_entry, entry_interval=_interval, symbol=sym)
     if not ok_t:
         return False, reason_t, {"trigger": True, "interval": _interval}
 

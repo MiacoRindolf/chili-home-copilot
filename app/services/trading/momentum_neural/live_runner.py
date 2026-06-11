@@ -23,6 +23,7 @@ from ....config import settings
 from ....models.trading import MomentumSymbolViability, TradingAutomationSession
 from ..execution_family_registry import (
     EXECUTION_FAMILY_COINBASE_SPOT,
+    EXECUTION_FAMILY_ROBINHOOD_SPOT,
     ExecutionFamilyNotImplementedError,
     normalize_execution_family,
     momentum_runner_supports_execution_family,
@@ -578,6 +579,26 @@ def _broker_balance_confirms_zero(symbol: str) -> bool:
         return False
 
 
+def _broker_position_confirms_zero(sess: TradingAutomationSession) -> bool:
+    """Family-agnostic broker-truth flat check for the exit-retry-cap reconcile.
+    Coinbase: balance/dust check (existing). Robinhood: open-position quantity
+    (2026-06-11 INDP: the reconcile was Coinbase-only, so an RH phantom position
+    looped 8 flatten retries into LIVE_ERROR while the broker was already flat).
+    Unknown family / failed fetch -> False (fail safe, surface the error)."""
+    fam = normalize_execution_family(sess.execution_family)
+    if fam == EXECUTION_FAMILY_COINBASE_SPOT:
+        return _broker_balance_confirms_zero(sess.symbol)
+    if fam == EXECUTION_FAMILY_ROBINHOOD_SPOT:
+        try:
+            from ...broker_service import get_open_position_quantity
+
+            q = get_open_position_quantity(sess.symbol)
+        except Exception:
+            return False
+        return q is not None and float(q) <= 1e-6
+    return False
+
+
 def _live_exit_submit_succeeded(
     db: Session,
     sess: TradingAutomationSession,
@@ -608,10 +629,7 @@ def _live_exit_submit_succeeded(
                 "max_attempts": _EXIT_SUBMIT_MAX_ATTEMPTS,
             },
         )
-        if (
-            normalize_execution_family(sess.execution_family) == EXECUTION_FAMILY_COINBASE_SPOT
-            and _broker_balance_confirms_zero(sess.symbol)
-        ):
+        if _broker_position_confirms_zero(sess):
             le["position"] = None
             le["last_exit_reason"] = (reason or "exit") + "_retry_cap_broker_zero_reconcile"
             le.pop("pending_exit_reason", None)
@@ -1977,6 +1995,34 @@ def tick_live_session(
         _register_stale_quote_tick(db, sess, le)
     else:
         _register_fresh_quote_tick(db, sess, le)
+    # SPREAD STABILITY (2026-06-11 INDP): the instantaneous BBO passed the gate
+    # for ONE tick inside a flickering, hostile spread regime — we submitted,
+    # the spread blew out a second later, and the eventual fill bought a dying
+    # midday book. One snapshot is an opinion; the MEDIAN of the recent tape is
+    # the market. Window = 1 entry bar (derived). Fails OPEN below the sample
+    # floor (thin tape coverage must not block; the instantaneous gate + ack
+    # lifecycle still protect).
+    if quote_block is None and _live_entry_quote_gate_applies(sess, le) and _adaptive_max_spread is not None:
+        try:
+            from .nbbo_tape import recent_spread_median_bps
+
+            _stab_window = (
+                float(getattr(settings, "chili_momentum_spread_stability_window_bars", 1.0) or 1.0)
+                * _entry_interval_seconds()
+            )
+            _stab = recent_spread_median_bps(db, sess.symbol, window_s=_stab_window)
+            _stab_min_n = int(getattr(settings, "chili_momentum_spread_stability_min_samples", 5) or 5)
+            if _stab is not None and _stab[1] >= _stab_min_n and _stab[0] > float(_adaptive_max_spread):
+                quote_block = {
+                    "reason": "unstable_spread",
+                    "median_spread_bps": round(_stab[0], 2),
+                    "samples": _stab[1],
+                    "window_s": round(_stab_window, 1),
+                    "max_spread_bps": float(_adaptive_max_spread),
+                }
+        except Exception:
+            _log.debug("[momentum_live] spread stability read skipped", exc_info=True)
+
     if quote_block is not None:
         quote_block["expected_move_bps"] = (
             None if _expected_move_bps is None else round(_expected_move_bps, 4)
@@ -2168,7 +2214,8 @@ def tick_live_session(
                                 except Exception:
                                     _live_px = None
                                 _trigger_ok, _trigger_reason, _pb_debug = momentum_pullback_trigger(
-                                    _df_pb, entry_interval=_interval, live_price=_live_px
+                                    _df_pb, entry_interval=_interval, live_price=_live_px,
+                                    symbol=sess.symbol,
                                 )
                     except Exception:
                         _trigger_ok = False

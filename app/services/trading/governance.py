@@ -255,14 +255,45 @@ def deactivate_kill_switch() -> None:
     logger.info("[governance] Kill switch deactivated")
 
 
+def _auto_clear_stale_daily_breach() -> None:
+    """A DAILY-loss breach is scoped to its ET trading day (operator 2026-06-11:
+    a daily cap should not need a manual reset) — once the ET date rolls, the
+    breach that armed the switch no longer describes reality, so it self-clears.
+    Manual and non-daily activations are untouched (operator action required)."""
+    with _kill_switch_lock:
+        active = _kill_switch
+        reason = _kill_switch_reason or ""
+        set_at = _kill_switch_set_at
+    if not active or not reason.startswith("global_daily_loss_breach") or set_at is None:
+        return
+    try:
+        from zoneinfo import ZoneInfo
+
+        from datetime import timezone as _tz
+
+        et = ZoneInfo("America/New_York")
+        set_day = set_at.replace(tzinfo=_tz.utc).astimezone(et).date()
+        today = datetime.utcnow().replace(tzinfo=_tz.utc).astimezone(et).date()
+        if today > set_day:
+            logger.warning(
+                "[governance] daily-loss kill switch auto-cleared at ET day roll (was: %s, set_at=%s)",
+                reason, set_at,
+            )
+            deactivate_kill_switch()
+    except Exception:
+        logger.debug("[governance] daily-breach auto-clear skipped", exc_info=True)
+
+
 def is_kill_switch_active() -> bool:
     _refresh_kill_switch_from_db_if_due()
+    _auto_clear_stale_daily_breach()
     with _kill_switch_lock:
         return _kill_switch
 
 
 def is_kill_switch_active_for_session(db: Session) -> bool:
     _refresh_kill_switch_from_db_if_due(db=db)
+    _auto_clear_stale_daily_breach()
     with _kill_switch_lock:
         return _kill_switch
 
@@ -684,11 +715,30 @@ def check_daily_loss_breach(
     pnl = global_realized_pnl_today_et(db, user_id)
     realized = float(pnl["total_usd"])
 
+    # ADAPTIVE CAP (operator 2026-06-11: "dapat adaptive siya"): when the caller
+    # didn't supply equity, resolve it ourselves so the pct-of-equity leg governs
+    # at EVERY call site (previously no caller passed equity, so the fixed $300
+    # leg always won the more-conservative race).
+    if pct_cap > 0 and (equity_usd is None or float(equity_usd) <= 0):
+        try:
+            from .momentum_neural.risk_policy import _account_equity_usd
+
+            equity_usd = _account_equity_usd()
+        except Exception:
+            equity_usd = None
+
     candidates: list[tuple[float, str]] = []
     if usd_cap > 0:
         candidates.append((usd_cap, "usd"))
     if pct_cap > 0 and equity_usd is not None and float(equity_usd) > 0:
         candidates.append((pct_cap * float(equity_usd), "pct_equity"))
+    if pct_cap > 0 and not candidates:
+        # Equity unresolvable AND no explicit usd override: fail CLOSED to the
+        # documented fail-safe floor rather than trading uncapped.
+        candidates.append((
+            float(getattr(settings, "chili_global_daily_loss_failsafe_usd", 300.0) or 300.0),
+            "usd_failsafe",
+        ))
 
     if not candidates:
         return {

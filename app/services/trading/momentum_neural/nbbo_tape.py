@@ -232,6 +232,35 @@ def tape_running_up_symbols(db: Session, *, now_utc: Optional[datetime] = None) 
     return [s for _, s in bursts[:max_symbols]]
 
 
+def recent_spread_median_bps(
+    db: Session, symbol: str, *, window_s: float, now_utc: Optional[datetime] = None,
+) -> tuple[float, int] | None:
+    """Median spread (bps) and sample count over the last ``window_s`` seconds of
+    tape for ``symbol`` — the spread-STABILITY read (2026-06-11 INDP: a single
+    clean BBO instant passed the gate inside an otherwise-hostile flickering
+    spread regime; one snapshot is an opinion, the median is the market).
+    Returns None on no data / failure (caller decides fail-open semantics)."""
+    sym = str(symbol or "").strip().upper()
+    if not sym or window_s <= 0:
+        return None
+    now_utc = now_utc or datetime.now(timezone.utc)
+    try:
+        row = db.execute(
+            text(
+                "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY spread_bps), count(*) "
+                "FROM momentum_nbbo_spread_tape "
+                "WHERE symbol = :s AND spread_bps IS NOT NULL AND observed_at >= :since"
+            ),
+            {"s": sym, "since": now_utc.replace(tzinfo=None) - timedelta(seconds=float(window_s))},
+        ).fetchone()
+    except Exception as exc:
+        logger.debug("[nbbo_tape] spread stability read failed: %s", exc)
+        return None
+    if not row or row[0] is None:
+        return None
+    return float(row[0]), int(row[1] or 0)
+
+
 def read_spread_profile(
     db: Session, symbol: str, *, day: Optional[str] = None,
 ) -> list[dict[str, Any]]:
