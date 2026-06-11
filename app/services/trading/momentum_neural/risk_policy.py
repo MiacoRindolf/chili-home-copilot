@@ -235,6 +235,52 @@ def adaptive_max_concurrent_live_sessions() -> int:
     return max(base, min(15, int(round(eq * frac / risk))))
 
 
+def streak_risk_multiplier(db) -> tuple[float, dict]:
+    """Streak-adaptive risk dial (Ross: 'coming out of the gates swinging' on a
+    hot streak; 'size down' when cold). A multiplier on the per-trade max loss
+    derived from the lane's OWN recent closed LIVE outcomes -- self-relative, no
+    market magic numbers; only the bounds are fixed and documented:
+
+      mult = clamp(0.5 + recent_win_rate, 0.5, 1.5)   # 50% wins -> 1.0 neutral
+      >=3 consecutive losses -> hard floor 0.5         # Ross's stop-digging rule
+      <5 closed outcomes      -> 1.0                   # not enough evidence
+
+    The daily-loss cap and drawdown breaker still bound everything above this.
+    Fail-neutral on ANY error (returns 1.0)."""
+    try:
+        from ....models.trading import MomentumAutomationOutcome
+
+        rows = (
+            db.query(MomentumAutomationOutcome.realized_pnl_usd)
+            .filter(
+                MomentumAutomationOutcome.mode == "live",
+                MomentumAutomationOutcome.realized_pnl_usd.isnot(None),
+            )
+            .order_by(MomentumAutomationOutcome.terminal_at.desc())
+            .limit(10)
+            .all()
+        )
+        pnls = [float(r[0]) for r in rows]
+        if len(pnls) < 5:
+            return 1.0, {"streak_mult": 1.0, "reason": "insufficient_history", "n": len(pnls)}
+        win_rate = sum(1 for p in pnls if p > 0) / len(pnls)
+        consec_losses = 0
+        for p in pnls:  # newest first
+            if p <= 0:
+                consec_losses += 1
+            else:
+                break
+        mult = max(0.5, min(1.5, 0.5 + win_rate))
+        if consec_losses >= 3:
+            mult = 0.5
+        return mult, {
+            "streak_mult": round(mult, 2), "win_rate": round(win_rate, 2),
+            "consecutive_losses": consec_losses, "n": len(pnls),
+        }
+    except Exception:
+        return 1.0, {"streak_mult": 1.0, "reason": "error_fail_neutral"}
+
+
 def compute_risk_first_quantity(
     *,
     entry_price: float,

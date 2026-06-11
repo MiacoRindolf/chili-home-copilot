@@ -1635,6 +1635,53 @@ def get_recent_news_tickers(*, limit: int = 200, max_age_min: int = 120) -> list
     return out
 
 
+def get_theme_news_tickers(keywords: list[str], *, limit: int = 200, max_age_min: int = 240) -> list[str]:
+    """Tickers whose FRESH headline matches the active EVENT THEME keywords.
+
+    The sympathy-theme play (SpaceX IPO week: space/satellite/rocket/...) needs
+    to know WHICH news names belong to the day's dominant theme — those keep
+    their catalyst boost even when the hot-tape regime neutralizes generic news.
+    Keyword-driven (no hardcoded ticker lists); matches title + description,
+    case-insensitive. Wider freshness than the generic catalyst (a theme runs
+    all session). Fail-open ``[]``."""
+    kws = [str(k).strip().lower() for k in (keywords or []) if str(k).strip()]
+    if not kws:
+        return []
+    cache_key = f"massive:theme_news:{','.join(sorted(kws))[:80]}:{int(max_age_min)}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    url = f"{_base()}/v2/reference/news"
+    data = _get(url, {"limit": str(limit), "order": "desc", "sort": "published_utc"})
+    if data is _NOT_FOUND or not data:
+        return []
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(1, int(max_age_min)))
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in data.get("results", []):
+        ts = item.get("published_utc")
+        if ts:
+            try:
+                pub = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                if pub < cutoff:
+                    continue
+            except (TypeError, ValueError):
+                pass
+        text_blob = f"{item.get('title') or ''} {item.get('description') or ''}".lower()
+        if not any(k in text_blob for k in kws):
+            continue
+        for t in item.get("tickers") or []:
+            tt = str(t or "").upper().strip()
+            if tt and tt not in seen:
+                seen.add(tt)
+                out.append(tt)
+    _cache_set(cache_key, out)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Snapshot-based screener helpers (filter the cached full snapshot)
 # ---------------------------------------------------------------------------

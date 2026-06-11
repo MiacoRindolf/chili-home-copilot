@@ -220,6 +220,15 @@ def run_momentum_neural_tick(
         pass
 
     try:
+        from .catalyst import theme_catalyst_symbols
+
+        _theme = theme_catalyst_symbols()
+        if _theme:
+            meta["theme_symbols"] = sorted(_theme)  # JSON-safe (regression guard #528)
+    except Exception:
+        pass
+
+    try:
         from .catalyst import all_catalyst_symbols
 
         _cat = all_catalyst_symbols()
@@ -250,6 +259,7 @@ def run_momentum_neural_tick(
             "catalyst_symbols",
             "hot_tape",
             "symbol_countries",
+            "theme_symbols",
         )
         if k in meta
     }

@@ -53,3 +53,13 @@ def test_hot_tape_regime_detector():
     assert hot_tape_regime({}) is False
     assert hot_tape_regime(None) is False
     assert hot_tape_regime({"A": {"daily_change_pct": "garbage"}, "B": sig(40), "C": sig(40), "D": sig(40)}) is True
+
+
+def test_hot_tape_theme_news_keeps_boost():
+    # SpaceX window: a space-headline name keeps the boost in a HOT tape
+    theme = {"MNTS", "SIDU"}
+    assert catalyst_viability_delta("MNTS", CAT | theme, hot_tape=True, theme_symbols=theme) == pytest.approx(HALF)
+    # generic news (not in theme) stays neutral in hot tape
+    assert catalyst_viability_delta("KIDZ", CAT | theme, hot_tape=True, theme_symbols=theme) == 0.0
+    # normal tape: theme membership is irrelevant (news boost as ever)
+    assert catalyst_viability_delta("MNTS", CAT | theme, hot_tape=False, theme_symbols=theme) == pytest.approx(HALF)

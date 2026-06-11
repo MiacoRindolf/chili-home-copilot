@@ -106,6 +106,27 @@ def catalyst_score(symbol: str, catalyst_symbols: set[str] | None) -> float:
     return 1.0 if _norm(symbol) in catalyst_symbols else 0.5
 
 
+def theme_catalyst_symbols() -> set[str]:
+    """Tickers in the ACTIVE EVENT THEME (keyword-driven, operator-set window).
+
+    ``chili_momentum_event_theme_keywords`` (comma-separated; empty = no theme)
+    names the day's dominant narrative — e.g. "space,satellite,rocket,orbit,
+    launch,aerospace,spacex" for the SpaceX IPO window. Theme names keep their
+    catalyst boost even in a HOT tape (the inversion neutralizes only GENERIC
+    news — Ross expects the event-theme headlines to perform). Fail-open."""
+    raw = str(getattr(settings, "chili_momentum_event_theme_keywords", "") or "")
+    kws = [k.strip() for k in raw.split(",") if k.strip()]
+    if not kws:
+        return set()
+    try:
+        from ...massive_client import get_theme_news_tickers
+
+        return {_norm(t) for t in get_theme_news_tickers(kws)}
+    except Exception:
+        logger.debug("[catalyst] theme news fetch failed", exc_info=True)
+        return set()
+
+
 # A "big mover" = a LULD-scale day move. Ross's hot days (2026-06-09/10) print
 # MULTIPLE +30%..+1000% names rotating ("hot potato"); a normal day has 0-1.
 HOT_TAPE_BIG_MOVE_PCT = 30.0
@@ -139,6 +160,7 @@ def catalyst_viability_delta(
     *,
     hot_tape: bool = False,
     hq_country: str | None = None,
+    theme_symbols: set[str] | None = None,
 ) -> float:
     """The additive viability tilt for a symbol — REGIME-AWARE.
 
@@ -158,6 +180,11 @@ def catalyst_viability_delta(
     if not hot_tape:
         return half if has_news else 0.0
     if has_news:
+        # EVENT-THEME exemption: news matching the day's dominant narrative
+        # (e.g. space headlines in the SpaceX IPO window) KEEPS the boost in a
+        # hot tape — only generic news is neutralized.
+        if theme_symbols and _norm(symbol) in theme_symbols:
+            return half
         return 0.0
     foreign = bool(hq_country) and str(hq_country).strip().lower() not in (
         "united states", "united states of america", "usa", "us",
