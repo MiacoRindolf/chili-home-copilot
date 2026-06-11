@@ -1,0 +1,118 @@
+"""Autopilot validation must be real, not vacuous.
+
+Regression coverage for the audit findings:
+
+  * run_ast_syntax(worktree, changed_files) crashed every implementation run
+    with TypeError (single-arg signature) — swallowed by the run-level
+    except, so every run ended "failed" at validate.
+  * subprocess_safe_env stripped TEST_DATABASE_URL, so every pytest step
+    skip-passed at the conftest guard and "validation passed" meant nothing.
+    Passthrough is fail-closed: only ``_test``-suffixed database names.
+  * pytest_targeted now reports tests_executed honestly (collect-only or
+    skipped steps are not the same as passing tests).
+"""
+
+from __future__ import annotations
+
+import textwrap
+from pathlib import Path
+
+from app.services.coding_task import envelope
+from app.services.coding_task.validator_runner import run_ast_syntax
+from app.services.project_autonomy.orchestrator import run_validation
+
+
+# ── run_ast_syntax scoping ───────────────────────────────────────────────
+
+
+def _write(tmp_path: Path, rel: str, body: str) -> None:
+    p = tmp_path / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(textwrap.dedent(body), encoding="utf-8")
+
+
+def test_ast_syntax_accepts_changed_files_and_scopes_to_them(tmp_path):
+    _write(tmp_path, "good.py", "x = 1\n")
+    _write(tmp_path, "bad.py", "def broken(:\n")
+
+    ok = run_ast_syntax(tmp_path, changed_files=["good.py"])
+    assert ok.exit_code == 0
+    assert "good.py" in ok.stdout
+    assert "bad.py" not in ok.stdout  # scoped: untouched files not parsed
+
+    bad = run_ast_syntax(tmp_path, changed_files=["bad.py"])
+    assert bad.exit_code == 1
+    assert "SyntaxError" in bad.stdout
+
+
+def test_ast_syntax_changed_files_skips_deleted_and_non_python(tmp_path):
+    _write(tmp_path, "kept.py", "x = 1\n")
+    result = run_ast_syntax(
+        tmp_path,
+        changed_files=["kept.py", "deleted_in_diff.py", "notes.md"],
+    )
+    assert result.exit_code == 0
+    assert "kept.py" in result.stdout
+
+
+def test_ast_syntax_changed_files_never_escapes_worktree(tmp_path):
+    outside = tmp_path.parent / "outside_secret.py"
+    outside.write_text("x = (", encoding="utf-8")
+    try:
+        result = run_ast_syntax(tmp_path, changed_files=["../outside_secret.py"])
+        assert result.exit_code == 0
+        assert "outside_secret" not in result.stdout
+    finally:
+        outside.unlink(missing_ok=True)
+
+
+def test_ast_syntax_legacy_no_changed_files_still_walks(tmp_path):
+    _write(tmp_path, "a.py", "x = 1\n")
+    result = run_ast_syntax(tmp_path)
+    assert result.exit_code == 0
+    assert "a.py" in result.stdout
+
+
+# ── run_validation end-to-end (the TypeError regression) ────────────────
+
+
+def test_run_validation_does_not_crash_with_changed_files(tmp_path):
+    """The exact call shape that crashed every autopilot run. Steps may
+    skip (ruff/mypy/pytest availability varies) but the call must complete
+    and ast_syntax must reflect the changed file."""
+    _write(tmp_path, "feature.py", "value = 42\n")
+    results = run_validation(tmp_path, ["feature.py"])
+    by_key = {r["step_key"]: r for r in results}
+    assert "ast_syntax" in by_key
+    assert by_key["ast_syntax"]["exit_code"] == 0
+    assert "pytest_targeted" in by_key
+    # Honesty marker is surfaced into the orchestrator payload.
+    assert "tests_executed" in by_key["pytest_targeted"]
+
+
+# ── TEST_DATABASE_URL passthrough (fail-closed) ──────────────────────────
+
+
+def test_safe_env_passes_test_db_url_only_when_test_suffixed(monkeypatch):
+    monkeypatch.setenv("TEST_DATABASE_URL", "postgresql://u:p@localhost:5433/chili_test")
+    env = envelope.subprocess_safe_env()
+    assert env.get("TEST_DATABASE_URL") == "postgresql://u:p@localhost:5433/chili_test"
+
+
+def test_safe_env_blocks_non_test_database(monkeypatch):
+    monkeypatch.setenv("TEST_DATABASE_URL", "postgresql://u:p@localhost:5433/chili")
+    env = envelope.subprocess_safe_env()
+    assert "TEST_DATABASE_URL" not in env
+
+
+def test_safe_env_blocks_non_postgres_and_query_string_tricks(monkeypatch):
+    monkeypatch.setenv("TEST_DATABASE_URL", "sqlite:///anything_test")
+    assert "TEST_DATABASE_URL" not in envelope.subprocess_safe_env()
+    monkeypatch.setenv("TEST_DATABASE_URL", "postgresql://u:p@h/chili?x=_test")
+    assert "TEST_DATABASE_URL" not in envelope.subprocess_safe_env()
+
+
+def test_safe_env_without_test_db_url(monkeypatch):
+    monkeypatch.delenv("TEST_DATABASE_URL", raising=False)
+    env = envelope.subprocess_safe_env()
+    assert "TEST_DATABASE_URL" not in env

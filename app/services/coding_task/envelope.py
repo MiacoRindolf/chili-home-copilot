@@ -55,8 +55,27 @@ def truncate_text(s: str, max_bytes: int = 100_000) -> tuple[str, int]:
     return cut + "\n…[truncated]", max_bytes
 
 
+def _safe_test_database_url() -> str | None:
+    """TEST_DATABASE_URL passthrough, fail-closed: only when the database
+    name ends in ``_test`` (mirrors the tests/conftest.py guard — fixtures
+    TRUNCATE, so anything else must never reach a validator subprocess)."""
+    url = (os.environ.get("TEST_DATABASE_URL") or "").strip()
+    if not url or not url.startswith(("postgresql://", "postgresql+psycopg2://")):
+        return None
+    db_name = url.rsplit("/", 1)[-1].split("?", 1)[0]
+    if not db_name.endswith("_test"):
+        return None
+    return url
+
+
 def subprocess_safe_env() -> dict[str, str]:
-    """Minimal environment for validator subprocesses (no user-controlled env maps in Phase 1)."""
+    """Minimal environment for validator subprocesses (no user-controlled env maps in Phase 1).
+
+    TEST_DATABASE_URL is passed through ONLY when it points at a
+    ``_test``-suffixed database — without it every pytest validation step
+    skip-passes at the conftest guard, which made "validation passed"
+    vacuous for the autopilot.
+    """
     keep = {
         "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP",
         "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
@@ -65,4 +84,7 @@ def subprocess_safe_env() -> dict[str, str]:
     for k, v in os.environ.items():
         if k.upper() in keep:
             out[k] = v
+    test_db = _safe_test_database_url()
+    if test_db:
+        out["TEST_DATABASE_URL"] = test_db
     return out

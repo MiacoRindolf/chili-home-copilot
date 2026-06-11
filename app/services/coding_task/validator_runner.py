@@ -45,6 +45,10 @@ class StepResult:
     stderr: str
     skipped: bool
     skip_reason: str | None = None
+    # Optional honesty payload merged into the validation result by the
+    # orchestrator's _step_result_payload (e.g. tests_executed=False when a
+    # pytest step only collected instead of running real tests).
+    metadata: dict | None = None
 
 
 def _timeout() -> float:
@@ -113,15 +117,36 @@ def _pytest_safe_database_skip(step_key: str, timed_out: bool, stdout: str, stde
     )
 
 
-def run_ast_syntax(cwd: Path) -> StepResult:
-    """Read-only: parse .py files under cwd (bounded count)."""
+def run_ast_syntax(cwd: Path, changed_files: list[str] | None = None) -> StepResult:
+    """Read-only: parse .py files under cwd (bounded count).
+
+    When ``changed_files`` is provided, parse ONLY those .py files (resolved
+    under cwd; deleted/missing paths are skipped). This both scopes the check
+    to what the run actually touched and avoids the repo-wide bounded walk,
+    which on a large repo checks an arbitrary 200 files that may not include
+    the changed ones at all.
+    """
     py_files: list[Path] = []
-    for p in cwd.rglob("*.py"):
-        if "__pycache__" in p.parts or ".venv" in p.parts or "venv" in p.parts:
-            continue
-        py_files.append(p)
-        if len(py_files) >= _MAX_PY_FILES:
-            break
+    if changed_files:
+        for rel in changed_files:
+            if not str(rel).endswith(".py"):
+                continue
+            p = (cwd / str(rel).replace("\\", "/")).resolve()
+            try:
+                p.relative_to(cwd.resolve())
+            except ValueError:
+                continue  # path escapes the worktree — never read outside it
+            if p.is_file():
+                py_files.append(p)
+            if len(py_files) >= _MAX_PY_FILES:
+                break
+    else:
+        for p in cwd.rglob("*.py"):
+            if "__pycache__" in p.parts or ".venv" in p.parts or "venv" in p.parts:
+                continue
+            py_files.append(p)
+            if len(py_files) >= _MAX_PY_FILES:
+                break
     buf: list[str] = []
     errors = 0
     for fp in py_files:
@@ -283,13 +308,19 @@ def run_pytest_targeted(cwd: Path, changed_files: list[str] | None = None) -> St
 
     code, to, out, err = _run_subprocess_allowlisted(argv, cwd, timeout=300)
     if code == 127 or (code == 1 and "No module named pytest" in (err or "")):
-        return StepResult("pytest_targeted", 0, to, out or "", err or "", True, "pytest not available")
+        return StepResult("pytest_targeted", 0, to, out or "", err or "", True, "pytest not available",
+                          {"tests_executed": False, "tests_selected": test_files})
     if _pytest_safe_database_guard_triggered(out, err):
-        return _pytest_safe_database_skip("pytest_targeted", to, out, err)
+        result = _pytest_safe_database_skip("pytest_targeted", to, out, err)
+        result.metadata = {"tests_executed": False, "tests_selected": test_files}
+        return result
     out_t, _ = truncate_text(out or "")
     err_t, _ = truncate_text(err or "")
     ok = code in (0, 5)  # 5 = no tests collected
-    return StepResult("pytest_targeted", 0 if ok else code, to, out_t, err_t, False, None)
+    # Honesty marker: "passed" with zero tests actually run is NOT the same
+    # as passing tests. Surfaced so the orchestrator/UI can show it.
+    return StepResult("pytest_targeted", 0 if ok else code, to, out_t, err_t, False, None,
+                      {"tests_executed": bool(test_files), "tests_selected": test_files})
 
 
 def run_mypy_check(cwd: Path) -> StepResult:
