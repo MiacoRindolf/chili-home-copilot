@@ -20463,6 +20463,153 @@ def _migration_303_momentum_nbbo_spread_tape(conn) -> None:
     )
 
 
+def _migration_304_position_identity_phase5i_position_insert_backlink(conn) -> None:
+    """Position-identity Phase 5I -- close the envelope->position first-fill race.
+
+    The Phase 5A AFTER INSERT trigger on the envelope table (mig 257) links
+    ``position_id`` only when a matching ``trading_positions`` row ALREADY
+    exists at envelope-insert time. For the FIRST fill ever in a natural key
+    (user, broker, ticker, direction) the position row does not exist yet --
+    it is created minutes later by the broker position observer -- and no code
+    path ever back-links the envelope afterwards. Observed live 2026-06-05:
+    envelopes 2285 (BFLY) / 2286 (IYH) filled at 13:48/13:50, positions
+    332/331 created by the observer at 13:52, both sides left unlinked. The
+    Phase 5B view then reports ``broker_envelope_missing_position`` as a hard
+    linkage issue and both phase-5 soak probes sit at BLOCKED_LINKAGE.
+
+    Fix, in the same in-database style as Phase 5A ("every writer path
+    participates without a broad application refactor"):
+
+    1. AFTER INSERT trigger on ``trading_positions`` back-links open,
+       unlinked, non-option broker envelopes that match the new position's
+       natural key, then fills the position's own ``current_envelope_id``
+       when exactly one open envelope resolves. The function NEVER raises
+       (position observation inserts must not fail on linkage hygiene).
+    2. Idempotent backfill of the existing orphans with an exactly-one-match
+       ambiguity guard. Closed envelopes with NULL position_id stay untouched:
+       that is the accepted ``historical_broker_envelope_missing_position``
+       debt class the probes already tolerate.
+
+    Option envelopes are excluded, mirroring ``position_resolver``: the
+    positions natural key has no contract identity, and a false link to the
+    underlying equity row is worse than no link (see mig 280 detach).
+    """
+    tables = _tables(conn)
+    if "trading_positions" not in tables or "trading_management_envelopes" not in tables:
+        conn.commit()
+        return
+
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION trading_positions_phase5i_backlink_after_insert()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+            v_envelope_id BIGINT;
+            v_open_count INT;
+        BEGIN
+            BEGIN
+                UPDATE trading_management_envelopes e
+                   SET position_id = NEW.id
+                 WHERE e.position_id IS NULL
+                   AND e.status = 'open'
+                   AND e.broker_source IS NOT NULL
+                   AND btrim(e.broker_source) <> ''
+                   AND LOWER(e.broker_source) = LOWER(NEW.broker_source)
+                   AND e.ticker = NEW.ticker
+                   AND COALESCE(NULLIF(LOWER(e.direction), ''), 'long')
+                       = COALESCE(NULLIF(LOWER(NEW.direction), ''), 'long')
+                   AND COALESCE(e.user_id, -1) = COALESCE(NEW.user_id, -1)
+                   AND COALESCE(LOWER(e.asset_kind), '') NOT IN ('option', 'options');
+
+                IF NEW.current_envelope_id IS NULL THEN
+                    SELECT MIN(e.id), COUNT(*)
+                      INTO v_envelope_id, v_open_count
+                      FROM trading_management_envelopes e
+                     WHERE e.position_id = NEW.id
+                       AND e.status = 'open';
+                    IF v_open_count = 1 THEN
+                        UPDATE trading_positions
+                           SET current_envelope_id = v_envelope_id,
+                               updated_at = NOW()
+                         WHERE id = NEW.id
+                           AND current_envelope_id IS NULL;
+                    END IF;
+                END IF;
+            EXCEPTION WHEN others THEN
+                RAISE WARNING
+                    'phase5i position backlink trigger skipped for position_id=%: %',
+                    NEW.id, SQLERRM;
+            END;
+            RETURN NEW;
+        END;
+        $$;
+    """))
+    conn.execute(text("""
+        DROP TRIGGER IF EXISTS trg_trading_positions_phase5i_backlink_after_insert
+        ON trading_positions
+    """))
+    conn.execute(text("""
+        CREATE TRIGGER trg_trading_positions_phase5i_backlink_after_insert
+        AFTER INSERT ON trading_positions
+        FOR EACH ROW
+        EXECUTE FUNCTION trading_positions_phase5i_backlink_after_insert()
+    """))
+
+    envelopes_linked = conn.execute(text("""
+        WITH matches AS (
+            SELECT e.id AS envelope_id, MIN(p.id) AS position_id
+              FROM trading_management_envelopes e
+              JOIN trading_positions p
+                ON COALESCE(p.user_id, -1) = COALESCE(e.user_id, -1)
+               AND LOWER(p.broker_source) = LOWER(e.broker_source)
+               AND p.ticker = e.ticker
+               AND COALESCE(NULLIF(LOWER(p.direction), ''), 'long')
+                   = COALESCE(NULLIF(LOWER(e.direction), ''), 'long')
+             WHERE e.position_id IS NULL
+               AND e.status = 'open'
+               AND e.broker_source IS NOT NULL
+               AND btrim(e.broker_source) <> ''
+               AND COALESCE(LOWER(e.asset_kind), '') NOT IN ('option', 'options')
+             GROUP BY e.id
+            HAVING COUNT(DISTINCT p.id) = 1
+        )
+        UPDATE trading_management_envelopes e
+           SET position_id = m.position_id
+          FROM matches m
+         WHERE e.id = m.envelope_id
+           AND e.position_id IS NULL
+    """)).rowcount
+
+    pointers_filled = conn.execute(text("""
+        WITH singles AS (
+            SELECT p.id AS position_id, MIN(e.id) AS envelope_id
+              FROM trading_positions p
+              JOIN trading_management_envelopes e
+                ON e.position_id = p.id
+               AND e.status = 'open'
+             WHERE p.state = 'open'
+               AND p.current_envelope_id IS NULL
+             GROUP BY p.id
+            HAVING COUNT(e.id) = 1
+        )
+        UPDATE trading_positions p
+           SET current_envelope_id = s.envelope_id,
+               updated_at = NOW()
+          FROM singles s
+         WHERE p.id = s.position_id
+           AND p.current_envelope_id IS NULL
+    """)).rowcount
+
+    conn.commit()
+    logger.info(
+        "[mig304] position-insert backlink trigger installed; backfill linked "
+        "%d envelope(s) to positions, filled %d current_envelope_id pointer(s)",
+        int(envelopes_linked or 0),
+        int(pointers_filled or 0),
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -20831,6 +20978,8 @@ MIGRATIONS = [
      _migration_302_breakout_alert_candidate_select_index),
     ("303_momentum_nbbo_spread_tape",
      _migration_303_momentum_nbbo_spread_tape),
+    ("304_position_identity_phase5i_position_insert_backlink",
+     _migration_304_position_identity_phase5i_position_insert_backlink),
 ]
 
 
