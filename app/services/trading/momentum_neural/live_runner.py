@@ -1375,6 +1375,57 @@ def _register_stale_quote_tick(db, sess, le: dict) -> None:
             })
 
 
+def _entry_pricebook_snapshot(symbol: str) -> dict | None:
+    """One-shot Nasdaq TotalView depth snapshot (RH pricebook — the same book
+    Legend's bid/ask windows render) at the entry decision. Returns a compact
+    dict: top-of-book sizes + 5-level depth totals + signed imbalance in
+    [-1, 1] (the convention viability's Phase 4a rules score). Fail-open:
+    crypto / no Gold entitlement / endpoint error -> None.
+
+    Depth caveat (research 2026-06-11): the pricebook is Nasdaq-venue-only
+    depth, not the consolidated book — partial for names routed elsewhere.
+    """
+    sym = (symbol or "").strip().upper()
+    if not sym or sym.endswith("-USD"):
+        return None
+    try:
+        import robin_stocks.robinhood as rh
+
+        pb = rh.stocks.get_pricebook_by_symbol(sym)
+        if not isinstance(pb, dict):
+            return None
+        bids = pb.get("bids") or []
+        asks = pb.get("asks") or []
+        if not bids and not asks:
+            return None
+
+        def _lvl(side: list, n: int = 5) -> tuple[float, float]:
+            tot = 0.0
+            top = 0.0
+            for i, lv in enumerate(side[:n]):
+                try:
+                    q = float(lv.get("quantity") or 0)
+                except (TypeError, ValueError):
+                    continue
+                tot += q
+                if i == 0:
+                    top = q
+            return top, tot
+
+        bid_top, bid5 = _lvl(bids)
+        ask_top, ask5 = _lvl(asks)
+        tot5 = bid5 + ask5
+        return {
+            "src": "rh_pricebook_totalview",
+            "bid_top": bid_top, "ask_top": ask_top,
+            "bid5": round(bid5, 0), "ask5": round(ask5, 0),
+            "imbalance5": round((bid5 - ask5) / tot5, 4) if tot5 > 0 else None,
+            "levels": min(len(bids), len(asks)),
+        }
+    except Exception:
+        return None
+
+
 def _register_fresh_quote_tick(db, sess, le: dict) -> None:
     """Quote is live again: clear the streak; if a suspected halt was in force, mark
     the RESUME (starts the entry cooldown) so the lane does not buy the whipsaw."""
@@ -1989,12 +2040,24 @@ def tick_live_session(
             else:
                 le.pop("structural_stop_price", None)
                 le.pop("breakout_level_price", None)
+            # L2 depth snapshot AT THE DECISION MOMENT (Robinhood pricebook =
+            # Nasdaq TotalView, the same book Legend's bid/ask windows show).
+            # One GET per entry decision — NOT a stream (streaming an unofficial
+            # Gold endpoint is the access pattern that risks the whole RH
+            # relationship; a handful of decision-time snapshots is not).
+            # Fail-open: no Gold / non-equity / any error -> no snapshot.
+            _l2 = _entry_pricebook_snapshot(sess.symbol)
+            if _l2 is not None:
+                le["entry_l2_snapshot"] = _l2
+            else:
+                le.pop("entry_l2_snapshot", None)
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
             _emit(
                 db, sess, "live_entry_candidate_detected",
                 {"viability_score": via.viability_score, "trigger": _trigger_reason,
-                 "structural_stop": le.get("structural_stop_price")},
+                 "structural_stop": le.get("structural_stop_price"),
+                 "l2": _l2},
             )
         elif _score_ok and not _mkt_open:
             _emit(db, sess, "live_entry_wait_market_closed", {"symbol": sess.symbol})
