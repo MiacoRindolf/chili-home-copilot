@@ -17,20 +17,22 @@ Design notes:
     NOT raw quotes (no fragile NBBO reconstruction).
   * Sampled only for the Ross universe (price 1-20, $vol>=1M, |change|>=5%) — the
     names a replay actually considers — to bound row volume.
-  * RTH-gated (quotes are stale/wide outside regular hours).
+  * Extended-session-gated via market_profile.is_tradeable_now (#562): the tape
+    covers premarket -> afterhours, every minute the lane can trade.
   * Retention-bounded (the exit_parity_log bloat lesson): prune older than the
     window; both indexes keep the read and the prune cheap.
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime, time, timezone
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ....config import settings
+from .market_profile import is_tradeable_now
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +42,6 @@ _PRICE_MIN = 1.0
 _PRICE_MAX = 20.0
 _MIN_DOLLAR_VOLUME = 1_000_000.0
 _MIN_ABS_CHANGE_PCT = 5.0
-# Regular US trading hours in UTC (13:30-20:00). Quotes are live only here; outside
-# it the snapshot lastQuote is a stale overnight quote (absurd spreads) — skip.
-_RTH_OPEN = time(13, 30)
-_RTH_CLOSE = time(20, 0)
 _MAX_SANE_SPREAD_BPS = 5_000.0  # >50% round-trip = stale/garbage quote, not a real market
 
 
@@ -57,13 +55,14 @@ def _f(v: Any) -> Optional[float]:
         return None
 
 
-def _is_rth(now_utc: datetime) -> bool:
-    # Weekday + within RTH window (UTC). Holidays aren't excluded — a holiday simply
-    # yields stale quotes that the per-row sanity filter drops, so no harm.
-    if now_utc.weekday() >= 5:
-        return False
-    t = now_utc.timetz().replace(tzinfo=None)
-    return _RTH_OPEN <= t <= _RTH_CLOSE
+def _in_sampling_window(now_utc: datetime) -> bool:
+    # Sample whenever the equity lane is TRADEABLE (#562 extended session:
+    # premarket_start -> afterhours_end ET, the same market_profile gate the live
+    # entry uses). The tape must cover every minute the lane can trade — Ross's
+    # money is made pre-market, and an RTH-only tape left the replay/divergence
+    # instruments blind exactly there (06-10: zero tape rows before 13:30 UTC).
+    # Holidays aren't excluded — stale quotes fail the per-row sanity filters.
+    return is_tradeable_now("EQUITY", now=now_utc)
 
 
 def _ross_row(s: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -75,18 +74,26 @@ def _ross_row(s: dict[str, Any]) -> Optional[dict[str, Any]]:
     if not sym or sym.endswith("-USD"):
         return None
     day = s.get("day") if isinstance(s.get("day"), dict) else {}
-    if not day.get("c"):
-        day = s.get("prevDay") if isinstance(s.get("prevDay"), dict) else {}
-    px = _f(day.get("c")) or _f(day.get("vw"))
-    vol = _f(day.get("v")) or 0.0
-    op = _f(day.get("o"))
+    mn = s.get("min") if isinstance(s.get("min"), dict) else {}
+    lt = s.get("lastTrade") if isinstance(s.get("lastTrade"), dict) else {}
+    prev = s.get("prevDay") if isinstance(s.get("prevDay"), dict) else {}
+    # PRE-MARKET truth: the snapshot 'day' aggregate stays zeroed until the RTH open,
+    # so a pre-market mover (the Ross gap-and-go) needs the live tick (lastTrade /
+    # latest minute bar) and the minute bar's ACCUMULATED volume ('av', which counts
+    # extended-hours prints). The old day-or-prevDay fallback graded pre-market names
+    # by YESTERDAY's move — which is why the tape had zero pre-market rows.
+    px = _f(day.get("c")) or _f(day.get("vw")) or _f(lt.get("p")) or _f(mn.get("c"))
+    vol = max(_f(day.get("v")) or 0.0, _f(mn.get("av")) or 0.0)
     if not px or px <= 0:
         return None
     if not (_PRICE_MIN <= px <= _PRICE_MAX):
         return None
     if px * vol < _MIN_DOLLAR_VOLUME:
         return None
-    chg = ((px - op) / op * 100.0) if (op and op > 0) else 0.0
+    chg = _f(s.get("todaysChangePerc"))  # vendor change vs prev close — valid pre-market
+    if chg is None:
+        base = _f(day.get("o")) or _f(prev.get("c"))
+        chg = ((px - base) / base * 100.0) if (base and base > 0) else 0.0
     if abs(chg) < _MIN_ABS_CHANGE_PCT:
         return None
     lq = s.get("lastQuote") if isinstance(s.get("lastQuote"), dict) else (s.get("last_quote") or {})
@@ -106,11 +113,11 @@ def _ross_row(s: dict[str, Any]) -> Optional[dict[str, Any]]:
 
 def sample_universe_nbbo_spreads(db: Session, *, now_utc: Optional[datetime] = None) -> dict[str, Any]:
     """Read the current Massive snapshot, keep the Ross-universe movers with a clean
-    NBBO, and batch-insert their spreads into the tape. RTH-gated; best-effort (never
+    NBBO, and batch-insert their spreads into the tape. Extended-session-gated; best-effort (never
     raises — a sampler failure must not affect anything else). Returns a small summary."""
     now_utc = now_utc or datetime.now(timezone.utc)
-    if not _is_rth(now_utc):
-        return {"ok": True, "skipped": "outside_rth", "inserted": 0}
+    if not _in_sampling_window(now_utc):
+        return {"ok": True, "skipped": "outside_session", "inserted": 0}
     try:
         from ...massive_client import get_full_market_snapshot
         snap = get_full_market_snapshot(max_age_seconds=120) or []

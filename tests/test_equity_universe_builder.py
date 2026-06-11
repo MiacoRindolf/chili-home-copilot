@@ -123,3 +123,28 @@ def test_pos_in_range_helper():
 def test_profile_has_snapshot_freshness_knob():
     # (A) the documented knob that forces a ~5-min snapshot pull for this profile.
     assert EQUITY_ROSS_SMALLCAP.snapshot_max_age_seconds == 300.0
+
+
+# ── (C) PRE-MARKET truth — the gap-and-go window Ross trades (#562 + sampler fix) ──
+
+def test_premarket_mover_passes_dollar_volume_floor_via_min_av():
+    # Pre-market the snapshot 'day' aggregate is zeroed (no RTH prints yet); the
+    # accumulated extended-hours volume lives in min.av and the live tick in
+    # lastTrade. A DSY-like 7:42am gapper must make the pool.
+    snap = [
+        {"ticker": "DSY", "todaysChangePerc": 130.0,
+         "day": {},  # zeroed until the open
+         "min": {"c": 2.40, "av": 9_000_000},
+         "lastTrade": {"p": 2.42}},
+    ]
+    out = build_equity_universe(EQUITY_ROSS_SMALLCAP, snapshot=snap)
+    assert "DSY" in out
+
+
+def test_premarket_thin_name_still_fails_floor():
+    # The floor still SCREENS pre-market: thin accumulated volume = no pool entry.
+    snap = [
+        {"ticker": "THIN", "todaysChangePerc": 40.0,
+         "day": {}, "min": {"c": 3.0, "av": 50_000}, "lastTrade": {"p": 3.0}},
+    ]
+    assert "THIN" not in build_equity_universe(EQUITY_ROSS_SMALLCAP, snapshot=snap)

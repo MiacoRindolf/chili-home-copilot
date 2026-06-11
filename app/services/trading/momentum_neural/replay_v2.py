@@ -94,6 +94,18 @@ def _aware(ts) -> datetime:
     return t.replace(tzinfo=timezone.utc) if t.tzinfo is None else t.astimezone(timezone.utc)
 
 
+def _premarket_utc_hhmm(date: str) -> str:
+    """The lane's premarket start (#562 setting, ET) as UTC HH:MM for ``date`` —
+    DST-correct via the exchange tz. The replay day starts where the lane's
+    tradeable session starts; Ross's money is made pre-market."""
+    pre_et = str(getattr(settings, "chili_momentum_premarket_start_et", "07:00") or "07:00")
+    try:
+        t = pd.Timestamp(f"{date} {pre_et}", tz="America/New_York").tz_convert("UTC")
+        return t.strftime("%H:%M")
+    except Exception:
+        return "11:00"  # 07:00 EDT
+
+
 class Tape:
     """Real 1-min NBBO per symbol for one date, + halt windows from tape gaps."""
 
@@ -108,7 +120,7 @@ class Tape:
                     "WHERE observed_at >= :lo AND observed_at < :hi AND bid > 0 AND ask > 0 "
                     "ORDER BY symbol, observed_at"
                 ),
-                {"lo": f"{date} 13:00:00", "hi": f"{date} 20:10:00"},
+                {"lo": f"{date} {_premarket_utc_hhmm(date)}:00", "hi": f"{date} 20:10:00"},
             ).fetchall()
         finally:
             db.rollback()
@@ -339,7 +351,7 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
     trades: list[dict] = []
     open_pos: dict[str, dict] = {}
     state = {"cum": 0.0, "peak": 0.0, "halted": None}
-    day_grid = pd.date_range(f"{date} 13:30:00", f"{date} 19:59:00", freq="1min", tz="UTC")
+    day_grid = pd.date_range(f"{date} {_premarket_utc_hhmm(date)}:00", f"{date} 19:59:00", freq="1min", tz="UTC")
 
     def asof_rank(now) -> list[str]:
         sigs = {}
