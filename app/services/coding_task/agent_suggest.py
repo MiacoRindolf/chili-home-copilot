@@ -19,8 +19,8 @@ def build_bounded_implementation_prompt(
 ) -> str:
     """
     Strict allowlist: task id/title, brief body, sub_path, readiness summary,
-    up to N blocker summaries, one-line validation status. No clarifications,
-    no artifact previews, no raw validation logs.
+    up to N blocker summaries, one-line validation status. Clarifications and
+    artifact previews are excluded.
     """
     task = handoff.get("task") or {}
     tid = task.get("id")
