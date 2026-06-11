@@ -150,6 +150,38 @@ def index_symbols(db: Session, repo_id: int) -> Dict[str, Any]:
     return {"indexed": symbol_count}
 
 
+# Generic English filler that carries no code signal. Deliberately small —
+# words like "fix"/"test"/"error" DO carry signal in a codebase.
+_QUERY_STOPWORDS = {
+    "the", "a", "an", "to", "in", "on", "for", "of", "and", "or", "with",
+    "is", "are", "this", "that", "it", "be", "as", "at", "by", "from",
+    "into", "when", "then", "so", "do", "does", "not", "should", "must",
+    "please", "can", "could", "would", "will", "we", "you", "i", "my",
+    "our", "their", "have", "has", "had", "was", "were", "all", "any",
+}
+_MAX_QUERY_TERMS = 6
+
+
+def _query_terms(query: str) -> List[str]:
+    """Tokenize a natural-language query into searchable code terms.
+
+    The historical behavior ran ILIKE '%<entire prompt>%', so any query
+    longer than a single identifier matched nothing and the planner fell
+    back to filename-word overlap — i.e. the agent planned blind.
+    """
+    tokens = re.findall(r"[a-zA-Z_][a-zA-Z0-9_]{2,}", (query or "").lower())
+    seen: set[str] = set()
+    out: List[str] = []
+    for t in tokens:
+        if t in _QUERY_STOPWORDS or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+        if len(out) >= _MAX_QUERY_TERMS:
+            break
+    return out
+
+
 def search_code(
     db: Session,
     query: str,
@@ -205,6 +237,29 @@ def search_code(
         _add(e, 0.4)
     for e in doc_matches:
         _add(e, 0.3)
+
+    # Strategy 4: tokenized multi-term search for natural-language queries.
+    # Full-phrase matches above stay strongest; per-term hits are scored by
+    # term COVERAGE (an entry matching 3 of 4 query terms outranks one
+    # matching 1 of 4), with the per-field weight of its best field.
+    terms = _query_terms(q_lower)
+    if len(terms) >= 2:
+        field_weights = (
+            (CodeSearchEntry.symbol_name, 0.7),
+            (CodeSearchEntry.file_path, 0.45),
+            (CodeSearchEntry.signature, 0.35),
+            (CodeSearchEntry.docstring, 0.25),
+        )
+        hits: Dict[int, Dict[str, Any]] = {}
+        for term in terms:
+            for field, weight in field_weights:
+                for e in base_q.filter(field.ilike(f"%{term}%")).limit(limit).all():
+                    h = hits.setdefault(e.id, {"entry": e, "terms": set(), "weight": 0.0})
+                    h["terms"].add(term)
+                    h["weight"] = max(h["weight"], weight)
+        for h in hits.values():
+            coverage = len(h["terms"]) / len(terms)
+            _add(h["entry"], h["weight"] * coverage)
 
     results.sort(key=lambda x: x["score"], reverse=True)
     return results[:limit]
