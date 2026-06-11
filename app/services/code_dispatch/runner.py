@@ -70,27 +70,33 @@ def create_dispatch_worktree(repo_root: str, task_id: int) -> WorktreeHandle:
     # exist, and `git worktree add` refuses with exit 128.
     #
     # Critical detail: a previous container that was killed mid-operation
-    # may have left a `locked` file in .git/worktrees/task-N/, which
-    # makes both `prune` and `remove --force` IGNORE the entry. Unlock
-    # explicitly first, then prune. All three commands are idempotent
-    # and silent on success/no-op, so we always run all three.
+    # may have left a `locked` file in .git/worktrees/task-N/, which makes
+    # `remove --force` IGNORE the entry. Unlock explicitly first.
+    #
+    # NEVER run blanket `git worktree prune` here: /workspace is the
+    # operator's SHARED repo, and host-side worktrees (agent worktrees,
+    # deploy checkouts) are invisible from inside the container — a
+    # blanket prune severs THEIR registrations (verified live 2026-06-11:
+    # a dispatch cycle destroyed the session's own coding worktree).
+    # Cleanup must stay scoped to THIS task's path/registration only.
     subprocess.run(
         ["git", "worktree", "unlock", path],
         cwd=repo_root, check=False, capture_output=True,
     )
+    # Remove THIS task's registration (works for both real-but-broken
+    # paths and registered-but-missing paths; silent no-op otherwise).
     subprocess.run(
-        ["git", "worktree", "prune"],
+        ["git", "worktree", "remove", "--force", path],
         cwd=repo_root, check=False, capture_output=True,
     )
+    # Scoped stale-entry fallback: if the registration survived (e.g. the
+    # path is gone and this git version refuses remove), delete ONLY this
+    # task's admin dir — the per-entry equivalent of prune.
+    admin_dir = os.path.join(repo_root, ".git", "worktrees", f"task-{task_id}")
+    if os.path.isdir(admin_dir) and not os.path.exists(path):
+        import shutil
 
-    # If a current-container worktree path still exists on disk, remove
-    # it (covers the case where the path is real but the registration
-    # is broken, or vice versa).
-    if os.path.exists(path):
-        subprocess.run(
-            ["git", "worktree", "remove", "--force", path],
-            cwd=repo_root, check=False, capture_output=True,
-        )
+        shutil.rmtree(admin_dir, ignore_errors=True)
 
     # Capture stderr so the error message tells us WHY git refused — not just
     # exit 128. Common cases: branch already checked out elsewhere, untracked
