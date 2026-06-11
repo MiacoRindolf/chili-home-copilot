@@ -672,6 +672,28 @@ def post_automation_session_run(
     return out
 
 
+@router.post("/automation/sessions/{session_id}/flatten")
+def post_automation_session_flatten(
+    request: Request,
+    session_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Operator FLATTEN: system-mediated market exit of a held LIVE position —
+    the safe alternative to a manual broker-app sell (which races the system's
+    own resting orders; 2026-06-11 CPSH/SNDG)."""
+    from ...services.trading.momentum_neural.automation_query import request_flatten_session
+
+    out = request_flatten_session(
+        db, user_id=_automation_user_id(request, db), session_id=session_id
+    )
+    if not out.get("ok"):
+        err = out.get("error")
+        code = 404 if err == "not_found" else 400
+        raise HTTPException(status_code=code, detail=err or "flatten_failed")
+    db.commit()
+    return out
+
+
 @router.post("/automation/sessions/{session_id}/pause")
 def post_automation_session_pause(
     request: Request,

@@ -1858,8 +1858,10 @@ def tick_live_session(
             return False
         return is_kill_switch_active()
 
-    def _handle_kill_switch_mid_run() -> bool:
-        """Safest effort: cancel open entry order; flatten if position recorded."""
+    def _handle_kill_switch_mid_run(flatten_reason: str = "kill_switch_flatten") -> bool:
+        """Safest effort: cancel open entry order; flatten if position recorded.
+        Reused by the operator FLATTEN button (flatten_reason="operator_flatten")
+        so manual exits flow through the same chokepoint chain."""
         nonlocal le, snap
         if le.get("entry_order_id") and not le.get("position"):
             oid = str(le["entry_order_id"])
@@ -1877,7 +1879,7 @@ def tick_live_session(
                 product_id=str(pid),
                 quantity=float(pos["quantity"]),
                 client_order_id=cid,
-                reason="kill_switch_flatten",
+                reason=flatten_reason,
                 bid=bid,
                 ask=ask,
                 mid=mid,
@@ -1885,13 +1887,13 @@ def tick_live_session(
             )
             if not _live_exit_submit_succeeded(db, sess, le=le, result=sr, reason="kill_switch_flatten"):
                 return False
-            _emit(db, sess, "live_exit_submitted", {"reason": "kill_switch", "result": sr})
+            _emit(db, sess, "live_exit_submitted", {"reason": flatten_reason, "result": sr})
             poll = _poll_live_exit_fill(
                 db,
                 sess,
                 adapter,
                 le=le,
-                reason="kill_switch_flatten",
+                reason=flatten_reason,
                 quantity=float(pos["quantity"]),
             )
             if not poll.get("filled"):
@@ -1903,7 +1905,7 @@ def tick_live_session(
                         filled_quantity=float(poll["filled_size"]),
                         entry_price=float(pos.get("avg_entry_price") or bid or mid or 0.0),
                         fill_price=float(poll["fill_price"]),
-                        reason="kill_switch_flatten",
+                        reason=flatten_reason,
                     )
                 return False
             _complete_confirmed_live_exit(
@@ -1913,7 +1915,7 @@ def tick_live_session(
                 quantity=float(pos["quantity"]),
                 entry_price=float(pos.get("avg_entry_price") or bid or mid or 0.0),
                 fill_price=float(poll["fill_price"]),
-                reason="kill_switch_flatten",
+                reason=flatten_reason,
                 slip_bps=float(le.get("entry_slip_bps_ref") or 6.0),
                 sell_result=sr,
             )
@@ -2082,6 +2084,22 @@ def tick_live_session(
         else:
             db.flush()
             return {"ok": True, "blocked": True, "risk_evaluation": ev}
+
+    # ── Operator FLATTEN (system-mediated manual exit, 2026-06-11) ────────
+    # The button sets a flag; the runner honors it HERE (quotes bound) so the
+    # exit flows through the one chokepoint chain (scale-out cancel ->
+    # broker-qty clamp -> place -> confirm -> reconcile) instead of a
+    # broker-app sell racing the system's own resting orders (CPSH/SNDG).
+    if le.get("operator_flatten_requested_utc") and sess.state in _HELD_LIVE_STATES:
+        le.pop("operator_flatten_requested_utc", None)
+        _commit_le(sess, le)
+        _flatten_done = _handle_kill_switch_mid_run(flatten_reason="operator_flatten")
+        _emit(db, sess, "operator_flatten_executed" if _flatten_done else "operator_flatten_pending", {})
+        if _flatten_done:
+            _safe_transition(db, sess, STATE_LIVE_EXITED)
+        db.flush()
+        return {"ok": True, "session_id": sess.id, "state": sess.state,
+                "operator_flatten": bool(_flatten_done)}
 
     if _kill_switch_blocks_live() and sess.state in (
         STATE_LIVE_PENDING_ENTRY,
