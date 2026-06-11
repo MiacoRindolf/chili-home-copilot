@@ -458,6 +458,16 @@ def _submit_live_market_exit(
             "attempts": attempts,
         }
 
+    # Sell-into-strength invariant: a resting scale-out limit may be working this
+    # position. Cancel it FIRST and adopt any fill it caught, then clamp the sell
+    # quantity to the true remainder — the one chokepoint every exit path crosses.
+    quantity = _cancel_scale_limit_and_clamp(
+        db, sess, adapter, le=le, requested_qty=quantity, reason=reason
+    )
+    if quantity <= 0:
+        _emit(db, sess, "live_exit_noop_scale_limit_consumed", {"reason": reason})
+        return {"ok": False, "error": "no_remaining_quantity", "noop": True}
+
     _record_live_exit_intent_safe(
         db,
         sess,
@@ -933,6 +943,130 @@ def _scale_out_to_runner(
             },
         )
     return pnl
+
+
+def _fmt_limit_price_sell(p: float) -> str:
+    """Penny-FLOOR for sell limits >= $1 (never ask above the intended level)."""
+    if p >= 1.0:
+        return f"{math.floor(p * 100.0) / 100.0:.2f}"
+    return f"{p:.4f}"
+
+
+def _place_scale_out_limit(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    le: dict[str, Any],
+    product_id: str,
+    target_px: float,
+    filled: float,
+    prod: Any,
+) -> None:
+    """Sell INTO strength (Ross): rest a GTC LIMIT for the scale-out fraction AT
+    the first target the moment the entry fills — the partial executes while the
+    pop is still paying the level, instead of a reactive market sell after the
+    trigger (which pays the give-back). Fail-open: any failure here leaves the
+    reactive market scale-out path fully in charge."""
+    try:
+        inc = prod.base_increment if prod else None
+        mn = prod.base_min_size if prod else None
+        scale_qty, _runner_qty, can_split = scale_out_quantity(
+            current_qty=float(filled),
+            original_qty=float(filled),
+            fraction=scale_out_fraction(),
+            base_increment=inc,
+            base_min_size=mn,
+        )
+        if not can_split or scale_qty <= 0:
+            return
+        _ext = False
+        try:
+            from .market_profile import market_session_now
+
+            _ext = market_session_now(sess.symbol) != "regular"
+        except Exception:
+            _ext = False
+        cid = f"chili_ml_sol_{sess.id}_{uuid.uuid4().hex[:12]}"
+        res = adapter.place_limit_order_gtc(
+            product_id=product_id,
+            side="sell",
+            base_size=_fmt_base_size(scale_qty),
+            limit_price=_fmt_limit_price_sell(float(target_px)),
+            client_order_id=cid,
+            extended_hours=_ext,
+        ) or {}
+        if res.get("ok") and res.get("order_id"):
+            le["scale_limit_order_id"] = str(res["order_id"])
+            le["scale_limit_px"] = float(target_px)
+            le["scale_limit_qty"] = float(scale_qty)
+            le["scale_limit_adopted_qty"] = 0.0
+            _commit_le(sess, le)
+            _emit(db, sess, "scale_out_limit_placed", {
+                "order_id": le["scale_limit_order_id"],
+                "qty": float(scale_qty), "limit_price": float(target_px),
+                "extended_hours": _ext,
+            })
+        else:
+            _emit(db, sess, "scale_out_limit_place_failed", {
+                "error": str(res.get("error"))[:120], "fallback": "reactive_market_scale_out",
+            })
+    except Exception:
+        logger.warning(
+            "[live_runner] scale-out limit placement failed sess=%s (reactive path covers)",
+            sess.id, exc_info=True,
+        )
+
+
+def _cancel_scale_limit_and_clamp(
+    db: Session,
+    sess: TradingAutomationSession,
+    adapter: Any,
+    *,
+    le: dict[str, Any],
+    requested_qty: float,
+    reason: str,
+) -> float:
+    """OVERSELL INVARIANT for sell-into-strength: before ANY market exit, cancel
+    the resting scale-out limit and adopt whatever it already filled (cancel-race
+    safe), then clamp the requested sell quantity to the TRUE remaining position.
+    Without this, the resting limit and the market exit could both execute and
+    flip the account short. Called from the single exit chokepoint so every path
+    (stop / trail / bailout / kill-switch / EOD / max-hold) is covered."""
+    oid = le.get("scale_limit_order_id")
+    if not oid:
+        return float(requested_qty)
+    try:
+        try:
+            adapter.cancel_order(str(oid))
+        except Exception:
+            pass
+        no, _ = adapter.get_order(str(oid))
+        filled = float(getattr(no, "filled_size", 0) or 0) if no is not None else 0.0
+        adopted = float(le.get("scale_limit_adopted_qty") or 0.0)
+        new_fill = max(0.0, filled - adopted)
+        if new_fill > 0:
+            pos = le.get("position") if isinstance(le.get("position"), dict) else {}
+            px = float(getattr(no, "average_filled_price", 0) or 0) or float(le.get("scale_limit_px") or 0)
+            _apply_confirmed_live_partial_exit(
+                db, sess, le=le, filled_quantity=new_fill,
+                entry_price=float(pos.get("avg_entry_price") or 0),
+                fill_price=px, reason="scale_out_limit_fill",
+            )
+            le["scale_limit_adopted_qty"] = adopted + new_fill
+        _emit(db, sess, "scale_out_limit_cancelled", {
+            "order_id": str(oid), "filled_qty": filled, "for_exit": reason,
+        })
+    except Exception:
+        logger.warning(
+            "[live_runner] scale-limit cancel-adopt failed sess=%s", sess.id, exc_info=True
+        )
+    finally:
+        le.pop("scale_limit_order_id", None)
+        _commit_le(sess, le)
+    pos2 = le.get("position") if isinstance(le.get("position"), dict) else {}
+    remaining = float(_float_or_none(pos2.get("quantity")) or 0.0)
+    return max(0.0, min(float(requested_qty), remaining))
 
 
 def _safe_transition(db: Session, sess: TradingAutomationSession, new_state: str) -> None:
@@ -2175,6 +2309,12 @@ def tick_live_session(
                     except Exception:
                         _log.debug("mark_packet_executed live skipped session=%s", sess.id, exc_info=True)
                 _record_live_entry_ledger_safe(db, sess, le=le, quantity=filled, fill_price=avg)
+                # Sell INTO strength: rest the scale-out limit AT the target now,
+                # while the move is paying the level (fail-open -> reactive path).
+                _place_scale_out_limit(
+                    db, sess, adapter, le=le, product_id=product_id,
+                    target_px=float(target_px), filled=float(filled), prod=prod,
+                )
                 _safe_transition(db, sess, STATE_LIVE_ENTERED)
                 _emit(
                     db,
@@ -2505,12 +2645,20 @@ def tick_live_session(
                 "pre_liq_notional_usd": round(_max_notional_pre_liq, 2),
                 "capped_notional_usd": round(max_notional, 2),
             }
+        # Streak-adaptive risk (Ross): the per-trade max loss scales with the
+        # lane's recent live win rate — bigger on a hot hand, half-size when
+        # cold or after 3 straight losses. Bounds [0.5, 1.5]; fail-neutral 1.0.
+        from .risk_policy import streak_risk_multiplier
+
+        _streak_mult, _streak_meta = streak_risk_multiplier(db)
+        _base_max_loss = policy_float_cap(
+            caps, "max_loss_per_trade_usd", settings.chili_momentum_risk_max_loss_per_trade_usd
+        )
+        le["streak_risk"] = _streak_meta
         _rf_qty, _rf_meta = compute_risk_first_quantity(
             entry_price=guarded_ask,
             atr_pct=_eff_atr_pct,
-            max_loss_usd=policy_float_cap(
-                caps, "max_loss_per_trade_usd", settings.chili_momentum_risk_max_loss_per_trade_usd
-            ),
+            max_loss_usd=float(_base_max_loss) * float(_streak_mult),
             max_notional_ceiling_usd=max_notional,
             base_increment=inc,
             base_min_size=mn,
@@ -3017,12 +3165,47 @@ def tick_live_session(
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
-        # First-target (2:1) reached and not yet scaled — take the Ross partial.
-        # Fires from ENTERED or from TRAILING (price drifted up past trail-activate
-        # before reaching the target); the partial_taken guard ensures it fires once.
+        # Sell-into-strength: while a resting scale-out limit is working the
+        # target, ADOPT its fill instead of firing the reactive market partial.
+        # If price blew >2% through the target and the order is somehow still
+        # open (stale book state), cancel-adopt and let the reactive path run.
         if (
             st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
             and not pos.get("partial_taken")
+            and le.get("scale_limit_order_id")
+        ):
+            _sl_oid = str(le["scale_limit_order_id"])
+            _no_sl, _ = adapter.get_order(_sl_oid)
+            _sl_filled = float(getattr(_no_sl, "filled_size", 0) or 0) if _no_sl is not None else 0.0
+            if _no_sl is not None and not _order_open(_no_sl) and _sl_filled > 0:
+                _px_f = float(getattr(_no_sl, "average_filled_price", 0) or 0) or float(
+                    le.get("scale_limit_px") or target_px
+                )
+                _already = float(le.get("scale_limit_adopted_qty") or 0.0)
+                le.pop("scale_limit_order_id", None)
+                _commit_le(sess, le)
+                _new_qty = max(0.0, _sl_filled - _already)
+                if _new_qty > 0:
+                    _scale_out_to_runner(
+                        db, sess, le=le, filled_quantity=_new_qty,
+                        entry_price=avg, fill_price=_px_f, reason="scale_out_limit",
+                    )
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state}
+            if bid is not None and bid >= target_px * 1.02 and _no_sl is not None and _order_open(_no_sl):
+                _cancel_scale_limit_and_clamp(
+                    db, sess, adapter, le=le, requested_qty=0.0, reason="stale_scale_limit"
+                )
+                # cleared — the reactive path below takes over this pulse
+
+        # First-target (2:1) reached and not yet scaled — take the Ross partial.
+        # Fires from ENTERED or from TRAILING (price drifted up past trail-activate
+        # before reaching the target); the partial_taken guard ensures it fires once.
+        # Skipped while a resting scale-out limit is working the level (above).
+        if (
+            st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
+            and not pos.get("partial_taken")
+            and not le.get("scale_limit_order_id")
             and bid >= target_px * 0.995
         ):
             _safe_transition(db, sess, STATE_LIVE_SCALING_OUT)

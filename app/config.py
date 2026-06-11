@@ -2205,6 +2205,14 @@ class Settings(BaseSettings):
         default=3,
         validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_TAPE_MIN_BIG_MOVERS"),
     )
+    # ACTIVE EVENT THEME keywords (comma-separated; empty = none). Names whose fresh
+    # headlines match keep their catalyst boost even in a HOT tape (only generic
+    # news is neutralized) — e.g. "space,satellite,rocket,orbit,launch,aerospace,
+    # spacex" for the SpaceX IPO window (June 10-13 2026). Operator-set per event.
+    chili_momentum_event_theme_keywords: str = Field(
+        default="",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EVENT_THEME_KEYWORDS"),
+    )
     # A CONFIGURED broker disconnected this long raises a loud ops alarm (websocket
     # broadcast + critical log). The RH refresh token died silently for ~7 weeks
     # (2026-04-19 -> 06-10) with only info-level log spam — never again.

@@ -252,8 +252,10 @@ def score_viability(
             _meta = ctx.meta if isinstance(getattr(ctx, "meta", None), dict) else {}
             _hot = bool(_meta.get("hot_tape"))
             _ctry = (_meta.get("symbol_countries") or {}).get(symbol)
+            _theme_syms = _meta.get("theme_symbols")
             _cat_delta = catalyst_viability_delta(
-                symbol, _cat_syms, hot_tape=_hot, hq_country=_ctry
+                symbol, _cat_syms, hot_tape=_hot, hq_country=_ctry,
+                theme_symbols=set(_theme_syms) if _theme_syms else None,
             )
             if _cat_delta:
                 base += _cat_delta
