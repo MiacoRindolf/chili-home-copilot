@@ -177,6 +177,23 @@ def _rate_limit_wait() -> None:
             time.sleep(wait)
 
 
+def invalidate_agg_cache_for_ticker(ticker: str) -> int:
+    """Drop every cached aggregate-bars entry for ``ticker`` (all intervals/periods).
+
+    Called on WS candle close so the next ``get_aggs`` read includes the
+    just-closed bar instead of serving up to ``_TTL_BARS`` (1h) of staleness.
+    """
+    t = (ticker or "").strip().upper()
+    if not t:
+        return 0
+    pref = f"massive:agg:{t}:"
+    with _cache_lock:
+        keys = [k for k in _cache if k.startswith(pref)]
+        for k in keys:
+            del _cache[k]
+    return len(keys)
+
+
 def _cache_get(key: str) -> Any | None:
     with _cache_lock:
         entry = _cache.get(key)
@@ -1165,11 +1182,18 @@ class CandleAggregator:
                 cb(sym, bar)
             except Exception:
                 pass
-        # Invalidate OHLCV cache for this ticker so next fetch gets fresh data
+        # Invalidate BOTH bar-cache layers so the next trigger evaluation includes
+        # the just-closed minute. Without the massive-layer drop, _TTL_BARS (1h)
+        # left "live" triggers reading bars up to an hour old — fatal for a 1m
+        # entry timeframe.
         try:
             from .trading.market_data import invalidate_ohlcv_cache_for_ticker
 
             invalidate_ohlcv_cache_for_ticker(sym)
+        except Exception:
+            pass
+        try:
+            invalidate_agg_cache_for_ticker(sym)
         except Exception:
             pass
 

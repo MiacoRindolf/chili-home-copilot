@@ -146,6 +146,37 @@ def main() -> None:
     except Exception as _e:
         logger.debug("[scheduler_worker] silent-exposure warning probe failed: %s", _e)
 
+    # ── Real-time market-data rail (Massive WS + price bus) ───────────────────
+    # The momentum live runner runs in THIS process, but the Massive WebSocket
+    # client was only ever started in FastAPI startup (app/main.py) — so with
+    # MASSIVE_USE_WEBSOCKET=true the runner still polled REST quotes on a 30s
+    # clock while the WS rail sat dormant (the only live WS thread was in
+    # broker-sync, subscribed to nothing). Start the feed where the consumers
+    # live; any failure degrades to the REST path.
+    try:
+        from app.config import settings as _rt_cfg
+
+        if _rt_cfg.massive_api_key and _rt_cfg.massive_use_websocket:
+            from app.services.massive_client import get_ws_client
+
+            get_ws_client().start()
+            logger.info("[scheduler_worker] Massive WS client started (real-time NBBO/trades)")
+        if _rt_cfg.chili_autopilot_price_bus_enabled:
+            from app.services.trading.price_bus import get_price_bus
+
+            _bus = get_price_bus()
+            _bus.bridge_massive_ws()
+            if _rt_cfg.chili_coinbase_ws_enabled:
+                from app.services.trading.venue.coinbase_spot import get_coinbase_ws
+
+                _cb_ws = get_coinbase_ws()
+                if not _cb_ws._running:
+                    _cb_ws.start()
+                _bus.bridge_coinbase_ws()
+            logger.info("[scheduler_worker] Price bus started: %s", _bus.describe())
+    except Exception as _rt_e:
+        logger.warning("[scheduler_worker] real-time feed start failed (REST fallback): %s", _rt_e)
+
     start_scheduler()
     logger.info("[scheduler_worker] Started (CHILI_SCHEDULER_ROLE=%s)", role)
 
