@@ -26,6 +26,12 @@ def test_statuses_come_from_env(monkeypatch):
 
 @pytest.fixture
 def project(db, paired_client):
+    from sqlalchemy import text
+
+    # code_brain_events is migration-created (not in ORM metadata), so the
+    # truncating db fixture does NOT clear it — stale events from previous
+    # runs would suppress enqueues and poison these tests.
+    db.execute(text("DELETE FROM code_brain_events"))
     _client, user = paired_client
     p = PlanProject(user_id=user.id, name="WatcherProj", key="WCH")
     db.add(p)
@@ -53,3 +59,36 @@ def test_watch_plan_tasks_ignores_non_configured_states(db, project, monkeypatch
     db.commit()
 
     assert watch_plan_tasks(db) == 0
+
+
+def test_no_reenqueue_after_failed_attempt_until_task_changes(db, project, monkeypatch):
+    """The live spam loop: a task whose dispatch terminally fails (e.g. no
+    workspace binding) was re-enqueued every 30s forever, because the dedupe
+    only looked at UNCLAIMED events. A processed attempt now suppresses
+    re-enqueue until the task row changes."""
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import text
+
+    monkeypatch.setenv("CHILI_DISPATCH_TASK_STATUSES", "brief_ready")
+    task = PlanTask(project_id=project.id, title="no workspace", coding_readiness_state="brief_ready")
+    db.add(task)
+    db.commit()
+
+    assert watch_plan_tasks(db) == 1
+
+    # Simulate the processor finishing (escalated) AFTER the task's last update.
+    db.execute(text(
+        "UPDATE code_brain_events SET claimed_at = now(), processed_at = now(), "
+        "outcome = 'escalated', error_message = 'draft_failed' "
+        "WHERE subject_kind = 'plan_task' AND subject_id = :s"
+    ), {"s": task.id})
+    db.commit()
+
+    # Same task state -> suppressed (this was the infinite loop).
+    assert watch_plan_tasks(db) == 0
+
+    # Operator touches the task (e.g. binds a workspace) -> eligible again.
+    task.updated_at = datetime.utcnow() + timedelta(seconds=1)
+    db.commit()
+    assert watch_plan_tasks(db) == 1

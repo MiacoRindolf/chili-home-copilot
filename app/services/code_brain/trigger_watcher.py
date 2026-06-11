@@ -66,7 +66,8 @@ def watch_plan_tasks(db: Session) -> int:
         return 0
     rows = db.execute(
         text(
-            "SELECT id, COALESCE(title, '') AS title "
+            "SELECT id, COALESCE(title, '') AS title, "
+            "       COALESCE(updated_at, created_at, now()) AS task_ts "
             "FROM plan_tasks "
             "WHERE coding_readiness_state IN :statuses "
             "ORDER BY sort_order ASC NULLS LAST, id ASC "
@@ -77,15 +78,26 @@ def watch_plan_tasks(db: Session) -> int:
 
     new_count = 0
     for row in rows or []:
+        # Suppress re-enqueue unless the TASK changed since the last attempt:
+        # an event that is pending (processed_at IS NULL — unclaimed OR
+        # in-flight) or that was processed AFTER the task's last update means
+        # this exact task state was already tried. Without this, a task whose
+        # dispatch terminally fails (e.g. no workspace binding) re-enqueued
+        # every 30s forever — verified live on first loop enablement
+        # 2026-06-11 (events 104-109+ for the same two tasks in 90s).
         before = db.execute(
             text(
                 "SELECT id FROM code_brain_events "
                 "WHERE event_type = :t "
                 "  AND subject_kind = 'plan_task' "
                 "  AND subject_id = :s "
-                "  AND claimed_at IS NULL"
+                "  AND (processed_at IS NULL OR processed_at >= :task_ts)"
             ),
-            {"t": event_bus.EVENT_PLAN_TASK_READY, "s": int(row[0])},
+            {
+                "t": event_bus.EVENT_PLAN_TASK_READY,
+                "s": int(row[0]),
+                "task_ts": row[2],
+            },
         ).fetchone()
         if before:
             continue
