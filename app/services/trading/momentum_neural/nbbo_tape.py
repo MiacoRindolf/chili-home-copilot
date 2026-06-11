@@ -25,7 +25,7 @@ Design notes:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -172,6 +172,64 @@ def prune_nbbo_tape(db: Session, *, retention_days: Optional[int] = None) -> dic
         db.rollback()
         logger.warning("[nbbo_tape] prune failed: %s", exc)
         return {"ok": False, "error": str(exc)[:120]}
+
+
+def tape_running_up_symbols(db: Session, *, now_utc: Optional[datetime] = None) -> list[str]:
+    """Ross's "Running Up" scanner, rebuilt from our own NBBO tape: symbols whose
+    MID price burst over the last few minutes — regardless of day change.
+
+    Why (2026-06-11, the SKYQ gap): the viability refresh batch ranks DAY-change
+    movers (a Top Gainers clone), so a name spiking NOW from a flat day (SKYQ:
+    +2% on the day yet 2,163% 5-min RVOL, firing a textbook pullback break on
+    Ross's Running Up scanner) never earns a fresh viability row and can never
+    arm. The tape already samples every Ross-universe name each minute — this
+    reads the burst straight off it. Selection-batch feeder ONLY: every real
+    gate (viability, probes, spread, belts) still runs downstream.
+
+    Returns burst symbols, fastest first, bounded by the max-symbols knob.
+    Best-effort: returns [] on any failure.
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    lookback_min = float(getattr(settings, "chili_momentum_running_up_lookback_min", 5.0) or 5.0)
+    min_pct = float(getattr(settings, "chili_momentum_running_up_min_pct", 3.0) or 3.0)
+    max_symbols = int(getattr(settings, "chili_momentum_running_up_max_symbols", 6) or 6)
+    _MIN_SAMPLES = 3  # one stale print must not read as a burst
+    try:
+        rows = db.execute(
+            text(
+                "WITH recent AS ("
+                "  SELECT symbol, mid,"
+                "         row_number() OVER (PARTITION BY symbol ORDER BY observed_at ASC) rn_a,"
+                "         row_number() OVER (PARTITION BY symbol ORDER BY observed_at DESC) rn_d,"
+                "         count(*) OVER (PARTITION BY symbol) n"
+                "  FROM momentum_nbbo_spread_tape"
+                "  WHERE observed_at >= :since AND mid > 0 AND symbol NOT LIKE '%-USD'"
+                ") "
+                "SELECT a.symbol, a.mid AS first_mid, d.mid AS last_mid "
+                "FROM recent a JOIN recent d ON d.symbol = a.symbol AND d.rn_d = 1 "
+                "WHERE a.rn_a = 1 AND a.n >= :min_n"
+            ),
+            {
+                "since": (now_utc.replace(tzinfo=None) - timedelta(minutes=lookback_min)),
+                "min_n": _MIN_SAMPLES,
+            },
+        ).fetchall()
+    except Exception as exc:
+        logger.debug("[nbbo_tape] running-up read failed: %s", exc)
+        return []
+    bursts: list[tuple[float, str]] = []
+    for sym, first_mid, last_mid in rows:
+        try:
+            f, l = float(first_mid), float(last_mid)
+        except (TypeError, ValueError):
+            continue
+        if f <= 0:
+            continue
+        pct = (l - f) / f * 100.0
+        if pct >= min_pct:
+            bursts.append((pct, str(sym).upper()))
+    bursts.sort(reverse=True)
+    return [s for _, s in bursts[:max_symbols]]
 
 
 def read_spread_profile(
