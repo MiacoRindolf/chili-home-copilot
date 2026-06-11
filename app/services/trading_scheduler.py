@@ -817,7 +817,9 @@ def _run_momentum_live_runner_batch_job():
 
         db = SessionLocal()
         try:
-            session_ids = [int(s.id) for s in list_runnable_live_sessions(db, limit=15)]
+            _runnable = list_runnable_live_sessions(db, limit=15)
+            session_ids = [int(s.id) for s in _runnable]
+            session_syms = {str(s.symbol).upper() for s in _runnable if getattr(s, "symbol", None)}
         except Exception:
             logger.warning("[scheduler] live runner: failed to list runnable sessions", exc_info=True)
             return
@@ -831,6 +833,18 @@ def _run_momentum_live_runner_batch_job():
 
         if not session_ids:
             return
+
+        # Keep the real-time feed pointed at what we're actually trading: subscribe
+        # every runnable symbol on the price bus (stocks -> Massive WS, crypto ->
+        # Coinbase WS). Idempotent + best-effort; no-op when the WS isn't running.
+        try:
+            from .trading.price_bus import get_price_bus
+
+            _pb = get_price_bus()
+            for _sym in session_syms:
+                _pb.subscribe_symbol(_sym)
+        except Exception:
+            pass
 
         # Bound the pool by the live concurrency cap — no second magic number; an
         # explicit override knob wins when > 0. Never more workers than sessions.

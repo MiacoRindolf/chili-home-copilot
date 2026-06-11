@@ -430,6 +430,35 @@ class RobinhoodSpotAdapter(VenueAdapter):
                 logger.warning("[rh_adapter] get_best_bid_ask crypto(%s) failed: %s", ticker, e)
                 return None, fresh
 
+        # Real-time NBBO from the Massive WebSocket when the feed is live in this
+        # process — beats the REST round-trip AND its quote cache. get_ws_quote
+        # enforces its own 5s staleness, and the WS receive time flows into
+        # FreshnessMeta so the stale_bbo gate / halt detection see push-quotes with
+        # the same semantics as pulled ones. Absent/stale -> REST path below.
+        try:
+            from ...massive_client import get_ws_quote
+
+            ws_q = get_ws_quote(ticker)
+        except Exception:
+            ws_q = None
+        if ws_q is not None and ws_q.bid and ws_q.ask and ws_q.bid > 0 and ws_q.ask >= ws_q.bid:
+            ws_fresh = _now_freshness(
+                provider_time_utc=datetime.fromtimestamp(ws_q.timestamp, tz=timezone.utc)
+            )
+            mid = (ws_q.bid + ws_q.ask) / 2.0
+            spread_abs = ws_q.ask - ws_q.bid
+            return NormalizedTicker(
+                product_id=ticker,
+                bid=ws_q.bid, ask=ws_q.ask, mid=mid,
+                spread_abs=spread_abs,
+                spread_bps=(spread_abs / mid) * 10_000 if mid > 0 else None,
+                last_price=ws_q.price,
+                last_size=None, bid_size=ws_q.bid_size, ask_size=ws_q.ask_size,
+                base_volume_24h=None, quote_volume_24h=None,
+                freshness=ws_fresh,
+                raw={"source": "massive_ws"},
+            ), ws_fresh
+
         try:
             import robin_stocks.robinhood as rh
 
