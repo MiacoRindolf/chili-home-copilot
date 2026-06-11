@@ -212,6 +212,155 @@ def _vol_aware_pullback_tolerances(
     return shallow, ema_wick, retest
 
 
+# Wait reasons whose ``debug["pullback_high"]`` is a LIVE tick-watchable level:
+# the live runner stashes it as ``watch_break_level`` (tick-speed dispatch), the
+# tick-break branch fires through it mid-bar, and the replay engine mirrors both.
+# ONE constant for all three call sites — growing the tuple in only one of them
+# is how the EDHL disarm bug (2026-06-11) happened.
+TICK_ARMED_WAIT_REASONS = (
+    "waiting_for_break",
+    "waiting_for_reclaim",
+    "waiting_for_reclaim_high",
+)
+
+
+def _collapse_cap(atr_pct: float | None) -> float:
+    """Volatility-relative max retrace depth that still reads as a PULLBACK —
+    beyond it the move is a breakdown, not a dip to buy. Shared yardstick of the
+    halt-resume dip trigger and the deep-retrace reclaim path (same Ross mechanic:
+    buy the dip's reclaim, never a collapse)."""
+    return min(0.25, max(0.06, 6.0 * (atr_pct or 0.01)))
+
+
+def _evaluate_deep_reclaim(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    ema9: list[Any],
+    cur: int,
+    *,
+    win_high: float,
+    base_end: int,
+    window_bars: int,
+    ema_wick: float,
+    tol: float,
+    atr_pct: float | None,
+    fallback_reason: str,
+    debug: dict[str, Any],
+    bar_ts: Any = None,
+) -> tuple[bool, str, float | None, float | None, dict[str, Any]] | None:
+    """Deep-retrace RECLAIM entry (the 2026-06-11 EDHL gap): after a retrace too
+    deep for the flag checks, Ross does not walk away — he waits for price to
+    RECLAIM the 9-EMA, hold it, and buys the first break of the recovery swing
+    high. The flag checks are anchored on fixed window OFFSETS, so a reclaim +
+    new highs could never clear them (only time could); this evaluator re-anchors
+    on the detected dip EVENT instead.
+
+    Called only from the two dead-end returns of ``_evaluate_break_retest``
+    (``pullback_too_deep`` / ``pullback_below_ema9``). Returns the 5-tuple to
+    return instead, or ``None`` to keep the original rejection (collapse tapes,
+    still-falling tapes, path disabled). Stateless on the frame — the live
+    runner's 15s re-evals and the replay engine reproduce it identically.
+
+    Mechanics (each reused from an existing yardstick — no new magic):
+      * collapse guard: ``_collapse_cap`` (the halt-resume dip cap),
+      * EMA hold band: the existing vol-aware ``ema_wick``,
+      * entry level: the RECOVERY swing high — NOT the pre-fade HOD (Ross bought
+        EDHL's reclaim at ~14.2 while HOD was 15.49),
+      * stop: the reclaim consolidation low, at least half an ATR under the level
+        (``_VOL_EMA_WICK_ATR_MULT`` — the system's own intrabar-noise floor),
+        NEVER the deep dip low (which zeroes risk-first sizing).
+    """
+    if not bool(getattr(settings, "chili_momentum_deep_reclaim_enabled", True)):
+        return None
+    # MORNING-ONLY (validated on the 06-10/06-11 A/B): a deep-retrace reclaim is a
+    # weaker prior than a clean flag — it pays in the discovery phase (premarket
+    # through shortly after the open: EDHL +25%, LASE +13%) and bleeds in midday/
+    # afternoon chop (06-10 added SPHL -$404, GCDT -$157, DBGI -$161, all 13:22 ET
+    # or later). Ross's own discipline: "by 10:30 I'm done." The lane's global
+    # entry window bounds the premarket side; this bounds the late side.
+    if bar_ts is not None:
+        try:
+            from zoneinfo import ZoneInfo
+
+            _ts = pd.Timestamp(bar_ts)
+            _ts = _ts.tz_localize("UTC") if _ts.tzinfo is None else _ts
+            _et = _ts.tz_convert(ZoneInfo("America/New_York"))
+            _cutoff_min = (9 * 60 + 30) + int(
+                60 * float(getattr(settings, "chili_momentum_reclaim_max_hours_after_open", 1.0) or 1.0)
+            )
+            if (_et.hour * 60 + _et.minute) >= _cutoff_min:
+                return None
+        except Exception:
+            pass  # no usable clock -> don't block on the guard
+    confirm_bars = max(1, int(getattr(settings, "chili_momentum_reclaim_confirm_bars", 2) or 2))
+    w_start = max(0, cur - int(window_bars))
+    # Dip anchor = the structural EVENT, peak-then-retrace: the pre-dip PEAK is
+    # the window's highest completed bar with room after it for dip + reclaim
+    # (a plain window-minimum would anchor on the impulse's ORIGIN instead of
+    # the retrace). The dip is the lowest low AFTER that peak.
+    peak_hi = cur - (confirm_bars + 1)
+    if peak_hi <= w_start:
+        return None
+    hi_win = high.iloc[w_start:peak_hi + 1]
+    peak_idx = w_start + int(hi_win.values.argmax())
+    lo_after = low.iloc[peak_idx + 1:cur + 1]
+    if len(lo_after) < confirm_bars + 1:
+        return None
+    dip_idx = peak_idx + 1 + int(lo_after.values.argmin())
+    dip_low = float(low.iloc[dip_idx])
+    if dip_idx >= cur or dip_low <= 0:
+        return None  # still making lows -> the original reason stands
+    # Collapse guard: deeper than the vol-relative cap = breakdown, don't reclaim-buy.
+    run_high = max(float(win_high), float(high.iloc[peak_idx]))
+    if run_high <= 0:
+        return None
+    depth = (run_high - dip_low) / run_high
+    if depth > _collapse_cap(atr_pct):
+        return None
+    # Reclaim hold: the CURRENT streak of closes holding the live EMA-9 band since
+    # the dip — judged at each bar's OWN EMA (the frozen base-bar EMA reference is
+    # exactly the bug this path fixes). One band-losing close resets the streak;
+    # the next pass re-anchors statelessly (self-healing on dead-cat bounces).
+    held = 0
+    full_reclaim = False
+    i = cur
+    while i > dip_idx:
+        e = ema9[i] if i < len(ema9) and ema9[i] is not None else None
+        if e is None or float(close.iloc[i]) < float(e) * (1.0 - ema_wick):
+            break
+        if float(close.iloc[i]) >= float(e):
+            full_reclaim = True
+        held += 1
+        i -= 1
+    debug = dict(debug)
+    debug.update({
+        "pattern": "deep_reclaim", "deep_reclaim_from": fallback_reason,
+        "dip_low": dip_low, "run_high": round(run_high, 6),
+        "depth_pct": round(depth * 100.0, 2), "reclaim_bars": held,
+    })
+    if held < confirm_bars or not full_reclaim:
+        # un-armed: strip the base evaluator's stale levels so nothing downstream
+        # (tick dispatch, replay parity) can fire through an outdated number
+        debug.pop("pullback_high", None)
+        debug.pop("pullback_low", None)
+        return False, "reclaim_forming", None, None, debug
+    r0 = cur - held + 1
+    prior_high = float(high.iloc[dip_idx + 1:cur].max()) if cur > dip_idx + 1 else float(high.iloc[cur])
+    reclaim_low = float(low.iloc[r0:cur + 1].min())
+    stop = min(reclaim_low, prior_high * (1.0 - _VOL_EMA_WICK_ATR_MULT * (atr_pct or 0.01)))
+    cur_high = float(high.iloc[cur])
+    if cur_high > prior_high and float(close.iloc[cur]) >= prior_high * (1.0 - tol):
+        debug["pullback_high"] = prior_high
+        debug["pullback_low"] = stop
+        return True, "deep_reclaim", prior_high, stop, debug
+    # Not fired on a completed bar yet: arm the tick watch at the recovery swing
+    # high (ratchets bar-by-bar; the live WS ask through it fires the tick path).
+    debug["pullback_high"] = max(prior_high, cur_high)
+    debug["pullback_low"] = stop
+    return False, "waiting_for_reclaim_high", None, None, debug
+
+
 def _evaluate_raw_break(
     high: pd.Series,
     low: pd.Series,
@@ -318,10 +467,28 @@ def _evaluate_break_retest(
     # tolerance by ATR% (calm name -> Ross floors). See _vol_aware_pullback_tolerances.
     eff_shallow, ema_wick, vol_retest = _vol_aware_pullback_tolerances(atr_pct, retracement_threshold)
     debug["shallow_cap"] = round(eff_shallow, 3)
+    tol = max(0.0, float(retest_tolerance), vol_retest)
+    # Deep-retrace fallback args: both base-check rejections below are anchored on
+    # window POSITION (they slide with `cur`, so a reclaim + new highs can never
+    # clear them — the 2026-06-11 EDHL miss). Instead of a terminal reject, hand
+    # the tape to the event-anchored reclaim evaluator; it returns None to keep
+    # the original rejection when the tape really is broken (collapse/still falling).
+    _reclaim_kw = dict(
+        win_high=win_high, base_end=base_end,
+        window_bars=20 + int(max_pullback_bars) + look_bars,
+        ema_wick=ema_wick, tol=tol, atr_pct=atr_pct, debug=debug,
+        bar_ts=(high.index[cur] if hasattr(high, "index") and len(high.index) > cur else None),
+    )
 
     retrace = (win_high - base_low) / impulse_range
     debug["retrace"] = round(retrace, 3)
     if retrace > eff_shallow:
+        res = _evaluate_deep_reclaim(
+            high, low, close, ema9, cur,
+            fallback_reason="pullback_too_deep", **_reclaim_kw,
+        )
+        if res is not None:
+            return res
         return False, "pullback_too_deep", None, None, debug
 
     # EMA-9 support is checked at the BASE (when the consolidation formed), not at
@@ -332,9 +499,13 @@ def _evaluate_break_retest(
     ema_base = ema9[ema_idx] if 0 <= ema_idx < len(ema9) and ema9[ema_idx] is not None else None
     if ema_base is not None and base_low < float(ema_base) * (1.0 - ema_wick):
         debug["ema_9"] = float(ema_base)
+        res = _evaluate_deep_reclaim(
+            high, low, close, ema9, cur,
+            fallback_reason="pullback_below_ema9", **_reclaim_kw,
+        )
+        if res is not None:
+            return res
         return False, "pullback_below_ema9", None, None, debug
-
-    tol = max(0.0, float(retest_tolerance), vol_retest)
 
     # 1) Breakout: a tail bar BEFORE the current pierced the level.
     break_idx: int | None = None
@@ -496,7 +667,7 @@ def pullback_break_confirmation(
         not ok_t
         and live_price is not None
         and float(live_price) > 0
-        and reason_t in ("waiting_for_break", "waiting_for_reclaim")
+        and reason_t in TICK_ARMED_WAIT_REASONS
         and debug.get("pullback_high") is not None
         and debug.get("pullback_low") is not None
         and float(live_price) > float(debug["pullback_high"])
@@ -508,6 +679,11 @@ def pullback_break_confirmation(
     if not ok_t:
         return False, reason_t, debug
 
+    # A deep-retrace reclaim (whether bar-fired or tick-fired) has a weaker
+    # structural prior than a clean shallow flag — the gates below treat it like
+    # a runaway: raised volume floor + fail-CLOSED sustained-volume.
+    _deep_reclaim = debug.get("pattern") == "deep_reclaim"
+
     # Volume spike on the trigger (break / reclaim) bar.
     vol_ratio = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
     if vol_ratio is None:
@@ -516,10 +692,13 @@ def pullback_break_confirmation(
         vol_ratio = (float(vol.iloc[-1]) / avg) if avg > 0 else 0.0
     debug["vol_ratio"] = round(vol_ratio, 2)
     # Runaways need MORE conviction (chasing a break without a retest): raise the
-    # volume floor to runaway_min_volume_spike for them; normal breaks keep the base.
+    # volume floor to runaway_min_volume_spike for them; same for deep reclaims
+    # (buying without the classic shallow flag). Normal breaks keep the base.
     # Tick-breaks skip the per-bar spike check (the breaking bar is still forming —
     # its volume is unknowable); the sustained-volume gate below still applies.
-    _vol_floor = float(runaway_min_volume_spike) if _runaway else float(volume_spike_multiple)
+    _vol_floor = (
+        float(runaway_min_volume_spike) if (_runaway or _deep_reclaim) else float(volume_spike_multiple)
+    )
     if not _tick_break and vol_ratio < _vol_floor:
         return False, "break_low_volume", debug
 
@@ -527,13 +706,17 @@ def pullback_break_confirmation(
     # by volume at the entry tick — recent rel-vol above the floor — so a faded 24h
     # mover (hot at selection, dead by entry) is rejected. Self-relative per
     # instrument, so the floor is adaptive (a FLOOR the system can raise), not a
-    # fixed magic count. Fails OPEN on thin data.
+    # fixed magic count. Fails OPEN on thin data — EXCEPT for a deep reclaim:
+    # a deep-retrace bounce with unknowable volume support is the textbook
+    # dead-cat trap, so that one path fails CLOSED.
     if require_sustained_volume:
         sustained = _sustained_rvol(vr, cur, int(sustain_lookback_bars))
         if sustained is not None:
             debug["sustained_rvol"] = round(sustained, 2)
             if sustained < float(sustained_rvol_floor):
                 return False, "faded_volume_no_sustain", debug
+        elif _deep_reclaim:
+            return False, "faded_volume_no_sustain", debug
 
     # ── Ross candle / VWAP / MACD confirmations (the tape-reading the structural
     # gate alone misses; each optional + live-runner-gated, fail-OPEN so thin data
@@ -576,6 +759,8 @@ def pullback_break_confirmation(
             if not bullish:
                 return False, "macd_not_bullish", debug
 
+    if _deep_reclaim:
+        return True, ("deep_reclaim_tick_ok" if _tick_break else "deep_reclaim_ok"), debug
     return True, ("pullback_break_tick_ok" if _tick_break else "pullback_break_ok"), debug
 
 
@@ -810,7 +995,7 @@ def halt_resume_dip_trigger(
         arrays = {}
         atr_pct = None
     noise_floor = max(0.003, 0.5 * (atr_pct or 0.01))
-    deep_cap = min(0.25, max(0.06, 6.0 * (atr_pct or 0.01)))
+    deep_cap = _collapse_cap(atr_pct)
     debug["atr_pct"] = round(atr_pct, 5) if atr_pct is not None else None
     debug["noise_floor_pct"] = round(noise_floor * 100.0, 2)
     debug["deep_cap_pct"] = round(deep_cap * 100.0, 2)

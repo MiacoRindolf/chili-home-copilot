@@ -2616,6 +2616,40 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_RETEST_LOOKBACK_BARS"),
         description="Bars reserved after the consolidation base for the break+retest+reclaim sequence.",
     )
+    # Deep-retrace RECLAIM entry (the 2026-06-11 EDHL gap): when the retrace was too
+    # deep for the flag checks, Ross waits for price to RECLAIM the 9-EMA, hold it,
+    # and buys the first break of the recovery swing high. Stop = the reclaim
+    # consolidation low (never the far dip low). All other yardsticks are reused
+    # (collapse cap = the halt-resume dip cap; EMA band, runaway volume floor).
+    chili_momentum_deep_reclaim_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DEEP_RECLAIM_ENABLED"),
+        description="Allow re-entry on a deep retrace once price reclaims the 9-EMA and breaks the recovery swing high.",
+    )
+    chili_momentum_reclaim_confirm_bars: int = Field(
+        default=2,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RECLAIM_CONFIRM_BARS"),
+        description="Completed bars that must CLOSE holding the 9-EMA band after a deep dip before the reclaim arms (Ross: reclaim it and HOLD it).",
+    )
+    chili_momentum_reclaim_max_hours_after_open: float = Field(
+        default=1.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RECLAIM_MAX_HOURS_AFTER_OPEN"),
+        description="Deep reclaims arm only until this many hours after the 9:30 ET open (Ross: 'by 10:30 I'm done'); A/B-validated — morning reclaims paid (EDHL/LASE), afternoon ones bled (SPHL/GCDT/DBGI 06-10).",
+    )
+    # Entry-order ack patience: how long a submitted (marketable-limit) entry may
+    # rest before the runner cancels and re-watches. RH holds orders in
+    # "unconfirmed" review for 10s+ right after the open — the original 10s window
+    # cancelled marketable orders before RH even confirmed them (2026-06-11 CPSH/
+    # SNDG). The limit price caps the cost of resting; breakout-or-bailout guards
+    # a late fill.
+    chili_momentum_entry_ack_timeout_seconds: float = Field(
+        default=45.0,
+        ge=5.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_ACK_TIMEOUT_SECONDS"),
+        description="Seconds a submitted entry limit may rest unfilled before cancel + re-watch.",
+    )
     # Volume spike required on the break/reclaim bar (a FLOOR, not a magic cutoff).
     chili_momentum_pullback_volume_spike_multiple: float = Field(
         default=1.5,
