@@ -2694,6 +2694,13 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_STABILITY_WINDOW_BARS"),
         description="Entry-interval bars of tape whose MEDIAN spread must also pass the adaptive max (0 disables).",
     )
+    # Nightly replay regression tripwire: rerun today through the replay engine
+    # on tonight's code and diff vs live actuals (catch behavior drift the
+    # evening before the next open, not during it).
+    chili_momentum_replay_regression_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REPLAY_REGRESSION_ENABLED"),
+    )
     chili_momentum_spread_stability_min_samples: int = Field(
         default=5,
         ge=1,
