@@ -389,12 +389,12 @@ def _token_param(base_url: str, max_tokens: int) -> dict:
 
 def _temperature_param(model: str) -> dict:
     """Return ``{"temperature": 0.7}`` only for models that support custom
-    temperature. The reasoning-tuned families (gpt-5*, o1*, o3*) reject
-    anything other than their default (1.0) with HTTP 400
+    temperature. The reasoning-tuned families (gpt-5*, o1*, o3*, claude*)
+    reject or constrain non-default temperatures with HTTP 400
     ``unsupported_value``. Omitting the param uses the default and works.
     """
     m = (model or "").lower()
-    if m.startswith("gpt-5") or m.startswith("o1") or m.startswith("o3"):
+    if m.startswith("gpt-5") or m.startswith("o1") or m.startswith("o3") or m.startswith("claude"):
         return {}
     return {"temperature": 0.7}
 
@@ -1011,6 +1011,38 @@ def _stream_tier_gemini(messages, prompt, trace_id, max_tokens, flags, model_ove
         log_info(trace_id, f"premium_stream_fallback_error={e2}")
 
 
+def _stream_tier_frontier(messages, prompt, trace_id, max_tokens, flags, model_override: str | None = None):
+    """Frontier streaming tier — opt-in mirror of ``_chat_frontier``. Only
+    prepended when the gateway explicitly requested the frontier model; any
+    failure falls through to the standard streaming cascade WITHOUT setting
+    the permanent/429 flags (frontier problems must never suppress the
+    standard tiers or the non-streaming tail fallback)."""
+    if not _frontier_configured():
+        return
+    if _is_auth_failed(settings.frontier_base_url):
+        log_info(trace_id, "frontier_stream skipped (auth previously failed)")
+        return
+    try:
+        got = False
+        model_name = (model_override or settings.frontier_model).strip() or settings.frontier_model
+        log_info(
+            trace_id,
+            f"trying frontier stream provider={_provider_host(settings.frontier_base_url)} model={model_name}",
+        )
+        for tok, model in _stream_provider(settings.frontier_api_key, settings.frontier_base_url, model_name,
+                                           messages, prompt, trace_id, max_tokens=max_tokens):
+            got = True
+            yield tok, model
+        if got:
+            flags["done"] = True
+        else:
+            log_info(trace_id, "frontier_stream yielded no tokens")
+    except Exception as e:
+        if _looks_like_auth_error(e):
+            _mark_auth_failed(settings.frontier_base_url, trace_id, str(e))
+        log_info(trace_id, f"frontier_stream_error={e}")
+
+
 def chat_stream(
     messages: list[dict],
     system_prompt: str | None = None,
@@ -1035,9 +1067,15 @@ def chat_stream(
     else:
         tiers = (_stream_tier_openai, _stream_tier_groq, _stream_tier_gemini)
 
+    # Frontier streaming tier (opt-in): same trigger as the non-streaming
+    # cascade in ``chat`` — explicit frontier model_override + configured
+    # provider. Every other call keeps the exact tier order above.
+    if _frontier_configured() and _is_frontier_model(model_override):
+        tiers = (_stream_tier_frontier,) + tiers
+
     flags = {"done": False, "saw_permanent": False, "saw_transient_429": False}
     for tier in tiers:
-        if tier in (_stream_tier_openai, _stream_tier_gemini):
+        if tier in (_stream_tier_openai, _stream_tier_gemini, _stream_tier_frontier):
             yield from tier(messages, prompt, trace_id, max_tokens, flags, model_override)
         else:
             yield from tier(messages, prompt, trace_id, max_tokens, flags)

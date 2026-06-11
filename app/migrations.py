@@ -20610,6 +20610,36 @@ def _migration_304_position_identity_phase5i_position_insert_backlink(conn) -> N
     )
 
 
+def _migration_305_code_dispatch_plan_augmented_routing(conn) -> None:
+    """Route ``code_dispatch_plan`` through the AUGMENTED strategy, not tree.
+
+    The original seed sent the dispatch plan step through the tree pipeline
+    (Ollama decompose/chunk/compile). For code planning that path (a) drops
+    the assembled repo context and the JSON plan contract from the prompt,
+    and (b) ignores ``model_override`` entirely — which made the frontier
+    code tier unreachable for the plan step even when enabled. Augmented
+    routing keeps context assembly + honors model overrides.
+
+    Idempotent: only flips the row if it still has the seeded 'tree' value,
+    so an operator who deliberately re-routed the purpose is not clobbered.
+    """
+    exists = conn.execute(text(
+        "SELECT to_regclass('public.llm_purpose_policy')"
+    )).scalar()
+    if not exists:
+        return
+    flipped = conn.execute(text(
+        "UPDATE llm_purpose_policy "
+        "SET routing_strategy = 'augmented', updated_at = NOW() "
+        "WHERE purpose = 'code_dispatch_plan' AND routing_strategy = 'tree'"
+    )).rowcount
+    conn.commit()
+    logger.info(
+        "[mig305] code_dispatch_plan routing_strategy tree->augmented (%d row)",
+        int(flipped or 0),
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -20980,6 +21010,8 @@ MIGRATIONS = [
      _migration_303_momentum_nbbo_spread_tape),
     ("304_position_identity_phase5i_position_insert_backlink",
      _migration_304_position_identity_phase5i_position_insert_backlink),
+    ("305_code_dispatch_plan_augmented_routing",
+     _migration_305_code_dispatch_plan_augmented_routing),
 ]
 
 

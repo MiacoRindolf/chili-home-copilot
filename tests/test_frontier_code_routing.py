@@ -218,7 +218,7 @@ def test_gateway_frontier_override_routes_code_purposes(frontier_configured):
     assert llm_gateway._frontier_code_override(_policy("code_review")) == FRONTIER_MODEL
 
 
-def test_gateway_frontier_override_skips_non_code_and_unsafe(frontier_configured):
+def test_gateway_frontier_override_skips_non_code(frontier_configured):
     monkeypatch = frontier_configured
     monkeypatch.setattr(settings, "chili_code_frontier_enabled", True)
 
@@ -226,10 +226,23 @@ def test_gateway_frontier_override_skips_non_code_and_unsafe(frontier_configured
     assert llm_gateway._frontier_code_override(_policy("chat")) is None
     # Retrieval-only code_search is intentionally excluded.
     assert llm_gateway._frontier_code_override(_policy("code_search")) is None
-    # High-stakes purposes are never auto-routed.
-    assert llm_gateway._frontier_code_override(_policy("code_dispatch_edit", high_stakes=True)) is None
     # None policy.
     assert llm_gateway._frontier_code_override(None) is None
+
+
+def test_gateway_frontier_override_allows_high_stakes_code_purposes(frontier_configured):
+    """high_stakes exists to block quality DOWNGRADES; the frontier tier is an
+    upgrade. The seeded code_dispatch_* policies are all high-stakes, so a
+    high_stakes veto here made the frontier tier unreachable for exactly the
+    purposes it was built for (the quadruple-dead frontier bug)."""
+    monkeypatch = frontier_configured
+    monkeypatch.setattr(settings, "chili_code_frontier_enabled", True)
+
+    assert llm_gateway._frontier_code_override(_policy("code_dispatch_edit", high_stakes=True)) == FRONTIER_MODEL
+    assert llm_gateway._frontier_code_override(_policy("code_dispatch_plan", high_stakes=True)) == FRONTIER_MODEL
+    assert llm_gateway._frontier_code_override(_policy("code_dispatch_create", high_stakes=True)) == FRONTIER_MODEL
+    # Non-code stays excluded even when high-stakes.
+    assert llm_gateway._frontier_code_override(_policy("chat_user", high_stakes=True)) is None
 
 
 def test_gateway_frontier_override_off_by_default(frontier_configured):
@@ -243,6 +256,91 @@ def test_gateway_frontier_override_requires_configured_provider(monkeypatch):
     monkeypatch.setattr(settings, "frontier_api_key", "")  # not configured
     monkeypatch.setattr(settings, "frontier_model", FRONTIER_MODEL)
     assert llm_gateway._frontier_code_override(_policy("code_dispatch_edit")) is None
+
+
+def test_temperature_param_omitted_for_reasoning_families():
+    """claude*/gpt-5*/o1*/o3* reject or constrain custom temperature; the
+    param must be omitted so the provider default applies. Anything else
+    keeps the historical 0.7."""
+    assert openai_client._temperature_param("claude-opus-4-8") == {}
+    assert openai_client._temperature_param("claude-fable-5") == {}
+    assert openai_client._temperature_param("gpt-5.5") == {}
+    assert openai_client._temperature_param("o3-mini") == {}
+    assert openai_client._temperature_param("gpt-4o-mini") == {"temperature": 0.7}
+    assert openai_client._temperature_param("llama-3.3-70b-versatile") == {"temperature": 0.7}
+
+
+# ── streaming cascade ────────────────────────────────────────────────────
+
+
+def test_chat_stream_uses_frontier_first_when_requested(frontier_configured):
+    monkeypatch = frontier_configured
+    seen_urls: list[str] = []
+
+    def fake_stream_provider(api_key, base_url, model, messages, prompt, trace_id, max_tokens=1024):
+        seen_urls.append(base_url)
+        yield "tok1", model
+        yield "tok2", model
+
+    monkeypatch.setattr(openai_client, "_stream_provider", fake_stream_provider)
+    monkeypatch.setattr(openai_client, "_stream_tier_groq", lambda *a, **k: pytest.fail("groq stream reached"))
+    monkeypatch.setattr(openai_client, "_stream_tier_openai", lambda *a, **k: pytest.fail("openai stream reached"))
+    monkeypatch.setattr(openai_client, "_stream_tier_gemini", lambda *a, **k: pytest.fail("gemini stream reached"))
+
+    out = list(openai_client.chat_stream(
+        [{"role": "user", "content": "refactor"}],
+        trace_id="code-stream",
+        model_override=FRONTIER_MODEL,
+    ))
+
+    assert [t for t, _m in out] == ["tok1", "tok2"]
+    assert seen_urls == ["https://api.anthropic.com/v1"]
+
+
+def test_chat_stream_frontier_failure_falls_back_silently(frontier_configured):
+    """A frontier stream error must not set the permanent/429 flags — the
+    standard tiers (and the non-streaming tail fallback) still run."""
+    monkeypatch = frontier_configured
+
+    def boom_stream(api_key, base_url, model, messages, prompt, trace_id, max_tokens=1024):
+        raise RuntimeError("frontier stream down")
+        yield  # pragma: no cover — make this a generator
+
+    def groq_ok(messages, prompt, trace_id, max_tokens, flags):
+        yield "local-tok", "llama-3.3-70b-versatile"
+        flags["done"] = True
+
+    monkeypatch.setattr(openai_client, "_stream_provider", boom_stream)
+    monkeypatch.setattr(openai_client, "_stream_tier_groq", groq_ok)
+
+    out = list(openai_client.chat_stream(
+        [{"role": "user", "content": "refactor"}],
+        trace_id="code-stream",
+        model_override=FRONTIER_MODEL,
+    ))
+    assert [t for t, _m in out] == ["local-tok"]
+
+
+def test_chat_stream_default_path_never_touches_frontier(frontier_configured):
+    monkeypatch = frontier_configured
+
+    def frontier_fail(*a, **k):
+        pytest.fail("frontier stream reached on default path")
+        yield  # pragma: no cover
+
+    def groq_ok(messages, prompt, trace_id, max_tokens, flags):
+        yield "local-tok", "llama-3.3-70b-versatile"
+        flags["done"] = True
+
+    monkeypatch.setattr(openai_client, "_stream_tier_frontier", frontier_fail)
+    monkeypatch.setattr(openai_client, "_stream_tier_groq", groq_ok)
+
+    out = list(openai_client.chat_stream(
+        [{"role": "user", "content": "hello"}],
+        trace_id="chat-stream",
+        model_override=None,
+    ))
+    assert [t for t, _m in out] == ["local-tok"]
 
 
 def test_explicit_json_override_wins_over_frontier(frontier_configured):
