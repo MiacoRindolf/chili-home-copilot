@@ -515,6 +515,30 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
     return result
 
 
+def _decisive_summary(lv: list[tuple]) -> list[tuple]:
+    """Pick the DECISIVE events (submits/fills/trigger_ok first), deduping repeats.
+
+    A symbol can log hundreds of blocked_by_risk repeats late in the day; showing the
+    last 4 blindly buries the entry that actually happened. Works for both live event
+    tuples (t, event_type, detail) and replay trace tuples (t, stage).
+    """
+    def _dedupe(seq: list[tuple]) -> list[tuple]:
+        out: list[tuple] = []
+        for x in seq:
+            if out and out[-1][1:] == x[1:]:
+                continue
+            out.append(x)
+        return out
+
+    def _is_decisive(et: str) -> bool:
+        return et in ("live_entry_submitted", "live_entry_filled") or et.startswith("fill@") or et == "trigger_ok"
+
+    decisive = _dedupe([x for x in lv if _is_decisive(x[1])])
+    others = _dedupe([x for x in lv if not _is_decisive(x[1])])
+    shown = (decisive[:3] + others[-2:]) if decisive else others[-4:]
+    return sorted(set(shown))
+
+
 def _build_divergence(date: str, trace: list[dict], trades: list[dict]) -> list[dict]:
     """Per-symbol join of LIVE decisions vs REPLAY decisions, with a classified cause."""
     db = SessionLocal()
@@ -569,8 +593,8 @@ def _build_divergence(date: str, trace: list[dict], trades: list[dict]) -> list[
             cause = "both_skipped"
         out.append({
             "sym": sym,
-            "live": "; ".join(f"{t} {et.replace('live_','')}{(' '+d) if d else ''}" for t, et, d in lv[-4:]) or "-",
-            "replay": "; ".join(f"{t} {st}" for t, st in rp[-4:]) or "-",
+            "live": "; ".join(f"{t} {et.replace('live_','')}{(' '+d) if d else ''}" for t, et, d in _decisive_summary(lv)) or "-",
+            "replay": "; ".join(f"{t} {st}" for t, st in _decisive_summary(rp)) or "-",
             "cause": cause,
         })
     return out
