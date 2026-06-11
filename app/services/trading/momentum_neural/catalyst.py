@@ -106,9 +106,60 @@ def catalyst_score(symbol: str, catalyst_symbols: set[str] | None) -> float:
     return 1.0 if _norm(symbol) in catalyst_symbols else 0.5
 
 
-def catalyst_viability_delta(symbol: str, catalyst_symbols: set[str] | None) -> float:
-    """The additive viability tilt for a symbol: CATALYST_TILT x (score - 0.5).
+# A "big mover" = a LULD-scale day move. Ross's hot days (2026-06-09/10) print
+# MULTIPLE +30%..+1000% names rotating ("hot potato"); a normal day has 0-1.
+HOT_TAPE_BIG_MOVE_PCT = 30.0
 
-    +tilt/2 for a catalyst name, 0 otherwise. Mirrors the Ross-quality tilt so the
-    selection prefers explosive movers that ALSO have a news catalyst."""
-    return _catalyst_tilt() * (catalyst_score(symbol, catalyst_symbols) - 0.5)
+
+def hot_tape_regime(ross_signals: dict | None) -> bool:
+    """HOT-tape detector: several LULD-scale movers at once, derived from the
+    scanner bridge's OWN signals (no extra fetch). The floor is the one
+    documented knob (``chili_momentum_hot_tape_min_big_movers``, default 3)."""
+    if not isinstance(ross_signals, dict) or not ross_signals:
+        return False
+    floor = int(getattr(settings, "chili_momentum_hot_tape_min_big_movers", 3) or 3)
+    n = 0
+    for sig in ross_signals.values():
+        if not isinstance(sig, dict):
+            continue
+        try:
+            chg = float(sig.get("daily_change_pct") or sig.get("gap_pct") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if chg >= HOT_TAPE_BIG_MOVE_PCT:
+            n += 1
+            if n >= floor:
+                return True
+    return False
+
+
+def catalyst_viability_delta(
+    symbol: str,
+    catalyst_symbols: set[str] | None,
+    *,
+    hot_tape: bool = False,
+    hq_country: str | None = None,
+) -> float:
+    """The additive viability tilt for a symbol — REGIME-AWARE.
+
+    NORMAL tape (default; unchanged behavior): +tilt/2 for a catalyst name, 0
+    otherwise — a mover with a real catalyst is more likely a true Ross gapper.
+
+    HOT tape (Ross 2026-06-10 recap, his biggest 2026 day): the leaders are
+    NO-NEWS foreign small caps with room to speculate, while the US name WITH
+    news rejected (KIDZ) — the read INVERTS: no-news gets the boost (full
+    tilt/2 when the HQ country is non-US, half when US/unknown) and news names
+    go NEUTRAL (never penalized — absence-of-news evidence is weaker than its
+    presence). Same ±tilt/2 magnitude as ever — no new constants."""
+    if "-USD" in str(symbol or "").upper():
+        return 0.0
+    half = _catalyst_tilt() * 0.5
+    has_news = bool(catalyst_symbols) and _norm(symbol) in catalyst_symbols
+    if not hot_tape:
+        return half if has_news else 0.0
+    if has_news:
+        return 0.0
+    foreign = bool(hq_country) and str(hq_country).strip().lower() not in (
+        "united states", "united states of america", "usa", "us",
+    )
+    return half if foreign else half * 0.5

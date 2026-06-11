@@ -1982,8 +1982,18 @@ def tick_live_session(
                                 # Shared trigger (parity): paper calls the SAME helper, so
                                 # both paths take the identical Ross pullback-break entry
                                 # (vol-aware, candle/VWAP/MACD, runaway). docs/DESIGN/MOMENTUM_LANE.md §8
+                                # live_price = the CURRENT ask: when the completed-bar
+                                # structure is valid and the live tick is already trading
+                                # through the level, fire NOW (tick-break) instead of a
+                                # bar-close later — Ross enters on the breaking tick.
+                                _live_px = None
+                                try:
+                                    if tick is not None:
+                                        _live_px = float(tick.ask or tick.mid or 0) or None
+                                except Exception:
+                                    _live_px = None
                                 _trigger_ok, _trigger_reason, _pb_debug = momentum_pullback_trigger(
-                                    _df_pb, entry_interval=_interval
+                                    _df_pb, entry_interval=_interval, live_price=_live_px
                                 )
                     except Exception:
                         _trigger_ok = False
@@ -2027,7 +2037,7 @@ def tick_live_session(
             # pullback low so sizing + placement can stop just UNDER the structure
             # (not at a noise-tight ATR). The momentum_volume fallback has no
             # structure -> clear it so the vol-floored ATR stop is used instead.
-            if _trigger_reason in ("pullback_break_ok", "halt_resume_dip_ok") and _pb_debug.get("pullback_low"):
+            if _trigger_reason in ("pullback_break_ok", "pullback_break_tick_ok", "halt_resume_dip_ok") and _pb_debug.get("pullback_low"):
                 le["structural_stop_price"] = float(_pb_debug["pullback_low"])
                 # #2 Breakout-or-bailout: stash the broken pullback HIGH (the breakout
                 # level) so the held-position handler can fast-bail if it fails to hold
@@ -2062,6 +2072,16 @@ def tick_live_session(
         elif _score_ok and not _mkt_open:
             _emit(db, sess, "live_entry_wait_market_closed", {"symbol": sess.symbol})
         elif _score_ok:
+            # Stash the level we're WAITING to break so the event loop can dispatch
+            # a tick-speed re-evaluation the instant a live tick crosses it (the
+            # tick-break path above then fires within seconds, like Ross).
+            _wl = _pb_debug.get("pullback_high") if isinstance(_pb_debug, dict) else None
+            if _trigger_reason in ("waiting_for_break", "waiting_for_reclaim") and _wl:
+                if le.get("watch_break_level") != float(_wl):
+                    le["watch_break_level"] = float(_wl)
+                    _commit_le(sess, le)
+            elif le.pop("watch_break_level", None) is not None:
+                _commit_le(sess, le)
             _emit(db, sess, "live_entry_trigger_wait", {"reason": _trigger_reason})
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}

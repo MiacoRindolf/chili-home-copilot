@@ -30,6 +30,33 @@ VIABILITY_NODE_ID = "nm_momentum_viability_pool"
 _log = logging.getLogger(__name__)
 
 
+def _symbol_country(symbol: str) -> str | None:
+    """HQ country from the yfinance fundamentals CACHE — cache-only read (the
+    viability tick must never block on network); a miss fires a background
+    fetch so the NEXT tick has it. Crypto/aggregate/blank -> None."""
+    s = (symbol or "").strip().upper()
+    if not s or s.endswith("-USD") or s == "__AGGREGATE__":
+        return None
+    try:
+        from ...yf_session import _cache_get as _yf_cache_get
+
+        f = _yf_cache_get(f"fund:{s}")
+        if isinstance(f, dict):
+            c = f.get("country")
+            return str(c) if c else None
+    except Exception:
+        return None
+    try:
+        import threading
+
+        from ...yf_session import get_fundamentals
+
+        threading.Thread(target=get_fundamentals, args=(s,), daemon=True).start()
+    except Exception:
+        pass
+    return None
+
+
 def _live_book_imbalance(symbol: str, db: Any = None) -> float | None:
     """Signed order-book imbalance in [-1, 1] from the LIVE venue feeds.
 
@@ -170,6 +197,28 @@ def run_momentum_neural_tick(
     # theme movers (a low-float small-cap that just printed a hot headline), not just
     # scheduled earnings. Best-effort + cached; empty -> no-op (degrades gracefully
     # without the news/Benzinga feed). (catalyst.py)
+    # Hot-tape regime + HQ countries for the REGIME-AWARE catalyst tilt (Ross
+    # 06-10: in a hot tape the no-news foreign small caps run; news names fade).
+    # Both best-effort: regime from the bridge's own signals (no fetch); country
+    # from the yfinance fundamentals CACHE only (a miss fires a background fill
+    # so the next tick has it — the viability tick never blocks on network).
+    try:
+        from .catalyst import hot_tape_regime
+
+        meta["hot_tape"] = bool(hot_tape_regime(meta.get("ross_signals")))
+    except Exception:
+        pass
+    try:
+        _countries = {}
+        for _s in symbols:
+            _c = _symbol_country(_s)
+            if _c:
+                _countries[_s] = _c
+        if _countries:
+            meta["symbol_countries"] = _countries
+    except Exception:
+        pass
+
     try:
         from .catalyst import all_catalyst_symbols
 
@@ -199,6 +248,8 @@ def run_momentum_neural_tick(
             "adx_14",
             "ross_scores",
             "catalyst_symbols",
+            "hot_tape",
+            "symbol_countries",
         )
         if k in meta
     }

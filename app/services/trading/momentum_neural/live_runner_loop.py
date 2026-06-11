@@ -39,6 +39,7 @@ from .live_fsm import (
     STATE_LIVE_PENDING_ENTRY,
     STATE_LIVE_SCALING_OUT,
     STATE_LIVE_TRAILING,
+    STATE_WATCHING_LIVE,
 )
 
 _log = logging.getLogger(__name__)
@@ -85,6 +86,13 @@ class _LiveSessionTracker:
                     try:
                         entry["stop_px"] = float(pos.get("stop_price") or 0)
                         entry["target_px"] = float(pos.get("target_price") or 0)
+                    except (TypeError, ValueError):
+                        pass
+                if sess.state == STATE_WATCHING_LIVE:
+                    try:
+                        wl = le.get("watch_break_level")
+                        if wl:
+                            entry["watch_break_level"] = float(wl)
                     except (TypeError, ValueError):
                         pass
                 new_map[int(sess.id)] = entry
@@ -199,6 +207,16 @@ class LiveRunnerLoop:
             elif state == STATE_LIVE_PENDING_ENTRY:
                 # resolve fills / the 10s ack-timeout at tick speed
                 self._dispatch(s["session_id"])
+            elif state == STATE_WATCHING_LIVE:
+                # Ross-speed ENTRY: the runner stashed the level it is waiting to
+                # break (watch_break_level); the instant a tick trades through it,
+                # re-evaluate NOW — the tick-break trigger fires within seconds
+                # instead of a bar-close + batch-cadence later. The full trigger
+                # still decides; this is only the dispatch hint.
+                wl = s.get("watch_break_level") or 0.0
+                ref = mid if (mid and mid > 0) else bid
+                if wl > 0 and ref and ref > wl:
+                    self._dispatch(s["session_id"])
 
     def _dispatch(self, session_id: int) -> None:
         now = time.monotonic()

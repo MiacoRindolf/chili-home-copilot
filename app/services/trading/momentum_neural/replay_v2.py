@@ -522,6 +522,20 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                 else:
                     ok, _treason, dbg = momentum_pullback_trigger(upto, entry_interval=ENTRY_INTERVAL)
                     trigger_cache[_bar_key] = (ok, _treason, dbg)
+                # TICK-BREAK parity (live_runner does the same with the WS ask): the
+                # completed-bar structure is valid but waiting, and THIS minute's tape
+                # ask is already through the level -> re-evaluate uncached with the
+                # live price so the tick-break path can fire mid-bar like live.
+                if (
+                    not ok
+                    and _treason in ("waiting_for_break", "waiting_for_reclaim")
+                    and isinstance(dbg, dict)
+                    and dbg.get("pullback_high")
+                ):
+                    _q_tb = tape.at(s, now, max_stale_min=ENTRY_QUOTE_MAX_STALE_MIN)
+                    if _q_tb is not None and _q_tb[1] > float(dbg["pullback_high"]):
+                        ok, _treason, dbg = momentum_pullback_trigger(
+                            upto, entry_interval=ENTRY_INTERVAL, live_price=float(_q_tb[1]))
             if not ok:
                 _tr(s, "trigger_fail:" + str(_treason), now)
                 continue
