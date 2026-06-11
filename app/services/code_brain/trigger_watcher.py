@@ -27,15 +27,30 @@ PREMIUM or LOCAL_MODEL, which only happens for genuinely new work.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from . import event_bus
 from . import runtime_state
 
 logger = logging.getLogger(__name__)
+
+
+def _dispatch_task_statuses() -> list[str]:
+    """The readiness-state allowlist, shared semantics with the miner
+    (``CHILI_DISPATCH_TASK_STATUSES``). Read per-call (not import-time) so
+    env changes apply on restart without import-order traps.
+
+    The watcher previously hardcoded 'ready_for_dispatch' — a state no
+    workflow transition ever produces — so ``code_brain_events`` stayed
+    empty forever and the reactive loop never fired (0 rows ever, verified
+    live 2026-06-11).
+    """
+    raw = os.environ.get("CHILI_DISPATCH_TASK_STATUSES", "ready_for_dispatch")
+    return [s.strip() for s in raw.split(",") if s.strip()]
 
 
 def watch_plan_tasks(db: Session) -> int:
@@ -46,14 +61,18 @@ def watch_plan_tasks(db: Session) -> int:
 
     Returns the count of events enqueued (newly inserted, not deduped).
     """
+    statuses = _dispatch_task_statuses()
+    if not statuses:
+        return 0
     rows = db.execute(
         text(
             "SELECT id, COALESCE(title, '') AS title "
             "FROM plan_tasks "
-            "WHERE coding_readiness_state = 'ready_for_dispatch' "
+            "WHERE coding_readiness_state IN :statuses "
             "ORDER BY sort_order ASC NULLS LAST, id ASC "
             "LIMIT 25"
-        )
+        ).bindparams(bindparam("statuses", expanding=True)),
+        {"statuses": statuses},
     ).fetchall()
 
     new_count = 0
