@@ -38,6 +38,7 @@ _BROKER_SESSION_RESTORE_ROLES = frozenset(
         "worker",
         "autotrader_only",
         "broker_sync_only",
+        "momentum_exec_only",
     }
 )
 
@@ -156,12 +157,16 @@ def main() -> None:
     try:
         from app.config import settings as _rt_cfg
 
-        if _rt_cfg.massive_api_key and _rt_cfg.massive_use_websocket:
+        # SCHEDULER SPLIT: the WS rails belong to the exec-critical process
+        # (the live runner consumes them in-process); the R&D plane skips them.
+        if role == "rnd_only":
+            logger.info("[scheduler_worker] rnd_only role — WS rails owned by the momentum_exec container; skipping")
+        elif _rt_cfg.massive_api_key and _rt_cfg.massive_use_websocket:
             from app.services.massive_client import get_ws_client
 
             get_ws_client().start()
             logger.info("[scheduler_worker] Massive WS client started (real-time NBBO/trades)")
-        if _rt_cfg.chili_autopilot_price_bus_enabled:
+        if role != "rnd_only" and _rt_cfg.chili_autopilot_price_bus_enabled:
             from app.services.trading.price_bus import get_price_bus
 
             _bus = get_price_bus()
