@@ -348,13 +348,16 @@ def _frontier_code_override(policy: PurposePolicy | None) -> str | None:
     """Frontier model for code-generation purposes when frontier routing is
     enabled and a frontier provider is configured. Explicit per-purpose JSON
     overrides (``_purpose_model_override``) are resolved first and take
-    precedence; high-stakes purposes are never auto-routed. Returns ``None``
-    (no change) unless every gate passes, so default behavior is preserved."""
+    precedence. ``high_stakes`` does NOT veto this override: that flag exists
+    to prevent quality DOWNGRADES (cheap-model substitution), while the
+    frontier tier is strictly an upgrade over the default cascade — the
+    seeded code_dispatch_* policies are all high-stakes, so a veto here made
+    the frontier tier unreachable for exactly the purposes it was built for.
+    Returns ``None`` (no change) unless every gate passes, so default
+    behavior is preserved."""
     if policy is None:
         return None
     if not getattr(settings, "chili_code_frontier_enabled", False):
-        return None
-    if getattr(policy, "high_stakes", False):
         return None
     if not _is_code_frontier_purpose(getattr(policy, "purpose", "")):
         return None

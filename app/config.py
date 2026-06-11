@@ -384,6 +384,14 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_CODE_FRONTIER_ENABLED"),
     )
+    # Output-token headroom for the code-generation purposes (plan / create /
+    # edit). ONE documented knob: frontier coding models need room to emit
+    # whole files and multi-file plans; the historical hardcoded 1500-3000
+    # caps amputated diffs mid-hunk and truncated plan JSON.
+    chili_code_gen_max_tokens: int = Field(
+        default=16384,
+        validation_alias=AliasChoices("CHILI_CODE_GEN_MAX_TOKENS"),
+    )
 
     # Cascade order toggle (Phase B, b1). When True AND both OPENAI_API_KEY and
     # LLM_API_KEY are set, reorder to Groq primary → Groq secondary →

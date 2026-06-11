@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
+from ...config import settings
 from ...models.code_brain import CodeHotspot, CodeInsight, CodeRepo, CodeSnapshot
 from . import insights as insights_mod
 from .indexer import get_accessible_repo_ids, get_accessible_repos
@@ -366,7 +367,7 @@ async def run_code_agent(
         system_prompt=plan_system,
         trace_id="code-agent-plan",
         user_message=prompt,
-        max_tokens=1500,
+        max_tokens=settings.chili_code_gen_max_tokens,
     )
     plan_reply = plan_result.get("reply", "")
     plan_model = plan_result.get("model", "unknown")
@@ -462,7 +463,7 @@ async def run_code_agent(
                 system_prompt="You are Chili Code Agent. Generate clean, production-quality code.",
                 trace_id=f"code-agent-create-{fpath}",
                 user_message=description,
-                max_tokens=3000,
+                max_tokens=settings.chili_code_gen_max_tokens,
                 _purpose="code_dispatch_create",
             )
             create_reply = create_result.get("reply", "")
@@ -506,7 +507,7 @@ async def run_code_agent(
             system_prompt=edit_system,
             trace_id=f"code-agent-edit-{fpath}",
             user_message=description,
-            max_tokens=3000,
+            max_tokens=settings.chili_code_gen_max_tokens,
             _purpose="code_dispatch_edit",
         )
         edit_reply = edit_result.get("reply", "")
