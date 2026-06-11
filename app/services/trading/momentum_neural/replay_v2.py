@@ -377,12 +377,32 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                     if armed_spans[s] and armed_spans[s][-1][1] is None:
                         armed_spans[s][-1][1] = str(now)[11:16]
                     del armed[s]
-            for s in asof_rank(now):
-                if len(armed) >= MAX_SLOTS:
-                    break
-                if s not in armed and s not in open_pos:
+            ranked = asof_rank(now)
+            pos = {s: i for i, s in enumerate(ranked)}
+            for s in ranked:
+                if s in armed or s in open_pos:
+                    continue
+                if len(armed) < MAX_SLOTS:
                     armed[s] = {"since": now}
                     armed_spans[s].append([str(now)[11:16], None])
+                    continue
+                if pos[s] >= MAX_SLOTS:
+                    break  # ranked is ordered — nothing further down can displace either
+                # Displacement arming: live re-scans continuously, so a newly-hot name
+                # (e.g. a halt-resume pop) gets armed within minutes; first-come-slots +
+                # 30-min reaps made the replay arm it ~20 min late. A top-MAX_SLOTS
+                # newcomer takes the slot of the worst-ranked armed symbol — but only
+                # one that itself FELL OUT of the top set (hysteresis: an armed symbol
+                # still holding a top rank is never displaced, so pullback dips that
+                # stay top-ranked keep their watcher while the entry forms).
+                evict = max((a for a in armed if a not in open_pos), key=lambda a: pos.get(a, 1 << 30), default=None)
+                if evict is None or pos.get(evict, 1 << 30) < MAX_SLOTS:
+                    break  # every armed symbol still holds a top rank
+                if armed_spans[evict] and armed_spans[evict][-1][1] is None:
+                    armed_spans[evict][-1][1] = str(now)[11:16]
+                del armed[evict]
+                armed[s] = {"since": now}
+                armed_spans[s].append([str(now)[11:16], None])
         for s in list(armed):
             if s in open_pos:
                 continue
