@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import datetime
 from typing import Any, Optional
 
@@ -14,6 +15,41 @@ from ..brain_neural_mesh.repository import get_or_create_state
 from ..brain_neural_mesh.schema import mesh_enabled
 
 from .context import build_momentum_regime_context
+
+
+def _live_book_imbalance(symbol: str) -> float | None:
+    """Signed order-book imbalance in [-1, 1] from the LIVE venue feeds.
+
+    Crypto: Coinbase Advanced WS ``level2`` ring buffer (true book depth — top
+    bid total vs ask total). Equities: the Massive WS NBBO displayed sizes (the
+    L1 depth a retail rail can see; RH exposes no API L2). Positive = bid-heavy
+    (supportive for the long-only lane) — the sign convention viability's
+    Phase 4a microstructure rules already score (>0.12 boost, <-0.18 penalty +
+    warning). None when no live feed covers the symbol (behavior unchanged).
+    """
+    s = (symbol or "").strip().upper()
+    if not s:
+        return None
+    try:
+        if s.endswith("-USD"):
+            from ..microstructure import get_features
+
+            r = get_features(s).bid_ask_imbalance  # ratio: >1 = bid-heavy
+            if r is None or float(r) <= 0:
+                return None
+            r = float(r)
+            return round((r - 1.0) / (r + 1.0), 4)
+        from ...massive_client import get_ws_quote
+
+        q = get_ws_quote(s)
+        if q is None or not q.bid_size or not q.ask_size:
+            return None
+        tot = float(q.bid_size) + float(q.ask_size)
+        if tot <= 0:
+            return None
+        return round((float(q.bid_size) - float(q.ask_size)) / tot, 4)
+    except Exception:
+        return None
 from .evolution import record_evolution_trace
 from .features import ExecutionReadinessFeatures
 from .telemetry import log_tick
@@ -152,8 +188,15 @@ def run_momentum_neural_tick(
 
     rows: list[dict[str, Any]] = []
     for sym in symbols:
+        # L2/order-flow utilization: viability's microstructure rules (book_imbalance
+        # boost/penalty) were designed in Phase 4a but no producer ever filled the
+        # field. Fill it per-symbol from the LIVE feeds now running in this process
+        # (#596): Coinbase level2 ring buffer for crypto, Massive WS NBBO sizes for
+        # equities. None (no feed for the symbol) -> unchanged behavior.
+        _imb = _live_book_imbalance(sym)
+        sym_feats = replace(feats, book_imbalance=_imb) if _imb is not None else feats
         for family in iter_momentum_families():
-            vr = score_viability(sym, family, ctx, feats, db=db)
+            vr = score_viability(sym, family, ctx, sym_feats, db=db)
             d = vr.to_public_dict()
             d["scope"] = scope
             d["label"] = family.label
