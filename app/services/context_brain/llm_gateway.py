@@ -367,6 +367,25 @@ def _frontier_code_override(policy: PurposePolicy | None) -> str | None:
     return model or None
 
 
+def _local_code_override(policy: PurposePolicy | None) -> str | None:
+    """Local coder model for code purposes when local-first routing is on
+    (free tier zero: own GPU). Same purpose set as the frontier override;
+    sits BETWEEN the explicit JSON override and the frontier flag in the
+    resolution order, so the default code brain is the local model and the
+    paid tiers are opt-in escalation. Weak/failed local replies still
+    escalate through the standard cascade inside ``openai_client.chat``."""
+    if policy is None:
+        return None
+    if not getattr(settings, "chili_code_local_first", False):
+        return None
+    if not _is_code_frontier_purpose(getattr(policy, "purpose", "")):
+        return None
+    if not openai_client._local_code_configured():
+        return None
+    model = (getattr(settings, "chili_code_local_model", "") or "").strip()
+    return model or None
+
+
 def _open_db_session():
     """Helper: gateway is called from many contexts (with or without a
     db session in scope). Open a fresh SessionLocal when none provided."""
@@ -668,7 +687,11 @@ def gateway_chat(
             policy = PurposePolicy(
                 **{**policy.__dict__, "routing_strategy": "passthrough"},
             )
-        model_override = _purpose_model_override(policy.purpose, policy) or _frontier_code_override(policy)
+        model_override = (
+            _purpose_model_override(policy.purpose, policy)
+            or _local_code_override(policy)
+            or _frontier_code_override(policy)
+        )
 
         log_id = _write_gateway_log_start(
             db,
@@ -916,7 +939,11 @@ def gateway_chat_stream(
             policy = PurposePolicy(
                 **{**policy.__dict__, "routing_strategy": "passthrough"},
             )
-        model_override = _purpose_model_override(policy.purpose, policy) or _frontier_code_override(policy)
+        model_override = (
+            _purpose_model_override(policy.purpose, policy)
+            or _local_code_override(policy)
+            or _frontier_code_override(policy)
+        )
 
         log_id = _write_gateway_log_start(
             db,

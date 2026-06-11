@@ -393,6 +393,22 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_CODE_GEN_MAX_TOKENS"),
     )
 
+    # ── Local-first code generation (free tier zero: own GPU) ────────────
+    # When on, code purposes route to the local Ollama coder FIRST; any
+    # failure or weak reply falls through the standard cascade (free Groq
+    # 70B → paid tiers), so quality is preserved while the default code
+    # brain costs nothing. Premium/frontier becomes opt-in escalation, not
+    # the default. Resolution order in the gateway: explicit per-purpose
+    # JSON override > local (this flag) > frontier flag.
+    chili_code_local_first: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_CODE_LOCAL_FIRST"),
+    )
+    chili_code_local_model: str = Field(
+        default="qwen2.5-coder:7b",
+        validation_alias=AliasChoices("CHILI_CODE_LOCAL_MODEL"),
+    )
+
     # Cascade order toggle (Phase B, b1). When True AND both OPENAI_API_KEY and
     # LLM_API_KEY are set, reorder to Groq primary → Groq secondary →
     # OpenAI official → Gemini, saving paid OpenAI calls whenever the

@@ -710,6 +710,72 @@ def _chat_frontier(
     return None
 
 
+# ── Local code-generation tier (free tier zero: own GPU) ────────────────
+# Mirror of the frontier tier in the opposite direction: when the gateway
+# explicitly requests the local coder model (code purposes with
+# chili_code_local_first on), try the local Ollama OpenAI-compatible
+# endpoint FIRST. Any failure or weak reply falls through to the standard
+# cascade (free Groq 70B → paid), so the default code brain costs nothing
+# without capping quality.
+def _local_code_configured() -> bool:
+    return bool(
+        (settings.ollama_host or "").strip()
+        and (settings.chili_code_local_model or "").strip()
+    )
+
+
+def _is_local_code_model(model: str | None) -> bool:
+    if not model or not (settings.chili_code_local_model or "").strip():
+        return False
+    return model.strip() == settings.chili_code_local_model.strip()
+
+
+def _ollama_openai_base_url() -> str:
+    return (settings.ollama_host or "").strip().rstrip("/") + "/v1"
+
+
+def _chat_local(
+    prompt,
+    messages,
+    user_message,
+    trace_id,
+    max_tokens,
+    strict_escalation,
+    model_override: str | None = None,
+):
+    if not _local_code_configured():
+        return None
+    try:
+        model = (model_override or settings.chili_code_local_model).strip()
+        log_info(trace_id, f"trying local coder model={model}")
+        result = _call_provider(
+            "ollama",  # Ollama ignores the key; SDK requires one
+            _ollama_openai_base_url(),
+            model,
+            messages,
+            prompt,
+            trace_id,
+            max_tokens=max_tokens,
+            # Local generation throughput is hardware-bound (~30 tok/s on the
+            # resident 8GB GPU); derive the cap from the requested budget
+            # instead of the cloud-tier default so long generations finish.
+            timeout_override=max(120.0, float(max_tokens) / 30.0),
+        )
+        if (
+            result
+            and result.get("reply")
+            and _is_weak_response(result["reply"], user_message, strict_escalation)
+        ):
+            # Quality preservation: a weak local reply escalates to the free
+            # 70B (and beyond) instead of being accepted because it was cheap.
+            log_info(trace_id, "local coder reply weak; escalating to cascade")
+            return None
+        return result
+    except Exception as e:
+        log_info(trace_id, f"local_coder_error={e}")
+    return None
+
+
 # ── DO NOT REMOVE — CHILI Dispatch (Phase D.0): llm_call_log writer ──
 # Every chat() invocation produces one row per tier attempt, so distillation
 # training data accumulates whether or not the cascade ultimately succeeded.
@@ -855,6 +921,13 @@ def chat(
     if _frontier_configured() and _is_frontier_model(model_override):
         order = ((_chat_frontier, "frontier", 0),) + order
 
+    # Local code-gen tier (free): same explicit-override trigger shape as the
+    # frontier tier, opposite direction — the gateway requests the local coder
+    # for code purposes when chili_code_local_first is on. Tried first; weak or
+    # failed local replies fall through to the standard (free-Groq-led) cascade.
+    if _local_code_configured() and _is_local_code_model(model_override):
+        order = ((_chat_local, "ollama", 0),) + order
+
     # Concatenated user content for log fidelity (system prompt logged separately).
     _user_prompt = "\n".join(
         (m.get("content") or "") for m in messages if isinstance(m, dict) and m.get("role") != "system"
@@ -862,7 +935,7 @@ def chat(
 
     for step, provider_name, tier_num in order:
         _t0 = time.monotonic()
-        if step in (_chat_openai, _chat_gemini, _chat_frontier):
+        if step in (_chat_openai, _chat_gemini, _chat_frontier, _chat_local):
             result = step(
                 prompt,
                 messages,
@@ -1043,6 +1116,28 @@ def _stream_tier_frontier(messages, prompt, trace_id, max_tokens, flags, model_o
         log_info(trace_id, f"frontier_stream_error={e}")
 
 
+def _stream_tier_local(messages, prompt, trace_id, max_tokens, flags, model_override: str | None = None):
+    """Local coder streaming tier — mirror of ``_chat_local``. Failures never
+    set the permanent/429 flags (a down Ollama must not suppress the standard
+    cascade or the non-streaming tail fallback)."""
+    if not _local_code_configured():
+        return
+    try:
+        got = False
+        model_name = (model_override or settings.chili_code_local_model).strip()
+        log_info(trace_id, f"trying local coder stream model={model_name}")
+        for tok, model in _stream_provider("ollama", _ollama_openai_base_url(), model_name,
+                                           messages, prompt, trace_id, max_tokens=max_tokens):
+            got = True
+            yield tok, model
+        if got:
+            flags["done"] = True
+        else:
+            log_info(trace_id, "local_coder_stream yielded no tokens")
+    except Exception as e:
+        log_info(trace_id, f"local_coder_stream_error={e}")
+
+
 def chat_stream(
     messages: list[dict],
     system_prompt: str | None = None,
@@ -1073,9 +1168,14 @@ def chat_stream(
     if _frontier_configured() and _is_frontier_model(model_override):
         tiers = (_stream_tier_frontier,) + tiers
 
+    # Local coder streaming tier (free): same explicit-override trigger as
+    # the non-streaming cascade.
+    if _local_code_configured() and _is_local_code_model(model_override):
+        tiers = (_stream_tier_local,) + tiers
+
     flags = {"done": False, "saw_permanent": False, "saw_transient_429": False}
     for tier in tiers:
-        if tier in (_stream_tier_openai, _stream_tier_gemini, _stream_tier_frontier):
+        if tier in (_stream_tier_openai, _stream_tier_gemini, _stream_tier_frontier, _stream_tier_local):
             yield from tier(messages, prompt, trace_id, max_tokens, flags, model_override)
         else:
             yield from tier(messages, prompt, trace_id, max_tokens, flags)
