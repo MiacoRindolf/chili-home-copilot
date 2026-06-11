@@ -239,6 +239,8 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
         "date": date,
         "engine": "v2",
         "armed_source": armed_source,
+        "entry_interval": ENTRY_INTERVAL,
+        "bar_interval_min": ENTRY_BAR_MIN,
         "ran_at_utc": started.isoformat(),
         "tape_symbols": len(syms),
         "halt_windows": sum(len(v) for v in tape.halts.values()),
@@ -602,7 +604,10 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             if span[1] is None:
                 span[1] = eod_label
 
-    # chart payloads: 5m OHLCV series + halt spans for every symbol with activity
+    # chart payloads: OHLCV series at the ENTRY interval (what the trigger actually
+    # saw) + halt spans for every symbol with activity. NOTE: minutes with zero
+    # prints / inside halts have NO aggregate bar — gaps in the chart are the real
+    # tape, not missing data.
     traded_syms = {t["sym"] for t in trades}
     active_syms = list(dict.fromkeys(list(traded_syms) + list(armed_spans.keys())))
     series: dict[str, list] = {}
