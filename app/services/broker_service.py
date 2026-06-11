@@ -1292,6 +1292,39 @@ def cancel_open_sell_orders_for_ticker(ticker: str) -> int:
         return 0
 
 
+def get_open_position_quantity(ticker: str) -> float | None:
+    """TOTAL shares currently held for *ticker* per Robinhood truth.
+
+    0.0 = a SUCCESSFUL fetch confirming the position is flat (safe to reconcile
+    an exit against). None = unknown (session down / API error) — callers must
+    fail SAFE and never treat unknown as flat. (2026-06-11 INDP: the exit-retry
+    loop flattened a phantom position 8x because only Coinbase had a
+    broker-zero reconcile.)"""
+    if not is_connected():
+        return None
+    sym = (ticker or "").upper().strip()
+    if not sym:
+        return None
+    try:
+        import robin_stocks.robinhood as rh
+
+        positions = rh.get_open_stock_positions() or []
+        for p in positions:
+            try:
+                qty_total = float(p.get("quantity") or 0)
+                instr_url = p.get("instrument")
+                inst = rh.helper.request_get(instr_url) if instr_url else {}
+                p_sym = ((inst or {}).get("symbol") or "").upper().strip()
+                if p_sym == sym:
+                    return qty_total
+            except Exception:
+                continue
+        return 0.0  # successful fetch, symbol absent -> confirmed flat
+    except Exception as e:
+        logger.debug(f"[broker] get_open_position_quantity({sym}) failed: {e}")
+        return None
+
+
 def get_position_held_for_sells(ticker: str) -> float | None:
     """Return shares already committed to existing sell orders for *ticker*.
 
