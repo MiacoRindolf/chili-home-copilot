@@ -3022,6 +3022,7 @@ def place_buy_order(
     *,
     market_hours_override: str | None = None,
     extended_hours_override: bool | None = None,
+    time_in_force: str | None = None,
 ) -> dict[str, Any]:
     """Place a buy order via Robinhood.
 
@@ -3049,7 +3050,10 @@ def place_buy_order(
             # error body: the sell path produced
             # {'non_field_errors': ['Invalid Good Til Canceled order.']}
             # on a straightforward 80-share market sell.
-            tif = "gtc" if order_type == "limit" else "gfd"
+            # ORDER-TRUTH (2026-06-11): callers may force the TIF — day-trade
+            # ENTRY limits must be 'gfd', never GTC: a dead momentum session's
+            # resting GTC buy (KMRK) filled hours later into a -21.9% dump.
+            tif = time_in_force or ("gtc" if order_type == "limit" else "gfd")
             return rh.orders.order(
                 symbol=ticker,
                 quantity=quantity,
