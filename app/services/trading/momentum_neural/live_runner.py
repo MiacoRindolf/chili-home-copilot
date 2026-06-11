@@ -1445,7 +1445,17 @@ def _sweep_unresolved_entry_orders(adapter, db, sess, le: dict) -> bool:
             continue  # indeterminate -> stays unresolved (guard keeps holding)
         if no is None:
             continue
-        if _order_done_for_entry(no):
+        # OPEN-WITH-FILLS (2026-06-11 INDP): RH can leave an order in state
+        # "open" with shares already filled — a cancel that silently failed
+        # plus a later fill. We OWN those shares; waiting for a terminal state
+        # that never comes left 612sh unmanaged at a generic -29% bracket.
+        # Best-effort cancel the open remainder (single clip), then adopt.
+        if _order_open(no) and float(no.filled_size or 0.0) > 0.0:
+            try:
+                adapter.cancel_order(str(oid))
+            except Exception:
+                logger.debug("[momentum_live] open-with-fills remainder cancel failed", exc_info=True)
+        if _order_done_for_entry(no) or float(no.filled_size or 0.0) > 0.0:
             # LATE FILL — re-point the session at the real order and let the
             # hardened pending-entry fill-handler adopt it (position + stop/target).
             le["entry_order_id"] = str(oid)
@@ -2296,7 +2306,22 @@ def tick_live_session(
                 }
         if le.get("entry_submitted") and le.get("entry_order_id"):
             no, _ = adapter.get_order(str(le["entry_order_id"]))
-            if no and _order_done_for_entry(no):
+            # OPEN-WITH-FILLS (2026-06-11 INDP): RH can hold an order in state
+            # "open" with shares ALREADY filled (a silently-failed cancel + a
+            # later fill). Those shares are OURS the moment they exist — adopt
+            # on fills, never on order-state ceremony. Cancel the open
+            # remainder first (single clip; extra post-adoption fills reconcile
+            # via broker-sync against broker truth).
+            if no and _order_open(no) and float(no.filled_size or 0.0) > 0.0:
+                try:
+                    adapter.cancel_order(str(le["entry_order_id"]))
+                except Exception:
+                    _log.debug("[momentum_live] remainder cancel failed", exc_info=True)
+                _emit(db, sess, "entry_open_with_fills_adopting", {
+                    "order_id": str(le["entry_order_id"]),
+                    "filled_size": float(no.filled_size or 0.0),
+                })
+            if no and (_order_done_for_entry(no) or float(no.filled_size or 0.0) > 0.0):
                 avg = float(no.average_filled_price or ask)
                 filled = float(no.filled_size or 0.0)
                 if filled <= 0:
@@ -2441,6 +2466,23 @@ def tick_live_session(
                                 return {
                                     "ok": True, "session_id": sess.id, "state": sess.state,
                                     "pending": "ack_timeout_cancel_raced_fill_adopt",
+                                }
+                            if _post and _order_open(_post):
+                                # CANCEL NOT CONFIRMED (2026-06-11 INDP): RH left the
+                                # order OPEN after our cancel and it filled minutes
+                                # later, unmanaged. Never walk away from a live order —
+                                # keep the session PENDING with the pointer intact; the
+                                # next tick re-checks (adopts fills / retries cancel).
+                                _emit(db, sess, "entry_cancel_unconfirmed", {
+                                    "order_id": str(le["entry_order_id"]),
+                                    "reason": _cancel_why,
+                                    "venue_status": _post.status,
+                                    "filled_size": float(_post.filled_size or 0.0),
+                                })
+                                db.flush()
+                                return {
+                                    "ok": True, "session_id": sess.id, "state": sess.state,
+                                    "pending": "cancel_unconfirmed",
                                 }
                             _emit(db, sess, "entry_ack_timeout", {
                                 "elapsed_sec": (_utcnow() - t_sub).total_seconds(),
