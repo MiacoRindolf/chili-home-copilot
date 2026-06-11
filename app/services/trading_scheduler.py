@@ -337,6 +337,34 @@ def _run_daily_prescreen_job():
     run_scheduler_job_guarded("daily_prescreen", _work)
 
 
+def _run_nightly_replay_regression_job():
+    """Nightly replay regression tripwire (~18:00 America/Los_Angeles, after the
+    data session ends): re-run TODAY through the replay engine on tonight's code
+    and diff vs what the live lane actually did — catches "we broke entries"
+    the evening BEFORE the next open instead of during it."""
+    from ..config import settings as _settings
+
+    if not getattr(_settings, "chili_momentum_replay_regression_enabled", True):
+        return
+
+    def _work() -> None:
+        from ..db import SessionLocal
+        from .trading.momentum_neural.replay_regression import run_nightly_replay_regression
+
+        db = SessionLocal()
+        try:
+            report = run_nightly_replay_regression(db)
+            logger.info("[scheduler] nightly replay regression: flags=%s", report.get("flags"))
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("nightly_replay_regression", _work)
+
+
 def _run_daily_trading_brief_job():
     """Generate + persist per-user daily trading brief (~17:00 America/Los_Angeles).
 
@@ -5288,6 +5316,16 @@ def start_scheduler():
                 replace_existing=True,
                 max_instances=1,
                 next_run_time=datetime.now() + timedelta(seconds=25),
+            )
+
+        if include_web_light and getattr(settings, "chili_momentum_replay_regression_enabled", True):
+            _scheduler.add_job(
+                _run_nightly_replay_regression_job,
+                trigger=CronTrigger(hour=18, minute=0, timezone="America/Los_Angeles"),
+                id="nightly_replay_regression",
+                name="Nightly replay regression tripwire (18:00 America/Los_Angeles)",
+                replace_existing=True,
+                max_instances=1,
             )
 
         if include_web_light and getattr(settings, "brain_daily_market_scan_scheduler_enabled", True):
