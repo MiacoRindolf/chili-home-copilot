@@ -502,6 +502,38 @@ def route(
             log_id=log_id,
         )
 
+    # ---- Q3b: budget remains but task scored low-novelty -------------------
+    # A retry of a previously-attempted task scores low novelty by design,
+    # which used to dead-end at ESCALATE even with budget available (live
+    # 2026-06-11: task 36's retry). With no template and no promoted local
+    # model, PREMIUM is the only executor — and the per-call budget gate
+    # still bounds spend — so route there while budget remains. ESCALATE is
+    # reserved for what its docstring says: budget exhausted.
+    if remaining > Decimal("0.10"):
+        log_id = _log_decision(
+            db,
+            event_id=event_id,
+            ctx=ctx,
+            decision=Decision.PREMIUM,
+            matched_pattern_id=None,
+            pattern_confidence=None,
+            novelty=novelty,
+            rule_snapshot=snapshot,
+        )
+        return RoutingDecision(
+            decision=Decision.PREMIUM,
+            reason=(
+                f"no cheaper tier (template/local) available; novelty={novelty} "
+                f"budget=${remaining}"
+            ),
+            matched_pattern_id=None,
+            matched_pattern_name=None,
+            pattern_confidence=None,
+            novelty_score=novelty,
+            rule_snapshot=snapshot,
+            log_id=log_id,
+        )
+
     # ---- Q4: low-novelty + no local model + no premium budget → escalate -
     snapshot["skip_reason"] = (
         f"no_pattern + no_local_model + premium_remaining=${remaining}"
