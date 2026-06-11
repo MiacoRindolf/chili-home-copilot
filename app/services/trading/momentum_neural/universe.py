@@ -199,7 +199,13 @@ def build_equity_universe(
                 continue
 
             day = s.get("day") or {}
-            vol = _f(day.get("v")) or 0.0
+            mn = s.get("min") or {}
+            # PRE-MARKET truth: the snapshot 'day' aggregate stays zeroed until the
+            # RTH open, so the $-volume floor must also read the minute bar's
+            # ACCUMULATED volume ('av', counts extended-hours prints). Without this
+            # every equity fails the floor pre-market -> empty universe -> nothing
+            # to arm in the very window Ross trades (#562's hour gate opened it).
+            vol = max(_f(day.get("v")) or 0.0, _f(mn.get("av")) or 0.0)
             dollar_vol = price * vol
             if profile.min_dollar_volume is not None and dollar_vol < profile.min_dollar_volume:
                 continue
