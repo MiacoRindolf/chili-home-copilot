@@ -3480,6 +3480,40 @@ def _bridge_scanner_to_viability(
             ross_signals[t] = r
         if len(tickers) >= _VIABILITY_BRIDGE_MAX_TICKERS:
             break
+
+    # ARMED-SESSION PIN (2026-06-11, the EDHL kill): an armed symbol that rotates
+    # OUT of the scanner's top batch stops getting viability refreshes, its
+    # snapshot ages past the 600s freshness gate, and our own staleness check
+    # then blocks every entry until the session dies — EDHL was armed at 11:33Z,
+    # never refreshed again, and got strangled (stale 1887s) while Ross banked
+    # +$782 on the same chart (also killed UEC today and AAOG on 06-10). Active
+    # live sessions' symbols are ALWAYS pinned into the refresh batch.
+    try:
+        from .trading.momentum_neural.live_fsm import LIVE_RUNNER_RUNNABLE_STATES
+        from ..models.trading import TradingAutomationSession
+
+        _armed_rows = (
+            db.query(TradingAutomationSession.symbol)
+            .filter(
+                TradingAutomationSession.mode == "live",
+                TradingAutomationSession.state.in_(LIVE_RUNNER_RUNNABLE_STATES),
+                ~TradingAutomationSession.symbol.like("%-USD"),
+            )
+            .distinct()
+            .all()
+        )
+        _pins = []
+        for (_sym,) in _armed_rows:
+            _su = str(_sym or "").strip().upper()
+            if _su and _su not in _pins:
+                _pins.append(_su)
+        if _pins:
+            # PREPEND the pins: the downstream pipeline caps symbols at 32, so
+            # armed names must sit at the HEAD of the list to survive the cut.
+            tickers = _pins + [t for t in tickers if t not in _pins]
+    except Exception:
+        logger.debug("[scheduler] armed-session viability pin failed", exc_info=True)
+
     if not tickers:
         return
     try:
