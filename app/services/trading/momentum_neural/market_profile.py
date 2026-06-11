@@ -85,6 +85,28 @@ def market_session_now(symbol: str | None, *, now: datetime | None = None) -> st
     return "closed"
 
 
+_DATA_SESSION_OPEN_MIN = 4 * 60   # 04:00 ET — US extended session opens (exchange fact)
+
+
+def is_data_session_now(symbol: str | None, *, now: datetime | None = None) -> bool:
+    """True whenever US equity QUOTES are live (Mon-Fri 04:00-20:00 ET) — the
+    DATA/selection window, deliberately WIDER than the lane's entry window
+    (premarket_start, default 07:00). The movers Ross trades at 7:00 develop
+    from 4:00; sampling/selection from 4:00 means the watchlist, tape, and
+    viability are WARM before the first entry is allowed — preparation time,
+    not extra trading time. Crypto: always True (24/7)."""
+    if asset_class_for_symbol(symbol) == "crypto":
+        return True
+    ref = now or datetime.now(timezone.utc)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    local = ref.astimezone(_NY_TZ)
+    if local.weekday() >= 5:
+        return False
+    mod = local.hour * 60 + local.minute
+    return _DATA_SESSION_OPEN_MIN <= mod < max(_afterhours_end_min(), _REGULAR_CLOSE_MIN)
+
+
 def market_open_now(symbol: str | None, *, now: datetime | None = None) -> bool:
     """True only during the REGULAR session (9:30–16:00 ET) — used for display/labels.
     For the trade/arm/entry decision use ``is_tradeable_now`` (extended-hours aware)."""

@@ -32,7 +32,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ....config import settings
-from .market_profile import is_tradeable_now
+from .market_profile import is_data_session_now
 
 logger = logging.getLogger(__name__)
 
@@ -56,13 +56,12 @@ def _f(v: Any) -> Optional[float]:
 
 
 def _in_sampling_window(now_utc: datetime) -> bool:
-    # Sample whenever the equity lane is TRADEABLE (#562 extended session:
-    # premarket_start -> afterhours_end ET, the same market_profile gate the live
-    # entry uses). The tape must cover every minute the lane can trade — Ross's
-    # money is made pre-market, and an RTH-only tape left the replay/divergence
-    # instruments blind exactly there (06-10: zero tape rows before 13:30 UTC).
-    # Holidays aren't excluded — stale quotes fail the per-row sanity filters.
-    return is_tradeable_now("EQUITY", now=now_utc)
+    # Sample the full US DATA session (04:00-20:00 ET) — wider than the lane's
+    # ENTRY window (premarket_start 07:00): the movers Ross trades at 7:00 develop
+    # from 4:00, so the tape/selection must already be warm by the first allowed
+    # entry (operator 2026-06-11: preparation time before the open). Holidays
+    # aren't excluded — stale quotes fail the per-row sanity filters.
+    return is_data_session_now("EQUITY", now=now_utc)
 
 
 def _ross_row(s: dict[str, Any]) -> Optional[dict[str, Any]]:

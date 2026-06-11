@@ -3108,7 +3108,31 @@ def tick_live_session(
                     "partial_taken": bool(pos.get("partial_taken")),
                 })
 
+        if bid > stop_px and le.pop("stop_breach_pending_utc", None) is not None:
+            # breach -> recovery between reads = flicker dodged; clear the marker
+            _commit_le(sess, le)
+            _emit(db, sess, "stop_breach_flicker_dodged", {"bid": bid, "stop_price": stop_px})
         if bid <= stop_px:
+            # SHAKE-OUT flicker guard (tick-speed exits): one bad bid print can show
+            # a breach for a single cached quote; a REAL breakdown persists. Confirm
+            # on a SECOND read >=1s apart before selling — the event loop redispatches
+            # within ~2s while the breach holds, so a true stop pays at most ~2s of
+            # delay; a transient flicker clears the marker on the recovery read.
+            _pend_raw = le.get("stop_breach_pending_utc")
+            if not _pend_raw:
+                le["stop_breach_pending_utc"] = _utcnow().isoformat()
+                _commit_le(sess, le)
+                _emit(db, sess, "stop_breach_pending_confirm", {"bid": bid, "stop_price": stop_px})
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state, "stop_pending_confirm": True}
+            try:
+                _pend_t = datetime.fromisoformat(str(_pend_raw).replace("Z", "+00:00")).replace(tzinfo=None)
+                if (_utcnow() - _pend_t).total_seconds() < 1.0:
+                    db.flush()
+                    return {"ok": True, "session_id": sess.id, "state": sess.state, "stop_pending_confirm": True}
+            except (TypeError, ValueError):
+                pass  # unparseable marker — treat as confirmed (protective default)
+            le.pop("stop_breach_pending_utc", None)
             # A stop hit while TRAILING (or after the first-target partial) IS the
             # runner's trailing stop; before that it's the initial protective stop.
             _stop_reason = "trail_stop" if (st == STATE_LIVE_TRAILING or pos.get("partial_taken")) else "stop"

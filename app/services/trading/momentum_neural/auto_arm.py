@@ -381,6 +381,59 @@ def _liquidity_rerank(
         return rows
 
 
+_EPOCH = datetime(1970, 1, 1)
+
+
+def _utcnow() -> datetime:
+    return datetime.utcnow()
+
+
+def _symbol_loss_guards(db: Session) -> tuple[set[str], dict[str, datetime]]:
+    """Churn guards from TODAY's closed live outcomes (UTC day):
+
+    - 2-STRIKE: symbols with >= ``chili_momentum_symbol_max_daily_stopouts``
+      (default 2) losing live trades today are BLOCKED for the rest of the day —
+      Ross walks away from a name that stopped him twice.
+    - POST-LOSS COOLDOWN: after any losing live trade, the symbol cannot re-arm
+      for ``chili_momentum_symbol_loss_cooldown_min`` (default 5) minutes — a
+      tick-speed re-trigger into the same chop is how 1R losses machine-gun.
+
+    Fail-open: any error returns no blocks (the daily-loss cap and drawdown
+    breaker still bound the account)."""
+    try:
+        from ....models.trading import MomentumAutomationOutcome
+
+        day_start = _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        rows = (
+            db.query(
+                MomentumAutomationOutcome.symbol,
+                MomentumAutomationOutcome.terminal_at,
+                MomentumAutomationOutcome.realized_pnl_usd,
+            )
+            .filter(
+                MomentumAutomationOutcome.mode == "live",
+                MomentumAutomationOutcome.terminal_at >= day_start,
+                MomentumAutomationOutcome.realized_pnl_usd < 0,
+            )
+            .all()
+        )
+        max_stops = int(getattr(settings, "chili_momentum_symbol_max_daily_stopouts", 2) or 2)
+        cd_min = float(getattr(settings, "chili_momentum_symbol_loss_cooldown_min", 5) or 5)
+        counts: dict[str, int] = {}
+        cooldown_until: dict[str, datetime] = {}
+        for sym, t_at, _pnl in rows:
+            s = str(sym).upper()
+            counts[s] = counts.get(s, 0) + 1
+            cd = (t_at if isinstance(t_at, datetime) else _utcnow()) + timedelta(minutes=cd_min)
+            if cd > cooldown_until.get(s, _EPOCH):
+                cooldown_until[s] = cd
+        blocked = {s for s, n in counts.items() if n >= max_stops}
+        return blocked, cooldown_until
+    except Exception:
+        logger.debug("[auto_arm] loss-guard query failed (fail-open)", exc_info=True)
+        return set(), {}
+
+
 def _symbol_free(db: Session, symbol: str, user_id: int | None) -> bool:
     """Per-symbol autopilot mutex vs AutoTrader v1 (fail open on helper error)."""
     try:
@@ -595,8 +648,15 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     # Cheap pre-filter (no network): venue, market hours, per-symbol mutex,
     # and self-collision (a symbol we already hold an active live session for).
     busy_symbols = _symbols_with_active_live_session(db, user_id=uid)
+    # SHAKE-OUT churn guards (tick-speed entries can re-trigger within seconds of a
+    # stop-out): (a) 2-strike rule — a symbol that stopped us out twice TODAY is
+    # done for the day (Ross's own discipline); (b) post-loss cooldown — after any
+    # loss on a symbol, sit out a few minutes before re-arming it so a chop doesn't
+    # machine-gun 1R losses on one name. Both fail-open on query errors.
+    loss_blocked, loss_cooldown_until = _symbol_loss_guards(db)
     out["busy_skipped"] = 0
     out["broker_not_ready_skipped"] = 0
+    out["loss_guard_skipped"] = 0
     _broker_ready_cache: dict[str, bool] = {}
     eligible: list[MomentumSymbolViability] = []
     for c in candidates:
@@ -608,6 +668,10 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         if c.symbol.upper() in busy_symbols:
             out["busy_skipped"] += 1
             continue  # already have a live session for this symbol — rotate to the next setup
+        _sym_u = c.symbol.upper()
+        if _sym_u in loss_blocked or _utcnow() < loss_cooldown_until.get(_sym_u, _EPOCH):
+            out["loss_guard_skipped"] += 1
+            continue  # 2-strike / post-loss cooldown — walk away like Ross does
         if not _symbol_market_open(c.symbol):
             continue  # equities only during their session; crypto always passes (24/7)
         if not _venue_broker_ready_for(c.symbol, _broker_ready_cache):
