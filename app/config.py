@@ -2213,6 +2213,17 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("CHILI_MOMENTUM_EVENT_THEME_KEYWORDS"),
     )
+    # SHAKE-OUT churn guards (tick-speed entries re-trigger in seconds): a symbol
+    # with this many losing live trades today is done for the DAY (Ross's 2-strike
+    # walk-away), and any losing trade sits the symbol out for the cooldown below.
+    chili_momentum_symbol_max_daily_stopouts: int = Field(
+        default=2,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SYMBOL_MAX_DAILY_STOPOUTS"),
+    )
+    chili_momentum_symbol_loss_cooldown_min: float = Field(
+        default=5.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SYMBOL_LOSS_COOLDOWN_MIN"),
+    )
     # A CONFIGURED broker disconnected this long raises a loud ops alarm (websocket
     # broadcast + critical log). The RH refresh token died silently for ~7 weeks
     # (2026-04-19 -> 06-10) with only info-level log spam — never again.
