@@ -201,17 +201,32 @@ def _build_plan_prompt(context: Dict[str, Any]) -> str:
 
 
 def _build_edit_prompt(file_path: str, file_content: str, change_description: str, conventions: List[str]) -> str:
-    """System prompt for Step 2: generate a diff for one specific file."""
+    """System prompt for Step 2: generate SEARCH/REPLACE edits for one file.
+
+    Exact-match search/replace blocks (Aider-style) instead of unified
+    diffs: small local models emit malformed diff hunks constantly, while
+    copying exact lines and writing replacements is reliable. The diff that
+    downstream ``git apply`` consumes is generated programmatically from
+    the applied result, so it is always well-formed.
+    """
     parts = [
         "You are Chili Code Agent. You are editing a specific file.",
         "",
+        "Emit one or more edit blocks in EXACTLY this format:",
+        "",
+        "<<<<<<< SEARCH",
+        "(lines copied EXACTLY from the file)",
+        "=======",
+        "(the replacement lines)",
+        ">>>>>>> REPLACE",
+        "",
         "STRICT RULES:",
-        "- Your diff MUST be based ONLY on the file content provided below.",
-        "- Every line you mark with '-' (removal) MUST exist verbatim in the current file.",
-        "- Do NOT invent or guess code that is not in the provided file.",
+        "- SEARCH text must be copied character-for-character from the file below (indentation matters).",
+        "- SEARCH text must appear EXACTLY ONCE in the file — include enough surrounding lines to make it unique.",
+        "- Several small blocks are better than one large block.",
+        "- To insert new code, SEARCH for the nearest existing line(s) and repeat them in REPLACE together with the new code.",
         "- Do NOT use placeholder code like '# Implementation here' or 'pass' for real logic.",
-        "- If you cannot accomplish the change with the provided content, explain why instead of guessing.",
-        "- Use proper unified diff format with --- a/ and +++ b/ headers.",
+        "- If the change cannot be made from the provided content, explain why in plain text instead of guessing.",
         "",
     ]
 
@@ -231,7 +246,7 @@ def _build_edit_prompt(file_path: str, file_content: str, change_description: st
         change_description,
         "",
         "## Output",
-        "Return ONLY a unified diff block wrapped in ```diff ... ```. No other text.",
+        "Return ONLY the edit block(s) in the format above. No other text.",
     ])
 
     return "\n".join(parts)
@@ -249,6 +264,118 @@ def _read_file_content(repo_path: str, file_path: str, max_lines: int = _MAX_FIL
         return "\n".join(lines)
     except Exception:
         return None
+
+
+def _read_file_full(repo_path: str, file_path: str) -> Optional[str]:
+    """Full, untruncated file content — the matching/apply substrate.
+
+    Edits are validated and applied against THIS, never against the
+    (possibly elided) prompt rendering, so a legitimate edit below any
+    prompt elision point still applies.
+    """
+    try:
+        full = Path(repo_path) / file_path
+        if not full.is_file():
+            return None
+        return full.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+
+
+def _prompt_file_budget_chars() -> int:
+    """Character budget for rendering a file into the edit prompt. Derived
+    from the output-token knob (≈4 chars/token, same order as the output
+    budget) rather than a second hardcoded line cap — the historical
+    600-line head-truncation meant the model literally could not see or
+    edit the bottom of larger files."""
+    return int(getattr(settings, "chili_code_gen_max_tokens", 16384)) * 4
+
+
+def _elide_for_prompt(content: str) -> str:
+    """Fit content into the prompt budget: head + tail with an explicit
+    elision marker (the model sees both ends; matching still runs against
+    the full file)."""
+    budget = _prompt_file_budget_chars()
+    if len(content) <= budget:
+        return content
+    head = int(budget * 0.6)
+    tail = budget - head
+    omitted = len(content) - head - tail
+    return (
+        content[:head]
+        + f"\n... ({omitted} characters elided — ask for a narrower change if the edit target is in this region) ...\n"
+        + content[-tail:]
+    )
+
+
+_SEARCH_REPLACE_RE = re.compile(
+    r"<<<<<<<\s*SEARCH\r?\n(.*?)\r?\n?=======\r?\n(.*?)\r?\n?>>>>>>>\s*REPLACE",
+    re.DOTALL,
+)
+
+
+def _parse_search_replace_blocks(reply: str) -> List[tuple]:
+    """Extract (search, replace) pairs from the model reply."""
+    return [(m.group(1), m.group(2)) for m in _SEARCH_REPLACE_RE.finditer(reply or "")]
+
+
+def _apply_search_replace(content: str, blocks: List[tuple]) -> Dict[str, Any]:
+    """Apply SEARCH/REPLACE blocks against FULL file content.
+
+    Exact-match + uniqueness enforcement is the anti-hallucination check:
+    a search string that is not in the file (hallucinated code) or matches
+    twice (ambiguous) rejects that block. Returns new_content (None when
+    nothing applied), applied count, and per-block warnings.
+    """
+    new_content = content
+    warnings: List[str] = []
+    applied = 0
+    for i, (search, replace) in enumerate(blocks, start=1):
+        if not search.strip():
+            warnings.append(f"block {i}: empty SEARCH text")
+            continue
+        count = new_content.count(search)
+        if count == 0:
+            warnings.append(
+                f"block {i}: SEARCH text not found in file (hallucinated or stale content)"
+            )
+            continue
+        if count > 1:
+            warnings.append(
+                f"block {i}: SEARCH text matches {count} times — not unique, add surrounding lines"
+            )
+            continue
+        new_content = new_content.replace(search, replace, 1)
+        applied += 1
+    return {
+        "new_content": new_content if applied else None,
+        "applied": applied,
+        "warnings": warnings,
+    }
+
+
+def _unified_diff_text(file_path: str, old: str, new: str) -> str:
+    """Machine-generated unified diff (git-apply-compatible a/ b/ headers).
+    Generated from the applied result, so it is always well-formed —
+    the model never has to emit diff syntax."""
+    import difflib
+
+    old_lines = old.splitlines(keepends=True)
+    new_lines = new.splitlines(keepends=True)
+    # Guard the no-trailing-newline edge: keep git apply happy by ensuring
+    # the last line carries a newline in both sides of the diff input.
+    if old_lines and not old_lines[-1].endswith("\n"):
+        old_lines[-1] += "\n"
+    if new_lines and not new_lines[-1].endswith("\n"):
+        new_lines[-1] += "\n"
+    return "".join(
+        difflib.unified_diff(
+            old_lines,
+            new_lines,
+            fromfile=f"a/{file_path}",
+            tofile=f"b/{file_path}",
+        )
+    )
 
 
 def _parse_plan_json(reply: str) -> Optional[Dict[str, Any]]:
@@ -484,11 +611,15 @@ async def run_code_agent(
                     _dispatch_log_ids.append((int(_create_log_id), "code_dispatch_create", False))
             continue
 
-        file_content = _read_file_content(default_repo_path, fpath)
+        # Full content is the matching/apply substrate; the prompt gets an
+        # elided rendering when the file exceeds the prompt budget. Edits
+        # below any elision point still apply (the old 600-line head
+        # truncation made the bottom of large files uneditable).
+        file_content = _read_file_full(default_repo_path, fpath)
         if file_content is None:
             # Try other repos
             for rp in repo_path_map.values():
-                file_content = _read_file_content(rp, fpath)
+                file_content = _read_file_full(rp, fpath)
                 if file_content is not None:
                     break
 
@@ -501,7 +632,7 @@ async def run_code_agent(
             edit_sections.append(f"### {fpath}\nFile not found -- skipped.")
             continue
 
-        edit_system = _build_edit_prompt(fpath, file_content, description, conventions)
+        edit_system = _build_edit_prompt(fpath, _elide_for_prompt(file_content), description, conventions)
         edit_result = llm_chat(
             messages=[{"role": "user", "content": f"Apply the change to {fpath} as described."}],
             system_prompt=edit_system,
@@ -513,24 +644,54 @@ async def run_code_agent(
         edit_reply = edit_result.get("reply", "")
         _edit_log_id = edit_result.get("gateway_log_id") if isinstance(edit_result, dict) else None
 
-        diffs_in_reply = re.findall(r"```diff\n(.*?)```", edit_reply, re.DOTALL)
         _edit_succeeded_at_least_one = False
-        if diffs_in_reply:
-            for d in diffs_in_reply:
-                validation = _validate_diff(d, fpath, file_content)
-                validations.append({"file": fpath, **validation})
-                if validation["valid"]:
+        sr_blocks = _parse_search_replace_blocks(edit_reply)
+        if sr_blocks:
+            outcome = _apply_search_replace(file_content, sr_blocks)
+            if outcome["new_content"] is not None:
+                d = _unified_diff_text(fpath, file_content, outcome["new_content"])
+                if d.strip():
                     all_diffs.append(d)
                     if fpath not in files_changed:
                         files_changed.append(fpath)
                     edit_sections.append(f"### {fpath}\n```diff\n{d}\n```")
                     _edit_succeeded_at_least_one = True
-                else:
-                    edit_sections.append(
-                        f"### {fpath}\n**Diff rejected** -- {'; '.join(validation['warnings'])}"
-                    )
+                validations.append({
+                    "file": fpath,
+                    "valid": True,
+                    "warnings": outcome["warnings"],
+                    "applied_blocks": outcome["applied"],
+                    "total_blocks": len(sr_blocks),
+                })
+            else:
+                validations.append({
+                    "file": fpath,
+                    "valid": False,
+                    "warnings": outcome["warnings"] or ["no SEARCH/REPLACE block applied"],
+                })
+                edit_sections.append(
+                    f"### {fpath}\n**Edits rejected** -- {'; '.join(outcome['warnings'])}"
+                )
         else:
-            edit_sections.append(f"### {fpath}\n{edit_reply}")
+            # Legacy fallback: some (cloud) models still answer with a raw
+            # unified diff; keep accepting it, validated against FULL content.
+            diffs_in_reply = re.findall(r"```diff\n(.*?)```", edit_reply, re.DOTALL)
+            if diffs_in_reply:
+                for d in diffs_in_reply:
+                    validation = _validate_diff(d, fpath, file_content)
+                    validations.append({"file": fpath, **validation})
+                    if validation["valid"]:
+                        all_diffs.append(d)
+                        if fpath not in files_changed:
+                            files_changed.append(fpath)
+                        edit_sections.append(f"### {fpath}\n```diff\n{d}\n```")
+                        _edit_succeeded_at_least_one = True
+                    else:
+                        edit_sections.append(
+                            f"### {fpath}\n**Diff rejected** -- {'; '.join(validation['warnings'])}"
+                        )
+            else:
+                edit_sections.append(f"### {fpath}\n{edit_reply}")
         if _edit_log_id:
             _dispatch_log_ids.append(
                 (int(_edit_log_id), "code_dispatch_edit", _edit_succeeded_at_least_one)
