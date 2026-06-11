@@ -6664,7 +6664,7 @@ def _step_result_payload(result: StepResult) -> dict[str, Any]:
 
 def run_validation(worktree: Path, changed_files: list[str]) -> list[dict[str, Any]]:
     results: list[StepResult] = [
-        run_ast_syntax(worktree, changed_files),
+        run_ast_syntax(worktree, changed_files=changed_files),
         run_ruff_check(worktree),
         run_pytest_targeted(worktree, changed_files),
         run_mypy_check(worktree),
