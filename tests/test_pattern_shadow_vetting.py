@@ -11,9 +11,11 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import text
 
 from app.config import Settings
 from app.models.trading import PaperTrade
+from app.services.trading.promotion_gate import persist_cpcv_shadow_eval
 from app.services.trading.pattern_shadow_vetting import (
     _negative_realized_gate_hold_reason,
     _apply_min_pilot_roster,
@@ -767,3 +769,141 @@ def test_shadow_vetting_can_disable_pilot_ramp(db, monkeypatch):
     assert out["collecting_ev"] == 1
     assert pat.lifecycle_stage == "shadow_promoted"
     assert pat.promotion_status == "shadow_collecting_ev"
+
+
+# ---------------------------------------------------------------------------
+# FIX 46 regression cluster (2026-06-11 pattern_shadow_vetting_finalizer
+# PendingRollbackError): an earlier statement failed mid-cycle, the error was
+# swallowed without rollback, and the poisoned Session crashed the next query
+# (`run_shadow_vetting_cycle` -> `select_shadow_vetting_candidates` ->
+# `_score_threshold_from_pool`). These tests pin the heal-before-reuse
+# behavior at each layer.
+# ---------------------------------------------------------------------------
+
+
+def test_select_candidates_survives_failed_paper_evidence_query(db, monkeypatch):
+    """A failed best-effort paper-evidence statement must not poison the
+    Session: the SAVEPOINT in ``_load_directional_evidence`` confines it and
+    the rest of the candidate selection keeps working."""
+    _truncate_phase4_state(db)
+    pat = _make_pattern(
+        db,
+        name="fix46_poison_probe",
+        lifecycle="shadow_promoted",
+        quality_score=None,
+    )
+    _seed_directional_outcomes(db, pattern_id=pat.id, n_correct=3, n_incorrect=1)
+    db.commit()
+
+    monkeypatch.setattr(
+        "app.services.trading.pattern_shadow_vetting.paper_trade_return_fraction_sql",
+        lambda alias: "no_such_column_fix46",
+    )
+
+    rows = select_shadow_vetting_candidates(
+        db,
+        settings_=_settings(chili_shadow_vetting_include_paper_dynamic_outcomes=True),
+    )
+
+    assert any(r["scan_pattern_id"] == pat.id for r in rows)
+    # pre-fix this raised PendingRollbackError on the poisoned session
+    assert db.execute(text("SELECT 1")).scalar() == 1
+
+
+def test_persist_cpcv_shadow_eval_failure_keeps_transaction_usable(db):
+    """The telemetry INSERT swallows its own errors; the SAVEPOINT must keep
+    the caller's transaction alive (pending changes included)."""
+    pat = _make_pattern(db, name="fix46_telemetry_poison", lifecycle="shadow_promoted")
+    pat.confidence = 0.91  # pending change that must survive the failed INSERT
+
+    persist_cpcv_shadow_eval(
+        db,
+        pat,
+        {
+            "skipped": False,
+            "promotion_gate_passed": True,
+            "deflated_sharpe": 1.0,
+            "pbo": 0.1,
+            "cpcv_n_paths": "not_an_integer",  # forces a statement-level failure
+        },
+    )
+
+    # pre-fix the swallowed failure doomed the transaction and the next
+    # statement raised PendingRollbackError
+    assert db.execute(text("SELECT 1")).scalar() == 1
+    db.commit()
+    db.refresh(pat)
+    assert pat.confidence == pytest.approx(0.91)
+
+
+def test_cycle_fails_clean_when_helper_poisons_session(db, monkeypatch):
+    """Shape of the 2026-06-11 incident: a helper swallows its own DB error
+    without rollback. The cycle must heal the session and return a structured
+    failure instead of crashing the scheduler job with PendingRollbackError."""
+    _truncate_phase4_state(db)
+    _make_pattern(
+        db,
+        name="fix46_poison_cycle",
+        lifecycle="shadow_promoted",
+        quality_score=None,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.pattern_quality_score.compute_and_persist_scores",
+        lambda *_args, **_kwargs: {"ok": True, "scored": 0},
+    )
+
+    def _swallowing_poison(db_, **_kwargs):
+        try:
+            db_.execute(text("SELECT no_such_column_fix46 FROM scan_patterns"))
+        except Exception:
+            pass  # swallowed without rollback — the bug shape under test
+        return {"ok": True, "refreshed_count": 0}
+
+    monkeypatch.setattr(
+        "app.services.trading.pattern_shadow_vetting."
+        "refresh_blocked_shadow_promotion_gates",
+        _swallowing_poison,
+    )
+
+    out = run_shadow_vetting_cycle(db, settings_=_settings())
+
+    assert out["ok"] is False
+    assert out["error"].startswith("candidate_select_failed:")
+    # the session handed back to the scheduler job must be healthy
+    assert db.execute(text("SELECT 1")).scalar() == 1
+
+
+def test_cycle_continues_when_gate_refresh_raises(db, monkeypatch):
+    """Gate refresh is best-effort enrichment: if it fails outright, the
+    cycle rolls back and still vets candidates with stale gates."""
+    _truncate_phase4_state(db)
+    pat = _make_pattern(
+        db,
+        name="fix46_gate_refresh_raises",
+        lifecycle="shadow_promoted",
+        cpcv=2.0,
+        quality_score=None,
+    )
+    # committed: the cycle's FIX 46 rollback after the gate-refresh failure
+    # discards pending state by design
+    db.commit()
+    monkeypatch.setattr(
+        "app.services.trading.pattern_quality_score.compute_and_persist_scores",
+        lambda *_args, **_kwargs: {"ok": True, "scored": 0},
+    )
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("gate refresh exploded")
+
+    monkeypatch.setattr(
+        "app.services.trading.pattern_shadow_vetting."
+        "refresh_blocked_shadow_promotion_gates",
+        _boom,
+    )
+
+    out = run_shadow_vetting_cycle(db, settings_=_settings())
+
+    assert out["ok"] is True
+    assert out["promotion_gate_refresh"]["ok"] is False
+    db.refresh(pat)
+    assert pat.lifecycle_stage == "pilot_promoted"
