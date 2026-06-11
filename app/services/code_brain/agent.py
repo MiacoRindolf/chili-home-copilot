@@ -282,6 +282,50 @@ def _read_file_full(repo_path: str, file_path: str) -> Optional[str]:
         return None
 
 
+def _resolve_planned_path(repo_path: str, fpath: str) -> Optional[str]:
+    """Self-heal small-model path slips. Planners (especially local models)
+    drop directory segments — live case: planned app/services/scorer.py for
+    app/services/code_dispatch/scorer.py despite the exact path in the task.
+    When the planned path doesn't exist, find same-basename files and pick
+    the one sharing the most trailing segments with the plan. Returns None
+    when nothing matches or the best match is ambiguous (never guess)."""
+    root = Path(repo_path)
+    rel_plan = fpath.replace("\\", "/")
+    name = Path(rel_plan).name
+    if not name:
+        return None
+    if (root / rel_plan).is_file():
+        return rel_plan
+    skip = {".git", "__pycache__", "node_modules", ".venv", "venv", "build", "dist"}
+    cands: List[str] = []
+    try:
+        for p in root.rglob(name):
+            if any(part in skip for part in p.parts):
+                continue
+            cands.append(p.relative_to(root).as_posix())
+            if len(cands) >= 50:
+                break
+    except OSError:
+        return None
+    if not cands:
+        return None
+
+    want = Path(rel_plan).parts
+
+    def _shared_tail(rel: str) -> int:
+        n = 0
+        for a, b in zip(reversed(want), reversed(Path(rel).parts)):
+            if a != b:
+                break
+            n += 1
+        return n
+
+    cands.sort(key=_shared_tail, reverse=True)
+    if len(cands) > 1 and _shared_tail(cands[0]) == _shared_tail(cands[1]):
+        return None
+    return cands[0]
+
+
 def _prompt_file_budget_chars() -> int:
     """Character budget for rendering a file into the edit prompt. Derived
     from the output-token knob (≈4 chars/token, same order as the output
@@ -616,6 +660,14 @@ async def run_code_agent(
         # below any elision point still apply (the old 600-line head
         # truncation made the bottom of large files uneditable).
         file_content = _read_file_full(default_repo_path, fpath)
+        if file_content is None:
+            # Self-heal planner path slips (unique basename match) before
+            # giving up — small models drop directory segments constantly.
+            healed = _resolve_planned_path(default_repo_path, fpath)
+            if healed and healed != fpath:
+                logger.info("[code_agent] healed planned path %s -> %s", fpath, healed)
+                fpath = healed
+                file_content = _read_file_full(default_repo_path, fpath)
         if file_content is None:
             # Try other repos
             for rp in repo_path_map.values():
