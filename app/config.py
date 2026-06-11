@@ -2638,17 +2638,17 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_RECLAIM_MAX_HOURS_AFTER_OPEN"),
         description="Deep reclaims arm only until this many hours after the 9:30 ET open (Ross: 'by 10:30 I'm done'); A/B-validated — morning reclaims paid (EDHL/LASE), afternoon ones bled (SPHL/GCDT/DBGI 06-10).",
     )
-    # Entry-order ack patience: how long a submitted (marketable-limit) entry may
-    # rest before the runner cancels and re-watches. RH holds orders in
-    # "unconfirmed" review for 10s+ right after the open — the original 10s window
-    # cancelled marketable orders before RH even confirmed them (2026-06-11 CPSH/
-    # SNDG). The limit price caps the cost of resting; breakout-or-bailout guards
-    # a late fill.
-    chili_momentum_entry_ack_timeout_seconds: float = Field(
-        default=45.0,
-        ge=5.0,
-        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_ACK_TIMEOUT_SECONDS"),
-        description="Seconds a submitted entry limit may rest unfilled before cancel + re-watch.",
+    # Pending-entry lifecycle is EVENT-DRIVEN (cancel on setup invalidation /
+    # limit left behind), not clock-driven — this is only the BACKSTOP: a
+    # submitted entry limit must not outlive the bar evidence that produced it,
+    # measured in entry-interval BARS (same pattern as breakout_bailout_max_bars;
+    # no free seconds). 2 bars @1m = 120s, which also outwaits RH's ~13s
+    # "unconfirmed" review that killed the CPSH/SNDG submits at the old 10s window.
+    chili_momentum_entry_max_rest_bars: float = Field(
+        default=2.0,
+        ge=0.5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_MAX_REST_BARS"),
+        description="Backstop: entry-interval bars a submitted entry limit may rest before cancel + re-watch (invalidation/runaway cancels fire first, event-driven).",
     )
     # Volume spike required on the break/reclaim bar (a FLOOR, not a magic cutoff).
     chili_momentum_pullback_volume_spike_multiple: float = Field(

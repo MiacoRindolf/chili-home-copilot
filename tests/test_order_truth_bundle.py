@@ -127,3 +127,44 @@ def test_session_death_surfaces_filled_order_instead_of_cancelling(db, monkeypat
         "WHERE session_id = :sid AND event_type = 'session_cancelled'"
     ), {"sid": sess.id}).scalar()
     assert payload is not None and "FILLED_NEEDS_ADOPTION" in payload
+
+
+# ── event-driven pending-entry lifecycle (no magic seconds) ──────────────────
+def test_pending_entry_cancels_on_setup_invalidation() -> None:
+    from app.services.trading.momentum_neural.live_runner import _pending_entry_cancel_reason
+
+    # bid broke the structural stop -> setup dead, cancel NOW (clock irrelevant)
+    assert _pending_entry_cancel_reason(
+        bid=7.50, structural_stop=7.60, limit_px=7.91,
+        elapsed_s=3.0, rest_bars=2.0, interval_s=60.0,
+    ) == "entry_invalidated_stop_breach"
+
+
+def test_pending_entry_cancels_when_limit_left_behind() -> None:
+    from app.services.trading.momentum_neural.live_runner import _pending_entry_cancel_reason
+
+    # bid above our buy limit -> can only fill on the way back down
+    assert _pending_entry_cancel_reason(
+        bid=8.20, structural_stop=7.60, limit_px=7.91,
+        elapsed_s=3.0, rest_bars=2.0, interval_s=60.0,
+    ) == "entry_limit_left_behind"
+
+
+def test_pending_entry_rests_through_broker_review_then_backstops() -> None:
+    from app.services.trading.momentum_neural.live_runner import _pending_entry_cancel_reason
+
+    common = dict(bid=7.85, structural_stop=7.60, limit_px=7.91,
+                  rest_bars=2.0, interval_s=60.0)
+    # 13s of RH "unconfirmed" review (the old 10s killer): KEEP RESTING
+    assert _pending_entry_cancel_reason(elapsed_s=13.0, **common) is None
+    # ...but never outlive the bar evidence (2 bars @1m = 120s)
+    assert _pending_entry_cancel_reason(elapsed_s=121.0, **common) == "entry_rest_backstop"
+
+
+def test_pending_entry_no_quote_falls_back_to_backstop_only() -> None:
+    from app.services.trading.momentum_neural.live_runner import _pending_entry_cancel_reason
+
+    assert _pending_entry_cancel_reason(
+        bid=None, structural_stop=7.60, limit_px=7.91,
+        elapsed_s=30.0, rest_bars=2.0, interval_s=60.0,
+    ) is None
