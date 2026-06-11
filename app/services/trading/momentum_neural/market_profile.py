@@ -85,16 +85,31 @@ def market_session_now(symbol: str | None, *, now: datetime | None = None) -> st
     return "closed"
 
 
-_DATA_SESSION_OPEN_MIN = 4 * 60   # 04:00 ET — US extended session opens (exchange fact)
+_EXCHANGE_EXT_OPEN_MIN = 4 * 60   # 04:00 ET — US extended session opens (exchange fact)
+
+
+def _data_session_open_min() -> int:
+    """Minute-of-day the DATA/selection window opens — DERIVED, never a fixed
+    clock (operator 2026-06-11, twice: selection must be WARM before the entry
+    window opens, whatever that window is). data open = entry start − prep
+    lead, and never LATER than the exchange's own 04:00 ET extended open (a
+    07:00 entry config keeps the historical 04:00 data start; a 04:00 entry
+    config pulls data sampling to 03:00 so the first allowed entry meets a
+    warm tape, not a cold one)."""
+    try:
+        lead = int(getattr(settings, "chili_momentum_selection_prep_lead_min", 60) or 60)
+    except (TypeError, ValueError):
+        lead = 60
+    return max(0, min(_EXCHANGE_EXT_OPEN_MIN, _premarket_start_min() - max(0, lead)))
 
 
 def is_data_session_now(symbol: str | None, *, now: datetime | None = None) -> bool:
-    """True whenever US equity QUOTES are live (Mon-Fri 04:00-20:00 ET) — the
-    DATA/selection window, deliberately WIDER than the lane's entry window
-    (premarket_start, default 07:00). The movers Ross trades at 7:00 develop
-    from 4:00; sampling/selection from 4:00 means the watchlist, tape, and
-    viability are WARM before the first entry is allowed — preparation time,
-    not extra trading time. Crypto: always True (24/7)."""
+    """True whenever the lane should be SAMPLING/SELECTING (Mon-Fri, derived
+    open → 20:00 ET) — the DATA window, deliberately WIDER than the entry
+    window: the movers traded at window-open develop BEFORE it, so the
+    watchlist, tape, and viability must already be WARM when the first entry
+    is allowed — preparation time, not extra trading time. The open is derived
+    from the entry window (``_data_session_open_min``). Crypto: always True (24/7)."""
     if asset_class_for_symbol(symbol) == "crypto":
         return True
     ref = now or datetime.now(timezone.utc)
@@ -104,7 +119,7 @@ def is_data_session_now(symbol: str | None, *, now: datetime | None = None) -> b
     if local.weekday() >= 5:
         return False
     mod = local.hour * 60 + local.minute
-    return _DATA_SESSION_OPEN_MIN <= mod < max(_afterhours_end_min(), _REGULAR_CLOSE_MIN)
+    return _data_session_open_min() <= mod < max(_afterhours_end_min(), _REGULAR_CLOSE_MIN)
 
 
 def market_open_now(symbol: str | None, *, now: datetime | None = None) -> bool:

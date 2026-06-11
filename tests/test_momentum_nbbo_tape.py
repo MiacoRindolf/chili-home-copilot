@@ -179,3 +179,19 @@ def test_running_up_ignores_rows_outside_lookback(db: Session) -> None:
     # burst happened 30+ minutes ago; only 2 fresh flat rows inside the window
     _seed_path(db, "OLDPOP", [1.00, 1.40, 1.50], minutes_ago_start=40.0)
     assert tape_running_up_symbols(db) == []
+
+
+# ── data window LEADS the entry window (operator 2026-06-11, twice) ──────────
+def test_data_session_open_is_derived_from_entry_window(monkeypatch) -> None:
+    from app.config import settings as _settings
+    from app.services.trading.momentum_neural.market_profile import _data_session_open_min
+
+    # entries at 07:00 -> data keeps the historical 04:00 exchange open
+    monkeypatch.setattr(_settings, "chili_momentum_premarket_start_et", "07:00", raising=False)
+    assert _data_session_open_min() == 4 * 60
+    # entries at 04:00 -> data PULLS FORWARD to 03:00 (entry − 60min lead)
+    monkeypatch.setattr(_settings, "chili_momentum_premarket_start_et", "04:00", raising=False)
+    assert _data_session_open_min() == 3 * 60
+    # lead knob respected; never below midnight
+    monkeypatch.setattr(_settings, "chili_momentum_selection_prep_lead_min", 300, raising=False)
+    assert _data_session_open_min() == 0

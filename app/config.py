@@ -2171,6 +2171,16 @@ class Settings(BaseSettings):
         default="20:00",
         validation_alias=AliasChoices("CHILI_MOMENTUM_AFTERHOURS_END_ET"),
     )
+    # Selection/data must be WARM before the entry window opens (operator
+    # 2026-06-11, twice): the data-session open is DERIVED as entry start minus
+    # this lead (never later than the exchange's 04:00 ET extended open) — the
+    # movers traded at window-open develop before it.
+    chili_momentum_selection_prep_lead_min: int = Field(
+        default=60,
+        ge=0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SELECTION_PREP_LEAD_MIN"),
+        description="Minutes the data/selection window leads the entry window (data open = entry start − lead).",
+    )
     # ── Halt awareness (Ross low-floats halt constantly: LULD circuit breakers) ──
     # A trading HALT is observable as a SUSTAINED quote freeze: the stale_bbo gate
     # already blocks single stale ticks; this many CONSECUTIVE stale-quote ticks on
