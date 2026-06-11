@@ -55,6 +55,10 @@ from .strategy_params import family_default_params
 logger = logging.getLogger(__name__)
 
 # ── live-lane parameters — read from the SAME sources the live runner uses ────
+# Trigger timeframe: the SAME setting live_runner reads (live_runner.py:1904) —
+# parity by construction; flipping live to 1m flips the replay with it.
+ENTRY_INTERVAL = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m").lower()
+ENTRY_BAR_MIN = int(ENTRY_INTERVAL[:-1]) if ENTRY_INTERVAL.endswith("m") and ENTRY_INTERVAL[:-1].isdigit() else 5
 _LIVE_PARAMS = family_default_params("default")
 STOP_ATR_MULT = float(_LIVE_PARAMS["stop_atr_mult"])                      # 0.60 default family
 TRAIL_ACTIVATE_BPS = float(_LIVE_PARAMS["trail_activate_return_bps"])     # live arms trailing pre-partial here
@@ -245,8 +249,21 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                 bars_cache[sym] = None
         return bars_cache[sym]
 
+    entry_bars_cache: dict[str, object] = {}
+
+    def entry_bars(sym: str):
+        """Bars at the LIVE trigger timeframe (5m today; follows the setting)."""
+        if ENTRY_INTERVAL == "5m":
+            return bars(sym)
+        if sym not in entry_bars_cache:
+            try:
+                entry_bars_cache[sym] = fetch_ohlcv_df(sym, interval=ENTRY_INTERVAL, period="5d")
+            except Exception:
+                entry_bars_cache[sym] = None
+        return entry_bars_cache[sym]
+
     def day_frame(sym: str):
-        df = bars(sym)
+        df = entry_bars(sym)
         if df is None or len(df) == 0:
             return None, None
         c = {x.lower(): x for x in df.columns}
@@ -453,7 +470,7 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             if df is None:
                 continue
             # completed-bars-only, like live: a bar indexed by START closes at +5min
-            upto = df[df.index <= now - pd.Timedelta(minutes=5)]
+            upto = df[df.index <= now - pd.Timedelta(minutes=ENTRY_BAR_MIN)]
             if len(upto) < 12:
                 continue
             # the trigger only changes when a NEW 5m bar completes — cache per
@@ -462,7 +479,7 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             if _bar_key in trigger_cache:
                 ok, _treason, dbg = trigger_cache[_bar_key]
             else:
-                ok, _treason, dbg = momentum_pullback_trigger(upto, entry_interval="5m")
+                ok, _treason, dbg = momentum_pullback_trigger(upto, entry_interval=ENTRY_INTERVAL)
                 trigger_cache[_bar_key] = (ok, _treason, dbg)
             if not ok:
                 _tr(s, "trigger_fail:" + str(_treason), now)
