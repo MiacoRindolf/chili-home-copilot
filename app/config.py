@@ -2239,6 +2239,15 @@ class Settings(BaseSettings):
         default=3,
         validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_TAPE_MIN_BIG_MOVERS"),
     )
+    # Crypto stands down while the US equity session is OPEN (premarket ->
+    # 16:00 ET close) and resumes automatically after the close (operator
+    # directive 2026-06-12, SpaceX morning: crypto arms were consuming live
+    # slots during the premarket equity tape). Live arming only; paper
+    # shadows unaffected.
+    chili_momentum_crypto_pause_during_us_session: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CRYPTO_PAUSE_DURING_US_SESSION"),
+    )
     # ACTIVE EVENT THEME keywords (comma-separated; empty = none). Names whose fresh
     # headlines match keep their catalyst boost even in a HOT tape (only generic
     # news is neutralized) — e.g. "space,satellite,rocket,orbit,launch,aerospace,

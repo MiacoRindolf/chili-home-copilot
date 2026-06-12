@@ -109,6 +109,21 @@ def _is_coinbase_tradeable_symbol(symbol: str) -> bool:
     return "-USD" in str(symbol or "").upper()
 
 
+def _crypto_paused_us_session() -> bool:
+    """Crypto stands down while the US equity session is OPEN (premarket ->
+    16:00 close): every live slot belongs to the equity tape during Ross
+    hours, and crypto resumes AUTOMATICALLY after the close — no manual flag
+    to remember to flip back (operator directive 2026-06-12)."""
+    if not bool(getattr(settings, "chili_momentum_crypto_pause_during_us_session", True)):
+        return False
+    try:
+        from .market_profile import market_session_now
+
+        return market_session_now("SPY") in ("premarket", "regular")
+    except Exception:
+        return False
+
+
 def _symbol_market_open(symbol: str) -> bool:
     """True if the symbol can be entered NOW. Crypto is 24/7; equities during the
     EXTENDED session (pre-market → after-hours, per config) so the lane catches Ross's
@@ -771,6 +786,9 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             continue  # defensive: never arm an equity via the coinbase_spot lane
         if _auto_arm_equity_only() and _is_coinbase_tradeable_symbol(c.symbol):
             continue  # equity-only focus: never arm crypto in the Ross lane
+        if _crypto_paused_us_session() and _is_coinbase_tradeable_symbol(c.symbol):
+            out["crypto_us_session_skipped"] = out.get("crypto_us_session_skipped", 0) + 1
+            continue  # crypto stands down during the US equity session (auto-resumes at close)
         if c.symbol.upper() in busy_symbols:
             out["busy_skipped"] += 1
             continue  # already have a live session for this symbol — rotate to the next setup
