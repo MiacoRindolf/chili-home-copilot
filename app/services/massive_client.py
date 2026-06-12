@@ -1063,10 +1063,22 @@ _tick_listeners_lock = threading.Lock()
 
 
 def register_tick_listener(ticker: str, callback: TickCallback) -> None:
-    """Register *callback* to receive every tick for *ticker*."""
+    """Register *callback* to receive every tick for *ticker*.
+
+    Also SUBSCRIBES the symbol on the live WS connection — a listener without
+    a subscription never fires (2026-06-12 IPO morning: newly armed equities
+    sat behind stale_bbo forever because only boot-time symbols were
+    subscribed; RYAM's freshest quote was 43 minutes old while Ross traded
+    the same tape live)."""
     sym = ticker.upper()
     with _tick_listeners_lock:
         _tick_listeners.setdefault(sym, []).append(callback)
+    try:
+        global _ws_client
+        if _ws_client is not None and _ws_client._thread is not None:
+            _ws_client.subscribe([sym])
+    except Exception:
+        logger.debug("[massive-ws] subscribe-on-listen failed for %s", sym, exc_info=True)
 
 
 def unregister_tick_listener(ticker: str, callback: TickCallback) -> None:
