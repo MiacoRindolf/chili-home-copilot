@@ -5524,6 +5524,38 @@ def _brainstorm_context_block(db: Session, run: ProjectAutonomyRun, latest_user_
             gl = _glossary_block(str(repo.path), latest_user_message)
             if gl:
                 parts.append(gl)
+            # Institutional memory: the project's hard-won findings live in
+            # docs/STRATEGY (+DESIGN) markdown and were never retrieved —
+            # the chat re-derived generic answers to questions the repo has
+            # already answered (live: momentum no-fill root cause is
+            # documented, the chat suggested a generic debugging tour).
+            try:
+                from ...services.code_brain.search import _query_terms
+
+                terms = set(_query_terms(latest_user_message))
+                doc_hits: list[tuple[int, str, str]] = []
+                root = Path(str(repo.path))
+                for sub in ("docs/STRATEGY/CC_REPORTS", "docs/DESIGN", "docs/STRATEGY"):
+                    d = root / sub
+                    if not d.is_dir():
+                        continue
+                    for md in sorted(d.glob("*.md"), reverse=True)[:60]:
+                        try:
+                            head = md.read_text(encoding="utf-8", errors="replace")[:4000]
+                        except OSError:
+                            continue
+                        low = head.lower()
+                        score = sum(1 for t in terms if t in low)
+                        if score >= 2:
+                            doc_hits.append((score, md.name, head[:700]))
+                doc_hits.sort(reverse=True)
+                if doc_hits:
+                    parts.append(
+                        "Project documents relevant to the question (hard-won findings — prefer these over first principles):\n"
+                        + "\n\n".join(f"[{name}]\n{excerpt}" for _s, name, excerpt in doc_hits[:2])
+                    )
+            except Exception:
+                pass
             try:
                 from ...services.code_brain.search import search_code
 
@@ -5581,11 +5613,23 @@ def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) 
         "You are CHILI, the project architect for THIS specific repository. "
         "Ground every answer in the project context below — never answer "
         "generically about other domains. Be concrete: name real files, "
-        "modules, and recent activity when relevant. This is a brainstorming "
-        "conversation, not an implementation run; do not claim you changed "
-        "files. Always finish with a complete sentence — never trail off "
-        "mid-list. When the user wants something implemented, suggest "
-        f"{PLAN_START_CHAT_ACTION_LABEL} in the sidebar.\n\n"
+        "modules, and recent activity when relevant.\n"
+        "JUDGMENT RULES: when asked for a recommendation or comparison, TAKE "
+        "A POSITION — state your criterion, pick, and give one falsifiable "
+        "condition that would change your mind. Never fence-sit with "
+        "'it could be beneficial, however'. If project documents in the "
+        "context already answer the question, LEAD with that documented "
+        "finding instead of re-deriving from first principles.\n"
+        "SELF-MODEL (be accurate about yourself): you see one assembled "
+        "context per message (search hits, docs excerpts, repo map) — you "
+        "cannot open more files mid-answer, run code, or browse; you have "
+        "no memory across runs beyond what is shown; your knowledge of this "
+        "repo comes from the LIVE context below, not from a training "
+        "cutoff — never mention a knowledge-cutoff date.\n"
+        "This is a brainstorming conversation, not an implementation run; "
+        "do not claim you changed files. Always finish with a complete "
+        "sentence — never trail off mid-list. When the user wants something "
+        f"implemented, suggest {PLAN_START_CHAT_ACTION_LABEL} in the sidebar.\n\n"
         f"## Project context\n{context_block or '(no repo registered yet)'}"
     )
     messages = [{"role": "system", "content": system}]
