@@ -5204,7 +5204,7 @@ def start_scheduler():
         if role not in (
             "all", "web", "worker",
             "autotrader_only", "cron_only", "broker_sync_only",
-            "market_snapshot_only",
+            "market_snapshot_only", "momentum_exec_only", "rnd_only",
         ):
             logger.warning(
                 "[scheduler] invalid CHILI_SCHEDULER_ROLE=%r; using 'all' "
@@ -5214,23 +5214,23 @@ def start_scheduler():
             role = "all"
         # cron_only = legacy 'worker' role minus autotrader minus broker_sync
         # (so scheduler-worker container drops both hot-loop call paths).
-        include_heavy = role in ("all", "worker", "cron_only")
+        include_heavy = role in ("all", "worker", "cron_only", "rnd_only")
         # The minimal market-snapshot lane is a mesh producer. It also needs a
         # bounded drain so stale imminent_eval chatter cannot starve fresh
         # market/momentum context when heavy workers are offline.
         include_neural_mesh_drain = include_heavy or role == "market_snapshot_only"
-        include_web_light = role in ("all", "web", "cron_only")
+        include_web_light = role in ("all", "web", "cron_only", "rnd_only")
         # Market snapshots feed HRP/cash deployment, pattern mining, and
         # vitals. Keep them available in the minimal trading stack without
         # requiring the full heavy scheduler/profile.
         include_market_snapshots = role in (
-            "all", "worker", "cron_only", "market_snapshot_only",
+            "all", "worker", "cron_only", "market_snapshot_only", "rnd_only",
         )
         include_cash_deployment_work = role in (
-            "all", "web", "cron_only", "market_snapshot_only",
+            "all", "web", "cron_only", "market_snapshot_only", "rnd_only",
         )
         include_batch_reconciler = role in (
-            "all", "web", "worker", "cron_only", "market_snapshot_only",
+            "all", "web", "worker", "cron_only", "market_snapshot_only", "rnd_only",
         )
         # autotrader_only registers ONLY autotrader jobs. 'all'/'worker' still
         # include them (legacy behavior preserved). 'cron_only' excludes them.
@@ -5241,6 +5241,14 @@ def start_scheduler():
         # share fate with autotrader. Pulled into their own container so a
         # broker-call storm only affects this lane.
         include_broker_sync = role in ("all", "web", "worker", "broker_sync_only")
+        # SCHEDULER SPLIT (2026-06-11, operator-approved): the EXEC-CRITICAL
+        # momentum set (live runner ticks, auto-arm, NBBO sampler, WS rails)
+        # gets its own role so R&D deploys never restart the process holding
+        # live positions. 'rnd_only' = cron_only MINUS this set; legacy roles
+        # keep everything (safe fallback). docs/DESIGN/SCHEDULER_SPLIT.md
+        include_momentum_exec = role in (
+            "all", "web", "worker", "cron_only", "momentum_exec_only",
+        )
         _hb_env = os.environ.get("CHILI_SCHEDULER_EMIT_HEARTBEAT", "").strip().lower()
         # FIX C5 (2026-04-29 third-pass audit): the container-split (FIX 45a/b)
         # introduced role='cron_only' for the scheduler-worker container and
@@ -5996,7 +6004,7 @@ def start_scheduler():
                     logger.warning("[scheduler] Event-driven runner loop failed to start: %s", e)
 
         if (
-            include_web_light
+            include_momentum_exec
             and settings.chili_momentum_live_runner_enabled
             and settings.chili_momentum_live_runner_scheduler_enabled
         ):
@@ -6044,7 +6052,7 @@ def start_scheduler():
         # session at a time). Only runs when the live runner is also on (no point
         # arming a session nothing will process). Guards live in the arm flow.
         if (
-            include_web_light
+            include_momentum_exec
             and settings.chili_momentum_live_runner_enabled
             and settings.chili_momentum_live_runner_scheduler_enabled
             and getattr(settings, "chili_momentum_auto_arm_live_enabled", True)
@@ -6067,7 +6075,7 @@ def start_scheduler():
         # replay uses REAL spreads (the proxy read PAVS at 53bps vs the 317bps the
         # lane saw). Independent of live trading (useful in paper/observation too);
         # RTH-gating + best-effort live in the sampler. (nbbo_tape.py)
-        if include_web_light and getattr(settings, "chili_momentum_nbbo_tape_enabled", True):
+        if include_momentum_exec and getattr(settings, "chili_momentum_nbbo_tape_enabled", True):
             _nbbo_secs = max(15, int(getattr(settings, "chili_momentum_nbbo_tape_sample_seconds", 60) or 60))
             _scheduler.add_job(
                 _run_nbbo_spread_sample_job,

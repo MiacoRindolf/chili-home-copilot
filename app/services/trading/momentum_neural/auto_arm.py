@@ -206,6 +206,65 @@ def _active_live_session_count(db: Session, *, user_id: int | None) -> int:
     return int(q.count())
 
 
+def _paper_shadow_arm(
+    db: Session, *, uid: int, candidates: list, exclude_symbol: str | None = None
+) -> int:
+    """PAPER SHADOW MASS (2026-06-11, operator: paper = free sample data): every
+    probed ELIGIBLE candidate that did NOT win the single live slot becomes a
+    PAPER session. The lane historically armed ~1 live/pass and ZERO paper
+    (3 paper sessions EVER vs 718 live) — so exit/entry tuning ran on n=6
+    anecdotes. Shadow-arming the rank losers multiplies outcome data ~10-20x
+    per pass at zero dollar risk. Bounded by a concurrent-session cap;
+    create_paper_draft_session dedupes per symbol/variant. Best-effort."""
+    if not bool(getattr(settings, "chili_momentum_paper_shadow_arm_enabled", True)):
+        return 0
+    if not bool(getattr(settings, "chili_momentum_paper_runner_enabled", False)):
+        return 0  # no runner to tick them — don't pile up dead drafts
+    cap = int(getattr(settings, "chili_momentum_paper_shadow_max_sessions", 40) or 40)
+    try:
+        from .operator_actions import _TERMINAL_OPERATOR_STATES
+
+        active = (
+            db.query(TradingAutomationSession)
+            .filter(
+                TradingAutomationSession.mode == "paper",
+                ~TradingAutomationSession.state.in_(tuple(_TERMINAL_OPERATOR_STATES)),
+            )
+            .count()
+        )
+    except Exception:
+        return 0
+    budget = max(0, cap - int(active or 0))
+    if budget <= 0:
+        return 0
+    from ..execution_family_registry import resolve_execution_family_for_symbol
+    from .operator_actions import create_paper_draft_session
+
+    armed = 0
+    _excl = str(exclude_symbol or "").upper()
+    for c in candidates:
+        if budget <= 0:
+            break
+        sym = str(getattr(c, "symbol", "") or "").upper()
+        if not sym or sym == _excl:
+            continue
+        try:
+            res = create_paper_draft_session(
+                db,
+                user_id=int(uid),
+                symbol=sym,
+                variant_id=int(getattr(c, "variant_id", 0) or 0),
+                execution_family=resolve_execution_family_for_symbol(sym),
+            )
+        except Exception:
+            logger.debug("[auto_arm] paper shadow arm failed for %s", sym, exc_info=True)
+            continue
+        if res.get("ok") and not res.get("deduped"):
+            armed += 1
+            budget -= 1
+    return armed
+
+
 def _symbols_with_active_live_session(db: Session, *, user_id: int | None) -> set[str]:
     """Symbols that already hold a non-terminal live momentum session.
 
@@ -785,6 +844,16 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
                 round(float(getattr(_cf, "score", 0.0) or 0.0), 4) if _cf is not None else None
             )
             out["chosen_firing"] = bool(_firing)
+
+    # Paper shadow mass: the probed eligibles that lose the live rank race still
+    # carry information — run them all in paper (free outcome data, zero risk).
+    try:
+        out["paper_shadow_armed"] = _paper_shadow_arm(
+            db, uid=int(uid), candidates=list(eligible or []),
+            exclude_symbol=(chosen.symbol if chosen is not None else None),
+        )
+    except Exception:
+        logger.debug("[auto_arm] paper shadow pass failed", exc_info=True)
 
     if chosen is None:
         out["skipped"] = "no_active_trigger"

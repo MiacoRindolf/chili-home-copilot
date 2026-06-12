@@ -80,7 +80,6 @@ class TapeWsRecorder:
                 .filter(
                     TradingAutomationSession.mode == "live",
                     TradingAutomationSession.state.in_(LIVE_RUNNER_RUNNABLE_STATES),
-                    ~TradingAutomationSession.symbol.like("%-USD"),
                 )
                 .distinct()
                 .all()
@@ -114,6 +113,21 @@ class TapeWsRecorder:
                 ).fetchone()
             except Exception:
                 row = None
+            if row is None and sym.endswith("-USD"):
+                # crypto has no Massive snapshot rows — anchor to the latest tape
+                # row from ANY source (best effort; 0 on a fresh symbol)
+                try:
+                    row = db.execute(
+                        text(
+                            "SELECT observed_at, day_volume FROM momentum_nbbo_spread_tape "
+                            "WHERE symbol = :s "
+                            "AND observed_at >= date_trunc('day', now() at time zone 'utc') "
+                            "ORDER BY observed_at DESC LIMIT 1"
+                        ),
+                        {"s": sym},
+                    ).fetchone()
+                except Exception:
+                    row = None
             if row is None:
                 self._vol_base.setdefault(sym, 0.0)
                 continue
@@ -125,15 +139,31 @@ class TapeWsRecorder:
                 self._vol_ws[sym] = 0.0  # trades since this anchor start over
 
     def _attach_listeners(self) -> None:
-        try:
-            from ...massive_client import register_tick_listener
-        except Exception:
-            return
         with self._lock:
             new = self._symbols - self._listening
         for sym in new:
-            register_tick_listener(sym, self._on_tick)
-            self._listening.add(sym)
+            try:
+                if sym.endswith("-USD"):
+                    # CRYPTO PARITY (2026-06-11): crypto was BLIND to the tape —
+                    # zero rows ever — so the running-up feeder, spread-stability
+                    # gate, and replay lab were equities-only. Coinbase ticks ride
+                    # the price bus into the same tape.
+                    from ...trading.price_bus import get_price_bus
+
+                    _bus = get_price_bus()
+                    _bus.subscribe_coinbase(sym)
+                    _bus.register_tick_listener(sym, lambda t, s2=sym: self._on_bus_tick(s2, t))
+                else:
+                    from ...massive_client import register_tick_listener
+
+                    register_tick_listener(sym, self._on_tick)
+                self._listening.add(sym)
+            except Exception as e:
+                _log.debug("[tape_ws] listener attach failed %s: %s", sym, e)
+
+    def _on_bus_tick(self, symbol: str, tick) -> None:
+        """Price-bus adapter (crypto): same dedupe/throttle path as _on_tick."""
+        self._on_tick(symbol, tick)
 
     # ── tick handler (WS receive thread — cheap only) ─────────────────────
 
@@ -163,6 +193,7 @@ class TapeWsRecorder:
             "bid": float(bid), "ask": float(ask), "mid": mid,
             "spread_bps": (ask - bid) / mid * 10_000.0 if mid > 0 else None,
             "day_volume": self._vol_base.get(sym, 0.0) + self._vol_ws.get(sym, 0.0),
+            "source": "coinbase_ws" if sym.endswith("-USD") else "massive_ws",
         }
         with self._lock:
             self._buffer.append(row)
@@ -190,7 +221,7 @@ class TapeWsRecorder:
                     text(
                         "INSERT INTO momentum_nbbo_spread_tape "
                         "(symbol, observed_at, bid, ask, mid, spread_bps, day_volume, source) "
-                        "VALUES (:symbol, :observed_at, :bid, :ask, :mid, :spread_bps, :day_volume, 'massive_ws')"
+                        "VALUES (:symbol, :observed_at, :bid, :ask, :mid, :spread_bps, :day_volume, :source)"
                     ),
                     rows,
                 )

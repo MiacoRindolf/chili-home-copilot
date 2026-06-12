@@ -282,6 +282,30 @@ def _read_file_full(repo_path: str, file_path: str) -> Optional[str]:
         return None
 
 
+_PATH_IN_TEXT_RE = re.compile(
+    r"[A-Za-z0-9_\-./\\]+\.(?:py|dart|ts|tsx|js|jsx|md|yml|yaml|toml|json|ps1|sql)\b"
+)
+
+
+def _existing_paths_in_text(repo_path: str, text: str) -> List[str]:
+    """Path-like tokens from the task text that EXIST in the repo, with at
+    least one directory segment (a bare filename is not an explicit target).
+    These are operator-stated facts — the strongest grounding signal a plan
+    can get."""
+    root = Path(repo_path)
+    out: List[str] = []
+    for m in _PATH_IN_TEXT_RE.finditer(text or ""):
+        rel = m.group(0).replace("\\", "/").lstrip("./")
+        if "/" not in rel or rel in out:
+            continue
+        try:
+            if (root / rel).is_file():
+                out.append(rel)
+        except OSError:
+            continue
+    return out
+
+
 def _resolve_planned_path(repo_path: str, fpath: str) -> Optional[str]:
     """Self-heal small-model path slips. Planners (especially local models)
     drop directory segments — live case: planned app/services/scorer.py for
@@ -595,6 +619,27 @@ async def run_code_agent(
     analysis = plan_json.get("analysis", "")
     plan_files = plan_json.get("files", [])[:_MAX_FILES_PER_EDIT]
     notes = plan_json.get("notes", "")
+
+    # Plan grounding: when the TASK ITSELF names existing file path(s), the
+    # plan must target them — small models routinely wander to a similar
+    # file from the gathered context (live: task 36 attempt 4 edited
+    # agent_suggest.py instead of the explicitly-named
+    # code_dispatch/scorer.py, burning a 17-minute run on the wrong file).
+    _repo_root_for_grounding = context["repos"][0]["path"] if context["repos"] else ""
+    if _repo_root_for_grounding:
+        explicit = _existing_paths_in_text(_repo_root_for_grounding, prompt)
+        if explicit:
+            planned_set = {str(pf.get("path", "")).replace("\\", "/") for pf in plan_files}
+            if not planned_set & set(explicit):
+                logger.info(
+                    "[code_agent] plan grounded: task names %s but plan targeted %s — pinning plan to the named path(s)",
+                    explicit, sorted(planned_set),
+                )
+                base_desc = (plan_files[0].get("description") if plan_files else "") or prompt
+                plan_files = [
+                    {"path": p, "action": "modify", "description": base_desc}
+                    for p in explicit[:_MAX_FILES_PER_EDIT]
+                ]
 
     # Collect conventions for the edit prompts
     conventions = [

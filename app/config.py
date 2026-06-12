@@ -2710,6 +2710,29 @@ class Settings(BaseSettings):
         ge=50.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_TRAIL_CEILING_BPS"),
     )
+    # Paper shadow mass (2026-06-11): probed eligibles that lose the single live
+    # slot are armed in PAPER (free sample data; 3 paper sessions EVER vs 718
+    # live = tuning on anecdotes). Bounded by the concurrent cap below.
+    chili_momentum_paper_shadow_arm_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PAPER_SHADOW_ARM_ENABLED"),
+    )
+    chili_momentum_paper_shadow_max_sessions: int = Field(
+        default=40,
+        ge=0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PAPER_SHADOW_MAX_SESSIONS"),
+    )
+    # Aggregate open at-risk cap (correlation guard, 2026-06-11: three
+    # "independent" losses were ONE regime trade trebled): the SUM of
+    # entry-to-stop risk across open live equity momentum positions may not
+    # exceed this fraction of equity. 3% = three concurrent full-risk (1%)
+    # positions; breakeven-locked winners contribute zero.
+    chili_momentum_max_aggregate_risk_pct_of_equity: float = Field(
+        default=0.03,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_AGGREGATE_RISK_PCT_OF_EQUITY"),
+    )
     # Nightly replay regression tripwire: rerun today through the replay engine
     # on tonight's code and diff vs live actuals (catch behavior drift the
     # evening before the next open, not during it).

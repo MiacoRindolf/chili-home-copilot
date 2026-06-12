@@ -248,6 +248,7 @@ def _evaluate_deep_reclaim(
     fallback_reason: str,
     debug: dict[str, Any],
     bar_ts: Any = None,
+    symbol: str | None = None,
 ) -> tuple[bool, str, float | None, float | None, dict[str, Any]] | None:
     """Deep-retrace RECLAIM entry (the 2026-06-11 EDHL gap): after a retrace too
     deep for the flag checks, Ross does not walk away — he waits for price to
@@ -279,7 +280,12 @@ def _evaluate_deep_reclaim(
     # afternoon chop (06-10 added SPHL -$404, GCDT -$157, DBGI -$161, all 13:22 ET
     # or later). Ross's own discipline: "by 10:30 I'm done." The lane's global
     # entry window bounds the premarket side; this bounds the late side.
-    if bar_ts is not None:
+    # CRYPTO PARITY (2026-06-11): the morning window is an EQUITY concept (the
+    # discovery phase around the 9:30 ET open) — a 24/7 asset has no open, so
+    # the gate must not leak onto crypto (it silently blocked crypto reclaims
+    # outside 4:00-10:30 ET from the moment #611 shipped).
+    _is_crypto = bool(symbol) and str(symbol).upper().endswith("-USD")
+    if bar_ts is not None and not _is_crypto:
         try:
             from zoneinfo import ZoneInfo
 
@@ -428,6 +434,7 @@ def _evaluate_break_retest(
     retest_tolerance: float,
     retest_lookback_bars: int,
     atr_pct: float | None = None,
+    symbol: str | None = None,
 ) -> tuple[bool, str, float | None, float | None, dict[str, Any]]:
     """Break-AND-retest trigger (Ross's recent refinement: "I almost never buy the
     first break anymore — too many wick out and reverse. I wait for the break AND
@@ -478,6 +485,7 @@ def _evaluate_break_retest(
         window_bars=20 + int(max_pullback_bars) + look_bars,
         ema_wick=ema_wick, tol=tol, atr_pct=atr_pct, debug=debug,
         bar_ts=(high.index[cur] if hasattr(high, "index") and len(high.index) > cur else None),
+        symbol=symbol,
     )
 
     retrace = (win_high - base_low) / impulse_range
@@ -625,6 +633,7 @@ def pullback_break_confirmation(
             retest_tolerance=retest_tolerance,
             retest_lookback_bars=retest_lookback_bars,
             atr_pct=atr_pct,
+            symbol=symbol,
         )
     else:
         ok_t, reason_t, pb_high, pb_low, debug = _evaluate_raw_break(
