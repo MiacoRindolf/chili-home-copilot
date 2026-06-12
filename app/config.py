@@ -2694,6 +2694,22 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_STABILITY_WINDOW_BARS"),
         description="Entry-interval bars of tape whose MEDIAN spread must also pass the adaptive max (0 disables).",
     )
+    # Cushion-adaptive runner trail (Ross day-4 2026-06-11) — band knobs: floor
+    # when no cushion, ceiling once the position+day bank the trade's own
+    # reward:risk plan. SWEPT 2026-06-11 on the two-day tape: FLAT 500/500 won
+    # decisively (+$939 vs +$533 for 500/1000 — the cushion ramp saturated too
+    # fast and gave winners back), so defaults ship FLAT at 500. The band
+    # machinery stays for the weekly refit from live capture ratios.
+    chili_momentum_trail_floor_bps: float = Field(
+        default=500.0,
+        ge=50.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TRAIL_FLOOR_BPS"),
+    )
+    chili_momentum_trail_ceiling_bps: float = Field(
+        default=500.0,
+        ge=50.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TRAIL_CEILING_BPS"),
+    )
     # Nightly replay regression tripwire: rerun today through the replay engine
     # on tonight's code and diff vs live actuals (catch behavior drift the
     # evening before the next open, not during it).

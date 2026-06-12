@@ -40,6 +40,7 @@ from .risk_evaluator import evaluate_proposed_momentum_automation
 from .risk_policy import RISK_SNAPSHOT_KEY, policy_float_cap, policy_int_cap
 from ..indicator_core import compute_atr
 from .paper_execution import (
+    cushion_adaptive_trail_stop,
     breakeven_stop_after_partial,
     build_synthetic_quote,
     default_reference_mid,
@@ -1123,10 +1124,18 @@ def tick_paper_session(
             except (TypeError, ValueError):
                 _atr_pct_trail = atrp
             _be_floor = entry if pos.get("partial_taken") else stop_px
-            _trailed = runner_trail_stop(
+            _sm = float(params.get("stop_atr_mult") or 0.60)
+            _q0 = float(pos.get("original_quantity") or pos.get("quantity") or 0.0)
+            # day_realized 0.0 in paper (no real account cushion) = tightest
+            # patience — mirrors a fresh small account; the cushion dial still
+            # widens with THIS position's unrealized R (parity with live).
+            _trailed = cushion_adaptive_trail_stop(
                 high_water_mark=float(pos.get("high_water_mark") or entry),
+                entry_price=float(entry),
                 atr_pct=_atr_pct_trail,
-                stop_atr_mult=float(params.get("stop_atr_mult") or 0.60),
+                stop_atr_mult=_sm,
+                day_realized_usd=0.0,
+                position_risk_usd=(float(entry) * max(0.003, float(_atr_pct_trail or 0.0) * _sm)) * _q0,
                 breakeven_floor=_be_floor,
                 current_stop=stop_px,
                 side_long=True,

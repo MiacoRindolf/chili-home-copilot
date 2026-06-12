@@ -313,5 +313,72 @@ def runner_trail_stop(
     return min(cs, chandelier)
 
 
+def cushion_adaptive_trail_stop(
+    *,
+    high_water_mark: float,
+    entry_price: float,
+    atr_pct: float,
+    stop_atr_mult: float,
+    day_realized_usd: float,
+    position_risk_usd: float,
+    breakeven_floor: float,
+    current_stop: float,
+    side_long: bool = True,
+) -> float:
+    """Cushion-adaptive runner trail (Ross day-4, 2026-06-11): exit patience is
+    NOT one number — it scales with the CUSHION. "In the small account, the
+    second I see an exit indicator I sell. In my big account I can hold through
+    a couple of those." Encoded: with no cushion the trail hugs the floor width
+    (protect the round-trip); as this position's unrealized R plus the day's
+    banked R approach the trade's own reward:risk plan (2R), the trail widens
+    to the ceiling (let the runner run).
+
+    Width band floor/ceiling are the two documented knobs (defaults 500/1000
+    bps — the two-day exit-capture study band: <=400 proved whipsaw-negative,
+    BATL capture 0.44->0.71 at 500; refit from live capture ratios weekly).
+    Everything between is derived: cushion_r = unrealized R + max(0, day R);
+    patience = cushion_r / reward_risk, clamped [0, 1].
+
+    Ratchet-only (never loosens), never below ``breakeven_floor``. Pure for
+    replay/live parity."""
+    try:
+        hwm = float(high_water_mark)
+        entry = float(entry_price)
+        be = float(breakeven_floor)
+        cs = float(current_stop)
+    except (TypeError, ValueError):
+        return current_stop
+    if not (math.isfinite(hwm) and math.isfinite(entry) and math.isfinite(cs)) or entry <= 0:
+        return current_stop
+    try:
+        floor_bps = float(getattr(settings, "chili_momentum_trail_floor_bps", 500.0) or 500.0)
+        ceil_bps = float(getattr(settings, "chili_momentum_trail_ceiling_bps", 1000.0) or 1000.0)
+    except (TypeError, ValueError):
+        floor_bps, ceil_bps = 500.0, 1000.0
+    ceil_bps = max(ceil_bps, floor_bps)
+    try:
+        rr = float(getattr(settings, "chili_momentum_risk_reward_risk_ratio", 2.0) or 2.0)
+    except (TypeError, ValueError):
+        rr = 2.0
+    # The trade's own risk unit, frozen at entry (same formula the stop used).
+    risk_dist = entry * max(0.003, float(atr_pct or 0.0) * float(stop_atr_mult or 0.0))
+    unrealized_r = max(0.0, (hwm - entry) / risk_dist) if (side_long and risk_dist > 0) else 0.0
+    day_r = 0.0
+    try:
+        pr = float(position_risk_usd)
+        if pr > 0 and math.isfinite(float(day_realized_usd)):
+            day_r = max(0.0, float(day_realized_usd) / pr)
+    except (TypeError, ValueError):
+        day_r = 0.0
+    patience = min(1.0, (unrealized_r + day_r) / max(rr, 1e-9))
+    trail_bps = floor_bps + (ceil_bps - floor_bps) * patience
+    if side_long:
+        trailed = hwm * (1.0 - trail_bps / 10_000.0)
+        floors = [c for c in (cs, be, trailed) if math.isfinite(c)]
+        return max(floors) if floors else cs
+    trailed = hwm * (1.0 + trail_bps / 10_000.0)
+    return min(cs, trailed)
+
+
 def utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()

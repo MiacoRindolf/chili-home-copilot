@@ -52,6 +52,7 @@ from .risk_policy import (
     policy_int_cap,
 )
 from .paper_execution import (
+    cushion_adaptive_trail_stop,
     breakeven_stop_after_partial,
     effective_stop_atr_pct,
     regime_atr_pct,
@@ -1271,6 +1272,28 @@ _INTERVAL_SECONDS: dict[str, float] = {
     "1m": 60.0, "2m": 120.0, "5m": 300.0, "15m": 900.0, "30m": 1800.0,
     "60m": 3600.0, "90m": 5400.0, "1h": 3600.0, "1d": 86400.0,
 }
+
+
+_DAY_PNL_CACHE: dict[str, float] = {"at": 0.0, "v": 0.0}
+
+
+def _day_realized_usd_cached(db: Session, user_id: int) -> float:
+    """Today's GLOBAL realized PnL (ET), 60s-cached — the cushion input for the
+    adaptive trail. Fail-safe 0.0 (= tightest patience) on any error."""
+    import time as _time
+
+    if _time.monotonic() - _DAY_PNL_CACHE["at"] < 60.0:
+        return _DAY_PNL_CACHE["v"]
+    v = 0.0
+    try:
+        from ..governance import global_realized_pnl_today_et
+
+        v = float(global_realized_pnl_today_et(db, user_id)["total_usd"])
+    except Exception:
+        v = 0.0
+    _DAY_PNL_CACHE["at"] = _time.monotonic()
+    _DAY_PNL_CACHE["v"] = v
+    return v
 
 
 def _entry_interval_seconds() -> float:
@@ -3260,10 +3283,15 @@ def tick_live_session(
             _atr_pct_trail = _float_or_none(le.get("entry_stop_atr_pct")) or 0.0
             _hwm_trail = _float_or_none(pos.get("high_water_mark")) or avg
             _be_floor = avg if pos.get("partial_taken") else stop_px
-            _trailed = runner_trail_stop(
+            _sm = float(params.get("stop_atr_mult") or 0.60)
+            _q0 = _float_or_none(pos.get("original_quantity")) or _float_or_none(pos.get("quantity")) or 0.0
+            _trailed = cushion_adaptive_trail_stop(
                 high_water_mark=_hwm_trail,
+                entry_price=avg,
                 atr_pct=_atr_pct_trail,
-                stop_atr_mult=float(params.get("stop_atr_mult") or 0.60),
+                stop_atr_mult=_sm,
+                day_realized_usd=_day_realized_usd_cached(db, int(sess.user_id)),
+                position_risk_usd=(avg * max(0.003, _atr_pct_trail * _sm)) * _q0,
                 breakeven_floor=_be_floor,
                 current_stop=stop_px,
                 side_long=True,
