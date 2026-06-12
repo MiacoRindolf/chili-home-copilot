@@ -93,6 +93,27 @@
       + '</button>';
   }
 
+  function pnlText(v) {
+    var n = Number(v);
+    if (!isFinite(n)) return '—';
+    return (n >= 0 ? '+' : '−') + '$' + Math.abs(n).toFixed(2);
+  }
+  function pnlClass(v) {
+    var n = Number(v);
+    if (!isFinite(n) || n === 0) return '';
+    return n > 0 ? 'positive' : 'negative';
+  }
+  function holdingLine(row) {
+    var p = row.pnl || {};
+    if (p.qty && p.entry) {
+      var line = 'Holding ' + p.qty + ' @ ' + p.entry;
+      if (p.last) line += ' → ' + p.last;
+      if (isFinite(Number(p.floating_pct))) line += ' (' + (Number(p.floating_pct) >= 0 ? '+' : '') + Number(p.floating_pct).toFixed(2) + '%)';
+      return line;
+    }
+    return 'Flat · no open position';
+  }
+
   function sessionSummaryCard(row) {
     var controls = row.controls || {};
     var readiness = row.execution_readiness || {};
@@ -122,7 +143,7 @@
       + '      </div>'
       + '      <div class="ap-subline" style="margin-top:8px;">'
       + '        ' + esc((row.variant && row.variant.label) || row.strategy_family || 'Strategy')
-      + '        &middot; Position ' + esc(row.current_position_state || 'flat')
+      + '        &middot; ' + esc(holdingLine(row))
       + '        &middot; Last action ' + esc(row.last_action || row.state || 'n/a')
       + '      </div>'
       + '    </div>'
@@ -136,9 +157,9 @@
       + '    </div>'
       + '  </div>'
       + '  <div class="ap-session-card__metrics">'
-      + '    <div class="ap-metric"><label>Runtime</label><b>' + esc(runtimeLabel(row.runtime || {})) + '</b><small>Lane ' + esc(row.lane || 'simulation') + '</small></div>'
-      + '    <div class="ap-metric"><label>Confidence</label><b>' + esc(pct(row.confidence)) + '</b><small>Conviction ' + esc(pct(row.conviction)) + '</small></div>'
-      + '    <div class="ap-metric"><label>Sim P&amp;L</label><b class="' + pnlCls + '">' + esc(money(row.simulated_pnl)) + '</b><small>Trades ' + esc(row.trade_count || 0) + '</small></div>'
+      + '    <div class="ap-metric"><label>Runtime</label><b>' + esc(runtimeLabel(row.runtime || {})) + '</b><small>Lane ' + esc(row.lane || 'simulation') + ' &middot; Conf ' + esc(pct(row.confidence)) + '</small></div>'
+      + '    <div class="ap-metric"><label>Floating P&amp;L</label><b class="' + pnlClass((row.pnl || {}).floating_usd) + '">' + esc(pnlText((row.pnl || {}).floating_usd)) + '</b><small>' + esc(holdingLine(row)) + '</small></div>'
+      + '    <div class="ap-metric"><label>Realized P&amp;L</label><b class="' + pnlClass((row.pnl || {}).realized_usd) + '">' + esc(pnlText((row.pnl || {}).realized_usd)) + '</b><small>Trades ' + esc(row.trade_count || 0) + '</small></div>'
       + '    <div class="ap-metric"><label>Runner</label><b>' + esc(runnerStateText(runner)) + '</b><small>Last tick ' + esc(runnerTickLabel(runner)) + '</small></div>'
       + '  </div>'
       + '  <div class="ap-session-card__callouts">'
@@ -251,17 +272,22 @@
       var card = document.querySelector('.ap-session-card[data-session-id="' + row.id + '"]');
       if (!card) return;
       var runner = row.runner_health || {};
-      var pnlVal = Number(row.simulated_pnl);
-      var pnlCls = isFinite(pnlVal) ? (pnlVal >= 0 ? 'positive' : 'negative') : '';
+      var pnl = row.pnl || {};
       var metrics = card.querySelectorAll('.ap-metric');
       if (metrics[0]) metrics[0].querySelector('b').textContent = runtimeLabel(row.runtime || {});
-      if (metrics[1]) metrics[1].querySelector('b').textContent = pct(row.confidence);
+      if (metrics[1]) {
+        var fB = metrics[1].querySelector('b');
+        fB.textContent = pnlText(pnl.floating_usd);
+        fB.className = pnlClass(pnl.floating_usd);
+        var fS = metrics[1].querySelector('small');
+        if (fS) fS.textContent = holdingLine(row);
+      }
       if (metrics[2]) {
-        var pnlB = metrics[2].querySelector('b');
-        pnlB.textContent = money(row.simulated_pnl);
-        pnlB.className = pnlCls;
-        var pnlSmall = metrics[2].querySelector('small');
-        if (pnlSmall) pnlSmall.textContent = 'Trades ' + (row.trade_count || 0);
+        var rB = metrics[2].querySelector('b');
+        rB.textContent = pnlText(pnl.realized_usd);
+        rB.className = pnlClass(pnl.realized_usd);
+        var rS = metrics[2].querySelector('small');
+        if (rS) rS.textContent = 'Trades ' + (row.trade_count || 0);
       }
       if (metrics[3]) {
         metrics[3].querySelector('b').textContent = runnerStateText(runner);
@@ -271,10 +297,67 @@
     });
   }
 
+  function modeTotals(rows) {
+    var t = {};
+    rows.forEach(function(r) {
+      var m = r.mode || 'paper';
+      if (!t[m]) t[m] = { n: 0, open: 0, floating: 0, realized: 0 };
+      t[m].n += 1;
+      var p = r.pnl || {};
+      if (isFinite(Number(p.floating_usd))) { t[m].floating += Number(p.floating_usd); t[m].open += 1; }
+      if (isFinite(Number(p.realized_usd))) t[m].realized += Number(p.realized_usd);
+    });
+    return t;
+  }
+
+  function renderPnlStrip(rows) {
+    var host = document.getElementById('ap-pnl-strip');
+    if (!host) {
+      var listEl = document.getElementById('ap-sessions');
+      if (!listEl || !listEl.parentNode) return;
+      host = document.createElement('div');
+      host.id = 'ap-pnl-strip';
+      host.style.cssText = 'display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 12px;';
+      listEl.parentNode.insertBefore(host, listEl);
+    }
+    var t = modeTotals(rows);
+    var filt = state.modeFilter || 'all';
+    function chip(mode, label) {
+      var d = t[mode] || { n: 0, open: 0, floating: 0, realized: 0 };
+      var fl = pnlText(d.floating), re = pnlText(d.realized);
+      return '<div style="background:rgba(110,118,129,.1);border:1px solid rgba(110,118,129,.3);border-radius:10px;padding:8px 14px;font-size:.92em;">'
+        + '<b style="margin-right:8px;">' + label + '</b>'
+        + d.n + ' sessions · ' + d.open + ' open'
+        + ' · Floating <b class="' + pnlClass(d.floating) + '">' + fl + '</b>'
+        + ' · Realized <b class="' + pnlClass(d.realized) + '">' + re + '</b>'
+        + '</div>';
+    }
+    function fbtn(mode, label) {
+      var on = filt === mode;
+      return '<button type="button" class="ap-btn" style="' + (on ? 'outline:2px solid #58a6ff;' : '') + '" '
+        + "onclick=\"apSetModeFilter('" + mode + "')\">" + label + '</button>';
+    }
+    host.innerHTML = chip('live', 'LIVE') + chip('paper', 'PAPER')
+      + '<span style="flex:1"></span>'
+      + fbtn('all', 'All') + fbtn('live', 'Live') + fbtn('paper', 'Paper');
+  }
+
+  window.apSetModeFilter = function(mode) {
+    state.modeFilter = mode;
+    state._prevSessions = null; // force re-render
+    renderSessions();
+  };
+
   function renderSessions() {
     var list = document.getElementById('ap-sessions');
     var empty = document.getElementById('ap-sessions-empty');
     if (!list || !empty) return;
+
+    renderPnlStrip(state.sessions || []);
+    var _filt = state.modeFilter || 'all';
+    var _visible = (state.sessions || []).filter(function(r) {
+      return _filt === 'all' || (r.mode || 'paper') === _filt;
+    });
 
     if (!state.sessions.length) {
       destroyAllCharts();
@@ -293,7 +376,7 @@
     var currIds = _sessionIdSet(state.sessions);
 
     if (prevIds === currIds && list.querySelector('.ap-session-card')) {
-      _updateMetricsInPlace(state.sessions);
+      _updateMetricsInPlace(_visible);
       state._prevSessions = state.sessions;
       return;
     }
@@ -302,7 +385,7 @@
     destroyAllCharts();
 
     empty.style.display = 'none';
-    list.innerHTML = state.sessions.map(sessionSummaryCard).join('');
+    list.innerHTML = _visible.map(sessionSummaryCard).join('');
     bindSessionTabs();
     _restoreTabState(tabState);
     observeSessionCards();
