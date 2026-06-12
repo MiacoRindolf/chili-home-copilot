@@ -5432,6 +5432,36 @@ def _brainstorm_context_block(db: Session, run: ProjectAutonomyRun, latest_user_
                 f"Project: {repo.name} (path {repo.path}; languages {repo.language_stats or 'n/a'}; "
                 f"frameworks {repo.framework_tags or 'n/a'})."
             )
+            # The richest grounding document is the project's own overview —
+            # without it the chat suggests things the repo already has
+            # (live: recommended "integrating FastAPI" to a FastAPI app).
+            try:
+                root = Path(str(repo.path))
+                for doc_name in ("CLAUDE.md", "README.md"):
+                    doc = root / doc_name
+                    if doc.is_file():
+                        parts.append(
+                            f"Project overview ({doc_name}, excerpt):\n"
+                            + doc.read_text(encoding="utf-8", errors="replace")[:1500]
+                        )
+                        break
+            except Exception:
+                pass
+            # Compact two-level map so the CORE modules orient every answer
+            # (search alone surfaces peripheral name-matches).
+            try:
+                root = Path(str(repo.path))
+                skip_dirs = {".git", "__pycache__", "node_modules", ".venv", "venv", "build", ".dart_tool"}
+                lines: list[str] = []
+                for top in sorted(p for p in root.iterdir() if p.is_dir() and p.name not in skip_dirs)[:14]:
+                    subs = sorted(
+                        s.name for s in top.iterdir() if s.is_dir() and s.name not in skip_dirs
+                    )[:10]
+                    lines.append(f"- {top.name}/" + (f" ({', '.join(subs)})" if subs else ""))
+                if lines:
+                    parts.append("Repo map (top levels):\n" + "\n".join(lines))
+            except Exception:
+                pass
             try:
                 from ...services.code_brain.search import search_code
 
