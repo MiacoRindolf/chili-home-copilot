@@ -745,7 +745,16 @@ def _poll_live_exit_fill(
     filled_size = float(no.filled_size or 0.0)
     avg_px = _float_or_none(no.average_filled_price)
     full_fill = _order_done_for_exit(no) and avg_px is not None and filled_size + 1e-12 >= float(quantity) * 0.999
+    # FILL-BY-SIZE (2026-06-12 SMU/RZLV phantoms): RH kept reporting the stop
+    # sell as status "open" while filled_size was already FULL — the status-
+    # string gate spun live_exit_pending_confirmation forever and the session
+    # held a phantom position. An order that has filled its full size with a
+    # known average price IS done, whatever the status string says.
+    if not full_fill and avg_px is not None and filled_size + 1e-12 >= float(quantity) * 0.999:
+        full_fill = True
     if full_fill:
+        le.pop("exit_pending_first_seen_utc", None)
+        _commit_le(sess, le)
         return {"filled": True, "fill_price": avg_px, "filled_size": filled_size, "order_status": no.status}
 
     terminal_status = (no.status or "").lower() in ("filled", "done", "closed", "cancelled", "canceled", "expired", "failed")
@@ -788,6 +797,32 @@ def _poll_live_exit_fill(
             pending["average_filled_price"] = avg_px
     else:
         pending["why"] = "exit_fill_pending"
+    # STUCK-PENDING ESCAPE (2026-06-12): if the order status never goes
+    # terminal but the BROKER confirms the position is gone, the exit
+    # happened — finalize instead of spinning forever. Deadline-gated and
+    # broker-truth-gated (a failed positions fetch never reconciles).
+    first_seen = le.get("exit_pending_first_seen_utc")
+    if not first_seen:
+        le["exit_pending_first_seen_utc"] = _utcnow().isoformat()
+        _commit_le(sess, le)
+    else:
+        try:
+            _age = (_utcnow() - datetime.fromisoformat(str(first_seen))).total_seconds()
+        except (TypeError, ValueError):
+            _age = 0.0
+        if _age > 90.0 and _broker_position_confirms_zero(sess):
+            fill_px = avg_px or _float_or_none(getattr(no, "price", None))
+            le.pop("exit_pending_first_seen_utc", None)
+            _commit_le(sess, le)
+            _emit(db, sess, "live_exit_reconciled_broker_zero", {
+                "reason": reason, "order_id": oid, "order_status": no.status,
+                "fill_price": fill_px,
+                "note": "order status never went terminal; broker confirms flat",
+            })
+            if fill_px is not None:
+                return {"filled": True, "fill_price": fill_px,
+                        "filled_size": filled_size or float(quantity),
+                        "order_status": no.status, "reconciled": "broker_zero"}
     le["last_exit_pending_confirmation"] = pending
     _commit_le(sess, le)
     _emit(db, sess, "live_exit_pending_confirmation", pending)
