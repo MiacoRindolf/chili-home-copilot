@@ -5415,20 +5415,68 @@ def _initial_chat_reply(prompt: str) -> str:
     )
 
 
+def _brainstorm_context_block(db: Session, run: ProjectAutonomyRun, latest_user_message: str) -> str:
+    """What separates an insightful answer from generic filler: the model
+    must SEE the project. Repo identity, the brain's accumulated insights,
+    recent autonomy activity, and code-search hits for the user's actual
+    question — all cheap reads, no LLM."""
+    parts: list[str] = []
+    try:
+        from ...models.code_brain import CodeRepo
+
+        repo = db.query(CodeRepo).filter(CodeRepo.id == run.repo_id).first() if run.repo_id else None
+        if repo is None:
+            repo = db.query(CodeRepo).order_by(CodeRepo.id).first()
+        if repo is not None:
+            parts.append(
+                f"Project: {repo.name} (path {repo.path}; languages {repo.language_stats or 'n/a'}; "
+                f"frameworks {repo.framework_tags or 'n/a'})."
+            )
+            try:
+                from ...services.code_brain.search import search_code
+
+                hits = search_code(db, latest_user_message, repo_id=int(repo.id), limit=6)
+                if hits:
+                    lines = [
+                        f"- {h['file']}:{h.get('line', '?')} {h.get('type', '')} {h.get('symbol', '')}"
+                        for h in hits
+                    ]
+                    parts.append("Code likely relevant to the question:\n" + "\n".join(lines))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        insights = [
+            str(i.get("description") or "")
+            for i in insights_mod.get_insights(db, repo_id=run.repo_id)[:6]
+            if i.get("description")
+        ]
+        if insights:
+            parts.append("Project insights the brain has learned:\n- " + "\n- ".join(insights))
+    except Exception:
+        pass
+    try:
+        recent_runs = (
+            db.query(ProjectAutonomyRun)
+            .filter(ProjectAutonomyRun.run_id != run.run_id)
+            .order_by(ProjectAutonomyRun.id.desc())
+            .limit(5)
+            .all()
+        )
+        if recent_runs:
+            parts.append(
+                "Recent Autopilot activity:\n- "
+                + "\n- ".join(f"{r.run_id}: {_clip(str(r.prompt or ''), 100)} [{r.status}]" for r in recent_runs)
+            )
+    except Exception:
+        pass
+    return "\n\n".join(p for p in parts if p)
+
+
 def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) -> str:
     if _looks_like_greeting_or_chat(latest_user_message):
         return _initial_chat_reply(latest_user_message)
-    if any(token in latest_user_message.lower() for token in ("implement", "change", "fix", "add", "update", "build")):
-        return (
-            "That sounds implementation-shaped. I can keep brainstorming here, or you can use "
-            f"{PLAN_START_CHAT_ACTION_LABEL} in the sidebar when you want me to scan the repo and draft a safe plan."
-        )
-    model_info = select_local_model()
-    if not model_info.get("model"):
-        return (
-            "I'm with you. We can keep shaping the idea here; local model chat is unavailable, "
-            "but planning and implementation can still use the repo-aware Autopilot flow when you start a plan."
-        )
     recent = (
         db.query(ProjectAutonomyMessage)
         .filter(ProjectAutonomyMessage.run_id == run.run_id)
@@ -5436,16 +5484,18 @@ def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) 
         .limit(8)
         .all()
     )
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are CHILI, a local project architect chat. This is a brainstorming conversation, "
-                "not an implementation run. Be concise, warm, and useful. Do not claim you changed files. "
-                "If implementation is needed, tell the user to start a plan."
-            ),
-        }
-    ]
+    context_block = _brainstorm_context_block(db, run, latest_user_message)
+    system = (
+        "You are CHILI, the project architect for THIS specific repository. "
+        "Ground every answer in the project context below — never answer "
+        "generically about other domains. Be concrete: name real files, "
+        "modules, and recent activity when relevant. This is a brainstorming "
+        "conversation, not an implementation run; do not claim you changed "
+        "files. When the user wants something implemented, suggest "
+        f"{PLAN_START_CHAT_ACTION_LABEL} in the sidebar.\n\n"
+        f"## Project context\n{context_block or '(no repo registered yet)'}"
+    )
+    messages = [{"role": "system", "content": system}]
     for row in reversed(recent):
         role = "assistant" if row.role == "assistant" else "user"
         content = row.content
@@ -5454,33 +5504,68 @@ def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) 
             if attachment_context:
                 content = f"{content}\n{attachment_context}"
         messages.append({"role": role, "content": content})
-    result = ollama_client.chat(
-        messages,
-        str(model_info["model"]),
-        temperature=0.35,
-        timeout_sec=45,
-        options={"num_predict": 220, "num_ctx": 2048, "keep_alive": _OLLAMA_KEEP_ALIVE},
-    )
-    _note_model_call_result(str(model_info["model"]), result)
+
+    # Brain upgrade: route through the gateway cascade (free Groq-70B class
+    # first, with the standard fallbacks) instead of the tiny local chat
+    # model that answered project questions with generic filler.
+    import time as _time
+
+    from ...services.context_brain.llm_gateway import gateway_chat as _gw_chat
+
+    _t0 = _time.monotonic()
+    reply_text = ""
+    model_used = "gateway_error"
+    try:
+        gw = _gw_chat(
+            messages=messages[1:],
+            purpose="brainstorm_chat",
+            system_prompt=system,
+            trace_id=f"autopilot-brainstorm-{run.run_id}",
+            user_message=latest_user_message,
+            max_tokens=900,
+            # The gateway must NOT share this session: its internal
+            # rollback-on-error would discard the caller's uncommitted user
+            # message (caught by the suite as a vanished chat message).
+            db=None,
+        )
+        if isinstance(gw, dict):
+            reply_text = (gw.get("reply") or "").strip()
+            model_used = str(gw.get("model") or model_used)
+    except Exception:
+        pass
+    if not reply_text:
+        # Offline fallback: the old local chat model path.
+        model_info = select_local_model()
+        if model_info.get("model"):
+            result = ollama_client.chat(
+                messages,
+                str(model_info["model"]),
+                temperature=0.35,
+                timeout_sec=45,
+                options={"num_predict": 400, "num_ctx": 4096, "keep_alive": _OLLAMA_KEEP_ALIVE},
+            )
+            _note_model_call_result(str(model_info["model"]), result)
+            if result.ok and result.text.strip():
+                reply_text = result.text.strip()
+                model_used = str(model_info["model"])
     _add_artifact(
         db,
         run.run_id,
         "model_call",
         "chat_model_call",
         content_json={
-            "model": model_info["model"],
-            "ok": result.ok,
-            "latency_ms": result.latency_ms,
-            "error": result.error,
-            "skipped_models": model_info.get("skipped_models"),
+            "model": model_used,
+            "ok": bool(reply_text),
+            "latency_ms": int((_time.monotonic() - _t0) * 1000),
             "purpose": "brainstorm_chat",
+            "grounded": bool(context_block),
         },
         commit=False,
     )
-    if result.ok and result.text.strip():
-        return _clip(result.text.strip(), CHAT_REPLY_LIMIT)
+    if reply_text:
+        return _clip(reply_text, CHAT_REPLY_LIMIT)
     return (
-        "I'm here for the brainstorming. The local chat model didn't answer cleanly, "
+        "I'm here for the brainstorming. The chat models didn't answer cleanly, "
         "but we can still keep the idea moving or start a plan when you're ready."
     )
 
@@ -6298,7 +6383,9 @@ def generate_diffs_from_plan(
             trace_id=f"autopilot-edit-{rel}",
             user_message=desc,
             max_tokens=_settings.chili_code_gen_max_tokens,
-            db=db,
+            # Own session inside the gateway — never share the run session
+            # (rollback-on-error would discard pending run state).
+            db=None,
         )
         reply_text = (gw.get("reply") or "") if isinstance(gw, dict) else ""
         _add_artifact(
