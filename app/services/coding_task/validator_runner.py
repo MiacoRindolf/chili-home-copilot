@@ -189,9 +189,26 @@ def run_ruff_check(cwd: Path) -> StepResult:
     return StepResult("ruff_check", 0 if code == 0 else code, to, out_t, err_t, False, None)
 
 
-def run_pytest_collect(cwd: Path) -> StepResult:
+def run_pytest_collect(cwd: Path, changed_files: list[str] | None = None) -> StepResult:
+    """Collect-sanity step. When ``changed_files`` is provided, scope to the
+    tests related to them — a repo-wide collect fails on any PRE-EXISTING
+    breakage in the base branch (live: every dispatch run failed on an
+    unrelated trading check baked into local main), which makes validation
+    measure the baseline, not the change."""
     pc = Path(tempfile.gettempdir()) / f"chili_pytest_{uuid.uuid4().hex}"
     pc.mkdir(parents=True, exist_ok=True)
+    targets: list[str] = []
+    if changed_files:
+        targets = _infer_test_files(cwd, changed_files)
+        if not targets:
+            return StepResult(
+                "pytest_collect", 0, False,
+                "(no tests related to the changed files; repo-wide collect "
+                "intentionally skipped — it measures baseline breakage, not "
+                "this change)",
+                "", True, "no related tests",
+                {"tests_executed": False, "tests_selected": []},
+            )
     code, to, out, err = _run_subprocess_allowlisted(
         [
             sys.executable,
@@ -199,7 +216,7 @@ def run_pytest_collect(cwd: Path) -> StepResult:
             "pytest",
             "--collect-only",
             "-q",
-            ".",
+            *(targets if targets else ["."]),
             "-o",
             f"cache_dir={pc}",
         ],
@@ -351,14 +368,19 @@ def assert_allowlisted_step(step_key: str) -> None:
         raise ValueError(f"Disallowed validation step: {step_key!r}")
 
 
-def run_phase1_validation(cwd: Path) -> list[StepResult]:
-    """Execute every Phase 1 step in order (hard-coded)."""
+def run_phase1_validation(cwd: Path, changed_files: list[str] | None = None) -> list[StepResult]:
+    """Execute every Phase 1 step in order (hard-coded keys; ast/pytest
+    scope to ``changed_files`` when provided so validation measures the
+    CHANGE, not pre-existing baseline breakage)."""
     results: list[StepResult] = []
     for key in PHASE1_STEP_KEYS:
         assert_allowlisted_step(key)
         runner = _STEP_RUNNERS[key]
         try:
-            results.append(runner(cwd))
+            if changed_files and key in ("ast_syntax", "pytest_collect"):
+                results.append(runner(cwd, changed_files))  # type: ignore[call-arg]
+            else:
+                results.append(runner(cwd))
         except Exception as e:
             logger.exception("[coding_task] step %s failed", key)
             msg, _ = truncate_text(str(e))

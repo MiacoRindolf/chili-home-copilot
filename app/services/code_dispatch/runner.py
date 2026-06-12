@@ -416,6 +416,7 @@ def run_validation_in_worktree(
     worktree: Path,
     *,
     validation_timeout_sec: int,
+    changed_files: Optional[list[str]] = None,
 ) -> tuple[Optional[int], bool, bool]:
     """Run Phase-1 validation in ``worktree`` with a **total** wall-clock cap.
 
@@ -443,14 +444,21 @@ def run_validation_in_worktree(
     root = str(_project_root())
     wt = str(worktree.resolve())
     code = (
-        "import os,sys,pickle;"
+        "import os,sys,pickle,json;"
         "r=os.environ['CHILI_DP_ROOT'];sys.path.insert(0,r);os.chdir(r);"
         "from pathlib import Path;"
         "from app.services.coding_task.validator_runner import run_phase1_validation;"
-        "out=run_phase1_validation(Path(os.environ['CHILI_DP_WT']));"
+        "cf=json.loads(os.environ.get('CHILI_DP_CHANGED_FILES') or 'null');"
+        "out=run_phase1_validation(Path(os.environ['CHILI_DP_WT']), changed_files=cf);"
         "sys.stdout.buffer.write(pickle.dumps(out))"
     )
-    env = {**os.environ, "CHILI_DP_ROOT": root, "CHILI_DP_WT": wt}
+    env = {
+        **os.environ,
+        "CHILI_DP_ROOT": root,
+        "CHILI_DP_WT": wt,
+        # Scope ast/pytest steps to the change (None -> legacy repo-wide).
+        "CHILI_DP_CHANGED_FILES": json.dumps(changed_files or None),
+    }
     timed_out = False
     steps: list[StepResult] = []
     try:

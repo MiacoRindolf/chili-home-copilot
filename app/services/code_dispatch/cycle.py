@@ -367,6 +367,7 @@ def _run_sandboxed(
                 int(candidate.task_id),
                 Path(handle.path),
                 validation_timeout_sec=v_timeout,
+                changed_files=diff_files,
             )
         finally:
             # FIX 46 pattern (rollback before close).
