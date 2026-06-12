@@ -954,7 +954,11 @@ def test_autopilot_chat_stores_image_attachments_in_message_metadata(tmp_path):
         db.close()
 
 
-def test_autopilot_chat_rejects_unsafe_image_attachment_sources(tmp_path):
+def test_autopilot_chat_rejects_unsafe_image_attachment_sources(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway.gateway_chat",
+        lambda **k: {"reply": "ok", "model": "m"},
+    )
     db = _sqlite_autonomy_session()
     try:
         repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
@@ -1551,7 +1555,11 @@ def test_run_payload_surfaces_pr_publication_receipt_quality_bar_artifact():
         db.close()
 
 
-def test_start_plan_transitions_chat_to_queued_plan(tmp_path):
+def test_start_plan_transitions_chat_to_queued_plan(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway.gateway_chat",
+        lambda **k: {"reply": "ok", "model": "m"},
+    )
     db = _sqlite_autonomy_session()
     try:
         repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
