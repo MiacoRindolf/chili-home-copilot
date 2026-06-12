@@ -85,7 +85,7 @@ def test_sandboxed_calls_draft_apply_validate_in_order(
         calls.append("apply")
         return {"ok": True, "files": ["a.py"], "loc": 3}
 
-    def fake_val(db, task_id, worktree, *, validation_timeout_sec: int = 300):
+    def fake_val(db, task_id, worktree, *, validation_timeout_sec: int = 300, changed_files=None):
         calls.append("validate")
         return (55, True, False)
 
@@ -134,7 +134,7 @@ def test_sandboxed_cleans_up_on_validation_failure(db, monkeypatch) -> None:
     monkeypatch.setattr(
         cycle,
         "_dispatch_draft_suggestion",
-        lambda tid, uid: (201, {"model": "m", "suggestion_id": 201}, 1.0),
+        lambda tid, uid, extra_instructions=None: (201, {"model": "m", "suggestion_id": 201}, 1.0),
     )
     monkeypatch.setattr(
         "app.services.coding_task.workspaces.get_bound_workspace_repo_for_profile",

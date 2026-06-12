@@ -410,6 +410,29 @@ def apply_suggestion_in_worktree(
     return result
 
 
+def validation_failure_text(db: Session, validation_run_id: int, *, max_bytes: int = 6000) -> str:
+    """Concise failure evidence for a repair prompt: the artifacts of the
+    failing/non-skipped steps of a validation run, bounded."""
+    from ...models import CodingValidationArtifact
+
+    rows = (
+        db.query(CodingValidationArtifact)
+        .filter(CodingValidationArtifact.run_id == int(validation_run_id))
+        .order_by(CodingValidationArtifact.id)
+        .all()
+    )
+    parts: list[str] = []
+    for r in rows:
+        if (r.kind or "") == "skip":
+            continue
+        content = (r.content or "").strip()
+        if not content or content.startswith("ok "):
+            continue
+        parts.append(f"### step {r.step_key}\n{content}")
+    text = "\n\n".join(parts)
+    return text[:max_bytes] if text else "(no failure artifacts captured)"
+
+
 def run_validation_in_worktree(
     db: Session,
     task_id: int,
