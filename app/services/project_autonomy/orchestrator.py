@@ -5759,7 +5759,18 @@ def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) 
     # Agentic protocol (first pass only): the model may ask to READ files
     # before answering — Fable-style "read before you speak" — or ESCALATE
     # judgment-heavy questions to the frontier tier. The MODEL decides;
-    # nothing here is keyed to project-specific strings.
+    # nothing here is keyed to project-specific strings. The escalation
+    # nudge adapts to the ACTUAL grounding state: with no relevant project
+    # document in context, a free model's recommendation is most likely to
+    # be generic-hype — exactly when a stronger model is worth cents.
+    has_doc_grounding = "Project documents relevant to the question" in (context_block or "")
+    escalate_nudge = (
+        "" if has_doc_grounding else
+        " NOTE: no project document in the context answers this question — "
+        "if the user asks for a recommendation or tradeoff decision, you "
+        "should strongly prefer ESCALATE over answering from general "
+        "knowledge."
+    )
     protocol = (
         "\n\nPROTOCOL (first line of your reply only, optional):\n"
         "- To inspect repository files before answering, reply with ONLY: "
@@ -5767,7 +5778,7 @@ def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) 
         "their contents and be asked again.\n"
         "- If this question hinges on a costly judgment call (architecture "
         "choice, irreversible tradeoff) where a stronger model is worth "
-        "cents, reply with ONLY: ESCALATE: <one-line reason>.\n"
+        f"cents, reply with ONLY: ESCALATE: <one-line reason>.{escalate_nudge}\n"
         "- Otherwise just answer. If this conversation established a "
         "durable, non-obvious fact about THIS project, you may end your "
         "answer with a final line: LESSON: <one sentence>."
