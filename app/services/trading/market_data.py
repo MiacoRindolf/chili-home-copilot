@@ -483,6 +483,11 @@ def fetch_ohlcv_df(
     can be used.  When *start* is given it takes precedence over *period*.
 
     *allow_provider_fallback* ``None`` uses ``settings.market_data_allow_provider_fallback``.
+
+    An empty result with ``df.attrs["quality_rejected"] is True`` means a
+    provider returned data that failed the integrity gate (see
+    ``quality_issues`` attr) — distinct from a plain empty frame, which
+    means no provider had data at all.
     """
     fb = _effective_allow_fallback(allow_provider_fallback)
     if interval not in _VALID_INTERVALS:
@@ -509,6 +514,13 @@ def fetch_ohlcv_df(
                     _ohlcv_df_cache.clear()
                 _ohlcv_df_cache[_cache_key] = (_time.time(), result)
         return result
+
+    # Quality-reject propagation (2026-06-12): when a provider's frame is
+    # rejected and fallback continues, remember the rejected frame. If every
+    # later tier comes back empty, return it (with its quality_rejected /
+    # quality_issues attrs) instead of a plain empty DataFrame so callers
+    # can distinguish "no data exists" from "data was rejected".
+    last_quality_rejected: pd.DataFrame | None = None
 
     # --- Massive path (primary) ---
     _massive_dead = False
@@ -539,6 +551,7 @@ def fetch_ohlcv_df(
                     if not fb:
                         return _store_and_return(finalized)
                     quality_rejected = True
+                    last_quality_rejected = finalized
             if _massive.massive_aggregate_variants_all_dead(ticker):
                 _massive_dead = True
             elif not quality_rejected:
@@ -589,6 +602,8 @@ def fetch_ohlcv_df(
         _log_ohlcv_outcome(
             ticker, interval, provider="massive", reason="all_variants_dead", row_count=0,
         )
+        if last_quality_rejected is not None:
+            return _store_and_return(last_quality_rejected)
         return pd.DataFrame()
 
     if not fb:
@@ -623,6 +638,7 @@ def fetch_ohlcv_df(
                         row_count=0,
                     )
                     quality_rejected = True
+                    last_quality_rejected = finalized
             if not quality_rejected:
                 _log_ohlcv_outcome(
                     ticker, interval, provider="polygon", reason="empty_try_fallback", row_count=0,
@@ -665,6 +681,8 @@ def fetch_ohlcv_df(
         _log_ohlcv_outcome(
             ticker, interval, provider="yfinance", reason="skipped_crypto_df_path", row_count=0,
         )
+        if last_quality_rejected is not None:
+            return _store_and_return(last_quality_rejected)
         return pd.DataFrame()
 
     if _start_str:
@@ -701,9 +719,14 @@ def fetch_ohlcv_df(
         _log_ohlcv_outcome(
             ticker, interval, provider="yfinance", reason="ok", row_count=len(_df),
         )
-    return _store_and_return(
-        _finalize_ohlcv_df(_df, ticker=ticker, interval=interval, provider="yfinance")
-    )
+    finalized = _finalize_ohlcv_df(_df, ticker=ticker, interval=interval, provider="yfinance")
+    if (
+        finalized.empty
+        and not _is_quality_rejected_df(finalized)
+        and last_quality_rejected is not None
+    ):
+        return _store_and_return(last_quality_rejected)
+    return _store_and_return(finalized)
 
 
 def fetch_ohlcv_batch(
