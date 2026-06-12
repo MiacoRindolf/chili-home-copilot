@@ -206,7 +206,13 @@ def _diff_loc_from_files(files: list[str], worktree: Path) -> int:
 # Push goes to the dispatch/<task_id> branch only — never to main/master.
 
 def _git_push_enabled() -> bool:
-    return os.environ.get("CHILI_DISPATCH_GIT_PUSH_ENABLED", "0") == "1"
+    # Tolerant parse: a corrupted legacy env line carried trailing comment
+    # text after the value ("1, the dispatch runner will, after"), which the
+    # strict == "1" comparison silently treated as DISABLED — the first
+    # passing autonomous run (task 39) never pushed because of it. Read the
+    # leading token only.
+    raw = os.environ.get("CHILI_DISPATCH_GIT_PUSH_ENABLED", "0")
+    return raw.split(",")[0].strip() == "1"
 
 
 def _git_token() -> Optional[str]:
