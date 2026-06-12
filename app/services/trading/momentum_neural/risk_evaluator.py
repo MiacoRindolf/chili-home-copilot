@@ -69,6 +69,8 @@ def aggregate_open_risk_usd(db: Session, *, user_id: int) -> tuple[float, list[d
                     ("live_entered", "live_scaling_out", "live_trailing", "live_bailout")
                 ),
                 ~TradingAutomationSession.symbol.like("%-USD"),
+                # alpaca paper twin-soak = fake money; never consumes real risk budget
+                TradingAutomationSession.execution_family != "alpaca_spot",
             )
             .all()
         )

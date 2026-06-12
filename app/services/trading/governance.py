@@ -665,12 +665,20 @@ def global_realized_pnl_today_et(
         if pnl is not None:
             trade_total += pnl
 
-    # Momentum automation outcomes
+    # Momentum automation outcomes. ALPACA PAPER EXCLUSION (2026-06-12): the
+    # alpaca_spot twin-soak sessions trade FAKE money against the paper API —
+    # their outcomes must never move the REAL daily-loss math (a fake -$300
+    # would trip the real kill switch).
+    from ...models.trading import TradingAutomationSession as _TAS
+
     mq = db.query(
         sa_func.coalesce(sa_func.sum(MomentumAutomationOutcome.realized_pnl_usd), 0.0)
+    ).join(
+        _TAS, _TAS.id == MomentumAutomationOutcome.session_id
     ).filter(
         MomentumAutomationOutcome.terminal_at >= start_utc,
         MomentumAutomationOutcome.terminal_at < end_utc,
+        _TAS.execution_family != "alpaca_spot",
     )
     if user_id is not None:
         mq = mq.filter(MomentumAutomationOutcome.user_id == user_id)

@@ -2710,6 +2710,14 @@ class Settings(BaseSettings):
         ge=50.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_TRAIL_CEILING_BPS"),
     )
+    # Alpaca twin soak (2026-06-12, ALPACA_LANE "same-name A/B"): every equity
+    # armed live on Robinhood also arms a twin on alpaca_spot (REAL order
+    # lifecycle, Alpaca PAPER endpoint = fake money). Fill-quality diff decides
+    # the venue migration. Fake-money outcomes/risk excluded from real accounting.
+    chili_momentum_alpaca_twin_arm_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ALPACA_TWIN_ARM_ENABLED"),
+    )
     # Paper shadow mass (2026-06-11): probed eligibles that lose the single live
     # slot are armed in PAPER (free sample data; 3 paper sessions EVER vs 718
     # live = tuning on anecdotes). Bounded by the concurrent cap below.

@@ -941,6 +941,40 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             chosen.symbol, begin.get("session_id"), confirm.get("state"),
             chosen_reason, float(chosen.viability_score or 0.0),
         )
+        # ALPACA TWIN SOAK (2026-06-12, docs/DESIGN/ALPACA_LANE.md "same-name
+        # A/B"): every EQUITY name armed live on Robinhood also arms a TWIN
+        # session on alpaca_spot — the live runner drives a REAL order
+        # lifecycle against Alpaca's PAPER endpoint (fake money) on the same
+        # symbol, same triggers, same session. The fill-quality diff between
+        # the twins is the evidence that decides the venue migration. The
+        # venue-aware arm dedupe was built for exactly this; fake-money
+        # outcomes/risk are excluded from real accounting (governance +
+        # aggregate-risk filters). Best-effort: a twin failure never affects
+        # the primary arm.
+        try:
+            if (
+                bool(getattr(settings, "chili_momentum_alpaca_twin_arm_enabled", True))
+                and _exec_family == "robinhood_spot"
+                and bool(getattr(settings, "chili_alpaca_enabled", False))
+                and bool(getattr(settings, "chili_alpaca_paper", True))
+                and str(getattr(settings, "chili_alpaca_api_key", "") or "")
+            ):
+                _tb = begin_live_arm(
+                    db, user_id=int(uid), symbol=chosen.symbol,
+                    variant_id=int(chosen.variant_id), execution_family="alpaca_spot",
+                )
+                if _tb.get("ok") and not _tb.get("deduped"):
+                    _tc = confirm_live_arm(
+                        db, user_id=int(uid), arm_token=_tb.get("arm_token"), confirm=True
+                    )
+                    if _tc.get("ok"):
+                        out["alpaca_twin_session_id"] = _tb.get("session_id")
+                        logger.info(
+                            "[auto_arm] alpaca twin armed %s session=%s (paper endpoint)",
+                            chosen.symbol, _tb.get("session_id"),
+                        )
+        except Exception:
+            logger.debug("[auto_arm] alpaca twin arm failed", exc_info=True)
     else:
         out["skipped"] = "confirm_blocked"
         out["confirm_error"] = confirm.get("error")
