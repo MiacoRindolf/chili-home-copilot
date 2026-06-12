@@ -180,6 +180,12 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
     when a setup never triggers. Never touches a session that holds a position.
     """
     cutoff = now - timedelta(seconds=_max_watch_seconds())
+    extend_cutoff = now - timedelta(
+        seconds=max(
+            _max_watch_seconds(),
+            int(getattr(settings, "chili_momentum_auto_arm_watch_extend_seconds", 600) or 600),
+        )
+    )
     try:
         q = db.query(TradingAutomationSession).filter(
             TradingAutomationSession.mode == "live",
@@ -197,6 +203,21 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
 
     reaped = 0
     for s in rows:
+        # PROGRESSING setups earn the extended watch: a tick-armed session
+        # (watch_break_level set = a reclaim/break is actually forming) keeps
+        # its slot to the extend cutoff; a watch that never produced a level
+        # is dead weight at the base cutoff (triggers fire in ~29s median).
+        try:
+            _snap = s.risk_snapshot_json or {}
+            _le = _snap.get("momentum_live_execution") if isinstance(_snap, dict) else None
+            if (
+                isinstance(_le, dict)
+                and _le.get("watch_break_level")
+                and s.started_at >= extend_cutoff
+            ):
+                continue
+        except Exception:
+            pass
         try:
             cancel_automation_session(db, user_id=int(user_id), session_id=int(s.id))
             reaped += 1
@@ -835,9 +856,9 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             continue  # defensive: never arm an equity via the coinbase_spot lane
         if _auto_arm_equity_only() and _is_coinbase_tradeable_symbol(c.symbol):
             continue  # equity-only focus: never arm crypto in the Ross lane
-        if _crypto_paused_us_session() and _is_coinbase_tradeable_symbol(c.symbol):
-            out["crypto_us_session_skipped"] = out.get("crypto_us_session_skipped", 0) + 1
-            continue  # crypto stands down during the US equity session (auto-resumes at close)
+        # (crypto live-arm gates apply at the LIVE pick stage below, NOT here —
+        # filtering the eligible list would also starve the PAPER shadow arms,
+        # which must keep learning crypto 24/7.)
         if c.symbol.upper() in busy_symbols:
             out["busy_skipped"] += 1
             continue  # already have a live session for this symbol — rotate to the next setup
@@ -939,19 +960,48 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             key=lambda c: _freshness_rank(_r(c)[2]),
             reverse=True,
         )
+        def _live_armable(_c) -> bool:
+            """Live-pick gates that must NOT starve the paper shadow list:
+            crypto pauses during the US equity session, and live crypto arming
+            stays off entirely while the realized record is 0/17 (A4)."""
+            if not _is_coinbase_tradeable_symbol(_c.symbol):
+                return True
+            if not bool(getattr(settings, "chili_momentum_crypto_live_arm_enabled", False)):
+                out["crypto_live_disabled_skipped"] = out.get("crypto_live_disabled_skipped", 0) + 1
+                return False
+            if _crypto_paused_us_session():
+                out["crypto_us_session_skipped"] = out.get("crypto_us_session_skipped", 0) + 1
+                return False
+            return True
+
+        _watch = []
         if _firing:
-            chosen = _firing[0]
-            chosen_reason = _r(chosen)[1]
-        elif _require_fresh_impulse():
+            chosen = next((c for c in _firing if _live_armable(c)), None)
+            if chosen is not None:
+                chosen_reason = _r(chosen)[1]
+        if chosen is None and _require_fresh_impulse():
             _watch = sorted(
                 (c for c in eligible if _known_fresh(_r(c)[2])),
                 key=lambda c: _freshness_rank(_r(c)[2]),
                 reverse=True,
             )
             out["faded_skipped"] = len(eligible) - len(_watch)
-            if _watch:
-                chosen = _watch[0]
+            _w_ok = next((c for c in _watch if _live_armable(c)), None)
+            if _w_ok is not None:
+                chosen = _w_ok
                 chosen_reason = "fresh_watch:" + str(_r(chosen)[1])
+        # A6: the freshest distinct armable candidates after the primary — the
+        # arm loop below spends up to max_arms_per_pass on them (open-burst
+        # bandwidth; each still passes begin/confirm risk gates individually).
+        _more_picks = []
+        if chosen is not None:
+            _seen_syms = {chosen.symbol}
+            for _c in list(_firing) + list(_watch):
+                if _c.symbol in _seen_syms or not _live_armable(_c):
+                    continue
+                _seen_syms.add(_c.symbol)
+                _is_fire = any(_c is _f for _f in _firing)
+                _more_picks.append((_c, _r(_c)[1] if _is_fire else "fresh_watch:" + str(_r(_c)[1])))
         if chosen is not None:
             _cf = _r(chosen)[2]
             out["chosen_fresh_score"] = (
@@ -984,97 +1034,114 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     from ..execution_family_registry import resolve_execution_family_for_symbol
     from .operator_actions import begin_live_arm, confirm_live_arm
 
-    _exec_family = resolve_execution_family_for_symbol(chosen.symbol)
-    out["symbol"] = chosen.symbol
-    out["execution_family"] = _exec_family
-    out["viability_score"] = round(float(chosen.viability_score or 0.0), 4)
-    out["trigger"] = chosen_reason
+    # A6: spend up to max_arms_per_pass on distinct fresh candidates — the
+    # open burst offers far more simultaneous setups than one arm per 30s pass
+    # can take (74 fresh vs 6 armed in the 13:30-13:50Z window). Every pick
+    # still passes begin/confirm risk gates individually.
+    _max_arms = max(1, int(getattr(settings, "chili_momentum_auto_arm_max_arms_per_pass", 3) or 1))
+    _picks = [(chosen, chosen_reason)] + list(_more_picks)
+    out["armed"] = 0
+    _armed_syms: list[str] = []
+    for chosen, chosen_reason in _picks:
+        if out["armed"] >= _max_arms:
+            break
+        _exec_family = resolve_execution_family_for_symbol(chosen.symbol)
+        out["symbol"] = chosen.symbol
+        out["execution_family"] = _exec_family
+        out["viability_score"] = round(float(chosen.viability_score or 0.0), 4)
+        out["trigger"] = chosen_reason
 
-    begin = begin_live_arm(
-        db,
-        user_id=int(uid),
-        symbol=chosen.symbol,
-        variant_id=int(chosen.variant_id),
-        execution_family=_exec_family,
-    )
-    if not begin.get("ok"):
-        out["skipped"] = "begin_blocked"
-        out["begin_error"] = begin.get("error")
-        logger.info(
-            "[auto_arm] begin_live_arm blocked %s: %s",
-            chosen.symbol, begin.get("error"),
+        begin = begin_live_arm(
+            db,
+            user_id=int(uid),
+            symbol=chosen.symbol,
+            variant_id=int(chosen.variant_id),
+            execution_family=_exec_family,
         )
-        return out
+        if not begin.get("ok"):
+            out["skipped"] = "begin_blocked"
+            out["begin_error"] = begin.get("error")
+            logger.info(
+                "[auto_arm] begin_live_arm blocked %s: %s",
+                chosen.symbol, begin.get("error"),
+            )
+            continue
 
-    if begin.get("deduped"):
-        # A race created an active session for this symbol after the busy-set
-        # snapshot. begin_live_arm returned the existing session's token, whose
-        # session is no longer arm-pending — confirming it would fail
-        # invalid_token. Treat as already-active and skip; the live runner owns
-        # that session now.
-        out["skipped"] = "already_active"
-        out["session_id"] = begin.get("session_id")
-        logger.info(
-            "[auto_arm] %s already has an active live session (state=%s) — skip confirm",
-            chosen.symbol, begin.get("state"),
-        )
-        return out
+        if begin.get("deduped"):
+            # A race created an active session for this symbol after the busy-set
+            # snapshot. begin_live_arm returned the existing session's token, whose
+            # session is no longer arm-pending — confirming it would fail
+            # invalid_token. Treat as already-active and skip; the live runner owns
+            # that session now.
+            out["skipped"] = "already_active"
+            out["session_id"] = begin.get("session_id")
+            logger.info(
+                "[auto_arm] %s already has an active live session (state=%s) — skip confirm",
+                chosen.symbol, begin.get("state"),
+            )
+            continue
 
-    confirm = confirm_live_arm(
-        db, user_id=int(uid), arm_token=begin.get("arm_token"), confirm=True
-    )
-    if confirm.get("ok"):
-        out["armed"] = 1
-        out["session_id"] = begin.get("session_id")
-        out["state"] = confirm.get("state")
-        logger.warning(
-            "[auto_arm] ARMED live %s session=%s state=%s trigger=%s viability=%.3f",
-            chosen.symbol, begin.get("session_id"), confirm.get("state"),
-            chosen_reason, float(chosen.viability_score or 0.0),
+        confirm = confirm_live_arm(
+            db, user_id=int(uid), arm_token=begin.get("arm_token"), confirm=True
         )
-        # ALPACA TWIN SOAK (2026-06-12, docs/DESIGN/ALPACA_LANE.md "same-name
-        # A/B"): every EQUITY name armed live on Robinhood also arms a TWIN
-        # session on alpaca_spot — the live runner drives a REAL order
-        # lifecycle against Alpaca's PAPER endpoint (fake money) on the same
-        # symbol, same triggers, same session. The fill-quality diff between
-        # the twins is the evidence that decides the venue migration. The
-        # venue-aware arm dedupe was built for exactly this; fake-money
-        # outcomes/risk are excluded from real accounting (governance +
-        # aggregate-risk filters). Best-effort: a twin failure never affects
-        # the primary arm.
-        try:
-            if (
-                bool(getattr(settings, "chili_momentum_alpaca_twin_arm_enabled", True))
-                and _exec_family in ("robinhood_spot", "coinbase_spot")
-                and bool(getattr(settings, "chili_alpaca_enabled", False))
-                and bool(getattr(settings, "chili_alpaca_paper", True))
-                and str(getattr(settings, "chili_alpaca_api_key", "") or "")
-                # crypto twin only for pairs Alpaca actually lists (majors —
-                # the lane's exotic low-cap alts mostly aren't there); equities
-                # are probed too (cheap, cached) so delisted names skip cleanly
-                and _alpaca_lists_symbol(chosen.symbol)
-            ):
-                _tb = begin_live_arm(
-                    db, user_id=int(uid), symbol=chosen.symbol,
-                    variant_id=int(chosen.variant_id), execution_family="alpaca_spot",
-                )
-                if _tb.get("ok") and not _tb.get("deduped"):
-                    _tc = confirm_live_arm(
-                        db, user_id=int(uid), arm_token=_tb.get("arm_token"), confirm=True
+        if confirm.get("ok"):
+            out["armed"] += 1
+            _armed_syms.append(chosen.symbol)
+            out["session_id"] = begin.get("session_id")
+            out["state"] = confirm.get("state")
+            logger.warning(
+                "[auto_arm] ARMED live %s session=%s state=%s trigger=%s viability=%.3f",
+                chosen.symbol, begin.get("session_id"), confirm.get("state"),
+                chosen_reason, float(chosen.viability_score or 0.0),
+            )
+            # ALPACA TWIN SOAK (2026-06-12, docs/DESIGN/ALPACA_LANE.md "same-name
+            # A/B"): every EQUITY name armed live on Robinhood also arms a TWIN
+            # session on alpaca_spot — the live runner drives a REAL order
+            # lifecycle against Alpaca's PAPER endpoint (fake money) on the same
+            # symbol, same triggers, same session. The fill-quality diff between
+            # the twins is the evidence that decides the venue migration. The
+            # venue-aware arm dedupe was built for exactly this; fake-money
+            # outcomes/risk are excluded from real accounting (governance +
+            # aggregate-risk filters). Best-effort: a twin failure never affects
+            # the primary arm.
+            try:
+                if (
+                    bool(getattr(settings, "chili_momentum_alpaca_twin_arm_enabled", True))
+                    and _exec_family in ("robinhood_spot", "coinbase_spot")
+                    and bool(getattr(settings, "chili_alpaca_enabled", False))
+                    and bool(getattr(settings, "chili_alpaca_paper", True))
+                    and str(getattr(settings, "chili_alpaca_api_key", "") or "")
+                    # crypto twin only for pairs Alpaca actually lists (majors —
+                    # the lane's exotic low-cap alts mostly aren't there); equities
+                    # are probed too (cheap, cached) so delisted names skip cleanly
+                    and _alpaca_lists_symbol(chosen.symbol)
+                ):
+                    _tb = begin_live_arm(
+                        db, user_id=int(uid), symbol=chosen.symbol,
+                        variant_id=int(chosen.variant_id), execution_family="alpaca_spot",
                     )
-                    if _tc.get("ok"):
-                        out["alpaca_twin_session_id"] = _tb.get("session_id")
-                        logger.info(
-                            "[auto_arm] alpaca twin armed %s session=%s (paper endpoint)",
-                            chosen.symbol, _tb.get("session_id"),
+                    if _tb.get("ok") and not _tb.get("deduped"):
+                        _tc = confirm_live_arm(
+                            db, user_id=int(uid), arm_token=_tb.get("arm_token"), confirm=True
                         )
-        except Exception:
-            logger.debug("[auto_arm] alpaca twin arm failed", exc_info=True)
-    else:
-        out["skipped"] = "confirm_blocked"
-        out["confirm_error"] = confirm.get("error")
-        logger.info(
-            "[auto_arm] confirm_live_arm blocked %s: %s",
-            chosen.symbol, confirm.get("error"),
-        )
+                        if _tc.get("ok"):
+                            out["alpaca_twin_session_id"] = _tb.get("session_id")
+                            logger.info(
+                                "[auto_arm] alpaca twin armed %s session=%s (paper endpoint)",
+                                chosen.symbol, _tb.get("session_id"),
+                            )
+            except Exception:
+                logger.debug("[auto_arm] alpaca twin arm failed", exc_info=True)
+        else:
+            out["skipped"] = "confirm_blocked"
+            out["confirm_error"] = confirm.get("error")
+            logger.info(
+                "[auto_arm] confirm_live_arm blocked %s: %s",
+                chosen.symbol, confirm.get("error"),
+            )
+    if _armed_syms:
+        out["armed_symbols"] = _armed_syms
+        out.pop("skipped", None)
+        out.pop("begin_error", None)
+        out.pop("confirm_error", None)
     return out
