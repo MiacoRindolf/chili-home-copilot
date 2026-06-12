@@ -116,3 +116,50 @@ def test_safe_env_without_test_db_url(monkeypatch):
     monkeypatch.delenv("TEST_DATABASE_URL", raising=False)
     env = envelope.subprocess_safe_env()
     assert "TEST_DATABASE_URL" not in env
+
+
+# ── dispatch lane: scoped phase-1 validation ─────────────────────────────
+
+
+def test_phase1_pytest_collect_scoped_skips_when_no_related_tests(tmp_path):
+    """Repo-wide collect fails on PRE-EXISTING base breakage (live: every
+    dispatch run failed on an unrelated trading check in local main). With
+    changed_files and no related tests, the step honestly skips."""
+    from app.services.coding_task.validator_runner import run_phase1_validation
+
+    _write(tmp_path, "app/services/code_dispatch/scorer.py", "x = 1\n")
+    # A pre-existing broken test that repo-wide collect would die on:
+    _write(tmp_path, "tests/test_unrelated_broken.py", "raise RuntimeError('baseline breakage')\n")
+
+    results = run_phase1_validation(
+        tmp_path, changed_files=["app/services/code_dispatch/scorer.py"]
+    )
+    by_key = {r.step_key: r for r in results}
+    pc = by_key["pytest_collect"]
+    assert pc.exit_code == 0
+    assert pc.skipped is True
+    assert "baseline" in pc.stdout
+
+
+def test_phase1_pytest_collect_targets_related_tests(tmp_path):
+    from app.services.coding_task.validator_runner import run_phase1_validation
+
+    _write(tmp_path, "app/scorer.py", "x = 1\n")
+    _write(tmp_path, "tests/test_scorer.py", "def test_ok():\n    assert True\n")
+    _write(tmp_path, "tests/test_unrelated_broken.py", "raise RuntimeError('baseline breakage')\n")
+
+    results = run_phase1_validation(tmp_path, changed_files=["app/scorer.py"])
+    by_key = {r.step_key: r for r in results}
+    pc = by_key["pytest_collect"]
+    assert pc.exit_code == 0, pc.stdout + pc.stderr
+    assert pc.skipped is False
+    assert "test_scorer" in pc.stdout
+
+
+def test_phase1_without_changed_files_keeps_legacy_repo_wide(tmp_path):
+    from app.services.coding_task.validator_runner import run_phase1_validation
+
+    _write(tmp_path, "a.py", "x = 1\n")
+    results = run_phase1_validation(tmp_path)
+    by_key = {r.step_key: r for r in results}
+    assert by_key["pytest_collect"].step_key == "pytest_collect"
