@@ -3493,6 +3493,31 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_CRYPTO_LIVE_ARM_ENABLED"),
     )
+    # Verticality entry skip: max extension above the 1m EMA9 at trigger, as a
+    # multiple of the instrument's ATR%% (3/3 fills with >3%% extension went a
+    # full R underwater on 2026-06-12). 0 disables.
+    chili_momentum_entry_verticality_atr_mult: float = Field(
+        default=1.5,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_VERTICALITY_ATR_MULT"),
+    )
+    # Ask-heavy book size-down: risk fraction applied when the decision-tick
+    # L2 imbalance5 < -0.4 (the measured chronic-late threshold).
+    chili_momentum_entry_ask_heavy_size_fraction: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_ASK_HEAVY_SIZE_FRACTION"),
+    )
+    # Booking truth: live sessions idle in exited/cooldown beyond this window
+    # are walked to live_finished so their realized PnL books an outcome row
+    # (2026-06-12: $195 of exits never booked; the day looked -$70 vs -$265
+    # broker truth). 0 disables.
+    chili_momentum_exited_finalize_idle_min: float = Field(
+        default=20.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXITED_FINALIZE_IDLE_MIN"),
+    )
     # Exit-limit repeg window: an unfilled marketable-limit exit older than
     # this re-submits one rung down the ladder (wider guard, then market).
     chili_momentum_exit_limit_repeg_seconds: float = Field(

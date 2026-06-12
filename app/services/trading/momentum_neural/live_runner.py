@@ -3002,10 +3002,25 @@ def tick_live_session(
             db, base_loss_usd=float(_base_max_loss)
         )
         le["cushion_risk"] = _cushion_meta
+        # B2 ask-heavy book size-down (2026-06-12 entry study: imbalance5 <
+        # -0.4 at the decision tick = 71% of chronic-late entries vs 29%,
+        # Cliff's d -0.31). The L2 snapshot is already taken at candidate
+        # detection; an ask-stacked book halves the risk fraction rather than
+        # skipping (counterexamples exist both ways). -0.4 is the measured
+        # threshold (documented constant); the fraction is the one knob.
+        _l2_mult = 1.0
+        try:
+            _l2s = le.get("entry_l2_snapshot") or {}
+            _imb = float(_l2s.get("imbalance5"))
+            if _imb < -0.4:
+                _l2_mult = float(getattr(settings, "chili_momentum_entry_ask_heavy_size_fraction", 0.5) or 1.0)
+                le["ask_heavy_size_down"] = {"imbalance5": round(_imb, 4), "mult": _l2_mult}
+        except (TypeError, ValueError):
+            _l2_mult = 1.0
         _rf_qty, _rf_meta = compute_risk_first_quantity(
             entry_price=guarded_ask,
             atr_pct=_eff_atr_pct,
-            max_loss_usd=float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult),
+            max_loss_usd=float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult),
             max_notional_ceiling_usd=max_notional,
             base_increment=inc,
             base_min_size=mn,

@@ -231,6 +231,52 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
     return reaped
 
 
+def _finalize_stale_exited_sessions(db: Session, *, user_id: int | None, now: datetime) -> int:
+    """BOOKING TRUTH (2026-06-12 waterfall c0 = $195 of unbooked exits): a live
+    session parked in exited/cooldown that nobody advances never reaches a
+    feedback-terminal state, so its realized PnL never books an outcome row —
+    the day reported −$70 when broker truth was −$265. Sessions idle in
+    exited/cooldown beyond the finalize window walk the LEGAL FSM chain
+    (exited → cooldown → finished) via the live runner's _safe_transition,
+    which fires the outcome writer exactly like a runner-driven finish."""
+    try:
+        idle_min = float(getattr(settings, "chili_momentum_exited_finalize_idle_min", 20.0) or 0.0)
+    except (TypeError, ValueError):
+        idle_min = 20.0
+    if idle_min <= 0:
+        return 0
+    cutoff = now - timedelta(minutes=idle_min)
+    try:
+        q = db.query(TradingAutomationSession).filter(
+            TradingAutomationSession.mode == "live",
+            TradingAutomationSession.state.in_(("live_exited", "live_cooldown")),
+            TradingAutomationSession.updated_at < cutoff,
+        )
+        if user_id is not None:
+            q = q.filter(TradingAutomationSession.user_id == int(user_id))
+        rows = q.all()
+    except Exception:
+        return 0
+    if not rows:
+        return 0
+    from .live_runner import _safe_transition as _live_safe_transition
+
+    done = 0
+    for sess in rows:
+        try:
+            if sess.state == "live_exited":
+                _live_safe_transition(db, sess, "live_cooldown")
+            _live_safe_transition(db, sess, "live_finished")
+            done += 1
+            logger.info(
+                "[auto_arm] finalized stale exited session=%s %s -> live_finished (outcome booked)",
+                sess.id, sess.symbol,
+            )
+        except Exception:
+            logger.debug("[auto_arm] finalize failed session=%s", getattr(sess, "id", None), exc_info=True)
+    return done
+
+
 def _active_live_session_count(db: Session, *, user_id: int | None) -> int:
     """Live sessions occupying a concurrency slot (any symbol) for the user."""
     q = db.query(TradingAutomationSession).filter(
@@ -411,6 +457,22 @@ def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[Momentum
     # markets HERE so the limit is spent on names the pass can actually arm.
     rows = [r for r in rows if _symbol_market_open(r.symbol)]
     rows = _filter_fresh_tape(rows)
+    # A0 (2026-06-12 selection-alpha study): the composite viability score has
+    # ZERO winner discrimination (AUC 0.515, p=0.56) while its own buried Ross
+    # sub-score DOES discriminate (AUC 0.58-0.63; ross>=0.8 hits 53% vs 25%
+    # base) — a dozen small regime nudges average the working signal away.
+    # Rank the arm queue by the ross score (already persisted in the same
+    # row); viability stays the eligibility FLOOR and the tiebreak.
+    def _ross_rank_key(r):
+        try:
+            extra = (r.execution_readiness_json or {}).get("extra") or {}
+            rs = extra.get("ross_scores") or {}
+            ross = float(rs.get("score", rs.get("ross_score", 0.0)) or 0.0)
+        except Exception:
+            ross = 0.0
+        return (ross, float(r.viability_score or 0.0))
+
+    rows = sorted(rows, key=_ross_rank_key, reverse=True)
     if _auto_arm_equity_only() and rows:
         rows = _enforce_ross_price_band(rows)
         rows = _liquidity_rerank(rows)
@@ -739,6 +801,12 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     # Reap stale pre-entry sessions FIRST so a faded leftover (e.g. a name armed
     # long ago whose intraday move never triggered) does not pin the only slot.
     reaped = _reap_stale_watching_sessions(db, user_id=uid, now=datetime.utcnow())
+    try:
+        _finalized = _finalize_stale_exited_sessions(db, user_id=uid, now=datetime.utcnow())
+        if _finalized:
+            out["finalized_exited"] = _finalized
+    except Exception:
+        logger.debug("[auto_arm] finalize sweep failed", exc_info=True)
     if reaped:
         out["reaped"] = reaped
         db.commit()
