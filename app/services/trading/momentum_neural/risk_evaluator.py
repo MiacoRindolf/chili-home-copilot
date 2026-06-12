@@ -642,15 +642,22 @@ def evaluate_proposed_momentum_automation(
                 )
 
     # ── Concurrency ─────────────────────────────────────────────────────
-    total_ct = count_concurrent_automation_sessions(db, user_id=user_id, exclude_session_id=exclude_session_id)
+    # MODE-SCOPED count (2026-06-12 SpaceX-morning incident): the paper shadow
+    # mass (10 overnight crypto paper sessions) filled a mode-blind total cap
+    # and starved EVERY live arm through the premarket window. Paper sessions
+    # are free simulations — they must never consume the real-money budget.
+    # Live proposals are additionally bounded by the adaptive live cap below.
+    total_ct = count_concurrent_automation_sessions(
+        db, user_id=user_id, mode=m, exclude_session_id=exclude_session_id
+    )
     ok_tot = total_ct < policy.max_concurrent_sessions
     checks.append(
         _check(
             "max_concurrent_sessions",
             ok_tot,
             severity="block" if not ok_tot else "ok",
-            message=f"Concurrent sessions {total_ct} / max {policy.max_concurrent_sessions}.",
-            detail={"count": total_ct},
+            message=f"Concurrent {m} sessions {total_ct} / max {policy.max_concurrent_sessions}.",
+            detail={"count": total_ct, "mode": m},
         )
     )
     if m == "live":
