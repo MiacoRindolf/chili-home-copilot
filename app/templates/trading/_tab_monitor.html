@@ -73,8 +73,12 @@
             var list = document.getElementById('monitor-momentum-list');
             var cnt = document.getElementById('mon-momentum-count');
             if(!list) return;
-            var rows = ((d && d.sessions) || []).filter(function(s){ return ACTIVE.indexOf((s.state||'').toLowerCase()) >= 0; });
-            if(cnt) cnt.textContent = rows.length ? '(' + rows.length + ' live)' : '';
+            var act = ((d && d.sessions) || []).filter(function(s){ return ACTIVE.indexOf((s.state||'').toLowerCase()) >= 0; });
+            // Alpaca twins shadow every real arm (fake money) — showing both reads
+            // as duplicates (operator 2026-06-12). Quick view = real arms only.
+            var rows = act.filter(function(s){ return (s.execution_family||'') !== 'alpaca_spot'; });
+            var twins = act.length - rows.length;
+            if(cnt) cnt.textContent = rows.length ? ('(' + rows.length + ' live' + (twins ? ' · ' + twins + ' alpaca twins' : '') + ')') : '';
             var banner = haltBanner(d && d.lane_status);
             if(!rows.length){
               // When halted, say so explicitly — the lane is blocked, NOT waiting for a setup.

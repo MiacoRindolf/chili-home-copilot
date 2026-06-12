@@ -105,10 +105,17 @@ def count_concurrent_automation_sessions(
     mode: Optional[str] = None,
     exclude_session_id: Optional[int] = None,
 ) -> int:
-    """Active pre-runner sessions only (cancelled/archived/expired excluded by state set)."""
+    """Active pre-runner sessions only (cancelled/archived/expired excluded by state set).
+
+    Alpaca twin-soak sessions (execution_family=alpaca_spot, fake money against
+    the paper endpoint) are EXCLUDED: every real arm spawns a twin, so counting
+    them halves the lane's real capacity (2026-06-12 — 10 "live" slots were
+    only ~5 real names on IPO morning). Twins are bounded 1:1 by the real arms.
+    """
     q = db.query(TradingAutomationSession).filter(
         TradingAutomationSession.user_id == user_id,
         TradingAutomationSession.state.in_(_CONCURRENT_STATES),
+        TradingAutomationSession.execution_family != "alpaca_spot",
     )
     if mode in ("paper", "live"):
         q = q.filter(TradingAutomationSession.mode == mode)

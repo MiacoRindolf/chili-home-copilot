@@ -51,3 +51,24 @@ def test_paper_cap_still_binds_paper_proposals(db):
     )
     cap_checks = [c for c in ev["checks"] if c["id"] == "max_concurrent_sessions"]
     assert cap_checks and cap_checks[0]["ok"] is False
+
+
+def test_alpaca_twins_do_not_consume_slots(db):
+    """Every real arm spawns an alpaca twin — counting twins halves real
+    capacity (2026-06-12 IPO morning). Twins are fake money; excluded."""
+    from app.services.trading.momentum_neural.risk_evaluator import (
+        count_concurrent_automation_sessions,
+    )
+
+    uid, vid = _seed(db, n_paper=0)
+    for i in range(3):
+        db.add(TradingAutomationSession(
+            user_id=uid, symbol=f"EQ{i}", mode="live", state="queued_live",
+            execution_family="robinhood_spot", variant_id=vid, risk_snapshot_json={},
+        ))
+        db.add(TradingAutomationSession(
+            user_id=uid, symbol=f"EQ{i}", mode="live", state="queued_live",
+            execution_family="alpaca_spot", variant_id=vid, risk_snapshot_json={},
+        ))
+    db.flush()
+    assert count_concurrent_automation_sessions(db, user_id=uid, mode="live") == 3
