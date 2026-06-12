@@ -422,6 +422,37 @@ def _fuzzy_exact_window(content: str, search: str) -> Optional[str]:
     return "".join(c_lines[i:i + n])
 
 
+def _leading_ws(line: str) -> str:
+    return line[: len(line) - len(line.lstrip(" \t"))]
+
+
+def _shift_indent_like(model_search: str, actual_window: str, replace: str) -> str:
+    """Undo a uniform indentation shift the model applied while copying.
+
+    Compares the leading whitespace of the first non-blank line of the
+    model's SEARCH vs the file's actual window; applies the inverse delta
+    to every REPLACE line. No-op when the indents already agree or the
+    shift is not uniform-prefix-shaped."""
+    s_first = next((l for l in model_search.splitlines() if l.strip()), "")
+    w_first = next((l for l in actual_window.splitlines() if l.strip()), "")
+    s_ind, w_ind = _leading_ws(s_first), _leading_ws(w_first)
+    if s_ind == w_ind:
+        return replace
+    out: List[str] = []
+    for line in replace.splitlines():
+        if not line.strip():
+            out.append(line)
+        elif s_ind and line.startswith(s_ind):
+            # model over-indented: swap its prefix for the file's real one
+            out.append(w_ind + line[len(s_ind):])
+        elif not s_ind:
+            # model under-indented (search at col 0, file indented)
+            out.append(w_ind + line)
+        else:
+            out.append(line)
+    return "\n".join(out) + ("\n" if replace.endswith("\n") else "")
+
+
 def _apply_search_replace(content: str, blocks: List[tuple]) -> Dict[str, Any]:
     """Apply SEARCH/REPLACE blocks against FULL file content.
 
@@ -443,6 +474,12 @@ def _apply_search_replace(content: str, blocks: List[tuple]) -> Dict[str, Any]:
             # normalization, then operate on the EXACT original span.
             window = _fuzzy_exact_window(new_content, search)
             if window is not None:
+                # The model's copy often carries a uniform indentation shift
+                # (live: run 687 re-indented a module docstring by 4 spaces →
+                # SyntaxError, caught by AST validation). Re-anchor the
+                # REPLACE to the file's real indentation by applying the
+                # SEARCH→window indent delta.
+                replace = _shift_indent_like(search, window, replace)
                 if window.endswith("\n") and not replace.endswith("\n"):
                     replace = replace + "\n"
                 search = window
