@@ -2710,6 +2710,15 @@ class Settings(BaseSettings):
         ge=50.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_TRAIL_CEILING_BPS"),
     )
+    # Paper quote sanity (2026-06-12 ROBO: a failed quote fetch fabricated a
+    # $100 placeholder that "filled" a $0.022 token's exit at $99.84 = +$555k of
+    # fiction): a mid that jumps beyond this fraction vs the session's own last
+    # mid in ONE tick is quarantined (tick skipped). 0 disables.
+    chili_momentum_paper_quote_jump_guard_frac: float = Field(
+        default=0.5,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PAPER_QUOTE_JUMP_GUARD_FRAC"),
+    )
     # Alpaca twin soak (2026-06-12, ALPACA_LANE "same-name A/B"): every equity
     # armed live on Robinhood also arms a twin on alpaca_spot (REAL order
     # lifecycle, Alpaca PAPER endpoint = fake money). Fill-quality diff decides
