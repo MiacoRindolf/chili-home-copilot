@@ -2099,7 +2099,11 @@ def tick_live_session(
             # refusal. Kill-switch still force-exits; otherwise fall through to the
             # exit handler below (it places no new entry/scale-in), so the stop is
             # always enforced even if viability went stale / a cap tripped.
-            if _handle_kill_switch_mid_run():
+            # (2026-06-12: the flatten helper was called UNGATED here — the
+            # aggregate at-risk cap breach liquidated ALOY (+$15 winner) and
+            # ASTN simultaneously. A cap breach must block NEW risk, never
+            # market-dump working positions; only the kill switch flattens.)
+            if _kill_switch_blocks_live() and _handle_kill_switch_mid_run():
                 _safe_transition(db, sess, STATE_LIVE_EXITED)
                 db.flush()
                 return {"ok": True, "blocked": True, "risk_evaluation": ev}
