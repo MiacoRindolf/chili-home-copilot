@@ -503,8 +503,14 @@ def _resolve_quote(
         bid_f = ask_f = 0.0
     if mid_f > 0 and bid_f > 0 and ask_f > 0:
         return bid_f, ask_f, mid_f, str(raw.get("source") or "quote")
-    syn = build_synthetic_quote(mid_f if mid_f > 0 else 100.0, spread_bps, source="synthetic_spread")
-    return syn.bid, syn.ask, syn.mid, syn.source
+    if mid_f > 0:
+        # mid known but one side missing: synthesize the spread around the REAL mid
+        syn = build_synthetic_quote(mid_f, spread_bps, source="synthetic_spread")
+        return syn.bid, syn.ask, syn.mid, syn.source
+    # NO REAL PRICE AT ALL: never fabricate one. The old $100.0 placeholder
+    # "filled" a ROBO-USD ($0.022) partial exit at $99.84 and minted +$555,963
+    # of fiction into realized PnL (2026-06-12). Zeros = the tick SKIPS.
+    return 0.0, 0.0, 0.0, "quote_unavailable"
 
 
 def list_runnable_paper_sessions(db: Session, *, limit: int = 25) -> list[TradingAutomationSession]:
@@ -636,6 +642,30 @@ def tick_paper_session(
         quote_mid=qmid,
     )
     bid, ask, mid, quote_src = _resolve_quote(sess.symbol, spread_bps, quote_fn)
+    # QUOTE SANITY (2026-06-12 ROBO +$555k fiction): no price -> no tick; and a
+    # mid that JUMPED beyond the guard fraction vs the session's own last mid in
+    # ONE tick is vendor garbage, not a market — quarantine the tick (skip, keep
+    # state). Real explosive moves arrive across ticks; the guard fraction is
+    # ONE documented knob.
+    if mid <= 0:
+        _emit(db, sess, "paper_quote_unavailable", {"source": quote_src})
+        db.flush()
+        return {"ok": True, "skipped": "quote_unavailable"}
+    _last_mid_guard = None
+    try:
+        _last_mid_guard = float(_paper_exec(dict(sess.risk_snapshot_json or {})).get("last_mid") or 0.0)
+    except (TypeError, ValueError):
+        _last_mid_guard = None
+    if _last_mid_guard and _last_mid_guard > 0:
+        _jump = abs(mid - _last_mid_guard) / _last_mid_guard
+        _jump_cap = float(getattr(settings, "chili_momentum_paper_quote_jump_guard_frac", 0.5) or 0.5)
+        if _jump_cap > 0 and _jump > _jump_cap:
+            _emit(db, sess, "paper_quote_quarantined", {
+                "mid": mid, "last_mid": _last_mid_guard,
+                "jump_frac": round(_jump, 4), "guard_frac": _jump_cap, "source": quote_src,
+            })
+            db.flush()
+            return {"ok": True, "skipped": "quote_quarantined"}
 
     ok_boundary, ev = runner_boundary_risk_ok(db, sess)
     if not ok_boundary:
