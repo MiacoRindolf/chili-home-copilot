@@ -389,10 +389,59 @@ def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[Momentum
     # while 320 live-eligible crypto candidates sat fresh. Filter untradeable
     # markets HERE so the limit is spent on names the pass can actually arm.
     rows = [r for r in rows if _symbol_market_open(r.symbol)]
+    rows = _filter_fresh_tape(rows)
     if _auto_arm_equity_only() and rows:
         rows = _enforce_ross_price_band(rows)
         rows = _liquidity_rerank(rows)
     return _dedupe_by_symbol(rows, limit=int(limit))
+
+
+def _filter_fresh_tape(rows: list, *, max_age_sec: float | None = None) -> list:
+    """ARM only names with a LIVE tape (2026-06-12 IPO morning): the lane was
+    arming quiet mid-caps (RYAM/BBD/BMA/ACAD) whose freshest NBBO was 8min-17h
+    old — their stale bars probe as pretty pullbacks while the REAL movers
+    probe as 'faded'. No fresh tape row = the name is not actually trading in
+    this session = the runner will sit behind stale_bbo forever. Selection
+    leads the trading window; data freshness leads selection."""
+    if not rows:
+        return rows
+    try:
+        age_cap = float(
+            max_age_sec
+            if max_age_sec is not None
+            else getattr(settings, "chili_momentum_arm_tape_freshness_max_sec", 180.0) or 180.0
+        )
+    except (TypeError, ValueError):
+        age_cap = 180.0
+    if age_cap <= 0:
+        return rows
+    syms = sorted({str(r.symbol or "").upper() for r in rows})
+    fresh: set[str] = set()
+    from ....db import SessionLocal
+
+    db = SessionLocal()
+    try:
+        from sqlalchemy import text as _text
+
+        res = db.execute(
+            _text(
+                "SELECT symbol FROM momentum_nbbo_spread_tape "
+                "WHERE symbol = ANY(:syms) "
+                "AND observed_at >= now() at time zone 'utc' - make_interval(secs => :cap) "
+                "GROUP BY symbol"
+            ),
+            {"syms": syms, "cap": age_cap},
+        )
+        fresh = {str(r[0]).upper() for r in res}
+    except Exception:
+        return rows  # fail-open: tape table unavailable must not kill arming
+    finally:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+    return [r for r in rows if str(r.symbol or "").upper() in fresh]
 
 
 def _enforce_ross_price_band(
