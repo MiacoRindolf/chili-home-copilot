@@ -2239,6 +2239,15 @@ class Settings(BaseSettings):
         default=3,
         validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_TAPE_MIN_BIG_MOVERS"),
     )
+    # ARM-time tape freshness: a candidate without an NBBO tape row this
+    # recent is not actually trading in this session (2026-06-12: quiet
+    # mid-caps with hours-old quotes consumed slots and sat stale_bbo while
+    # the real movers ran). 3 min = 3 missed 1-min sampler beats. 0 disables.
+    chili_momentum_arm_tape_freshness_max_sec: float = Field(
+        default=180.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ARM_TAPE_FRESHNESS_MAX_SEC"),
+    )
     # Crypto stands down while the US equity session is OPEN (premarket ->
     # 16:00 ET close) and resumes automatically after the close (operator
     # directive 2026-06-12, SpaceX morning: crypto arms were consuming live
