@@ -746,8 +746,10 @@ def pullback_break_confirmation(
             debug["break_candle"] = {"o": cur_o, "h": cur_h, "l": cur_l, "c": cur_c}
             return False, "weak_break_candle", debug
 
-    # VWAP hold: Ross stays long ABOVE VWAP. Skip when VWAP unavailable (fail-open).
-    # For a tick-break the actionable price is the LIVE tick, not the last close.
+    # VWAP hold: Ross stays long ABOVE VWAP. Fail-OPEN when VWAP unavailable —
+    # EXCEPT on the deep-reclaim path (2026-06-12 entry study: both VSME losers
+    # entered BELOW VWAP via deep-reclaim; "weak structure bought cheap" is the
+    # loser signature, so the weak-prior path must not fire blind).
     if require_vwap_hold:
         vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
         if vwap_cur is not None and float(vwap_cur) > 0:
@@ -755,6 +757,8 @@ def pullback_break_confirmation(
             _px_vs_vwap = float(live_price) if _tick_break else cur_c
             if _px_vs_vwap < float(vwap_cur) * (1.0 - max(0.0, float(vwap_hold_buffer))):
                 return False, "below_vwap", debug
+        elif _deep_reclaim:
+            return False, "vwap_unavailable_weak_path", debug
 
     # MACD momentum confirmation (lenient: histogram >= 0 OR macd line >= signal).
     if require_macd_bullish:
@@ -768,6 +772,26 @@ def pullback_break_confirmation(
             debug["macd_hist"] = None if hh is None else round(float(hh), 6)
             if not bullish:
                 return False, "macd_not_bullish", debug
+
+    # VERTICALITY SKIP (2026-06-12 entry study: 3/3 fills with >3% 1m-EMA9
+    # extension went a full R underwater — vertical-bar chases). The cap is
+    # ATR-scaled (an instrument that breathes 4% gets more room than one that
+    # breathes 1%): extension above EMA9 must stay under atr_pct x the knob.
+    # 0 disables. Applies to every success path incl. tick-breaks — the tick
+    # path is exactly where mid-extension chases happen.
+    try:
+        _vert_mult = float(getattr(settings, "chili_momentum_entry_verticality_atr_mult", 1.5) or 0.0)
+    except (TypeError, ValueError):
+        _vert_mult = 1.5
+    if _vert_mult > 0:
+        _e9 = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+        if _e9 is not None and float(_e9) > 0:
+            _px_v = float(live_price) if (_tick_break and live_price) else cur_c
+            _ext = (_px_v / float(_e9)) - 1.0
+            _cap = max(0.005, float(atr_pct or 0.0) * _vert_mult)
+            if _ext > _cap:
+                debug["verticality"] = {"ext": round(_ext, 4), "cap": round(_cap, 4)}
+                return False, "extended_verticality", debug
 
     if _deep_reclaim:
         return True, ("deep_reclaim_tick_ok" if _tick_break else "deep_reclaim_ok"), debug
