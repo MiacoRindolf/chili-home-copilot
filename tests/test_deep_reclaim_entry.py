@@ -136,3 +136,21 @@ def test_tick_armed_tuple_is_shared_across_call_sites() -> None:
         assert "TICK_ARMED_WAIT_REASONS" in src, mod.__name__
         assert '("waiting_for_break", "waiting_for_reclaim")' not in src, mod.__name__
     assert "waiting_for_reclaim_high" in TICK_ARMED_WAIT_REASONS
+
+
+def test_reclaim_morning_gate_does_not_leak_onto_crypto(monkeypatch) -> None:
+    # CRYPTO PARITY: a 24/7 asset has no "open" — the morning window must not
+    # block a crypto reclaim at e.g. 15:00 ET (equity: blocked past 10:30 ET)
+    import pandas as pd
+
+    bars = _deep_v_bars()
+    idx = pd.date_range("2026-06-11 19:00", periods=len(bars), freq="1min")  # 15:00 ET
+    df = pd.DataFrame(
+        {"Open": [b[0] for b in bars], "High": [b[1] for b in bars],
+         "Low": [b[2] for b in bars], "Close": [b[3] for b in bars],
+         "Volume": [b[4] for b in bars]}, index=idx,
+    )
+    ok_eq, reason_eq, _ = pullback_break_confirmation(df, symbol="EDHL", **_GATES)
+    assert not ok_eq and reason_eq in ("pullback_too_deep", "pullback_below_ema9")  # equity: gated
+    ok_cr, reason_cr, dbg = pullback_break_confirmation(df, symbol="KAIO-USD", **_GATES)
+    assert ok_cr and reason_cr == "deep_reclaim_ok", (reason_cr, dbg)  # crypto: fires
