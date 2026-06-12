@@ -1209,3 +1209,115 @@
 .ap-data-table tbody tr:hover {
   background: rgba(148, 163, 184, 0.06);
 }
+
+/* ── P&L command band + per-symbol ledger (2026-06-12 money-first redesign) ── */
+.ap-pnl-band {
+  position: sticky;
+  top: var(--ap-header-h, 64px);
+  z-index: 15; /* below .ap-header (20) — band slides under nothing, stacks below */
+  display: flex;
+  align-items: stretch;
+  gap: 18px;
+  padding: 12px 18px;
+  margin-bottom: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(8, 13, 28, .96);
+  backdrop-filter: blur(6px);
+  box-shadow: var(--shadow-md);
+  /* The band surface is hardcoded dark (page idiom) — text must not follow
+     the light theme's dark --text or it vanishes. */
+  color: #e2e8f0;
+}
+.ap-pnl-band__zone { display: flex; flex-direction: column; justify-content: center; gap: 2px; }
+.ap-pnl-band__hero { flex: 0 0 auto; min-width: 260px; }
+.ap-pnl-band__label {
+  font-size: 10px; font-weight: 700; letter-spacing: .08em;
+  text-transform: uppercase; color: #7c8aa0;
+}
+.ap-pnl-band__label-sub { font-weight: 500; letter-spacing: 0; text-transform: none; }
+.ap-pnl-band__big {
+  font-size: 32px; font-weight: 800; line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  color: #e2e8f0;
+}
+.ap-pnl-band__big.positive, .ap-pnl-chip__val.positive, .ap-lane-total.positive, .ap-pnl-num.positive { color: var(--color-success); }
+.ap-pnl-band__big.negative, .ap-pnl-chip__val.negative, .ap-lane-total.negative, .ap-pnl-num.negative { color: var(--color-danger); }
+.ap-pnl-band__sub { font-size: var(--text-xs); color: #94a3b8; }
+.ap-pnl-band__risk { flex: 1 1 auto; border-left: 1px solid rgba(148,163,184,.18); padding-left: 18px; }
+.ap-pnl-band__risk-line { font-size: var(--text-base); font-weight: 700; font-variant-numeric: tabular-nums; }
+.ap-pnl-band__fenced {
+  flex: 0 0 auto; flex-direction: row; gap: 10px; align-items: center;
+  border-left: 1px dashed rgba(148,163,184,.35); padding-left: 18px;
+}
+.ap-pnl-chip {
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 6px 12px; border: 1px solid rgba(148,163,184,.25);
+  border-radius: 10px; background: rgba(15,23,42,.6);
+}
+.ap-pnl-chip--alpaca { border-style: dashed; opacity: .92; }
+.ap-pnl-chip__name { font-size: 9px; font-weight: 700; letter-spacing: .08em; color: #7c8aa0; }
+.ap-pnl-chip__val { font-size: var(--text-lg); font-weight: 800; font-variant-numeric: tabular-nums; color: #e2e8f0; }
+.ap-pnl-chip__sub { font-size: 10px; color: #7c8aa0; }
+.ap-pnl-band__asof {
+  position: absolute; right: 14px; bottom: 4px;
+  font-size: 10px; color: #7c8aa0;
+}
+.ap-pnl-band.ap-pnl-aging .ap-pnl-band__asof { color: var(--color-warning); }
+.ap-pnl-band.ap-pnl-stale .ap-pnl-band__big,
+.ap-pnl-band.ap-pnl-stale .ap-pnl-chip__val,
+.ap-pnl-band.ap-pnl-stale .ap-pnl-band__risk-line { opacity: .5; }
+
+.ap-lane { margin-bottom: var(--space-4); }
+.ap-lane:last-child { margin-bottom: 0; }
+.ap-lane-head {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  padding: 8px 10px; border-radius: 10px 10px 0 0;
+  background: rgba(34,197,94,.07); border: 1px solid rgba(148,163,184,.18); border-bottom: none;
+}
+.ap-lane--paper .ap-lane-head { background: rgba(56,189,248,.06); }
+.ap-lane--alpaca .ap-lane-head { background: rgba(148,163,184,.06); border-style: dashed; }
+.ap-lane--alpaca .ap-pnl-table, .ap-lane--alpaca .ap-pnl-empty { opacity: .85; }
+.ap-lane-name { font-size: 11px; font-weight: 800; letter-spacing: .08em; }
+.ap-lane-total { font-size: var(--text-lg); font-weight: 800; font-variant-numeric: tabular-nums; }
+.ap-pnl-table td { vertical-align: middle; }
+.ap-pnl-sym { font-weight: 800; font-size: 14px; }
+.ap-pnl-num { font-variant-numeric: tabular-nums; text-align: right; }
+.ap-pnl-table th:nth-child(4), .ap-pnl-table th:nth-child(5), .ap-pnl-table th:nth-child(6) { text-align: right; }
+.ap-pnl-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
+.ap-pnl-jump { color: var(--text-muted); text-decoration: none; font-size: 16px; }
+.ap-pnl-jump:hover { color: var(--accent); }
+.ap-pnl-empty {
+  padding: 12px; font-size: var(--text-xs); color: var(--text-muted);
+  border: 1px solid rgba(148,163,184,.18); border-top: none; border-radius: 0 0 10px 10px;
+}
+.ap-pnl-muted { font-size: 10px; color: var(--text-muted); }
+.ap-session-card { scroll-margin-top: var(--ap-top-obstruction, 180px); }
+
+@media (max-width: 900px) {
+  .ap-pnl-band { flex-wrap: wrap; gap: 10px; }
+  .ap-pnl-band__risk { border-left: none; padding-left: 0; flex-basis: 100%; }
+  .ap-pnl-band__fenced { border-left: none; padding-left: 0; }
+  .ap-pnl-band__big { font-size: 26px; }
+}
+
+/* Collapsed-by-default folds (fast path, broker truth, diagnostics footer) */
+.ap-fold {
+  margin-bottom: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(15,23,42,.5);
+}
+.ap-fold > summary {
+  cursor: pointer;
+  padding: 12px 16px;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--text-secondary);
+  list-style: none;
+}
+.ap-fold > summary::before { content: '▸ '; color: var(--text-muted); }
+.ap-fold[open] > summary::before { content: '▾ '; }
+.ap-fold[open] { background: rgba(15,23,42,.72); }
+.ap-fold > summary:hover { color: var(--text); }
+.ap-fold > *:not(summary) { margin: 0 14px 14px; }

@@ -1837,3 +1837,283 @@ def archive_automation_session(db: Session, *, user_id: int, session_id: int) ->
     except Exception:
         pass
     return {"ok": True, "session_id": sess.id, "state": sess.state}
+
+
+# ── P&L rollup (2026-06-12 money-first redesign) ────────────────────────────
+# The operator could not answer "magkano na ang total PnL?" from the page:
+# totals were summed CLIENT-side over a capped-100, archived-excluded session
+# list at the bottom of the page. This computes the truth server-side in one
+# DB snapshot — uncapped, archived included — per symbol × bucket.
+#
+# Buckets: live (real money), paper (simulator), alpaca (live-mode twin soak
+# against the Alpaca PAPER endpoint — fake money, never blended into live).
+#
+# Realized-today sources differ by lane because only the paper runner writes
+# fill rows: paper = simulated-fill pnl_usd inside the ET day (exact);
+# live/alpaca = terminal outcomes today + cumulative runtime realized of
+# still-active sessions (sessions are intraday in practice).
+
+
+def _rollup_bucket_for(sess_mode: str, execution_family: str | None) -> str:
+    # "alpaca" = LIVE-mode twin-soak sessions only. Paper-mode sessions routed
+    # to alpaca_spot (the paper-equity DMA lane, #649) are still the paper
+    # SIMULATOR — they belong to the paper bucket, and their money is already
+    # fully counted from simulated fills (bucketing them here would also
+    # double-count their cumulative runtime realized).
+    if sess_mode == "live" and (execution_family or "") == "alpaca_spot":
+        return "alpaca"
+    return "live" if sess_mode == "live" else "paper"
+
+
+def _et_day_bounds_utc() -> tuple[datetime, datetime, str]:
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    now_et = datetime.now(et)
+    start_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_et = start_et + timedelta(days=1)
+    utc = ZoneInfo("UTC")
+    return (
+        start_et.astimezone(utc).replace(tzinfo=None),
+        end_et.astimezone(utc).replace(tzinfo=None),
+        now_et.strftime("%H:%M:%S"),
+    )
+
+
+def _rollup_exec_state(sess: TradingAutomationSession) -> dict[str, Any]:
+    snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
+    key = "momentum_live_execution" if sess.mode == "live" else "momentum_paper_execution"
+    ex = snap.get(key)
+    return ex if isinstance(ex, dict) else {}
+
+
+def automation_pnl_rollup(db: Session, *, user_id: int) -> dict[str, Any]:
+    start_utc, end_utc, as_of_et = _et_day_bounds_utc()
+    from ....models.trading import MomentumAutomationOutcome
+
+    week_floor_utc = datetime.utcnow() - timedelta(days=7)
+
+    def _sym_cell() -> dict[str, Any]:
+        return {
+            "state": "FLAT", "qty": None, "avg_price": None, "mark": None,
+            "mark_age_s": None, "floating_usd": 0.0, "realized_usd": 0.0,
+            "realized_7d_usd": 0.0,
+            "trades": 0, "wins": 0, "losses": 0, "last_activity_utc": None,
+            "session_id": None, "open_session_ids": [], "asset_class": None,
+        }
+
+    def _bucket_cell() -> dict[str, Any]:
+        return {
+            "floating_usd": 0.0, "realized_usd": 0.0, "realized_7d_usd": 0.0,
+            "total_usd": 0.0,
+            "open_count": 0, "armed_count": 0, "at_risk_usd": 0.0,
+            "at_risk_unknown_stops": 0, "trades": 0, "wins": 0, "losses": 0,
+            "symbols": {},
+        }
+
+    buckets: dict[str, dict[str, Any]] = {
+        "live": _bucket_cell(), "paper": _bucket_cell(), "alpaca": _bucket_cell(),
+    }
+
+    def _sym(bucket: str, symbol: str) -> dict[str, Any]:
+        return buckets[bucket]["symbols"].setdefault(symbol, _sym_cell())
+
+    def _touch_activity(cell: dict[str, Any], ts) -> None:
+        if ts is None:
+            return
+        iso = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+        if cell["last_activity_utc"] is None or iso > cell["last_activity_utc"]:
+            cell["last_activity_utc"] = iso
+
+    # 1) PAPER realized today — exact, from fill rows inside the ET day.
+    fill_rows = (
+        db.query(
+            TradingAutomationSimulatedFill.symbol,
+            TradingAutomationSimulatedFill.pnl_usd,
+            TradingAutomationSimulatedFill.ts,
+            TradingAutomationSession.mode,
+            TradingAutomationSession.execution_family,
+        )
+        .join(TradingAutomationSession, TradingAutomationSession.id == TradingAutomationSimulatedFill.session_id)
+        .filter(
+            TradingAutomationSession.user_id == user_id,
+            TradingAutomationSimulatedFill.ts >= week_floor_utc,
+            TradingAutomationSimulatedFill.ts < end_utc,
+            TradingAutomationSimulatedFill.pnl_usd.isnot(None),
+        )
+        .all()
+    )
+    for symbol, pnl, fill_ts, mode, fam in fill_rows:
+        bucket = _rollup_bucket_for(mode, fam)
+        cell = _sym(bucket, symbol)
+        p = float(pnl or 0.0)
+        cell["realized_7d_usd"] += p
+        if fill_ts is not None and fill_ts >= start_utc:
+            cell["realized_usd"] += p
+            cell["trades"] += 1
+            if p > 0:
+                cell["wins"] += 1
+            elif p < 0:
+                cell["losses"] += 1
+        _touch_activity(cell, fill_ts)
+
+    # 2) LIVE/ALPACA realized today — terminal outcomes inside the ET day.
+    outcome_rows = (
+        db.query(
+            MomentumAutomationOutcome.realized_pnl_usd,
+            MomentumAutomationOutcome.terminal_at,
+            TradingAutomationSession.symbol,
+            TradingAutomationSession.mode,
+            TradingAutomationSession.execution_family,
+        )
+        .join(TradingAutomationSession, TradingAutomationSession.id == MomentumAutomationOutcome.session_id)
+        .filter(
+            MomentumAutomationOutcome.user_id == user_id,
+            MomentumAutomationOutcome.terminal_at >= week_floor_utc,
+            MomentumAutomationOutcome.terminal_at < end_utc,
+            # NULL pnl = never entered (cancelled_pre_entry, risk_block, ...)
+            # — hundreds exist; they are not trades and must not create
+            # phantom $0 ledger rows.
+            MomentumAutomationOutcome.realized_pnl_usd.isnot(None),
+            TradingAutomationSession.mode == "live",
+        )
+        .all()
+    )
+    for pnl, terminal_at, symbol, mode, fam in outcome_rows:
+        bucket = _rollup_bucket_for(mode, fam)
+        cell = _sym(bucket, symbol)
+        p = float(pnl or 0.0)
+        cell["realized_7d_usd"] += p
+        if terminal_at is not None and terminal_at >= start_utc:
+            cell["realized_usd"] += p
+            cell["trades"] += 1
+            if p > 0:
+                cell["wins"] += 1
+            elif p < 0:
+                cell["losses"] += 1
+        _touch_activity(cell, terminal_at)
+
+    # 3) ACTIVE sessions — floating from open positions, plus (live/alpaca
+    #    only) cumulative runtime realized not yet visible as an outcome row.
+    inactive_states = TERMINAL_STATES | {STATE_ARCHIVED}
+    active_rows = (
+        db.query(TradingAutomationSession)
+        .filter(
+            TradingAutomationSession.user_id == user_id,
+            TradingAutomationSession.state.notin_(inactive_states),
+        )
+        .all()
+    )
+    now_utc = datetime.utcnow()
+    for sess in active_rows:
+        bucket = _rollup_bucket_for(sess.mode, sess.execution_family)
+        ex = _rollup_exec_state(sess)
+        cell = _sym(bucket, sess.symbol)
+        if cell["session_id"] is None:
+            cell["session_id"] = int(sess.id)
+        if cell["asset_class"] is None:
+            try:
+                cell["asset_class"] = asset_class_for_symbol(sess.symbol)
+            except Exception:
+                cell["asset_class"] = None
+        _touch_activity(cell, sess.updated_at)
+        if sess.mode == "live":
+            # Runner identity decides the money source: only the LIVE runner
+            # lacks fill rows. Day-fence by session start — a 24/7 crypto
+            # session that banked before ET midnight must not put yesterday's
+            # money into the "TODAY (since 00:00 ET)" hero.
+            _rt = float(_float_or_none_q(ex.get("realized_pnl_usd")) or 0.0)
+            if _rt:
+                _sa = sess.started_at or sess.created_at
+                if _sa is None or _sa >= start_utc:
+                    cell["realized_usd"] += _rt
+                if _sa is None or _sa >= week_floor_utc:
+                    cell["realized_7d_usd"] += _rt
+        pos = ex.get("position") if isinstance(ex.get("position"), dict) else None
+        if not pos:
+            if cell["state"] != "OPEN":
+                cell["state"] = "ARMED"
+            buckets[bucket]["armed_count"] += 1
+            continue
+        qty = _float_or_none_q(pos.get("quantity"))
+        entry = _float_or_none_q(pos.get("avg_entry_price")) or _float_or_none_q(pos.get("entry_price"))
+        last = _float_or_none_q(ex.get("last_mid"))
+        # Multiple open sessions on one symbol: aggregate qty/weighted entry,
+        # track every session id so per-row Flatten covers them all.
+        if cell["state"] == "OPEN" and qty and cell["qty"]:
+            prev_qty, prev_entry = cell["qty"], cell["avg_price"]
+            cell["qty"] = prev_qty + qty
+            if entry and prev_entry and cell["qty"] > 0:
+                cell["avg_price"] = (prev_entry * prev_qty + entry * qty) / cell["qty"]
+            cell["mark"] = last or cell["mark"]
+        else:
+            cell["qty"], cell["avg_price"], cell["mark"] = qty, entry, last
+        cell["state"] = "OPEN"
+        cell["open_session_ids"].append(int(sess.id))
+        cell["session_id"] = int(sess.id)
+        buckets[bucket]["open_count"] += 1
+        tick = ex.get("last_tick_utc")
+        if tick:
+            try:
+                tick_dt = datetime.fromisoformat(str(tick).replace("Z", "+00:00")).replace(tzinfo=None)
+                cell["mark_age_s"] = max(0, int((now_utc - tick_dt).total_seconds()))
+            except (TypeError, ValueError):
+                pass
+        if qty and entry and last and entry > 0:
+            cell["floating_usd"] += round((last - entry) * qty, 2)
+        stop = _float_or_none_q(pos.get("stop_price"))
+        if qty and entry and stop and stop > 0:
+            # A stop AT or ABOVE entry (breakeven ratchet / trail in profit)
+            # is a KNOWN stop with $0 risk — the safest positions must not
+            # read as the scariest. "Unknown" = genuinely missing stop.
+            buckets[bucket]["at_risk_usd"] += max(0.0, (entry - stop)) * qty
+        else:
+            buckets[bucket]["at_risk_unknown_stops"] += 1
+
+    # Bucket totals from symbol cells.
+    for b in buckets.values():
+        for cell in b["symbols"].values():
+            cell["realized_usd"] = round(cell["realized_usd"], 2)
+            cell["realized_7d_usd"] = round(cell["realized_7d_usd"], 2)
+            cell["floating_usd"] = round(cell["floating_usd"], 2)
+            cell["total_usd"] = round(cell["realized_usd"] + cell["floating_usd"], 2)
+            b["floating_usd"] += cell["floating_usd"]
+            b["realized_usd"] += cell["realized_usd"]
+            b["realized_7d_usd"] += cell["realized_7d_usd"]
+            b["trades"] += cell["trades"]
+            b["wins"] += cell["wins"]
+            b["losses"] += cell["losses"]
+        b["floating_usd"] = round(b["floating_usd"], 2)
+        b["realized_usd"] = round(b["realized_usd"], 2)
+        b["realized_7d_usd"] = round(b["realized_7d_usd"], 2)
+        b["total_usd"] = round(b["floating_usd"] + b["realized_usd"], 2)
+        b["at_risk_usd"] = round(b["at_risk_usd"], 2)
+        # Ledger rows = TODAY's story (open/armed positions + today's trades).
+        # Symbols whose only activity is older in the 7d window stay in the
+        # bucket 7d totals but are dropped from the row list — 276 flat history
+        # rows is noise, not a ledger. The count is reported, never silent.
+        visible = {
+            sym: cell
+            for sym, cell in b["symbols"].items()
+            if cell["state"] != "FLAT" or cell["trades"] > 0
+            or cell["realized_usd"] != 0.0 or cell["floating_usd"] != 0.0
+        }
+        b["older_7d_symbols"] = len(b["symbols"]) - len(visible)
+        # OPEN first by |floating|, then by |realized| — fixed sort, server-side.
+        b["symbols"] = [
+            dict(cell, symbol=sym)
+            for sym, cell in sorted(
+                visible.items(),
+                key=lambda kv: (
+                    0 if kv[1]["state"] == "OPEN" else 1,
+                    -abs(kv[1]["floating_usd"] if kv[1]["state"] == "OPEN" else kv[1]["realized_usd"]),
+                ),
+            )
+        ]
+
+    return {
+        "as_of_utc": datetime.utcnow().isoformat() + "Z",
+        "as_of_et": as_of_et,
+        "et_day_start_utc": start_utc.isoformat() + "Z",
+        "buckets": buckets,
+    }

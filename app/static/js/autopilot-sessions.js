@@ -134,7 +134,7 @@
     var pnlCls = isFinite(pnlVal) ? (pnlVal >= 0 ? 'positive' : 'negative') : '';
 
     return ''
-      + '<article class="ap-session-card" data-session-id="' + sid + '">'
+      + '<article class="ap-session-card" id="ap-sess-' + sid + '" data-session-id="' + sid + '">'
       + '  <div class="ap-session-card__header">'
       + '    <div>'
       + '      <div class="ap-symbol-lockup">'
@@ -264,7 +264,12 @@
   }
 
   function _sessionIdSet(sessions) {
-    return (sessions || []).map(function(s) { return String(s.id); }).sort().join(',');
+    // Includes the open/flat flag so a position opening or closing forces a
+    // re-render (and therefore the open-first re-sort) instead of the
+    // in-place metric patch.
+    return (sessions || []).map(function(s) {
+      return String(s.id) + ((s.pnl || {}).qty ? 'o' : 'f');
+    }).sort().join(',');
   }
 
   function _updateMetricsInPlace(sessions) {
@@ -297,67 +302,23 @@
     });
   }
 
-  function modeTotals(rows) {
-    var t = {};
-    rows.forEach(function(r) {
-      var m = r.mode || 'paper';
-      if (!t[m]) t[m] = { n: 0, open: 0, floating: 0, realized: 0 };
-      t[m].n += 1;
-      var p = r.pnl || {};
-      if (isFinite(Number(p.floating_usd))) { t[m].floating += Number(p.floating_usd); t[m].open += 1; }
-      if (isFinite(Number(p.realized_usd))) t[m].realized += Number(p.realized_usd);
+  // Aggregate P&L moved server-side (autopilot-pnl.js renders the command
+  // band + per-symbol ledger from /automation/pnl-rollup). Cards sort
+  // open-positions-first so the money at work is on top.
+  function _openFirst(rows) {
+    return rows.slice().sort(function(a, b) {
+      var ao = (a.pnl || {}).qty ? 0 : 1;
+      var bo = (b.pnl || {}).qty ? 0 : 1;
+      return ao - bo;
     });
-    return t;
   }
-
-  function renderPnlStrip(rows) {
-    var host = document.getElementById('ap-pnl-strip');
-    if (!host) {
-      var listEl = document.getElementById('ap-sessions');
-      if (!listEl || !listEl.parentNode) return;
-      host = document.createElement('div');
-      host.id = 'ap-pnl-strip';
-      host.style.cssText = 'display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 12px;';
-      listEl.parentNode.insertBefore(host, listEl);
-    }
-    var t = modeTotals(rows);
-    var filt = state.modeFilter || 'all';
-    function chip(mode, label) {
-      var d = t[mode] || { n: 0, open: 0, floating: 0, realized: 0 };
-      var fl = pnlText(d.floating), re = pnlText(d.realized);
-      return '<div style="background:rgba(110,118,129,.1);border:1px solid rgba(110,118,129,.3);border-radius:10px;padding:8px 14px;font-size:.92em;">'
-        + '<b style="margin-right:8px;">' + label + '</b>'
-        + d.n + ' sessions · ' + d.open + ' open'
-        + ' · Floating <b class="' + pnlClass(d.floating) + '">' + fl + '</b>'
-        + ' · Realized <b class="' + pnlClass(d.realized) + '">' + re + '</b>'
-        + '</div>';
-    }
-    function fbtn(mode, label) {
-      var on = filt === mode;
-      return '<button type="button" class="ap-btn" style="' + (on ? 'outline:2px solid #58a6ff;' : '') + '" '
-        + "onclick=\"apSetModeFilter('" + mode + "')\">" + label + '</button>';
-    }
-    host.innerHTML = chip('live', 'LIVE') + chip('paper', 'PAPER')
-      + '<span style="flex:1"></span>'
-      + fbtn('all', 'All') + fbtn('live', 'Live') + fbtn('paper', 'Paper');
-  }
-
-  window.apSetModeFilter = function(mode) {
-    state.modeFilter = mode;
-    state._prevSessions = null; // force re-render
-    renderSessions();
-  };
 
   function renderSessions() {
     var list = document.getElementById('ap-sessions');
     var empty = document.getElementById('ap-sessions-empty');
     if (!list || !empty) return;
 
-    renderPnlStrip(state.sessions || []);
-    var _filt = state.modeFilter || 'all';
-    var _visible = (state.sessions || []).filter(function(r) {
-      return _filt === 'all' || (r.mode || 'paper') === _filt;
-    });
+    var _visible = _openFirst(state.sessions || []);
 
     if (!state.sessions.length) {
       destroyAllCharts();
@@ -814,12 +775,13 @@
       });
   };
 
-  window.apSessionAction = function(sessionId, action) {
+  window.apSessionAction = function(sessionId, action, label) {
     if (!sessionId || !action) return;
-    if (action === 'flatten' && !window.confirm('Flatten this position now? The system will market-exit through its own order chain.')) {
+    var target = label || ('session #' + sessionId);
+    if (action === 'flatten' && !window.confirm('Flatten ' + target + ' now? The system will market-exit through its own order chain.')) {
       return;
     }
-    if ((action === 'delete' || action === 'stop') && !window.confirm('Are you sure you want to ' + action + ' this session?')) {
+    if ((action === 'delete' || action === 'stop') && !window.confirm('Are you sure you want to ' + action + ' ' + target + '?')) {
       return;
     }
     AP.trackEvent('SessionAction', { session_id: sessionId, action: action });
@@ -840,7 +802,8 @@
     return Promise.all([
       apRefreshSummary(),
       apRefreshOpportunities(),
-      apRefreshSessions()
+      apRefreshSessions(),
+      window.apRefreshPnl ? window.apRefreshPnl() : Promise.resolve()
     ]);
   };
 
@@ -850,6 +813,7 @@
       if (IS_GUEST) return;
       apRefreshSummary();
       apRefreshOpportunities();
+      if (window.apRefreshPnl) window.apRefreshPnl();
       apRefreshSessions().then(function() {
         Object.keys(state.visibleSessionIds).forEach(function(id) {
           apLoadSessionDetail(Number(id), true);

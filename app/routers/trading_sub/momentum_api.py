@@ -34,6 +34,7 @@ from ...models.trading import TradingAutomationSession, TradingDecisionCandidate
 from ...services.trading.decision_ledger import deployment_summary_for_user, recent_packets
 from ...services.trading.momentum_neural.automation_query import (
     archive_automation_session,
+    automation_pnl_rollup,
     automation_summary,
     cancel_automation_session,
     delete_automation_session,
@@ -404,6 +405,12 @@ def _automation_user_id(request: Request, db: Session) -> int:
 @router.get("/automation/summary")
 def get_automation_summary(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
     return automation_summary(db, user_id=_automation_user_id(request, db))
+
+
+@router.get("/automation/pnl-rollup")
+def get_automation_pnl_rollup(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Server-computed P&L truth: uncapped, archived included, per symbol × bucket."""
+    return automation_pnl_rollup(db, user_id=_automation_user_id(request, db))
 
 
 @router.get("/automation/sessions")
