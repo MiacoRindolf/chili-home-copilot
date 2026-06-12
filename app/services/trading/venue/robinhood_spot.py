@@ -882,28 +882,46 @@ class RobinhoodSpotAdapter(VenueAdapter):
 
         from ...broker_service import place_buy_order, place_sell_order
 
+        def _place(mh_override: Optional[str]) -> dict[str, Any]:
+            if side.lower() == "buy":
+                return place_buy_order(
+                    ticker,
+                    qty,
+                    order_type="limit",
+                    limit_price=price,
+                    market_hours_override=mh_override,
+                    extended_hours_override=extended_hours_override,
+                    time_in_force=time_in_force,
+                )
+            return place_sell_order(
+                ticker,
+                qty,
+                order_type="limit",
+                limit_price=price,
+                market_hours_override=mh_override,
+                extended_hours_override=extended_hours_override,
+            )
+
         side_l = side.lower()
-        if side_l == "buy":
-            result = place_buy_order(
-                ticker,
-                qty,
-                order_type="limit",
-                limit_price=price,
-                market_hours_override=market_hours_override,
-                extended_hours_override=extended_hours_override,
-                time_in_force=time_in_force,
-            )
-        elif side_l == "sell":
-            result = place_sell_order(
-                ticker,
-                qty,
-                order_type="limit",
-                limit_price=price,
-                market_hours_override=market_hours_override,
-                extended_hours_override=extended_hours_override,
-            )
-        else:
+        if side_l not in ("buy", "sell"):
             return {"ok": False, "error": f"unknown side: {side}"}
+        result = _place(market_hours_override)
+        # 2026-06-12 first premarket entries (OTLK/CUPR): all_day_hours is the
+        # 24h-MARKET session — most small caps aren't enrolled and RH rejects
+        # with "instrument is untradable for 24 hour trading". Those names ARE
+        # tradable in the regular EXTENDED session (7:00-9:30 / 16:00-20:00 ET)
+        # — retry once there. Applies to exits too (a held position must always
+        # be closable premarket).
+        if (
+            not result.get("ok")
+            and market_hours_override == "all_day_hours"
+            and "untradable for 24 hour trading" in str(result.get("raw") or result.get("error") or "")
+        ):
+            logger.info(
+                "[robinhood_spot] %s %s not 24h-enrolled; retrying in extended_hours session",
+                side_l, ticker,
+            )
+            result = _place("extended_hours")
 
         if result.get("ok") and client_order_id:
             idempotency_store.remember(
