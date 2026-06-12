@@ -340,6 +340,14 @@ def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[Momentum
         .limit(max(int(limit) * 25, 200))
         .all()
     )
+    # MARKET-OPEN FILTER BEFORE THE LIMIT (2026-06-12 night-lane fix): the
+    # top-N by score overnight is stale CLOSED equities (frozen at yesterday's
+    # +200%, scoring above every crypto pair) — they filled the whole candidate
+    # list, got dropped by the in-loop market-hours check, and the pass probed
+    # NOTHING all night: zero crypto arms, zero paper shadow, an empty lane
+    # while 320 live-eligible crypto candidates sat fresh. Filter untradeable
+    # markets HERE so the limit is spent on names the pass can actually arm.
+    rows = [r for r in rows if _symbol_market_open(r.symbol)]
     if _auto_arm_equity_only() and rows:
         rows = _enforce_ross_price_band(rows)
         rows = _liquidity_rerank(rows)
