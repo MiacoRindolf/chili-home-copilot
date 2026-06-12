@@ -2856,17 +2856,23 @@ def tick_live_session(
         # Streak-adaptive risk (Ross): the per-trade max loss scales with the
         # lane's recent live win rate — bigger on a hot hand, half-size when
         # cold or after 3 straight losses. Bounds [0.5, 1.5]; fail-neutral 1.0.
-        from .risk_policy import streak_risk_multiplier
+        from .risk_policy import cushion_risk_multiplier, streak_risk_multiplier
 
         _streak_mult, _streak_meta = streak_risk_multiplier(db)
         _base_max_loss = policy_float_cap(
             caps, "max_loss_per_trade_usd", settings.chili_momentum_risk_max_loss_per_trade_usd
         )
         le["streak_risk"] = _streak_meta
+        # Day-cushion ladder (Ross 06-11): start the day at half risk; earn the
+        # right to full and then aggressive size from TODAY's banked P&L.
+        _cushion_mult, _cushion_meta = cushion_risk_multiplier(
+            db, base_loss_usd=float(_base_max_loss)
+        )
+        le["cushion_risk"] = _cushion_meta
         _rf_qty, _rf_meta = compute_risk_first_quantity(
             entry_price=guarded_ask,
             atr_pct=_eff_atr_pct,
-            max_loss_usd=float(_base_max_loss) * float(_streak_mult),
+            max_loss_usd=float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult),
             max_notional_ceiling_usd=max_notional,
             base_increment=inc,
             base_min_size=mn,
