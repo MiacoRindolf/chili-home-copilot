@@ -3,7 +3,7 @@
 
 {% block head_extra %}
 <script src="https://unpkg.com/lightweight-charts@4/dist/lightweight-charts.standalone.production.js"></script>
-<link rel="stylesheet" href="/static/css/autopilot.css" />
+<link rel="stylesheet" href="/static/css/autopilot.css?v=6" />
 {% endblock %}
 
 {% block content %}
@@ -11,17 +11,39 @@
   {% include "trading/_autopilot_header.html" %}
 
   <div class="ap-shell">
+    {# 1 ── Money truth: sticky command band + needs-attention blockers #}
+    {% include "trading/_autopilot_pnl_band.html" %}
     {% include "trading/_autopilot_summary.html" %}
 
-    {% include "trading/_autopilot_fast_path.html" %}
+    {# 2 ── Per-symbol P&L ledger (stacked lanes: LIVE / PAPER / ALPACA SOAK) #}
+    {% include "trading/_autopilot_pnl_ledger.html" %}
 
+    {# 3 ── Sessions (cards: controls, chart, fills, events) #}
+    {% include "trading/_autopilot_sessions.html" %}
+
+    {# 4 ── Candidate flow: eligible board, then the fast-path desk collapsed #}
     <section class="ap-section" id="ap-eligible-section">
       {% include "trading/_autopilot_filters.html" %}
       {% include "trading/_autopilot_opportunities.html" %}
     </section>
 
-    {% include "trading/_autopilot_pattern_positions.html" %}
-    {% include "trading/_autopilot_sessions.html" %}
+    <details class="ap-fold" id="ap-fast-path-fold">
+      <summary>Fast Path · crypto scalping desk</summary>
+      {% include "trading/_autopilot_fast_path.html" %}
+    </details>
+
+    {# 5 ── Broker truth / reconciliation (audit surface, click to expand) #}
+    <details class="ap-fold" id="ap-broker-truth-fold">
+      <summary>Broker truth · CHILI-managed positions &amp; reconciliation</summary>
+      {% include "trading/_autopilot_pattern_positions.html" %}
+    </details>
+
+    {# 6 ── System diagnostics footer #}
+    <details class="ap-fold" id="ap-diagnostics-fold">
+      <summary>System diagnostics · runners, pipeline, decisions</summary>
+      <div id="ap-summary-strip" class="ap-summary-ribbon" role="region" aria-label="System summary"></div>
+      <div id="ap-decision-strip" class="ap-muted" style="font-size:var(--text-xs);line-height:1.45;margin:var(--space-2) 0 var(--space-3);"></div>
+    </details>
   </div>
 </div>
 
@@ -33,7 +55,8 @@
     LEGACY_ALIAS: {{ automation_legacy_alias | default(false) | tojson }}
   };
 </script>
-<script src="/static/js/autopilot.js?v=5"></script>
-<script src="/static/js/autopilot-pattern-desk.js?v=5"></script>
-<script src="/static/js/autopilot-sessions.js?v=5"></script>
+<script src="/static/js/autopilot.js?v=6"></script>
+<script src="/static/js/autopilot-pattern-desk.js?v=6"></script>
+<script src="/static/js/autopilot-sessions.js?v=6"></script>
+<script src="/static/js/autopilot-pnl.js?v=6"></script>
 {% endblock %}
