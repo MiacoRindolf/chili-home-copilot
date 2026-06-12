@@ -1899,15 +1899,12 @@ def test_generate_diffs_reports_rejected_model_output(monkeypatch, tmp_path):
         db.commit()
         monkeypatch.setattr(orchestrator, "select_local_model", lambda: {"model": "qwen", "available": True})
         monkeypatch.setattr(orchestrator.insights_mod, "get_insights", lambda *args, **kwargs: [])
+        # The edit engine now goes through the gateway (local-first code
+        # tier) instead of direct ollama_client — mock at the gateway so the
+        # test never touches a real LLM.
         monkeypatch.setattr(
-            orchestrator.ollama_client,
-            "chat",
-            lambda *args, **kwargs: SimpleNamespace(
-                ok=True,
-                text="I cannot produce a patch.",
-                error=None,
-                latency_ms=1,
-            ),
+            "app.services.context_brain.llm_gateway.gateway_chat",
+            lambda *args, **kwargs: {"reply": "I cannot produce a patch.", "model": "m"},
         )
 
         with pytest.raises(orchestrator.AutonomyBlocked) as exc:
@@ -1918,7 +1915,7 @@ def test_generate_diffs_reports_rejected_model_output(monkeypatch, tmp_path):
                 [{"path": "foo.txt", "description": "make a small change"}],
             )
 
-        assert "model did not return a unified diff" in str(exc.value)
+        assert "neither edit blocks nor a unified diff" in str(exc.value)
     finally:
         db.close()
 

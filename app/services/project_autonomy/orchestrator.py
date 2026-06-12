@@ -6272,62 +6272,93 @@ def generate_diffs_from_plan(
             desc = desc + "\n\nValidation failure to repair:\n" + validation_context
         if not validation_context and try_fallback(rel, content):
             continue
-        prompt = _build_edit_prompt(rel, content or "", desc, conventions)
-        result = ollama_client.chat(
-            [
-                {"role": "system", "content": "Return a single unified diff. No prose."},
-                {"role": "user", "content": prompt},
-            ],
-            str(model_info["model"]),
-            temperature=0.1,
-            timeout_sec=_EDIT_TIMEOUT_SEC,
-            options={
-                "num_predict": _EDIT_NUM_PREDICT,
-                "num_ctx": _EDIT_NUM_CTX,
-                "keep_alive": _OLLAMA_KEEP_ALIVE,
-            },
+        # Proven dispatch-lane edit machinery (SR blocks + fuzzy/indent
+        # healing + machine-generated diffs), via the gateway's local-first
+        # code tier with cascade escalation — replaces the old direct-Ollama
+        # unified-diff guessing against the 260-line truncation, which was
+        # the autopilot lane's dominant failure mode.
+        import time as _time
+
+        from ...config import settings as _settings
+        from ...services.code_brain import agent as code_agent_mod
+        from ...services.context_brain.llm_gateway import gateway_chat as _gw_chat
+
+        full_content = code_agent_mod._read_file_full(str(repo_path), rel)
+        prompt = code_agent_mod._build_edit_prompt(
+            rel,
+            code_agent_mod._elide_for_prompt(full_content if full_content is not None else (content or "")),
+            desc,
+            conventions,
         )
-        _note_model_call_result(str(model_info["model"]), result)
+        _t0 = _time.monotonic()
+        gw = _gw_chat(
+            messages=[{"role": "user", "content": f"Apply the change to {rel} as described."}],
+            purpose="code_dispatch_edit",
+            system_prompt=prompt,
+            trace_id=f"autopilot-edit-{rel}",
+            user_message=desc,
+            max_tokens=_settings.chili_code_gen_max_tokens,
+            db=db,
+        )
+        reply_text = (gw.get("reply") or "") if isinstance(gw, dict) else ""
         _add_artifact(
             db,
             run.run_id,
             "model_call",
             f"edit_{rel}",
             content_json={
-                "model": model_info["model"],
+                "model": (gw.get("model") if isinstance(gw, dict) else None) or "gateway_error",
                 "file": rel,
-                "ok": result.ok,
-                "latency_ms": result.latency_ms,
-                "error": result.error,
-                "skipped_models": model_info.get("skipped_models"),
+                "ok": bool(reply_text.strip()),
+                "latency_ms": int((_time.monotonic() - _t0) * 1000),
+                "engine": "sr_blocks_via_gateway",
                 "prompt_chars": len(prompt),
-                "timeout_sec": _EDIT_TIMEOUT_SEC,
-                "num_predict": _EDIT_NUM_PREDICT,
-                "num_ctx": _EDIT_NUM_CTX,
-                "keep_alive": _OLLAMA_KEEP_ALIVE,
             },
         )
         _check_cancel(db, run)
-        if not result.ok:
-            rejections.append(f"{rel}: model call failed ({result.error or 'unknown error'})")
+        if not reply_text.strip():
+            rejections.append(f"{rel}: model call failed (empty gateway reply)")
             if try_fallback(rel, content):
                 continue
             continue
-        diff = _extract_diff(result.text)
+        diff = ""
+        sr_blocks = code_agent_mod._parse_search_replace_blocks(reply_text)
+        if sr_blocks and full_content is not None:
+            outcome = code_agent_mod._apply_search_replace(full_content, sr_blocks)
+            if outcome["new_content"] is not None:
+                diff = code_agent_mod._unified_diff_text(rel, full_content, outcome["new_content"])
+            else:
+                _add_artifact(
+                    db, run.run_id, "diff_rejected", rel,
+                    content_json={"reason": "sr_blocks_rejected", "warnings": outcome["warnings"]},
+                )
+                rejections.append(
+                    f"{rel}: edit blocks rejected ({'; '.join(outcome['warnings'])[:300]})"
+                )
+                if try_fallback(rel, content):
+                    continue
+                continue
         if not diff:
-            reason = "model_response_missing_unified_diff"
+            # Legacy fallback: a raw unified diff reply (cloud models).
+            diff = _extract_diff(reply_text)
+            if diff and diff.lstrip().startswith("@@"):
+                diff = f"--- a/{rel}\n+++ b/{rel}\n{diff.lstrip()}"
+        if not diff:
             _add_artifact(
                 db,
                 run.run_id,
                 "diff_rejected",
                 rel,
-                content_json={"reason": reason, "response_preview": _clip(result.text, 800)},
+                content_json={
+                    "reason": "model_response_missing_edit_blocks_and_diff",
+                    "response_preview": _clip(reply_text, 800),
+                },
             )
-            rejections.append(f"{rel}: model did not return a unified diff")
+            rejections.append(f"{rel}: model returned neither edit blocks nor a unified diff")
             if try_fallback(rel, content):
                 continue
             continue
-        validity = _validate_diff(diff, rel, content)
+        validity = _validate_diff(diff, rel, full_content if full_content is not None else content)
         if not validity.get("valid"):
             _add_artifact(db, run.run_id, "diff_rejected", rel, content_json=validity)
             warnings = ", ".join(str(item) for item in validity.get("warnings") or [])
