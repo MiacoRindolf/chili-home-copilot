@@ -70,3 +70,25 @@ def test_shadow_noop_when_runner_off(db, monkeypatch) -> None:
     u, v = _setup(db)
     monkeypatch.setattr(settings, "chili_momentum_paper_runner_enabled", False, raising=False)
     assert _paper_shadow_arm(db, uid=u.id, candidates=_candidates(v, "AAA")) == 0
+
+
+def test_candidate_list_drops_closed_markets_before_limit(db, monkeypatch) -> None:
+    # 2026-06-12 night-lane fix: overnight, stale CLOSED equities outscored
+    # crypto and consumed the whole candidate limit -> empty lane all night
+    from datetime import datetime
+
+    from app.models.trading import MomentumSymbolViability
+    import app.services.trading.momentum_neural.auto_arm as aa
+
+    _u, v = _setup(db)
+    now = datetime.utcnow()
+    for sym, score in (("STALEEQ", 0.9), ("KAIO-USD", 0.6)):
+        db.add(MomentumSymbolViability(
+            symbol=sym, variant_id=v.id, scope="symbol", viability_score=score,
+            live_eligible=True, freshness_ts=now,
+        ))
+    db.commit()
+    # night: equities closed, crypto open
+    monkeypatch.setattr(aa, "_symbol_market_open", lambda s: s.endswith("-USD"))
+    out = aa._fresh_live_eligible_candidates(db, limit=1)
+    assert [c.symbol for c in out] == ["KAIO-USD"]  # the closed equity no longer crowds the limit
