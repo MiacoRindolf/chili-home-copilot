@@ -177,3 +177,27 @@ def test_fuzzy_match_requires_uniqueness():
 def test_fuzzy_match_ignores_blank_only_search():
     out = _apply_search_replace("x = 1\n", [("   ", "y = 2")])
     assert out["applied"] == 0
+
+
+def test_fuzzy_match_reindents_replace_to_file_truth():
+    """Run-687 live failure: the model copied a module docstring with +4
+    indentation and its REPLACE kept it -> SyntaxError. The fuzzy path must
+    re-anchor REPLACE to the file's real indentation."""
+    content = "\"\"\"Tiers:\n  4 — old premium line\n\"\"\"\nx = 1\n"
+    out = _apply_search_replace(
+        content,
+        [("    \"\"\"Tiers:\n      4 - old premium line\n    \"\"\"",
+          "    \"\"\"Tiers:\n      4 - frontier escalation\n    \"\"\"")],
+    )
+    assert out["applied"] == 1
+    nc = out["new_content"]
+    assert nc.startswith("\"\"\"Tiers:")          # no leading indent on line 1
+    assert "\n  4 - frontier escalation\n" in nc   # body keeps 2-space indent
+    assert "    \"\"\"" not in nc
+
+
+def test_reindent_noop_when_indentation_agrees():
+    content = "def f():\n    x = 1\n"
+    out = _apply_search_replace(content, [("    x = 1", "    x = 2")])
+    assert out["applied"] == 1
+    assert "    x = 2" in out["new_content"]
