@@ -210,6 +210,67 @@ class TestFetchOhlcvDfDeadCacheEquity:
         assert calls["count"] == 1
 
 
+class TestQualityRejectPropagation:
+    """2026-06-12: a quality-rejected frame must stay distinguishable from
+    "no data" even after the fallback chain comes back empty, and a real
+    hyper-mover frame (+100% on explosive volume) must pass the gate at all.
+    """
+
+    def test_rejected_attrs_propagate_when_fallbacks_empty(self, monkeypatch):
+        monkeypatch.setattr(market_data, "_use_massive", lambda: True)
+        monkeypatch.setattr(market_data, "_use_polygon", lambda: False)
+        monkeypatch.setattr(market_data, "_effective_allow_fallback", lambda _x: True)
+
+        m = market_data._massive
+        monkeypatch.setattr(m, "get_aggregates_df", lambda *a, **k: _mk_df([100.0, 19.0]))
+        monkeypatch.setattr(m, "massive_aggregate_variants_all_dead", lambda _t: False)
+        monkeypatch.setattr(market_data, "_yf_history", lambda *a, **k: pd.DataFrame())
+
+        df = market_data.fetch_ohlcv_df("MSFT", interval="1d", period="5d")
+
+        assert df.empty
+        assert df.attrs.get("quality_rejected") is True
+        assert df.attrs.get("provider") == "massive"
+        issues = df.attrs.get("quality_issues") or []
+        assert any(str(i).startswith("probable_splits") for i in issues)
+
+    def test_hypermover_frame_passes_gate_end_to_end(self, monkeypatch):
+        """DSY/NPT-shaped +99% day (ratio ~2.0) on explosive volume must
+        come back intact -- not split-rejected, not bad-print-dropped.
+        """
+        closes = [1.25, 1.26] * 30 + [1.29, 2.57]
+        volumes = [300_000] * 61 + [80_000_000]
+        hyper = pd.DataFrame(
+            {
+                "Open": closes,
+                "High": [c * 1.01 for c in closes],
+                "Low": [c * 0.99 for c in closes],
+                "Close": closes,
+                "Volume": volumes,
+            },
+            index=pd.date_range("2026-03-01", periods=len(closes), freq="D"),
+        )
+        monkeypatch.setattr(market_data, "_use_massive", lambda: True)
+        monkeypatch.setattr(market_data, "_use_polygon", lambda: False)
+        monkeypatch.setattr(market_data, "_effective_allow_fallback", lambda _x: True)
+
+        m = market_data._massive
+        monkeypatch.setattr(m, "get_aggregates_df", lambda *a, **k: hyper)
+        monkeypatch.setattr(m, "massive_aggregate_variants_all_dead", lambda _t: False)
+
+        def _yf_spy(*_args, **_kwargs):
+            raise AssertionError("hyper-mover frame must not fall through to yfinance")
+
+        monkeypatch.setattr(market_data, "_yf_history", _yf_spy)
+
+        df = market_data.fetch_ohlcv_df("NPT", interval="1d", period="6mo")
+
+        assert not df.empty
+        assert df.attrs["provider"] == "massive"
+        assert len(df) == len(hyper)
+        assert float(df["Close"].iloc[-1]) == 2.57
+
+
 class TestFetchQuoteDeadCacheCrypto:
     def test_crypto_quote_uses_coinbase_when_massive_dead(self, monkeypatch):
         """Massive exhausted + crypto quote -> Coinbase public ticker fallback."""
