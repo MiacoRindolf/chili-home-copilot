@@ -706,6 +706,19 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     except Exception:
         pass
 
+    # Coinbase connect at PASS START (2026-06-12): the venue-readiness filter
+    # at selection ran BEFORE the lazy _cb_connect() at the arm phase, so a
+    # fresh scheduler process dropped every crypto candidate as
+    # broker_not_ready and never reached the code that would have connected —
+    # the chicken-and-egg that kept the night lane empty. connect() is cached/
+    # idempotent; failures fall through to the readiness filter as before.
+    try:
+        from ...coinbase_service import connect as _cb_connect_early
+
+        _cb_connect_early()
+    except Exception:
+        pass
+
     candidates = _fresh_live_eligible_candidates(db, limit=_scan_limit())
     out["scanned"] = len(candidates)
     if not candidates:
