@@ -66,3 +66,16 @@ def test_draft_dispatcher_threads_extra_instructions():
 
     params = inspect.signature(_dispatch_draft_suggestion).parameters
     assert "extra_instructions" in params
+
+
+def test_git_push_enabled_tolerates_corrupted_env(monkeypatch):
+    from app.services.code_dispatch.runner import _git_push_enabled
+
+    monkeypatch.setenv("CHILI_DISPATCH_GIT_PUSH_ENABLED", "1, the dispatch runner will, after")
+    assert _git_push_enabled() is True
+    monkeypatch.setenv("CHILI_DISPATCH_GIT_PUSH_ENABLED", "1")
+    assert _git_push_enabled() is True
+    monkeypatch.setenv("CHILI_DISPATCH_GIT_PUSH_ENABLED", "0")
+    assert _git_push_enabled() is False
+    monkeypatch.delenv("CHILI_DISPATCH_GIT_PUSH_ENABLED", raising=False)
+    assert _git_push_enabled() is False
