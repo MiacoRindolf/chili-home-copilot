@@ -92,6 +92,27 @@ def test_chat_reply_grounds_the_system_prompt(db, monkeypatch):
     assert "orchestrator.py" in sys_prompt
 
 
+def test_glossary_bridges_operator_vocabulary(db, tmp_path):
+    """'autopilot' never appears in app/services/project_autonomy/ paths —
+    name-match search can't bridge it; the glossary must."""
+    anchor = tmp_path / "app" / "services" / "project_autonomy" / "orchestrator.py"
+    anchor.parent.mkdir(parents=True)
+    anchor.write_text('"""The desktop Autopilot run orchestrator."""\n', encoding="utf-8")
+    db.add(User(email="t3@t.local", name="t3"))
+    repo = CodeRepo(name="r3", path=str(tmp_path), user_id=None)
+    db.add(repo)
+    db.flush()
+    run = ProjectAutonomyRun(run_id="pa_gloss", prompt="x", status="chatting",
+                             current_stage="chat", repo_id=repo.id)
+    db.add(run)
+    db.commit()
+    block = _brainstorm_context_block(db, run, "improve the autopilot please")
+    assert "app/services/project_autonomy/" in block
+    assert "desktop Autopilot run orchestrator" in block  # anchor docstring head
+    # Non-matching topic stays clean.
+    assert "Core modules" not in _brainstorm_context_block(db, run, "what about the weather")
+
+
 def test_implementation_shaped_message_no_longer_hijacked(db, monkeypatch):
     """'fix/add/implement' keywords used to short-circuit to a canned
     redirect, making real conversations impossible."""

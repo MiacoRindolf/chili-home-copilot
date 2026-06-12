@@ -5415,6 +5415,65 @@ def _initial_chat_reply(prompt: str) -> str:
     )
 
 
+# Glossary, not config: operator vocabulary → the core module it means.
+# Name-match search cannot bridge "autopilot" → project_autonomy/ (the word
+# never appears in that path), so peripheral scripts dominated the hits.
+# Each entry: (trigger terms, module path, one-liner, anchor file whose
+# docstring head gets quoted).
+_DOMAIN_GLOSSARY: list[tuple[tuple[str, ...], str, str, str]] = [
+    (
+        ("autopilot", "autonomy", "autonomous coding"),
+        "app/services/project_autonomy/",
+        "the desktop Autopilot orchestrator (plan → implement → validate → merge runs)",
+        "app/services/project_autonomy/orchestrator.py",
+    ),
+    (
+        ("dispatch", "coding loop", "code brain"),
+        "app/services/code_dispatch/ + app/services/code_brain/",
+        "the background autonomous coding loop (miner → router → draft → sandbox validate → push)",
+        "app/services/code_dispatch/cycle.py",
+    ),
+    (
+        ("trading", "trade", "broker"),
+        "app/services/trading/",
+        "the autonomous trading brain (mine → decide → execute → reconcile → audit)",
+        "app/services/trading/auto_trader.py",
+    ),
+    (
+        ("llm", "gateway", "model routing", "cascade"),
+        "app/services/context_brain/llm_gateway.py + app/openai_client.py",
+        "the LLM gateway and provider cascade (local-first code tier, free 70B, paid escalation)",
+        "app/services/context_brain/llm_gateway.py",
+    ),
+    (
+        ("desktop app", "flutter", "mobile app", "ui"),
+        "chili_mobile/",
+        "the Flutter desktop client (windowed OS workspace, Autopilot app)",
+        "chili_mobile/lib/src/brain/brain_dispatch_screen.dart",
+    ),
+]
+
+
+def _glossary_block(repo_root: str, latest_user_message: str) -> str:
+    msg = (latest_user_message or "").lower()
+    out: list[str] = []
+    for terms, path, blurb, anchor in _DOMAIN_GLOSSARY:
+        if not any(t in msg for t in terms):
+            continue
+        entry = f"- {path} — {blurb}"
+        try:
+            af = Path(repo_root) / anchor
+            if af.is_file():
+                head = af.read_text(encoding="utf-8", errors="replace")[:600]
+                entry += f"\n  Anchor ({anchor}) head:\n  " + head.replace("\n", "\n  ")
+        except Exception:
+            pass
+        out.append(entry)
+        if len(out) >= 2:
+            break
+    return ("Core modules for this topic:\n" + "\n".join(out)) if out else ""
+
+
 def _brainstorm_context_block(db: Session, run: ProjectAutonomyRun, latest_user_message: str) -> str:
     """What separates an insightful answer from generic filler: the model
     must SEE the project. Repo identity, the brain's accumulated insights,
@@ -5462,6 +5521,9 @@ def _brainstorm_context_block(db: Session, run: ProjectAutonomyRun, latest_user_
                     parts.append("Repo map (top levels):\n" + "\n".join(lines))
             except Exception:
                 pass
+            gl = _glossary_block(str(repo.path), latest_user_message)
+            if gl:
+                parts.append(gl)
             try:
                 from ...services.code_brain.search import search_code
 
@@ -5521,7 +5583,8 @@ def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) 
         "generically about other domains. Be concrete: name real files, "
         "modules, and recent activity when relevant. This is a brainstorming "
         "conversation, not an implementation run; do not claim you changed "
-        "files. When the user wants something implemented, suggest "
+        "files. Always finish with a complete sentence — never trail off "
+        "mid-list. When the user wants something implemented, suggest "
         f"{PLAN_START_CHAT_ACTION_LABEL} in the sidebar.\n\n"
         f"## Project context\n{context_block or '(no repo registered yet)'}"
     )
@@ -5552,7 +5615,7 @@ def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) 
             system_prompt=system,
             trace_id=f"autopilot-brainstorm-{run.run_id}",
             user_message=latest_user_message,
-            max_tokens=900,
+            max_tokens=1200,
             # The gateway must NOT share this session: its internal
             # rollback-on-error would discard the caller's uncommitted user
             # message (caught by the suite as a vanished chat message).
