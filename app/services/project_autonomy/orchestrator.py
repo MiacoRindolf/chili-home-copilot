@@ -5474,6 +5474,96 @@ def _glossary_block(repo_root: str, latest_user_message: str) -> str:
     return ("Core modules for this topic:\n" + "\n".join(out)) if out else ""
 
 
+def _best_excerpt(text: str, terms: set[str], width: int = 700) -> str:
+    """Window of ``width`` chars centered on the densest cluster of query
+    terms — the head of a long report rarely contains the finding.
+    Word-boundary matching: 'fill' must not match 'filler'."""
+    low = text.lower()
+    positions: list[int] = []
+    for t in terms:
+        for m in re.finditer(rf"\b{re.escape(t)}\b", low):
+            positions.append(m.start())
+    if not positions:
+        return text[:width]
+    positions.sort()
+    best_start, best_count = positions[0], 1
+    for p in positions:
+        count = sum(1 for q in positions if p <= q < p + width)
+        if count > best_count:
+            best_start, best_count = p, count
+    s = max(0, best_start - width // 4)
+    return text[s:s + width]
+
+
+def _score_doc(name: str, text: str, terms: set[str]) -> tuple[int, int]:
+    """(distinct_terms_matched, weighted_score). Filename hits weigh 3x;
+    body occurrences are dampened so one repeated word can't dominate."""
+    low_name, low_text = name.lower(), text.lower()
+    distinct = 0
+    weighted = 0
+    for t in terms:
+        in_name = 3 if t in low_name else 0
+        occ = min(len(re.findall(rf"\b{re.escape(t)}\b", low_text)), 5)
+        if in_name or occ:
+            distinct += 1
+        weighted += in_name + occ
+    return distinct, weighted
+
+
+def _safe_repo_file_read(repo_root: str, rel: str, budget: int = 3000) -> Optional[str]:
+    """Read a repo-relative file for the read-loop; never escape the root."""
+    try:
+        root = Path(repo_root).resolve()
+        p = (root / rel.replace("\\", "/").lstrip("/")).resolve()
+        p.relative_to(root)
+        if not p.is_file():
+            return None
+        return p.read_text(encoding="utf-8", errors="replace")[:budget]
+    except Exception:
+        return None
+
+
+_PROTOCOL_READ_RE = re.compile(r"^\s*READ:\s*(.+)$", re.IGNORECASE)
+_PROTOCOL_ESCALATE_RE = re.compile(r"^\s*ESCALATE:\s*(.+)$", re.IGNORECASE)
+_LESSON_RE = re.compile(r"\n\s*LESSON:\s*(.+?)\s*$", re.DOTALL)
+
+
+def _parse_protocol_directive(reply: str) -> tuple[str, str] | None:
+    """First-line protocol: ('read', 'a.py b.py') or ('escalate', reason)."""
+    first = (reply or "").strip().splitlines()[0] if (reply or "").strip() else ""
+    m = _PROTOCOL_READ_RE.match(first)
+    if m:
+        return ("read", m.group(1).strip())
+    m = _PROTOCOL_ESCALATE_RE.match(first)
+    if m:
+        return ("escalate", m.group(1).strip())
+    return None
+
+
+def _store_lesson(db: Session, repo_id: Optional[int], lesson: str) -> bool:
+    """Persist a durable conversation lesson into the EXISTING insights
+    store (category='lesson') — get_insights already feeds future context,
+    so every conversation can teach the next one. Deduped on exact text."""
+    text_clean = (lesson or "").strip()[:500]
+    if len(text_clean) < 15:
+        return False
+    try:
+        from ...models.code_brain import CodeInsight
+
+        exists = (
+            db.query(CodeInsight)
+            .filter(CodeInsight.category == "lesson", CodeInsight.description == text_clean)
+            .first()
+        )
+        if exists:
+            return False
+        db.add(CodeInsight(repo_id=repo_id, category="lesson", description=text_clean))
+        db.flush()
+        return True
+    except Exception:
+        return False
+
+
 def _brainstorm_context_block(db: Session, run: ProjectAutonomyRun, latest_user_message: str) -> str:
     """What separates an insightful answer from generic filler: the model
     must SEE the project. Repo identity, the brain's accumulated insights,
@@ -5533,26 +5623,31 @@ def _brainstorm_context_block(db: Session, run: ProjectAutonomyRun, latest_user_
                 from ...services.code_brain.search import _query_terms
 
                 terms = set(_query_terms(latest_user_message))
-                doc_hits: list[tuple[int, str, str]] = []
+                doc_hits: list[tuple[int, int, str, str]] = []
                 root = Path(str(repo.path))
-                for sub in ("docs/STRATEGY/CC_REPORTS", "docs/DESIGN", "docs/STRATEGY"):
-                    d = root / sub
-                    if not d.is_dir():
+                seen_docs: set[str] = set()
+                # Any docs tree the project keeps (adaptive: walk docs/
+                # recursively rather than assuming a layout).
+                docs_root = root / "docs"
+                md_files: list[Path] = []
+                if docs_root.is_dir():
+                    md_files = sorted(docs_root.rglob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)[:200]
+                for md in md_files:
+                    if md.name in seen_docs:
                         continue
-                    for md in sorted(d.glob("*.md"), reverse=True)[:60]:
-                        try:
-                            head = md.read_text(encoding="utf-8", errors="replace")[:4000]
-                        except OSError:
-                            continue
-                        low = head.lower()
-                        score = sum(1 for t in terms if t in low)
-                        if score >= 2:
-                            doc_hits.append((score, md.name, head[:700]))
+                    seen_docs.add(md.name)
+                    try:
+                        text_full = md.read_text(encoding="utf-8", errors="replace")[:64_000]
+                    except OSError:
+                        continue
+                    distinct, weighted = _score_doc(md.name, text_full, terms)
+                    if distinct >= 2:
+                        doc_hits.append((distinct, weighted, md.name, _best_excerpt(text_full, terms)))
                 doc_hits.sort(reverse=True)
                 if doc_hits:
                     parts.append(
                         "Project documents relevant to the question (hard-won findings — prefer these over first principles):\n"
-                        + "\n\n".join(f"[{name}]\n{excerpt}" for _s, name, excerpt in doc_hits[:2])
+                        + "\n\n".join(f"[{name}]\n{excerpt}" for _d, _w, name, excerpt in doc_hits[:2])
                     )
             except Exception:
                 pass
@@ -5649,27 +5744,110 @@ def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) 
 
     from ...services.context_brain.llm_gateway import gateway_chat as _gw_chat
 
-    _t0 = _time.monotonic()
-    reply_text = ""
-    model_used = "gateway_error"
+    repo_root_for_reads = ""
     try:
-        gw = _gw_chat(
-            messages=messages[1:],
-            purpose="brainstorm_chat",
-            system_prompt=system,
-            trace_id=f"autopilot-brainstorm-{run.run_id}",
-            user_message=latest_user_message,
-            max_tokens=1200,
-            # The gateway must NOT share this session: its internal
-            # rollback-on-error would discard the caller's uncommitted user
-            # message (caught by the suite as a vanished chat message).
-            db=None,
-        )
-        if isinstance(gw, dict):
-            reply_text = (gw.get("reply") or "").strip()
-            model_used = str(gw.get("model") or model_used)
+        from ...models.code_brain import CodeRepo as _CR
+
+        _repo = db.query(_CR).filter(_CR.id == run.repo_id).first() if run.repo_id else None
+        if _repo is None:
+            _repo = db.query(_CR).order_by(_CR.id).first()
+        if _repo is not None:
+            repo_root_for_reads = str(_repo.path)
     except Exception:
         pass
+
+    # Agentic protocol (first pass only): the model may ask to READ files
+    # before answering — Fable-style "read before you speak" — or ESCALATE
+    # judgment-heavy questions to the frontier tier. The MODEL decides;
+    # nothing here is keyed to project-specific strings.
+    protocol = (
+        "\n\nPROTOCOL (first line of your reply only, optional):\n"
+        "- To inspect repository files before answering, reply with ONLY: "
+        "READ: <path1> <path2> (max 4, repo-relative). You will receive "
+        "their contents and be asked again.\n"
+        "- If this question hinges on a costly judgment call (architecture "
+        "choice, irreversible tradeoff) where a stronger model is worth "
+        "cents, reply with ONLY: ESCALATE: <one-line reason>.\n"
+        "- Otherwise just answer. If this conversation established a "
+        "durable, non-obvious fact about THIS project, you may end your "
+        "answer with a final line: LESSON: <one sentence>."
+    )
+
+    def _call_gateway(sys_prompt: str, msgs: list[dict]) -> tuple[str, str]:
+        try:
+            gw = _gw_chat(
+                messages=msgs,
+                purpose="brainstorm_chat",
+                system_prompt=sys_prompt,
+                trace_id=f"autopilot-brainstorm-{run.run_id}",
+                user_message=latest_user_message,
+                max_tokens=1200,
+                # Never share this session: gateway rollback-on-error would
+                # discard the caller's uncommitted user message.
+                db=None,
+            )
+            if isinstance(gw, dict):
+                return (gw.get("reply") or "").strip(), str(gw.get("model") or "gateway_error")
+        except Exception:
+            pass
+        return "", "gateway_error"
+
+    _t0 = _time.monotonic()
+    protocol_note = None
+    reply_text, model_used = _call_gateway(system + protocol, messages[1:])
+    directive = _parse_protocol_directive(reply_text)
+    if directive and directive[0] == "read" and repo_root_for_reads:
+        rels = [r for r in directive[1].replace(",", " ").split() if r][:4]
+        bodies: list[str] = []
+        for rel in rels:
+            body = _safe_repo_file_read(repo_root_for_reads, rel)
+            bodies.append(f"### {rel}\n{body if body is not None else '(not found or unreadable)'}")
+        protocol_note = {"read": rels}
+        followup = messages[1:] + [
+            {"role": "assistant", "content": reply_text},
+            {
+                "role": "user",
+                "content": "Requested file contents:\n\n" + "\n\n".join(bodies)
+                + "\n\nNow answer the original question grounded in what you just read.",
+            },
+        ]
+        reply_text, model_used = _call_gateway(system, followup)
+    elif directive and directive[0] == "escalate":
+        protocol_note = {"escalate": directive[1][:200]}
+        escalated = False
+        try:
+            from ... import openai_client as _oc
+            from ...config import settings as _st
+
+            if getattr(_st, "chili_code_frontier_enabled", False) and _oc._frontier_configured():
+                res = _oc.chat(
+                    messages[1:],
+                    system_prompt=system,
+                    trace_id=f"autopilot-brainstorm-esc-{run.run_id}",
+                    user_message=latest_user_message,
+                    max_tokens=1200,
+                    model_override=_st.frontier_model,
+                )
+                if isinstance(res, dict) and (res.get("reply") or "").strip():
+                    reply_text = res["reply"].strip()
+                    model_used = str(res.get("model") or _st.frontier_model)
+                    escalated = True
+        except Exception:
+            pass
+        if not escalated:
+            followup = messages[1:] + [
+                {"role": "assistant", "content": reply_text},
+                {"role": "user", "content": "Escalation is unavailable; answer as well as you can yourself."},
+            ]
+            reply_text, model_used = _call_gateway(system, followup)
+
+    # Cross-run lessons: persist a durable fact into the insights store so
+    # the NEXT conversation already knows it (get_insights feeds context).
+    lesson_stored = False
+    m_lesson = _LESSON_RE.search(reply_text or "")
+    if m_lesson:
+        lesson_stored = _store_lesson(db, run.repo_id, m_lesson.group(1))
+        reply_text = _LESSON_RE.sub("", reply_text).rstrip()
     if not reply_text:
         # Offline fallback: the old local chat model path.
         model_info = select_local_model()
@@ -5696,6 +5874,8 @@ def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) 
             "latency_ms": int((_time.monotonic() - _t0) * 1000),
             "purpose": "brainstorm_chat",
             "grounded": bool(context_block),
+            "protocol": protocol_note,
+            "lesson_stored": lesson_stored,
         },
         commit=False,
     )
