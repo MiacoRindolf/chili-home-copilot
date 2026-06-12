@@ -451,8 +451,10 @@ def _apply_search_replace(content: str, blocks: List[tuple]) -> Dict[str, Any]:
                     f"block {i}: matched via whitespace/unicode normalization"
                 )
         if count == 0:
+            snippet = search.strip().replace("\n", " | ")[:120]
             warnings.append(
-                f"block {i}: SEARCH text not found in file (hallucinated or stale content)"
+                f"block {i}: SEARCH text not found in file (hallucinated or "
+                f"stale content): {snippet!r}"
             )
             continue
         if count > 1:
