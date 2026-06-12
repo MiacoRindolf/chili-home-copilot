@@ -6,7 +6,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from app import models
-from app.models.trading import MomentumStrategyVariant
+from app.models.trading import MomentumStrategyVariant, TradingAutomationSession
 from app.services.trading.momentum_neural.auto_arm import _paper_shadow_arm
 
 
@@ -106,3 +106,57 @@ def test_paper_equities_route_to_alpaca_when_configured(monkeypatch) -> None:
     assert resolve_execution_family_for_symbol("KAIO-USD", mode="paper") == "coinbase_spot"
     monkeypatch.setattr(settings, "chili_alpaca_enabled", False, raising=False)
     assert resolve_execution_family_for_symbol("AAPL", mode="paper") == "robinhood_spot"
+
+
+def test_alpaca_paper_outcomes_excluded_from_real_daily_pnl(db) -> None:
+    # fake-money twin outcomes must never move the REAL daily-loss math
+    from datetime import datetime
+
+    from app.models.trading import MomentumAutomationOutcome
+    import app.services.trading.governance as gov
+
+    u, v = _setup(db)
+    rh = TradingAutomationSession(
+        user_id=u.id, symbol="AAPL", mode="live", variant_id=v.id,
+        state="live_exited", execution_family="robinhood_spot",
+    )
+    al = TradingAutomationSession(
+        user_id=u.id, symbol="AAPL", mode="live", variant_id=v.id,
+        state="live_exited", execution_family="alpaca_spot",
+    )
+    db.add_all([rh, al])
+    db.flush()
+    now = datetime.utcnow()
+    db.add_all([
+        MomentumAutomationOutcome(
+            session_id=rh.id, user_id=u.id, variant_id=v.id, symbol="AAPL",
+            mode="live", realized_pnl_usd=-100.0, terminal_at=now,
+            terminal_state="live_exited", outcome_class="loss",
+        ),
+        MomentumAutomationOutcome(
+            session_id=al.id, user_id=u.id, variant_id=v.id, symbol="AAPL",
+            mode="live", realized_pnl_usd=-5000.0, terminal_at=now,  # fake-money disaster
+            terminal_state="live_exited", outcome_class="loss",
+        ),
+    ])
+    db.commit()
+    out = gov.global_realized_pnl_today_et(db, u.id)
+    assert out["momentum_usd"] == -100.0  # the fake -5000 is invisible to real risk
+
+
+def test_alpaca_sessions_excluded_from_aggregate_risk(db) -> None:
+    from app.services.trading.momentum_neural.risk_evaluator import aggregate_open_risk_usd
+
+    u, v = _setup(db)
+    for fam, sym in (("robinhood_spot", "AAA"), ("alpaca_spot", "BBB")):
+        db.add(TradingAutomationSession(
+            user_id=u.id, symbol=sym, mode="live", variant_id=v.id,
+            state="live_entered", execution_family=fam,
+            risk_snapshot_json={"momentum_live_execution": {"position": {
+                "quantity": 100, "avg_entry_price": 10.0, "stop_price": 9.0,
+            }}},
+        ))
+    db.commit()
+    total, rows = aggregate_open_risk_usd(db, user_id=u.id)
+    assert abs(total - 100.0) < 1e-9  # only the RH position counts
+    assert [r["symbol"] for r in rows] == ["AAA"]
