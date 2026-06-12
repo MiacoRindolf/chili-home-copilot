@@ -281,6 +281,44 @@ def streak_risk_multiplier(db) -> tuple[float, dict]:
         return 1.0, {"streak_mult": 1.0, "reason": "error_fail_neutral"}
 
 
+def cushion_risk_multiplier(db, *, base_loss_usd: float) -> tuple[float, dict]:
+    """Ross's day-cushion risk ladder (2026-06-11 recap video: "I am NOT taking
+    full risk until I first have a cushion on the day" — his −$17k FGL stop-out
+    landed on a +$65k banked cushion, so the day stayed well green).
+
+      mult = clamp(0.5 + 0.5 * cushion / base_loss, 0.5, 2.0)
+
+      no banked day P&L   -> 0.5  (start cautious — "can't start with full size")
+      cushion = 1x base   -> 1.0  (normal risk once the day funds one stop-out)
+      cushion >= 3x base  -> 2.0  (aggression ceiling)
+
+    Green guarantee by construction: a max-risk stop-out gives back at most
+    0.5*cushion + 0.5*base, so with >= 1x base of cushion the day stays green.
+    Self-relative (cushion measured in units of the CURRENT equity-relative
+    per-trade loss — scales with the account, no fixed dollars); only the
+    bounds are fixed and documented. Composes with streak_risk_multiplier
+    (streak = multi-day form; cushion = today's ladder). Daily-loss cap and
+    drawdown breaker still bound everything above this. Fail-neutral 1.0."""
+    try:
+        from ..governance import global_realized_pnl_today_et
+
+        day = global_realized_pnl_today_et(db)
+        realized = float(day.get("total_usd") or 0.0)
+        cushion = max(0.0, realized)
+        base = float(base_loss_usd or 0.0)
+        if base <= 0:
+            return 1.0, {"cushion_mult": 1.0, "reason": "no_base_loss"}
+        mult = max(0.5, min(2.0, 0.5 + 0.5 * (cushion / base)))
+        return mult, {
+            "cushion_mult": round(mult, 2),
+            "day_realized_usd": round(realized, 2),
+            "cushion_usd": round(cushion, 2),
+            "base_loss_usd": round(base, 2),
+        }
+    except Exception:
+        return 1.0, {"cushion_mult": 1.0, "reason": "error_fail_neutral"}
+
+
 def compute_risk_first_quantity(
     *,
     entry_price: float,
