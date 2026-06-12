@@ -25,7 +25,9 @@ _ALLOWED_CLARIFICATION_KEYS = frozenset(
     {"id", "question", "answer", "status", "sort_order", "created_at", "updated_at"}
 )
 _ALLOWED_TASK_KEYS = frozenset(
-    {"id", "project_id", "title", "coding_readiness_state", "coding_workflow_mode"}
+    # description joined the allowlist 2026-06-12: operator-authored scope
+    # text, the bridge prompt's fallback when no formal brief exists.
+    {"id", "project_id", "title", "description", "coding_readiness_state", "coding_workflow_mode"}
 )
 _ALLOWED_PROFILE_KEYS = frozenset(
     {"repo_index", "code_repo_id", "repo_name", "repo_path", "sub_path", "workspace_bound", "brief_approved_at"}
