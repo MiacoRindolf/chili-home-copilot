@@ -87,6 +87,14 @@ def test_candidate_list_drops_closed_markets_before_limit(db, monkeypatch) -> No
             symbol=sym, variant_id=v.id, scope="symbol", viability_score=score,
             live_eligible=True, freshness_ts=now,
         ))
+    # the fresh-tape gate (#669) requires a live tape row — seed one for the
+    # crypto candidate (the closed equity stays tape-less, doubly dead)
+    from sqlalchemy import text as _text
+
+    db.execute(_text(
+        "INSERT INTO momentum_nbbo_spread_tape (symbol, observed_at, source) "
+        "VALUES ('KAIO-USD', now() at time zone 'utc', 'test')"
+    ))
     db.commit()
     # night: equities closed, crypto open
     monkeypatch.setattr(aa, "_symbol_market_open", lambda s: s.endswith("-USD"))

@@ -3461,11 +3461,46 @@ class Settings(BaseSettings):
     )
     # Reap a pre-entry live session that has watched this long without entering,
     # freeing the slot for a fresher mover (Ross moves on; default 30min).
+    # Watch reap (2026-06-12 throughput study): triggers that EVER fire do so in
+    # 29s median / 56s p75 — dead watches squatted slots for the full 1800s
+    # (84-97% of armed sessions died at the reap; ~32 slot-hours dead in one
+    # day). 300s base; tick-armed setups (watch_break_level set = a reclaim is
+    # actually forming) get chili_momentum_auto_arm_watch_extend_seconds.
     chili_momentum_auto_arm_max_watch_seconds: int = Field(
-        default=1800,
+        default=300,
         ge=60,
-        le=86400,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_MAX_WATCH_SECONDS"),
+    )
+    chili_momentum_auto_arm_watch_extend_seconds: int = Field(
+        default=600,
+        ge=60,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_WATCH_EXTEND_SECONDS"),
+    )
+    # A6 (open-burst bandwidth): arm up to N distinct fresh candidates per
+    # auto-arm pass while slots remain (was 1/pass; 74 fresh candidates in the
+    # 13:30-13:50Z burst vs 6 armed).
+    chili_momentum_auto_arm_max_arms_per_pass: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_MAX_ARMS_PER_PASS"),
+    )
+    # A4 (2026-06-12 winner/loser DNA): live crypto momentum is 0/17 winners
+    # ever (-$171/wk) AND its losses spend the daily-loss budget that gates the
+    # profitable equity window. Live crypto arming OFF until the weekend crypto
+    # program proves a profitable config; paper/alpaca crypto unaffected.
+    chili_momentum_crypto_live_arm_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CRYPTO_LIVE_ARM_ENABLED"),
+    )
+    # EOD flatten (2026-06-12 QH: a 3:19 PM entry was still held 2 min before
+    # the Friday close — no momentum scalp holds the bell, ever). Equity
+    # positions flatten through the operator-flatten chokepoint this many
+    # minutes before the 16:00 ET close.
+    chili_momentum_eod_flatten_lead_min: float = Field(
+        default=5.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EOD_FLATTEN_LEAD_MIN"),
     )
     # The momentum live lane executes via coinbase_spot (crypto). The viability
     # board ALSO carries equities (ARKK, CLSK...) that go live-eligible at US

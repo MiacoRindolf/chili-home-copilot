@@ -2147,6 +2147,34 @@ def tick_live_session(
             db.flush()
             return {"ok": True, "blocked": True, "risk_evaluation": ev}
 
+    # ── EOD FLATTEN (2026-06-12 QH: a 3:19 PM entry was still held 2 min
+    # before the FRIDAY close — momentum scalps never hold the bell, let alone
+    # a weekend). Equity positions flatten through the operator-flatten
+    # chokepoint when within the lead window of the 16:00 ET close. Derived
+    # from the session clock; the lead is the one documented knob.
+    if sess.state in _HELD_LIVE_STATES and not str(sess.symbol or "").upper().endswith("-USD"):
+        try:
+            from zoneinfo import ZoneInfo as _ZI
+
+            _now_et = datetime.now(_ZI("America/New_York"))
+            _lead = float(getattr(settings, "chili_momentum_eod_flatten_lead_min", 5.0) or 0.0)
+            _mins_to_close = (16 * 60) - (_now_et.hour * 60 + _now_et.minute)
+            if (
+                _lead > 0
+                and _now_et.weekday() < 5
+                and 0 <= _mins_to_close <= _lead
+                and not le.get("operator_flatten_requested_utc")
+                and not le.get("eod_flatten_done")
+            ):
+                le["operator_flatten_requested_utc"] = _utcnow().isoformat()
+                le["eod_flatten_done"] = True
+                _commit_le(sess, le)
+                _emit(db, sess, "eod_flatten_triggered", {
+                    "minutes_to_close": _mins_to_close, "lead_min": _lead,
+                })
+        except Exception:
+            _log.debug("eod flatten check failed session=%s", sess.id, exc_info=True)
+
     # ── Operator FLATTEN (system-mediated manual exit, 2026-06-11) ────────
     # The button sets a flag; the runner honors it HERE (quotes bound) so the
     # exit flows through the one chokepoint chain (scale-out cancel ->
