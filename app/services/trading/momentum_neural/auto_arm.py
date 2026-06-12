@@ -254,7 +254,9 @@ def _paper_shadow_arm(
                 user_id=int(uid),
                 symbol=sym,
                 variant_id=int(getattr(c, "variant_id", 0) or 0),
-                execution_family=resolve_execution_family_for_symbol(sym),
+                # mode="paper": equities route to the Alpaca paper rail when
+                # configured (the DMA fill-quality soak; docs/DESIGN/ALPACA_LANE.md)
+                execution_family=resolve_execution_family_for_symbol(sym, mode="paper"),
             )
         except Exception:
             logger.debug("[auto_arm] paper shadow arm failed for %s", sym, exc_info=True)

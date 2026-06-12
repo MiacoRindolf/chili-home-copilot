@@ -92,3 +92,17 @@ def test_candidate_list_drops_closed_markets_before_limit(db, monkeypatch) -> No
     monkeypatch.setattr(aa, "_symbol_market_open", lambda s: s.endswith("-USD"))
     out = aa._fresh_live_eligible_candidates(db, limit=1)
     assert [c.symbol for c in out] == ["KAIO-USD"]  # the closed equity no longer crowds the limit
+
+
+def test_paper_equities_route_to_alpaca_when_configured(monkeypatch) -> None:
+    from app.config import settings
+    from app.services.trading.execution_family_registry import resolve_execution_family_for_symbol
+
+    monkeypatch.setattr(settings, "chili_alpaca_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_alpaca_paper", True, raising=False)
+    monkeypatch.setattr(settings, "chili_alpaca_api_key", "pk_test", raising=False)
+    assert resolve_execution_family_for_symbol("AAPL", mode="paper") == "alpaca_spot"
+    assert resolve_execution_family_for_symbol("AAPL", mode="live") == "robinhood_spot"
+    assert resolve_execution_family_for_symbol("KAIO-USD", mode="paper") == "coinbase_spot"
+    monkeypatch.setattr(settings, "chili_alpaca_enabled", False, raising=False)
+    assert resolve_execution_family_for_symbol("AAPL", mode="paper") == "robinhood_spot"
