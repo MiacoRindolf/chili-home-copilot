@@ -104,7 +104,11 @@ def _set_code_agent_cycle_step(run_id: int, step: str) -> None:
         logger.debug("[code_dispatch] cycle_step update failed", exc_info=True)
 
 
-def _dispatch_draft_suggestion(task_id: int, user_id: int) -> tuple[Optional[int], dict[str, Any], float]:
+def _dispatch_draft_suggestion(
+    task_id: int,
+    user_id: int,
+    extra_instructions: Optional[str] = None,
+) -> tuple[Optional[int], dict[str, Any], float]:
     """Run planner agent-suggest and persist a snapshot row. Returns (suggestion_id, meta, elapsed_ms)."""
     from ...config import settings
     from ...db import SessionLocal
@@ -130,7 +134,7 @@ def _dispatch_draft_suggestion(task_id: int, user_id: int) -> tuple[Optional[int
                     db,
                     task,
                     user_id,
-                    None,
+                    extra_instructions,
                 ),
                 timeout=timeout_s,
             )
@@ -393,8 +397,81 @@ def _run_sandboxed(
             )
             return {"status": "sandboxed_fail", "reason": "timeout"}
 
+        repaired = False
+        if not val_passed:
+            # ── ONE repair pass: re-draft WITH the failure evidence ────────
+            # A cold retry re-rolls the same dice; showing the model what
+            # actually failed is the single biggest success-rate multiplier
+            # for the local brain. Bounded to one attempt — persistent
+            # failures should surface, not loop.
+            _set_code_agent_cycle_step(run_id, "repair")
+            rdb = SessionLocal()
+            try:
+                failure_text = runner.validation_failure_text(rdb, int(val_run_id or 0))
+            finally:
+                try:
+                    rdb.rollback()
+                except Exception:
+                    pass
+                rdb.close()
+            repair_instructions = (
+                "## PREVIOUS ATTEMPT FAILED VALIDATION\n"
+                f"Files changed last attempt: {', '.join(diff_files) or '(none applied)'}\n"
+                "Validation output (fix EXACTLY these failures; change nothing else):\n"
+                f"{failure_text}\n"
+                "Produce corrected edit blocks for the SAME task."
+            )
+            suggestion_id2, meta2, ms_draft2 = _dispatch_draft_suggestion(
+                int(candidate.task_id), user_id, extra_instructions=repair_instructions
+            )
+            if suggestion_id2 is not None and not (meta2 or {}).get("error"):
+                # Fresh worktree so the failed attempt's edits don't compound.
+                runner.cleanup_worktree(handle, repo_root, keep_branch=False)
+                handle = runner.create_dispatch_worktree(repo_root, int(candidate.task_id))
+                a2db = SessionLocal()
+                try:
+                    tsk2 = a2db.query(PlanTask).filter(PlanTask.id == int(candidate.task_id)).first()
+                    apply_out2 = runner.apply_suggestion_in_worktree(
+                        a2db,
+                        int(candidate.task_id),
+                        user_id,
+                        suggestion_id2,
+                        handle,
+                        task_title=str(getattr(tsk2, "title", "") or ""),
+                        repo_root=repo_root,
+                    )
+                finally:
+                    try:
+                        a2db.rollback()
+                    except Exception:
+                        pass
+                    a2db.close()
+                if apply_out2.get("ok"):
+                    diff_files = list(apply_out2.get("files") or [])
+                    diff_loc = int(apply_out2.get("loc") or 0)
+                    suggestion_id = suggestion_id2
+                    apply_out = apply_out2
+                    v2db = SessionLocal()
+                    try:
+                        vrid, val_passed, timed_out = runner.run_validation_in_worktree(
+                            v2db,
+                            int(candidate.task_id),
+                            Path(handle.path),
+                            validation_timeout_sec=v_timeout,
+                            changed_files=diff_files,
+                        )
+                    finally:
+                        try:
+                            v2db.rollback()
+                        except Exception:
+                            pass
+                        v2db.close()
+                    val_run_id = vrid
+                    repaired = True
+                    ms_val += ms_draft2
+
         if val_passed:
-            decision = "passed"
+            decision = "passed_after_repair" if repaired else "passed"
         else:
             decision = "validation_failed"
 
