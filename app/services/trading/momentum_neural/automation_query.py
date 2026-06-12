@@ -479,6 +479,40 @@ def _runner_health_for_mode(
     }
 
 
+def _float_or_none_q(v):
+    try:
+        f = float(v)
+        return f if f == f else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _pnl_summary(sess: TradingAutomationSession, runtime_values: dict[str, Any]) -> dict[str, Any]:
+    """The two numbers an operator actually scans for (2026-06-12 UX pass):
+    FLOATING (unrealized: open position vs last price) and REALIZED (banked this
+    session). Computed at read time from the session's own execution state —
+    None when not applicable, never fabricated."""
+    snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
+    ex = snap.get("momentum_live_execution") if sess.mode == "live" else snap.get("momentum_paper_execution")
+    ex = ex if isinstance(ex, dict) else {}
+    pos = ex.get("position") if isinstance(ex.get("position"), dict) else None
+    out: dict[str, Any] = {
+        "floating_usd": None, "floating_pct": None,
+        "realized_usd": _float_or_none_q(ex.get("realized_pnl_usd")),
+        "qty": None, "entry": None, "last": _float_or_none_q(runtime_values.get("last_price")),
+    }
+    if not pos:
+        return out
+    qty = _float_or_none_q(pos.get("quantity"))
+    entry = _float_or_none_q(pos.get("avg_entry_price")) or _float_or_none_q(pos.get("entry_price"))
+    last = _float_or_none_q(ex.get("last_mid")) or out["last"]
+    out["qty"], out["entry"], out["last"] = qty, entry, last
+    if qty and entry and last and entry > 0:
+        out["floating_usd"] = round((last - entry) * qty, 2)
+        out["floating_pct"] = round((last - entry) / entry * 100.0, 2)
+    return out
+
+
 def _controls_for_session(
     sess: TradingAutomationSession,
     *,
@@ -837,6 +871,7 @@ def list_automation_sessions(
             "data_binding": binding_payload,
             "data_fidelity": data_fidelity,
             "simulated_pnl": runtime_values.get("simulated_pnl_usd"),
+            "pnl": _pnl_summary(sess, runtime_values),
             "trade_count": runtime_values.get("trade_count"),
             "chart_levels": runtime_values.get("latest_levels_json"),
             "strategy_params_summary": summarize_strategy_params(var.params_json),
@@ -1049,6 +1084,7 @@ def get_automation_session_detail(db: Session, *, user_id: int, session_id: int)
             "source_of_truth_exchange": binding_payload.get("source_of_truth_exchange"),
         },
         "simulated_pnl": runtime_values.get("simulated_pnl_usd"),
+        "pnl": _pnl_summary(sess, runtime_values),
         "trade_count": runtime_values.get("trade_count"),
         "chart_levels": runtime_values.get("latest_levels_json"),
         "strategy_params_summary": summarize_strategy_params(var.params_json),
