@@ -267,6 +267,30 @@ def _paper_shadow_arm(
     return armed
 
 
+_ALPACA_LISTED_CACHE: dict[str, bool] = {}
+
+
+def _alpaca_lists_symbol(symbol: str) -> bool:
+    """True when Alpaca has a tradable asset for this lane symbol (equity ticker
+    or crypto BASE-USD -> BASE/USD). Cached per process — listings change rarely.
+    Fail-CLOSED (no twin) on probe errors: the twin is best-effort by design."""
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return False
+    if sym in _ALPACA_LISTED_CACHE:
+        return _ALPACA_LISTED_CACHE[sym]
+    listed = False
+    try:
+        from ..venue.alpaca_spot import AlpacaSpotAdapter
+
+        prod, _ = AlpacaSpotAdapter().get_product(sym)
+        listed = prod is not None and not bool(getattr(prod, "trading_disabled", True))
+    except Exception:
+        listed = False
+    _ALPACA_LISTED_CACHE[sym] = listed
+    return listed
+
+
 def _symbols_with_active_live_session(db: Session, *, user_id: int | None) -> set[str]:
     """Symbols that already hold a non-terminal live momentum session.
 
@@ -954,10 +978,14 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         try:
             if (
                 bool(getattr(settings, "chili_momentum_alpaca_twin_arm_enabled", True))
-                and _exec_family == "robinhood_spot"
+                and _exec_family in ("robinhood_spot", "coinbase_spot")
                 and bool(getattr(settings, "chili_alpaca_enabled", False))
                 and bool(getattr(settings, "chili_alpaca_paper", True))
                 and str(getattr(settings, "chili_alpaca_api_key", "") or "")
+                # crypto twin only for pairs Alpaca actually lists (majors —
+                # the lane's exotic low-cap alts mostly aren't there); equities
+                # are probed too (cheap, cached) so delisted names skip cleanly
+                and _alpaca_lists_symbol(chosen.symbol)
             ):
                 _tb = begin_live_arm(
                     db, user_id=int(uid), symbol=chosen.symbol,

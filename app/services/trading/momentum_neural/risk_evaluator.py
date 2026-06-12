@@ -375,7 +375,10 @@ def evaluate_proposed_momentum_automation(
         db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.id == int(variant_id)).one_or_none()
     )
     vef = normalize_execution_family(v_row.execution_family) if v_row is not None else None
-    if asset_class_of_execution_family(ef) != asset_class_of_execution_family(symbol_ef):
+    _symbol_class = asset_class_of_execution_family(symbol_ef)
+    from ..execution_family_registry import execution_family_supports_asset_class
+
+    if not execution_family_supports_asset_class(ef, _symbol_class):
         checks.append(
             _check(
                 "execution_family_variant_alignment",

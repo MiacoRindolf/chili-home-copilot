@@ -71,10 +71,26 @@ def _norm_status(raw: Any) -> str:
     return _STATUS_MAP.get(s, s or "unknown")
 
 
+def _is_crypto_pid(product_id: str) -> bool:
+    """The lane's crypto convention: BASE-USD (BTC-USD, KAIO-USD)."""
+    return str(product_id or "").strip().upper().endswith("-USD")
+
+
 def _to_symbol(product_id: str) -> str:
-    """Equity product_id is the bare ticker (AAPL); Alpaca uses the same. Crypto pairs
-    keep their slash form (BTC/USD) — not the momentum equity path, but harmless."""
-    return str(product_id or "").strip().upper()
+    """Equity product_id is the bare ticker (AAPL); Alpaca uses the same. The
+    lane's crypto pairs are dash-form (BTC-USD) — Alpaca's crypto API wants the
+    slash form (BTC/USD)."""
+    pid = str(product_id or "").strip().upper()
+    if pid.endswith("-USD"):
+        return pid[:-4] + "/USD"
+    return pid
+
+
+def _from_alpaca_symbol(sym: str) -> str:
+    """Normalize an Alpaca order/asset symbol back to the lane's product_id:
+    crypto BTC/USD -> BTC-USD; equities unchanged."""
+    s2 = str(sym or "").strip().upper()
+    return s2.replace("/", "-") if "/" in s2 else s2
 
 
 def _now() -> datetime:
@@ -128,6 +144,14 @@ def _data_client():
     return _clients["data"]
 
 
+def _crypto_data_client():
+    if "crypto_data" not in _clients:
+        from alpaca.data.historical import CryptoHistoricalDataClient
+        key, secret = _keys()
+        _clients["crypto_data"] = CryptoHistoricalDataClient(key, secret)
+    return _clients["crypto_data"]
+
+
 def reset_clients_for_tests() -> None:
     _clients.clear()
 
@@ -153,9 +177,14 @@ class AlpacaSpotAdapter:
     def get_best_bid_ask(self, product_id: str):
         sym = _to_symbol(product_id)
         try:
-            from alpaca.data.requests import StockLatestQuoteRequest
-            req = StockLatestQuoteRequest(symbol_or_symbols=sym, feed=_data_feed())
-            q = _data_client().get_stock_latest_quote(req).get(sym)
+            if _is_crypto_pid(product_id):
+                from alpaca.data.requests import CryptoLatestQuoteRequest
+                req = CryptoLatestQuoteRequest(symbol_or_symbols=sym)
+                q = _crypto_data_client().get_crypto_latest_quote(req).get(sym)
+            else:
+                from alpaca.data.requests import StockLatestQuoteRequest
+                req = StockLatestQuoteRequest(symbol_or_symbols=sym, feed=_data_feed())
+                q = _data_client().get_stock_latest_quote(req).get(sym)
             if q is None:
                 return None, _fresh()
             bid = _f(getattr(q, "bid_price", None)); ask = _f(getattr(q, "ask_price", None))
@@ -181,10 +210,16 @@ class AlpacaSpotAdapter:
     def get_recent_trades(self, product_id: str, *, limit: int = 50):
         sym = _to_symbol(product_id)
         try:
-            from alpaca.data.requests import StockLatestTradeRequest
-            t = _data_client().get_stock_latest_trade(
-                StockLatestTradeRequest(symbol_or_symbols=sym, feed=_data_feed())
-            ).get(sym)
+            if _is_crypto_pid(product_id):
+                from alpaca.data.requests import CryptoLatestTradeRequest
+                t = _crypto_data_client().get_crypto_latest_trade(
+                    CryptoLatestTradeRequest(symbol_or_symbols=sym)
+                ).get(sym)
+            else:
+                from alpaca.data.requests import StockLatestTradeRequest
+                t = _data_client().get_stock_latest_trade(
+                    StockLatestTradeRequest(symbol_or_symbols=sym, feed=_data_feed())
+                ).get(sym)
             if t is None:
                 return [], _fresh()
             return [{"price": _f(getattr(t, "price", None)), "size": _f(getattr(t, "size", None)),
@@ -210,7 +245,8 @@ class AlpacaSpotAdapter:
                 trading_disabled=not tradable, cancel_only=False, limit_only=False,
                 post_only=False, auction_mode=False,
                 base_min_size=min_sz, base_increment=base_inc, price_increment=price_inc,
-                product_type="equity", raw={"fractionable": fractionable, "exchange": str(getattr(a, "exchange", ""))},
+                product_type="crypto" if _is_crypto_pid(product_id) else "equity",
+                raw={"fractionable": fractionable, "exchange": str(getattr(a, "exchange", ""))},
             )
             return prod, _fresh(3600.0)
         except Exception as exc:
@@ -228,7 +264,7 @@ class AlpacaSpotAdapter:
             for a in assets or []:
                 if not bool(getattr(a, "tradable", False)):
                     continue
-                sym = _to_symbol(getattr(a, "symbol", ""))
+                sym = _from_alpaca_symbol(getattr(a, "symbol", ""))
                 if not sym:
                     continue
                 out.append(NormalizedProduct(
@@ -247,7 +283,7 @@ class AlpacaSpotAdapter:
         return NormalizedOrder(
             order_id=str(getattr(o, "id", "") or ""),
             client_order_id=getattr(o, "client_order_id", None),
-            product_id=_to_symbol(getattr(o, "symbol", "")),
+            product_id=_from_alpaca_symbol(getattr(o, "symbol", "")),
             side=str(getattr(getattr(o, "side", None), "value", getattr(o, "side", "")) or "").lower(),
             status=_norm_status(getattr(o, "status", None)),
             order_type=str(getattr(getattr(o, "order_type", None), "value",
@@ -289,7 +325,7 @@ class AlpacaSpotAdapter:
             if not fp or not fq:
                 return [], _fresh(5.0)
             return [NormalizedFill(
-                fill_id=None, order_id=str(getattr(o, "id", "")), product_id=_to_symbol(getattr(o, "symbol", "")),
+                fill_id=None, order_id=str(getattr(o, "id", "")), product_id=_from_alpaca_symbol(getattr(o, "symbol", "")),
                 side=str(getattr(getattr(o, "side", None), "value", "")).lower(), size=fq, price=fp,
                 trade_time=str(getattr(o, "filled_at", "") or ""),
             )], _fresh(5.0)
@@ -315,6 +351,22 @@ class AlpacaSpotAdapter:
             from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
             _side = OrderSide.BUY if str(side).lower() == "buy" else OrderSide.SELL
             qty = float(base_size)
+            if _is_crypto_pid(product_id):
+                # Crypto orders: 24/7, no extended-hours concept, and Alpaca
+                # accepts only GTC/IOC TIFs (DAY is rejected).
+                if limit_price is not None:
+                    req = LimitOrderRequest(symbol=sym, qty=qty, side=_side,
+                                            time_in_force=TimeInForce.GTC,
+                                            limit_price=float(limit_price),
+                                            client_order_id=client_order_id)
+                else:
+                    req = MarketOrderRequest(symbol=sym, qty=qty, side=_side,
+                                             time_in_force=TimeInForce.GTC,
+                                             client_order_id=client_order_id)
+                o = _trading_client().submit_order(order_data=req)
+                return {"ok": True, "order_id": str(getattr(o, "id", "") or ""),
+                        "client_order_id": getattr(o, "client_order_id", None) or client_order_id,
+                        "status": _norm_status(getattr(o, "status", None))}
             if limit_price is not None:
                 # Marketable/posting limit. Alpaca rejects extended_hours unless the order
                 # is a LIMIT with DAY tif — so for pre-/after-market (Ross's gap-and-go) we

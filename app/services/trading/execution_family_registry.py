@@ -62,6 +62,24 @@ _EQUITY_EXECUTION_FAMILIES: frozenset[str] = frozenset({
     EXECUTION_FAMILY_ALPACA_SPOT,
 })
 
+# Asset classes each family can actually TRADE. Alpaca serves BOTH (US equities
+# AND spot crypto — the paper crypto soak rides this, 2026-06-12); the legacy
+# single-class map above stays for asset_class_of_execution_family's primary
+# answer (alpaca's primary remains equity).
+_EXECUTION_FAMILY_ASSET_CLASSES: dict[str, frozenset[str]] = {
+    EXECUTION_FAMILY_COINBASE_SPOT: frozenset({"crypto"}),
+    EXECUTION_FAMILY_ROBINHOOD_SPOT: frozenset({"equity"}),
+    EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP: frozenset({"equity"}),
+    EXECUTION_FAMILY_ALPACA_SPOT: frozenset({"equity", "crypto"}),
+}
+
+
+def execution_family_supports_asset_class(execution_family: str, asset_class: str) -> bool:
+    """True when the family can trade the asset class (alpaca: both). Unknown
+    family -> False (fail closed at the cross-class gate)."""
+    ef = normalize_execution_family(execution_family)
+    return str(asset_class or "").strip().lower() in _EXECUTION_FAMILY_ASSET_CLASSES.get(ef, frozenset())
+
 
 def asset_class_of_execution_family(execution_family: str) -> str:
     """'crypto' for coinbase_spot, 'equity' for the RH/Alpaca/MCP equity venues, else 'other'
