@@ -488,12 +488,47 @@ def _submit_live_market_exit(
     le["exit_next_retry_at_utc"] = (
         now + timedelta(seconds=_exit_submit_backoff_seconds(attempts))
     ).isoformat()
-    result = adapter.place_market_order(
-        product_id=product_id,
-        side="sell",
-        base_size=_fmt_base_size(quantity),
-        client_order_id=client_order_id,
-    ) or {}
+    # EXIT LADDER (2026-06-12 exit study: 30/70 exits filled WORSE than the
+    # planned stop, −15.7R ≈ $428/wk — naked market sells crossing wide books).
+    # Attempt 1: marketable LIMIT at bid − guard (mirror of the entry's
+    # ask-guard; sits AT/UNDER the bid = immediately matchable, slip capped).
+    # Attempt 2: 4× guard. Attempt 3+: market (the old behavior as the floor).
+    # Kill-switch/operator/EOD flatten intent = OUT NOW = market immediately.
+    # An unfilled limit is re-pegged by the poll loop (repeg knob) — each
+    # repeg re-enters here with attempts+1, walking the ladder.
+    _urgent = str(reason or "") in ("kill_switch_flatten", "operator_flatten")
+    _lim_px = None
+    if not _urgent and attempts <= 2:
+        _g = (_notional_guard_multiplier() - 1.0) * (1.0 if attempts <= 1 else 4.0)
+        _ref = None
+        for _cand in (bid, mid):
+            try:
+                if _cand and float(_cand) > 0:
+                    _ref = float(_cand)
+                    break
+            except (TypeError, ValueError):
+                continue
+        if _ref is not None:
+            _lim_px = _ref * (1.0 - _g)
+    if _lim_px is not None and hasattr(adapter, "place_limit_order_gtc"):
+        result = adapter.place_limit_order_gtc(
+            product_id=product_id,
+            side="sell",
+            base_size=_fmt_base_size(quantity),
+            limit_price=f"{_lim_px:.6f}".rstrip("0").rstrip("."),
+            client_order_id=client_order_id,
+        ) or {}
+        le["exit_order_type"] = "limit"
+        le["exit_limit_price"] = _lim_px
+    else:
+        result = adapter.place_market_order(
+            product_id=product_id,
+            side="sell",
+            base_size=_fmt_base_size(quantity),
+            client_order_id=client_order_id,
+        ) or {}
+        le["exit_order_type"] = "market"
+        le.pop("exit_limit_price", None)
     le["exit_order_id"] = result.get("order_id")
     le["exit_client_order_id"] = result.get("client_order_id") or client_order_id
     le["exit_place_result"] = {"ok": result.get("ok"), "error": result.get("error")}
@@ -797,6 +832,37 @@ def _poll_live_exit_fill(
             pending["average_filled_price"] = avg_px
     else:
         pending["why"] = "exit_fill_pending"
+    # LIMIT REPEG (2026-06-12 exit ladder): an exit LIMIT that hasn't filled
+    # within the repeg window is resting above a falling market — cancel it
+    # and clear pending state so the next pulse re-submits one rung down the
+    # ladder (wider guard, then market). Market orders never repeg.
+    if le.get("exit_order_type") == "limit":
+        _sub_at = le.get("pending_exit_submitted_at_utc")
+        try:
+            _sub_age = (
+                (_utcnow() - datetime.fromisoformat(str(_sub_at))).total_seconds()
+                if _sub_at else 0.0
+            )
+        except (TypeError, ValueError):
+            _sub_age = 0.0
+        _repeg_s = float(getattr(settings, "chili_momentum_exit_limit_repeg_seconds", 20.0) or 20.0)
+        if _repeg_s > 0 and _sub_age > _repeg_s and filled_size <= 1e-12:
+            try:
+                adapter.cancel_order(str(oid))
+            except Exception:
+                pass
+            le.pop("exit_order_id", None)
+            le.pop("exit_order_type", None)
+            le.pop("pending_exit_reason", None)
+            le.pop("pending_exit_quantity", None)
+            le.pop("pending_exit_submitted_at_utc", None)
+            le.pop("exit_pending_first_seen_utc", None)
+            _commit_le(sess, le)
+            _emit(db, sess, "live_exit_limit_repegged", {
+                "reason": reason, "order_id": oid, "age_s": round(_sub_age, 1),
+            })
+            return {"filled": False, "repegged": True, "why": "limit_repeg"}
+
     # STUCK-PENDING ESCAPE (2026-06-12): if the order status never goes
     # terminal but the BROKER confirms the position is gone, the exit
     # happened — finalize instead of spinning forever. Deadline-gated and
@@ -3376,6 +3442,24 @@ def tick_live_session(
             _be_floor = avg if pos.get("partial_taken") else stop_px
             _sm = float(params.get("stop_atr_mult") or 0.60)
             _q0 = _float_or_none(pos.get("original_quantity")) or _float_or_none(pos.get("quantity")) or 0.0
+            # 5m EMA9 structural anchor for the runner trail — refreshed at most
+            # once per minute per session (cached in le), fail-open (None).
+            _ema5 = None
+            try:
+                _min_key = _utcnow().strftime("%Y%m%d%H%M")
+                if le.get("ema5m_min") == _min_key:
+                    _ema5 = _float_or_none(le.get("ema5m_val"))
+                else:
+                    from ..market_data import fetch_ohlcv_df as _e5_fetch
+
+                    _df5 = _e5_fetch(sess.symbol, interval="5m", period="1d")
+                    if _df5 is not None and len(_df5) >= 9:
+                        _ema5 = float(_df5["Close"].ewm(span=9, adjust=False).mean().iloc[-1])
+                    le["ema5m_min"] = _min_key
+                    le["ema5m_val"] = _ema5
+                    _commit_le(sess, le)
+            except Exception:
+                _ema5 = None
             _trailed = cushion_adaptive_trail_stop(
                 high_water_mark=_hwm_trail,
                 entry_price=avg,
@@ -3386,6 +3470,7 @@ def tick_live_session(
                 breakeven_floor=_be_floor,
                 current_stop=stop_px,
                 side_long=True,
+                ema_5m=_ema5,
             )
             if _trailed > stop_px:
                 pos["stop_price"] = _trailed

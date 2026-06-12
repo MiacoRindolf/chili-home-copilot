@@ -324,6 +324,7 @@ def cushion_adaptive_trail_stop(
     breakeven_floor: float,
     current_stop: float,
     side_long: bool = True,
+    ema_5m: float | None = None,
 ) -> float:
     """Cushion-adaptive runner trail (Ross day-4, 2026-06-11): exit patience is
     NOT one number — it scales with the CUSHION. "In the small account, the
@@ -374,6 +375,21 @@ def cushion_adaptive_trail_stop(
     trail_bps = floor_bps + (ceil_bps - floor_bps) * patience
     if side_long:
         trailed = hwm * (1.0 - trail_bps / 10_000.0)
+        # 5m-EMA structural runner anchor (2026-06-12 exit study: the bps band
+        # captured only 39% of BATL's MFE — Ross trails the 5m 9EMA on a
+        # trending runner and exits when the STRUCTURE breaks, not when an
+        # arbitrary band is grazed). When the runner is >= 1R in profit and
+        # the 5m EMA sits below the high-water mark (healthy uptrend), the
+        # structure replaces the band: stop = ema_5m − ATR-scaled wick buffer.
+        # Ratchet-only is preserved by the max() below.
+        if ema_5m is not None and unrealized_r >= 1.0:
+            try:
+                _e5 = float(ema_5m)
+                if math.isfinite(_e5) and 0.0 < _e5 < hwm:
+                    _buf = entry * max(0.001, float(atr_pct or 0.0) * 0.25)
+                    trailed = max(be, _e5 - _buf)
+            except (TypeError, ValueError):
+                pass
         floors = [c for c in (cs, be, trailed) if math.isfinite(c)]
         return max(floors) if floors else cs
     trailed = hwm * (1.0 + trail_bps / 10_000.0)
