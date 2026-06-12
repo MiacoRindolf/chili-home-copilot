@@ -180,19 +180,32 @@ def _equity_rail_is_agentic_mcp() -> bool:
         return False
 
 
-def resolve_execution_family_for_symbol(symbol: str) -> str:
+def resolve_execution_family_for_symbol(symbol: str, *, mode: str = "live") -> str:
     """Route a symbol to its execution family by asset class.
 
     Crypto pairs (BASE-USD) -> coinbase_spot (the proven momentum path). Equities
     (bare tickers — ARKK, CLSK, AAPL) -> ``robinhood_spot`` via the unofficial robin_stocks
     API by DEFAULT, or the officially-sanctioned ``robinhood_agentic_mcp`` rail when the
     operator selects it and a token is present (see ``_equity_rail_is_agentic_mcp``).
+
+    PAPER equities -> ``alpaca_spot`` when the Alpaca paper rail is configured
+    (docs/DESIGN/ALPACA_LANE.md): the soak that measures DMA-style limit-posting
+    fill quality against the RH live lane on the SAME names, at zero risk.
     """
     try:
         from .venue.robinhood_spot import _is_crypto_product
 
         if _is_crypto_product(symbol):
             return EXECUTION_FAMILY_COINBASE_SPOT
+        from ...config import settings
+
+        if (
+            str(mode or "").lower() == "paper"
+            and bool(getattr(settings, "chili_alpaca_enabled", False))
+            and bool(getattr(settings, "chili_alpaca_paper", True))
+            and str(getattr(settings, "chili_alpaca_api_key", "") or "")
+        ):
+            return EXECUTION_FAMILY_ALPACA_SPOT
         if _equity_rail_is_agentic_mcp():
             return EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP
         return EXECUTION_FAMILY_ROBINHOOD_SPOT
