@@ -477,6 +477,7 @@ def build_handoff_dict(db: Session, task: PlanTask, *, user_id: int | None = Non
             "id": task.id,
             "project_id": task.project_id,
             "title": task.title,
+            "description": task.description or "",
             "coding_readiness_state": task.coding_readiness_state or "not_started",
             "coding_workflow_mode": task.coding_workflow_mode or "tracked",
         },

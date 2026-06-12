@@ -37,6 +37,14 @@ def build_bounded_implementation_prompt(
 
     brief = handoff.get("brief") or {}
     body = brief.get("body") or ""
+    # Fallback scope text: tasks queued without a formal brief (operator
+    # one-liners, dispatch-mined tasks) carry their scope in the task
+    # DESCRIPTION — same operator-authored authority class. Without this
+    # the model saw only the title and guessed file paths (live: task 36
+    # attempt 5 invented app/services/score/code_dispatch.py because the
+    # path lived in the unsent description).
+    if not str(body).strip():
+        body = task.get("description") or ""
     body_t, _ = truncate_text(str(body), _BRIDGE_BRIEF_MAX_BYTES)
 
     rc = handoff.get("readiness_context") or {}
