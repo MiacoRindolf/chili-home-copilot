@@ -1159,6 +1159,27 @@ def tick_paper_session(
             # day_realized 0.0 in paper (no real account cushion) = tightest
             # patience — mirrors a fresh small account; the cushion dial still
             # widens with THIS position's unrealized R (parity with live).
+            # 5m EMA9 structural anchor — same as the live caller (parity),
+            # refreshed at most once per minute per session, fail-open.
+            _ema5 = None
+            try:
+                from datetime import datetime as _dt, timezone as _tz
+
+                _min_key = _dt.now(_tz.utc).strftime("%Y%m%d%H%M")
+                if pe.get("ema5m_min") == _min_key:
+                    _ema5 = pe.get("ema5m_val")
+                    _ema5 = float(_ema5) if _ema5 is not None else None
+                else:
+                    from ..market_data import fetch_ohlcv_df as _e5_fetch
+
+                    _df5 = _e5_fetch(sess.symbol, interval="5m", period="1d")
+                    if _df5 is not None and len(_df5) >= 9:
+                        _ema5 = float(_df5["Close"].ewm(span=9, adjust=False).mean().iloc[-1])
+                    pe["ema5m_min"] = _min_key
+                    pe["ema5m_val"] = _ema5
+                    _commit_pe(sess, pe)
+            except Exception:
+                _ema5 = None
             _trailed = cushion_adaptive_trail_stop(
                 high_water_mark=float(pos.get("high_water_mark") or entry),
                 entry_price=float(entry),
@@ -1169,6 +1190,7 @@ def tick_paper_session(
                 breakeven_floor=_be_floor,
                 current_stop=stop_px,
                 side_long=True,
+                ema_5m=_ema5,
             )
             if _trailed > stop_px:
                 pos["stop_price"] = _trailed

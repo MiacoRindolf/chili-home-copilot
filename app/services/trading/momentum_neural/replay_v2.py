@@ -432,14 +432,35 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             if p["scaled"] or p["trail_armed"]:
                 # cushion-adaptive trail (Ross day-4): width scales with this
                 # position's unrealized R + the day's banked R — same primitive
-                # live uses (parity by construction)
+                # live uses (parity by construction). 2026-06-12: live now
+                # anchors >=1R runners to the 5m EMA9 — the replay passes the
+                # SAME anchor from its cached 5m bars (completed bars only,
+                # the lookahead rule) so the parity contract holds.
+                _e5 = None
+                try:
+                    _df5 = bars(s)
+                    if _df5 is not None and len(_df5) >= 9:
+                        import pandas as _pd
+
+                        _now_a = _aware(now)
+                        _idx = _df5.index
+                        if getattr(_idx, "tz", None) is None:
+                            _cut = _pd.Timestamp(now) - _pd.Timedelta(minutes=5)
+                        else:
+                            _cut = _pd.Timestamp(_now_a) - _pd.Timedelta(minutes=5)
+                        _win = _df5[_idx <= _cut]
+                        if len(_win) >= 9:
+                            _e5 = float(_win["Close"].ewm(span=9, adjust=False).mean().iloc[-1])
+                except Exception:
+                    _e5 = None
                 p["stop"] = cushion_adaptive_trail_stop(
                     high_water_mark=p["hwm"], entry_price=p["entry"],
                     atr_pct=p["atrp"], stop_atr_mult=STOP_ATR_MULT,
                     day_realized_usd=float(state["cum"]),
                     position_risk_usd=(p["entry"] * max(0.003, p["atrp"] * STOP_ATR_MULT)) * p["qty0"],
                     breakeven_floor=p["entry"] if p["scaled"] else p["stop0"],
-                    current_stop=p["stop"], side_long=True)
+                    current_stop=p["stop"], side_long=True,
+                    ema_5m=_e5)
 
     for now in day_grid:
         manage_open(now)
