@@ -861,6 +861,12 @@ async def run_code_agent(
             diffs_in_reply = re.findall(r"```diff\n(.*?)```", edit_reply, re.DOTALL)
             if diffs_in_reply:
                 for d in diffs_in_reply:
+                    # Models often emit bare hunks (first line '@@ …') —
+                    # git apply rejects "patch fragment without header"
+                    # (live: one-off run 2026-06-12). We know the target
+                    # file, so synthesize the headers.
+                    if d.lstrip().startswith("@@"):
+                        d = f"--- a/{fpath}\n+++ b/{fpath}\n{d.lstrip()}"
                     validation = _validate_diff(d, fpath, file_content)
                     validations.append({"file": fpath, **validation})
                     if validation["valid"]:
