@@ -4,7 +4,7 @@ Tiers (see CHILI_DISPATCH_AUTONOMOUS_DEV_PLAN.md §4.1):
   1 — local Ollama (chili-coder:current → qwen2.5-coder:7b fallback)
   2 — Groq free tier (llama-3.3-70b-versatile)
   3 — OpenAI gpt-4o-mini
-  4 — OpenAI gpt-4o or Anthropic claude-opus-4.6 (premium)
+  4 - frontier escalation (FRONTIER_MODEL, e.g. gpt-5.5)
 """
 from __future__ import annotations
 
