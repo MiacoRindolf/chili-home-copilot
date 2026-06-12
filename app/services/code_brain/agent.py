@@ -387,6 +387,41 @@ def _parse_search_replace_blocks(reply: str) -> List[tuple]:
     return [(m.group(1), m.group(2)) for m in _SEARCH_REPLACE_RE.finditer(reply or "")]
 
 
+_UNICODE_FOLD = (
+    ("—", "-"), ("–", "-"),  # em/en dash -> hyphen
+    ("‘", "'"), ("’", "'"),  # curly single quotes
+    ("“", '"'), ("”", '"'),  # curly double quotes
+    (" ", " "),                     # nbsp
+)
+
+
+def _normalize_match_line(s: str) -> str:
+    for a, b in _UNICODE_FOLD:
+        s = s.replace(a, b)
+    return re.sub(r"\s+", " ", s.strip())
+
+
+def _fuzzy_exact_window(content: str, search: str) -> Optional[str]:
+    """Map a whitespace/unicode-normalized SEARCH onto the EXACT original
+    span of the file. Small models fold em-dashes to hyphens and re-flow
+    whitespace when copying lines (live: task 37 run 685 — the docstring's
+    'gpt-4o' line uses an em-dash, qwen wrote a hyphen, exact match missed).
+    Same uniqueness rule as exact matching: exactly ONE window or nothing —
+    fuzziness never licenses guessing."""
+    s_lines = search.splitlines()
+    norm_s = [_normalize_match_line(l) for l in s_lines]
+    if not any(norm_s):
+        return None
+    c_lines = content.splitlines(keepends=True)
+    norm_c = [_normalize_match_line(l) for l in c_lines]
+    n = len(norm_s)
+    hits = [i for i in range(len(norm_c) - n + 1) if norm_c[i:i + n] == norm_s]
+    if len(hits) != 1:
+        return None
+    i = hits[0]
+    return "".join(c_lines[i:i + n])
+
+
 def _apply_search_replace(content: str, blocks: List[tuple]) -> Dict[str, Any]:
     """Apply SEARCH/REPLACE blocks against FULL file content.
 
@@ -403,6 +438,18 @@ def _apply_search_replace(content: str, blocks: List[tuple]) -> Dict[str, Any]:
             warnings.append(f"block {i}: empty SEARCH text")
             continue
         count = new_content.count(search)
+        if count == 0:
+            # Forgiving fallback: re-find the block via whitespace/unicode
+            # normalization, then operate on the EXACT original span.
+            window = _fuzzy_exact_window(new_content, search)
+            if window is not None:
+                if window.endswith("\n") and not replace.endswith("\n"):
+                    replace = replace + "\n"
+                search = window
+                count = new_content.count(search)
+                warnings.append(
+                    f"block {i}: matched via whitespace/unicode normalization"
+                )
         if count == 0:
             warnings.append(
                 f"block {i}: SEARCH text not found in file (hallucinated or stale content)"

@@ -145,3 +145,35 @@ def test_edit_prompt_teaches_search_replace_format():
     assert "<<<<<<< SEARCH" in p
     assert ">>>>>>> REPLACE" in p
     assert "EXACTLY ONCE" in p
+
+
+# ── fuzzy fallback: normalized match onto the exact original span ────────
+
+
+EMDASH_FILE = "\"\"\"Tiers:\n  4 — OpenAI gpt-4o or Anthropic claude-opus-4.6 (premium)\n\"\"\"\nx = 1\n"
+
+
+def test_fuzzy_match_em_dash_and_whitespace():
+    """The task-37 run-685 live failure: file has an em-dash, model wrote
+    a hyphen. The fuzzy fallback must edit the EXACT original line."""
+    out = _apply_search_replace(
+        EMDASH_FILE,
+        [("  4 - OpenAI gpt-4o or Anthropic claude-opus-4.6 (premium)",
+          "  4 - frontier escalation (FRONTIER_MODEL, e.g. gpt-5.5)")],
+    )
+    assert out["applied"] == 1
+    assert "frontier escalation" in out["new_content"]
+    assert "gpt-4o" not in out["new_content"]
+    assert any("normalization" in w for w in out["warnings"])
+    assert "x = 1" in out["new_content"]
+
+
+def test_fuzzy_match_requires_uniqueness():
+    content = "a — one\nb\na — one\n"
+    out = _apply_search_replace(content, [("a - one", "a - two")])
+    assert out["applied"] == 0  # two normalized matches -> never guess
+
+
+def test_fuzzy_match_ignores_blank_only_search():
+    out = _apply_search_replace("x = 1\n", [("   ", "y = 2")])
+    assert out["applied"] == 0
