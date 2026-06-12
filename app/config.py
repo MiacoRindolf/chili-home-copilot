@@ -3493,6 +3493,13 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_CRYPTO_LIVE_ARM_ENABLED"),
     )
+    # Exit-limit repeg window: an unfilled marketable-limit exit older than
+    # this re-submits one rung down the ladder (wider guard, then market).
+    chili_momentum_exit_limit_repeg_seconds: float = Field(
+        default=20.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_LIMIT_REPEG_SECONDS"),
+    )
     # EOD flatten (2026-06-12 QH: a 3:19 PM entry was still held 2 min before
     # the Friday close — no momentum scalp holds the bell, ever). Equity
     # positions flatten through the operator-flatten chokepoint this many
