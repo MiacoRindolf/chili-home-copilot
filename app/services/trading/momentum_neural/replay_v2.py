@@ -46,8 +46,8 @@ from .entry_gates import (
     momentum_pullback_trigger,
 )
 from .paper_execution import (
+    cushion_adaptive_trail_stop,
     effective_stop_atr_pct,
-    runner_trail_stop,
     scale_out_fraction,
     stop_target_prices,
     structural_or_vol_floored_atr_pct,
@@ -430,8 +430,14 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             if not p["trail_armed"] and bid >= p["entry"] * (1.0 + TRAIL_ACTIVATE_BPS / 10_000.0):
                 p["trail_armed"] = True
             if p["scaled"] or p["trail_armed"]:
-                p["stop"] = runner_trail_stop(
-                    high_water_mark=p["hwm"], atr_pct=p["atrp"], stop_atr_mult=STOP_ATR_MULT,
+                # cushion-adaptive trail (Ross day-4): width scales with this
+                # position's unrealized R + the day's banked R — same primitive
+                # live uses (parity by construction)
+                p["stop"] = cushion_adaptive_trail_stop(
+                    high_water_mark=p["hwm"], entry_price=p["entry"],
+                    atr_pct=p["atrp"], stop_atr_mult=STOP_ATR_MULT,
+                    day_realized_usd=float(state["cum"]),
+                    position_risk_usd=(p["entry"] * max(0.003, p["atrp"] * STOP_ATR_MULT)) * p["qty0"],
                     breakeven_floor=p["entry"] if p["scaled"] else p["stop0"],
                     current_stop=p["stop"], side_long=True)
 
