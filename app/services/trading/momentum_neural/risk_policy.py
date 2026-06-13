@@ -235,7 +235,7 @@ def adaptive_max_concurrent_live_sessions() -> int:
     return max(base, min(15, int(round(eq * frac / risk))))
 
 
-def streak_risk_multiplier(db) -> tuple[float, dict]:
+def streak_risk_multiplier(db, *, execution_family: str | None = None) -> tuple[float, dict]:
     """Streak-adaptive risk dial (Ross: 'coming out of the gates swinging' on a
     hot streak; 'size down' when cold). A multiplier on the per-trade max loss
     derived from the lane's OWN recent closed LIVE outcomes -- self-relative, no
@@ -245,22 +245,37 @@ def streak_risk_multiplier(db) -> tuple[float, dict]:
       >=3 consecutive losses -> hard floor 0.5         # Ross's stop-digging rule
       <5 closed outcomes      -> 1.0                   # not enough evidence
 
-    The daily-loss cap and drawdown breaker still bound everything above this.
-    Fail-neutral on ANY error (returns 1.0)."""
+    The window is the last 10 REAL ENTERED trades in THE SAME lane:
+      * execution_family (when given) segregates the lane -- without it the window
+        mixed crypto (Coinbase), equity (Robinhood) AND paper-soak twins (Alpaca)
+        into one dial, so a crypto loss spuriously de-risked the equity lane.
+      * is_real_entry_outcome() drops never-entered rows -- a $0.00
+        cancelled_pre_entry (realized=0.0, NOT NULL) was being miscounted as a loss
+        and inflating the consecutive-loss run. Entered-then-force-closed losses
+        (stop_loss, bailout, stale_data_abort, governance_exit, ...) still count.
+
+    Bounds/formula are UNCHANGED; only the input set is corrected. execution_family
+    defaults to None for byte-identical legacy behaviour. The daily-loss cap and
+    drawdown breaker still bound everything above this. Fail-neutral (returns 1.0)."""
     try:
         from ....models.trading import MomentumAutomationOutcome
+        from .outcome_labels import is_real_entry_outcome
 
-        rows = (
-            db.query(MomentumAutomationOutcome.realized_pnl_usd)
-            .filter(
-                MomentumAutomationOutcome.mode == "live",
-                MomentumAutomationOutcome.realized_pnl_usd.isnot(None),
-            )
-            .order_by(MomentumAutomationOutcome.terminal_at.desc())
-            .limit(10)
-            .all()
+        q = db.query(
+            MomentumAutomationOutcome.realized_pnl_usd,
+            MomentumAutomationOutcome.outcome_class,
+        ).filter(
+            MomentumAutomationOutcome.mode == "live",
+            MomentumAutomationOutcome.realized_pnl_usd.isnot(None),
         )
-        pnls = [float(r[0]) for r in rows]
+        if execution_family:
+            q = q.filter(MomentumAutomationOutcome.execution_family == execution_family)
+        # Fetch headroom (NOT a risk parameter): pull more than the 10-window so the
+        # post-filter prune of never-entered rows still yields the newest 10 REAL
+        # entries; the verified deepest real entry within the non-null set sits well
+        # inside this cap. Bounded + indexed (mode, terminal_at desc).
+        raw = q.order_by(MomentumAutomationOutcome.terminal_at.desc()).limit(40).all()
+        pnls = [float(p) for (p, oc) in raw if is_real_entry_outcome(oc)][:10]
         if len(pnls) < 5:
             return 1.0, {"streak_mult": 1.0, "reason": "insufficient_history", "n": len(pnls)}
         win_rate = sum(1 for p in pnls if p > 0) / len(pnls)
