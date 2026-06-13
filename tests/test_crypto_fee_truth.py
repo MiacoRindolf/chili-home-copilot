@@ -8,9 +8,13 @@ caused 81 % of the crypto lane's losses. These tests pin the fix.
 import math
 from types import SimpleNamespace
 
+import app.services.trading.momentum_neural.paper_execution as pe
 from app.services.trading.momentum_neural import live_runner
 from app.services.trading.momentum_neural.live_runner import _order_total_fees_usd
-from app.services.trading.momentum_neural.paper_execution import roundtrip_fee_usd
+from app.services.trading.momentum_neural.paper_execution import (
+    crypto_paper_roundtrip_bps,
+    roundtrip_fee_usd,
+)
 
 
 # ── paper: venue-bps truth path ──────────────────────────────────────────────
@@ -31,6 +35,26 @@ def test_garbage_venue_bps_falls_back_to_ratio_model():
     base = roundtrip_fee_usd(1_000.0, 0.08, entry=100.0, target=102.0)
     assert roundtrip_fee_usd(1_000.0, 0.08, entry=100.0, target=102.0, venue_rt_bps=float("nan")) == base
     assert roundtrip_fee_usd(1_000.0, 0.08, entry=100.0, target=102.0, venue_rt_bps=-5.0) == base
+
+
+# ── paper crypto fee mode: maker-only charges maker, else taker ──────────────
+
+class _FeeSettings:
+    chili_coinbase_taker_fee_bps_round_trip = 153
+    chili_coinbase_maker_fee_bps_round_trip = 50
+    chili_coinbase_maker_only_enabled = False
+
+
+def test_crypto_paper_bps_taker_by_default(monkeypatch):
+    monkeypatch.setattr(pe, "settings", _FeeSettings())
+    assert crypto_paper_roundtrip_bps() == 153.0
+
+
+def test_crypto_paper_bps_maker_when_maker_only(monkeypatch):
+    s = _FeeSettings()
+    s.chili_coinbase_maker_only_enabled = True
+    monkeypatch.setattr(pe, "settings", s)
+    assert crypto_paper_roundtrip_bps() == 50.0
 
 
 # ── live: broker-reported commission extraction ──────────────────────────────

@@ -162,6 +162,18 @@ def roundtrip_fee_usd(
     return abs(notional) * 0.0025 * 2.0
 
 
+def crypto_paper_roundtrip_bps() -> float:
+    """Round-trip commission (bps) a crypto PAPER trade should be charged.
+
+    Maker round-trip (post-only entries never pay taker) when the crypto lane
+    is configured maker-only (A3); otherwise the taker round-trip. The soak
+    must measure the cost structure the live lane will actually run with, so
+    flipping maker-only flips the paper fee with it (parity by construction)."""
+    if bool(getattr(settings, "chili_coinbase_maker_only_enabled", False)):
+        return float(getattr(settings, "chili_coinbase_maker_fee_bps_round_trip", 80) or 80)
+    return float(getattr(settings, "chili_coinbase_taker_fee_bps_round_trip", 120) or 120)
+
+
 def stop_target_prices(
     entry: float,
     *,
