@@ -3099,7 +3099,9 @@ def tick_live_session(
         # cold or after 3 straight losses. Bounds [0.5, 1.5]; fail-neutral 1.0.
         from .risk_policy import cushion_risk_multiplier, streak_risk_multiplier
 
-        _streak_mult, _streak_meta = streak_risk_multiplier(db)
+        # Segregate the streak dial by THIS lane (ef = normalized execution_family,
+        # resolved above) so a crypto/paper-twin loss never de-risks the equity lane.
+        _streak_mult, _streak_meta = streak_risk_multiplier(db, execution_family=ef)
         _base_max_loss = policy_float_cap(
             caps, "max_loss_per_trade_usd", settings.chili_momentum_risk_max_loss_per_trade_usd
         )
