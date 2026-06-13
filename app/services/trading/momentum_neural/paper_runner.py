@@ -43,6 +43,7 @@ from .paper_execution import (
     cushion_adaptive_trail_stop,
     breakeven_stop_after_partial,
     build_synthetic_quote,
+    class_aware_reward_risk,
     default_reference_mid,
     effective_stop_atr_pct,
     long_entry_fill_price,
@@ -894,6 +895,7 @@ def tick_paper_session(
             side_long=True,
             stop_atr_mult=_sam,
             target_atr_mult=float(params["target_atr_mult"]),
+            reward_risk=class_aware_reward_risk(sess.symbol),
         )
         # VENUE-TRUTH fees for crypto (2026-06-13 forensics: the ratio model
         # booked ~1/7th of real Coinbase commissions — paper looked profitable
@@ -1274,7 +1276,7 @@ def tick_paper_session(
             # runner (-> TRAILING). A position too small to leave a sellable runner is
             # flattened whole at target (the old flat exit). (docs/DESIGN/MOMENTUM_LANE.md)
             orig_qty = float(pos.get("original_quantity") or qty)
-            frac = scale_out_fraction()
+            frac = scale_out_fraction(symbol=sess.symbol)
             scale_qty, runner_qty, can_split = scale_out_quantity(
                 current_qty=qty,
                 original_qty=orig_qty,

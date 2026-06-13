@@ -46,6 +46,7 @@ from .entry_gates import (
     momentum_pullback_trigger,
 )
 from .paper_execution import (
+    class_aware_reward_risk,
     cushion_adaptive_trail_stop,
     effective_stop_atr_pct,
     scale_out_fraction,
@@ -66,8 +67,10 @@ ENTRY_BAR_MIN = int(ENTRY_INTERVAL[:-1]) if ENTRY_INTERVAL.endswith("m") and ENT
 _LIVE_PARAMS = family_default_params("default")
 STOP_ATR_MULT = float(_LIVE_PARAMS["stop_atr_mult"])                      # 0.60 default family
 TRAIL_ACTIVATE_BPS = float(_LIVE_PARAMS["trail_activate_return_bps"])     # live arms trailing pre-partial here
-REWARD_RISK = float(settings.chili_momentum_risk_reward_risk_ratio)
-SCALE_FRAC = scale_out_fraction()
+# R:R and scale-out are resolved PER-SYMBOL at the call sites now (A4: crypto
+# takes a wider target + heavier first de-risk than equity) via
+# class_aware_reward_risk(s) / scale_out_fraction(symbol=s) — equity replay is
+# unchanged (crypto overrides only apply to -USD symbols).
 GUARD_BPS = float(settings.chili_momentum_order_notional_guard_bps)       # live marketable-limit premium over ask
 SPREAD_BASE_BPS = float(settings.chili_momentum_risk_max_spread_bps_live)
 SPREAD_EM_RATIO = float(settings.chili_momentum_risk_spread_to_expected_move_ratio)
@@ -420,7 +423,7 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             # sells scale_out_fraction of the ORIGINAL qty (live_runner.py:2916-2964)
             if not p["scaled"] and bid >= p["target"] * TARGET_FIRE_FRAC:
                 p["scaled"] = True
-                part = min(p["qty"], p["qty0"] * SCALE_FRAC)
+                part = min(p["qty"], p["qty0"] * scale_out_fraction(symbol=s))
                 p["scale_usd"] = (bid - p["entry"]) * part
                 state["cum"] += p["scale_usd"]
                 p["qty"] -= part
@@ -616,7 +619,8 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                 vol_floored_atr_pct=eff, structural_stop_price=float(pblow) if pblow else None,
                 entry_price=fill_px, stop_atr_mult=STOP_ATR_MULT)
             stop, target = stop_target_prices(
-                fill_px, atr_pct=eff, side_long=True, stop_atr_mult=STOP_ATR_MULT, reward_risk=REWARD_RISK)
+                fill_px, atr_pct=eff, side_long=True, stop_atr_mult=STOP_ATR_MULT,
+                reward_risk=class_aware_reward_risk(s))
             if not (0 < stop < fill_px):
                 continue
             max_notional = min(NOTIONAL_CAP_USD, LIQ_FRACTION * mid * dvol)
