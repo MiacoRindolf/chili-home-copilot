@@ -54,6 +54,7 @@ from .risk_policy import (
 from .paper_execution import (
     cushion_adaptive_trail_stop,
     breakeven_stop_after_partial,
+    class_aware_reward_risk,
     effective_stop_atr_pct,
     regime_atr_pct,
     runner_trail_stop,
@@ -1120,7 +1121,7 @@ def _scale_out_to_runner(
         )
         pos["stop_price"] = be_stop
         pos["scaled_out_at_utc"] = _utcnow().isoformat()
-        pos["scale_out_fraction"] = scale_out_fraction()
+        pos["scale_out_fraction"] = scale_out_fraction(symbol=sess.symbol)
         le["position"] = pos
         _commit_le(sess, le)
         _safe_transition(db, sess, STATE_LIVE_TRAILING)
@@ -1168,7 +1169,7 @@ def _place_scale_out_limit(
         scale_qty, _runner_qty, can_split = scale_out_quantity(
             current_qty=float(filled),
             original_qty=float(filled),
-            fraction=scale_out_fraction(),
+            fraction=scale_out_fraction(symbol=sess.symbol),
             base_increment=inc,
             base_min_size=mn,
         )
@@ -2656,6 +2657,7 @@ def tick_live_session(
                     side_long=True,
                     stop_atr_mult=_stop_atr_mult,
                     target_atr_mult=float(params["target_atr_mult"]),
+                    reward_risk=class_aware_reward_risk(sess.symbol),
                 )
                 le["position"]["stop_price"] = stop_px
                 le["position"]["target_price"] = target_px
@@ -3765,7 +3767,7 @@ def tick_live_session(
             inc = prod.base_increment if prod else None
             mn = prod.base_min_size if prod else None
             orig_qty = _float_or_none(pos.get("original_quantity")) or qty
-            frac = scale_out_fraction()
+            frac = scale_out_fraction(symbol=sess.symbol)
             scale_qty, runner_qty, can_split = scale_out_quantity(
                 current_qty=qty,
                 original_qty=orig_qty,

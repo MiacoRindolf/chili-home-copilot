@@ -207,17 +207,59 @@ def stop_target_prices(
 # trail (chandelier off the frozen entry ATR) are DERIVED. docs/DESIGN/MOMENTUM_LANE.md
 
 
-def scale_out_fraction(default: float = 0.5) -> float:
-    """Fraction of the ORIGINAL position sold into the first (2:1) target.
+def _is_crypto_symbol(symbol: str | None) -> bool:
+    return bool(symbol) and str(symbol).upper().endswith("-USD")
+
+
+def class_aware_reward_risk(symbol: str | None = None) -> float:
+    """Reward:risk multiple for a symbol's asset class (2026-06-13, A4).
+
+    Equity uses the global ``chili_momentum_risk_reward_risk_ratio`` (2:1
+    floor). Crypto's fatter-tail moves take a wider target via
+    ``chili_momentum_crypto_reward_risk_ratio`` when set; left None it falls
+    back to the global so equity is never affected. Ross's R:R is a FLOOR, so
+    a misconfig below the equity floor is clamped up to it."""
+    try:
+        g = float(getattr(settings, "chili_momentum_risk_reward_risk_ratio", 2.0) or 2.0)
+    except (TypeError, ValueError):
+        g = 2.0
+    if not math.isfinite(g) or g <= 0:
+        g = 2.0
+    if _is_crypto_symbol(symbol):
+        ov = getattr(settings, "chili_momentum_crypto_reward_risk_ratio", None)
+        if ov is not None:
+            try:
+                ovf = float(ov)
+                if math.isfinite(ovf) and ovf > 0:
+                    return max(g, ovf)  # crypto override, never below the equity floor
+            except (TypeError, ValueError):
+                pass
+    return g
+
+
+def scale_out_fraction(default: float = 0.5, symbol: str | None = None) -> float:
+    """Fraction of the ORIGINAL position sold into the first target.
 
     Ross "sell 1/2 into strength" (up to 0.75 on the micro-pullback). ONE
     documented knob (``chili_momentum_scale_out_fraction``); the breakeven move
-    and runner trail are derived. Bounded to the open interval (0, 1) so a
-    misconfig can never sell 0% (no de-risk) or 100% (no runner)."""
+    and runner trail are derived. Crypto takes a heavier first de-risk via
+    ``chili_momentum_crypto_scale_out_fraction`` when set (A4); left None it
+    falls back to the global so equity is never affected. Bounded to the open
+    interval (0, 1) so a misconfig can never sell 0% (no de-risk) or 100% (no
+    runner)."""
     try:
         v = float(getattr(settings, "chili_momentum_scale_out_fraction", default))
     except (TypeError, ValueError):
         v = default
+    if _is_crypto_symbol(symbol):
+        ov = getattr(settings, "chili_momentum_crypto_scale_out_fraction", None)
+        if ov is not None:
+            try:
+                ovf = float(ov)
+                if math.isfinite(ovf):
+                    v = ovf
+            except (TypeError, ValueError):
+                pass
     if not math.isfinite(v):
         v = default
     return max(0.05, min(0.95, v))

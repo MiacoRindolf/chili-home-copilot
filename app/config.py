@@ -5100,6 +5100,19 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_CRYPTO_SCHEDULE_ENABLED"),
     )
+    # Per-asset-class geometry (2026-06-13 crypto-live plan, A4). The global
+    # reward:risk + scale-out knobs are tuned for the equity lane (2:1, 0.33);
+    # crypto's fatter-tail moves want a wider target and a heavier first
+    # de-risk. These crypto OVERRIDES apply only to -USD symbols; left at None
+    # they fall back to the global equity knobs (so equity is never affected).
+    chili_momentum_crypto_reward_risk_ratio: Optional[float] = Field(
+        default=3.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CRYPTO_REWARD_RISK_RATIO"),
+    )
+    chili_momentum_crypto_scale_out_fraction: Optional[float] = Field(
+        default=0.5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CRYPTO_SCALE_OUT_FRACTION"),
+    )
     # Optional per-venue notional cap (USD) for CHILI-managed Coinbase
     # autotrader exposure. 0 disables the static cap; sizing, buying power,
     # cost/edge, and portfolio gates remain active.
