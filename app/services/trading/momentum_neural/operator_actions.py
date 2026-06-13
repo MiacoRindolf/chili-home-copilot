@@ -204,6 +204,11 @@ def create_paper_draft_session(
         return {"ok": False, "error": "user_required", "message": "Paired user required."}
 
     sym = symbol.strip().upper()
+    # Venue-aware dedup: key on EXECUTION_FAMILY too so a crypto name can hold
+    # both its coinbase primary paper session AND an alpaca paper twin (the
+    # fill-quality A/B). Without this the twin dedups against the primary and
+    # never spawns. Mirrors the live dedup. (docs/DESIGN/ALPACA_LANE.md)
+    _ef_dedup = normalize_execution_family(execution_family)
     existing = (
         db.query(TradingAutomationSession)
         .filter(
@@ -211,6 +216,7 @@ def create_paper_draft_session(
             TradingAutomationSession.symbol == sym,
             TradingAutomationSession.variant_id == int(variant_id),
             TradingAutomationSession.mode == "paper",
+            TradingAutomationSession.execution_family == _ef_dedup,
             TradingAutomationSession.state != STATE_ARCHIVED,
         )
         .order_by(TradingAutomationSession.updated_at.desc())
@@ -224,7 +230,7 @@ def create_paper_draft_session(
                 "state": row.state,
                 "mode": row.mode,
                 "deduped": True,
-                "message": "Existing paper automation session reused for this symbol/variant.",
+                "message": "Existing paper automation session reused for this symbol/variant/venue.",
             }
     policy_full = resolve_effective_risk_policy()
     ev = evaluate_proposed_momentum_automation(
@@ -266,7 +272,7 @@ def create_paper_draft_session(
     sess = create_trading_automation_session(
         db,
         user_id=user_id,
-        venue="coinbase",
+        venue=venue_for_execution_family(ef),
         execution_family=ef,
         mode="paper",
         symbol=sym,
