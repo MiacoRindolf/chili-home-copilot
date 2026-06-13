@@ -3200,8 +3200,27 @@ def tick_live_session(
         # guarded_ask — the exact price the notional guard already sized against. If
         # it does not fill (the price ran away), the entry ack-timeout cancels it and
         # re-watches: a missed fill, not a chase. (docs/DESIGN/MOMENTUM_LANE.md)
-        entry_limit_px = guarded_ask
-        entry_limit_str = _fmt_limit_price_buy(entry_limit_px)
+        # MAKER-ONLY crypto entry (2026-06-13): the marketable guarded-ask limit
+        # CROSSES and pays TAKER (~153bps RT) — the crypto plan's #1 lever
+        # (maker-only, ~50bps) was built to avoid exactly this, but it was never
+        # enforced on the order (post_only defaulted False; first live TAO trade's
+        # fee $1.77 was 2x its gross loss). For crypto with maker-only enabled,
+        # post a POST-ONLY limit AT THE BID (a true maker order). A post-only that
+        # would cross is rejected by the venue (no order_id) → the existing
+        # ack-timeout cancels + re-watches, exactly like a non-fill ("missed fill,
+        # not a chase"). Equity + non-maker crypto keep the marketable guarded-ask.
+        _maker_entry = (
+            str(sess.symbol or "").upper().endswith("-USD")
+            and bool(getattr(settings, "chili_coinbase_maker_only_enabled", False))
+            and bid is not None
+            and float(bid) > 0
+        )
+        if _maker_entry:
+            entry_limit_px = float(bid)
+            entry_limit_str = f"{entry_limit_px:.6f}".rstrip("0").rstrip(".")
+        else:
+            entry_limit_px = guarded_ask
+            entry_limit_str = _fmt_limit_price_buy(entry_limit_px)
         le["entry_notional_guard"] = {
             "max_notional_usd": max_notional,
             "ask": ask,
@@ -3251,7 +3270,7 @@ def tick_live_session(
         except Exception:
             _entry_extended = False
         le["entry_session_extended"] = bool(_entry_extended)
-        res = adapter.place_limit_order_gtc(
+        _entry_kwargs = dict(
             product_id=product_id,
             side="buy",
             base_size=_fmt_base_size(qty),
@@ -3263,6 +3282,13 @@ def tick_live_session(
             # -21.9% dump. Equity adapters map this to RH 'gfd'; crypto ignores.
             time_in_force="gfd",
         )
+        # MAKER-ONLY (2026-06-13): post-only so a crossing price is rejected (no
+        # taker) — the ack-timeout then cancels + re-watches. Pass post_only ONLY
+        # for crypto+maker (coinbase_spot supports it); the RH equity adapter does
+        # NOT accept the kwarg, so equity is called exactly as before (no regress).
+        if _maker_entry:
+            _entry_kwargs["post_only"] = True
+        res = adapter.place_limit_order_gtc(**_entry_kwargs)
         le["entry_submitted"] = True
         le["entry_submit_utc"] = _utcnow().isoformat()
         le["entry_order_type"] = "limit"
