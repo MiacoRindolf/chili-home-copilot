@@ -3074,6 +3074,24 @@ def tick_live_session(
                 "pre_liq_notional_usd": round(_max_notional_pre_liq, 2),
                 "capped_notional_usd": round(max_notional, 2),
             }
+        # Crypto liquidity ceiling (A1): the dvol-snapshot path above is equity-only
+        # (fails open for -USD), so crypto had no ceiling. Bind it to the crypto
+        # turnover cap (fraction of one minute's $-volume) from the same floor the
+        # arm gate uses. Fail-open: no turnover datum -> unchanged.
+        if str(sess.symbol or "").upper().endswith("-USD"):
+            try:
+                from .crypto_liquidity import crypto_liquidity_ok as _liq
+
+                _ok, _det, _cap = _liq(sess.symbol, via, adapter=None)
+                if _cap is not None and float(_cap) > 0 and float(_cap) < max_notional - 1e-9:
+                    le["crypto_liquidity_cap"] = {
+                        "pre_cap_notional_usd": round(max_notional, 2),
+                        "capped_notional_usd": round(float(_cap), 2),
+                        "per_min_vol_usd": _det.get("per_min_vol_usd"),
+                    }
+                    max_notional = float(_cap)
+            except Exception:
+                pass
         # Streak-adaptive risk (Ross): the per-trade max loss scales with the
         # lane's recent live win rate — bigger on a hot hand, half-size when
         # cold or after 3 straight losses. Bounds [0.5, 1.5]; fail-neutral 1.0.
