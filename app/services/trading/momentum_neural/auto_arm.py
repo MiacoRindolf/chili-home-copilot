@@ -1033,6 +1033,17 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             crypto pauses during the US equity session, and live crypto arming
             stays off entirely while the realized record is 0/17 (A4)."""
             if not _is_coinbase_tradeable_symbol(_c.symbol):
+                # A2 schedule (quant pass v2): no NEW equity arms in the late
+                # window (>=14:30 ET) — freed-slot signals there lose money
+                # (−$169/−$322 buckets); exits/management unaffected.
+                try:
+                    from .market_profile import schedule_window_now
+
+                    if schedule_window_now() == "late":
+                        out["late_window_skipped"] = out.get("late_window_skipped", 0) + 1
+                        return False
+                except Exception:
+                    pass
                 return True
             if not bool(getattr(settings, "chili_momentum_crypto_live_arm_enabled", False)):
                 out["crypto_live_disabled_skipped"] = out.get("crypto_live_disabled_skipped", 0) + 1

@@ -469,6 +469,28 @@ def _submit_live_market_exit(
     if quantity <= 0:
         _emit(db, sess, "live_exit_noop_scale_limit_consumed", {"reason": reason})
         return {"ok": False, "error": "no_remaining_quantity", "noop": True}
+    # BROKER-QTY CLAMP (2026-06-12 quant pass v2 A6): sell what the BROKER
+    # says we hold, not what the session remembers — selling phantom shares
+    # produced the "Not enough shares to sell"/"cannot be sold short" reject
+    # storms (37/40 RH rejects, 8 stuck Alpaca sessions). A SUCCESSFUL fetch
+    # showing less than requested clamps; a failed fetch changes nothing.
+    try:
+        _bq = adapter.get_position_quantity(product_id) if hasattr(adapter, "get_position_quantity") else None
+        if _bq is None:
+            from ...broker_service import get_open_position_quantity as _rh_qty
+
+            if normalize_execution_family(sess.execution_family) == EXECUTION_FAMILY_ROBINHOOD_SPOT:
+                _bq = _rh_qty(sess.symbol)
+        if _bq is not None and float(_bq) >= 0 and float(_bq) < float(quantity) - 1e-9:
+            _emit(db, sess, "live_exit_qty_clamped_to_broker", {
+                "requested": float(quantity), "broker_qty": float(_bq), "reason": reason,
+            })
+            quantity = float(_bq)
+            if quantity <= 0:
+                return {"ok": False, "error": "no_remaining_quantity", "noop": True,
+                        "broker_zero": True}
+    except Exception:
+        pass
 
     _record_live_exit_intent_safe(
         db,
@@ -3017,10 +3039,33 @@ def tick_live_session(
                 le["ask_heavy_size_down"] = {"imbalance5": round(_imb, 4), "mult": _l2_mult}
         except (TypeError, ValueError):
             _l2_mult = 1.0
+        # A2 schedule risk multiplier (quant pass v2, +$3k/3d premarket leg):
+        # hot (04:00–10:30 ET) ×1.5, midday ×0.5, late ×0 (entries blocked at
+        # arm; this is the belt for already-armed sessions). Equities only —
+        # crypto rides its own 24/7 clock. Combined multipliers are capped at
+        # 3× base by the clamp below; the aggregate at-risk cap still governs.
+        _sched_mult = 1.0
+        if not str(sess.symbol or "").upper().endswith("-USD"):
+            try:
+                from .market_profile import schedule_window_now
+
+                _win = schedule_window_now()
+                _sched_mult = {"hot": 1.5, "midday": 0.5, "late": 0.0}.get(_win, 1.0)
+                if _sched_mult != 1.0:
+                    le["schedule_risk"] = {"window": _win, "mult": _sched_mult}
+            except Exception:
+                _sched_mult = 1.0
+        if _sched_mult <= 0.0:
+            _emit(db, sess, "live_entry_wait_late_window", {"window": "late"})
+            db.flush()
+            return {"ok": True, "session_id": sess.id, "state": sess.state, "skipped": "late_window"}
         _rf_qty, _rf_meta = compute_risk_first_quantity(
             entry_price=guarded_ask,
             atr_pct=_eff_atr_pct,
-            max_loss_usd=float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult),
+            max_loss_usd=min(
+                float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult),
+                float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
+            ),
             max_notional_ceiling_usd=max_notional,
             base_increment=inc,
             base_min_size=mn,

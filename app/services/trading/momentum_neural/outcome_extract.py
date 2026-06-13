@@ -282,6 +282,17 @@ def extract_momentum_session_outcome(
                 realized = float(realized)
             except (TypeError, ValueError):
                 realized = None
+        # BROKER-TRUTH OVERRIDE (2026-06-12 quant pass v2 A1): the runtime
+        # self-report is censored by flatten cascades / reconcile paths — the
+        # 30d ledger read −$234 while broker truth was +$2,568, and the streak
+        # multiplier halved size off the phantom record. When the session's
+        # own entry order id matches a closed broker-synced Trade row, the
+        # BROKER's realized is the truth. Joined on broker_order_id — never
+        # by symbol/time (the operator's manual trades share the account).
+        _bt = _broker_truth_realized_for_session(db, sess, le)
+        if _bt is not None:
+            if realized is None or abs(_bt - (realized or 0.0)) > 0.01:
+                realized = _bt
         exit_reason = le.get("last_exit_reason")
         if isinstance(exit_reason, str):
             exit_reason = exit_reason.strip() or None
@@ -399,6 +410,90 @@ _REAL_EXIT_OUTCOMES = frozenset(
         OUTCOME_GOVERNANCE_EXIT,
     }
 )
+
+
+def _broker_truth_realized_for_session(db, sess, le: dict) -> Optional[float]:
+    """Realized PnL from the broker-synced Trade row whose broker_order_id
+    matches THIS session's entry order — None when no confident match.
+    Fail-open (None) on any error: the self-report remains the fallback."""
+    oid = le.get("entry_order_id")
+    if not oid:
+        return None
+    try:
+        from sqlalchemy import text as _text
+
+        row = db.execute(
+            _text(
+                "SELECT pnl FROM trading_trades "
+                "WHERE broker_order_id = :oid AND status = 'closed' "
+                "AND pnl IS NOT NULL ORDER BY exit_date DESC LIMIT 1"
+            ),
+            {"oid": str(oid)},
+        ).fetchone()
+        if row is None:
+            return None
+        return float(row[0])
+    except Exception:
+        return None
+
+
+def backfill_outcomes_from_broker_truth(db, *, lookback_days: float = 30.0) -> dict:
+    """Repair censored outcome rows from broker truth (2026-06-12 quant pass v2
+    A1): flatten cascades / reconcile paths wrote NULL/zero realized while the
+    broker filled real money — the 30d ledger read −$234 vs +$2,568 broker
+    truth, and the streak multiplier halved size off the phantom record.
+    Joins outcome → session → le.entry_order_id → trading_trades.broker_order_id
+    (never symbol/time — manual trades share the account). Idempotent."""
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import text as _text
+
+    from ....models.trading import MomentumAutomationOutcome, TradingAutomationSession
+
+    fixed = 0
+    checked = 0
+    try:
+        cutoff = datetime.utcnow() - timedelta(days=float(lookback_days))
+        rows = (
+            db.query(MomentumAutomationOutcome, TradingAutomationSession)
+            .join(TradingAutomationSession, TradingAutomationSession.id == MomentumAutomationOutcome.session_id)
+            .filter(
+                MomentumAutomationOutcome.terminal_at >= cutoff,
+                MomentumAutomationOutcome.mode == "live",
+                TradingAutomationSession.execution_family != "alpaca_spot",
+            )
+            .all()
+        )
+    except Exception:
+        return {"ok": False, "error": "query_failed"}
+    for outcome, sess in rows:
+        checked += 1
+        try:
+            snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
+            le = snap.get("momentum_live_execution") or {}
+            oid = le.get("entry_order_id")
+            if not oid:
+                continue
+            row = db.execute(
+                _text(
+                    "SELECT pnl FROM trading_trades WHERE broker_order_id = :oid "
+                    "AND status = 'closed' AND pnl IS NOT NULL "
+                    "ORDER BY exit_date DESC LIMIT 1"
+                ),
+                {"oid": str(oid)},
+            ).fetchone()
+            if row is None:
+                continue
+            bt = float(row[0])
+            cur = outcome.realized_pnl_usd
+            if cur is None or abs(bt - float(cur or 0.0)) > 0.01:
+                outcome.realized_pnl_usd = bt
+                if outcome.outcome_class in ("cancelled_pre_entry", "error_exit") and abs(bt) > 0.01:
+                    outcome.outcome_class = "broker_truth_reclassified"
+                fixed += 1
+        except Exception:
+            continue
+    return {"ok": True, "checked": checked, "fixed": fixed}
 
 
 def _strip_reconcile_suffix(exit_reason: Optional[str]) -> Optional[str]:
