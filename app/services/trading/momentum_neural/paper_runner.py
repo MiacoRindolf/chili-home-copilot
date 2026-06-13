@@ -44,6 +44,7 @@ from .paper_execution import (
     breakeven_stop_after_partial,
     build_synthetic_quote,
     class_aware_reward_risk,
+    crypto_paper_roundtrip_bps,
     default_reference_mid,
     effective_stop_atr_pct,
     long_entry_fill_price,
@@ -902,11 +903,12 @@ def tick_paper_session(
         # on trades that were structurally underwater live). Crypto paper now
         # charges the same round-trip bps the live cost gate uses; equity keeps
         # the legacy model (RH/Alpaca commissions are ~0, slip modeled apart).
+        # When the crypto lane is configured maker-only (A3), charge the MAKER
+        # round-trip (post-only entries never pay taker) so the soak measures
+        # the cost structure the live lane will actually run with.
         _venue_rt_bps = None
         if str(sess.symbol or "").upper().endswith("-USD"):
-            _venue_rt_bps = float(
-                getattr(settings, "chili_coinbase_taker_fee_bps_round_trip", 120) or 120
-            )
+            _venue_rt_bps = crypto_paper_roundtrip_bps()
         fees = roundtrip_fee_usd(
             notional, fee_ratio, entry=entry_px, target=target_px, venue_rt_bps=_venue_rt_bps,
         )
