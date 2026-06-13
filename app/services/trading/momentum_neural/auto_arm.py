@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from ....config import settings
 from ....models.trading import MomentumSymbolViability, TradingAutomationSession
+from .crypto_liquidity import crypto_liquidity_ok
 from .live_fsm import (
     LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY,
     STATE_ARMED_PENDING_RUNNER,
@@ -917,6 +918,7 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     out["broker_not_ready_skipped"] = 0
     out["loss_guard_skipped"] = 0
     _broker_ready_cache: dict[str, bool] = {}
+    out["crypto_illiquid_skipped"] = 0
     eligible: list[MomentumSymbolViability] = []
     for c in candidates:
         out["checked"] += 1
@@ -936,6 +938,17 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             continue  # 2-strike / post-loss cooldown — walk away like Ross does
         if not _symbol_market_open(c.symbol):
             continue  # equities only during their session; crypto always passes (24/7)
+        # Crypto liquidity floor (A1): the Ross scorer is blind to executability,
+        # so it ranks $24k/24h names alongside DOGE. Block crypto pairs whose
+        # turnover can't absorb a trade — applies to PAPER too, since the whole
+        # point of the soak is to learn on EXECUTABLE names. Cheap ($-volume
+        # from the already-loaded viability row; no network). The live spread
+        # probe runs later at the arm stage. Stash the per-name notional cap.
+        if _is_coinbase_tradeable_symbol(c.symbol):
+            _liq_ok, _liq_detail, _liq_cap = crypto_liquidity_ok(c.symbol, c, adapter=None)
+            if not _liq_ok:
+                out["crypto_illiquid_skipped"] = out.get("crypto_illiquid_skipped", 0) + 1
+                continue
         if not _venue_broker_ready_for(c.symbol, _broker_ready_cache):
             out["broker_not_ready_skipped"] += 1
             continue  # venue disconnected (e.g. RH token expired) — don't burn the single

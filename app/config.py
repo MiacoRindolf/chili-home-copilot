@@ -5060,6 +5060,36 @@ class Settings(BaseSettings):
         default=30,
         validation_alias=AliasChoices("CHILI_MIN_EDGE_SAFETY_BUFFER_BPS"),
     )
+    # ── Crypto liquidity floor (2026-06-13 crypto-live plan, A1) ──────────────
+    # The Ross scorer ranks crypto on burst signals that are blind to whether
+    # the name can be traded at size; the lane was arming $24k/24h names. A
+    # crypto pair is tradeable iff its 24h quote ($) volume clears this floor.
+    # $1.44M/24h = ~$1k/min, the plan's median-1m-$vol floor. Adaptive by
+    # design: ONE documented number, no hardcoded ticker whitelist.
+    chili_crypto_min_quote_volume_24h_usd: float = Field(
+        default=1_440_000.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_CRYPTO_MIN_QUOTE_VOLUME_24H_USD"),
+    )
+    # Max acceptable live spread (bps) for a crypto entry — a wide book is a
+    # hidden round-trip cost the $-volume floor won't catch. Probed via the
+    # venue adapter when chili_crypto_liquidity_spread_probe_enabled.
+    chili_crypto_max_spread_bps: float = Field(
+        default=50.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_CRYPTO_MAX_SPREAD_BPS"),
+    )
+    chili_crypto_liquidity_spread_probe_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_CRYPTO_LIQUIDITY_SPREAD_PROBE_ENABLED"),
+    )
+    # Per-name notional cap = this fraction of one minute's $-volume. Never
+    # post more than half a minute of turnover (the liquidity ceiling).
+    chili_crypto_notional_vol_fraction: float = Field(
+        default=0.5,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_CRYPTO_NOTIONAL_VOL_FRACTION"),
+    )
     # Optional per-venue notional cap (USD) for CHILI-managed Coinbase
     # autotrader exposure. 0 disables the static cap; sizing, buying power,
     # cost/edge, and portfolio gates remain active.
