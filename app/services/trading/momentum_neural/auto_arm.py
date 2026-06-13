@@ -512,7 +512,19 @@ def _filter_fresh_tape(rows: list, *, max_age_sec: float | None = None) -> list:
         age_cap = 180.0
     if age_cap <= 0:
         return rows
-    syms = sorted({str(r.symbol or "").upper() for r in rows})
+    # CRYPTO EXEMPTION (2026-06-13): momentum_nbbo_spread_tape records EQUITY
+    # only — crypto (-USD) has ZERO rows there, so this equity stale-quote gate
+    # was silently dropping EVERY crypto candidate (flag on, but never arming).
+    # Crypto majors are 24/7 liquid and already gated by the crypto liquidity
+    # floor (C2) + the live-price trigger freshness, so this NBBO-tape gate is
+    # equity-only by design. Apply it to equities; pass crypto through unchanged.
+    equity_syms = sorted({
+        str(r.symbol or "").upper()
+        for r in rows
+        if not str(r.symbol or "").upper().endswith("-USD")
+    })
+    if not equity_syms:
+        return rows  # all-crypto candidate set — nothing for the equity gate to check
     fresh: set[str] = set()
     from ....db import SessionLocal
 
@@ -527,7 +539,7 @@ def _filter_fresh_tape(rows: list, *, max_age_sec: float | None = None) -> list:
                 "AND observed_at >= now() at time zone 'utc' - make_interval(secs => :cap) "
                 "GROUP BY symbol"
             ),
-            {"syms": syms, "cap": age_cap},
+            {"syms": equity_syms, "cap": age_cap},
         )
         fresh = {str(r[0]).upper() for r in res}
     except Exception:
@@ -538,7 +550,12 @@ def _filter_fresh_tape(rows: list, *, max_age_sec: float | None = None) -> list:
         except Exception:
             pass
         db.close()
-    return [r for r in rows if str(r.symbol or "").upper() in fresh]
+    return [
+        r
+        for r in rows
+        if str(r.symbol or "").upper().endswith("-USD")  # crypto: exempt (see above)
+        or str(r.symbol or "").upper() in fresh
+    ]
 
 
 def _enforce_ross_price_band(
