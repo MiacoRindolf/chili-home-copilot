@@ -218,6 +218,7 @@ def _record_live_entry_ledger_safe(
     le: dict[str, Any],
     quantity: float,
     fill_price: float,
+    fee: float = 0.0,
 ) -> None:
     try:
         from .. import economic_ledger as _ledger
@@ -232,7 +233,7 @@ def _record_live_entry_ledger_safe(
             ticker=sess.symbol,
             quantity=quantity,
             fill_price=fill_price,
-            fee=0.0,
+            fee=float(fee or 0.0),
             venue=sess.venue,
             mode="live",
             decision_packet_id=int(le["entry_decision_packet_id"]) if le.get("entry_decision_packet_id") else None,
@@ -256,6 +257,7 @@ def _record_live_exit_ledger_safe(
     fill_price: float,
     realized_pnl_usd: float,
     reason: str,
+    fee: float = 0.0,
 ) -> None:
     try:
         from .. import economic_ledger as _ledger
@@ -274,7 +276,7 @@ def _record_live_exit_ledger_safe(
             fill_price=fill_price,
             entry_price=entry_price,
             realized_pnl_usd=realized_pnl_usd,
-            fee=0.0,
+            fee=float(fee or 0.0),
             venue=sess.venue,
             mode="live",
             decision_packet_id=dpid,
@@ -309,6 +311,7 @@ def _record_live_partial_exit_ledger_safe(
     fill_price: float,
     realized_pnl_usd: float,
     reason: str,
+    fee: float = 0.0,
 ) -> None:
     try:
         from .. import economic_ledger as _ledger
@@ -327,7 +330,7 @@ def _record_live_partial_exit_ledger_safe(
             fill_price=fill_price,
             entry_price=entry_price,
             realized_pnl_usd=realized_pnl_usd,
-            fee=0.0,
+            fee=float(fee or 0.0),
             venue=sess.venue,
             mode="live",
             decision_packet_id=dpid,
@@ -350,6 +353,28 @@ def _float_or_none(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return out if math.isfinite(out) else None
+
+
+def _order_total_fees_usd(no: Any) -> float | None:
+    """Broker-reported commission on an order, from the raw payload.
+
+    Coinbase Advanced Trade returns ``total_fees`` on every order; Robinhood
+    equities have no such field (commission ~0) so this returns None and the
+    caller books 0 — same as the old behavior. This is the live half of the
+    2026-06-13 fee-truth fix: fees the broker actually charged must reach the
+    economic ledger and the session PnL, not be silently dropped.
+    """
+    try:
+        raw = getattr(no, "raw", None) or {}
+        val = raw.get("total_fees")
+        if val is None:
+            val = raw.get("totalFees")
+        if val is None:
+            return None
+        fee = float(val)
+    except (TypeError, ValueError):
+        return None
+    return fee if math.isfinite(fee) and fee >= 0.0 else None
 
 
 def _record_live_exit_intent_safe(
@@ -811,11 +836,18 @@ def _poll_live_exit_fill(
         full_fill = True
     if full_fill:
         le.pop("exit_pending_first_seen_utc", None)
+        # Fee truth (2026-06-13): stash the broker-reported commission so the
+        # completion fn (which never sees the order object) books it into the
+        # ledger and nets it out of session PnL. le is the existing poll →
+        # complete side channel — no caller signatures change.
+        le["last_exit_fee_usd"] = _order_total_fees_usd(no)
         _commit_le(sess, le)
         return {"filled": True, "fill_price": avg_px, "filled_size": filled_size, "order_status": no.status}
 
     terminal_status = (no.status or "").lower() in ("filled", "done", "closed", "cancelled", "canceled", "expired", "failed")
     if terminal_status and filled_size > 1e-12 and avg_px is not None:
+        le["last_exit_fee_usd"] = _order_total_fees_usd(no)
+        _commit_le(sess, le)
         return {
             "filled": False,
             "partial": True,
@@ -929,8 +961,19 @@ def _complete_confirmed_live_exit(
     slip_bps: float,
     sell_result: dict[str, Any] | None = None,
 ) -> float:
-    pnl = (float(fill_price) - float(entry_price)) * float(quantity)
+    pnl_gross = (float(fill_price) - float(entry_price)) * float(quantity)
     notional_basis = abs(float(entry_price) * float(quantity))
+    # Fee truth (2026-06-13): net the broker-reported commissions out of the
+    # session's realized PnL — the exit order's own fee (stashed by the poll)
+    # plus any entry-side fee not yet booked (charged once, at the FULL exit,
+    # so partial-exit accounting needs no fractional allocation). Sessions
+    # whose exits reconcile without an order poll (broker-zero escape) book 0,
+    # exactly the old behavior.
+    _exit_fee = _float_or_none(le.pop("last_exit_fee_usd", None)) or 0.0
+    _entry_fee = _float_or_none(le.pop("entry_fee_usd_unbooked", None)) or 0.0
+    fees_usd = max(0.0, _exit_fee) + max(0.0, _entry_fee)
+    pnl = pnl_gross - fees_usd
+    le["fees_usd_total"] = float(le.get("fees_usd_total") or 0.0) + fees_usd
     le["realized_pnl_usd"] = float(le.get("realized_pnl_usd") or 0.0) + pnl
     le["last_exit_price"] = float(fill_price)
     le["last_exit_entry_price"] = float(entry_price)
@@ -946,6 +989,7 @@ def _complete_confirmed_live_exit(
         fill_price=float(fill_price),
         realized_pnl_usd=pnl,
         reason=reason,
+        fee=fees_usd,
     )
     _finalize_live_decision_after_exit(db, sess, le=le, realized_pnl_usd=pnl, slip_bps=slip_bps)
     le["last_exit_reason"] = reason
@@ -974,6 +1018,9 @@ def _complete_confirmed_live_exit(
     _commit_le(sess, le)
     _safe_transition(db, sess, STATE_LIVE_EXITED)
     payload = {"reason": reason, "pnl_usd": pnl, "fill_price": float(fill_price)}
+    if fees_usd > 0.0:
+        payload["pnl_gross_usd"] = pnl_gross
+        payload["fees_usd"] = fees_usd
     if sell_result is not None:
         payload["sell_result"] = sell_result
     _emit(db, sess, "live_exit_filled", payload)
@@ -994,9 +1041,13 @@ def _apply_confirmed_live_partial_exit(
     pos = dict(pos) if isinstance(pos, dict) else {}
     current_qty = _float_or_none(pos.get("quantity")) or 0.0
     qty = min(max(float(filled_quantity), 0.0), current_qty)
-    pnl = (float(fill_price) - float(entry_price)) * qty
+    # Fee truth (2026-06-13): a partial exit nets only ITS OWN order's
+    # commission; the entry-side fee is booked once at the final full exit.
+    _exit_fee = max(0.0, _float_or_none(le.pop("last_exit_fee_usd", None)) or 0.0)
+    pnl = (float(fill_price) - float(entry_price)) * qty - _exit_fee
     notional_basis = abs(float(entry_price) * qty)
     remaining = max(0.0, current_qty - qty)
+    le["fees_usd_total"] = float(le.get("fees_usd_total") or 0.0) + _exit_fee
     le["realized_pnl_usd"] = float(le.get("realized_pnl_usd") or 0.0) + pnl
     le["last_partial_exit_price"] = float(fill_price)
     le["last_partial_exit_reason"] = reason
@@ -1018,6 +1069,7 @@ def _apply_confirmed_live_partial_exit(
         fill_price=float(fill_price),
         realized_pnl_usd=pnl,
         reason=reason,
+        fee=_exit_fee,
     )
     _commit_le(sess, le)
     _emit(
@@ -1190,6 +1242,9 @@ def _cancel_scale_limit_and_clamp(
         if new_fill > 0:
             pos = le.get("position") if isinstance(le.get("position"), dict) else {}
             px = float(getattr(no, "average_filled_price", 0) or 0) or float(le.get("scale_limit_px") or 0)
+            # Fee truth: this adopt path never goes through the exit poll, so
+            # stash the order's commission for the partial bookkeeping here.
+            le["last_exit_fee_usd"] = _order_total_fees_usd(no)
             _apply_confirmed_live_partial_exit(
                 db, sess, le=le, filled_quantity=new_fill,
                 entry_price=float(pos.get("avg_entry_price") or 0),
@@ -2612,7 +2667,18 @@ def tick_live_session(
                         mark_packet_executed(db, int(le["entry_decision_packet_id"]))
                     except Exception:
                         _log.debug("mark_packet_executed live skipped session=%s", sess.id, exc_info=True)
-                _record_live_entry_ledger_safe(db, sess, le=le, quantity=filled, fill_price=avg)
+                # Fee truth (2026-06-13): book the broker-reported entry
+                # commission and carry it on the session until the full exit
+                # nets it out of realized PnL.
+                _entry_fee = _order_total_fees_usd(no) or 0.0
+                if _entry_fee > 0.0:
+                    le["entry_fee_usd_unbooked"] = (
+                        float(le.get("entry_fee_usd_unbooked") or 0.0) + _entry_fee
+                    )
+                    _commit_le(sess, le)
+                _record_live_entry_ledger_safe(
+                    db, sess, le=le, quantity=filled, fill_price=avg, fee=_entry_fee,
+                )
                 # Sell INTO strength: rest the scale-out limit AT the target now,
                 # while the move is paying the level (fail-open -> reactive path).
                 _place_scale_out_limit(

@@ -135,14 +135,24 @@ def roundtrip_fee_usd(
     *,
     entry: float = 0.0,
     target: float = 0.0,
+    venue_rt_bps: float | None = None,
 ) -> float:
     """Estimate round-trip fees for a paper trade.
 
-    ``fee_to_target_ratio`` is the fraction of *expected target profit*
-    consumed by fees (e.g. 0.08 = 8 % of target PnL).  When ``entry``
-    and ``target`` are supplied we compute fees from the target P&L;
-    otherwise fall back to a conservative 0.5 % per-side exchange rate.
+    ``venue_rt_bps`` is the VENUE-TRUTH path: the broker's actual round-trip
+    commission in bps of notional (e.g. Coinbase taker 153 bps). When given it
+    overrides the ratio model entirely — the 2026-06-13 crypto forensics found
+    the ratio model booked ~1/7th of real Coinbase fees, hiding that every
+    crypto round trip started ~1.5 % underwater.
+
+    ``fee_to_target_ratio`` is the legacy fraction of *expected target profit*
+    consumed by fees (e.g. 0.08 = 8 % of target PnL), kept for venues without
+    a measured commission schedule. When ``entry`` and ``target`` are supplied
+    we compute fees from the target P&L; otherwise fall back to a conservative
+    0.5 % per-side exchange rate.
     """
+    if venue_rt_bps is not None and math.isfinite(float(venue_rt_bps)) and float(venue_rt_bps) >= 0.0:
+        return abs(notional) * float(venue_rt_bps) / 10_000.0
     r = float(fee_to_target_ratio)
     if entry > 0 and target > 0 and entry != target:
         qty = abs(notional) / entry if entry else 0.0
