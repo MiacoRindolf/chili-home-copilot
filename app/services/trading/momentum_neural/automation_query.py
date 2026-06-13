@@ -1900,6 +1900,7 @@ def automation_pnl_rollup(db: Session, *, user_id: int) -> dict[str, Any]:
             "realized_7d_usd": 0.0,
             "trades": 0, "wins": 0, "losses": 0, "last_activity_utc": None,
             "session_id": None, "open_session_ids": [], "asset_class": None,
+            "broker_unconfirmed": False,
         }
 
     def _bucket_cell() -> dict[str, Any]:
@@ -2005,6 +2006,51 @@ def automation_pnl_rollup(db: Session, *, user_id: int) -> dict[str, Any]:
         .all()
     )
     now_utc = datetime.utcnow()
+    # Cockpit broker-truth defense (2026-06-13): the live runner can keep
+    # le['position'] populated for minutes-to-hours after a position has actually
+    # left the broker (sold externally / missed exit fill / dust) — that stale
+    # position read as REAL money (the TAO +$16.70 phantom that made -$3.65 look
+    # like +$12). The broker-sync (every 2min) closes the Trade row once the broker
+    # confirms the holding is gone (coinbase_position_sync_gone + missing-streak /
+    # RH sync), so an OPEN broker-synced Trade is a DB-only broker-truth signal —
+    # NO broker call in this UI path. Applied ONLY to the real-broker "live" bucket
+    # (coinbase + robinhood); alpaca paper twins + paper have no real broker holding
+    # and are never suppressed. Fail-open: any error leaves floating untouched.
+    # Two broker-truth signals from the broker-synced Trade rows: symbols the
+    # broker currently HOLDS (an open trade) and symbols the broker recently
+    # EXITED (a closed/cancelled trade in the last 2 days). A live position is a
+    # PHANTOM only on POSITIVE exit evidence — a recently-closed trade AND no open
+    # one — never merely on "no open trade" (a brand-new real fill may not have its
+    # synced Trade row yet; absence of evidence must NOT suppress real money).
+    _open_tk: "set[str] | None" = None
+    _exited_tk: "set[str]" = set()
+    try:
+        from ....models.trading import Trade
+
+        _open_tk = {
+            str(_tk).upper()
+            for (_tk,) in db.query(Trade.ticker)
+            .filter(Trade.user_id == user_id, Trade.status == "open")
+            .distinct()
+            .all()
+            if _tk
+        }
+        _closed_floor = now_utc - timedelta(days=2)
+        _exited_tk = {
+            str(_tk).upper()
+            for (_tk,) in db.query(Trade.ticker)
+            .filter(
+                Trade.user_id == user_id,
+                Trade.status.in_(("closed", "cancelled")),
+                Trade.exit_date.isnot(None),
+                Trade.exit_date >= _closed_floor,
+            )
+            .distinct()
+            .all()
+            if _tk
+        }
+    except Exception:
+        _open_tk = None  # fail-open: never suppress on a query error
     for sess in active_rows:
         bucket = _rollup_bucket_for(sess.mode, sess.execution_family)
         ex = _rollup_exec_state(sess)
@@ -2059,10 +2105,25 @@ def automation_pnl_rollup(db: Session, *, user_id: int) -> dict[str, Any]:
                 cell["mark_age_s"] = max(0, int((now_utc - tick_dt).total_seconds()))
             except (TypeError, ValueError):
                 pass
-        if qty and entry and last and entry > 0:
+        # Phantom guard: a real-broker ("live" = coinbase/robinhood) holding the
+        # broker does NOT confirm (no OPEN broker-synced Trade for the symbol) must
+        # NOT add floating or at-risk — that is the stale-position phantom. Alpaca
+        # paper twins ("alpaca" bucket) + paper are never broker-checked here.
+        _sym_up = str(sess.symbol or "").upper()
+        _broker_unconfirmed = (
+            bucket == "live"
+            and _open_tk is not None
+            and _sym_up in _exited_tk
+            and _sym_up not in _open_tk
+        )
+        if _broker_unconfirmed:
+            cell["broker_unconfirmed"] = True
+        if qty and entry and last and entry > 0 and not _broker_unconfirmed:
             cell["floating_usd"] += round((last - entry) * qty, 2)
         stop = _float_or_none_q(pos.get("stop_price"))
-        if qty and entry and stop and stop > 0:
+        if _broker_unconfirmed:
+            pass  # phantom: no real position -> contributes no at-risk
+        elif qty and entry and stop and stop > 0:
             # A stop AT or ABOVE entry (breakeven ratchet / trail in profit)
             # is a KNOWN stop with $0 risk — the safest positions must not
             # read as the scariest. "Unknown" = genuinely missing stop.

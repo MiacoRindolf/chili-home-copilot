@@ -230,3 +230,82 @@ def test_breakeven_ratcheted_stop_is_known_zero_risk(db):
     out = automation_pnl_rollup(db, user_id=uid)
     assert out["buckets"]["live"]["at_risk_unknown_stops"] == 0
     assert out["buckets"]["live"]["at_risk_usd"] == 0.0
+
+
+def test_phantom_position_floating_suppressed(db):
+    """A live session still tracking a position whose broker holding has EXITED
+    (a recent CLOSED broker-synced trade + NO open one) must NOT contribute phantom
+    floating — the TAO +$16.70 cockpit lie. A real holding (OPEN trade) keeps its
+    floating. Suppression needs POSITIVE exit evidence, never mere absence."""
+    from app.models.trading import Trade
+
+    uid = _seed_user(db)
+    v = _variant(db)
+    now = datetime.utcnow()
+    # PHANTOM: live session shows a position, but the broker-synced trade is CLOSED.
+    _sess(db, uid, v.id, symbol="TAO-USD", mode="live", state="live_trailing",
+          family="coinbase_spot", exec_state={
+              "last_mid": 272.89,
+              "position": {"quantity": 1.4021, "avg_entry_price": 260.98, "stop_price": 255.0},
+          })
+    db.add(Trade(user_id=uid, ticker="TAO-USD", status="closed",
+                 entry_price=260.98, quantity=1.4021, exit_date=now))
+    # REAL: live session with an OPEN broker-synced trade -> floating kept.
+    _sess(db, uid, v.id, symbol="MEGA-USD", mode="live", state="live_trailing",
+          family="coinbase_spot", exec_state={
+              "last_mid": 0.0560,
+              "position": {"quantity": 5000.0, "avg_entry_price": 0.0554, "stop_price": 0.050},
+          })
+    db.add(Trade(user_id=uid, ticker="MEGA-USD", status="open",
+                 entry_price=0.0554, quantity=5000.0))
+    db.flush()
+    out = automation_pnl_rollup(db, user_id=uid)
+    live = out["buckets"]["live"]
+    syms = {s["symbol"]: s for s in live["symbols"]}
+    # TAO phantom: floating suppressed + flagged.
+    assert syms["TAO-USD"]["floating_usd"] == 0.0
+    assert syms["TAO-USD"]["broker_unconfirmed"] is True
+    # MEGA real: floating computed = (0.0560-0.0554)*5000 = 3.0, not flagged.
+    assert round(syms["MEGA-USD"]["floating_usd"], 2) == 3.0
+    assert syms["MEGA-USD"]["broker_unconfirmed"] is False
+    # bucket floating excludes the phantom.
+    assert round(live["floating_usd"], 2) == 3.0
+
+
+def test_phantom_guard_needs_positive_exit_evidence(db):
+    """A live position with NO broker-synced trade at all (e.g. a fresh fill whose
+    synced trade row has not landed yet) must NOT be suppressed — absence of an open
+    trade is not proof of exit. Guards against false-suppressing real money."""
+    uid = _seed_user(db)
+    v = _variant(db)
+    _sess(db, uid, v.id, symbol="FRESH-USD", mode="live", state="live_entered",
+          family="coinbase_spot", exec_state={
+              "last_mid": 1.10,
+              "position": {"quantity": 100.0, "avg_entry_price": 1.00, "stop_price": 0.90},
+          })
+    out = automation_pnl_rollup(db, user_id=uid)
+    syms = {s["symbol"]: s for s in out["buckets"]["live"]["symbols"]}
+    assert round(syms["FRESH-USD"]["floating_usd"], 2) == 10.0  # (1.10-1.00)*100, kept
+    assert syms["FRESH-USD"]["broker_unconfirmed"] is False
+
+
+def test_alpaca_twin_floating_never_suppressed(db):
+    """Alpaca paper twins have no real broker holding by design — even with a
+    closed trade lying around, their floating must NEVER be suppressed."""
+    from app.models.trading import Trade
+
+    uid = _seed_user(db)
+    v = _variant(db)
+    now = datetime.utcnow()
+    _sess(db, uid, v.id, symbol="NVDA", mode="live", state="live_trailing",
+          family="alpaca_spot", exec_state={
+              "last_mid": 101.0,
+              "position": {"quantity": 10.0, "avg_entry_price": 100.0, "stop_price": 95.0},
+          })
+    db.add(Trade(user_id=uid, ticker="NVDA", status="closed",
+                 entry_price=100.0, quantity=10.0, exit_date=now))
+    db.flush()
+    out = automation_pnl_rollup(db, user_id=uid)
+    syms = {s["symbol"]: s for s in out["buckets"]["alpaca"]["symbols"]}
+    assert round(syms["NVDA"]["floating_usd"], 2) == 10.0  # (101-100)*10, NOT suppressed
+    assert syms["NVDA"]["broker_unconfirmed"] is False
