@@ -895,7 +895,19 @@ def tick_paper_session(
             stop_atr_mult=_sam,
             target_atr_mult=float(params["target_atr_mult"]),
         )
-        fees = roundtrip_fee_usd(notional, fee_ratio, entry=entry_px, target=target_px)
+        # VENUE-TRUTH fees for crypto (2026-06-13 forensics: the ratio model
+        # booked ~1/7th of real Coinbase commissions — paper looked profitable
+        # on trades that were structurally underwater live). Crypto paper now
+        # charges the same round-trip bps the live cost gate uses; equity keeps
+        # the legacy model (RH/Alpaca commissions are ~0, slip modeled apart).
+        _venue_rt_bps = None
+        if str(sess.symbol or "").upper().endswith("-USD"):
+            _venue_rt_bps = float(
+                getattr(settings, "chili_coinbase_taker_fee_bps_round_trip", 120) or 120
+            )
+        fees = roundtrip_fee_usd(
+            notional, fee_ratio, entry=entry_px, target=target_px, venue_rt_bps=_venue_rt_bps,
+        )
         opened = _utcnow()
         pe["position"] = {
             "side": "long",
