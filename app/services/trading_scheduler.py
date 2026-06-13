@@ -4284,6 +4284,58 @@ def _build_crypto_momentum_universe() -> list[dict]:
     return out
 
 
+def _presubscribe_crypto_l2(db) -> int:
+    """Warm Coinbase Level-2 books for fresh live-eligible crypto candidates so
+    ``book_imbalance`` is populated at SCORING / arm time — not only for symbols that
+    already hold a running session. Equity gets 5-level depth via
+    ``iqfeed_depth_snapshots``; this gives the crypto lane the same microstructure
+    input from the Coinbase WS the scheduler already runs (pipeline._live_book_imbalance
+    reads the microstructure ring that ``_handle_l2`` fills for every subscribed product).
+
+    Uses ``cb_ws.subscribe()`` DIRECTLY: it is idempotent (skips already-subscribed
+    pids via ``_subscribed``) and the L2 ring is fed by ``_handle_l2`` for every
+    subscribed product regardless of tick listeners. It deliberately does NOT use
+    ``price_bus.subscribe_symbol`` here, which re-appends a tick closure on every call
+    (the ``_on_cb_tick`` growth) — book warming needs the level2 channel, not a quote
+    listener. Bounded by the system's OWN live-eligibility set (~the liquidity-floored
+    whitelist), so there is no magic-N and no unbounded 429 exposure. Best-effort +
+    fail-open: a WS or DB hiccup must never break the viability refresh. Crypto-only
+    (``-USD`` filter) — equity behaviour is untouched. Returns the count warmed.
+    """
+    try:
+        from datetime import datetime, timedelta
+
+        from ..config import settings as _settings
+        from ..models.trading import MomentumSymbolViability
+        from .trading.venue.coinbase_spot import get_coinbase_ws
+
+        max_age = float(getattr(_settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0)
+        cutoff = datetime.utcnow() - timedelta(seconds=max_age)
+        elig = [
+            str(s).upper()
+            for (s,) in (
+                db.query(MomentumSymbolViability.symbol)
+                .filter(
+                    MomentumSymbolViability.scope == "symbol",
+                    MomentumSymbolViability.live_eligible.is_(True),
+                    MomentumSymbolViability.symbol.like("%-USD%"),
+                    MomentumSymbolViability.freshness_ts >= cutoff,
+                )
+                .distinct()
+                .all()
+            )
+            if s
+        ]
+        if not elig:
+            return 0
+        get_coinbase_ws().subscribe(elig)
+        logger.info("[scheduler] crypto L2 pre-subscribe: %d live-eligible candidates warmed", len(elig))
+        return len(elig)
+    except Exception as e:
+        logger.debug("[scheduler] crypto L2 pre-subscribe skipped: %s", e)
+        return 0
+
+
 def _run_crypto_viability_refresh_job():
     """24/7 crypto viability refresh: pull a FRESH crypto momentum universe from the
     live venue (Coinbase products + 24h stats) and bridge it to viability.
@@ -4301,6 +4353,9 @@ def _run_crypto_viability_refresh_job():
         results = _build_crypto_momentum_universe()
         if results:
             _bridge_scanner_to_viability(db, results, source="crypto_viability_refresh")
+            # Warm L2 books for the now-eligible crypto candidates (book_imbalance
+            # parity with equity's iqfeed depth). Best-effort; never blocks refresh.
+            _presubscribe_crypto_l2(db)
         else:
             logger.warning("[scheduler] crypto viability refresh: empty venue universe (adapter off?)")
     except Exception as e:
