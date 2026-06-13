@@ -85,6 +85,32 @@ def market_session_now(symbol: str | None, *, now: datetime | None = None) -> st
     return "closed"
 
 
+def schedule_window_now(now: datetime | None = None) -> str:
+    """Intraday schedule window for the equity lane (2026-06-12 quant pass v2:
+    the day's edge is heavily clock-shaped — premarket+open carries the tails,
+    midday bleeds, late entries lose). Windows:
+      ``hot``    04:00–10:30 ET  (premarket + open drive)
+      ``midday`` 10:30–14:30 ET  (lull — wide lane off, board half-risk)
+      ``late``   14:30–16:00 ET  (no NEW entries; exits unaffected)
+      ``closed`` otherwise / weekends
+    Pure clock policy — the tape-derived regime dials measured WORSE (rejected
+    list, pass v2)."""
+    ref = now or datetime.now(timezone.utc)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    local = ref.astimezone(_NY_TZ)
+    if local.weekday() >= 5:
+        return "closed"
+    mod = local.hour * 60 + local.minute
+    if 4 * 60 <= mod < 10 * 60 + 30:
+        return "hot"
+    if 10 * 60 + 30 <= mod < 14 * 60 + 30:
+        return "midday"
+    if 14 * 60 + 30 <= mod < 16 * 60:
+        return "late"
+    return "closed"
+
+
 _EXCHANGE_EXT_OPEN_MIN = 4 * 60   # 04:00 ET — US extended session opens (exchange fact)
 
 

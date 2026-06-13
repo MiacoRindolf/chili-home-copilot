@@ -376,7 +376,16 @@ class AlpacaSpotAdapter:
                                             limit_price=float(limit_price), client_order_id=client_order_id,
                                             extended_hours=True)
                 else:
-                    req = LimitOrderRequest(symbol=sym, qty=qty, side=_side, time_in_force=TimeInForce.GTC,
+                    # Fractional-qty orders REQUIRE DAY tif on Alpaca (GTC is
+                    # rejected) — 25% of twin entries died on this (2026-06-12
+                    # quant pass v2 A6). Whole-share orders keep GTC.
+                    _tif = TimeInForce.GTC
+                    try:
+                        if abs(float(qty) - round(float(qty))) > 1e-9:
+                            _tif = TimeInForce.DAY
+                    except (TypeError, ValueError):
+                        pass
+                    req = LimitOrderRequest(symbol=sym, qty=qty, side=_side, time_in_force=_tif,
                                             limit_price=float(limit_price), client_order_id=client_order_id)
             else:
                 req = MarketOrderRequest(symbol=sym, qty=qty, side=_side, time_in_force=TimeInForce.DAY,

@@ -288,8 +288,10 @@ def cushion_risk_multiplier(db, *, base_loss_usd: float) -> tuple[float, dict]:
 
       mult = clamp(0.5 + 0.5 * cushion / base_loss, 0.5, 2.0)
 
-      no banked day P&L   -> 0.5  (start cautious — "can't start with full size")
-      cushion = 1x base   -> 1.0  (normal risk once the day funds one stop-out)
+      no banked day P&L   -> 1.0  (full base risk — first triggers are the
+                                   highest-EV pool; floor raised from 0.5 on
+                                   2026-06-12 quant-pass-v2 replay evidence)
+      cushion = 1x base   -> 1.0  (ladder begins climbing past 1x cushion)
       cushion >= 3x base  -> 2.0  (aggression ceiling)
 
     Green guarantee by construction: a max-risk stop-out gives back at most
@@ -308,7 +310,12 @@ def cushion_risk_multiplier(db, *, base_loss_usd: float) -> tuple[float, dict]:
         base = float(base_loss_usd or 0.0)
         if base <= 0:
             return 1.0, {"cushion_mult": 1.0, "reason": "no_base_loss"}
-        mult = max(0.5, min(2.0, 0.5 + 0.5 * (cushion / base)))
+        # Floor raised 0.5 -> 1.0 (2026-06-12 quant pass v2, +$1,015/3d
+        # replay-validated): FIRST triggers are the highest-EV pool (+1.45R) —
+        # the half-size start was a stealth de-risk of the day's best trades.
+        # The daily-loss cap + drawdown breaker remain the downside bound;
+        # the ladder still EARNS the climb to 2x from banked cushion.
+        mult = max(1.0, min(2.0, 0.5 + 0.5 * (cushion / base)))
         return mult, {
             "cushion_mult": round(mult, 2),
             "day_realized_usd": round(realized, 2),
