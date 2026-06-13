@@ -323,6 +323,17 @@ def _paper_shadow_arm(
     from ..execution_family_registry import resolve_execution_family_for_symbol
     from .operator_actions import create_paper_draft_session
 
+    # A5 crypto clock applies to PAPER too so the weekend soak measures
+    # productive-window behavior, not the 0/21 dead band that would pollute the
+    # validation gate. Equity paper is unaffected. Resolve once per pass.
+    _crypto_clock_blocks = False
+    try:
+        from .market_profile import crypto_schedule_enabled, crypto_session_active_now
+
+        _crypto_clock_blocks = crypto_schedule_enabled() and not crypto_session_active_now()
+    except Exception:
+        _crypto_clock_blocks = False
+
     armed = 0
     _excl = str(exclude_symbol or "").upper()
     for c in candidates:
@@ -331,6 +342,8 @@ def _paper_shadow_arm(
         sym = str(getattr(c, "symbol", "") or "").upper()
         if not sym or sym == _excl:
             continue
+        if _crypto_clock_blocks and sym.endswith("-USD"):
+            continue  # crypto dead band — sit out, like the equity 'late' window
         try:
             res = create_paper_draft_session(
                 db,
@@ -1064,6 +1077,16 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             if _crypto_paused_us_session():
                 out["crypto_us_session_skipped"] = out.get("crypto_us_session_skipped", 0) + 1
                 return False
+            # A5 crypto clock: no NEW crypto entries in the 21:00–05:00 UTC dead
+            # band (0/21 earned there). Exits/management unaffected.
+            try:
+                from .market_profile import crypto_schedule_enabled, crypto_session_active_now
+
+                if crypto_schedule_enabled() and not crypto_session_active_now():
+                    out["crypto_clock_skipped"] = out.get("crypto_clock_skipped", 0) + 1
+                    return False
+            except Exception:
+                pass
             return True
 
         _watch = []

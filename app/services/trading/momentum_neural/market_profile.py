@@ -111,6 +111,34 @@ def schedule_window_now(now: datetime | None = None) -> str:
     return "closed"
 
 
+def crypto_session_active_now(now: datetime | None = None) -> bool:
+    """Crypto entry-window clock (2026-06-13 crypto-live plan, A5).
+
+    Crypto trades 24/7 but the 2026-06-13 clock analysis found the lane earned
+    0/21 in the 21:00–05:00 UTC dead band (thin overnight books, no follow-
+    through) and that bursts + follow-through concentrate in two UTC windows:
+      ACTIVE  05:00–10:00 UTC  (EU morning + US pre-open crypto drive)
+      ACTIVE  12:00–21:00 UTC  (US session overlap)
+    Outside those = QUIET → no NEW crypto entries (exits/management unaffected,
+    like the equity ``late`` window). This is a documented schedule policy, not
+    a hard exchange fact — bounds are the two windows above. Returns True iff
+    the lane should arm NEW crypto entries now.
+
+    Gated by ``chili_crypto_schedule_enabled`` at the call site; this fn always
+    answers the clock question.
+    """
+    ref = now or datetime.now(timezone.utc)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    u = ref.astimezone(timezone.utc)
+    h = u.hour + u.minute / 60.0
+    return (5.0 <= h < 10.0) or (12.0 <= h < 21.0)
+
+
+def crypto_schedule_enabled() -> bool:
+    return bool(getattr(settings, "chili_crypto_schedule_enabled", True))
+
+
 _EXCHANGE_EXT_OPEN_MIN = 4 * 60   # 04:00 ET — US extended session opens (exchange fact)
 
 

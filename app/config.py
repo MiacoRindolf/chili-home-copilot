@@ -5090,6 +5090,16 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_CRYPTO_NOTIONAL_VOL_FRACTION"),
     )
+    # Crypto entry-window clock (2026-06-13 crypto-live plan, A5). The clock
+    # analysis found 0/21 earned in the 21:00–05:00 UTC dead band; bursts +
+    # follow-through concentrate in 05:00–10:00 and 12:00–21:00 UTC. When on,
+    # the lane arms NO new crypto entries outside those windows (exits
+    # unaffected) — so the weekend soak measures productive-window behavior,
+    # not dead-hours noise that would pollute the validation gate.
+    chili_crypto_schedule_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_CRYPTO_SCHEDULE_ENABLED"),
+    )
     # Optional per-venue notional cap (USD) for CHILI-managed Coinbase
     # autotrader exposure. 0 disables the static cap; sizing, buying power,
     # cost/edge, and portfolio gates remain active.
