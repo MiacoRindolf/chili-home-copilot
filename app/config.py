@@ -2975,13 +2975,15 @@ class Settings(BaseSettings):
     # <= today — breakdown is vetoed FIRST), a CHOP dip with bids absorbing is
     # held for a HARD-BOUNDED beat (<= max_ticks, <= max_age_s) so a transient
     # shake-out can recover. INVARIANT A is untouched: this delays the SELL
-    # EXECUTION only, it never moves/loosens the stop. Default OFF = Stage-0 dark
-    # logging (compute + emit the counterfactual, always take today's path). Flip
-    # crypto-first once the counterfactuals prove the classifier sees real chop.
+    # EXECUTION only, it never moves/loosens the stop. Default ON (ship live, no
+    # dark flags): the bounded CHOP hold is live AND the stop_breach_l2_classify
+    # A/B counterfactual emits on every confirmed breach so realized-vs-baseline
+    # is measured continuously. Worst case bounded (<=2 ticks/<=2.5s) + reversible
+    # via the kill-switch (=0). Equity auto-guards: stale iqfeed off-RTH => BREAKDOWN.
     chili_momentum_stop_l2_confirm_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_STOP_L2_CONFIRM_ENABLED"),
-        description="L2-aware anti-shake-out: hold a CHOP-classified stop breach for a hard-bounded beat (BREAKDOWN sells immediately). Default OFF = dark-logging only (emit stop_breach_l2_classify counterfactual, always take today's >=1s path). ON = the bounded CHOP hold goes live. INVARIANT-A-clean (delays the sell, never moves the stop). Kill-switch.",
+        description="L2-aware anti-shake-out: hold a CHOP-classified stop breach for a hard-bounded beat (BREAKDOWN sells immediately). Default ON (ship live, no dark flags) — the bounded CHOP hold is live AND the stop_breach_l2_classify A/B counterfactual emits on every confirmed breach (realized-vs-baseline). INVARIANT-A-clean (delays the SELL execution <=2 ticks/<=2.5s, never moves the stop); worst case bounded + reversible. Set =0 to revert (pure kill-switch).",
     )
     chili_momentum_stop_l2_confirm_max_ticks: int = Field(
         default=2,
