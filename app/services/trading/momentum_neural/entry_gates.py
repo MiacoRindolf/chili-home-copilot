@@ -548,6 +548,40 @@ def _evaluate_break_retest(
     return True, "break_retest", level, base_low, debug
 
 
+def _premarket_tickbreak_confirmed(
+    *, live_price: float, level: float, atr_pct: float | None,
+    symbol: str | None, now: Any = None,
+) -> bool:
+    """Premarket tick-break confirmation (the CUPR fix).
+
+    In PREMARKET (thin tape, whipsaw, NO L2) a tick poking 1¢ through the pullback
+    high is the CUPR false-pop: CHILI entered 4.07 on a failed pop, was stopped
+    −15% in the 3.2↔4.5 chop, THEN the name ran +92%. Require an ATR-derived THRUST
+    buffer so a real break fires, not a chop wick. RTH **and ALL crypto return
+    True** (the existing tick-break is byte-unchanged there — ``market_session_now``
+    is ``regular`` for both). ONE adaptive base knob: buffer = ``atr_pct · mult ·
+    level`` (equity-relative; auto-scales as ATR thickens into RTH = the regime
+    adaptivity). Only GATES an entry — it never touches a stop, so INVARIANT A holds
+    by construction. Fail-OPEN (return True) on missing vol or any error: never
+    block an entry on thin data or a bug. ``now`` (sim time for replay; None=live
+    real clock) drives the session check so the replay evaluates the right session.
+    """
+    try:
+        from ....config import settings
+        from .market_profile import market_session_now
+
+        if not bool(getattr(settings, "chili_momentum_premarket_tickbreak_confirm", True)):
+            return True
+        if market_session_now(symbol, now=now) != "premarket":  # RTH + crypto -> unchanged
+            return True
+        if atr_pct is None:
+            return True  # no volatility read -> fail-open (don't block on thin data)
+        mult = float(getattr(settings, "chili_momentum_premarket_tickbreak_atr_mult", 0.10) or 0.10)
+        return float(live_price) >= (float(level) + max(0.0, float(atr_pct)) * mult * float(level))
+    except Exception:
+        return True  # any error -> fail-open (never block an entry on a bug)
+
+
 def pullback_break_confirmation(
     df: pd.DataFrame,
     *,
@@ -570,6 +604,7 @@ def pullback_break_confirmation(
     runaway_min_volume_spike: float = 2.0,
     live_price: float | None = None,
     symbol: str | None = None,
+    now: Any = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Ross-style pullback-break entry on intraday (1m/5m) bars.
 
@@ -682,9 +717,19 @@ def pullback_break_confirmation(
         and debug.get("pullback_low") is not None
         and float(live_price) > float(debug["pullback_high"])
     ):
-        ok_t, _tick_break = True, True
-        debug["tick_break"] = True
-        debug["live_price"] = float(live_price)
+        # Premarket false-pop guard (CUPR): a thin-tape wick poking 1¢ through the
+        # level is a shake-out entry (4.07 on a failed pop → −15% stop → THEN +92%).
+        # In premarket require an ATR thrust buffer; RTH + crypto are unchanged.
+        if _premarket_tickbreak_confirmed(
+            live_price=float(live_price), level=float(debug["pullback_high"]),
+            atr_pct=atr_pct, symbol=symbol, now=now,
+        ):
+            ok_t, _tick_break = True, True
+            debug["tick_break"] = True
+            debug["live_price"] = float(live_price)
+        else:
+            debug["premarket_tickbreak_unconfirmed"] = True
+            reason_t = "premarket_tickbreak_unconfirmed"
 
     if not ok_t:
         return False, reason_t, debug
@@ -890,7 +935,7 @@ def hurst_proxy_from_closes(close: pd.Series) -> float:
 
 def momentum_pullback_trigger(
     df: pd.DataFrame, *, entry_interval: str, live_price: float | None = None,
-    symbol: str | None = None,
+    symbol: str | None = None, now: Any = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """The Ross pullback-break trigger resolved from live settings — the SINGLE
     source BOTH the live runner and the paper runner call, so the two paths make
@@ -906,6 +951,7 @@ def momentum_pullback_trigger(
         entry_interval=entry_interval,
         live_price=live_price,
         symbol=symbol,
+        now=now,
         volume_spike_multiple=float(
             getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5
         ),

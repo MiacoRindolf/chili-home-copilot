@@ -2188,12 +2188,28 @@ class Settings(BaseSettings):
     # there is no separate on/off flag). Orders placed outside RTH are flagged
     # extended_hours so the venue routes them correctly (Alpaca DAY+ext, RH override).
     chili_momentum_premarket_start_et: str = Field(
-        default="07:00",
+        default="04:00",
         validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_START_ET"),
+        description="Premarket entry-window open (ET). 04:00 = the US extended-session open Ross trades from; the data-session is derived as this minus selection_prep_lead. (Was 07:00; aligns the code default with the deployed value.) Set 09:30 to collapse premarket to RTH-only.",
     )
     chili_momentum_afterhours_end_et: str = Field(
         default="20:00",
         validation_alias=AliasChoices("CHILI_MOMENTUM_AFTERHOURS_END_ET"),
+    )
+    # Premarket tick-break confirmation (the CUPR fix): in premarket (thin, whipsaw,
+    # NO L2) a tick poking 1¢ through the pullback high is a false-pop shake-out
+    # entry (CUPR: bought 4.07 on a failed pop → −15% stop → THEN +92%). Require an
+    # ATR-derived THRUST buffer so a real break fires, not a chop wick. RTH + crypto
+    # unchanged. ONE adaptive knob (atr_mult); buffer = atr_pct·mult·level.
+    chili_momentum_premarket_tickbreak_confirm: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_TICKBREAK_CONFIRM"),
+        description="Gate premarket tick-break entries on an ATR thrust buffer (the CUPR false-pop guard). Premarket-only; RTH + crypto byte-unchanged. Only gates an entry (INVARIANT-A-safe). 0 = old behavior (fire on any 1¢ poke).",
+    )
+    chili_momentum_premarket_tickbreak_atr_mult: float = Field(
+        default=0.10,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_TICKBREAK_ATR_MULT"),
+        description="The single adaptive base knob for the premarket tick-break buffer: required clearance above the level = atr_pct · this · level (equity-relative; auto-scales as ATR thickens into RTH).",
     )
     # Selection/data must be WARM before the entry window opens (operator
     # 2026-06-11, twice): the data-session open is DERIVED as entry start minus

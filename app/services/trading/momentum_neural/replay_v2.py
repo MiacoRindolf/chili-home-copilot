@@ -682,8 +682,11 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                 ):
                     _q_tb = tape.at(s, now, max_stale_min=ENTRY_QUOTE_MAX_STALE_MIN)
                     if _q_tb is not None and _q_tb[1] > float(dbg["pullback_high"]):
+                        # pass the SIM time so the premarket tick-break confirmation
+                        # (CUPR guard) evaluates the right session, not wall-clock now.
                         ok, _treason, dbg = momentum_pullback_trigger(
-                            upto, entry_interval=ENTRY_INTERVAL, live_price=float(_q_tb[1]))
+                            upto, entry_interval=ENTRY_INTERVAL, live_price=float(_q_tb[1]),
+                            now=_aware(now))
             if not ok:
                 _tr(s, "trigger_fail:" + str(_treason), now)
                 continue
