@@ -3839,7 +3839,10 @@ def tick_live_session(
             # band. The A/B counterfactual (fixed-R:R stop, lock OFF) is emitted on
             # EVERY armed tick so realized PnL is measured vs baseline LIVE before
             # the partial (Action B) ever moves size. (docs/DESIGN/ADAPTIVE_OFI_EXIT.md)
-            if sess.symbol.endswith("-USD") and bool(
+            if (
+                sess.symbol.endswith("-USD")
+                or bool(getattr(settings, "chili_momentum_exit_adaptive_equity_enabled", True))
+            ) and bool(
                 getattr(settings, "chili_momentum_exit_ofi_lock_enabled", True)
             ):
                 try:
@@ -3847,9 +3850,13 @@ def tick_live_session(
 
                     _ofi_x, _mpe_x = _live_ofi_microprice(sess.symbol, db=db)
                     # Hidden-seller absorption (accelerant) only when its flag is on;
-                    # reads the same in-process Coinbase book ring. Fail-open None.
+                    # reads the in-process COINBASE book ring — CRYPTO-ONLY (an equity
+                    # symbol has no ring entry → empty → _hs_x stays None anyway, but
+                    # gate it explicitly so the crypto-only coupling is documented).
                     _hs_x = None
-                    if bool(getattr(settings, "chili_momentum_exit_ofi_hidden_seller_enabled", False)):
+                    if sess.symbol.endswith("-USD") and bool(
+                        getattr(settings, "chili_momentum_exit_ofi_hidden_seller_enabled", False)
+                    ):
                         try:
                             from ..microstructure import get_book_buffer
                             from ..fast_path.microstructure_log import _hidden_seller
@@ -3919,8 +3926,13 @@ def tick_live_session(
             # v2 HARVESTS the top (a small resting limit into genuine strength). The
             # counterfactual A/B + the INVARIANT-A stop-ratchet are LIVE on every armed
             # tick; the size-moving resting limit is gated by exit_ladder_live (2-step
-            # ship). Equity untouched (`-USD`-gated). Fail-open: any error => no-op.
-            if sess.symbol.endswith("-USD") and bool(
+            # ship). CLASS-AWARE: crypto always runs (byte-identical); equity runs when
+            # chili_momentum_exit_adaptive_equity_enabled (default ON) — equity L2 from
+            # iqfeed, same helpers. Fail-open: any error => no-op.
+            if (
+                sess.symbol.endswith("-USD")
+                or bool(getattr(settings, "chili_momentum_exit_adaptive_equity_enabled", True))
+            ) and bool(
                 getattr(settings, "chili_momentum_exit_ladder_enabled", True)
             ):
                 try:
@@ -3992,13 +4004,27 @@ def tick_live_session(
                         _ll_qty = _float_or_none(_sis.get("sell_qty"))
                         if _ll_px and _ll_qty and _ll_qty > 0:
                             _ll_cid = f"chili_ml_sis_{sess.id}_{uuid.uuid4().hex[:12]}"
-                            _ll_res = adapter.place_limit_order_gtc(
+                            _ll_kwargs = dict(
                                 product_id=product_id,
                                 side="sell",
                                 base_size=_fmt_base_size(_ll_qty),
                                 limit_price=_fmt_limit_price_sell(_ll_px),
                                 client_order_id=_ll_cid,
-                            ) or {}
+                            )
+                            if not sess.symbol.endswith("-USD"):
+                                # EQUITY: a DAY order (auto-cancels at the close — the
+                                # free-option expires daily, never a stale resting GTC);
+                                # extended_hours flagged when outside RTH. Crypto keeps the
+                                # bare 24/7 GTC call (byte-identical).
+                                try:
+                                    from .market_profile import market_session_now
+
+                                    _ll_ext = market_session_now(sess.symbol) != "regular"
+                                except Exception:
+                                    _ll_ext = False
+                                _ll_kwargs["time_in_force"] = "gfd"
+                                _ll_kwargs["extended_hours"] = _ll_ext
+                            _ll_res = adapter.place_limit_order_gtc(**_ll_kwargs) or {}
                             if _ll_res.get("ok") and _ll_res.get("order_id"):
                                 le["scale_limit_order_id"] = str(_ll_res["order_id"])
                                 le["scale_limit_px"] = float(_ll_px)

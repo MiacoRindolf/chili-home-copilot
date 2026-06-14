@@ -2956,6 +2956,17 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_LADDER_LIVE"),
         description="The size-moving gate: when ON, a fired distribution read posts the small resting sell-into-strength limit live. Default OFF for the first armed-tick counterfactuals to land (the 2-step ship); flip ON within the same session once the funnel is sane. Resting-limit + veto + INVARIANT A bound the worst case to recoverable, so this is low-regret to flip — not a permanent dark flag.",
     )
+    # Class gate: extend the adaptive exit (v1 exhaustion lock + v2 sell-into-strength)
+    # to the EQUITY lane too (using equity L2 from iqfeed_depth_snapshots). The helpers
+    # are class-agnostic; this un-gates the live_runner hooks from crypto-only. Default
+    # ON (no dark flags) — equity gets Step-1 (emit counterfactual + INVARIANT-A stop
+    # ratchet, can only help); the size-moving sell is still gated by exit_ladder_live.
+    # OFF ⇒ equity is byte-identical to pre-extension (parity kill-switch / rollback).
+    chili_momentum_exit_adaptive_equity_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_ADAPTIVE_EQUITY_ENABLED"),
+        description="Run the adaptive exit (v1 exhaustion lock + v2 sell-into-strength) for EQUITY positions, not just crypto. Equity L2 from iqfeed. Default ON; the size-moving sell stays gated by exit_ladder_live. OFF = equity byte-identical (parity / rollback).",
+    )
     # Runaway-break allowance: take a high-conviction break that ran away WITHOUT a
     # retest (else a vertical runner that never comes back is missed). Strict — only
     # the retest WAIT is waived; raised volume + candle/VWAP/MACD confirmations stand.

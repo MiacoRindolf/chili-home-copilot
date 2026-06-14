@@ -281,20 +281,28 @@ def _depth_imbal5(bl: Any, al: Any) -> float | None:
 
 
 def read_ladder_distribution(symbol: str, db: Any = None, *, k: int = 6) -> LadderRead:
-    """Multi-level L2 distribution read from ``fast_orderbook`` for the proactive
-    sell-into-strength exit. ``bid_levels``/``ask_levels`` are JSONB ``[[price,size],…]``
-    best-first (top-20, written by the crypto L2 drain job as 2-TUPLES — not dicts). Reads
-    the K newest snapshots in a 30s window, newest-first, and pairs them with the OFI/
-    micro read. Fail-open: any miss → ``None`` fields → the caller HOLDs. Crypto-only."""
+    """Multi-level L2 distribution read for the proactive sell-into-strength exit.
+    CLASS-AWARE: crypto (``-USD``) reads the per-level ``fast_orderbook`` table; equities
+    read the aggregate 5-level ``iqfeed_depth_snapshots`` (bid5_size/ask5_size/imbalance5
+    — no per-level arrays, but the aggregate is enough for the distribution read). Both
+    pair with the OFI/micro read. K newest snapshots in a 30s window, newest-first.
+    Fail-open: any miss → ``None`` fields → the caller HOLDs (never sells on bad data)."""
     _NULL = LadderRead(None, None, None, None, None, None, None, None, 0)
     s = (symbol or "").strip().upper()
-    if not s.endswith("-USD") or db is None:
+    if not s or db is None:
         return _NULL
     ofi, micro = None, None
     try:
         ofi, micro = _live_ofi_microprice(s, db=db)
     except Exception:
         pass
+    if s.endswith("-USD"):
+        return _ladder_crypto(s, db, int(k), ofi, micro)
+    return _ladder_equity(s, db, int(k), ofi, micro)
+
+
+def _ladder_crypto(s: str, db: Any, k: int, ofi: float | None, micro: float | None) -> LadderRead:
+    """Crypto ladder from ``fast_orderbook`` — per-level JSONB ``[[price,size],…]``."""
     try:
         from sqlalchemy import text as _sql
 
@@ -357,6 +365,73 @@ def read_ladder_distribution(symbol: str, db: Any = None, *, k: int = 6) -> Ladd
         spread = float(newest[3]) if newest[3] is not None else None
     except (TypeError, ValueError):
         spread = None
+    return LadderRead(imb_now, pctile, ofi, micro, bid_refill, ask_build, spread, age, len(series))
+
+
+def _eq_imbalance5(row: Any) -> float | None:
+    """5-level imbalance for an iqfeed row: prefer the precomputed ``imbalance5``;
+    else derive from the aggregate 5-level sizes (bid5_size − ask5_size)/(sum)."""
+    try:
+        if row[7] is not None:
+            return float(row[7])
+    except (TypeError, ValueError, IndexError):
+        pass
+    try:
+        b = float(row[5] or 0.0)
+        a = float(row[6] or 0.0)
+    except (TypeError, ValueError, IndexError):
+        return None
+    return (b - a) / (b + a) if (b + a) > 0 else None
+
+
+def _ladder_equity(s: str, db: Any, k: int, ofi: float | None, micro: float | None) -> LadderRead:
+    """Equity ladder from ``iqfeed_depth_snapshots`` — aggregate 5-level (bid5_size,
+    ask5_size, imbalance5) + top-of-book (bid_top/ask_top + sizes). No per-level arrays,
+    but the aggregate carries the distribution signal. Populated market-hours by the
+    iqfeed depth bridge → ``None`` (HOLD) overnight / pre-RTH before data flows."""
+    try:
+        from sqlalchemy import text as _sql
+
+        rows = db.execute(
+            _sql(
+                "SELECT observed_at, bid_top, ask_top, bid_top_size, ask_top_size, "
+                "bid5_size, ask5_size, imbalance5 FROM iqfeed_depth_snapshots "
+                "WHERE symbol = :s AND observed_at > "
+                "(now() at time zone 'utc') - make_interval(secs => :w) "
+                "ORDER BY observed_at DESC LIMIT :k"
+            ),
+            {"s": s, "w": 30.0, "k": int(k)},
+        ).fetchall()
+    except Exception:
+        rows = []
+    if not rows:
+        return LadderRead(None, None, ofi, micro, None, None, None, None, 0)
+    series = list(rows)  # newest-first
+    newest, oldest = series[0], series[-1]
+    imb_now = _eq_imbalance5(newest)
+    imbs = [v for v in (_eq_imbalance5(r) for r in series) if v is not None]
+    pctile = None
+    if imb_now is not None and len(imbs) >= 3:
+        pctile = sum(1 for v in imbs if v <= imb_now) / float(len(imbs))
+
+    def _f(x: Any) -> float | None:
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return None
+
+    bbo = _f(oldest[3])  # oldest bid_top_size — best-bid refill across the window
+    bbn = _f(newest[3])
+    bid_refill = (bbn - bbo) / bbo if (bbo and bbo > 0 and bbn is not None) else None
+    a_old = _f(oldest[6])  # oldest ask5_size — ask-side build across the window
+    a_new = _f(newest[6])
+    ask_build = (a_new - a_old) / a_old if (a_old and a_old > 0 and a_new is not None) else None
+    bt, at = _f(newest[1]), _f(newest[2])  # top-of-book spread (no spread col in iqfeed)
+    spread = (at - bt) / ((at + bt) / 2.0) * 10_000.0 if (bt and at and (bt + at) > 0) else None
+    try:
+        age = max(0.0, (datetime.utcnow() - newest[0]).total_seconds())
+    except Exception:
+        age = None
     return LadderRead(imb_now, pctile, ofi, micro, bid_refill, ask_build, spread, age, len(series))
 
 
