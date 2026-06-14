@@ -11,6 +11,11 @@ class ExecutionReadinessFeatures:
     spread_bps: float | None = None
     bid_ask_drift_bps: float | None = None
     book_imbalance: float | None = None
+    # Order-flow imbalance (Cont/Kukanov/Stoikov), normalized net directional
+    # fraction in [-1, 1] over a short window; >0 = net buying pressure.
+    ofi: float | None = None
+    # Micro-price (Stoikov) edge vs mid, in bps; >0 = micro above mid (bid-heavy).
+    micro_price_edge: float | None = None
     tape_velocity_z: float | None = None
     slippage_estimate_bps: float | None = None
     fee_to_target_ratio: float | None = None
@@ -28,6 +33,8 @@ class ExecutionReadinessFeatures:
             spread_bps=_f(meta.get("spread_bps")),
             bid_ask_drift_bps=_f(meta.get("bid_ask_drift_bps")),
             book_imbalance=_f(meta.get("book_imbalance")),
+            ofi=_f(meta.get("ofi")),
+            micro_price_edge=_f(meta.get("micro_price_edge")),
             tape_velocity_z=_f(meta.get("tape_velocity_z")),
             slippage_estimate_bps=_f(meta.get("slippage_estimate_bps")),
             fee_to_target_ratio=_f(meta.get("fee_to_target_ratio")),
@@ -44,6 +51,10 @@ class ExecutionReadinessFeatures:
             out["bid_ask_drift_bps"] = self.bid_ask_drift_bps
         if self.book_imbalance is not None:
             out["book_imbalance"] = self.book_imbalance
+        if self.ofi is not None:
+            out["ofi"] = self.ofi
+        if self.micro_price_edge is not None:
+            out["micro_price_edge"] = self.micro_price_edge
         if self.tape_velocity_z is not None:
             out["tape_velocity_z"] = self.tape_velocity_z
         if self.slippage_estimate_bps is not None:

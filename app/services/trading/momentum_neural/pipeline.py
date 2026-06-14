@@ -113,6 +113,108 @@ def _live_book_imbalance(symbol: str, db: Any = None) -> float | None:
         return None
 
 
+def _compute_ofi_micro(
+    seq: list[tuple[float, float, float, float]],
+) -> tuple[float | None, float | None]:
+    """OFI (normalized net directional flow in [-1, 1]) + micro-price edge (bps)
+    from a time-ordered sequence of ``(bid_px, bid_sz, ask_px, ask_sz)`` best
+    quotes (oldest first).
+
+    OFI per Cont/Kukanov/Stoikov: at each step the bid contributes +new size if
+    the bid price rose, -old size if it fell, the size delta if unchanged; the
+    ask mirrors with the demand sign (ask retreating up = buying pressure).
+    Normalized by gross flow so it is bounded and scale-free (no magic depth
+    constant). Micro-price (Stoikov) edge from the latest quote.
+    """
+    if not seq:
+        return None, None
+    pb, qb, pa, qa = seq[-1]
+    micro_edge: float | None = None
+    mid = (pb + pa) / 2.0
+    denom = qb + qa
+    if mid > 0 and denom > 0:
+        micro = (pa * qb + pb * qa) / denom
+        micro_edge = round((micro - mid) / mid * 10000.0, 2)
+    if len(seq) < 2:
+        return None, micro_edge
+    ofi = 0.0
+    gross = 0.0
+    for (pb0, qb0, pa0, qa0), (pb1, qb1, pa1, qa1) in zip(seq, seq[1:]):
+        if pb1 > pb0:
+            eb = qb1
+        elif pb1 < pb0:
+            eb = -qb0
+        else:
+            eb = qb1 - qb0
+        if pa1 < pa0:
+            ea = qa1
+        elif pa1 > pa0:
+            ea = -qa0
+        else:
+            ea = qa1 - qa0
+        ofi += eb - ea
+        gross += abs(eb) + abs(ea)
+    if gross <= 0:
+        return 0.0, micro_edge
+    return round(max(-1.0, min(1.0, ofi / gross)), 4), micro_edge
+
+
+def _live_ofi_microprice(symbol: str, db: Any = None) -> tuple[float | None, float | None]:
+    """Live OFI (normalized [-1, 1]) + micro-price edge (bps) for a symbol.
+
+    Crypto: from the in-process Coinbase full-book ring (``recent()`` window of
+    top-of-book snapshots). Equity: from the IQFeed depth-bridge time series
+    (``iqfeed_depth_snapshots`` best bid/ask price+size). Returns ``(None, None)``
+    when no live sequence covers the symbol (then no tilt — behavior unchanged).
+
+    OFI is the strongest L2 short-horizon predictor in the literature
+    (Cont/Kukanov/Stoikov 2014; portable across cryptos), micro-price the
+    confirmer (Stoikov). Wired as a SMALL agreement-guarded viability tilt and
+    validated by live A/B (the literature edge is contemporaneous + may sit near
+    Coinbase fees, so net incremental alpha is proven LIVE, not assumed).
+    """
+    s = (symbol or "").strip().upper()
+    if not s:
+        return None, None
+    try:
+        window = float(getattr(settings, "chili_crypto_l2_ofi_window_s", 15.0) or 15.0)
+    except (TypeError, ValueError):
+        window = 15.0
+    try:
+        if s.endswith("-USD"):
+            from ..microstructure import get_book_buffer
+
+            snaps = get_book_buffer().recent(s, window_secs=window)
+            seq = [
+                (snap.bids[0].price, snap.bids[0].size, snap.asks[0].price, snap.asks[0].size)
+                for snap in snaps
+                if snap.bids and snap.asks
+            ]
+            return _compute_ofi_micro(seq)
+        if db is not None:
+            from sqlalchemy import text as _sql
+
+            rows = db.execute(
+                _sql(
+                    "SELECT bid_top, bid_top_size, ask_top, ask_top_size "
+                    "FROM iqfeed_depth_snapshots "
+                    "WHERE symbol = :s AND observed_at > "
+                    "(now() at time zone 'utc') - make_interval(secs => :w) "
+                    "ORDER BY observed_at ASC"
+                ),
+                {"s": s, "w": window},
+            ).fetchall()
+            seq = [
+                (float(r[0]), float(r[1]), float(r[2]), float(r[3]))
+                for r in rows
+                if None not in (r[0], r[1], r[2], r[3])
+            ]
+            return _compute_ofi_micro(seq)
+    except Exception:
+        return None, None
+    return None, None
+
+
 def maybe_run_momentum_neural_tick(
     db: Session,
     ev: BrainActivationEvent,
@@ -278,7 +380,18 @@ def run_momentum_neural_tick(
         # (#596): Coinbase level2 ring buffer for crypto, Massive WS NBBO sizes for
         # equities. None (no feed for the symbol) -> unchanged behavior.
         _imb = _live_book_imbalance(sym, db=db)
-        sym_feats = replace(feats, book_imbalance=_imb) if _imb is not None else feats
+        # Order-flow imbalance (Cont/Kukanov/Stoikov) + micro-price (Stoikov) edge
+        # from the SAME live feeds, fed in as a small agreement-guarded viability
+        # tilt (research: OFI is the strongest L2 short-horizon predictor).
+        _ofi, _mpe = _live_ofi_microprice(sym, db=db)
+        _overrides: dict[str, Any] = {}
+        if _imb is not None:
+            _overrides["book_imbalance"] = _imb
+        if _ofi is not None:
+            _overrides["ofi"] = _ofi
+        if _mpe is not None:
+            _overrides["micro_price_edge"] = _mpe
+        sym_feats = replace(feats, **_overrides) if _overrides else feats
         for family in iter_momentum_families():
             vr = score_viability(sym, family, ctx, sym_feats, db=db)
             d = vr.to_public_dict()
