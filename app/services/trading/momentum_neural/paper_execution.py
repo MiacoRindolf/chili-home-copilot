@@ -662,5 +662,218 @@ def ofi_exhaustion_lock(
     return out
 
 
+def sell_into_strength_ladder(
+    *,
+    high_water_mark: float,
+    entry_price: float,
+    bid: float,
+    atr_pct: float,
+    stop_atr_mult: float,
+    reward_risk: float,
+    current_stop: float,
+    breakeven_floor: float,
+    remaining_qty: float,
+    ladder: Any,
+    prior_partial_taken: bool = False,
+    cooldown_active: bool = False,
+    side_long: bool = True,
+) -> dict[str, Any]:
+    """Ross-style PROACTIVE sell-into-strength layer (v2) on top of the v1 exhaustion
+    lock. v1 only DEFENDS (tightens the stop after exhaustion, then waits for the stop
+    to be hit — structural give-back from the peak, the MEGA/JASMY pattern). This sells
+    a small first increment INTO the strength at the top, the way Ross reads the ladder.
+
+    THE SAFETY IS THE MECHANISM, not a forecast: the proactive sell is a RESTING LIMIT
+    at/ABOVE the bid (``limit_px = max(bid, hwm*(1-rung_bps))``), never a market dump. If
+    the move actually continues (the catastrophic sell-early case the red-team flagged
+    on every signal), the limit simply is NOT hit as price runs up, auto-cancels, and the
+    runner is intact — an unfilled sell-into-strength limit is a FREE OPTION. It only
+    fills when the market genuinely trades up into the offer = literally selling into
+    strength. The caller posts it with a short TIF so an unfilled rung leaves no residue.
+
+    Sell-early FIREWALL (the red-team's #1 risk, bounded to recoverable):
+      • DISTRIBUTION confluence-AND (all three): depth-imbalance in the bottom quartile
+        of its OWN recent window (a TREND, not an absolute a spoof can trip), OFI below a
+        2× ENTRY threshold (exit conviction ≫ entry), micro-price decisively rolling.
+      • CONTINUATION VETO (any one ⇒ HOLD): bids still refilling, OFI not decisively
+        negative, or price still bid-favored. A healthy pullback fails a veto and HOLDs.
+      • staleness / thinness / illiquidity / sub-deep-run ⇒ HOLD (no decision on bad data).
+
+    INVARIANT A (ratchet-only): ``new_stop_floor = max(current_stop, breakeven, …)`` — the
+    layer can only realize profit earlier and RAISE the stop; it never loosens/nulls any
+    stop. ``fill_ratchet_floor`` is what the caller ratchets the remainder to ON fill.
+
+    ADAPTIVE, single base knob ``chili_momentum_exit_ladder_rung_bps``; everything else
+    derives from the plan's ``rr``, the position's ``risk_dist`` (ATR), or percentiles.
+    Pure (no I/O); fail-safe → HOLD. Emits the pure-hold counterfactual for the live A/B.
+    """
+    out: dict[str, Any] = {
+        "state": "hold",
+        "action": "none",
+        "limit_px": None,
+        "sell_qty": 0.0,
+        "new_stop_floor": current_stop,
+        "fill_ratchet_floor": current_stop,
+        "armed": False,
+        "fired": False,
+        "vetoed_by": None,
+        "peak_r": None,
+        "dist_pctile": None,
+        "rung_bps": None,
+        "first_increment_frac": 0.0,
+        "counterfactual_hold_stop": current_stop,
+        "reason": None,
+    }
+    if not side_long or ladder is None:
+        out["reason"] = "not_long_or_no_ladder"
+        return out
+    try:
+        hwm = float(high_water_mark)
+        entry = float(entry_price)
+        b = float(bid)
+        cs = float(current_stop)
+        be = float(breakeven_floor)
+        rem = float(remaining_qty)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_inputs"
+        return out
+    if not (math.isfinite(hwm) and math.isfinite(entry) and math.isfinite(b) and math.isfinite(cs)):
+        out["reason"] = "non_finite"
+        return out
+    if entry <= 0 or hwm <= 0 or b <= 0 or rem <= 0:
+        out["reason"] = "non_positive"
+        return out
+
+    # INVARIANT A floor is established up-front and NEVER lowered, whatever happens.
+    base_floor = max([c for c in (cs, be) if math.isfinite(c)] or [cs])
+    out["new_stop_floor"] = base_floor
+    out["fill_ratchet_floor"] = base_floor
+
+    risk_dist = entry * max(0.003, float(atr_pct or 0.0) * float(stop_atr_mult or 0.0))
+    if not (math.isfinite(risk_dist) and risk_dist > 0):
+        out["reason"] = "bad_risk_dist"
+        return out
+    peak_r = max(0.0, (hwm - entry) / risk_dist)
+    out["peak_r"] = round(peak_r, 4)
+    risk_dist_bps = risk_dist / entry * 10_000.0
+
+    # ---- counterfactual: pure-hold (cushion) floor this tick = the A/B baseline ----
+    # Same shape as v1: what the band-only stop would leave with no proactive layer.
+    out["counterfactual_hold_stop"] = base_floor
+
+    # ---- derived knobs (ONE base; the rest from rr / risk_dist / percentiles) ----
+    try:
+        rr = float(reward_risk) if math.isfinite(float(reward_risk)) and float(reward_risk) > 0 else 2.0
+    except (TypeError, ValueError):
+        rr = 2.0
+    try:
+        thr = abs(float(getattr(settings, "chili_momentum_ofi_threshold", 0.25) or 0.25))
+    except (TypeError, ValueError):
+        thr = 0.25
+    try:
+        base_rung_bps = float(getattr(settings, "chili_momentum_exit_ladder_rung_bps", 60.0) or 60.0)
+    except (TypeError, ValueError):
+        base_rung_bps = 60.0
+    base_rung_bps = max(1.0, base_rung_bps)
+    try:
+        arm_frac = min(max(float(getattr(settings, "chili_momentum_exit_ofi_arm_frac", 0.5) or 0.5), 0.0), 1.0)
+    except (TypeError, ValueError):
+        arm_frac = 0.5
+    try:
+        drain_s = float(getattr(settings, "chili_crypto_l2_drain_seconds", 5.0) or 5.0)
+    except (TypeError, ValueError):
+        drain_s = 5.0
+
+    arm_r = max(0.5, arm_frac * rr)
+    harvest_gap_r = 0.5 * max(0.0, rr - arm_r)          # only harvest a genuine runner
+    ofi_exit_thr = 2.0 * thr                            # exit conviction = 2× entry
+    micro_roll_bps = max(3.0, 0.10 * risk_dist_bps)     # 10% of the trade's own 1R, ATR-derived
+    dist_pctile_max = 0.25                              # bottom quartile of its own window
+    stale_max_s = max(6.0, 2.0 * drain_s)
+    spread_cap_bps = 3.0 * risk_dist_bps                # illiquid relative to the trade's risk unit
+    refill_floor = 0.0
+
+    # ---- ladder reads (fail-safe) ----
+    def _f(name: str) -> float | None:
+        v = getattr(ladder, name, None)
+        try:
+            return float(v) if (v is not None and math.isfinite(float(v))) else None
+        except (TypeError, ValueError):
+            return None
+    pctile = _f("depth_imbal_pctile")
+    o = _f("ofi")
+    m = _f("micro_edge")
+    refill = _f("bid_refill")
+    spread = _f("spread_bps")
+    age = _f("snapshot_age_s")
+    try:
+        n_snaps = int(getattr(ladder, "n_snaps", 0) or 0)
+    except (TypeError, ValueError):
+        n_snaps = 0
+    out["dist_pctile"] = round(pctile, 4) if pctile is not None else None
+
+    # ---- GATES (any failure ⇒ HOLD; no decision on bad/insufficient data) ----
+    if peak_r < arm_r:
+        out["reason"] = "below_profit_arm"
+        return out
+    out["armed"] = True
+    if peak_r < arm_r + harvest_gap_r:
+        out["reason"] = "not_deep_run"       # defensive-only territory (v1 handles)
+        return out
+    if cooldown_active:
+        out["reason"] = "cooldown"
+        return out
+    if age is None or age > stale_max_s or n_snaps < 3:
+        out["reason"] = "stale_or_thin"
+        return out
+    if spread is not None and spread > spread_cap_bps:
+        out["reason"] = "illiquid"
+        return out
+    # required distribution signals must be present (None ⇒ HOLD)
+    if pctile is None or o is None or m is None:
+        out["reason"] = "missing_signal"
+        return out
+
+    # ---- DISTRIBUTION confluence-AND ----
+    d1 = pctile <= dist_pctile_max          # now ask-heavy vs its own recent window
+    d2 = o < -ofi_exit_thr                  # order flow decisively rolled over
+    d3 = m < -micro_roll_bps                # price decisively settling toward the bid
+    # ---- CONTINUATION VETO (any TRUE ⇒ HOLD; the sell-early firewall) ----
+    v1 = refill is not None and refill > refill_floor   # buyers still stacking the bid
+    v2 = o > -ofi_exit_thr / 2.0                          # flow not decisively negative
+    v3 = m >= 0.0                                         # price still bid-favored
+    if v1 or v2 or v3:
+        out["vetoed_by"] = "bid_refill" if v1 else ("ofi_weak" if v2 else "micro_nonneg")
+        out["reason"] = "continuation_veto"
+        return out
+    if not (d1 and d2 and d3):
+        out["reason"] = "no_distribution"
+        return out
+
+    # ---- SELL INTO STRENGTH: one small resting limit at/above the bid ----
+    # rung widens on a stronger run (let winners run): base · (1 + 0.3·(peak_r−arm_r)/rr).
+    rung_bps = base_rung_bps * (1.0 + 0.3 * max(0.0, peak_r - arm_r) / rr)
+    out["rung_bps"] = round(rung_bps, 2)
+    limit_px = max(b, hwm * (1.0 - rung_bps / 10_000.0))   # never below market = never a hidden dump
+    # first increment SMALL: 10% of remaining at the arm, up to 25% near target.
+    inc_frac = min(max(0.10 * (peak_r / rr), 0.10), 0.25)
+    out["first_increment_frac"] = round(inc_frac, 4)
+    sell_qty = max(0.0, inc_frac * rem)
+    if sell_qty <= 0 or not math.isfinite(limit_px) or limit_px <= 0:
+        out["reason"] = "degenerate_order"
+        return out
+
+    out["state"] = "sell_into_strength"
+    out["action"] = "sell_limit"
+    out["fired"] = True
+    out["limit_px"] = limit_px
+    out["sell_qty"] = sell_qty
+    # INVARIANT A: on FILL the remainder ratchets to the fill floor; pre-fill the stop
+    # is unchanged (max(cs, be)). Never below the structural floor, ever.
+    out["fill_ratchet_floor"] = max(base_floor, limit_px)
+    out["reason"] = "distribution_confluence"
+    return out
+
+
 def utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()

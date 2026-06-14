@@ -54,7 +54,10 @@ def test_subscribes_eligible_crypto_uppercased(monkeypatch):
     db = _FakeDB([("ORCA-USD",), ("TRUMP-USD",), ("pepe-usd",)])
     n = sched._presubscribe_crypto_l2(db)
     assert n == 3
-    assert fake.calls == [["ORCA-USD", "TRUMP-USD", "PEPE-USD"]]
+    # eligible_crypto_symbols now unions the fresh-eligible set with active live
+    # crypto session symbols and returns a stable SORTED set (subscribe order is
+    # immaterial; the dedup matters). Uppercased.
+    assert fake.calls == [["ORCA-USD", "PEPE-USD", "TRUMP-USD"]]
 
 
 def test_noop_when_no_eligible(monkeypatch):
@@ -92,7 +95,8 @@ def test_shared_eligibility_filter_is_crypto_only():
         "app/services/trading/fast_path/crypto_l2_drain.py", encoding="utf-8"
     ).read()
     i = src.index("def eligible_crypto_symbols")
-    block = src[i:i + 1200]
+    # widened window: the helper grew a longer docstring + an active-session union.
+    block = src[i:i + 2600]
     assert 'like("%-USD%")' in block                       # crypto-only (equity untouched)
     assert "live_eligible" in block                        # bounded by eligibility, no magic N
     assert "freshness_ts" in block                         # fresh-only

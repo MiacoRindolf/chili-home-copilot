@@ -54,15 +54,22 @@ def _norm_imbalance(bid_total: float, ask_total: float) -> float:
 
 def eligible_crypto_symbols(db) -> list[str]:
     """Live-eligible, fresh crypto (-USD) symbols — the EXACT filter used by
-    ``_presubscribe_crypto_l2`` so the warmed set and the drained set match."""
+    ``_presubscribe_crypto_l2`` so the warmed (subscribed) set and the drained
+    (written-to-fast_orderbook) set match.
+
+    Unions in the symbols of ACTIVE live crypto sessions (watching-to-enter or
+    holding), unconditionally — a name we are actually trading must keep its L2
+    captured even after it drops out of the fresh-eligible universe. JASMY-USD was
+    a real +2.3R winner with 0 fast_orderbook rows because it was never a fresh
+    candidate, so its OFI/micro read None and the exit lock could never fire."""
     from ....config import settings as _settings
-    from ....models.trading import MomentumSymbolViability
+    from ....models.trading import MomentumSymbolViability, TradingAutomationSession
 
     max_age = float(
         getattr(_settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0
     )
     cutoff = datetime.utcnow() - timedelta(seconds=max_age)
-    return [
+    out: set[str] = {
         str(s).upper()
         for (s,) in (
             db.query(MomentumSymbolViability.symbol)
@@ -76,7 +83,29 @@ def eligible_crypto_symbols(db) -> list[str]:
             .all()
         )
         if s
-    ]
+    }
+    # Active live crypto sessions: capital-at-risk OR watching to enter. These need
+    # L2 for the exit lock / entry tilt regardless of candidate freshness.
+    try:
+        active = (
+            db.query(TradingAutomationSession.symbol)
+            .filter(
+                TradingAutomationSession.mode == "live",
+                TradingAutomationSession.symbol.like("%-USD%"),
+                TradingAutomationSession.state.in_((
+                    "watching_live", "live_entry_candidate", "live_pending_entry",
+                    "live_entered", "live_scaling_out", "live_trailing", "live_bailout",
+                )),
+            )
+            .distinct()
+            .all()
+        )
+        for (s,) in active:
+            if s:
+                out.add(str(s).upper())
+    except Exception:
+        pass
+    return sorted(out)
 
 
 def _book_item_for(pid: str) -> dict | None:

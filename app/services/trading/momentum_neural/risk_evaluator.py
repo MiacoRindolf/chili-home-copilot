@@ -18,12 +18,18 @@ from ..execution_family_registry import (
 )
 from ..governance import get_kill_switch_status, is_kill_switch_active
 from .market_profile import is_coinbase_spot_symbol
-from .live_fsm import LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY
+from .live_fsm import (
+    LIVE_POSITION_HOLDING_STATES,
+    LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY,
+    LIVE_WATCHING_PREFILL_STATES,
+    STATE_LIVE_PENDING_ENTRY,
+)
 from .paper_fsm import LIVE_INTENT_STATES, PAPER_CONCURRENT_STATES
 from .risk_policy import (
     MomentumAutomationRiskPolicy,
     POLICY_VERSION,
     adaptive_max_spread_bps,
+    effective_position_cap,
     equity_relative_daily_loss_cap,
     resolve_effective_risk_policy,
 )
@@ -122,6 +128,125 @@ def count_concurrent_automation_sessions(
     if exclude_session_id is not None:
         q = q.filter(TradingAutomationSession.id != int(exclude_session_id))
     return int(q.count())
+
+
+def count_open_positions(
+    db: Session,
+    *,
+    user_id: int,
+    mode: str = "live",
+    crypto_only: Optional[bool] = None,
+) -> int:
+    """HELD positions only (``LIVE_POSITION_HOLDING_STATES`` = entered / scaling_out
+    / trailing / bailout — the states that hold capital + a live stop). The
+    decouple_watching position cap charges THESE; pre-fill watchers are $0-risk and
+    are governed by the watch-fanout cap instead. Alpaca twins excluded (1:1 bounded
+    by real arms; never consume a real position slot). ``crypto_only`` filters to /
+    out ``-USD`` for the crypto super-bucket + per-lane checks."""
+    q = db.query(TradingAutomationSession).filter(
+        TradingAutomationSession.user_id == int(user_id),
+        TradingAutomationSession.mode == mode,
+        TradingAutomationSession.state.in_(LIVE_POSITION_HOLDING_STATES),
+        TradingAutomationSession.execution_family != "alpaca_spot",
+    )
+    if crypto_only is True:
+        q = q.filter(TradingAutomationSession.symbol.like("%-USD"))
+    elif crypto_only is False:
+        q = q.filter(~TradingAutomationSession.symbol.like("%-USD"))
+    return int(q.count())
+
+
+def count_inflight_entry_orders(
+    db: Session,
+    *,
+    user_id: int,
+    crypto_only: Optional[bool] = None,
+    exclude_session_id: Optional[int] = None,
+) -> int:
+    """In-flight LIVE entry orders: submitted to the broker but not yet filled
+    (``state == live_pending_entry`` AND ``entry_submitted`` set in the live-exec
+    snapshot, no ``position`` yet). These are positions *born-but-not-yet-held* —
+    the resting order can fill into a held position at any instant.
+
+    The decouple_watching fill-boundary cap MUST count these alongside held
+    positions: a position only flips to a HOLDING state at fill (seconds after
+    submit), so a burst of K simultaneous submits would each read the same held
+    count and all fill → overshoot. The advisory lock serializes the
+    count-and-submit so each submitter sees the prior one's committed
+    ``entry_submitted=True`` here, making the cap exact (B1). ``entry_submitted``
+    lives in ``risk_snapshot_json`` (not a column) so this is JSON-inspected over
+    the small live-pending set. Alpaca twins excluded; ``exclude_session_id`` drops
+    the submitter's own row (defensive — it has not set ``entry_submitted`` yet)."""
+    q = db.query(TradingAutomationSession).filter(
+        TradingAutomationSession.user_id == int(user_id),
+        TradingAutomationSession.mode == "live",
+        TradingAutomationSession.state == STATE_LIVE_PENDING_ENTRY,
+        TradingAutomationSession.execution_family != "alpaca_spot",
+    )
+    if crypto_only is True:
+        q = q.filter(TradingAutomationSession.symbol.like("%-USD"))
+    elif crypto_only is False:
+        q = q.filter(~TradingAutomationSession.symbol.like("%-USD"))
+    if exclude_session_id is not None:
+        q = q.filter(TradingAutomationSession.id != int(exclude_session_id))
+    n = 0
+    try:
+        rows = q.all()
+    except Exception:
+        return 0
+    for s in rows:
+        try:
+            snap = s.risk_snapshot_json or {}
+            le = snap.get("momentum_live_execution") if isinstance(snap, dict) else None
+            if isinstance(le, dict) and le.get("entry_submitted") and not le.get("position"):
+                n += 1
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return n
+
+
+def aggregate_open_crypto_risk_usd(db: Session, *, user_id: int) -> tuple[float, list[dict[str, Any]]]:
+    """Crypto mirror of :func:`aggregate_open_risk_usd` (which is equity-only —
+    it filters OUT ``-USD``). Sum of entry-to-stop $ at-risk across OPEN live
+    CRYPTO (-USD) positions, so the crypto lane has a dollar-precise correlated-
+    exposure backstop (decouple_watching B2: the count cap alone can't bound
+    dollars once crypto gaps through). Breakeven/locked stops contribute 0."""
+    total = 0.0
+    rows: list[dict[str, Any]] = []
+    try:
+        held = (
+            db.query(TradingAutomationSession)
+            .filter(
+                TradingAutomationSession.user_id == int(user_id),
+                TradingAutomationSession.mode == "live",
+                TradingAutomationSession.state.in_(LIVE_POSITION_HOLDING_STATES),
+                TradingAutomationSession.symbol.like("%-USD"),
+                TradingAutomationSession.execution_family != "alpaca_spot",
+            )
+            .all()
+        )
+    except Exception:
+        return 0.0, rows
+    for sess in held:
+        try:
+            snap = sess.risk_snapshot_json or {}
+            le = snap.get("momentum_live_execution") if isinstance(snap, dict) else None
+            pos = (le or {}).get("position") if isinstance(le, dict) else None
+            if not isinstance(pos, dict):
+                continue
+            qty = float(pos.get("quantity") or 0.0)
+            entry = float(pos.get("avg_entry_price") or 0.0)
+            stop = float(pos.get("stop_price") or 0.0)
+            if qty <= 0 or entry <= 0 or stop <= 0:
+                continue
+            at_risk = max(0.0, (entry - stop)) * qty
+            if at_risk > 0:
+                total += at_risk
+                rows.append({"symbol": sess.symbol, "session_id": sess.id,
+                             "at_risk_usd": round(at_risk, 2)})
+        except (TypeError, ValueError):
+            continue
+    return total, rows
 
 
 def _viability_age_seconds(via: MomentumSymbolViability) -> float:
@@ -654,30 +779,47 @@ def evaluate_proposed_momentum_automation(
     # and starved EVERY live arm through the premarket window. Paper sessions
     # are free simulations — they must never consume the real-money budget.
     # Live proposals are additionally bounded by the adaptive live cap below.
+    _decouple = bool(getattr(settings, "chili_momentum_decouple_watching_enabled", False))
     total_ct = count_concurrent_automation_sessions(
         db, user_id=user_id, mode=m, exclude_session_id=exclude_session_id
     )
-    ok_tot = total_ct < policy.max_concurrent_sessions
+    _max_total = policy.max_concurrent_sessions
+    if _decouple and m == "live":
+        # Decoupled: watchers fan out to watch_fanout_max, so the coarse all-states
+        # cap must clear (fanout + position cap + slack) or it would silently re-cap
+        # the funnel at the legacy 10. It remains a leak-catching backstop (a stuck
+        # live_cooldown pile-up still trips it), not the active constraint.
+        _fanout = int(getattr(settings, "chili_momentum_watch_fanout_max", 15) or 15)
+        _max_total = max(_max_total, _fanout + effective_position_cap(crypto=False) + 5)
+    ok_tot = total_ct < _max_total
     checks.append(
         _check(
             "max_concurrent_sessions",
             ok_tot,
             severity="block" if not ok_tot else "ok",
-            message=f"Concurrent {m} sessions {total_ct} / max {policy.max_concurrent_sessions}.",
+            message=f"Concurrent {m} sessions {total_ct} / max {_max_total}.",
             detail={"count": total_ct, "mode": m},
         )
     )
     if m == "live":
-        live_ct = count_concurrent_automation_sessions(
-            db, user_id=user_id, mode="live", exclude_session_id=exclude_session_id
-        )
-        ok_lv = live_ct < policy.max_concurrent_live_sessions
+        if _decouple:
+            # Charge the risk-budget cap against HELD positions only (watchers are
+            # $0-risk). This mirrors the authoritative advisory-locked fill-boundary
+            # cap in live_runner; here it is a coarse secondary check at arm time.
+            live_ct = count_open_positions(db, user_id=user_id, mode="live")
+            _live_cap = effective_position_cap(crypto=False)
+        else:
+            live_ct = count_concurrent_automation_sessions(
+                db, user_id=user_id, mode="live", exclude_session_id=exclude_session_id
+            )
+            _live_cap = policy.max_concurrent_live_sessions
+        ok_lv = live_ct < _live_cap
         checks.append(
             _check(
                 "max_concurrent_live_sessions",
                 ok_lv,
                 severity="block" if not ok_lv else "ok",
-                message=f"Concurrent live sessions {live_ct} / max {policy.max_concurrent_live_sessions}.",
+                message=f"Concurrent live sessions {live_ct} / max {_live_cap}.",
                 detail={"count": live_ct},
             )
         )

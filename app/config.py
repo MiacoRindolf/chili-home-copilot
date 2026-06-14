@@ -2516,6 +2516,15 @@ class Settings(BaseSettings):
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_AGGREGATE_CRYPTO_RISK_PCT_OF_EQUITY"),
     )
+    # Age (s) after which a momentum-lane advisory lock held by an idle-in-transaction
+    # backend is treated as orphaned (force-killed worker) and reaped by the once-per-
+    # batch janitor. Generous vs a normal tick so legitimate slow ticks aren't killed.
+    chili_momentum_lane_leak_cleanup_threshold_s: int = Field(
+        default=120,
+        ge=60,
+        le=3600,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LANE_LEAK_CLEANUP_THRESHOLD_S"),
+    )
     # Adaptive concurrency: the number of live slots = the simultaneous-open-risk BUDGET
     # RATIO. N = clamp(round(this_fraction / loss_fraction_of_equity), max_concurrent_live_
     # sessions, 15) — i.e. how many per-trade risks fit in the budget. With loss_fraction
@@ -2926,6 +2935,26 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_OFI_HIDDEN_SELLER_ENABLED"),
         description="Accelerant: hidden-seller absorption at the highs arms the lock on profit-arm + micro-rollover alone (distribution is the one LEADING signal). OFF at ship — promote only after OFI+micro proves net-positive (log-only-first).",
+    )
+    # ── Sell-into-strength ladder (v2 proactive exit) ────────────────────────────
+    # Ross-style: post a SMALL resting limit at/above the bid into genuine strength
+    # (unfilled = free option, fills only on a real up-trade). Safety = the mechanism
+    # (resting-limit + continuation-veto + INVARIANT A), not a forecast.
+    chili_momentum_exit_ladder_rung_bps: float = Field(
+        default=60.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_LADDER_RUNG_BPS"),
+        description="The ONE base knob for v2: distance (bps) below the high-water mark for the first sell-into-strength rung. Widened on a stronger run (let winners run); the limit is clamped to never post below the live bid. Everything else (arm_r, deep-run gap, exit/micro thresholds, increment size) derives from the plan rr / the position's ATR risk unit / window percentiles.",
+    )
+    chili_momentum_exit_ladder_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_LADDER_ENABLED"),
+        description="Master gate / kill-switch for the v2 sell-into-strength layer. ON = the ladder read + decision run and emit live_sell_into_strength with the pure-hold counterfactual on every armed tick, AND the INVARIANT-A stop-ratchet applies (can only help). The size-MOVING resting limit is separately gated by chili_momentum_exit_ladder_live.",
+    )
+    chili_momentum_exit_ladder_live: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_LADDER_LIVE"),
+        description="The size-moving gate: when ON, a fired distribution read posts the small resting sell-into-strength limit live. Default OFF for the first armed-tick counterfactuals to land (the 2-step ship); flip ON within the same session once the funnel is sane. Resting-limit + veto + INVARIANT A bound the worst case to recoverable, so this is low-regret to flip — not a permanent dark flag.",
     )
     # Runaway-break allowance: take a high-conviction break that ran away WITHOUT a
     # retest (else a vertical runner that never comes back is missed). Strict — only

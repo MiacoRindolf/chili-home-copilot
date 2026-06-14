@@ -834,6 +834,7 @@ def _run_momentum_live_runner_batch_job():
         from ..config import settings as _settings
         from ..db import SessionLocal
         from .trading.momentum_neural.live_runner import (
+            cleanup_leaked_lane_locks,
             list_runnable_live_sessions,
             tick_live_session,
         )
@@ -845,7 +846,30 @@ def _run_momentum_live_runner_batch_job():
 
         db = SessionLocal()
         try:
-            _runnable = list_runnable_live_sessions(db, limit=15)
+            # Once-per-batch janitor: reap any momentum-lane advisory lock orphaned by
+            # a force-killed worker (decouple B1). Only the decoupled path takes that
+            # lock, so this is a no-op when the flag is off. Runs on the short-lived
+            # listing session before the SELECT; best-effort, never raises.
+            if bool(getattr(_settings, "chili_momentum_decouple_watching_enabled", False)):
+                try:
+                    cleanup_leaked_lane_locks(db)
+                except Exception:
+                    logger.debug("[scheduler] lane-lock janitor failed", exc_info=True)
+            # Fetch limit. Legacy = 15 (byte-identical). Decoupled: the funnel fans
+            # out to watch_fanout_max WATCHERS, and every HELD position must also be
+            # ticked (its stop/trail is managed in tick_live_session) — so the limit
+            # must clear fanout + the held-position ceiling + slack, or a held name
+            # would silently stop being managed. This only widens the SELECT; tick
+            # PARALLELISM stays bounded by the worker pool below (the 429 throttle).
+            if bool(getattr(_settings, "chili_momentum_decouple_watching_enabled", False)):
+                _rl = (
+                    int(getattr(_settings, "chili_momentum_watch_fanout_max", 15) or 15)
+                    + int(getattr(_settings, "chili_momentum_max_open_positions_ceiling", 20) or 20)
+                    + 5
+                )
+            else:
+                _rl = 15
+            _runnable = list_runnable_live_sessions(db, limit=_rl)
             session_ids = [int(s.id) for s in _runnable]
             session_syms = {str(s.symbol).upper() for s in _runnable if getattr(s, "symbol", None)}
         except Exception:

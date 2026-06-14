@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Optional
 
@@ -182,14 +182,50 @@ def _live_ofi_microprice(symbol: str, db: Any = None) -> tuple[float | None, flo
         window = 15.0
     try:
         if s.endswith("-USD"):
-            from ..microstructure import get_book_buffer
+            # Crypto L2: prefer the in-process Coinbase book ring (sub-second), and
+            # FALL BACK to the durable, cross-process ``fast_orderbook`` table when the
+            # ring is empty in THIS process. The ring is per-process: a held name not in
+            # this process's subscription set has 0 ring snapshots → ofi=None → the exit
+            # lock can never fire (JASMY-USD logged 89 armed ticks at None as a real
+            # +2.3R winner). The table is fed by the crypto L2 drain and is always
+            # populated for any subscribed name, mirroring how the equity branch reads
+            # iqfeed_depth_snapshots. Crypto-GATED: the equity path NEVER reads
+            # fast_orderbook (equity decisions stay isolated from crypto rows).
+            seq: list[tuple[float, float, float, float]] = []
+            try:
+                from ..microstructure import get_book_buffer
 
-            snaps = get_book_buffer().recent(s, window_secs=window)
-            seq = [
-                (snap.bids[0].price, snap.bids[0].size, snap.asks[0].price, snap.asks[0].size)
-                for snap in snaps
-                if snap.bids and snap.asks
-            ]
+                snaps = get_book_buffer().recent(s, window_secs=window)
+                seq = [
+                    (snap.bids[0].price, snap.bids[0].size, snap.asks[0].price, snap.asks[0].size)
+                    for snap in snaps
+                    if snap.bids and snap.asks
+                ]
+            except Exception:
+                seq = []
+            if seq:
+                return _compute_ofi_micro(seq)
+            # ring empty in this process → durable table fallback (top-of-book)
+            if db is None:
+                return None, None
+            from sqlalchemy import text as _sql
+
+            rows = db.execute(
+                _sql(
+                    "SELECT bid_levels, ask_levels FROM fast_orderbook "
+                    "WHERE ticker = :s AND snapshot_at > "
+                    "(now() at time zone 'utc') - make_interval(secs => :w) "
+                    "ORDER BY snapshot_at ASC"
+                ),
+                {"s": s, "w": window},
+            ).fetchall()
+            for r in rows:
+                bl, al = r[0], r[1]
+                try:
+                    if bl and al:
+                        seq.append((float(bl[0][0]), float(bl[0][1]), float(al[0][0]), float(al[0][1])))
+                except (KeyError, IndexError, TypeError, ValueError):
+                    continue
             return _compute_ofi_micro(seq)
         if db is not None:
             from sqlalchemy import text as _sql
@@ -213,6 +249,115 @@ def _live_ofi_microprice(symbol: str, db: Any = None) -> tuple[float | None, flo
     except Exception:
         return None, None
     return None, None
+
+
+@dataclass(frozen=True)
+class LadderRead:
+    """Multi-level L2 distribution read for the proactive sell-into-strength exit.
+
+    Every field fail-safe to ``None``; a ``None`` in any REQUIRED slot (depth_imbal,
+    depth_imbal_pctile, ofi, micro_edge) keeps the exit state machine in HOLD — it
+    never sells on missing/stale data. Crypto-only (``fast_orderbook`` is ``-USD``)."""
+
+    depth_imbal: float | None          # (Σbid5 − Σask5)/(Σbid5 + Σask5) ∈ [-1,1], NEWEST snap
+    depth_imbal_pctile: float | None   # where NEWEST imbalance sits in the K-window [0,1]
+    ofi: float | None                  # order-flow imbalance (Cont), in-process/table
+    micro_edge: float | None           # micro-price edge (bps, Stoikov)
+    bid_refill: float | None           # Δ(best-bid size)/prior across the window
+    ask_build: float | None            # Δ(Σask5)/prior across the window (wall building)
+    spread_bps: float | None
+    snapshot_age_s: float | None       # now − newest snapshot_at (staleness gate)
+    n_snaps: int                       # rows actually parsed
+
+
+def _depth_imbal5(bl: Any, al: Any) -> float | None:
+    """5-level depth imbalance from [[price,size],…] tuple ladders. None if empty."""
+    try:
+        b = sum(float(l[1]) for l in bl[:5])
+        a = sum(float(l[1]) for l in al[:5])
+    except (TypeError, ValueError, IndexError):
+        return None
+    return (b - a) / (b + a) if (b + a) > 0 else None
+
+
+def read_ladder_distribution(symbol: str, db: Any = None, *, k: int = 6) -> LadderRead:
+    """Multi-level L2 distribution read from ``fast_orderbook`` for the proactive
+    sell-into-strength exit. ``bid_levels``/``ask_levels`` are JSONB ``[[price,size],…]``
+    best-first (top-20, written by the crypto L2 drain job as 2-TUPLES — not dicts). Reads
+    the K newest snapshots in a 30s window, newest-first, and pairs them with the OFI/
+    micro read. Fail-open: any miss → ``None`` fields → the caller HOLDs. Crypto-only."""
+    _NULL = LadderRead(None, None, None, None, None, None, None, None, 0)
+    s = (symbol or "").strip().upper()
+    if not s.endswith("-USD") or db is None:
+        return _NULL
+    ofi, micro = None, None
+    try:
+        ofi, micro = _live_ofi_microprice(s, db=db)
+    except Exception:
+        pass
+    try:
+        from sqlalchemy import text as _sql
+
+        rows = db.execute(
+            _sql(
+                "SELECT snapshot_at, bid_levels, ask_levels, spread_bps "
+                "FROM fast_orderbook WHERE ticker = :s AND snapshot_at > "
+                "(now() at time zone 'utc') - make_interval(secs => :w) "
+                "ORDER BY snapshot_at DESC LIMIT :k"
+            ),
+            {"s": s, "w": 30.0, "k": int(k)},
+        ).fetchall()
+    except Exception:
+        rows = []
+    if not rows:
+        return LadderRead(None, None, ofi, micro, None, None, None, None, 0)
+    import json as _json
+
+    series = []  # newest-first: (snapshot_at, bid_levels, ask_levels, spread_bps)
+    for r in rows:
+        try:
+            bl = _json.loads(r[1]) if isinstance(r[1], str) else r[1]
+            al = _json.loads(r[2]) if isinstance(r[2], str) else r[2]
+            if isinstance(bl, list) and isinstance(al, list) and bl and al:
+                series.append((r[0], bl, al, r[3]))
+        except Exception:
+            continue
+    if not series:
+        return LadderRead(None, None, ofi, micro, None, None, None, None, 0)
+    newest, oldest = series[0], series[-1]
+    imb_now = _depth_imbal5(newest[1], newest[2])
+    imbs = [v for v in (_depth_imbal5(b, a) for _, b, a, _ in series) if v is not None]
+    pctile = None
+    if imb_now is not None and len(imbs) >= 3:
+        # Low percentile ⇒ NEWEST book is ask-heavy relative to its own recent window
+        # (a TREND of distribution, not an absolute threshold a single spoof can trip).
+        pctile = sum(1 for v in imbs if v <= imb_now) / float(len(imbs))
+
+    def _bb(lv: Any) -> float:
+        try:
+            return float(lv[0][1])
+        except (TypeError, ValueError, IndexError):
+            return 0.0
+
+    def _sa5(lv: Any) -> float:
+        try:
+            return sum(float(x[1]) for x in lv[:5])
+        except (TypeError, ValueError, IndexError):
+            return 0.0
+
+    bb_old = _bb(oldest[1])
+    bid_refill = (_bb(newest[1]) - bb_old) / bb_old if bb_old > 0 else None
+    a_old = _sa5(oldest[2])
+    ask_build = (_sa5(newest[2]) - a_old) / a_old if a_old > 0 else None
+    try:
+        age = max(0.0, (datetime.utcnow() - newest[0]).total_seconds())
+    except Exception:
+        age = None
+    try:
+        spread = float(newest[3]) if newest[3] is not None else None
+    except (TypeError, ValueError):
+        spread = None
+    return LadderRead(imb_now, pctile, ofi, micro, bid_refill, ask_build, spread, age, len(series))
 
 
 def maybe_run_momentum_neural_tick(
