@@ -175,6 +175,24 @@ def _max_watch_seconds() -> int:
     return max(60, int(getattr(settings, "chili_momentum_auto_arm_max_watch_seconds", 1800)))
 
 
+# Per-symbol PRE-ENTRY REAP cooldown (in-process, scheduler-local). A name reaped
+# here just held the live slot for the full watch window without firing; cooling it
+# down briefly stops it from immediately re-arming and re-occupying the single slot,
+# giving genuinely different fresh movers a turn. Diagnosed 2026-06-14: crypto arms
+# 460:3 cancel:fill/24h, ~31% concentrated in RENDER(88x)/WLD(56x) looping arm->reap.
+_REAP_COOLDOWN: dict[str, datetime] = {}
+
+
+def _reap_cooldown_active(sym_u: str, now: datetime) -> bool:
+    """True if ``sym_u`` (upper) was reaped pre-entry within
+    ``chili_momentum_reap_cooldown_sec``. 0 disables (instant kill-switch)."""
+    cd_sec = float(getattr(settings, "chili_momentum_reap_cooldown_sec", 300.0) or 0.0)
+    if cd_sec <= 0:
+        return False
+    at = _REAP_COOLDOWN.get(sym_u)
+    return at is not None and (now - at).total_seconds() < cd_sec
+
+
 def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: datetime) -> int:
     """Cancel PRE-ENTRY live sessions that have watched too long without entering,
     freeing the concurrency slot for a fresher surging candidate — Ross moves on
@@ -222,6 +240,21 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
         try:
             cancel_automation_session(db, user_id=int(user_id), session_id=int(s.id))
             reaped += 1
+            # Cool this name down so it doesn't immediately re-arm the slot it just
+            # churned without firing (only PROGRESSING tick-armed setups got here are
+            # already excluded above via watch_break_level). CRYPTO-ONLY (-USD): the
+            # diagnosed churn (RENDER/WLD); equity arming stays byte-identical. Bounded
+            # prune to stay small.
+            try:
+                _rs = str(s.symbol or "").upper()
+                if _rs.endswith("-USD"):
+                    _REAP_COOLDOWN[_rs] = now
+                    if len(_REAP_COOLDOWN) > 500:
+                        _stale = now - timedelta(hours=1)
+                        for _k in [k for k, v in _REAP_COOLDOWN.items() if v < _stale]:
+                            _REAP_COOLDOWN.pop(_k, None)
+            except Exception:
+                pass
             logger.warning(
                 "[auto_arm] reaped stale pre-entry session=%s %s state=%s "
                 "(watched > %ss, never entered) — freeing slot for a fresher mover",
@@ -1011,6 +1044,7 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     out["loss_guard_skipped"] = 0
     _broker_ready_cache: dict[str, bool] = {}
     out["crypto_illiquid_skipped"] = 0
+    out["reap_cooldown_skipped"] = 0
     eligible: list[MomentumSymbolViability] = []
     for c in candidates:
         out["checked"] += 1
@@ -1028,6 +1062,9 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         if _sym_u in loss_blocked or _utcnow() < loss_cooldown_until.get(_sym_u, _EPOCH):
             out["loss_guard_skipped"] += 1
             continue  # 2-strike / post-loss cooldown — walk away like Ross does
+        if _sym_u.endswith("-USD") and _reap_cooldown_active(_sym_u, _utcnow()):
+            out["reap_cooldown_skipped"] += 1
+            continue  # crypto just churned the slot without firing — let a different mover watch
         if not _symbol_market_open(c.symbol):
             continue  # equities only during their session; crypto always passes (24/7)
         # Crypto liquidity floor (A1): the Ross scorer is blind to executability,
