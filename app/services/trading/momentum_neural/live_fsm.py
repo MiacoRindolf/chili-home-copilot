@@ -57,6 +57,31 @@ LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY = frozenset(
     }
 )
 
+# ── decouple_watching taxonomy (concurrency) ────────────────────────────────
+# Positions are BORN at FILL (live_pending_entry → live_entered). Only these four
+# hold capital + a live stop → the simultaneous-open-RISK budget cap charges THESE
+# (byte-identical to the set aggregate_open_risk_usd trusts).
+LIVE_POSITION_HOLDING_STATES = frozenset(
+    {
+        STATE_LIVE_ENTERED,
+        STATE_LIVE_SCALING_OUT,
+        STATE_LIVE_TRAILING,
+        STATE_LIVE_BAILOUT,
+    }
+)
+# Zero capital, zero stop, $0 at risk → governed by the watch-FANOUT cap, NOT the
+# risk cap. live_pending_entry sits here: a resting gfd order encumbers nothing
+# material (cancelled/re-watched on ack-timeout) and contributes $0 to open risk.
+LIVE_WATCHING_PREFILL_STATES = frozenset(
+    {
+        STATE_ARMED_PENDING_RUNNER,
+        STATE_QUEUED_LIVE,
+        STATE_WATCHING_LIVE,
+        STATE_LIVE_ENTRY_CANDIDATE,
+        STATE_LIVE_PENDING_ENTRY,
+    }
+)
+
 # In-flight live runner (for Automation summary “active” count).
 LIVE_RUNNER_ACTIVE_SUMMARY_STATES = frozenset(
     {

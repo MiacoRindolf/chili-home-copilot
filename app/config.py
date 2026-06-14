@@ -2472,6 +2472,50 @@ class Settings(BaseSettings):
         le=50,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_CONCURRENT_POSITIONS"),
     )
+    # ── decouple_watching (concurrency conversion lever) ────────────────────
+    # MASTER KILL-SWITCH. false = legacy single live-session cap (byte-identical
+    # to today: watchers + holders share one risk-budget cap, so the lane watches
+    # only ~5-15 names). true = watchers governed by the watch-FANOUT cap (zero
+    # risk), the risk-budget cap charges only OPEN POSITIONS. Do NOT flip true
+    # until the atomic fill-cap + fill-burst test land.
+    chili_momentum_decouple_watching_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DECOUPLE_WATCHING_ENABLED"),
+    )
+    # Max simultaneous WATCHERS (pre-fill, $0 risk) when decoupled. REST-safe
+    # ceiling 20 without the WS-quote re-route; default 15 = today's runner-list
+    # limit (zero behaviour change day one). Watch more → catch more breaks.
+    chili_momentum_watch_fanout_max: int = Field(
+        default=15,
+        ge=1,
+        le=100,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WATCH_FANOUT_MAX"),
+    )
+    # Hard operator backstop on OPEN POSITIONS; adaptive risk-budget N (≤15) binds
+    # first (reference numbers are ceilings, not the active value).
+    chili_momentum_max_open_positions_ceiling: int = Field(
+        default=20,
+        ge=1,
+        le=50,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_OPEN_POSITIONS_CEILING"),
+    )
+    # Crypto correlated-dump SUPER-bucket: max simultaneous OPEN crypto (-USD)
+    # positions across ALL coins (one BTC-led dump hits everything). NOT per-coin.
+    chili_momentum_max_open_positions_per_correlation_bucket: int = Field(
+        default=4,
+        ge=1,
+        le=50,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_OPEN_POSITIONS_PER_CORRELATION_BUCKET"),
+    )
+    # Crypto pre-entry DOLLAR backstop: cap aggregate open-crypto-risk (entry→stop
+    # $) at this fraction of equity (the equity aggregate_open_risk_cap excludes
+    # crypto, so this is the crypto lane's only dollar-precise correlation guard).
+    chili_momentum_max_aggregate_crypto_risk_pct_of_equity: float = Field(
+        default=0.07,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_AGGREGATE_CRYPTO_RISK_PCT_OF_EQUITY"),
+    )
     # Adaptive concurrency: the number of live slots = the simultaneous-open-risk BUDGET
     # RATIO. N = clamp(round(this_fraction / loss_fraction_of_equity), max_concurrent_live_
     # sessions, 15) — i.e. how many per-trade risks fit in the budget. With loss_fraction
