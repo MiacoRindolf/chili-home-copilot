@@ -2844,6 +2844,45 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_TOPPING_TAIL_ENABLED"),
         description="Exit the TRAILING runner on a topping-tail/shooting-star rejection candle.",
     )
+    # Adaptive order-flow EXHAUSTION LOCK (crypto runner). The cushion trail band
+    # is loose by design on an extended runner (~800bps at +1.9R into a 3R plan);
+    # MEGA-USD peaked +1.9R, never reached the 3R partial (partial_taken stayed
+    # False, runner floored at the loss-side stop), and bled the peak back inside
+    # the band that never triggered. This lock fires an adaptive, FLOW-CONFIRMED
+    # tighten BEFORE the fixed target when live OFI + micro-price say the thrust
+    # is exhausting (the sign-mirror of the entry OFI tilt). Crypto-only; equity
+    # exit byte-identical (the live caller hard-gates on `-USD`). Ratchet-only
+    # over the structural stop (never loosens). The A/B counterfactual (fixed-R:R
+    # candidate stop, lock OFF) is logged on EVERY armed tick so the realized-PnL
+    # delta vs the baseline is measured LIVE before the partial moves size.
+    chili_momentum_exit_ofi_lock_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_OFI_LOCK_ENABLED"),
+        description="Master gate (kill-switch #1) for the crypto order-flow exhaustion lock. false = exact legacy cushion trail + fixed target; the A/B counterfactual still logs.",
+    )
+    chili_momentum_exit_ofi_lock_partial_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_OFI_LOCK_PARTIAL_ENABLED"),
+        description="Action B: arm the early PARTIAL (scale-out → breakeven) on strong exhaustion. Default OFF = log-would-fire-first; the ratchet-tighten (Action A) still applies. Promote after the counterfactual proves net-positive.",
+    )
+    chili_momentum_exit_ofi_arm_frac: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_OFI_ARM_FRAC"),
+        description="Profit-arm point as a FRACTION of the plan's own reward:risk (arm_r = arm_frac·rr, floored 0.5R). Derived from rr — not a fixed-R magic number. Below the arm the lock is inert (the trail/stop owns healthy pullbacks).",
+    )
+    chili_momentum_exit_ofi_base_lock_bps: float = Field(
+        default=120.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_OFI_BASE_LOCK_BPS"),
+        description="The ONE irreducible knob: base lock tightness (bps below the high-water mark). Scaled tighter by move strength (peak_r/rr) and flow magnitude, clamped no looser than the cushion band already is and no tighter than 0.25× the base.",
+    )
+    chili_momentum_exit_ofi_hidden_seller_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_OFI_HIDDEN_SELLER_ENABLED"),
+        description="Accelerant: hidden-seller absorption at the highs arms the lock on profit-arm + micro-rollover alone (distribution is the one LEADING signal). OFF at ship — promote only after OFI+micro proves net-positive (log-only-first).",
+    )
     # Runaway-break allowance: take a high-conviction break that ran away WITHOUT a
     # retest (else a vertical runner that never comes back is missed). Strict — only
     # the retest WAIT is waived; raised volume + candle/VWAP/MACD confirmations stand.

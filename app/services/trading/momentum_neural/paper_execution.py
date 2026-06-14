@@ -460,5 +460,207 @@ def cushion_adaptive_trail_stop(
     return min(cs, trailed)
 
 
+def ofi_exhaustion_lock(
+    *,
+    high_water_mark: float,
+    entry_price: float,
+    bid: float,
+    atr_pct: float,
+    stop_atr_mult: float,
+    ofi: float | None,
+    micro_edge: float | None,
+    hidden_seller: float | None,
+    reward_risk: float,
+    current_stop: float,
+    breakeven_floor: float,
+    current_band_bps: float,
+    side_long: bool = True,
+) -> dict[str, Any]:
+    """Adaptive order-flow exhaustion lock for the crypto momentum runner.
+
+    The cushion trail band (``cushion_adaptive_trail_stop``) is loose by design
+    on an extended runner (≈800bps at +1.9R into a 3R plan). MEGA-USD peaked at
+    +1.9R, never reached the 3R partial, so ``partial_taken`` stayed False, the
+    runner floor stayed at the loss-side stop, and the +1.9R peak bled back
+    inside the band that never triggered. This helper fires an adaptive, flow-
+    CONFIRMED tighten (and optionally arms the partial) the moment live order
+    flow says the thrust is exhausting — BEFORE the fixed target.
+
+    Mirror of the entry tilt (``viability``: boost on ``OFI > +T ∧ micro > 0``).
+    Confluence-AND so a single noisy OFI blip never sells a winner:
+
+      1. profit-arm   peak_r ≥ arm_r (= ``arm_frac · rr``)  — only ever lock a winner
+      2. micro rollover  micro_edge < 0  (the spoof-resistant state anchor)
+      3. OFI flip       ofi < −T  (windowed confirmation, never alone)
+      4. giveback       (hwm − bid) ≥ k · risk_dist  (extension/deceleration check)
+
+    Accelerant (OR-bypass of 3+4): hidden-seller absorption ≥ threshold arms on
+    1+2 alone — distribution is the one LEADING signal. Off by default.
+
+    ADAPTIVE & single-knob: ``base_lock_bps`` is the only irreducible number.
+    ``arm_r`` derives from the plan's own ``rr``; the giveback arm derives from
+    the position's own ``risk_dist`` (ATR); lock tightness scales with the move's
+    percentile (``peak_r/rr``) and the flow magnitude. Thresholds reuse the
+    entry's tuned ``chili_momentum_ofi_threshold``.
+
+    RATCHET-ONLY / NEVER-LOOSEN (Invariant A): ``new_stop_floor`` is
+    unconditionally ``max(current_stop, breakeven_floor, candidate)`` — it can
+    only raise, never null, never write below the structural stop. The caller
+    additionally re-applies its own ``> stop_px`` ratchet guard (belt-and-
+    suspenders). The candidate lock is also clamped no looser than the cushion
+    band already produced this tick (``current_band_bps``), so the lock can only
+    EQUAL or TIGHTEN the trail, never widen it.
+
+    Pure (no I/O) for replay/live parity. Fail-safe: missing/NaN signals →
+    no-op (``new_stop_floor == current_stop``, ``partial_arm == False``). The
+    returned dict ALSO carries the A/B counterfactual (the fixed-R:R candidate
+    stop, lock OFF) so realized PnL can be measured against the baseline live.
+    """
+    out: dict[str, Any] = {
+        "new_stop_floor": current_stop,
+        "partial_arm": False,
+        "armed": False,
+        "fired": False,
+        "trigger": None,
+        "peak_r": None,
+        "lock_bps": None,
+        "counterfactual_fixed_stop": current_stop,  # band-only stop, lock OFF
+    }
+    if not side_long:
+        return out
+    try:
+        hwm = float(high_water_mark)
+        entry = float(entry_price)
+        b = float(bid)
+        cs = float(current_stop)
+        be = float(breakeven_floor)
+        band_bps = float(current_band_bps)
+    except (TypeError, ValueError):
+        return out
+    if not (math.isfinite(hwm) and math.isfinite(entry) and math.isfinite(b) and math.isfinite(cs)):
+        return out
+    if entry <= 0 or hwm <= 0:
+        return out
+
+    # The trade's own risk unit, frozen at entry (same formula the stop used).
+    risk_dist = entry * max(0.003, float(atr_pct or 0.0) * float(stop_atr_mult or 0.0))
+    if not (math.isfinite(risk_dist) and risk_dist > 0):
+        return out
+    peak_r = max(0.0, (hwm - entry) / risk_dist)
+    out["peak_r"] = round(peak_r, 4)
+
+    # ---- knobs (single irreducible base; everything else derived/reused) ----
+    try:
+        rr = float(reward_risk) if math.isfinite(float(reward_risk)) and float(reward_risk) > 0 else 2.0
+    except (TypeError, ValueError):
+        rr = 2.0
+    try:
+        thr = abs(float(getattr(settings, "chili_momentum_ofi_threshold", 0.25) or 0.25))
+    except (TypeError, ValueError):
+        thr = 0.25
+    try:
+        base_lock_bps = float(getattr(settings, "chili_momentum_exit_ofi_base_lock_bps", 120.0) or 120.0)
+    except (TypeError, ValueError):
+        base_lock_bps = 120.0
+    base_lock_bps = max(1.0, base_lock_bps)
+    try:
+        arm_frac = float(getattr(settings, "chili_momentum_exit_ofi_arm_frac", 0.5) or 0.5)
+    except (TypeError, ValueError):
+        arm_frac = 0.5
+    arm_frac = min(max(arm_frac, 0.0), 1.0)
+    # arm_r derives from the plan's OWN reward:risk (no fixed-R magic): half the
+    # planned reward, floored at 0.5R so a sub-1R plan still arms a winner.
+    arm_r = max(0.5, arm_frac * rr)
+    # The giveback corroborant derives from the position's OWN risk unit (ATR),
+    # not a fixed bps: require the pullback off the high to exceed a fraction of
+    # 1R, scaled DOWN as the move extends (a 2.5R move needs less confirmation
+    # than a 1R move). k ∈ [0.15, 0.5] of risk_dist.
+    giveback_k = max(0.15, 0.5 - 0.15 * max(0.0, peak_r - arm_r))
+    giveback_dist = giveback_k * risk_dist
+
+    # ---- live reads (fail-safe to no-op) ----
+    o = None
+    m = None
+    hs = None
+    try:
+        if ofi is not None and math.isfinite(float(ofi)):
+            o = float(ofi)
+    except (TypeError, ValueError):
+        o = None
+    try:
+        if micro_edge is not None and math.isfinite(float(micro_edge)):
+            m = float(micro_edge)
+    except (TypeError, ValueError):
+        m = None
+    try:
+        if hidden_seller is not None and math.isfinite(float(hidden_seller)):
+            hs = float(hidden_seller)
+    except (TypeError, ValueError):
+        hs = None
+
+    # ---- counterfactual: fixed-R:R baseline stop this tick (lock OFF) ----
+    # = exactly what the cushion band would have left as the floor (no lock).
+    cf_band = hwm * (1.0 - max(0.0, band_bps) / 10_000.0) if math.isfinite(band_bps) else cs
+    out["counterfactual_fixed_stop"] = max(cs, be, cf_band) if math.isfinite(cf_band) else max(cs, be)
+
+    # ---- gate 1: profit-arm (only ever lock a winner) ----
+    if peak_r < arm_r:
+        return out
+    out["armed"] = True
+
+    # ---- accelerant: hidden-seller absorption at the highs (1+2 only) ----
+    try:
+        hs_enabled = bool(getattr(settings, "chili_momentum_exit_ofi_hidden_seller_enabled", False))
+    except (TypeError, ValueError):
+        hs_enabled = False
+    # Hidden-seller score is a ratio (refill / price-advance); "strong" absorption
+    # is score >= 1.0 (refill at least matches advance). Derived, not a new knob.
+    absorption = hs_enabled and hs is not None and hs >= 1.0 and (m is not None and m < 0.0)
+
+    # ---- confluence-AND (the normal path) ----
+    micro_roll = m is not None and m < 0.0
+    ofi_flip = o is not None and o < -thr
+    giveback = (hwm - b) >= giveback_dist
+    confluence = micro_roll and ofi_flip and giveback
+
+    if not (confluence or absorption):
+        return out
+
+    out["fired"] = True
+    out["trigger"] = "absorption" if (absorption and not confluence) else "ofi_micro_confluence"
+
+    # ---- adaptive lock tightness (tighten with strength + flow) ----
+    # strength_scale: stronger move (higher peak_r within its rr plan) ⇒ tighter
+    # lock (more to protect, less expected continuation). 1.0 at the arm, →~0.4
+    # as the move reaches the full plan.
+    strength_scale = 1.0 / (1.0 + 0.6 * max(0.0, peak_r - arm_r))
+    # flow_scale: harder OFI flip / deeper micro rollover ⇒ tighter. Bounded.
+    flow_excess = (abs(o) - thr) if o is not None else 0.0
+    micro_mag = (abs(m) / 50.0) if m is not None else 0.0  # ~50bps micro = full unit
+    flow_scale = 1.0 / (1.0 + max(0.0, flow_excess) + min(1.0, micro_mag))
+    if absorption and hs is not None:
+        flow_scale = min(flow_scale, 1.0 / (1.0 + min(2.0, hs)))
+    lock_bps = base_lock_bps * strength_scale * flow_scale
+    # Bounds: never wider than the cushion band already is (so the lock only ever
+    # tightens vs the realized trail); never below a small floor of the base.
+    lock_floor_bps = 0.25 * base_lock_bps
+    ceil_bps = band_bps if (math.isfinite(band_bps) and band_bps > 0) else base_lock_bps
+    lock_bps = min(max(lock_bps, lock_floor_bps), ceil_bps)
+    out["lock_bps"] = round(lock_bps, 2)
+
+    candidate = hwm * (1.0 - lock_bps / 10_000.0)
+    # INVARIANT A: unconditional ratchet floor — never below current stop or BE.
+    floors = [c for c in (cs, be, candidate) if math.isfinite(c)]
+    out["new_stop_floor"] = max(floors) if floors else cs
+
+    # ---- Action B: arm the partial when exhaustion is STRONG ----
+    # Strong = decisive flow (both OFI and micro decisively reversed) or
+    # absorption. The partial routes through the audited scale-out path and
+    # flips _be_floor to breakeven — the exact MEGA give-back fix.
+    strong_flow = (o is not None and o < -2.0 * thr) and (m is not None and m < 0.0)
+    out["partial_arm"] = bool(absorption or strong_flow)
+    return out
+
+
 def utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
