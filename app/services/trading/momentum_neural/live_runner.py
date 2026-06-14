@@ -56,6 +56,7 @@ from .paper_execution import (
     breakeven_stop_after_partial,
     class_aware_reward_risk,
     effective_stop_atr_pct,
+    ofi_exhaustion_lock,
     regime_atr_pct,
     runner_trail_stop,
     scale_out_fraction,
@@ -3657,6 +3658,90 @@ def tick_live_session(
                     "partial_taken": bool(pos.get("partial_taken")),
                 })
 
+            # Adaptive order-flow EXHAUSTION LOCK (crypto runner). Runs AFTER the
+            # cushion ratchet so `current_band_bps` is the band's REALIZED output
+            # this tick — the lock can then only ever tighten vs the actual trail
+            # (never clamps to a looser theoretical band). Crypto-only: equity is
+            # byte-identical (this entire block is gated on `-USD`). The lock is
+            # ratchet-only over the structural stop and clamped no looser than the
+            # band. The A/B counterfactual (fixed-R:R stop, lock OFF) is emitted on
+            # EVERY armed tick so realized PnL is measured vs baseline LIVE before
+            # the partial (Action B) ever moves size. (docs/DESIGN/ADAPTIVE_OFI_EXIT.md)
+            if sess.symbol.endswith("-USD") and bool(
+                getattr(settings, "chili_momentum_exit_ofi_lock_enabled", True)
+            ):
+                try:
+                    from .pipeline import _live_ofi_microprice
+
+                    _ofi_x, _mpe_x = _live_ofi_microprice(sess.symbol, db=db)
+                    # Hidden-seller absorption (accelerant) only when its flag is on;
+                    # reads the same in-process Coinbase book ring. Fail-open None.
+                    _hs_x = None
+                    if bool(getattr(settings, "chili_momentum_exit_ofi_hidden_seller_enabled", False)):
+                        try:
+                            from ..microstructure import get_book_buffer
+                            from ..fast_path.microstructure_log import _hidden_seller
+
+                            _hs_win = float(
+                                getattr(settings, "chili_crypto_l2_ofi_window_s", 15.0) or 15.0
+                            )
+                            _hs_snaps = get_book_buffer().recent(sess.symbol, window_secs=_hs_win)
+                            if len(_hs_snaps) >= 2:
+                                _hs_x = _hidden_seller(_hs_snaps)
+                        except Exception:
+                            _hs_x = None
+                    # current_band_bps = the cushion band's REALIZED stop this tick.
+                    _band_bps = ((_hwm_trail - stop_px) / _hwm_trail * 10_000.0) if _hwm_trail > 0 else 0.0
+                    _lock = ofi_exhaustion_lock(
+                        high_water_mark=_hwm_trail,
+                        entry_price=avg,
+                        bid=bid,
+                        atr_pct=_atr_pct_trail,
+                        stop_atr_mult=_sm,
+                        ofi=_ofi_x,
+                        micro_edge=_mpe_x,
+                        hidden_seller=_hs_x,
+                        reward_risk=class_aware_reward_risk(sess.symbol),
+                        current_stop=stop_px,
+                        breakeven_floor=_be_floor,
+                        current_band_bps=_band_bps,
+                        side_long=True,
+                    )
+                    # A/B telemetry on every ARMED tick (winner past the profit-arm),
+                    # whether or not the lock fired — this is the counterfactual that
+                    # proves capture vs the fixed-R:R baseline before we trust it.
+                    if _lock.get("armed"):
+                        _emit(db, sess, "live_ofi_exhaustion_lock", {
+                            "fired": bool(_lock.get("fired")),
+                            "trigger": _lock.get("trigger"),
+                            "peak_r": _lock.get("peak_r"),
+                            "lock_bps": _lock.get("lock_bps"),
+                            "band_bps": round(_band_bps, 2),
+                            "ofi": _ofi_x,
+                            "micro_edge": _mpe_x,
+                            "hidden_seller": _hs_x,
+                            "adaptive_stop": _lock.get("new_stop_floor"),
+                            "counterfactual_fixed_stop": _lock.get("counterfactual_fixed_stop"),
+                            "partial_arm": bool(_lock.get("partial_arm")),
+                            "bid": bid,
+                            "high_water_mark": _hwm_trail,
+                        })
+                    # Action A: ratchet-only stop write (belt-and-suspenders > guard).
+                    _lock_stop = _float_or_none(_lock.get("new_stop_floor"))
+                    if _lock.get("fired") and _lock_stop is not None and _lock_stop > stop_px:
+                        pos["stop_price"] = _lock_stop
+                        stop_px = _lock_stop
+                        le["position"] = pos
+                        _commit_le(sess, le)
+                    # Action B: arm the early partial (one-tick flag read at 3778).
+                    # Default OFF (log-would-fire-first); promote after A/B proves out.
+                    if bool(getattr(settings, "chili_momentum_exit_ofi_lock_partial_enabled", False)):
+                        if _lock.get("fired") and _lock.get("partial_arm"):
+                            le["exhaustion_lock_partial_armed"] = True
+                            _commit_le(sess, le)
+                except Exception:
+                    pass
+
         if bid > stop_px and le.pop("stop_breach_pending_utc", None) is not None:
             # breach -> recovery between reads = flicker dodged; clear the marker
             _commit_le(sess, le)
@@ -3775,14 +3860,32 @@ def tick_live_session(
         # Fires from ENTERED or from TRAILING (price drifted up past trail-activate
         # before reaching the target); the partial_taken guard ensures it fires once.
         # Skipped while a resting scale-out limit is working the level (above).
+        #
+        # OR-in the adaptive order-flow EXHAUSTION partial: a crypto runner whose
+        # flow exhausted BELOW the fixed target arms `exhaustion_lock_partial_armed`
+        # (primary hook). It routes through the SAME audited SCALING_OUT path (which
+        # flips _be_floor to breakeven — the MEGA give-back fix). Gated directly on
+        # `-USD` (NOT transitively via the flag) so equity is byte-identical, and on
+        # the partial flag + the same `not scale_limit_order_id` contract so it never
+        # races a resting limit. (docs/DESIGN/ADAPTIVE_OFI_EXIT.md)
+        _ofi_partial_armed = bool(
+            sess.symbol.endswith("-USD")
+            and getattr(settings, "chili_momentum_exit_ofi_lock_partial_enabled", False)
+            and le.get("exhaustion_lock_partial_armed")
+        )
         if (
             st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
             and not pos.get("partial_taken")
             and not le.get("scale_limit_order_id")
-            and bid >= target_px * 0.995
+            and (bid >= target_px * 0.995 or _ofi_partial_armed)
         ):
+            _exit_kind = "target" if bid >= target_px * 0.995 else "ofi_exhaustion"
+            le.pop("exhaustion_lock_partial_armed", None)
+            _commit_le(sess, le)
             _safe_transition(db, sess, STATE_LIVE_SCALING_OUT)
-            _emit(db, sess, "live_partial_exit", {"bid": bid, "target_price": target_px})
+            _emit(db, sess, "live_partial_exit", {
+                "bid": bid, "target_price": target_px, "trigger": _exit_kind,
+            })
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
