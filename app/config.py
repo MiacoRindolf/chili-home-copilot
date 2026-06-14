@@ -3476,6 +3476,16 @@ class Settings(BaseSettings):
         ge=60,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_WATCH_EXTEND_SECONDS"),
     )
+    # Post-reap cooldown (seconds): after a name is reaped pre-entry (watched the
+    # full window without firing), sit it out this long before it can re-arm, so
+    # the same non-firing name (RENDER/WLD looped 88x/56x/24h) stops hogging the
+    # single live slot — a different fresh mover gets watched instead. 0 disables
+    # (instant kill-switch). One watch-window default; env-tunable.
+    chili_momentum_reap_cooldown_sec: float = Field(
+        default=300.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REAP_COOLDOWN_SEC"),
+    )
     # A6 (open-burst bandwidth): arm up to N distinct fresh candidates per
     # auto-arm pass while slots remain (was 1/pass; 74 fresh candidates in the
     # 13:30-13:50Z burst vs 6 armed).
