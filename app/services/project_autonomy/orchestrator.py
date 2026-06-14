@@ -5803,36 +5803,16 @@ def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) 
             pass
         return "", "gateway_error"
 
-    _t0 = _time.monotonic()
-    protocol_note = None
-    reply_text, model_used = _call_gateway(system + protocol, messages[1:])
-    directive = _parse_protocol_directive(reply_text)
-    if directive and directive[0] == "read" and repo_root_for_reads:
-        rels = [r for r in directive[1].replace(",", " ").split() if r][:4]
-        bodies: list[str] = []
-        for rel in rels:
-            body = _safe_repo_file_read(repo_root_for_reads, rel)
-            bodies.append(f"### {rel}\n{body if body is not None else '(not found or unreadable)'}")
-        protocol_note = {"read": rels}
-        followup = messages[1:] + [
-            {"role": "assistant", "content": reply_text},
-            {
-                "role": "user",
-                "content": "Requested file contents:\n\n" + "\n\n".join(bodies)
-                + "\n\nNow answer the original question grounded in what you just read.",
-            },
-        ]
-        reply_text, model_used = _call_gateway(system, followup)
-    elif directive and directive[0] == "escalate":
-        protocol_note = {"escalate": directive[1][:200]}
-        escalated = False
+    def _do_escalate(convo: list[dict], reason: str) -> tuple[str, str, bool]:
+        """Re-ask the frontier tier (cents/question) for costly judgment
+        calls; graceful self-answer when frontier is unconfigured."""
         try:
             from ... import openai_client as _oc
             from ...config import settings as _st
 
             if getattr(_st, "chili_code_frontier_enabled", False) and _oc._frontier_configured():
                 res = _oc.chat(
-                    messages[1:],
+                    convo,
                     system_prompt=system,
                     trace_id=f"autopilot-brainstorm-esc-{run.run_id}",
                     user_message=latest_user_message,
@@ -5840,17 +5820,71 @@ def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) 
                     model_override=_st.frontier_model,
                 )
                 if isinstance(res, dict) and (res.get("reply") or "").strip():
-                    reply_text = res["reply"].strip()
-                    model_used = str(res.get("model") or _st.frontier_model)
-                    escalated = True
+                    return res["reply"].strip(), str(res.get("model") or _st.frontier_model), True
         except Exception:
             pass
-        if not escalated:
-            followup = messages[1:] + [
+        fb = convo + [
+            {"role": "user", "content": "Escalation is unavailable; answer as well as you can yourself."},
+        ]
+        rt, mu = _call_gateway(system, fb)
+        return rt, mu, False
+
+    # ── Iterative agentic loop: read-before-you-speak, AND keep reading ───
+    # A single READ pass can't follow a reference chain (orchestrator.py
+    # mentions cycle.py → read that too). Up to MAX_READ_ROUNDS rounds, the
+    # model may READ more, ESCALATE, or answer; every file it reads persists
+    # in the conversation so later rounds compound understanding. Bounded so
+    # a confused model can't loop forever (latency + cost guard).
+    _MAX_READ_ROUNDS = 3
+    _t0 = _time.monotonic()
+    protocol_note: dict[str, Any] | None = None
+    reads_done: list[str] = []
+    files_already_read: set[str] = set()
+    convo = list(messages[1:])
+    reply_text, model_used = _call_gateway(system + protocol, convo)
+
+    for _round in range(_MAX_READ_ROUNDS):
+        directive = _parse_protocol_directive(reply_text)
+        if not directive:
+            break
+        if directive[0] == "escalate":
+            protocol_note = {"escalate": directive[1][:200], "reads": reads_done}
+            reply_text, model_used, _esc = _do_escalate(convo, directive[1])
+            break
+        if directive[0] == "read" and repo_root_for_reads:
+            rels = [r for r in directive[1].replace(",", " ").split() if r][:4]
+            # Drop files already supplied so a stuck model can't re-request
+            # the same paths every round.
+            fresh = [r for r in rels if r not in files_already_read]
+            bodies: list[str] = []
+            for rel in (fresh or rels):
+                files_already_read.add(rel)
+                reads_done.append(rel)
+                body = _safe_repo_file_read(repo_root_for_reads, rel)
+                bodies.append(f"### {rel}\n{body if body is not None else '(not found or unreadable)'}")
+            last_round = _round == _MAX_READ_ROUNDS - 1
+            instruction = (
+                "Requested file contents:\n\n" + "\n\n".join(bodies) + "\n\n"
+                + (
+                    "You have used your file-reading budget. Now answer the "
+                    "original question grounded in everything you have read."
+                    if last_round else
+                    "You may READ more files (follow references you just saw), "
+                    "ESCALATE, or answer now grounded in what you have read."
+                )
+            )
+            convo = convo + [
                 {"role": "assistant", "content": reply_text},
-                {"role": "user", "content": "Escalation is unavailable; answer as well as you can yourself."},
+                {"role": "user", "content": instruction},
             ]
-            reply_text, model_used = _call_gateway(system, followup)
+            # Last round: force a final answer (no protocol -> no more READ).
+            reply_text, model_used = _call_gateway(
+                system if last_round else (system + protocol), convo
+            )
+        else:
+            break
+    if reads_done and protocol_note is None:
+        protocol_note = {"reads": reads_done}
 
     # Cross-run lessons: persist a durable fact into the insights store so
     # the NEXT conversation already knows it (get_insights feeds context).
