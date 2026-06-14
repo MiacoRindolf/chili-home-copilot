@@ -5824,6 +5824,39 @@ def start_scheduler():
                 next_run_time=datetime.now() + timedelta(seconds=30),
             )
 
+            # Phase 1 (1a): LOG-ONLY L2 signal layer -> trading_microstructure_log.
+            # Computes OFI/micro-price/ask-eaten/hidden-seller/spoof from the ring
+            # (zero DB in the hot path). NO decision wiring — calibration data only.
+            from .trading.fast_path.microstructure_log import (
+                run_microstructure_log_drain_job,
+                run_microstructure_log_prune_job,
+            )
+
+            _mld_secs = max(
+                1.0, float(getattr(_cvr_settings, "chili_micro_log_drain_seconds", 5.0) or 5.0)
+            )
+            _scheduler.add_job(
+                run_microstructure_log_drain_job,
+                trigger=IntervalTrigger(seconds=_mld_secs),
+                id="microstructure_log_drain",
+                name="Microstructure log drain (LOG-ONLY signals)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=5,
+                next_run_time=datetime.now() + timedelta(seconds=40),
+            )
+            _scheduler.add_job(
+                run_microstructure_log_prune_job,
+                trigger=IntervalTrigger(hours=6),
+                id="microstructure_log_prune",
+                name="Microstructure log prune (partition-drop retention)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=90),
+            )
+
             _scheduler.add_job(
                 _run_fast_path_universe_rotator_job,
                 trigger=IntervalTrigger(minutes=60),

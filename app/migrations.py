@@ -20640,6 +20640,89 @@ def _migration_305_code_dispatch_plan_augmented_routing(conn) -> None:
     )
 
 
+def _migration_306_trading_microstructure_log(conn) -> None:
+    """LOG-ONLY L2 microstructure signal layer. Touches NO decision path.
+
+    Accumulates forward-return-labeled microstructure signals (OFI, micro-price,
+    ask-eaten, hidden-seller, spoof, book imbalance) computed from the live L2
+    book, so a later calibration phase can learn which signals actually predict
+    before ANY of them is wired into entry/viability/replay (the -1.58pp
+    falsified sub-bar lesson: never wire an uncalibrated signal).
+
+    Design (matches the L2 design + red-team):
+    * ``observed_at`` is naive ``TIMESTAMP`` (UTC) to MATCH ``fast_orderbook`` and
+      ``iqfeed_depth_snapshots`` (avoid TIMESTAMPTZ-vs-TIMESTAMP silent offset).
+      It is the EXCHANGE event time; ``ingest_at`` is wall-clock for latency audit.
+    * Range-partitioned by ``observed_at`` so retention is partition-drop, not
+      row-DELETE (named daily partitions are pre-created by
+      ``data_retention.ensure_fast_path_partitions``; a DEFAULT partition catches
+      the current window before the daily one exists).
+    * Stores RAW depth so imbalance is derived (one convention), eligibility +
+      viability for selection-bias stratification, and BOTH mid-to-mid and
+      executable (fee-adjusted) forward returns.
+    Idempotent: CREATE ... IF NOT EXISTS throughout.
+    """
+    conn.execute(text(
+        "CREATE TABLE IF NOT EXISTS trading_microstructure_log ("
+        " id BIGSERIAL,"
+        " symbol VARCHAR(32) NOT NULL,"
+        " asset_class VARCHAR(8) NOT NULL,"          # 'crypto' | 'equity'
+        " observed_at TIMESTAMP NOT NULL,"           # naive UTC, EXCHANGE event time
+        " ingest_at TIMESTAMP,"                      # naive UTC, handler wall-clock
+        " source VARCHAR(24) NOT NULL,"             # 'coinbase_ws' | 'iqfeed_l2'
+        " eligibility_state VARCHAR(16),"           # 'eligible' | 'control'
+        " viability_score DOUBLE PRECISION,"
+        " mid_price DOUBLE PRECISION,"
+        " micro_price DOUBLE PRECISION,"
+        " best_bid DOUBLE PRECISION,"
+        " best_ask DOUBLE PRECISION,"
+        " spread_bps DOUBLE PRECISION,"
+        " depth_bid_total DOUBLE PRECISION,"
+        " depth_ask_total DOUBLE PRECISION,"
+        " book_depth_levels INTEGER,"
+        " book_imbalance DOUBLE PRECISION,"          # normalized (b-a)/(b+a) in [-1,1]
+        " microprice_edge_bps DOUBLE PRECISION,"
+        " ofi DOUBLE PRECISION,"
+        " ofi_window_s DOUBLE PRECISION,"           # ACTUAL window span (event time)
+        " snapshot_count INTEGER,"                  # points in window (skip thin)
+        " ask_eaten_events INTEGER,"
+        " ask_eaten_notional_usd DOUBLE PRECISION,"
+        " hidden_seller_score DOUBLE PRECISION,"
+        " spoof_score DOUBLE PRECISION,"
+        " sample_window_secs DOUBLE PRECISION,"
+        " fwd_return_1m DOUBLE PRECISION,"           # mid-to-mid
+        " fwd_return_5m DOUBLE PRECISION,"
+        " fwd_return_15m DOUBLE PRECISION,"
+        " fwd_exec_return_1m DOUBLE PRECISION,"      # ask->future-bid minus round-trip cost
+        " fwd_exec_return_5m DOUBLE PRECISION,"
+        " fwd_exec_return_15m DOUBLE PRECISION,"
+        " fwd_label_at TIMESTAMP,"
+        " PRIMARY KEY (id, observed_at)"
+        ") PARTITION BY RANGE (observed_at)"
+    ))
+    conn.execute(text(
+        "CREATE TABLE IF NOT EXISTS trading_microstructure_log_default "
+        "PARTITION OF trading_microstructure_log DEFAULT"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_micro_log_symbol_observed "
+        "ON trading_microstructure_log (symbol, observed_at DESC)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_micro_log_observed "
+        "ON trading_microstructure_log (observed_at)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_micro_log_unlabeled "
+        "ON trading_microstructure_log (observed_at) WHERE fwd_label_at IS NULL"
+    ))
+    conn.commit()
+    logger.info(
+        "[mig306] ensured trading_microstructure_log (partitioned, naive-UTC, "
+        "derived-imbalance) — LOG-ONLY microstructure layer (no decision path)"
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -21012,6 +21095,8 @@ MIGRATIONS = [
      _migration_304_position_identity_phase5i_position_insert_backlink),
     ("305_code_dispatch_plan_augmented_routing",
      _migration_305_code_dispatch_plan_augmented_routing),
+    ("306_trading_microstructure_log",
+     _migration_306_trading_microstructure_log),
 ]
 
 
