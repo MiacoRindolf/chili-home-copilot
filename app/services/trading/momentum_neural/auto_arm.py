@@ -487,9 +487,17 @@ def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[Momentum
         return (ross, float(r.viability_score or 0.0))
 
     rows = sorted(rows, key=_ross_rank_key, reverse=True)
-    if _auto_arm_equity_only() and rows:
-        rows = _enforce_ross_price_band(rows)
-        rows = _liquidity_rerank(rows)
+    if rows:
+        if _auto_arm_equity_only():
+            rows = _enforce_ross_price_band(rows)
+            rows = _liquidity_rerank(rows)
+        else:
+            # Crypto (crypto-only or mixed): the binary liquidity floor only gates
+            # pass/block — among the passers, arm the most FILLABLE 24h-volume name
+            # first (deepest book = tighter maker fill + cleaner exit, directly
+            # attacking the crypto fill/exit toxicity). Equity rows in a mixed list
+            # keep ross order (their re-rank is equity-only above).
+            rows = _crypto_liquidity_rerank(rows)
     return _dedupe_by_symbol(rows, limit=int(limit))
 
 
@@ -649,6 +657,60 @@ def _liquidity_rerank(
         return reranked
     except Exception:
         logger.debug("[auto_arm] liquidity-bias re-rank errored — viability order", exc_info=True)
+        return rows
+
+
+def _crypto_liquidity_rerank(
+    rows: list[MomentumSymbolViability],
+) -> list[MomentumSymbolViability]:
+    """Crypto analog of :func:`_liquidity_rerank`: among the crypto (``-USD``)
+    candidates that cleared the binary liquidity FLOOR (``crypto_liquidity_ok``),
+    arm the most FILLABLE first by blending viability/ross rank with 24h
+    quote-volume rank.
+
+    The floor only gates pass/block — but among passers the thinnest can otherwise
+    arm ahead of the deepest, and a trigger on a thin book pays the maker-fill /
+    exit toxicity that drove the early crypto losses. Re-ranking by turnover lands
+    the trigger on the deepest book. The 24h quote-$ datum already rides each
+    viability row (``extra.ross_signals[sym].quote_volume_24h``) — zero new network
+    call. ADAPTIVE rank-blend WITHIN the crypto batch (no fixed threshold, operator
+    principle #1). FAIL-OPEN: missing data / <2 crypto names -> unchanged order.
+    Non-crypto rows keep their ross-ranked positions (mixed-lane safe)."""
+    if not _auto_arm_liquidity_bias():
+        return rows
+    crypto = [r for r in rows if str(r.symbol or "").strip().upper().endswith("-USD")]
+    if len(crypto) < 2:
+        return rows
+    try:
+        from .crypto_liquidity import _quote_volume_24h_for
+
+        dvols: dict[int, float] = {}
+        for r in crypto:
+            qv = _quote_volume_24h_for(r, str(r.symbol or "").strip().upper())
+            if qv is not None:
+                dvols[id(r)] = qv
+        if len(dvols) < 2:
+            return rows  # not enough turnover data -> keep ross order (fail-open)
+        # crypto is already in ross order -> position = ross/viability rank (0 best)
+        vrank = {id(r): i for i, r in enumerate(crypto)}
+        by_dvol = sorted(crypto, key=lambda r: dvols.get(id(r), 0.0), reverse=True)
+        drank = {id(r): i for i, r in enumerate(by_dvol)}
+        reranked = sorted(crypto, key=lambda r: vrank[id(r)] + drank[id(r)])
+        if reranked[0] is not crypto[0]:
+            logger.info(
+                "[auto_arm] crypto liquidity-bias: armed-first now %s ($%.1fM 24h) over "
+                "the ross-top %s ($%.1fM) — preferring fillable",
+                reranked[0].symbol, dvols.get(id(reranked[0]), 0.0) / 1e6,
+                crypto[0].symbol, dvols.get(id(crypto[0]), 0.0) / 1e6,
+            )
+        # splice the re-ranked crypto back into the crypto slots; equity untouched
+        it = iter(reranked)
+        return [
+            next(it) if str(r.symbol or "").strip().upper().endswith("-USD") else r
+            for r in rows
+        ]
+    except Exception:
+        logger.debug("[auto_arm] crypto liquidity-bias errored — order unchanged", exc_info=True)
         return rows
 
 
