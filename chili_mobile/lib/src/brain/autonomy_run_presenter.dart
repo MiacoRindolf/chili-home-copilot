@@ -177,6 +177,28 @@ class AutonomyRunPresenter {
     }
   }
 
+  /// Raw unified-diff text for a `diff` artifact, or empty when none.
+  ///
+  /// The full patch already reaches the client in `content` — it was only
+  /// ever summarised ("Generated a patch for X"). Surface it so the operator
+  /// can review the actual change before approving/merging.
+  static String diffContent(Map<String, dynamic> artifact) {
+    if (_text(artifact['artifact_type']) != 'diff') return '';
+    final content = _text(artifact['content']).trim();
+    if (content.contains('@@') ||
+        content.contains('--- ') ||
+        content.startsWith('diff ')) {
+      return content;
+    }
+    // Some runs stash the patch under content_json.diff / .patch.
+    final json = _map(artifact['content_json']);
+    for (final key in const ['diff', 'patch', 'unified_diff']) {
+      final v = _text(json[key]).trim();
+      if (v.contains('@@') || v.contains('--- ')) return v;
+    }
+    return '';
+  }
+
   static String artifactBody(Map<String, dynamic> artifact) {
     final type = _text(artifact['artifact_type']);
     final name = _text(artifact['name']);

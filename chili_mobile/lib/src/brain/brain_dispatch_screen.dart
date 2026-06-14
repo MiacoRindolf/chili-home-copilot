@@ -15,6 +15,7 @@ import '../screen/focus_target.dart';
 import 'autonomy_run_presenter.dart';
 import 'autopilot_ui.dart';
 import 'device_auth_store.dart';
+import 'diff_view.dart';
 
 /// Dispatch monitor: status, queue task, run history.
 class BrainDispatchScreen extends StatefulWidget {
@@ -3537,6 +3538,19 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                           height: 1.25,
                         ),
                       ),
+                    ],
+                    // The actual code the autopilot wrote — render it so the
+                    // operator reviews the change, not just its summary.
+                    if (type == 'diff') ...[
+                      Builder(builder: (context) {
+                        final diff =
+                            AutonomyRunPresenter.diffContent(artifact);
+                        if (diff.isEmpty) return const SizedBox.shrink();
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: DiffView(diff),
+                        );
+                      }),
                     ],
                     if ((type == 'visual_screenshot' ||
                             type == _autopilotArtifactPromptImage) &&
