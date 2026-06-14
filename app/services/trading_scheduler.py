@@ -4303,29 +4303,12 @@ def _presubscribe_crypto_l2(db) -> int:
     (``-USD`` filter) — equity behaviour is untouched. Returns the count warmed.
     """
     try:
-        from datetime import datetime, timedelta
-
-        from ..config import settings as _settings
-        from ..models.trading import MomentumSymbolViability
+        # Shared eligibility filter (same one the Phase-0 crypto L2 drain uses),
+        # so the warmed set and the drained set never drift.
+        from .trading.fast_path.crypto_l2_drain import eligible_crypto_symbols
         from .trading.venue.coinbase_spot import get_coinbase_ws
 
-        max_age = float(getattr(_settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0)
-        cutoff = datetime.utcnow() - timedelta(seconds=max_age)
-        elig = [
-            str(s).upper()
-            for (s,) in (
-                db.query(MomentumSymbolViability.symbol)
-                .filter(
-                    MomentumSymbolViability.scope == "symbol",
-                    MomentumSymbolViability.live_eligible.is_(True),
-                    MomentumSymbolViability.symbol.like("%-USD%"),
-                    MomentumSymbolViability.freshness_ts >= cutoff,
-                )
-                .distinct()
-                .all()
-            )
-            if s
-        ]
+        elig = eligible_crypto_symbols(db)
         if not elig:
             return 0
         get_coinbase_ws().subscribe(elig)
@@ -5819,6 +5802,26 @@ def start_scheduler():
                 replace_existing=True,
                 max_instances=1,
                 next_run_time=datetime.now() + timedelta(seconds=35),
+            )
+
+            # Phase 0 crypto L2 writer: persist the warmed Coinbase full-book ring
+            # -> fast_orderbook (crypto only; nothing else writes crypto L2). Feeds
+            # the Phase-1 log-only signal layer + Phase-2 forward-return backfill.
+            from .trading.fast_path.crypto_l2_drain import run_crypto_l2_drain_job
+
+            _cld_secs = max(
+                1.0, float(getattr(_cvr_settings, "chili_crypto_l2_drain_seconds", 5.0) or 5.0)
+            )
+            _scheduler.add_job(
+                run_crypto_l2_drain_job,
+                trigger=IntervalTrigger(seconds=_cld_secs),
+                id="crypto_l2_drain",
+                name="Crypto L2 ring drain -> fast_orderbook (log-only persistence)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=2,
+                next_run_time=datetime.now() + timedelta(seconds=30),
             )
 
             _scheduler.add_job(

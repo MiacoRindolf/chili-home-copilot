@@ -77,11 +77,25 @@ def test_uses_direct_subscribe_not_pricebus_listener_stacking():
     i = src.index("def _presubscribe_crypto_l2")
     block = src[i:i + 3600]
     assert "get_coinbase_ws().subscribe(" in block       # direct, idempotent (not subscribe_symbol)
+    # The crypto-only eligibility filter is now shared with the Phase-0 L2 drain
+    # (eligible_crypto_symbols) so the warmed set == the drained set, no drift.
+    assert "eligible_crypto_symbols(" in block             # uses the shared filter
+    # the actual CALL must be the direct WS subscribe, never the tick-closure stacker
+    call_region = block[block.index("eligible_crypto_symbols("):]  # code after the docstring
+    assert "subscribe_symbol" not in call_region
+
+
+def test_shared_eligibility_filter_is_crypto_only():
+    """The crypto-only guarantee (live_eligible + -USD) lives in the shared
+    eligible_crypto_symbols helper that both the pre-subscribe and the L2 drain use."""
+    src = io.open(
+        "app/services/trading/fast_path/crypto_l2_drain.py", encoding="utf-8"
+    ).read()
+    i = src.index("def eligible_crypto_symbols")
+    block = src[i:i + 1200]
     assert 'like("%-USD%")' in block                       # crypto-only (equity untouched)
     assert "live_eligible" in block                        # bounded by eligibility, no magic N
-    # the actual CALL must be the direct WS subscribe, never the tick-closure stacker
-    call_region = block[block.index("max_age ="):]         # code after the docstring
-    assert "subscribe_symbol" not in call_region
+    assert "freshness_ts" in block                         # fresh-only
 
 
 def test_wired_into_crypto_refresh_job():

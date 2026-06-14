@@ -43,7 +43,13 @@ class BookSnapshot:
     product_id: str
     bids: list[BookLevel]
     asks: list[BookLevel]
+    # ts = local ARRIVAL/ingest wall-clock — drives the ring's recency
+    # (prune/recent), robust to exchange clock skew. event_ts = the EXCHANGE
+    # event time (when present), used for persistence (fast_orderbook.snapshot_at)
+    # and forward-return horizon alignment. Keeping them separate is RT-2:
+    # "capture event time; store ingestion time separately for latency audit."
     ts: float = field(default_factory=time.time)
+    event_ts: float | None = None
 
 
 @dataclass
@@ -90,6 +96,16 @@ class OrderBookBuffer:
         with self._lock:
             buf = self._books.get(product_id)
             return buf[-1] if buf else None
+
+    def product_ids(self) -> list[str]:
+        """Lock-guarded snapshot of product_ids currently holding book data.
+
+        Added for the crypto L2 drain (fast_path/crypto_l2_drain.py): it
+        intersects this with the live-eligible crypto set to drain only
+        warmed books. Read-only; does not mutate the ring.
+        """
+        with self._lock:
+            return list(self._books.keys())
 
     def recent(self, product_id: str, window_secs: float = 30.0) -> list[BookSnapshot]:
         cutoff = time.time() - window_secs
