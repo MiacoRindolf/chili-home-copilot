@@ -365,6 +365,18 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
     armed_spans: dict[str, list[list[str]]] = defaultdict(list)   # sym -> [[from,to],...] HH:MM UTC
     trades: list[dict] = []
     open_pos: dict[str, dict] = {}
+    # CONVERGENCE GATES (2026-06-14): the replay must reproduce LIVE entry DISCIPLINE,
+    # not over-trade. Live keys a SESSION (arm→cooldown) for concurrency + re-entry, so
+    # a name can't stack while alive and the lane holds only ~N at once. Each gate below
+    # is a faithful mirror of a real live gate + its config knob (no magic numbers):
+    #   G1 concurrency cap = adaptive_max_concurrent_live_sessions base (auto_arm.py:985)
+    #   G2 post-loss cooldown + 2-strike = _symbol_loss_guards (auto_arm.py:776-819)
+    # Without these the replay re-entered GMM 6x/VSME 5x (36 trades vs live's 8 on 06/12).
+    MAX_OPEN_CONCURRENT = int(getattr(settings, "chili_momentum_risk_max_concurrent_live_sessions", 5) or 5)
+    MAX_DAILY_STOPOUTS = int(getattr(settings, "chili_momentum_symbol_max_daily_stopouts", 2) or 2)
+    LOSS_COOLDOWN_MIN = float(getattr(settings, "chili_momentum_symbol_loss_cooldown_min", 5.0) or 5.0)
+    loss_cooldown_until: dict = {}   # symbol -> re-arm-allowed time (tz-aware), set on a LOSS only
+    loss_strikes: dict = {}          # symbol -> count of losing trades today
     state = {"cum": 0.0, "peak": 0.0, "halted": None}
     day_grid = pd.date_range(f"{date} {_premarket_utc_hhmm(date)}:00", f"{date} 19:59:00", freq="1min", tz="UTC")
 
@@ -396,6 +408,13 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                        "stop": round(p.get("stop0", p["stop"]), 4),
                        "target": round(p["target"], 4),
                        "usd": round(pnl + p.get("scale_usd", 0.0), 0)})
+        # G2: per-symbol post-loss discipline — mirror live _symbol_loss_guards (only a
+        # net LOSS cools down + strikes; a WIN stays re-armable, preserving the legit
+        # winner re-entry live takes — the ASTN-twice case — so this is not overfit).
+        if pnl + p.get("scale_usd", 0.0) < 0:
+            _w = when if when is not None else now
+            loss_strikes[s] = loss_strikes.get(s, 0) + 1
+            loss_cooldown_until[s] = _aware(_w) + timedelta(minutes=LOSS_COOLDOWN_MIN)
         del open_pos[s]
         if state["halted"] is None and state["cum"] <= -DAILY_LOSS_CAP_USD:
             state["halted"] = "daily_loss"
@@ -516,6 +535,21 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                 armed_spans[s].append([str(now)[11:16], None])
         for s in list(armed):
             if s in open_pos:
+                continue
+            # G1: concurrency cap — live holds only ~MAX_OPEN_CONCURRENT positions at once
+            # (adaptive_max_concurrent_live_sessions base); open_pos is the held analog.
+            if len(open_pos) >= MAX_OPEN_CONCURRENT:
+                _tr(s, "gate_fail:concurrency_cap", now)
+                continue
+            # G2: per-symbol re-entry discipline — 2-strike (today's losses) then a
+            # post-loss cooldown; mirrors live so a just-lost name can't immediately
+            # re-stack (the GMM-6x / VSME-5x churn the replay used to invent).
+            if loss_strikes.get(s, 0) >= MAX_DAILY_STOPOUTS:
+                _tr(s, "gate_fail:loss_2strike", now)
+                continue
+            _cd_until = loss_cooldown_until.get(s)
+            if _cd_until is not None and _aware(now) < _cd_until:
+                _tr(s, "gate_fail:loss_cooldown", now)
                 continue
             if tape.in_halt(s, now):
                 _tr(s, "gate_fail:halt_window", now)
