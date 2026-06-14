@@ -662,6 +662,100 @@ def ofi_exhaustion_lock(
     return out
 
 
+def classify_stop_breach(
+    *,
+    ladder: Any,
+    ofi_threshold: float,
+    max_age_s: float = 2.5,
+    min_snaps: int = 3,
+) -> dict[str, Any]:
+    """Classify a LOSS-side stop breach at the moment ``bid <= stop`` so the
+    caller can distinguish a REAL breakdown (sell now) from a CHOP dip that a
+    transient shake-out can recover from (hold one hard-bounded beat).
+
+    This is the OPG-USD fix: OPG was stopped out at a dip VALLEY (-41bps) then
+    recovered + re-armed 6 min later. The existing ``>=1s`` flicker guard catches
+    a single bad PRINT but not a multi-second chop dip where bids keep absorbing.
+
+    INVARIANT-A SAFE BY CONSTRUCTION: this function returns ONLY a classification.
+    It never reads, writes, moves, or loosens the stop. The caller uses the verdict
+    to delay the SELL EXECUTION (bounded) — the stop value is never touched.
+
+    BREAKDOWN-FIRST (the safety property): every decisive-sell signal is checked
+    BEFORE any hold can be granted, and missing/stale/too-few L2 → BREAKDOWN. So a
+    real breakdown's loss-side latency is STRICTLY <= today's time-only confirm;
+    the only behaviour change is that a *confirmed CHOP* dip earns a bounded wait.
+
+    Verdicts:
+      * ``BREAKDOWN`` — sell now. Any of: stale/missing/too-few L2; OFI decisively
+        negative (``< -2T``); newest book ask-heaviest in its own window
+        (``depth_imbal_pctile < 0.2``); ask side building faster than bids with a
+        negative micro-price (sellers stacking — relative, no magic constant).
+      * ``CHOP`` — hold one bounded beat. Confluence-AND (ALL): bids refilling
+        (``bid_refill > 0``); OFI not decisively negative (``-T <= ofi <= 0.4T``);
+        micro-price not rolling hard (``>= -0.5*spread`` bps, spread-relative);
+        book NOT ask-heavy (``depth_imbal_pctile >= 0.5``).
+      * ``INCONCLUSIVE`` — neither; caller falls back to today's >=1s path (sell).
+
+    Pure (no I/O). Reuses the entry's tuned ``chili_momentum_ofi_threshold`` — no
+    new tuning knobs; only the structural age/snaps floors are passed in.
+    """
+    def _f(name: str) -> float | None:
+        v = getattr(ladder, name, None)
+        try:
+            fv = float(v)
+            return fv if math.isfinite(fv) else None
+        except (TypeError, ValueError):
+            return None
+
+    sig: dict[str, Any] = {}
+    out = {"cls": "BREAKDOWN", "reason": "stale_or_missing_l2", "signals": sig}
+    if ladder is None:
+        return out
+    pctile = _f("depth_imbal_pctile")
+    ofi = _f("ofi")
+    micro = _f("micro_edge")
+    refill = _f("bid_refill")
+    ask_build = _f("ask_build")
+    age = _f("snapshot_age_s")
+    spread = _f("spread_bps")
+    try:
+        n = int(getattr(ladder, "n_snaps", 0) or 0)
+    except (TypeError, ValueError):
+        n = 0
+    thr = abs(float(ofi_threshold or 0.0)) or 0.25
+    sig.update(
+        {"pctile": pctile, "ofi": ofi, "micro": micro, "refill": refill,
+         "ask_build": ask_build, "age": age, "spread": spread, "n": n}
+    )
+
+    # ---- data-validity floor: never hold on bad data → BREAKDOWN ----
+    if (age is None or age > float(max_age_s) or n < int(min_snaps)
+            or ofi is None or micro is None or pctile is None):
+        return out
+
+    # ---- BREAKDOWN veto (evaluated FIRST; any one fires ⇒ sell now) ----
+    if ofi < -2.0 * thr:
+        return {"cls": "BREAKDOWN", "reason": "ofi_decisive", "signals": sig}
+    if pctile < 0.2:
+        return {"cls": "BREAKDOWN", "reason": "depth_ask_heaviest", "signals": sig}
+    if (ask_build is not None and refill is not None
+            and ask_build > max(0.0, refill) and micro < 0.0):
+        # ask side stacking faster than the bid refills + price bid-favoured
+        # negative = sellers building. Relative (ask vs bid growth) — no constant.
+        return {"cls": "BREAKDOWN", "reason": "ask_wall_building", "signals": sig}
+
+    # ---- CHOP (confluence-AND; only reachable when NO breakdown fired) ----
+    micro_floor = (0.5 * spread) if (spread is not None and spread > 0) else 0.0
+    if (refill is not None and refill > 0.0
+            and -thr <= ofi <= 0.4 * thr
+            and micro >= -micro_floor
+            and pctile >= 0.5):
+        return {"cls": "CHOP", "reason": "bids_absorbing", "signals": sig}
+
+    return {"cls": "INCONCLUSIVE", "reason": "mixed", "signals": sig}
+
+
 def sell_into_strength_ladder(
     *,
     high_water_mark: float,

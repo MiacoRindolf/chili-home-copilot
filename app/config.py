@@ -2967,6 +2967,37 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_ADAPTIVE_EQUITY_ENABLED"),
         description="Run the adaptive exit (v1 exhaustion lock + v2 sell-into-strength) for EQUITY positions, not just crypto. Equity L2 from iqfeed. Default ON; the size-moving sell stays gated by exit_ladder_live. OFF = equity byte-identical (parity / rollback).",
     )
+    # ── L2-aware anti-shake-out (LOSS side) ──────────────────────────────────
+    # OPG-USD was shaken out at a dip VALLEY (trail_stop -41bps) then recovered +
+    # re-armed 6 min later. The existing >=1s flicker guard catches a single bad
+    # PRINT but not a multi-second CHOP dip. This gate classifies the breach via
+    # L2/OFI at the moment of breach: a REAL BREAKDOWN sells immediately (latency
+    # <= today — breakdown is vetoed FIRST), a CHOP dip with bids absorbing is
+    # held for a HARD-BOUNDED beat (<= max_ticks, <= max_age_s) so a transient
+    # shake-out can recover. INVARIANT A is untouched: this delays the SELL
+    # EXECUTION only, it never moves/loosens the stop. Default OFF = Stage-0 dark
+    # logging (compute + emit the counterfactual, always take today's path). Flip
+    # crypto-first once the counterfactuals prove the classifier sees real chop.
+    chili_momentum_stop_l2_confirm_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STOP_L2_CONFIRM_ENABLED"),
+        description="L2-aware anti-shake-out: hold a CHOP-classified stop breach for a hard-bounded beat (BREAKDOWN sells immediately). Default OFF = dark-logging only (emit stop_breach_l2_classify counterfactual, always take today's >=1s path). ON = the bounded CHOP hold goes live. INVARIANT-A-clean (delays the sell, never moves the stop). Kill-switch.",
+    )
+    chili_momentum_stop_l2_confirm_max_ticks: int = Field(
+        default=2,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STOP_L2_CONFIRM_MAX_TICKS"),
+        description="Hard cap on how many consecutive ticks a CHOP-classified breach may be held before forcing the sell. Bounds the worst-case hold-through of a breakdown the classifier mislabels. Structural (not a tuning knob).",
+    )
+    chili_momentum_stop_l2_confirm_max_age_s: float = Field(
+        default=2.5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STOP_L2_CONFIRM_MAX_AGE_S"),
+        description="L2 staleness floor AND the wall-clock cap on a CHOP hold: a snapshot older than this (or a breach held this long total) is treated as BREAKDOWN and sells. Never hold on stale data.",
+    )
+    chili_momentum_stop_l2_confirm_min_snaps: int = Field(
+        default=3,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STOP_L2_CONFIRM_MIN_SNAPS"),
+        description="Minimum L2 snapshots required to trust a CHOP classification; below this the breach is treated as BREAKDOWN (sell). Never hold on too-few snapshots.",
+    )
     # Runaway-break allowance: take a high-conviction break that ran away WITHOUT a
     # retest (else a vertical runner that never comes back is missed). Strict — only
     # the retest WAIT is waived; raised volume + candle/VWAP/MACD confirmations stand.
