@@ -113,6 +113,52 @@ def test_read_loop_feeds_file_contents_back(db, tmp_path, monkeypatch):
     assert len(calls) == 2
 
 
+def test_read_loop_is_iterative_follows_reference_chain(db, tmp_path, monkeypatch):
+    """Fable-style 'keep reading': READ core.py -> it points at deep.py ->
+    READ deep.py -> answer. A single-pass loop could not follow the chain."""
+    run = _mk_run(db, tmp_path)
+    (tmp_path / "core.py").write_text("# see deep.py for the real value\nFROM_CORE = 1\n", encoding="utf-8")
+    (tmp_path / "deep.py").write_text("REAL_VALUE = 99\n", encoding="utf-8")
+    calls: list[dict] = []
+
+    def fake_gateway(**k):
+        calls.append(k)
+        joined = " ".join(m["content"] for m in k["messages"] if m["role"] == "user")
+        if len(calls) == 1:
+            return {"reply": "READ: core.py", "model": "m"}
+        if "see deep.py" in joined and "REAL_VALUE" not in joined:
+            return {"reply": "READ: deep.py", "model": "m"}  # follow the reference
+        assert "REAL_VALUE = 99" in joined
+        return {"reply": "The real value is 99, per deep.py.", "model": "m"}
+
+    monkeypatch.setattr("app.services.context_brain.llm_gateway.gateway_chat", fake_gateway)
+    out = _chat_reply(db, run, "what is the real value?")
+    assert "99" in out
+    assert len(calls) == 3  # initial + 2 read rounds
+
+
+def test_read_loop_bounded_forces_answer(db, tmp_path, monkeypatch):
+    """A model that keeps asking to READ must be cut off and forced to answer."""
+    run = _mk_run(db, tmp_path)
+    (tmp_path / "a.py").write_text("a=1\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("b=2\n", encoding="utf-8")
+    (tmp_path / "c.py").write_text("c=3\n", encoding="utf-8")
+    (tmp_path / "d.py").write_text("d=4\n", encoding="utf-8")
+    seq = iter(["READ: a.py", "READ: b.py", "READ: c.py", "READ: d.py", "READ: a.py"])
+
+    def fake_gateway(**k):
+        # On the forced-answer round the system prompt lacks the protocol.
+        sysp = k.get("system_prompt") or ""
+        if "PROTOCOL" not in sysp:
+            return {"reply": "Final answer after reading my budget.", "model": "m"}
+        return {"reply": next(seq, "Done."), "model": "m"}
+
+    monkeypatch.setattr("app.services.context_brain.llm_gateway.gateway_chat", fake_gateway)
+    out = _chat_reply(db, run, "tell me everything")
+    assert "Final answer" in out
+    assert "READ:" not in out
+
+
 def test_escalation_routes_to_frontier_when_configured(db, tmp_path, monkeypatch):
     run = _mk_run(db, tmp_path)
     monkeypatch.setattr(
