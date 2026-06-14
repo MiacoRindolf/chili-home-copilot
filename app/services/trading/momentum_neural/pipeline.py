@@ -159,7 +159,9 @@ def _compute_ofi_micro(
     return round(max(-1.0, min(1.0, ofi / gross)), 4), micro_edge
 
 
-def _live_ofi_microprice(symbol: str, db: Any = None) -> tuple[float | None, float | None]:
+def _live_ofi_microprice(
+    symbol: str, db: Any = None, as_of: "datetime | None" = None
+) -> tuple[float | None, float | None]:
     """Live OFI (normalized [-1, 1]) + micro-price edge (bps) for a symbol.
 
     Crypto: from the in-process Coinbase full-book ring (``recent()`` window of
@@ -172,10 +174,18 @@ def _live_ofi_microprice(symbol: str, db: Any = None) -> tuple[float | None, flo
     confirmer (Stoikov). Wired as a SMALL agreement-guarded viability tilt and
     validated by live A/B (the literature edge is contemporaneous + may sit near
     Coinbase fees, so net incremental alpha is proven LIVE, not assumed).
+
+    ``as_of`` (UTC-naive) reads L2 AS-OF a historical instant for the replay
+    instrument — the window becomes ``(as_of - w, as_of]`` instead of trailing
+    ``now()``, and the in-process ring (which has no history) is skipped so the
+    durable table is the sole source. ``as_of=None`` is the LIVE default and emits
+    the EXACT original SQL (literal ``now()``, no upper bound) → byte-identical.
     """
     s = (symbol or "").strip().upper()
     if not s:
         return None, None
+    if as_of is not None and getattr(as_of, "tzinfo", None) is not None:
+        as_of = as_of.replace(tzinfo=None)  # naive UTC for the naive snapshot columns
     try:
         window = float(getattr(settings, "chili_crypto_l2_ofi_window_s", 15.0) or 15.0)
     except (TypeError, ValueError):
@@ -192,33 +202,42 @@ def _live_ofi_microprice(symbol: str, db: Any = None) -> tuple[float | None, flo
             # iqfeed_depth_snapshots. Crypto-GATED: the equity path NEVER reads
             # fast_orderbook (equity decisions stay isolated from crypto rows).
             seq: list[tuple[float, float, float, float]] = []
-            try:
-                from ..microstructure import get_book_buffer
+            if as_of is None:
+                # in-process ring has no replay history → table-only when as_of is set
+                try:
+                    from ..microstructure import get_book_buffer
 
-                snaps = get_book_buffer().recent(s, window_secs=window)
-                seq = [
-                    (snap.bids[0].price, snap.bids[0].size, snap.asks[0].price, snap.asks[0].size)
-                    for snap in snaps
-                    if snap.bids and snap.asks
-                ]
-            except Exception:
-                seq = []
-            if seq:
-                return _compute_ofi_micro(seq)
-            # ring empty in this process → durable table fallback (top-of-book)
+                    snaps = get_book_buffer().recent(s, window_secs=window)
+                    seq = [
+                        (snap.bids[0].price, snap.bids[0].size, snap.asks[0].price, snap.asks[0].size)
+                        for snap in snaps
+                        if snap.bids and snap.asks
+                    ]
+                except Exception:
+                    seq = []
+                if seq:
+                    return _compute_ofi_micro(seq)
+            # ring empty in this process (or replaying) → durable table fallback (top-of-book)
             if db is None:
                 return None, None
             from sqlalchemy import text as _sql
 
-            rows = db.execute(
-                _sql(
+            if as_of is None:
+                _q = (
                     "SELECT bid_levels, ask_levels FROM fast_orderbook "
                     "WHERE ticker = :s AND snapshot_at > "
                     "(now() at time zone 'utc') - make_interval(secs => :w) "
                     "ORDER BY snapshot_at ASC"
-                ),
-                {"s": s, "w": window},
-            ).fetchall()
+                )
+                _p = {"s": s, "w": window}
+            else:
+                _q = (
+                    "SELECT bid_levels, ask_levels FROM fast_orderbook "
+                    "WHERE ticker = :s AND snapshot_at > :as_of - make_interval(secs => :w) "
+                    "AND snapshot_at <= :as_of ORDER BY snapshot_at ASC"
+                )
+                _p = {"s": s, "w": window, "as_of": as_of}
+            rows = db.execute(_sql(_q), _p).fetchall()
             for r in rows:
                 bl, al = r[0], r[1]
                 try:
@@ -230,16 +249,24 @@ def _live_ofi_microprice(symbol: str, db: Any = None) -> tuple[float | None, flo
         if db is not None:
             from sqlalchemy import text as _sql
 
-            rows = db.execute(
-                _sql(
+            if as_of is None:
+                _q = (
                     "SELECT bid_top, bid_top_size, ask_top, ask_top_size "
                     "FROM iqfeed_depth_snapshots "
                     "WHERE symbol = :s AND observed_at > "
                     "(now() at time zone 'utc') - make_interval(secs => :w) "
                     "ORDER BY observed_at ASC"
-                ),
-                {"s": s, "w": window},
-            ).fetchall()
+                )
+                _p = {"s": s, "w": window}
+            else:
+                _q = (
+                    "SELECT bid_top, bid_top_size, ask_top, ask_top_size "
+                    "FROM iqfeed_depth_snapshots "
+                    "WHERE symbol = :s AND observed_at > :as_of - make_interval(secs => :w) "
+                    "AND observed_at <= :as_of ORDER BY observed_at ASC"
+                )
+                _p = {"s": s, "w": window, "as_of": as_of}
+            rows = db.execute(_sql(_q), _p).fetchall()
             seq = [
                 (float(r[0]), float(r[1]), float(r[2]), float(r[3]))
                 for r in rows
@@ -280,41 +307,60 @@ def _depth_imbal5(bl: Any, al: Any) -> float | None:
     return (b - a) / (b + a) if (b + a) > 0 else None
 
 
-def read_ladder_distribution(symbol: str, db: Any = None, *, k: int = 6) -> LadderRead:
+def read_ladder_distribution(
+    symbol: str, db: Any = None, *, k: int = 6, as_of: "datetime | None" = None
+) -> LadderRead:
     """Multi-level L2 distribution read for the proactive sell-into-strength exit.
     CLASS-AWARE: crypto (``-USD``) reads the per-level ``fast_orderbook`` table; equities
     read the aggregate 5-level ``iqfeed_depth_snapshots`` (bid5_size/ask5_size/imbalance5
     — no per-level arrays, but the aggregate is enough for the distribution read). Both
     pair with the OFI/micro read. K newest snapshots in a 30s window, newest-first.
-    Fail-open: any miss → ``None`` fields → the caller HOLDs (never sells on bad data)."""
+    Fail-open: any miss → ``None`` fields → the caller HOLDs (never sells on bad data).
+
+    ``as_of`` (UTC-naive) reads AS-OF a historical instant for the replay instrument
+    (window ``(as_of - 30s, as_of]``, age relative to ``as_of``); ``as_of=None`` is the
+    LIVE default and emits the EXACT original SQL → byte-identical."""
     _NULL = LadderRead(None, None, None, None, None, None, None, None, 0)
     s = (symbol or "").strip().upper()
     if not s or db is None:
         return _NULL
+    if as_of is not None and getattr(as_of, "tzinfo", None) is not None:
+        as_of = as_of.replace(tzinfo=None)
     ofi, micro = None, None
     try:
-        ofi, micro = _live_ofi_microprice(s, db=db)
+        ofi, micro = _live_ofi_microprice(s, db=db, as_of=as_of)
     except Exception:
         pass
     if s.endswith("-USD"):
-        return _ladder_crypto(s, db, int(k), ofi, micro)
-    return _ladder_equity(s, db, int(k), ofi, micro)
+        return _ladder_crypto(s, db, int(k), ofi, micro, as_of=as_of)
+    return _ladder_equity(s, db, int(k), ofi, micro, as_of=as_of)
 
 
-def _ladder_crypto(s: str, db: Any, k: int, ofi: float | None, micro: float | None) -> LadderRead:
+def _ladder_crypto(
+    s: str, db: Any, k: int, ofi: float | None, micro: float | None,
+    as_of: "datetime | None" = None,
+) -> LadderRead:
     """Crypto ladder from ``fast_orderbook`` — per-level JSONB ``[[price,size],…]``."""
     try:
         from sqlalchemy import text as _sql
 
-        rows = db.execute(
-            _sql(
+        if as_of is None:
+            _q = (
                 "SELECT snapshot_at, bid_levels, ask_levels, spread_bps "
                 "FROM fast_orderbook WHERE ticker = :s AND snapshot_at > "
                 "(now() at time zone 'utc') - make_interval(secs => :w) "
                 "ORDER BY snapshot_at DESC LIMIT :k"
-            ),
-            {"s": s, "w": 30.0, "k": int(k)},
-        ).fetchall()
+            )
+            _p = {"s": s, "w": 30.0, "k": int(k)}
+        else:
+            _q = (
+                "SELECT snapshot_at, bid_levels, ask_levels, spread_bps "
+                "FROM fast_orderbook WHERE ticker = :s "
+                "AND snapshot_at > :as_of - make_interval(secs => :w) "
+                "AND snapshot_at <= :as_of ORDER BY snapshot_at DESC LIMIT :k"
+            )
+            _p = {"s": s, "w": 30.0, "k": int(k), "as_of": as_of}
+        rows = db.execute(_sql(_q), _p).fetchall()
     except Exception:
         rows = []
     if not rows:
@@ -358,7 +404,7 @@ def _ladder_crypto(s: str, db: Any, k: int, ofi: float | None, micro: float | No
     a_old = _sa5(oldest[2])
     ask_build = (_sa5(newest[2]) - a_old) / a_old if a_old > 0 else None
     try:
-        age = max(0.0, (datetime.utcnow() - newest[0]).total_seconds())
+        age = max(0.0, ((as_of or datetime.utcnow()) - newest[0]).total_seconds())
     except Exception:
         age = None
     try:
@@ -384,7 +430,10 @@ def _eq_imbalance5(row: Any) -> float | None:
     return (b - a) / (b + a) if (b + a) > 0 else None
 
 
-def _ladder_equity(s: str, db: Any, k: int, ofi: float | None, micro: float | None) -> LadderRead:
+def _ladder_equity(
+    s: str, db: Any, k: int, ofi: float | None, micro: float | None,
+    as_of: "datetime | None" = None,
+) -> LadderRead:
     """Equity ladder from ``iqfeed_depth_snapshots`` — aggregate 5-level (bid5_size,
     ask5_size, imbalance5) + top-of-book (bid_top/ask_top + sizes). No per-level arrays,
     but the aggregate carries the distribution signal. Populated market-hours by the
@@ -392,16 +441,24 @@ def _ladder_equity(s: str, db: Any, k: int, ofi: float | None, micro: float | No
     try:
         from sqlalchemy import text as _sql
 
-        rows = db.execute(
-            _sql(
+        if as_of is None:
+            _q = (
                 "SELECT observed_at, bid_top, ask_top, bid_top_size, ask_top_size, "
                 "bid5_size, ask5_size, imbalance5 FROM iqfeed_depth_snapshots "
                 "WHERE symbol = :s AND observed_at > "
                 "(now() at time zone 'utc') - make_interval(secs => :w) "
                 "ORDER BY observed_at DESC LIMIT :k"
-            ),
-            {"s": s, "w": 30.0, "k": int(k)},
-        ).fetchall()
+            )
+            _p = {"s": s, "w": 30.0, "k": int(k)}
+        else:
+            _q = (
+                "SELECT observed_at, bid_top, ask_top, bid_top_size, ask_top_size, "
+                "bid5_size, ask5_size, imbalance5 FROM iqfeed_depth_snapshots "
+                "WHERE symbol = :s AND observed_at > :as_of - make_interval(secs => :w) "
+                "AND observed_at <= :as_of ORDER BY observed_at DESC LIMIT :k"
+            )
+            _p = {"s": s, "w": 30.0, "k": int(k), "as_of": as_of}
+        rows = db.execute(_sql(_q), _p).fetchall()
     except Exception:
         rows = []
     if not rows:
@@ -429,7 +486,7 @@ def _ladder_equity(s: str, db: Any, k: int, ofi: float | None, micro: float | No
     bt, at = _f(newest[1]), _f(newest[2])  # top-of-book spread (no spread col in iqfeed)
     spread = (at - bt) / ((at + bt) / 2.0) * 10_000.0 if (bt and at and (bt + at) > 0) else None
     try:
-        age = max(0.0, (datetime.utcnow() - newest[0]).total_seconds())
+        age = max(0.0, ((as_of or datetime.utcnow()) - newest[0]).total_seconds())
     except Exception:
         age = None
     return LadderRead(imb_now, pctile, ofi, micro, bid_refill, ask_build, spread, age, len(series))

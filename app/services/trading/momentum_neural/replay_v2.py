@@ -47,12 +47,16 @@ from .entry_gates import (
 )
 from .paper_execution import (
     class_aware_reward_risk,
+    classify_stop_breach,
     cushion_adaptive_trail_stop,
     effective_stop_atr_pct,
+    ofi_exhaustion_lock,
     scale_out_fraction,
+    sell_into_strength_ladder,
     stop_target_prices,
     structural_or_vol_floored_atr_pct,
 )
+from .pipeline import _live_ofi_microprice, read_ladder_distribution
 from .risk_policy import adaptive_max_spread_bps
 from .ross_momentum import ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED, score_universe
 from .strategy_params import family_default_params
@@ -421,10 +425,15 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
         elif state["halted"] is None and state["peak"] >= DAILY_LOSS_CAP_USD and state["cum"] <= state["peak"] * (1 - GIVEBACK_FRAC):
             state["halted"] = "giveback"
 
-    def manage_open(now) -> None:
+    def manage_open(now, _l2db=None) -> None:
         # Live manages positions every ~30s tick on NBBO bid (live_runner.py:2550+,
         # 2837-2924); the tape's 1-min cadence is the replay analog. All live exits
         # are MARKET sells realized near the bid — exits here price AT the tape bid.
+        # ORDER CONTRACT (mirrors live STATE_LIVE_TRAILING): hwm → partial/arm →
+        # cushion trail → v1 ofi_exhaustion_lock → v2 sell_into_strength_ladder
+        # (gain-side, ratchet-only) → LOSS-SIDE BREACH **LAST**, tested against the
+        # freshly-ratcheted stop, with the L2 anti-shake-out hold. Do NOT move the
+        # breach above the trail block — a winner would close against a stale stop.
         for s in list(open_pos):
             p = open_pos[s]
             if tape.in_halt(s, now):
@@ -434,10 +443,7 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                 continue
             bid = q[0]
             p["hwm"] = max(p["hwm"], bid)
-            if bid <= p["stop"]:
-                why = "trail_stop" if (p["scaled"] or p["trail_armed"]) and p["stop"] > p["stop0"] else "stop"
-                close_trade(s, p, bid, why, when=now)
-                continue
+            _as_of = _aware(now).replace(tzinfo=None)  # UTC-naive instant for the as-of L2 reads
             # partial at the first target — live fires at bid >= target*0.995 and
             # sells scale_out_fraction of the ORIGINAL qty (live_runner.py:2916-2964)
             if not p["scaled"] and bid >= p["target"] * TARGET_FIRE_FRAC:
@@ -483,9 +489,83 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                     breakeven_floor=p["entry"] if p["scaled"] else p["stop0"],
                     current_stop=p["stop"], side_long=True,
                     ema_5m=_e5)
+                # v1 ofi_exhaustion_lock — flow-confirmed gain-side tighten (live_runner
+                # 3842-3922). Reads L2 AS-OF the sim minute; INVARIANT A: ratchet-only.
+                if (s.endswith("-USD") or bool(getattr(settings, "chili_momentum_exit_adaptive_equity_enabled", True))) \
+                        and bool(getattr(settings, "chili_momentum_exit_ofi_lock_enabled", True)):
+                    try:
+                        _ofi_x, _mpe_x = _live_ofi_microprice(s, db=_l2db, as_of=_as_of)
+                        _band_bps = ((p["hwm"] - p["stop"]) / p["hwm"] * 10_000.0) if p["hwm"] > 0 else 0.0
+                        _lock = ofi_exhaustion_lock(
+                            high_water_mark=p["hwm"], entry_price=p["entry"], bid=bid,
+                            atr_pct=p["atrp"], stop_atr_mult=STOP_ATR_MULT,
+                            ofi=_ofi_x, micro_edge=_mpe_x, hidden_seller=None,
+                            reward_risk=class_aware_reward_risk(s),
+                            current_stop=p["stop"],
+                            breakeven_floor=(p["entry"] if p["scaled"] else p["stop0"]),
+                            current_band_bps=_band_bps, side_long=True)
+                        _ls = _lock.get("new_stop_floor")
+                        if _lock.get("fired") and _ls is not None and _ls > p["stop"]:
+                            p["stop"] = _ls  # INVARIANT A: ratchet-only
+                    except Exception:
+                        pass
+                # v2 sell_into_strength_ladder — distribution-aware ratchet (live_runner
+                # 3932-4045). Action A (stop ratchet) only; the size-MOVING resting limit
+                # is gated live by exit_ladder_live (default False), so the replay
+                # faithfully omits it (no adapter to rest a limit against).
+                if (s.endswith("-USD") or bool(getattr(settings, "chili_momentum_exit_adaptive_equity_enabled", True))) \
+                        and bool(getattr(settings, "chili_momentum_exit_ladder_enabled", True)):
+                    try:
+                        _ladder = read_ladder_distribution(s, db=_l2db, as_of=_as_of)
+                        _sis = sell_into_strength_ladder(
+                            high_water_mark=p["hwm"], entry_price=p["entry"], bid=bid,
+                            atr_pct=p["atrp"], stop_atr_mult=STOP_ATR_MULT,
+                            reward_risk=class_aware_reward_risk(s),
+                            current_stop=p["stop"],
+                            breakeven_floor=(p["entry"] if p["scaled"] else p["stop0"]),
+                            remaining_qty=p["qty"], ladder=_ladder,
+                            prior_partial_taken=bool(p["scaled"]),
+                            cooldown_active=False, side_long=True)
+                        _ss = _sis.get("new_stop_floor")
+                        if _sis.get("fired") and _ss is not None and _ss > p["stop"]:
+                            p["stop"] = _ss  # INVARIANT A: ratchet-only
+                    except Exception:
+                        pass
+            # LOSS-SIDE BREACH **LAST** — vs the freshly-ratcheted stop (mirrors live
+            # order). L2 anti-shake-out: a CHOP-classified breach rides one bounded beat
+            # (the OPG-USD shake-out); a BREAKDOWN / stale-or-missing L2 sells now. The
+            # hold NEVER touches the stop (INVARIANT A intact); it only delays the sell.
+            if bid <= p["stop"]:
+                _do_hold = False
+                if bool(getattr(settings, "chili_momentum_stop_l2_confirm_enabled", False)):
+                    try:
+                        _thr = float(getattr(settings, "chili_momentum_ofi_threshold", 0.25) or 0.25)
+                        _mage = float(getattr(settings, "chili_momentum_stop_l2_confirm_max_age_s", 2.5) or 2.5)
+                        _msnap = int(getattr(settings, "chili_momentum_stop_l2_confirm_min_snaps", 3) or 3)
+                        _mtick = int(getattr(settings, "chili_momentum_stop_l2_confirm_max_ticks", 2) or 2)
+                        _bl = read_ladder_distribution(s, db=_l2db, as_of=_as_of)
+                        _bc = classify_stop_breach(ladder=_bl, ofi_threshold=_thr,
+                                                   max_age_s=_mage, min_snaps=_msnap)
+                        _holds = int(p.get("stop_breach_chop_holds") or 0)
+                        if _bc.get("cls") == "CHOP" and _holds < _mtick:
+                            p["stop_breach_chop_holds"] = _holds + 1
+                            _do_hold = True
+                    except Exception:
+                        _do_hold = False  # any L2 miss => sell (protective)
+                if _do_hold:
+                    continue  # ride one bounded beat
+                p.pop("stop_breach_chop_holds", None)
+                why = "trail_stop" if (p["scaled"] or p["trail_armed"]) and p["stop"] > p["stop0"] else "stop"
+                close_trade(s, p, bid, why, when=now)
+                continue
+            # flicker recovery: bid back above stop clears the hold counter (live 4047-4054)
+            if p.get("stop_breach_chop_holds"):
+                p.pop("stop_breach_chop_holds", None)
 
-    for now in day_grid:
-        manage_open(now)
+    _l2db = SessionLocal()  # read-only L2 session spanning the day-grid (SELECT-only)
+    try:
+      for now in day_grid:
+        manage_open(now, _l2db)
         if state["halted"]:
             continue
         if live_spans is not None:
@@ -679,6 +759,9 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                          "partial": round(qty / want_qty if want_qty > 0 else 1.0, 2),
                          "fidelity": "tape"},
             }
+    finally:
+        _l2db.rollback()
+        _l2db.close()
 
     for s in list(open_pos):
         p = open_pos[s]
