@@ -235,6 +235,26 @@ def adaptive_max_concurrent_live_sessions() -> int:
     return max(base, min(15, int(round(eq * frac / risk))))
 
 
+def effective_position_cap(*, crypto: bool = False) -> int:
+    """OPEN-POSITION cap for decouple_watching. The adaptive risk-budget N binds
+    first (≤15); the fixed ``chili_momentum_risk_max_concurrent_positions`` (5) is
+    the fallback floor; the operator's ``chili_momentum_max_open_positions_ceiling``
+    (20) is a hard backstop that only catches a misconfigured fraction (reference
+    numbers are ceilings, not the active value — [[feedback_adaptive_no_magic]]).
+    The crypto-specific bound is the super-bucket sub-cap enforced atomically at
+    the fill boundary, so ``crypto`` does not change the gross cap here."""
+    adaptive_n = adaptive_max_concurrent_live_sessions()
+    try:
+        pos_floor = int(getattr(settings, "chili_momentum_risk_max_concurrent_positions", 5) or 5)
+    except (TypeError, ValueError):
+        pos_floor = 5
+    try:
+        ceiling = int(getattr(settings, "chili_momentum_max_open_positions_ceiling", 20) or 20)
+    except (TypeError, ValueError):
+        ceiling = 20
+    return max(1, min(max(adaptive_n, pos_floor), ceiling))
+
+
 def streak_risk_multiplier(db, *, execution_family: str | None = None) -> tuple[float, dict]:
     """Streak-adaptive risk dial (Ross: 'coming out of the gates swinging' on a
     hot streak; 'size down' when cold). A multiplier on the per-trade max loss

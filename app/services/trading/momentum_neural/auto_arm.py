@@ -27,6 +27,7 @@ from ....models.trading import MomentumSymbolViability, TradingAutomationSession
 from .crypto_liquidity import crypto_liquidity_ok
 from .live_fsm import (
     LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY,
+    LIVE_WATCHING_PREFILL_STATES,
     STATE_ARMED_PENDING_RUNNER,
     STATE_QUEUED_LIVE,
     STATE_WATCHING_LIVE,
@@ -312,10 +313,28 @@ def _finalize_stale_exited_sessions(db: Session, *, user_id: int | None, now: da
 
 
 def _active_live_session_count(db: Session, *, user_id: int | None) -> int:
-    """Live sessions occupying a concurrency slot (any symbol) for the user."""
+    """Live sessions occupying a concurrency slot (any symbol) for the user.
+
+    LEGACY single-cap path (decouple_watching OFF). Unchanged — counts every
+    pre-fill-or-held state against one cap, which is exactly why the lane never
+    fanned past ~5-15 watchers (a $0-risk watcher consumed a real slot)."""
     q = db.query(TradingAutomationSession).filter(
         TradingAutomationSession.mode == "live",
         TradingAutomationSession.state.in_(LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY),
+    )
+    if user_id is not None:
+        q = q.filter(TradingAutomationSession.user_id == int(user_id))
+    return int(q.count())
+
+
+def _count_watching_prefill(db: Session, *, user_id: int | None) -> int:
+    """Decouple_watching: $0-risk pre-fill watchers (armed/queued/watching/candidate/
+    pending_entry), twin-excluded. Governed by the watch-FANOUT cap, not the risk
+    cap. Twins (alpaca paper-soak) never consume a real slot."""
+    q = db.query(TradingAutomationSession).filter(
+        TradingAutomationSession.mode == "live",
+        TradingAutomationSession.state.in_(LIVE_WATCHING_PREFILL_STATES),
+        TradingAutomationSession.execution_family != "alpaca_spot",
     )
     if user_id is not None:
         q = q.filter(TradingAutomationSession.user_id == int(user_id))
@@ -937,12 +956,37 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         out["reaped"] = reaped
         db.commit()
 
-    # Guard 2: global concurrency (one live position at a time by default).
-    active = _active_live_session_count(db, user_id=uid)
-    if active >= _max_live_sessions():
-        out["skipped"] = "live_session_active"
-        out["active"] = active
-        return out
+    # Guard 2: concurrency. Two regimes, selected by the master flag.
+    if getattr(settings, "chili_momentum_decouple_watching_enabled", False):
+        # DECOUPLED: watchers fan out to the top-N funnel cap (a $0-risk watcher no
+        # longer eats a real slot); only HELD positions charge the risk-budget cap.
+        # Both checks here are SOFT pre-checks (don't bother arming an 11th watcher
+        # into a full book) — the AUTHORITATIVE position cap is the advisory-locked
+        # fill boundary in live_runner (a soft re-count cannot be atomic at arm time).
+        from .risk_evaluator import count_open_positions as _count_open_positions
+        from .risk_policy import effective_position_cap as _effective_position_cap
+
+        _fanout = int(getattr(settings, "chili_momentum_watch_fanout_max", 15) or 15)
+        _watch_ct = _count_watching_prefill(db, user_id=uid)
+        if _watch_ct >= _fanout:
+            out["skipped"] = "watch_fanout_full"
+            out["watching"] = _watch_ct
+            return out
+        try:
+            _pos_ct = _count_open_positions(db, user_id=int(uid), mode="live")
+            if _pos_ct >= _effective_position_cap(crypto=False):
+                out["skipped"] = "position_cap"
+                out["open_positions"] = _pos_ct
+                return out
+        except Exception:
+            logger.debug("[auto_arm] decoupled position pre-check failed", exc_info=True)
+    else:
+        # LEGACY single-cap path — byte-identical to pre-decouple behaviour.
+        active = _active_live_session_count(db, user_id=uid)
+        if active >= _max_live_sessions():
+            out["skipped"] = "live_session_active"
+            out["active"] = active
+            return out
 
     # Guard 3: portfolio drawdown breaker (Hard Rule 2 — not enforced in the
     # arm path; shadow mode returns not-tripped).

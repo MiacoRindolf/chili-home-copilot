@@ -150,3 +150,71 @@ So we PROVE capture before trusting it:
 - Evidence base is thin (n=6 live + 1 replay) — thresholds are priors to refit
   from CHILI's stored snapshots + backfilled forward returns. That is exactly why
   Action B and the hidden-seller override ship log-would-fire-first.
+
+---
+
+# v2 — Proactive sell-into-strength ladder
+
+v1 only DEFENDS (it tightens the stop on exhaustion, then waits for that stop to be
+HIT). That is structurally two steps behind Ross: by the time exhaustion confirms AND
+the tightened stop is hit, the peak has already bled back (the MEGA/JASMY give-back).
+v2 adds the missing half: HARVEST the top by selling a small increment INTO genuine
+strength, the way Ross reads the ladder.
+
+## The safety IS the mechanism (not a forecast)
+
+A red-team of three independent designs rated every *prediction*-based proactive sell
+**catastrophic**: no L2 signal reliably distinguishes "topping/distribution" from "a
+dip inside a continuing move", so any signal-triggered sell will sometimes dump a
+winner early. The resolution is to make the worst case *recoverable by construction*:
+
+- **The proactive sell is a RESTING LIMIT at/ABOVE the bid** (`limit_px =
+  max(bid, hwm·(1 − rung_bps/1e4))`), never a market dump. If the move actually
+  continues, the limit is simply not hit as price runs up, auto-cancels (short TIF),
+  and the runner is intact. **An unfilled sell-into-strength limit is a free option.**
+  It only fills when the market genuinely trades up into the offer = selling into
+  strength.
+
+## Sell-early firewall (in `sell_into_strength_ladder`, `paper_execution.py`)
+
+Gates (any fail ⇒ HOLD): profit-arm `peak_r ≥ arm_r`; **deep-run** `peak_r ≥
+arm_r + ½(rr−arm_r)` (only harvest a genuine runner); freshness (`snapshot_age_s ≤
+2×drain`, `n_snaps ≥ 3`); liquidity (`spread ≤ 3×risk_dist_bps`); cooldown.
+
+Then **DISTRIBUTION confluence-AND** — `depth_imbal_pctile ≤ 0.25` (NEWEST book ask-
+heavy vs its OWN recent window — a *trend*, not an absolute a single spoof can trip),
+`ofi < −2T` (exit conviction = 2× entry), `micro < −0.10·risk_dist_bps` — gated by a
+**CONTINUATION VETO** (any ⇒ HOLD): `bid_refill > 0` (buyers still stacking), `ofi >
+−T/2` (flow not decisive), or `micro ≥ 0` (price still bid-favored). A healthy pullback
+fails a veto and HOLDs. The merge gate is `test_sell_early_guard_*` in
+`tests/test_sell_into_strength_ladder.py`.
+
+## Reader + INVARIANT A + A/B
+
+`read_ladder_distribution` (`pipeline.py`) reads multi-level depth from the durable
+`fast_orderbook` table (`bid_levels`/`ask_levels` are `[price,size]` 2-tuples), pairing
+it with the same OFI/micro read v1 uses. INVARIANT A is untouched: `new_stop_floor =
+max(current_stop, breakeven, …)` — the layer can only realize profit earlier and RAISE
+the stop, never loosen/null it. On fill the remainder ratchets to the fill floor. Every
+armed tick emits `live_sell_into_strength` with `counterfactual_hold_stop` so realized
+PnL is measured against pure-hold LIVE.
+
+## The crypto L2-feed fix (prerequisite — revives v1 too)
+
+v1 silently never fired live because the crypto OFI/micro read an empty in-process book
+ring in the scheduler process (`ofi=None` ⇒ confluence impossible). JASMY-USD logged 89
+armed ticks as a real +2.3R winner with `ofi=None`. Fix: `_live_ofi_microprice`
+(crypto) now reads the durable `fast_orderbook` table (mirrors equity's
+`iqfeed_depth_snapshots`), and `eligible_crypto_symbols` unions in ACTIVE live crypto
+session symbols so a name we actually hold keeps its L2 captured even after it drops out
+of the fresh-eligible candidate universe.
+
+## Staged rollout (2-step, NOT a dark flag)
+
+`CHILI_MOMENTUM_EXIT_LADDER_ENABLED=true` (default): the read + decision run, emit the
+counterfactual, AND the INVARIANT-A stop-ratchet applies (live, can only help).
+`CHILI_MOMENTUM_EXIT_LADDER_LIVE=false` (default): the size-moving resting limit waits
+for the first armed-tick counterfactuals to land, then flips ON within the same session
+(low-regret — resting-limit + veto + INVARIANT A bound the worst case). The ONE base
+knob is `CHILI_MOMENTUM_EXIT_LADDER_RUNG_BPS=60`; everything else derives from the
+plan's `rr`, the position's ATR risk unit, or window percentiles.

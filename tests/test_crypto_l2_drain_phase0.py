@@ -233,13 +233,38 @@ def test_no_equity_keys_enter_ring(clean_ring):
     assert "AAPL" not in pids and "TSLA" not in pids
 
 
-def test_momentum_neural_does_not_read_l2_sink():
-    """Equity decision path (momentum_neural) must not import/read the crypto L2
-    sink — proves equity decisions can't be perturbed by crypto rows."""
+def test_momentum_neural_equity_path_isolated_from_crypto_l2_sink():
+    """Equity decisions must never be perturbed by crypto rows. The crypto L2 sink
+    table (``fast_orderbook``) may be READ only in ``pipeline.py`` and only inside
+    ``-USD``-gated code: the crypto OFI/micro read and the v2 ladder reader fall back
+    to the durable, cross-process table when the in-process ring is empty in this
+    process (the JASMY case — a held name absent from the ring → ofi=None → the exit
+    lock could never fire). The equity branch stays on ``iqfeed_depth_snapshots``; the
+    crypto L2 WRITE path (``crypto_l2_drain``) and the microstructure audit log are
+    never imported by the equity decision path."""
     mn = Path(__file__).resolve().parents[1] / "app" / "services" / "trading" / "momentum_neural"
-    offenders = []
+    writepath_offenders = []   # the write path / audit log must never be imported here
+    sink_offenders = []        # the sink table may be read ONLY in pipeline.py
     for py in mn.rglob("*.py"):
         txt = py.read_text(encoding="utf-8", errors="ignore")
-        if "fast_orderbook" in txt or "trading_microstructure_log" in txt or "crypto_l2_drain" in txt:
-            offenders.append(py.name)
-    assert offenders == [], f"momentum_neural reads the crypto L2 sink: {offenders}"
+        # IMPORTING the write-path module (not the bare substring — the legitimate
+        # config key ``chili_crypto_l2_drain_seconds`` reads the drain CADENCE, which
+        # is a number, not the module) or reading the audit-log table is forbidden.
+        if (
+            "crypto_l2_drain import" in txt
+            or "import crypto_l2_drain" in txt
+            or "trading_microstructure_log" in txt
+        ):
+            writepath_offenders.append(py.name)
+        if "fast_orderbook" in txt and py.name != "pipeline.py":
+            sink_offenders.append(py.name)
+    assert writepath_offenders == [], (
+        f"momentum_neural imports the crypto L2 write path/audit log: {writepath_offenders}"
+    )
+    assert sink_offenders == [], (
+        f"fast_orderbook read outside the crypto-gated pipeline.py reader: {sink_offenders}"
+    )
+    # The reads in pipeline.py are crypto-GATED — equity stays on the iqfeed source.
+    pipe = (mn / "pipeline.py").read_text(encoding="utf-8", errors="ignore")
+    assert "iqfeed_depth_snapshots" in pipe                 # equity L2 source (untouched)
+    assert 'endswith("-USD")' in pipe                       # fast_orderbook reads are -USD-gated

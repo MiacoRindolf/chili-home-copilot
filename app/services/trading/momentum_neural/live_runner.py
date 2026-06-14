@@ -1923,6 +1923,70 @@ def list_runnable_live_sessions(db: Session, *, limit: int = 25) -> list[Trading
     return [row for row in rows if not is_operator_paused(row.risk_snapshot_json)]
 
 
+# Momentum-lane advisory-lock namespace ("ML"), distinct from auto_trader's 0x4154
+# ("AT"). The decouple_watching fill-boundary lock key is (this << 32) | user_id, so
+# in pg_locks the namespace lands in ``classid`` and the user in ``objid``.
+_MOMENTUM_LANE_LOCK_NS = 0x4D4C
+
+
+def cleanup_leaked_lane_locks(db: Session) -> int:
+    """Terminate orphan sessions holding a momentum-lane advisory lock (decouple B1).
+
+    ``pg_advisory_xact_lock`` self-releases on commit/rollback, which covers every
+    NORMAL path of both dispatchers. The gap it does NOT cover: a worker force-killed
+    (deploy signal / supervisor) mid-submit, before its txn boundary — that leaves the
+    lane lock held by an idle-in-transaction backend, wedging EVERY subsequent entry
+    for that user until the backend times out. A wedged lane is the safe-failure
+    direction (blocks entries, never over-leverages), but should still be cleaned.
+
+    Mirrors ``auto_trader._cleanup_leaked_advisory_locks``: run once per batch (NOT
+    per session-tick — it commits). Cheap, idempotent, best-effort; never raises."""
+    from sqlalchemy import text as _sql_text
+
+    try:
+        dialect = db.bind.dialect.name if db.bind else ""
+    except Exception:
+        dialect = ""
+    if dialect != "postgresql":
+        return 0
+    try:
+        threshold_s = max(60, int(getattr(settings, "chili_momentum_lane_leak_cleanup_threshold_s", 120) or 120))
+    except Exception:
+        threshold_s = 120
+    try:
+        rows = db.execute(
+            _sql_text(
+                "SELECT pa.pid, EXTRACT(EPOCH FROM (NOW() - pa.state_change))::int AS age_s, pa.state "
+                "FROM pg_stat_activity pa "
+                "JOIN pg_locks l ON l.pid = pa.pid "
+                "WHERE l.locktype = 'advisory' "
+                "  AND l.classid::int = :ns "
+                "  AND pa.state IN ('idle in transaction', 'idle in transaction (aborted)') "
+                "  AND EXTRACT(EPOCH FROM (NOW() - pa.state_change)) > :thr"
+            ),
+            {"ns": _MOMENTUM_LANE_LOCK_NS, "thr": threshold_s},
+        ).fetchall()
+        killed = 0
+        for r in rows or []:
+            pid, age_s, state = int(r[0]), int(r[1] or 0), r[2]
+            try:
+                db.execute(_sql_text("SELECT pg_terminate_backend(:p)"), {"p": pid})
+                killed += 1
+                _log.warning(
+                    "[live_runner] lane-lock janitor: terminated leaked session pid=%s "
+                    "state=%s age=%ss (orphan lock from an abandoned tick)",
+                    pid, state, age_s,
+                )
+            except Exception as e:
+                _log.debug("[live_runner] lane-lock janitor terminate pid=%s failed: %s", pid, e)
+        if killed:
+            db.commit()
+        return killed
+    except Exception as e:
+        _log.debug("[live_runner] lane-lock janitor pass failed: %s", e)
+        return 0
+
+
 def run_live_runner_batch(
     db: Session,
     *,
@@ -3291,6 +3355,114 @@ def tick_live_session(
         # NOT accept the kwarg, so equity is called exactly as before (no regress).
         if _maker_entry:
             _entry_kwargs["post_only"] = True
+        # ── ATOMIC POSITION CAP (decouple_watching: B1 + B2 + B3) ────────────────
+        # Positions are born at FILL (live_pending_entry → live_entered), seconds
+        # after this submit. tick_live_session row-locks only its OWN row (:2001),
+        # so two watchers tick in parallel and each read the same held count → both
+        # submit → cap breached. Fix: an xact-scoped advisory lock keyed on
+        # (user, lane) serializes the count-and-submit across worker connections
+        # (batch pool + WS event loop both land here), so each submitter SEES the
+        # prior one's committed in-flight order. The count therefore charges held
+        # positions PLUS in-flight-submitted entries (born-but-not-yet-held) — only
+        # that pair makes the cap exact under a burst (held-only would let every
+        # serialized submitter read N-1). The lock auto-releases at the per-tick
+        # db.commit() (event loop :247 / batch :891), so a hung worker cannot wedge
+        # the lane (the auto_trader.py:1963 orphan-lock lesson). Flag OFF ⇒ this
+        # entire block is a no-op — legacy single-cap path, parity-tested.
+        if getattr(settings, "chili_momentum_decouple_watching_enabled", False):
+            from sqlalchemy import text as _sql_text
+
+            from .risk_evaluator import (
+                aggregate_open_crypto_risk_usd,
+                count_inflight_entry_orders,
+                count_open_positions,
+            )
+            from .risk_policy import (
+                _account_equity_usd,
+                effective_position_cap,
+                equity_relative_loss_cap,
+            )
+
+            _is_crypto = str(sess.symbol or "").upper().endswith("-USD")
+            # "ML" (momentum lane) namespace in the high word — distinct from
+            # auto_trader's 0x4154 "AT"; lane_key stays well under 2**63.
+            _lane_key = (_MOMENTUM_LANE_LOCK_NS << 32) | (int(sess.user_id) & 0xFFFFFFFF)
+            db.execute(_sql_text("SELECT pg_advisory_xact_lock(:k)"), {"k": _lane_key})
+
+            _cap = effective_position_cap(crypto=_is_crypto)
+            _pos_ct = count_open_positions(db, user_id=sess.user_id, mode="live") + (
+                count_inflight_entry_orders(db, user_id=sess.user_id, exclude_session_id=sess.id)
+            )
+            if _pos_ct >= _cap:
+                _emit(db, sess, "live_entry_blocked_position_cap", {"pos_ct": _pos_ct, "cap": _cap})
+                _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                db.flush()
+                return {
+                    "ok": True, "session_id": sess.id, "state": sess.state,
+                    "skipped": "position_cap_at_fill", "pos_ct": _pos_ct, "cap": _cap,
+                }
+            if _is_crypto:
+                _cryp_ct = count_open_positions(
+                    db, user_id=sess.user_id, mode="live", crypto_only=True
+                ) + count_inflight_entry_orders(
+                    db, user_id=sess.user_id, crypto_only=True, exclude_session_id=sess.id
+                )
+                _bucket_cap = int(
+                    getattr(settings, "chili_momentum_max_open_positions_per_correlation_bucket", 4) or 4
+                )
+                if _cryp_ct >= _bucket_cap:
+                    _emit(db, sess, "live_entry_blocked_crypto_bucket_cap",
+                          {"cryp_ct": _cryp_ct, "bucket_cap": _bucket_cap})
+                    _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                    db.flush()
+                    return {
+                        "ok": True, "session_id": sess.id, "state": sess.state,
+                        "skipped": "crypto_bucket_cap", "cryp_ct": _cryp_ct, "bucket_cap": _bucket_cap,
+                    }
+                # B2 crypto dollar backstop. FAIL CLOSED when equity is unknown —
+                # never size a position against an unknown account ([[feedback_adaptive_no_magic]]);
+                # over-leverage is catastrophic, a missed entry during an equity-fetch
+                # outage is not (exits don't pass through here, so open positions stay
+                # managed). Equity is normally available live; this trips only on outage.
+                _eq = _account_equity_usd(ef)
+                if not _eq or float(_eq) <= 0:
+                    _emit(db, sess, "live_entry_blocked_equity_unavailable", {"lane": "crypto"})
+                    _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                    db.flush()
+                    return {
+                        "ok": True, "session_id": sess.id, "state": sess.state,
+                        "skipped": "equity_unavailable",
+                    }
+                _open_cryp_risk, _ = aggregate_open_crypto_risk_usd(db, user_id=sess.user_id)
+                _planned_usd = float(equity_relative_loss_cap(0.0, ef) or 0.0)
+                # In-flight crypto entries (submitted, not yet filled) carry $ at-risk the
+                # held-only aggregate can't see. Charge each a conservative per-trade proxy
+                # (every crypto entry sizes to ~one loss-fraction) so a fill-burst can't
+                # slip dollars past the ceiling — B3 already bounds the COUNT atomically in
+                # the same lock; this bounds the DOLLARS. Over-estimating is the safe side.
+                _inflight_cryp = count_inflight_entry_orders(
+                    db, user_id=sess.user_id, crypto_only=True, exclude_session_id=sess.id
+                )
+                _inflight_cryp_risk = float(_inflight_cryp) * _planned_usd
+                _cap_usd = float(
+                    getattr(settings, "chili_momentum_max_aggregate_crypto_risk_pct_of_equity", 0.07) or 0.07
+                ) * float(_eq)
+                _proj_cryp_usd = _open_cryp_risk + _inflight_cryp_risk + _planned_usd
+                if _cap_usd > 0 and _proj_cryp_usd > _cap_usd:
+                    _emit(db, sess, "live_entry_blocked_crypto_dollar_cap", {
+                        "open_crypto_risk_usd": round(_open_cryp_risk, 2),
+                        "inflight_crypto_risk_usd": round(_inflight_cryp_risk, 2),
+                        "planned_usd": round(_planned_usd, 2),
+                        "projected_usd": round(_proj_cryp_usd, 2),
+                        "cap_usd": round(_cap_usd, 2),
+                    })
+                    _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                    db.flush()
+                    return {
+                        "ok": True, "session_id": sess.id, "state": sess.state,
+                        "skipped": "crypto_dollar_cap",
+                    }
+        # ── end atomic position cap; the lock releases when this tick's txn commits ─
         res = adapter.place_limit_order_gtc(**_entry_kwargs)
         le["entry_submitted"] = True
         le["entry_submit_utc"] = _utcnow().isoformat()
@@ -3739,6 +3911,110 @@ def tick_live_session(
                         if _lock.get("fired") and _lock.get("partial_arm"):
                             le["exhaustion_lock_partial_armed"] = True
                             _commit_le(sess, le)
+                except Exception:
+                    pass
+
+            # v2 PROACTIVE sell-into-strength (Ross ladder read) — sibling to v1, runs
+            # AFTER it so they compose: v1 DEFENDS (tightens the stop on exhaustion),
+            # v2 HARVESTS the top (a small resting limit into genuine strength). The
+            # counterfactual A/B + the INVARIANT-A stop-ratchet are LIVE on every armed
+            # tick; the size-moving resting limit is gated by exit_ladder_live (2-step
+            # ship). Equity untouched (`-USD`-gated). Fail-open: any error => no-op.
+            if sess.symbol.endswith("-USD") and bool(
+                getattr(settings, "chili_momentum_exit_ladder_enabled", True)
+            ):
+                try:
+                    from .paper_execution import sell_into_strength_ladder
+                    from .pipeline import read_ladder_distribution
+
+                    _cooldown = False
+                    try:
+                        _cd_raw = le.get("ladder_cooldown_until_utc")
+                        if _cd_raw:
+                            _cooldown = _utcnow() < datetime.fromisoformat(_cd_raw)
+                    except Exception:
+                        _cooldown = False
+                    _ladder = read_ladder_distribution(sess.symbol, db=db)
+                    _sis = sell_into_strength_ladder(
+                        high_water_mark=_hwm_trail,
+                        entry_price=avg,
+                        bid=bid,
+                        atr_pct=_atr_pct_trail,
+                        stop_atr_mult=_sm,
+                        reward_risk=class_aware_reward_risk(sess.symbol),
+                        current_stop=stop_px,
+                        breakeven_floor=_be_floor,
+                        remaining_qty=_float_or_none(pos.get("quantity")) or 0.0,
+                        ladder=_ladder,
+                        prior_partial_taken=bool(pos.get("partial_taken")),
+                        cooldown_active=_cooldown,
+                        side_long=True,
+                    )
+                    if _sis.get("armed"):
+                        _emit(db, sess, "live_sell_into_strength", {
+                            "state": _sis.get("state"),
+                            "fired": bool(_sis.get("fired")),
+                            "vetoed_by": _sis.get("vetoed_by"),
+                            "reason": _sis.get("reason"),
+                            "peak_r": _sis.get("peak_r"),
+                            "dist_pctile": _sis.get("dist_pctile"),
+                            "rung_bps": _sis.get("rung_bps"),
+                            "first_increment_frac": _sis.get("first_increment_frac"),
+                            "limit_px": _sis.get("limit_px"),
+                            "sell_qty": _sis.get("sell_qty"),
+                            "adaptive_stop": _sis.get("new_stop_floor"),
+                            "counterfactual_hold_stop": _sis.get("counterfactual_hold_stop"),
+                            "ofi": getattr(_ladder, "ofi", None),
+                            "micro_edge": getattr(_ladder, "micro_edge", None),
+                            "bid_refill": getattr(_ladder, "bid_refill", None),
+                            "n_snaps": getattr(_ladder, "n_snaps", 0),
+                            "live": bool(getattr(settings, "chili_momentum_exit_ladder_live", False)),
+                            "bid": bid,
+                            "high_water_mark": _hwm_trail,
+                        })
+                    # Action A: ratchet-only stop (INVARIANT A; live-on, can only help).
+                    _sis_stop = _float_or_none(_sis.get("new_stop_floor"))
+                    if _sis_stop is not None and _sis_stop > stop_px:
+                        pos["stop_price"] = _sis_stop
+                        stop_px = _sis_stop
+                        le["position"] = pos
+                        _commit_le(sess, le)
+                    # Size-moving resting limit — GATED. Reuse the scale-out limit
+                    # adoption machinery; one scale limit at a time (don't collide with
+                    # v1's partial). On fill, the runner remainder ratchets to the fill.
+                    if (
+                        bool(getattr(settings, "chili_momentum_exit_ladder_live", False))
+                        and _sis.get("fired")
+                        and _sis.get("action") == "sell_limit"
+                        and not le.get("scale_limit_order_id")
+                    ):
+                        _ll_px = _float_or_none(_sis.get("limit_px"))
+                        _ll_qty = _float_or_none(_sis.get("sell_qty"))
+                        if _ll_px and _ll_qty and _ll_qty > 0:
+                            _ll_cid = f"chili_ml_sis_{sess.id}_{uuid.uuid4().hex[:12]}"
+                            _ll_res = adapter.place_limit_order_gtc(
+                                product_id=product_id,
+                                side="sell",
+                                base_size=_fmt_base_size(_ll_qty),
+                                limit_price=_fmt_limit_price_sell(_ll_px),
+                                client_order_id=_ll_cid,
+                            ) or {}
+                            if _ll_res.get("ok") and _ll_res.get("order_id"):
+                                le["scale_limit_order_id"] = str(_ll_res["order_id"])
+                                le["scale_limit_px"] = float(_ll_px)
+                                le["scale_limit_qty"] = float(_ll_qty)
+                                le["scale_limit_adopted_qty"] = 0.0
+                                le["scale_limit_source"] = "sell_into_strength"
+                                # cooldown so a second rung can't stack for ~15s
+                                le["ladder_cooldown_until_utc"] = (
+                                    _utcnow() + timedelta(seconds=15)
+                                ).isoformat()
+                                _commit_le(sess, le)
+                                _emit(db, sess, "sell_into_strength_limit_placed", {
+                                    "order_id": le["scale_limit_order_id"],
+                                    "qty": float(_ll_qty), "limit_price": float(_ll_px),
+                                    "peak_r": _sis.get("peak_r"), "rung_bps": _sis.get("rung_bps"),
+                                })
                 except Exception:
                     pass
 
