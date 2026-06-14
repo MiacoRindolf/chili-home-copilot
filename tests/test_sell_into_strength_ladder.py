@@ -208,6 +208,51 @@ def test_reader_failopen_on_empty(db):
     assert lr.n_snaps == 0 and lr.depth_imbal is None and lr.depth_imbal_pctile is None
 
 
-def test_reader_equity_noop(db):
+def test_reader_equity_failopen_no_iqfeed(db):
+    # equity with NO iqfeed rows -> fail-open None (HOLD), never crashes.
     lr = read_ladder_distribution("NVDA", db, k=6)
     assert lr.n_snaps == 0 and lr.depth_imbal is None and lr.ofi is None
+
+
+def _ins_iqfeed(db, symbol, observed_at, bid_top, ask_top, bid_top_size, ask5_size, imbalance5):
+    from sqlalchemy import text
+    # iqfeed_depth_snapshots is a host-side bridge table (not in the app's ORM/migrations),
+    # so it's absent from chili_test — create a minimal one matching the reader's columns.
+    db.execute(text(
+        "CREATE TABLE IF NOT EXISTS iqfeed_depth_snapshots ("
+        "id BIGSERIAL PRIMARY KEY, symbol VARCHAR(16) NOT NULL, observed_at TIMESTAMP NOT NULL, "
+        "bid_top DOUBLE PRECISION, ask_top DOUBLE PRECISION, bid_top_size DOUBLE PRECISION, "
+        "ask_top_size DOUBLE PRECISION, bid5_size DOUBLE PRECISION, ask5_size DOUBLE PRECISION, "
+        "imbalance5 DOUBLE PRECISION, venues VARCHAR(64), source VARCHAR(32) NOT NULL)"
+    ))
+    db.execute(text(
+        "INSERT INTO iqfeed_depth_snapshots (symbol, observed_at, bid_top, ask_top, "
+        "bid_top_size, ask_top_size, bid5_size, ask5_size, imbalance5, source) VALUES "
+        "(:s, :o, :bt, :at, :bts, :ats, :b5, :a5, :im, 'test')"
+    ), {
+        "s": symbol, "o": observed_at, "bt": bid_top, "at": ask_top,
+        "bts": bid_top_size, "ats": 500.0, "b5": bid_top_size * 3, "a5": ask5_size, "im": imbalance5,
+    })
+
+
+def test_reader_equity_from_iqfeed(db):
+    """Equity ladder reads iqfeed aggregate 5-level (imbalance5 + sizes) — distribution
+    trend: newest ask-heavy (imbalance5 falling), best-bid thinning across the window."""
+    now = datetime.utcnow()
+    # oldest -> newest: imbalance5 0.6 -> -0.3 (turning ask-heavy); bid_top_size 8000 -> 1000
+    for i, (imb, bts, a5) in enumerate([
+        (0.60, 8000.0, 600.0),
+        (0.30, 6000.0, 900.0),
+        (-0.10, 3000.0, 1500.0),
+        (-0.30, 1000.0, 2200.0),  # newest: ask-heavy, bids thinned
+    ]):
+        _ins_iqfeed(db, "TESTQ", now - timedelta(seconds=(3 - i) * 2), 7.10, 7.34, bts, a5, imb)
+    db.commit()
+    lr = read_ladder_distribution("TESTQ", db, k=6)
+    assert lr.n_snaps == 4
+    assert lr.depth_imbal is not None and lr.depth_imbal < 0       # newest ask-heavy (imbalance5)
+    assert lr.depth_imbal_pctile is not None and lr.depth_imbal_pctile <= 0.5
+    assert lr.bid_refill is not None and lr.bid_refill < 0         # best bid 8000 -> 1000
+    assert lr.ask_build is not None and lr.ask_build > 0           # ask5 grew
+    assert lr.spread_bps is not None and lr.spread_bps > 0         # (7.34-7.10) top-of-book
+    assert lr.snapshot_age_s is not None and lr.snapshot_age_s < 30
