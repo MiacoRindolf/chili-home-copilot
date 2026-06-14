@@ -1519,6 +1519,36 @@ class CoinbaseSpotAdapter(VenueAdapter):
         return snap
 
 
+def _parse_cb_ts(ts: Any) -> float | None:
+    """Parse a Coinbase RFC3339 timestamp to UTC epoch seconds.
+
+    Returns ``None`` when absent/unparseable so callers fall back to
+    handler wall-clock. Tolerates a trailing ``Z`` and sub-second
+    precision finer than microseconds (Coinbase sometimes sends nanos,
+    which ``datetime.fromisoformat`` rejects).
+    """
+    if ts is None:
+        return None
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    if not isinstance(ts, str) or not ts:
+        return None
+    s = ts.strip()
+    try:
+        import re as _re
+        from datetime import datetime as _dt, timezone as _tz
+
+        s = _re.sub(r"(\.\d{6})\d+", r"\1", s)  # nanos -> micros
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        d = _dt.fromisoformat(s)
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=_tz.utc)
+        return d.timestamp()
+    except Exception:
+        return None
+
+
 class CoinbaseWebSocketSeam:
     """Coinbase Advanced Trade WebSocket for L2 book, trade tape, and ticker streaming.
 
@@ -1540,6 +1570,10 @@ class CoinbaseWebSocketSeam:
         self._quote_cache_lock: Any = None  # lazy init
         self._tick_listeners: dict[str, list] = {}
         self._tick_listeners_lock: Any = None  # lazy init
+        # Authoritative per-product full order book maintained from level2
+        # snapshot+update deltas. {pid: {"bids": {price: size}, "asks": {...}}}.
+        # Bounded by subscribed-product count; each side trimmed in _handle_l2.
+        self._cb_books: dict[str, dict[str, dict[float, float]]] = {}
 
     # ── lifecycle ───────────────────────────────────────────────────
     def start(self, product_ids: list[str] | None = None) -> dict[str, Any]:
@@ -1667,7 +1701,7 @@ class CoinbaseWebSocketSeam:
         events = data.get("events", [])
 
         if channel == "l2_data":
-            self._handle_l2(events)
+            self._handle_l2(events, data.get("timestamp"))
         elif channel == "market_trades":
             self._handle_trades(events)
         elif channel == "ticker":
@@ -1712,41 +1746,83 @@ class CoinbaseWebSocketSeam:
         finally:
             self._reconnecting = False
 
-    def _handle_l2(self, events: list[dict]) -> None:
+    def _handle_l2(self, events: list[dict], msg_ts: Any = None) -> None:
+        """Maintain an authoritative per-product full order book from Coinbase
+        ``level2`` snapshot+update deltas, then emit a top-of-book snapshot into
+        the microstructure ring.
+
+        Coinbase sends an initial ``type="snapshot"`` (full book) followed by
+        incremental ``type="update"`` deltas. The PRIOR implementation rebuilt
+        the ring from each message's ``updates`` alone — i.e. from delta
+        fragments, not the maintained book — so ``get_features()`` (imbalance /
+        spread / depth) for crypto was computed off whatever few levels happened
+        to change in the last message. This keeps a real book in
+        ``self._cb_books``: apply the snapshot, merge updates, delete a level
+        when its size goes to 0, and stamp the snapshot with the EXCHANGE event
+        time (not handler wall-clock) so the downstream OFI window and
+        forward-return horizons align to market time. Crypto-only (Coinbase WS);
+        equity books come from iqfeed and are untouched.
+        """
         from ..microstructure import BookLevel, BookSnapshot, get_book_buffer
         import time as _time
 
         buf = get_book_buffer()
+        event_at = _parse_cb_ts(msg_ts) or _time.time()
         for ev in events:
             pid = ev.get("product_id", "")
             updates = ev.get("updates", [])
             if not pid or not updates:
                 continue
 
-            bids = []
-            asks = []
+            ev_type = ev.get("type", "update")
+            book = self._cb_books.setdefault(pid, {"bids": {}, "asks": {}})
+            if ev_type == "snapshot":
+                book["bids"].clear()
+                book["asks"].clear()
+
             for u in updates:
                 side = u.get("side", "")
                 px = float(u.get("price_level", 0) or u.get("new_price", 0) or 0)
-                sz = float(u.get("new_quantity", 0) or u.get("qty", 0) or 0)
                 if px <= 0:
                     continue
-                lvl = BookLevel(price=px, size=sz, side="bid" if side == "bid" else "offer")
-                if side == "bid":
-                    bids.append(lvl)
+                raw_sz = u.get("new_quantity")
+                if raw_sz is None:
+                    raw_sz = u.get("qty", 0)
+                try:
+                    sz = float(raw_sz or 0)
+                except (TypeError, ValueError):
+                    continue
+                sidebook = book["bids"] if side == "bid" else book["asks"]
+                if sz <= 0.0:
+                    sidebook.pop(px, None)   # level removed
                 else:
-                    asks.append(lvl)
+                    sidebook[px] = sz
 
-            if bids or asks:
-                bids.sort(key=lambda l: l.price, reverse=True)
-                asks.sort(key=lambda l: l.price)
-                snap = BookSnapshot(
-                    product_id=pid,
-                    bids=bids[:20],
-                    asks=asks[:20],
-                    ts=_time.time(),
+            # Bound per-side memory/sort cost: keep a generous top slice (>> the
+            # 20 levels emitted) so top-of-book tracking stays correct across
+            # deletes without retaining an unbounded book for liquid products.
+            if len(book["bids"]) > 100:
+                book["bids"] = dict(
+                    sorted(book["bids"].items(), key=lambda kv: kv[0], reverse=True)[:50]
                 )
-                buf.update(snap)
+            if len(book["asks"]) > 100:
+                book["asks"] = dict(
+                    sorted(book["asks"].items(), key=lambda kv: kv[0])[:50]
+                )
+
+            if not book["bids"] or not book["asks"]:
+                continue
+
+            top_bids = sorted(book["bids"].items(), key=lambda kv: kv[0], reverse=True)[:20]
+            top_asks = sorted(book["asks"].items(), key=lambda kv: kv[0])[:20]
+            snap = BookSnapshot(
+                product_id=pid,
+                bids=[BookLevel(price=p, size=s, side="bid") for p, s in top_bids],
+                asks=[BookLevel(price=p, size=s, side="offer") for p, s in top_asks],
+                ts=_time.time(),      # local arrival -> ring recency (skew-robust)
+                event_ts=event_at,    # exchange event time -> persistence + horizons
+            )
+            buf.update(snap)
 
     def _handle_ticker(self, events: list[dict]) -> None:
         """Process Coinbase ``ticker`` channel: consolidated BBO + last price."""

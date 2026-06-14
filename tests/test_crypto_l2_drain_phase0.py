@@ -1,0 +1,245 @@
+"""Phase 0 tests: full-book maintainer (coinbase_spot._handle_l2) + crypto L2
+drain (fast_path/crypto_l2_drain) + equity-safety/parity.
+
+The keystone regression guarded here is RT-1: the old _handle_l2 rebuilt the
+ring from each message's `updates` alone (delta fragments), so a bid-only update
+wiped the asks and any unreferenced bids. The full-book maintainer must MERGE
+deltas onto a maintained book. Equity must stay byte-identical: no equity key may
+ever enter the crypto ring, and no momentum_neural module may read the crypto L2
+sink.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+from sqlalchemy import text
+
+from app.db import engine
+from app.services.trading.microstructure import get_book_buffer, get_features
+from app.services.trading.venue.coinbase_spot import (
+    CoinbaseWebSocketSeam,
+    _parse_cb_ts,
+)
+from app.services.trading.fast_path import crypto_l2_drain as drain
+
+_TS1 = "2026-06-13T01:20:45.761182Z"
+_TS2 = "2026-06-13T01:20:46.000000Z"
+
+
+@pytest.fixture
+def clean_ring():
+    """Track product_ids added during a test and remove them from the global
+    ring afterward, so the shared singleton stays hermetic across tests."""
+    buf = get_book_buffer()
+    before = set(buf.product_ids())
+    yield buf
+    with buf._lock:  # noqa: SLF001 — test-only cleanup of the shared singleton
+        for pid in list(buf._books.keys()):
+            if pid not in before:
+                buf._books.pop(pid, None)
+
+
+def _snapshot_event(pid):
+    return [{
+        "type": "snapshot",
+        "product_id": pid,
+        "updates": [
+            {"side": "bid", "price_level": "100.0", "new_quantity": "5"},
+            {"side": "bid", "price_level": "99.0", "new_quantity": "3"},
+            {"side": "offer", "price_level": "101.0", "new_quantity": "4"},
+            {"side": "offer", "price_level": "102.0", "new_quantity": "2"},
+        ],
+    }]
+
+
+# ── pure: normalization + timestamp ────────────────────────────────────
+
+def test_norm_imbalance_bounds():
+    assert drain._norm_imbalance(3.0, 1.0) == pytest.approx(0.5)
+    assert drain._norm_imbalance(1.0, 3.0) == pytest.approx(-0.5)
+    assert drain._norm_imbalance(0.0, 0.0) == 0.0
+    # always within [-1, 1]
+    for b, a in [(1e9, 1.0), (0.0, 5.0), (5.0, 0.0), (2.5, 2.5)]:
+        assert -1.0 <= drain._norm_imbalance(b, a) <= 1.0
+
+
+def test_parse_cb_ts():
+    z = _parse_cb_ts(_TS1)
+    nanos = _parse_cb_ts("2026-06-13T01:20:45.761182947Z")  # nanosecond precision
+    assert z is not None and nanos is not None
+    assert abs(z - nanos) < 1e-3  # truncation to micros, not a crash
+    assert _parse_cb_ts(None) is None
+    assert _parse_cb_ts("") is None
+    assert _parse_cb_ts("garbage") is None
+    assert _parse_cb_ts(1781313646.0) == 1781313646.0  # epoch passthrough
+
+
+# ── full-book maintainer (RT-1 keystone) ───────────────────────────────
+
+def test_handle_l2_maintains_full_book(clean_ring):
+    """A bid-only UPDATE must keep the asks and the untouched bids — proves the
+    book is MERGED, not rebuilt from the delta (the RT-1 regression)."""
+    ws = CoinbaseWebSocketSeam()
+    pid = "FULLBOOK-USD"
+    ws._handle_l2(_snapshot_event(pid), _TS1)
+    snap = clean_ring.latest(pid)
+    assert snap is not None
+    assert snap.bids[0].price == 100.0  # best bid
+    assert snap.asks[0].price == 101.0  # best ask
+    assert snap.event_ts == pytest.approx(_parse_cb_ts(_TS1))  # exchange event time
+    assert snap.ts > 0  # local arrival (ring recency)
+
+    # bid-only update: delete 100, add a new best 100.5
+    ws._handle_l2([{
+        "type": "update",
+        "product_id": pid,
+        "updates": [
+            {"side": "bid", "price_level": "100.0", "new_quantity": "0"},   # delete
+            {"side": "bid", "price_level": "100.5", "new_quantity": "7"},   # new best
+        ],
+    }], _TS2)
+    snap2 = clean_ring.latest(pid)
+    bid_prices = [l.price for l in snap2.bids]
+    assert snap2.bids[0].price == 100.5            # new best bid
+    assert 100.0 not in bid_prices                  # deleted level gone
+    assert 99.0 in bid_prices                       # untouched snapshot level RETAINED
+    assert snap2.asks[0].price == 101.0             # asks SURVIVED a bid-only update
+    assert len(snap2.asks) == 2                      # both asks intact
+    assert snap2.event_ts == pytest.approx(_parse_cb_ts(_TS2))
+
+
+def test_handle_l2_delete_on_zero(clean_ring):
+    ws = CoinbaseWebSocketSeam()
+    pid = "DELZERO-USD"
+    ws._handle_l2(_snapshot_event(pid), _TS1)
+    ws._handle_l2([{
+        "type": "update",
+        "product_id": pid,
+        "updates": [{"side": "offer", "price_level": "101.0", "new_quantity": "0"}],
+    }], _TS2)
+    snap = clean_ring.latest(pid)
+    ask_prices = [l.price for l in snap.asks]
+    assert 101.0 not in ask_prices       # best ask removed
+    assert snap.asks[0].price == 102.0   # next ask promoted
+
+
+def test_handle_l2_falls_back_to_wallclock_without_ts(clean_ring):
+    ws = CoinbaseWebSocketSeam()
+    pid = "NOTS-USD"
+    ws._handle_l2(_snapshot_event(pid), None)  # no exchange timestamp
+    snap = clean_ring.latest(pid)
+    assert snap is not None and snap.event_ts > 0  # wall-clock fallback, no crash
+
+
+# ── ring -> fast_orderbook param mapping ───────────────────────────────
+
+def test_book_item_for_maps_ring(clean_ring):
+    ws = CoinbaseWebSocketSeam()
+    pid = "MAPITEM-USD"
+    ws._handle_l2(_snapshot_event(pid), _TS1)
+    item = drain._book_item_for(pid)
+    assert item is not None
+    assert item["ticker"] == pid
+    assert item["source"] == "coinbase"
+    assert -1.0 <= item["imbalance"] <= 1.0            # NORMALIZED (RT-9)
+    # bid_total 8 (5+3), ask_total 6 (4+2) -> (8-6)/14
+    assert item["imbalance"] == pytest.approx((8 - 6) / 14.0)
+    assert item["snapshot_at"].tzinfo is None           # naive UTC (RT-3)
+    bids = json.loads(item["bid_levels"])
+    assert [tuple(x) for x in bids][0] == (100.0, 5.0)
+
+
+def test_book_item_for_none_when_one_sided(clean_ring):
+    ws = CoinbaseWebSocketSeam()
+    pid = "ONESIDE-USD"
+    ws._handle_l2([{
+        "type": "snapshot",
+        "product_id": pid,
+        "updates": [{"side": "bid", "price_level": "100.0", "new_quantity": "5"}],
+    }], _TS1)
+    assert drain._book_item_for(pid) is None  # no asks -> skip
+
+
+# ── drain writes fast_orderbook ────────────────────────────────────────
+
+def test_drain_writes_fast_orderbook(clean_ring, monkeypatch):
+    pid = "DRAINW-USD"
+    ws = CoinbaseWebSocketSeam()
+    ws._handle_l2(_snapshot_event(pid), _TS1)
+    monkeypatch.setattr(drain, "eligible_crypto_symbols", lambda db: [pid])
+    # clean any prior rows for this synthetic ticker
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM fast_orderbook WHERE ticker = :t"), {"t": pid})
+    try:
+        drain.run_crypto_l2_drain_job()
+        with engine.begin() as conn:
+            rows = conn.execute(text(
+                "SELECT source, imbalance FROM fast_orderbook WHERE ticker = :t"
+            ), {"t": pid}).fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "coinbase"
+        assert -1.0 <= rows[0][1] <= 1.0
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM fast_orderbook WHERE ticker = :t"), {"t": pid})
+
+
+def test_drain_noop_when_not_eligible(clean_ring, monkeypatch):
+    pid = "NOTELIG-USD"
+    ws = CoinbaseWebSocketSeam()
+    ws._handle_l2(_snapshot_event(pid), _TS1)
+    monkeypatch.setattr(drain, "eligible_crypto_symbols", lambda db: [])  # none eligible
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM fast_orderbook WHERE ticker = :t"), {"t": pid})
+    drain.run_crypto_l2_drain_job()
+    with engine.begin() as conn:
+        n = conn.execute(text(
+            "SELECT count(*) FROM fast_orderbook WHERE ticker = :t"
+        ), {"t": pid}).scalar()
+    assert n == 0  # nothing warmed-and-eligible -> nothing written
+
+
+# ── EQUITY SAFETY / PARITY ─────────────────────────────────────────────
+
+def test_equity_features_all_none_after_crypto_drain(clean_ring, monkeypatch):
+    """The crypto ring/drain must never make get_features() return data for an
+    equity ticker — equity gets the all-None default that alerts/scanner skip."""
+    pid = "PARITY-USD"
+    ws = CoinbaseWebSocketSeam()
+    ws._handle_l2(_snapshot_event(pid), _TS1)
+    monkeypatch.setattr(drain, "eligible_crypto_symbols", lambda db: [pid])
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM fast_orderbook WHERE ticker = :t"), {"t": pid})
+    try:
+        drain.run_crypto_l2_drain_job()
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM fast_orderbook WHERE ticker = :t"), {"t": pid})
+    eq = get_features("AAPL")
+    assert eq.bid_ask_imbalance is None
+    assert eq.depth_bid_total is None
+    assert eq.spread_bps is None
+    assert "AAPL" not in get_book_buffer().product_ids()
+
+
+def test_no_equity_keys_enter_ring(clean_ring):
+    ws = CoinbaseWebSocketSeam()
+    ws._handle_l2(_snapshot_event("CRYPTOONLY-USD"), _TS1)
+    pids = get_book_buffer().product_ids()
+    assert all(p.endswith("-USD") for p in pids if p in {"CRYPTOONLY-USD"})
+    assert "AAPL" not in pids and "TSLA" not in pids
+
+
+def test_momentum_neural_does_not_read_l2_sink():
+    """Equity decision path (momentum_neural) must not import/read the crypto L2
+    sink — proves equity decisions can't be perturbed by crypto rows."""
+    mn = Path(__file__).resolve().parents[1] / "app" / "services" / "trading" / "momentum_neural"
+    offenders = []
+    for py in mn.rglob("*.py"):
+        txt = py.read_text(encoding="utf-8", errors="ignore")
+        if "fast_orderbook" in txt or "trading_microstructure_log" in txt or "crypto_l2_drain" in txt:
+            offenders.append(py.name)
+    assert offenders == [], f"momentum_neural reads the crypto L2 sink: {offenders}"
