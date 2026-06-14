@@ -4046,8 +4046,12 @@ def tick_live_session(
 
         if bid > stop_px and le.pop("stop_breach_pending_utc", None) is not None:
             # breach -> recovery between reads = flicker dodged; clear the marker
+            # AND the L2 chop-hold counter (the shake-out recovered — exactly the
+            # OPG-USD case the anti-shake-out hold is meant to ride out).
+            _holds_dodged = le.pop("stop_breach_chop_holds", None)
             _commit_le(sess, le)
-            _emit(db, sess, "stop_breach_flicker_dodged", {"bid": bid, "stop_price": stop_px})
+            _emit(db, sess, "stop_breach_flicker_dodged", {
+                "bid": bid, "stop_price": stop_px, "chop_holds": _holds_dodged})
         if bid <= stop_px:
             # SHAKE-OUT flicker guard (tick-speed exits): one bad bid print can show
             # a breach for a single cached quote; a REAL breakdown persists. Confirm
@@ -4067,7 +4071,60 @@ def tick_live_session(
                     db.flush()
                     return {"ok": True, "session_id": sess.id, "state": sess.state, "stop_pending_confirm": True}
             except (TypeError, ValueError):
-                pass  # unparseable marker — treat as confirmed (protective default)
+                _pend_t = None  # unparseable marker — treat as confirmed (protective default)
+
+            # ── L2-aware anti-shake-out (LOSS side) ──────────────────────────
+            # The >=1s flicker guard above has confirmed the breach PERSISTS. Before
+            # paying the stop, read L2/OFI to separate a real BREAKDOWN (sell now)
+            # from a CHOP dip with bids absorbing (the OPG-USD shake-out: stopped at
+            # a dip valley, then recovered). BREAKDOWN is vetoed FIRST and stale/
+            # missing L2 => BREAKDOWN, so a real breakdown's latency is <= today's;
+            # only a CONFIRMED chop earns a hard-bounded hold. INVARIANT A untouched:
+            # this delays the SELL execution only — it never moves/loosens the stop.
+            # Default OFF = Stage-0 dark logging (classify + emit the A/B
+            # counterfactual, always take today's sell path).
+            try:
+                _l2_thr = float(getattr(settings, "chili_momentum_ofi_threshold", 0.25) or 0.25)
+                _l2_max_age = float(getattr(settings, "chili_momentum_stop_l2_confirm_max_age_s", 2.5) or 2.5)
+                _l2_min_snaps = int(getattr(settings, "chili_momentum_stop_l2_confirm_min_snaps", 3) or 3)
+                _l2_max_ticks = int(getattr(settings, "chili_momentum_stop_l2_confirm_max_ticks", 2) or 2)
+                _l2_enabled = bool(getattr(settings, "chili_momentum_stop_l2_confirm_enabled", False))
+                from .paper_execution import classify_stop_breach
+                from .pipeline import read_ladder_distribution
+
+                _bl = read_ladder_distribution(sess.symbol, db=db)
+                _bc = classify_stop_breach(
+                    ladder=_bl, ofi_threshold=_l2_thr,
+                    max_age_s=_l2_max_age, min_snaps=_l2_min_snaps,
+                )
+                _holds = int(le.get("stop_breach_chop_holds") or 0)
+                try:
+                    _held_s = (_utcnow() - _pend_t).total_seconds() if _pend_t else 0.0
+                except Exception:
+                    _held_s = 0.0
+                _within_bounds = (_holds < _l2_max_ticks) and (_held_s < _l2_max_age)
+                _do_hold = bool(_l2_enabled and _bc.get("cls") == "CHOP" and _within_bounds)
+                _emit(db, sess, "stop_breach_l2_classify", {
+                    "bid": bid, "stop_price": stop_px, "cls": _bc.get("cls"),
+                    "reason": _bc.get("reason"), "enabled": _l2_enabled,
+                    "held_s": round(_held_s, 2), "holds": _holds,
+                    "would_hold": bool(_bc.get("cls") == "CHOP" and _within_bounds),
+                    "did_hold": _do_hold, "signals": _bc.get("signals"),
+                })
+                if _do_hold:
+                    le["stop_breach_chop_holds"] = _holds + 1
+                    # KEEP stop_breach_pending_utc so the wall-clock cap stays anchored
+                    _commit_le(sess, le)
+                    _emit(db, sess, "stop_breach_chop_hold", {
+                        "bid": bid, "stop_price": stop_px, "hold_n": _holds + 1,
+                        "max_ticks": _l2_max_ticks, "held_s": round(_held_s, 2),
+                    })
+                    db.flush()
+                    return {"ok": True, "session_id": sess.id, "state": sess.state, "stop_chop_hold": True}
+            except Exception:
+                pass  # any L2 failure => fall through to today's sell (protective)
+
+            le.pop("stop_breach_chop_holds", None)
             le.pop("stop_breach_pending_utc", None)
             # A stop hit while TRAILING (or after the first-target partial) IS the
             # runner's trailing stop; before that it's the initial protective stop.
