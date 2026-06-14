@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import desc
 
+from ....config import settings
 from .context import MomentumRegimeContext, VolatilityRegime
 from .features import ExecutionReadinessFeatures
 from .variants import MomentumStrategyFamily
@@ -162,6 +163,28 @@ def score_viability(
             elif im < -0.18:
                 base -= 0.03
                 warnings.append("Order book imbalance against long bias")
+        except (TypeError, ValueError):
+            pass
+    # Order-flow imbalance (OFI) + micro-price agreement tilt. Research's top L2
+    # short-horizon predictor (Cont/Kukanov/Stoikov) used as a SMALL long-bias
+    # SELECTION tilt — fires only when OFI and micro-price AGREE (guards thin-book
+    # / flicker / spoof). Weight is env-tunable (set 0 to disable without redeploy);
+    # validated by live A/B + instant rollback, since the literature edge is
+    # contemporaneous and may sit near Coinbase fees.
+    ofi = feats.ofi
+    mpe = feats.micro_price_edge
+    if ofi is not None and mpe is not None:
+        try:
+            w = float(getattr(settings, "chili_momentum_ofi_tilt_weight", 0.015) or 0.0)
+            thr = float(getattr(settings, "chili_momentum_ofi_threshold", 0.25) or 0.25)
+            if w > 0.0:
+                o = float(ofi)
+                m = float(mpe)
+                if o > thr and m > 0:
+                    base += w
+                elif o < -thr and m < 0:
+                    base -= w
+                    warnings.append("Order-flow imbalance against long bias (OFI+micro)")
         except (TypeError, ValueError):
             pass
     if tape_z is not None:

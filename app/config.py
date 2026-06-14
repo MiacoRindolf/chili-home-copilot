@@ -3501,51 +3501,62 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_VERTICALITY_ATR_MULT"),
     )
-    # ── L2 microstructure layer (crypto writer + log-only signals) ──────
-    # Phase 0: cadence to drain the warmed Coinbase WS full-book ring into
-    # fast_orderbook (crypto only). Conservative 5s start; soak before tightening.
+    # ── L2 microstructure (crypto full-book persistence + OFI/micro-price tilt) ──
+    # Cadence to drain the warmed Coinbase WS full-book ring into fast_orderbook
+    # (crypto only; persists L2 so the live OFI tilt is measurable). 5s start.
     chili_crypto_l2_drain_seconds: float = Field(
         default=5.0,
         ge=1.0,
         validation_alias=AliasChoices("CHILI_CRYPTO_L2_DRAIN_SECONDS"),
     )
-    # OFI / windowed-signal lookback (seconds). Must be <= the ring's
+    # OFI lookback window (seconds) for the viability tilt. Must be <= the ring's
     # _DEFAULT_BOOK_HISTORY (30s) so recent() spans it.
     chili_crypto_l2_ofi_window_s: float = Field(
         default=15.0,
         gt=0.0,
         validation_alias=AliasChoices("CHILI_CRYPTO_L2_OFI_WINDOW_S"),
     )
-    # Phase 1 (LOG-ONLY signal layer -> trading_microstructure_log). Touches no
-    # decision path; accumulates forward-return-labeled data for later calibration.
+    # Live OFI/micro-price viability tilt (research: OFI = strongest L2 short-horizon
+    # predictor, Cont/Kukanov/Stoikov; micro-price confirmer). Applied as a SMALL
+    # agreement-guarded adjustment to the viability score (long-bias selection
+    # tilt, NOT bps-scalping) — validated by live A/B + instant rollback. The
+    # weight is the lever: tune live, set 0 to disable the tilt without redeploy.
+    chili_momentum_ofi_tilt_weight: float = Field(
+        default=0.015,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OFI_TILT_WEIGHT"),
+    )
+    # Normalized-OFI magnitude (in [0,1]) required before the tilt fires (with
+    # micro-price agreement). Guards against thin-book / flicker noise.
+    chili_momentum_ofi_threshold: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OFI_THRESHOLD"),
+    )
+    # ── microstructure_log (#698, parallel agent): background signal-LOG layer
+    # (trading_microstructure_log). MEASUREMENT only — does not gate the live OFI
+    # tilt above; persists OFI/micro/ask-eaten/etc + (later) forward returns so the
+    # live A/B can quantify which signal helps. Settings kept so #698 honors env.
     chili_micro_log_drain_seconds: float = Field(
         default=5.0,
         ge=1.0,
         validation_alias=AliasChoices("CHILI_MICRO_LOG_DRAIN_SECONDS"),
     )
-    # Equity branch is opt-in: crypto-first. Keeps the new recurring equity DB
-    # read off the shared scheduler process until the crypto layer has soaked.
     chili_micro_log_equity_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_MICRO_LOG_EQUITY_ENABLED"),
     )
-    # Stratified control sample of NON-eligible -USD names per cycle (selection
-    # de-bias for calibration). 0 disables the control arm.
     chili_micro_log_control_sample_size: int = Field(
         default=8,
         ge=0,
         validation_alias=AliasChoices("CHILI_MICRO_LOG_CONTROL_SAMPLE_SIZE"),
     )
-    # Retention for the log table (days). Keep >= the calibration accumulation
-    # window so training rows are not pruned before Phase 2 runs.
     chili_micro_log_retain_days: int = Field(
         default=21,
         ge=1,
         validation_alias=AliasChoices("CHILI_MICRO_LOG_RETAIN_DAYS"),
     )
-    # Round-trip execution cost (bps) subtracted from the executable forward
-    # return (fees only; spread is already in ask->future-bid). Crypto = maker
-    # entry + taker exit ~100bps; equity ~ commission-free + dust fees.
     chili_micro_log_roundtrip_cost_bps_crypto: float = Field(
         default=100.0,
         ge=0.0,
