@@ -57,6 +57,21 @@ ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED: dict[str, float] = {
     "tradeable_liquidity": 0.15,
 }
 
+# Daily-context variant (opt-in via `weights=` when chili_momentum_daily_context_enabled):
+# adds a FIFTH pillar `daily_structure` — the daily-chart S&R level-awareness from
+# daily_levels.compute_daily_context (break ABOVE a major daily level + room to the next
+# level + a SOFT broader-trend minority input). 10% weight → it RE-RANKS the candidate
+# pool toward clean daily breakouts, it can never block a fill (the entry gate is
+# untouched). A news-gap spike breaking a level scores HIGH (the CUPR guarantee), so it
+# is never demoted. Percentile-ranked like every other pillar (raw range normalised away).
+ROSS_PILLAR_WEIGHTS_DAILY_CONTEXT: dict[str, float] = {
+    "rvol": 0.40,
+    "momentum": 0.30,
+    "liquidity": 0.10,
+    "tradeable_liquidity": 0.10,
+    "daily_structure": 0.10,
+}
+
 # Max tilt the Ross momentum quality applies to a momentum-neural viability
 # score. ``ross_score`` in [0,1] is centered at 0.5, so the applied tilt is
 # +/- (TILT/2): at 0.20 a top-decile explosive setup gets +0.10 — enough to
@@ -195,6 +210,12 @@ def score_universe(
     liq_sorted = sorted(p[2] for p in pillars.values() if p[2] is not None)
     tliq_sorted = sorted(p[3] for p in pillars.values() if p[3] is not None)
     _w_tliq = float(w.get("tradeable_liquidity") or 0.0)  # only an active pillar when weighted
+    # 5th pillar (daily-context variant only): the daily-structure sub-score from the
+    # signal dict, read directly (no _extract_pillars signature change). Graceful-degrade
+    # exactly like tradeable_liquidity — absent/zero-weight ⇒ not in the blend.
+    _ds_raw = {sym: _first_float(sig or {}, "daily_structure_pct") for sym, sig in signals.items()}
+    ds_sorted = sorted(v for v in _ds_raw.values() if v is not None)
+    _w_ds = float(w.get("daily_structure") or 0.0)
 
     out: dict[str, RossMomentumScore] = {}
     for sym, (rvol, mom, liq, tliq) in pillars.items():
@@ -202,6 +223,8 @@ def score_universe(
         mom_pct = _percentile_rank(mom, mom_sorted) if mom is not None else None
         liq_pct = _percentile_rank(liq, liq_sorted) if liq is not None else None
         tliq_pct = _percentile_rank(tliq, tliq_sorted) if tliq is not None else None
+        _ds = _ds_raw.get(sym)
+        ds_pct = _percentile_rank(_ds, ds_sorted) if _ds is not None else None
 
         present: list[tuple[float, float]] = []  # (percentile, weight)
         if rvol_pct is not None:
@@ -212,6 +235,8 @@ def score_universe(
             present.append((liq_pct, w["liquidity"]))
         if tliq_pct is not None and _w_tliq > 0:
             present.append((tliq_pct, _w_tliq))
+        if ds_pct is not None and _w_ds > 0:
+            present.append((ds_pct, _w_ds))
 
         wsum = sum(wt for _, wt in present)
         score = (sum(pct * wt for pct, wt in present) / wsum) if wsum > 0 else 0.0
@@ -230,12 +255,14 @@ def score_universe(
                 "momentum": mom,
                 "liquidity_neglog_size": liq,
                 "tradeable_liquidity_log_dvol": tliq,
+                "daily_structure": _ds if _w_ds > 0 else None,
                 "pillars_present": [
                     name
                     for name, val in (
                         ("rvol", rvol_pct), ("momentum", mom_pct),
                         ("liquidity", liq_pct),
                         ("tradeable_liquidity", tliq_pct if _w_tliq > 0 else None),
+                        ("daily_structure", ds_pct if _w_ds > 0 else None),
                     )
                     if val is not None
                 ],

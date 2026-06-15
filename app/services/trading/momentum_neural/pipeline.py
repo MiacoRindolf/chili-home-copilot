@@ -562,11 +562,46 @@ def run_momentum_neural_tick(
             # names that get spread-gated and only ever watched. Validated on the
             # 11-day previous-days A/B replay: +6 fills, +$914 PnL vs baseline
             # (scripts/_sim_liquidity_selection.py, 2026-06-10).
+            _weights = ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED
+            # Daily-chart context TILT (off => byte-identical): enrich each candidate
+            # with daily_structure_pct (break ABOVE a major daily level + room to the
+            # next level + soft trend) and switch to the 5-pillar weights. The daily
+            # fetch is cached (600s) and runs on the viability-refresh pass, NOT the
+            # live tick path. A breaking-spike scores HIGH (the CUPR guarantee), so the
+            # tilt PREFERS clean daily breakouts; it can never block a fill.
+            if bool(getattr(settings, "chili_momentum_daily_context_enabled", True)):
+                try:
+                    from .ross_momentum import ROSS_PILLAR_WEIGHTS_DAILY_CONTEXT
+                    from .daily_levels import compute_daily_context
+                    from ..market_data import fetch_ohlcv_df as _fetch_daily
+
+                    _lb = int(getattr(settings, "chili_momentum_daily_lookback_days", 20) or 20)
+                    _n_daily = 0
+                    for _sym, _sig in _ross_signals.items():
+                        if not isinstance(_sig, dict) or "-USD" in str(_sym):
+                            continue  # equities only; crypto has no daily-S&R regime here
+                        try:
+                            _px = None
+                            for _k in ("price", "last", "close", "last_price"):
+                                _v = _sig.get(_k)
+                                if _v is not None:
+                                    _px = float(_v)
+                                    break
+                            _ddf = _fetch_daily(_sym, interval="1d", period="6mo")
+                            _dctx = compute_daily_context(_ddf, lookback=_lb, price=_px)
+                            if _dctx.daily_structure_pct is not None:
+                                _sig["daily_structure_pct"] = _dctx.daily_structure_pct
+                                _sig["daily_breaking_major"] = bool(_dctx.breaking_major_level)
+                                _n_daily += 1
+                        except Exception:
+                            continue
+                    if _n_daily > 0:
+                        _weights = ROSS_PILLAR_WEIGHTS_DAILY_CONTEXT
+                except Exception:
+                    pass
             meta["ross_scores"] = {
                 s: rs.score
-                for s, rs in _ross_score_universe(
-                    _ross_signals, weights=ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED
-                ).items()
+                for s, rs in _ross_score_universe(_ross_signals, weights=_weights).items()
             }
         except Exception:
             pass
