@@ -120,6 +120,43 @@ def test_selection_pillar_parity_and_tilt():
     assert dc["A"].score > dc["B"].score
 
 
+def test_sma200_computed_with_enough_bars():
+    """≥200 daily bars => the 200-SMA macro benchmark populates (above/below + signed
+    ATR distance). An uptrend's last price sits ABOVE its 200-SMA."""
+    df = _daily(np.linspace(3.0, 9.0, 210))   # 210 bars, uptrend
+    ctx = compute_daily_context(df, lookback=20, price=9.2)
+    assert ctx.sma_200 is not None and ctx.sma_200 > 0
+    assert ctx.above_sma_200 is True
+    assert ctx.dist_to_sma_200_atr is not None and ctx.dist_to_sma_200_atr > 0
+
+
+def test_sma200_none_when_too_few_bars():
+    """< 200 daily bars => 200-SMA is None (fail-open, neutral macro — a fresh listing
+    is never penalized)."""
+    df = _daily(np.linspace(3.0, 6.0, 24))
+    ctx = compute_daily_context(df, lookback=20, price=6.5)
+    assert ctx.sma_200 is None and ctx.above_sma_200 is None
+
+
+def test_cupr_guarantee_holds_below_sma200():
+    """THE CUPR GUARANTEE under the macro layer: a name DEEP BELOW its 200-SMA (bearish
+    macro) that breaks a recent level still scores HIGH in daily_structure_pct — the
+    200-SMA is a SOFT minority input, never a hard macro filter that blocks a spike."""
+    df = _daily(np.linspace(15.0, 4.0, 210))   # long downtrend, far below the 200-SMA
+    px = 5.0                                    # breaks the recent (declining) highs, still below 200-SMA
+    ctx = compute_daily_context(df, lookback=20, price=px)
+    assert ctx.above_sma_200 is False           # bearish macro
+    assert ctx.breaking_major_level is True
+    assert ctx.daily_structure_pct is not None and ctx.daily_structure_pct > 0.5  # still preferred
+
+
+def test_above_sma200_lifts_trend_vs_below():
+    """Above the 200-SMA reads more bullish than below (the macro is folded into trend)."""
+    up = compute_daily_context(_daily(np.linspace(3.0, 9.0, 210)), lookback=20, price=9.2)
+    down = compute_daily_context(_daily(np.linspace(9.0, 3.0, 210)), lookback=20, price=3.1)
+    assert up.trend_score > down.trend_score
+
+
 def test_levels_are_populated_on_ok():
     df = _daily(np.linspace(3.0, 6.0, 24))
     ctx = compute_daily_context(df, lookback=20, price=6.5)

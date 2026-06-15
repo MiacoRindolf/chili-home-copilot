@@ -587,7 +587,7 @@ def run_momentum_neural_tick(
                                 if _v is not None:
                                     _px = float(_v)
                                     break
-                            _ddf = _fetch_daily(_sym, interval="1d", period="6mo")
+                            _ddf = _fetch_daily(_sym, interval="1d", period="1y")
                             _dctx = compute_daily_context(_ddf, lookback=_lb, price=_px)
                             if _dctx.daily_structure_pct is not None:
                                 _sig["daily_structure_pct"] = _dctx.daily_structure_pct
