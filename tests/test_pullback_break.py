@@ -4,11 +4,26 @@ from __future__ import annotations
 
 import pandas as pd
 
+from app.config import settings
 from app.services.trading.momentum_neural.entry_gates import (
     _vol_aware_pullback_tolerances,
     breakout_failed_to_hold,
     pullback_break_confirmation,
 )
+
+
+def _isolate_trigger_logic(monkeypatch) -> None:
+    """Disable the ATR-scaled verticality skip for tests that isolate the
+    break/retest/reclaim TRIGGER mechanics (not the verticality gate).
+
+    These frames predate ``chili_momentum_entry_verticality_atr_mult`` (added
+    2026-06-12; covered by ``test_evening_batch3.py``). Their synthetic impulses
+    rise off a long flat base, so the break bar legitimately closes a few %
+    above the lagging EMA-9 and would now trip the chase-suppression skip — a
+    veto that has nothing to do with the trigger logic under test. The gate keeps
+    its own dedicated coverage; here we hold it off so the trigger assertions
+    mean what they originally did."""
+    monkeypatch.setattr(settings, "chili_momentum_entry_verticality_atr_mult", 0.0, raising=False)
 
 
 def _df(rows: list[tuple[float, float, float, float]]) -> pd.DataFrame:
@@ -35,7 +50,8 @@ def _retest_rows() -> list[tuple[float, float, float, float]]:
     return r
 
 
-def test_pullback_break_fires_on_shallow_pullback_then_break() -> None:
+def test_pullback_break_fires_on_shallow_pullback_then_break(monkeypatch) -> None:
+    _isolate_trigger_logic(monkeypatch)
     rows = [_base(100.0) for _ in range(14)]
     rows += [_base(c) for c in (102.0, 104.0, 106.0, 108.0, 110.0)]  # impulse
     rows += [_base(109.0, 800.0), _base(108.5, 800.0)]  # shallow pullback (holds high)
@@ -74,7 +90,8 @@ def test_insufficient_bars() -> None:
 
 # ── #1 break-retest ────────────────────────────────────────────────────────
 
-def test_retest_fires_on_break_then_retest_then_reclaim() -> None:
+def test_retest_fires_on_break_then_retest_then_reclaim(monkeypatch) -> None:
+    _isolate_trigger_logic(monkeypatch)
     ok, reason, dbg = pullback_break_confirmation(
         _df(_retest_rows()), entry_interval="5m", require_retest=True, require_sustained_volume=False
     )
@@ -99,7 +116,8 @@ def test_retest_does_not_fire_on_runaway_first_break() -> None:
     assert reason == "waiting_for_retest"
 
 
-def test_runaway_break_fires_when_enabled() -> None:
+def test_runaway_break_fires_when_enabled(monkeypatch) -> None:
+    _isolate_trigger_logic(monkeypatch)
     # The broke-then-ran-away rows that return waiting_for_retest (never offered a
     # retest). With the runaway allowance + enough volume, the high-conviction break
     # is taken rather than missed — but ONLY the retest WAIT is waived.
@@ -155,7 +173,8 @@ def test_retest_rejects_failed_hold() -> None:
     assert reason == "retest_failed_hold"
 
 
-def test_raw_mode_unchanged_when_retest_off() -> None:
+def test_raw_mode_unchanged_when_retest_off(monkeypatch) -> None:
+    _isolate_trigger_logic(monkeypatch)
     # The canonical raw fire still fires identically with the new params defaulted off.
     rows = [_base(100.0) for _ in range(14)]
     rows += [_base(c) for c in (102.0, 104.0, 106.0, 108.0, 110.0)]
@@ -188,7 +207,8 @@ def test_sustaining_volume_blocks_faded_mover() -> None:
     assert dbg.get("sustained_rvol") is not None and dbg["sustained_rvol"] < 1.0
 
 
-def test_sustaining_volume_off_lets_faded_through() -> None:
+def test_sustaining_volume_off_lets_faded_through(monkeypatch) -> None:
+    _isolate_trigger_logic(monkeypatch)
     ok, reason, _ = pullback_break_confirmation(
         _df(_faded_rows()), entry_interval="5m", require_sustained_volume=False
     )
