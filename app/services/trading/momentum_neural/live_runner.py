@@ -2629,6 +2629,7 @@ def tick_live_session(
             if _trigger_reason in (
                 "pullback_break_ok", "pullback_break_tick_ok", "halt_resume_dip_ok",
                 "deep_reclaim_ok", "deep_reclaim_tick_ok",
+                "deep_reclaim_dipbuy_ok", "deep_reclaim_dipbuy_tick_ok",
             ) and _pb_debug.get("pullback_low"):
                 le["structural_stop_price"] = float(_pb_debug["pullback_low"])
                 # #2 Breakout-or-bailout: stash the broken pullback HIGH (the breakout

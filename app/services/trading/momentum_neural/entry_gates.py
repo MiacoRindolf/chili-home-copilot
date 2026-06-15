@@ -221,6 +221,7 @@ TICK_ARMED_WAIT_REASONS = (
     "waiting_for_break",
     "waiting_for_reclaim",
     "waiting_for_reclaim_high",
+    "waiting_for_dipbuy_break",
 )
 
 
@@ -230,6 +231,167 @@ def _collapse_cap(atr_pct: float | None) -> float:
     halt-resume dip trigger and the deep-retrace reclaim path (same Ross mechanic:
     buy the dip's reclaim, never a collapse)."""
     return min(0.25, max(0.06, 6.0 * (atr_pct or 0.01)))
+
+
+def _dipbuy_signals_ok(
+    high: pd.Series, low: pd.Series, close: pd.Series, vol: pd.Series, vwap: list,
+    *, peak_idx: int, dip_idx: int, dip_low: float, run_high: float, depth: float,
+    cur: int, w_start: int, atr_pct: float | None, tol: float, ema_wick: float,
+    ema9: list, symbol: str | None,
+) -> tuple[str, float | None, float | None, dict[str, Any]]:
+    """Ross "buy the FIRST reversal off the dip" gate — the EARLY deep-reclaim entry.
+
+    Returns ``(verdict, level, stop, patch)`` with ``verdict`` in:
+      * ``"FIRE"`` — a completed bar reversed THROUGH the dip bar's OWN pullback high
+        on a strong close with returning volume → enter at ``level`` (the pullback
+        high, NEAR the dip — EARLIER than the recovery swing high the legacy path uses).
+      * ``"ARM"``  — the context + volume-dry-up signals + structure are valid but the
+        pullback high has not broken on a completed bar yet → arm a tick-watch at
+        ``level`` (the live ask through it fires the tick path; the closed-bar volume-
+        return leg is waived there and the dipbuy tick thrust buffer compensates).
+      * ``"PASS"`` — any decline / thin data / unaffordable runway → caller falls
+        through to the EXISTING recovery-high reclaim BYTE-IDENTICALLY (fail-open).
+
+    Pure + NEVER raises (any error → PASS). The stop is the dip-low ANCHOR only; the
+    authoritative ``structural_or_vol_floored_atr_pct`` layer widens it to the vol
+    floor downstream (INVARIANT A lives there, identically for live/paper/replay), so
+    this gate must NOT pre-floor it. ``vwap`` is the 20-bar ROLLING proxy
+    (indicator_core.compute_vwap) → a trend-MA slope, a directional filter only; the
+    knife discrimination leans on HH/HL + volume dry-up/return + a strong reversal
+    close. ONE adaptive base = the slope lookback; the rest are Ross-discipline
+    floors. docs/DESIGN/MOMENTUM_LANE.md
+    """
+    try:
+        if not bool(getattr(settings, "chili_momentum_deep_reclaim_dipbuy_enabled", True)):
+            return "PASS", None, None, {"dipbuy_declined": "disabled"}
+        if cur <= peak_idx or dip_idx <= peak_idx or dip_idx >= cur:
+            return "PASS", None, None, {"dipbuy_declined": "bad_indices"}
+        L = int(getattr(settings, "chili_momentum_deep_reclaim_dipbuy_vwap_lookback", 12) or 12)
+        K = int(getattr(settings, "chili_momentum_deep_reclaim_dipbuy_pullback_bars", 3) or 3)
+        dryup = float(getattr(settings, "chili_momentum_deep_reclaim_dipbuy_dryup_ratio", 0.85) or 0.85)
+        buf_bps = float(getattr(settings, "chili_momentum_deep_reclaim_dipbuy_stop_buffer_bps", 10.0) or 0.0)
+        a = float(atr_pct) if (atr_pct is not None and atr_pct > 0) else 0.0
+
+        # SHALLOWNESS (research: a 2-3 red-candle pullback, not a long grind down).
+        if (dip_idx - peak_idx) > (K + 1):
+            return "PASS", None, None, {"dipbuy_declined": "not_shallow"}
+
+        hi = high.values
+        lo = low.values
+        cl = close.values
+
+        # ── SIGNAL 1: rising trend (VWAP-proxy slope) + intact HH/HL + first pullback + runway
+        # (a) slope > 0 over L bars (least squares on the non-NaN VWAP-proxy points).
+        i0 = max(0, cur - L)
+        xs: list[float] = []
+        ys: list[float] = []
+        for i in range(i0, cur + 1):
+            v = vwap[i] if (0 <= i < len(vwap)) else None
+            if v is None:
+                continue
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            if fv == fv:  # not NaN
+                xs.append(float(i))
+                ys.append(fv)
+        if len(ys) < max(4, L // 2):
+            return "PASS", None, None, {"dipbuy_declined": "vwap_warmup"}
+        mx = sum(xs) / len(xs)
+        my = sum(ys) / len(ys)
+        cov = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+        var = sum((x - mx) ** 2 for x in xs)
+        if var <= 0 or (cov / var) <= 0:
+            return "PASS", None, None, {"dipbuy_declined": "vwap_not_rising"}
+        # (b) HH/HL intact: the dip's peak is a higher HIGH and the dip a higher LOW
+        #     than the prior structure window.
+        anchor = max(w_start, peak_idx - L)
+        if anchor < peak_idx:
+            prior_hi = float(hi[anchor:peak_idx].max())
+            prior_lo = float(lo[anchor:peak_idx].min())
+            if not (run_high > prior_hi and dip_low > prior_lo):
+                return "PASS", None, None, {"dipbuy_declined": "hh_hl_broken"}
+            # (c) FIRST pullback: the run INTO the peak held the 9-EMA band (no earlier dip).
+            for i in range(anchor, peak_idx):
+                e = ema9[i] if (0 <= i < len(ema9) and ema9[i] is not None) else None
+                if e is not None and float(lo[i]) < float(e) * (1.0 - ema_wick):
+                    return "PASS", None, None, {"dipbuy_declined": "not_first_pullback"}
+        # (d) Runway clear: no completed-bar high since the dip overhangs the target (run_high).
+        post_hi = float(hi[dip_idx + 1:cur + 1].max()) if cur > dip_idx else float(hi[cur])
+        if run_high < post_hi * (1.0 - tol):
+            return "PASS", None, None, {"dipbuy_declined": "overhead_resistance"}
+
+        # ── SIGNAL 2: volume DRY-UP on the dip, then volume RETURN on the trigger ──
+        vv = vol.values if hasattr(vol, "values") else None
+        if vv is None:
+            return "PASS", None, None, {"dipbuy_declined": "no_volume"}
+        P = max(2, dip_idx - peak_idx)
+        push_lo = max(w_start, peak_idx - P) + 1
+        dip_v = [float(vv[i]) for i in range(peak_idx + 1, dip_idx + 1) if i < len(vv)]
+        push_v = [float(vv[i]) for i in range(push_lo, peak_idx + 1) if i < len(vv)]
+        if len(dip_v) < 1 or len(push_v) < 2:
+            return "PASS", None, None, {"dipbuy_declined": "thin_volume_window"}
+        if any(x != x for x in dip_v + push_v):  # NaN-safe
+            return "PASS", None, None, {"dipbuy_declined": "volume_nan"}
+        dip_vm = sum(dip_v) / len(dip_v)
+        push_vm = sum(push_v) / len(push_v)
+        if push_vm <= 0:
+            return "PASS", None, None, {"dipbuy_declined": "zero_push_volume"}
+        if dip_vm > push_vm:  # heavy dip volume = sellers in control (the falling-knife signature)
+            return "PASS", None, None, {"dipbuy_declined": "no_dryup_heavy_dip"}
+        if dip_vm > dryup * push_vm:  # not enough dry-up
+            return "PASS", None, None, {"dipbuy_declined": "insufficient_dryup"}
+
+        # ── SIGNAL 3: first reversal new-high off the dip bar's OWN pullback high ──
+        # Window = the last K dip bars but NEVER reaching back to the peak (else the
+        # level becomes the recovery swing high = the late chase this branch replaces).
+        _pb_start = max(peak_idx + 1, dip_idx - K + 1)
+        pb_dip_high = float(hi[_pb_start:dip_idx + 1].max())
+        if pb_dip_high <= 0:
+            return "PASS", None, None, {"dipbuy_declined": "bad_level"}
+        # Stop = the dip-low ANCHOR only (the vol-floor layer widens it downstream).
+        buf = max(buf_bps / 10_000.0, 0.25 * a)
+        stop = dip_low * (1.0 - buf)
+        if not (0.0 < stop < pb_dip_high):
+            return "PASS", None, None, {"dipbuy_declined": "bad_stop"}
+        # Runway affordability: the STRUCTURAL reward:risk must clear the class floor
+        # (do NOT tighten the stop to manufacture R:R — PASS instead). Reward is to the
+        # MEASURED-MOVE continuation (peak + the dip's own depth), not the bare peak: a
+        # dip-buy targets NEW HIGHS, and using the peak alone makes a near-dip-high entry
+        # always sub-1:1 (it would never fire). Depth-independent: risk and reward both
+        # scale with the dip depth, so affordability does not change with how deep the
+        # buyable dip is (echoes the basis-independent sizing rule).
+        from .paper_execution import class_aware_reward_risk
+
+        rr_target = float(class_aware_reward_risk(symbol))
+        cont_target = run_high + (run_high - dip_low)
+        risk_runway = pb_dip_high - stop
+        reward_runway = cont_target - pb_dip_high
+        if risk_runway <= 0 or (reward_runway / risk_runway) < rr_target:
+            return "PASS", None, None, {"dipbuy_declined": "runway_rr_unaffordable"}
+
+        patch = {
+            "dipbuy_dip_low": round(dip_low, 6), "dipbuy_level": round(pb_dip_high, 6),
+            "dipbuy_dryup": round(dip_vm / push_vm, 3), "dipbuy_depth_pct": round(depth * 100.0, 2),
+            "dipbuy_runway_rr": round(reward_runway / risk_runway, 2),
+        }
+        cur_hi = float(hi[cur])
+        cur_cl = float(cl[cur])
+        cur_lo = float(lo[cur])
+        # Not broken on a completed bar yet → ARM a tick-watch (vol-return waived for
+        # the tick; the dipbuy tick thrust buffer is the compensating guard).
+        if cur_hi <= pb_dip_high:
+            return "ARM", pb_dip_high, stop, patch
+        # A completed bar broke through → require a STRONG reversal close + volume RETURN.
+        rng = cur_hi - cur_lo
+        strong_close = (rng <= 0.0) or (((cur_cl - cur_lo) / rng) >= 0.5)
+        vol_return = (cur < len(vv)) and (vv[cur] == vv[cur]) and (float(vv[cur]) >= dip_vm)
+        if cur_cl >= pb_dip_high * (1.0 - tol) and strong_close and vol_return:
+            return "FIRE", pb_dip_high, stop, patch
+        return "PASS", None, None, {"dipbuy_declined": "weak_completed_break"}
+    except Exception:
+        return "PASS", None, None, {"dipbuy_declined": "error"}
 
 
 def _evaluate_deep_reclaim(
@@ -249,6 +411,8 @@ def _evaluate_deep_reclaim(
     debug: dict[str, Any],
     bar_ts: Any = None,
     symbol: str | None = None,
+    vol: pd.Series | None = None,
+    vwap: list | None = None,
 ) -> tuple[bool, str, float | None, float | None, dict[str, Any]] | None:
     """Deep-retrace RECLAIM entry (the 2026-06-11 EDHL gap): after a retrace too
     deep for the flag checks, Ross does not walk away — he waits for price to
@@ -324,6 +488,29 @@ def _evaluate_deep_reclaim(
     depth = (run_high - dip_low) / run_high
     if depth > _collapse_cap(atr_pct):
         return None
+    # EARLY DIP-BUY (Ross "first reversal off the dip"): try the earlier NEAR-DIP
+    # entry BEFORE the recovery-high reclaim — fire/arm on the first candle to tick
+    # the dip bar's OWN pullback high, behind the 3-signal knife gate. On ANY decline
+    # ("PASS"/thin data) it falls through to the existing recovery-high logic
+    # BYTE-IDENTICALLY (debug untouched). docs/DESIGN/MOMENTUM_LANE.md
+    if vol is not None and vwap is not None:
+        _dv, _dlvl, _dstop, _dpatch = _dipbuy_signals_ok(
+            high, low, close, vol, vwap,
+            peak_idx=peak_idx, dip_idx=dip_idx, dip_low=dip_low, run_high=run_high,
+            depth=depth, cur=cur, w_start=w_start, atr_pct=atr_pct, tol=tol,
+            ema_wick=ema_wick, ema9=ema9, symbol=symbol,
+        )
+        if _dv in ("FIRE", "ARM"):
+            _ddebug = dict(debug)
+            _ddebug.update(_dpatch)
+            _ddebug["pattern"] = "deep_reclaim"
+            _ddebug["dipbuy"] = True
+            _ddebug["deep_reclaim_from"] = fallback_reason
+            _ddebug["pullback_high"] = float(_dlvl)
+            _ddebug["pullback_low"] = float(_dstop)
+            if _dv == "FIRE":
+                return True, "deep_reclaim_dipbuy", float(_dlvl), float(_dstop), _ddebug
+            return False, "waiting_for_dipbuy_break", None, None, _ddebug
     # Reclaim hold: the CURRENT streak of closes holding the live EMA-9 band since
     # the dip — judged at each bar's OWN EMA (the frozen base-bar EMA reference is
     # exactly the bug this path fixes). One band-losing close resets the streak;
@@ -435,6 +622,8 @@ def _evaluate_break_retest(
     retest_lookback_bars: int,
     atr_pct: float | None = None,
     symbol: str | None = None,
+    vol: pd.Series | None = None,
+    vwap: list | None = None,
 ) -> tuple[bool, str, float | None, float | None, dict[str, Any]]:
     """Break-AND-retest trigger (Ross's recent refinement: "I almost never buy the
     first break anymore — too many wick out and reverse. I wait for the break AND
@@ -485,7 +674,7 @@ def _evaluate_break_retest(
         window_bars=20 + int(max_pullback_bars) + look_bars,
         ema_wick=ema_wick, tol=tol, atr_pct=atr_pct, debug=debug,
         bar_ts=(high.index[cur] if hasattr(high, "index") and len(high.index) > cur else None),
-        symbol=symbol,
+        symbol=symbol, vol=vol, vwap=vwap,
     )
 
     retrace = (win_high - base_low) / impulse_range
@@ -590,6 +779,25 @@ def _premarket_tickbreak_confirmed(
         return True  # any error -> fail-open (never block an entry on a bug)
 
 
+def _dipbuy_tick_thrust_ok(*, live_price: float, level: float, atr_pct: float | None) -> bool:
+    """Thrust buffer for a DIP-BUY tick fire. The dip bar's OWN high is the tightest
+    level the lane ever arms, so — unlike the premarket guard (which is a no-op in
+    RTH+crypto) — a 1-tick poke must clear an ATR/floor buffer in EVERY session, or it
+    is a dead-cat entry. Reuses the premarket floor_bps + atr_mult knobs. Fail-OPEN
+    (True) on a missing volatility read or any error."""
+    try:
+        from ....config import settings
+
+        if atr_pct is None:
+            return True
+        mult = float(getattr(settings, "chili_momentum_premarket_tickbreak_atr_mult", 0.10) or 0.10)
+        floor_bps = float(getattr(settings, "chili_momentum_premarket_tickbreak_floor_bps", 100.0) or 0.0)
+        tol = max(max(0.0, float(atr_pct)) * mult, max(0.0, floor_bps) / 10_000.0)
+        return float(live_price) >= (float(level) + tol * float(level))
+    except Exception:
+        return True
+
+
 def pullback_break_confirmation(
     df: pd.DataFrame,
     *,
@@ -677,6 +885,8 @@ def pullback_break_confirmation(
             retest_lookback_bars=retest_lookback_bars,
             atr_pct=atr_pct,
             symbol=symbol,
+            vol=vol,
+            vwap=vwap,
         )
     else:
         ok_t, reason_t, pb_high, pb_low, debug = _evaluate_raw_break(
@@ -728,16 +938,25 @@ def pullback_break_confirmation(
         # Premarket false-pop guard (CUPR): a thin-tape wick poking 1¢ through the
         # level is a shake-out entry (4.07 on a failed pop → −15% stop → THEN +92%).
         # In premarket require an ATR thrust buffer; RTH + crypto are unchanged.
-        if _premarket_tickbreak_confirmed(
+        _confirmed = _premarket_tickbreak_confirmed(
             live_price=float(live_price), level=float(debug["pullback_high"]),
             atr_pct=atr_pct, symbol=symbol, now=now,
+        )
+        _unconf = "premarket_tickbreak_unconfirmed"
+        # DIP-BUY arms on the dip bar's OWN high — the tightest level the lane arms.
+        # Require an ATR/floor thrust buffer in EVERY session (RTH + crypto too, not
+        # just premarket) so a 1-tick poke of that tight level is not a dead-cat entry.
+        if _confirmed and reason_t == "waiting_for_dipbuy_break" and not _dipbuy_tick_thrust_ok(
+            live_price=float(live_price), level=float(debug["pullback_high"]), atr_pct=atr_pct,
         ):
+            _confirmed, _unconf = False, "dipbuy_tickbreak_unconfirmed"
+        if _confirmed:
             ok_t, _tick_break = True, True
             debug["tick_break"] = True
             debug["live_price"] = float(live_price)
         else:
-            debug["premarket_tickbreak_unconfirmed"] = True
-            reason_t = "premarket_tickbreak_unconfirmed"
+            debug[_unconf] = True
+            reason_t = _unconf
 
     if not ok_t:
         return False, reason_t, debug
@@ -847,6 +1066,10 @@ def pullback_break_confirmation(
                 return False, "extended_verticality", debug
 
     if _deep_reclaim:
+        if debug.get("dipbuy"):
+            # observable/A/B-able dip-buy reason (else it would be swallowed as plain
+            # deep_reclaim_ok and the 06/12 A/B could not attribute it)
+            return True, ("deep_reclaim_dipbuy_tick_ok" if _tick_break else "deep_reclaim_dipbuy_ok"), debug
         return True, ("deep_reclaim_tick_ok" if _tick_break else "deep_reclaim_ok"), debug
     return True, ("pullback_break_tick_ok" if _tick_break else "pullback_break_ok"), debug
 

@@ -390,3 +390,50 @@ so the venue routes them instead of rejecting: **Alpaca** → limit + `DAY` tif 
 `market_hours_override="all_day_hours"` + `extended_hours_override=True`; **Coinbase**
 → ignored (24/7). Threaded through the `VenueAdapter.place_limit_order_gtc` contract
 (`extended_hours: bool = False`). Tests: `tests/test_momentum_market_session.py`.
+
+## 11. Deep-reclaim DIP-BUY (Ross "first reversal off the dip", 2026-06-14)
+
+**The gap.** `_evaluate_deep_reclaim` (§ the EDHL fix) only fired on the **recovery
+swing-high break** — price had to reclaim the 9-EMA, hold ≥2 bars, *then* break the
+post-dip recovery high. That enters **well off the dip low = a chase** and never fits a
+**vertical** reclaim (one bar from the dip to new highs). Ross instead **buys NEAR the
+dip on the FIRST candle to tick its own pullback-bar high**, with a stop just under the
+dip low. The CUPR 06/12 lesson: a real high-volume gapper shook out a structural stop,
+then ran +92% on a vertical reclaim the recovery-high path (correctly) would not chase —
+the money was in **buying the dip**, not the confirmed reclaim.
+
+**The fix (additive, fail-open-to-existing).** Inside `_evaluate_deep_reclaim`, AFTER
+the collapse guard (`depth ≤ _collapse_cap`, so >25% collapses stay rejected) and
+BEFORE the recovery-hold loop, try the pure helper `_dipbuy_signals_ok(...)` →
+`FIRE | ARM | PASS`. On `FIRE`/`ARM` it returns `deep_reclaim_dipbuy[_tick]_ok` /
+arms `waiting_for_dipbuy_break` at the **dip bar's own pullback high** (NOT the recovery
+high); on `PASS` (any decline / thin data / unaffordable runway) it falls through to the
+existing recovery-high reclaim **byte-identically**. The 3-signal AND gate (web-research,
+adversarially red-teamed) separates a buyable dip from a falling knife:
+
+1. **Rising trend + structure** — VWAP-proxy slope > 0 over `vwap_lookback` bars (the
+   20-bar rolling proxy is a *trend-MA* filter, not anchored VWAP), intact higher-high /
+   higher-low, the run into the peak held the 9-EMA (first pullback), and clear runway.
+2. **Volume dry-up → return** — dip-bar mean volume < `dryup_ratio` × the prior
+   trend-push mean (sellers absent), then the trigger bar's volume returns. Heavy dip
+   volume = the falling-knife signature → reject.
+3. **First reversal new-high** — a strong-close completed bar that ticks the dip bar's
+   own high back (FIRE), else arm a tick-watch (the tick path adds a thrust buffer in
+   **every** session via `_dipbuy_tick_thrust_ok`, since the dip-bar high is the tightest
+   level the lane arms).
+
+**Stop / sizing.** The gate emits ONLY the **dip-low anchor** (`dip_low × (1 − buf)`,
+`buf = max(stop_buffer_bps, 0.25·ATR%)`); the authoritative `structural_or_vol_floored_atr_pct`
+layer widens it to the vol floor and caps it (INVARIANT A lives there, identical for
+live/paper/replay). The **runway affordability** check uses a **measured-move
+continuation target** (`run_high + (run_high − dip_low)`) — a dip-buy targets new highs,
+and the bare peak would make any near-dip-high entry sub-1:1; it is **depth-independent**
+(risk and reward both scale with the dip depth). If even the measured move is < the
+class R:R floor → PASS (never tighten the stop to manufacture R:R).
+
+**Knobs** (`config.py`, default ON / one adaptive base + Ross-discipline floors):
+`chili_momentum_deep_reclaim_dipbuy_enabled` (kill-switch → byte-identical to today),
+`…_vwap_lookback` (12, THE base), `…_dryup_ratio` (0.85), `…_pullback_bars` (3),
+`…_stop_buffer_bps` (10). Class-aware (crypto inherits the 24/7 reclaim window + crypto
+R:R); only helps the **buyable-depth class** (≤25% dips). Tests:
+`tests/test_dipbuy_deep_reclaim.py`.
