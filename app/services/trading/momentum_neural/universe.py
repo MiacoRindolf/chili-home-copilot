@@ -147,6 +147,38 @@ def _pos_in_range(s: dict, price: float | None) -> float:
     return max(0.0, min(1.0, (price - lo) / (hi - lo)))
 
 
+def _premarket_change_pct(s: dict) -> float | None:
+    """Premarket-honest change% when the snapshot's vendor ``todaysChangePerc`` is
+    null. The vendor field is valid premarket for ACTIVELY-printing names, but the
+    universe builder drops any row where it is null — which silently starves the
+    premarket universe (the day's gappers surface at ~09:40 ET instead of ~04:00).
+
+    Mirrors the PROVEN ``nbbo_tape`` fallback (nbbo_tape.py:92-95): base = today's
+    open, else yesterday's close; chg = (live price − base)/base·100. So the
+    universe surfaces exactly the premarket movers the NBBO tape already grades.
+    Fail-CLOSED: no live price or no usable base ⇒ ``None`` ⇒ the ticker is still
+    dropped (no invented mover from a no-print row). Behind a default-ON kill-switch
+    so it is trivially reversible; RTH is byte-unchanged (vendor field is populated
+    RTH, so this is never reached).
+    """
+    try:
+        from ....config import settings
+
+        if not bool(getattr(settings, "chili_momentum_premarket_change_fallback_enabled", True)):
+            return None
+    except Exception:
+        pass
+    price = _snapshot_price(s)
+    if price is None or price <= 0:
+        return None
+    day = s.get("day") or {}
+    prev = s.get("prevDay") or {}
+    base = _f(day.get("o")) or _f(prev.get("c"))
+    if base is None or base <= 0:
+        return None
+    return (price - base) / base * 100.0
+
+
 def build_equity_universe(
     profile: UniverseProfile = EQUITY_ROSS_SMALLCAP,
     *,
@@ -211,6 +243,10 @@ def build_equity_universe(
                 continue
 
             chg = _f(s.get("todaysChangePerc"))
+            if chg is None:
+                # premarket fallback (today-open → prev-close vs live print) — proven
+                # in nbbo_tape; surfaces already-printing gappers by ~04:00 ET not 09:40
+                chg = _premarket_change_pct(s)
             if chg is None:
                 continue
             # Long bias: a positive floor keeps only names moving UP into the day
