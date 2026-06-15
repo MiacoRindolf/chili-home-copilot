@@ -4406,6 +4406,7 @@ def _run_equity_viability_refresh_job():
     fresh as crypto (both at ~half the gate). Light: just the equity momentum-continuation
     + premarket-gap scans (the same movers the sweep finds), bridged. docs/DESIGN/MOMENTUM_LANE.md
     """
+    from ..config import settings
     from ..db import SessionLocal
     from .trading.intraday_signals import scan_momentum_continuation, scan_premarket_gaps
     from .trading.momentum_neural.universe import EQUITY_ROSS_SMALLCAP, build_equity_universe
@@ -4463,6 +4464,22 @@ def _run_equity_viability_refresh_job():
     # unexpectedly"), so the bridge write failed and equities went stale. So: scan on a
     # short-lived session that is RELEASED before the write, then bridge on a FRESH
     # connection (the scan's may already be dead). docs/DESIGN/MOMENTUM_LANE.md
+    # Premarket-gap output cap: the input ``scan_tickers`` is ALREADY the screened
+    # Ross pool, so cap the gap scan to that pool's size — every screened gapper
+    # reaches the Ross percentile re-rank (which makes the real selection) instead
+    # of the fixed top-15-by-raw-gap-magnitude truncating fresh-catalyst mid-gap
+    # runners (a +7% low-float 8AM-catalyst name) out behind already-extended +200%
+    # gappers, leaving them with no fresh viability score → never armable. Adaptive
+    # (no new magic number); kill-switch default-ON; None ⇒ historical fixed cap.
+    # docs/DESIGN/MOMENTUM_LANE.md
+    _pm_gap_cap = (
+        len(scan_tickers)
+        if (
+            scan_tickers
+            and bool(getattr(settings, "chili_momentum_premarket_gap_full_universe_enabled", True))
+        )
+        else None
+    )
     sweep: dict[str, Any] = {"momentum_signals": [], "premarket_gaps": []}
     scan_db = SessionLocal()
     try:
@@ -4473,7 +4490,9 @@ def _run_equity_viability_refresh_job():
         except Exception:
             sweep["momentum_signals"] = []
         try:
-            sweep["premarket_gaps"] = list(scan_premarket_gaps(tickers=scan_tickers) or [])
+            sweep["premarket_gaps"] = list(
+                scan_premarket_gaps(tickers=scan_tickers, max_signals=_pm_gap_cap) or []
+            )
         except Exception:
             sweep["premarket_gaps"] = []
     finally:
