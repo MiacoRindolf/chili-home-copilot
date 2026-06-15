@@ -3079,6 +3079,25 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ORDER_NOTIONAL_GUARD_BPS"),
         description="Extra bps cushion applied to live market-entry ask when sizing against max notional; 0 disables.",
     )
+    # ── Entry fill-rate (the equity 0-fill blocker: a marketable limit was cancelled
+    # the instant the bid pipped one tick past it, while it was at the front of the book
+    # and about to fill → orphaned). All three default to TODAY's exact behavior (parity
+    # kill-switches); the non-zero values are set by the paper A/B, not by guess.
+    chili_momentum_entry_chase_ceiling_bps: float = Field(
+        default=0.0, ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_CHASE_CEILING_BPS"),
+        description="Bid may drift this many bps above the buy limit before the resting order is abandoned as left-behind (vol-widened by chase_move_ratio, hard-capped at the live spread cap). The resting limit is TOLERATED, never re-pegged up. 0 = today's cancel-on-first-tick (parity).",
+    )
+    chili_momentum_entry_chase_move_ratio: float = Field(
+        default=0.25, ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_CHASE_MOVE_RATIO"),
+        description="Fraction of the name's expected per-bar move added to the chase ceiling (adaptive widening; inert while chase_ceiling_bps=0).",
+    )
+    chili_momentum_entry_guard_move_ratio: float = Field(
+        default=0.0, ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_GUARD_MOVE_RATIO"),
+        description="Fraction of expected move added to the marketable-limit guard premium over the ask (born-marketable on volatile names, capped at the spread cap). 0 = the fixed 25bps notional guard (parity).",
+    )
     chili_momentum_risk_max_position_size_base: float = Field(
         default=1_000_000.0,
         ge=0.0,
