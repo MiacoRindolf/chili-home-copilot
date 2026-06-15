@@ -977,6 +977,20 @@ def is_broker_daily_loss_blocked(family: str) -> bool:
         return fam in _per_broker_daily_loss
 
 
+def get_broker_daily_loss_block(family: str) -> dict[str, Any] | None:
+    """The sticky per-broker block entry for THIS broker, or None when not blocked.
+
+    A cheap, read-only view of the per-broker registry (reason / set_at / realized /
+    limit / et_date) so callers (e.g. the lane-health freeze alert) can render WHY a
+    broker is frozen and HOW LONG without reaching into private module state.
+    """
+    clear_stale_broker_daily_loss_blocks()
+    fam = _normalize_real_family(family)
+    with _per_broker_lock:
+        blk = _per_broker_daily_loss.get(fam)
+        return dict(blk) if blk else None
+
+
 def broker_daily_loss_breached(
     db: Session, family: str, *, user_id: int | None = None
 ) -> tuple[bool, dict[str, Any]]:

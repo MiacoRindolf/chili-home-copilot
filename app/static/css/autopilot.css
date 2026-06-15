@@ -1211,6 +1211,41 @@
 }
 
 /* ── P&L command band + per-symbol ledger (2026-06-12 money-first redesign) ── */
+/* Lane-frozen alert: a tripped safety breaker silently empties the lane (the 06-15
+   ~8h frozen-lane incident). When frozen this is the LOUDEST thing on the page —
+   full-width, danger-red, pulsing — so it is impossible to miss on landing. */
+.ap-lane-frozen {
+  /* Normal flow above the sticky band (two sticky siblings at the same offset would
+     overlap when pinned) — full-width and loud on landing; the critical log + audit
+     row are the durable signals when scrolled away. */
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 18px;
+  margin-bottom: var(--space-3);
+  border: 2px solid var(--color-danger, #ef4444);
+  border-radius: var(--radius);
+  background: linear-gradient(90deg, rgba(127, 29, 29, .97), rgba(60, 12, 12, .97));
+  color: #fff;
+  box-shadow: 0 0 0 1px rgba(239,68,68,.35), var(--shadow-md);
+  animation: ap-frozen-pulse 1.4s ease-in-out infinite;
+}
+.ap-lane-frozen[hidden] { display: none; }
+.ap-lane-frozen__icon { font-size: 28px; line-height: 1; flex: 0 0 auto; }
+.ap-lane-frozen__text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.ap-lane-frozen__headline {
+  font-size: var(--text-base); font-weight: 800; letter-spacing: .02em;
+  text-transform: uppercase; color: #fff;
+}
+.ap-lane-frozen__detail { font-size: var(--text-xs); color: #fecaca; line-height: 1.4; }
+@keyframes ap-frozen-pulse {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(239,68,68,.35), var(--shadow-md); }
+  50% { box-shadow: 0 0 0 4px rgba(239,68,68,.55), var(--shadow-md); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ap-lane-frozen { animation: none; }
+}
+
 .ap-pnl-band {
   position: sticky;
   top: var(--ap-header-h, 64px);

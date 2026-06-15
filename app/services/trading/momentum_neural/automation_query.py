@@ -2172,9 +2172,21 @@ def automation_pnl_rollup(db: Session, *, user_id: int) -> dict[str, Any]:
             )
         ]
 
+    # Lane-health: surface a FROZEN safety-breaker state in the cockpit's primary
+    # surface (the sticky P&L band) so a silently-frozen lane is impossible to miss —
+    # the 06-15 incident sat unnoticed ~8h. Read-only; fail-open (never break the P&L).
+    lane_health: dict[str, Any] | None = None
+    try:
+        from .lane_health import evaluate_lane_health
+
+        lane_health = evaluate_lane_health(db, user_id=user_id)
+    except Exception:
+        lane_health = None
+
     return {
         "as_of_utc": datetime.utcnow().isoformat() + "Z",
         "as_of_et": as_of_et,
         "et_day_start_utc": start_utc.isoformat() + "Z",
         "buckets": buckets,
+        "lane_health": lane_health,
     }
