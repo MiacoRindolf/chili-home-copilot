@@ -58,7 +58,11 @@ from .paper_execution import (
 )
 from .pipeline import _live_ofi_microprice, read_ladder_distribution
 from .risk_policy import adaptive_max_spread_bps
-from .ross_momentum import ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED, score_universe
+from .ross_momentum import (
+    ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED,
+    intraday_impulse_freshness,
+    score_universe,
+)
 from .strategy_params import family_default_params
 
 logger = logging.getLogger(__name__)
@@ -96,6 +100,16 @@ PX_MIN, PX_MAX = 1.0, 20.0
 MIN_DVOL_USD = 1_000_000.0
 MIN_ABS_CHG = 5.0
 RTH_START_MIN = 13 * 60 + 30  # UTC minutes (09:30 ET)
+# Selection->entry alignment (replay parity with live auto_arm). The live
+# auto_arm reuses the entry gate's OWN shallow/deep boundary as its "fresh / faded"
+# cutoff (auto_arm._freshness_retracement_threshold) so the freshness filter and the
+# pullback gate share ONE self-consistent definition of "shallow" — mirror it here.
+FRESHNESS_RETRACEMENT_THRESHOLD = float(
+    getattr(settings, "chili_momentum_pullback_retracement_threshold", 0.50) or 0.50
+)
+REPLAY_FRESHNESS_FILTER = bool(
+    getattr(settings, "chili_momentum_replay_freshness_filter_enabled", True)
+)
 
 REPLAY_RESULTS_DIR = os.environ.get("CHILI_REPLAY_RESULTS_DIR", "/app/data/replays")
 
@@ -238,6 +252,27 @@ def _expected_move_bps_15m(upto: pd.DataFrame, H: str, L: str, C: str) -> float 
         return em if em > 0 else None
     except Exception:
         return None
+
+
+def freshness_arm_decision(upto, *, firing: bool) -> bool:
+    """The live auto_arm fresh-impulse selection rule, as a pure function over a
+    completed-bars frame — shared by the replay arming gate so it is unit-testable
+    and provably equals the live discipline:
+
+      (1) a FIRING break is always a valid arm (live: 'a name whose break is FIRING
+          now is always a valid entry');
+      (2) otherwise arm only a name POSITIVELY known to be in a fresh up-impulse
+          (``intraday_impulse_freshness().is_fresh``) — drop FADED 24h leaders;
+      (3) UNKNOWN freshness (bad/insufficient bars -> is_fresh False) is NOT armed on
+          freshness alone (live ``_known_fresh`` treats unknown as not-fresh).
+
+    Uses the SAME helper + threshold the live auto_arm uses (parity by construction).
+    """
+    if firing:
+        return True
+    fr = intraday_impulse_freshness(
+        upto, retracement_threshold=FRESHNESS_RETRACEMENT_THRESHOLD)
+    return bool(getattr(fr, "is_fresh", False))
 
 
 def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -> dict:
@@ -402,6 +437,63 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             return []
         scored = score_universe(sigs, weights=ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED)
         return [r.symbol for r in sorted(scored.values(), key=lambda r: r.rank)]
+
+    def _completed_upto(s: str, now):
+        """The completed-bars frame the entry trigger sees at ``now`` (no lookahead:
+        a bar indexed by START closes at +ENTRY_BAR_MIN) — the SAME slice the entry
+        loop builds, so freshness and the trigger read one frame."""
+        df, _c = day_frame(s)
+        if df is None:
+            return None
+        upto = df[df.index <= now - pd.Timedelta(minutes=ENTRY_BAR_MIN)]
+        return upto if len(upto) >= 12 else None
+
+    def _trigger_firing_now(s: str, upto) -> bool:
+        """Is the generic pullback break firing on the completed bars at ``now``?
+        Reuses the SAME per-(symbol, last-bar) cache the entry loop uses so the gate
+        and the entry decision agree and the 1-min grid doesn't multiply trigger cost.
+        Bar-level only (no live_price / no tick-break) — a firing bar is always a
+        valid arm, mirroring live auto_arm's 'a name whose break is FIRING is always
+        a valid entry' rule."""
+        try:
+            _bar_key = (s, str(upto.index[-1]))
+            if _bar_key in trigger_cache:
+                ok = trigger_cache[_bar_key][0]
+            else:
+                res = momentum_pullback_trigger(upto, entry_interval=ENTRY_INTERVAL)
+                trigger_cache[_bar_key] = res
+                ok = res[0]
+            return bool(ok)
+        except Exception:
+            return False
+
+    def _arm_freshness_ok(s: str, now) -> bool:
+        """SELECTION->ENTRY ALIGNMENT — replay parity with the live auto_arm's
+        fresh-impulse discipline (auto_arm.run_auto_arm_pass: _require_fresh_impulse /
+        _candidate_freshness / _known_fresh). The live lane does NOT pin a watch slot
+        on a FADED 24h leader; it watches the freshest in-impulse name and lets a
+        FIRING break arm anything. Mirror that here so the replay arms the same set
+        live would:
+          (1) trigger FIRING now -> always armable (a firing break is always valid);
+          (2) otherwise arm only a name we POSITIVELY know is in a fresh up-impulse
+              (intraday_impulse_freshness.is_fresh) — drop faded names;
+          (3) UNKNOWN freshness (no/insufficient bars) -> NOT armed proactively, same
+              as live (_known_fresh treats None as not-fresh); only a firing break
+              arms an unknown.
+        Computed completed-bars-only from the data the replay HAS at ``now`` (no
+        lookahead). Reuses the SAME ``intraday_impulse_freshness`` helper the live
+        auto_arm calls (parity by construction). Disable via the kill-switch knob to
+        restore viability-rank-only arming."""
+        if not REPLAY_FRESHNESS_FILTER:
+            return True
+        upto = _completed_upto(s, now)
+        if upto is None:
+            # No completed-bars frame yet — the entry loop will skip it anyway
+            # (len(upto) < 12), so let it arm (a watch with no bars is inert and
+            # the firing/fresh decision is made the moment bars exist). This keeps
+            # the gate from depending on the OHLCV feed's per-name lookback depth.
+            return True
+        return freshness_arm_decision(upto, firing=_trigger_firing_now(s, upto))
 
     def close_trade(s: str, p: dict, exit_px: float, why: str, when=None) -> None:
         pnl = (exit_px - p["entry"]) * p["qty"]
@@ -591,6 +683,13 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             pos = {s: i for i, s in enumerate(ranked)}
             for s in ranked:
                 if s in armed or s in open_pos:
+                    continue
+                # SELECTION->ENTRY ALIGNMENT: drop FADED non-firing names from the
+                # watch slot, exactly like the live auto_arm (parity). A faded 24h
+                # leader pinned a slot in the old replay (e.g. SMSI armed 13:56 at
+                # position 0.005 in its range) and inflated the arm count vs live.
+                if not _arm_freshness_ok(s, now):
+                    _tr(s, "arm_skip:faded_impulse", now)
                     continue
                 if len(armed) < MAX_SLOTS:
                     armed[s] = {"since": now}
@@ -806,12 +905,16 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
     ]
 
     result["decision_trace"] = trace
-    if armed_source == "live":
-        try:
-            result["divergence"] = _build_divergence(date, trace, trades)
-        except Exception:
-            logger.warning("[replay_v2] divergence build failed", exc_info=True)
-            result["divergence"] = []
+    # Divergence vs LIVE actuals is meaningful for BOTH armed sources: armed_source
+    # ="live" replays the real arm spans (the faithful reference); armed_source="asof"
+    # exercises the engine's OWN selection, so its divergence is the metric that proves
+    # the as-of selection tracks live (e.g. fewer arming_timing / replay-only rows once
+    # the freshness filter drops the faded arms live never made).
+    try:
+        result["divergence"] = _build_divergence(date, trace, trades)
+    except Exception:
+        logger.warning("[replay_v2] divergence build failed", exc_info=True)
+        result["divergence"] = []
 
     result["trades"] = sorted(trades, key=lambda z: z["t"])
     result["total_usd"] = round(state["cum"], 0)
