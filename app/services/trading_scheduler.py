@@ -5881,6 +5881,46 @@ def start_scheduler():
                 next_run_time=datetime.now() + timedelta(seconds=90),
             )
 
+            # Phase 1 (10s): LOG-ONLY 10-second candle pattern layer ->
+            # trading_tenbeat_candle_log. Aggregates the per-tick mid into 10s candles
+            # + runs ABCD / flat-top SHAPE detectors + leak-free forward-returns. NO
+            # decision wiring — calibration data only (crypto-first; equity dark).
+            if bool(getattr(_cvr_settings, "chili_tenbeat_candle_enabled", True)):
+                from .trading.fast_path.tenbeat_candle_log import (
+                    run_tenbeat_candle_backfill_job,
+                    run_tenbeat_candle_drain_job,
+                    run_tenbeat_candle_prune_job,
+                )
+
+                _tb_secs = max(
+                    10.0, float(getattr(_cvr_settings, "chili_tenbeat_candle_drain_seconds", 10) or 10)
+                )
+                _scheduler.add_job(
+                    run_tenbeat_candle_drain_job,
+                    trigger=IntervalTrigger(seconds=_tb_secs),
+                    id="tenbeat_candle_drain",
+                    name="10s-candle pattern drain (LOG-ONLY)",
+                    replace_existing=True, max_instances=1, coalesce=True,
+                    misfire_grace_time=5,
+                    next_run_time=datetime.now() + timedelta(seconds=45),
+                )
+                _scheduler.add_job(
+                    run_tenbeat_candle_backfill_job,
+                    trigger=IntervalTrigger(minutes=10),
+                    id="tenbeat_candle_backfill",
+                    name="10s-candle forward-return backfill (LOG-ONLY)",
+                    replace_existing=True, max_instances=1, coalesce=True,
+                    next_run_time=datetime.now() + timedelta(seconds=120),
+                )
+                _scheduler.add_job(
+                    run_tenbeat_candle_prune_job,
+                    trigger=IntervalTrigger(hours=6),
+                    id="tenbeat_candle_prune",
+                    name="10s-candle log prune (partition-drop retention)",
+                    replace_existing=True, max_instances=1, coalesce=True,
+                    next_run_time=datetime.now() + timedelta(seconds=150),
+                )
+
             _scheduler.add_job(
                 _run_fast_path_universe_rotator_job,
                 trigger=IntervalTrigger(minutes=60),

@@ -20723,6 +20723,76 @@ def _migration_306_trading_microstructure_log(conn) -> None:
     )
 
 
+def _migration_307_trading_tenbeat_candle_log(conn) -> None:
+    """LOG-ONLY 10-second candle pattern layer. Touches NO decision path.
+
+    Aggregates the per-tick mid into 10s candles and persists ABCD / flat-top SHAPE
+    detections + forward-return labels, so a later calibration can learn — on a FRESH
+    window of the CURRENT system — whether these Ross micro-patterns predict, BEFORE
+    any is wired (the −1.58pp sub-bar-SPEED lesson: never wire an uncalibrated signal;
+    pattern-SHAPE is a different thing and the old baseline is stale). Mirrors mig306.
+    ``observed_at`` is naive TIMESTAMP (UTC) to match fast_orderbook; range-partitioned
+    so retention is partition-drop. Idempotent. Crypto-first (equity stays dark until a
+    fast equity mid source lands — the min_ticks guard fails closed on 60s data).
+    """
+    conn.execute(text(
+        "CREATE TABLE IF NOT EXISTS trading_tenbeat_candle_log ("
+        " id BIGSERIAL,"
+        " symbol VARCHAR(32) NOT NULL,"
+        " asset_class VARCHAR(8) NOT NULL,"
+        " observed_at TIMESTAMP NOT NULL,"           # naive UTC, 10s bar close (event time)
+        " ingest_at TIMESTAMP,"
+        " source VARCHAR(24) NOT NULL,"
+        " eligibility_state VARCHAR(16),"
+        " viability_score DOUBLE PRECISION,"
+        " open_price DOUBLE PRECISION,"
+        " high_price DOUBLE PRECISION,"
+        " low_price DOUBLE PRECISION,"
+        " close_price DOUBLE PRECISION,"
+        " candle_volume DOUBLE PRECISION,"
+        " tick_count INTEGER,"
+        " atr_pct_10s DOUBLE PRECISION,"
+        " candle_shape VARCHAR(16),"
+        " abcd_pattern BOOLEAN DEFAULT FALSE,"
+        " abcd_armed BOOLEAN DEFAULT FALSE,"
+        " abcd_score DOUBLE PRECISION,"
+        " abcd_metadata JSONB,"
+        " flatop_pattern BOOLEAN DEFAULT FALSE,"
+        " flatop_score DOUBLE PRECISION,"
+        " flatop_metadata JSONB,"
+        " entry_level DOUBLE PRECISION,"
+        " stop_level DOUBLE PRECISION,"
+        " fwd_return_30s DOUBLE PRECISION,"
+        " fwd_return_60s DOUBLE PRECISION,"
+        " fwd_return_5m DOUBLE PRECISION,"
+        " fwd_max_excursion_5m_bps DOUBLE PRECISION,"
+        " fwd_label_at TIMESTAMP,"
+        " PRIMARY KEY (id, observed_at)"
+        ") PARTITION BY RANGE (observed_at)"
+    ))
+    conn.execute(text(
+        "CREATE TABLE IF NOT EXISTS trading_tenbeat_candle_log_default "
+        "PARTITION OF trading_tenbeat_candle_log DEFAULT"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_tenbeat_symbol_observed "
+        "ON trading_tenbeat_candle_log (symbol, observed_at DESC)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_tenbeat_observed "
+        "ON trading_tenbeat_candle_log (observed_at)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_tenbeat_unlabeled "
+        "ON trading_tenbeat_candle_log (observed_at) WHERE fwd_label_at IS NULL"
+    ))
+    conn.commit()
+    logger.info(
+        "[mig307] ensured trading_tenbeat_candle_log (partitioned, naive-UTC) — "
+        "LOG-ONLY 10s-candle pattern layer (no decision path)"
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -21097,6 +21167,8 @@ MIGRATIONS = [
      _migration_305_code_dispatch_plan_augmented_routing),
     ("306_trading_microstructure_log",
      _migration_306_trading_microstructure_log),
+    ("307_trading_tenbeat_candle_log",
+     _migration_307_trading_tenbeat_candle_log),
 ]
 
 
