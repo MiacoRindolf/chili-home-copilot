@@ -2226,6 +2226,25 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_CHANGE_FALLBACK_ENABLED"),
         description="Premarket: when the snapshot's vendor todaysChangePerc is null, derive change% from today's open (else prevDay close) → live premarket price, so already-printing gappers enter the universe/viability board by ~04:00 ET (warm by the derived 03:00-03:45 prep window) instead of ~09:40 ET. Mirrors the proven nbbo_tape fallback; fail-closed (no usable base → dropped). RTH byte-unchanged (vendor field populated RTH → never consulted). 0 = old behavior.",
     )
+    # ── Daily-chart context (the multi-timeframe layer Ross STARTS with) ─────────
+    # Adds a 5th SELECTION pillar (daily_structure, 10% weight) from
+    # daily_levels.compute_daily_context — break ABOVE a major daily level + room to
+    # the next level + a SOFT broader-trend minority input. It RE-RANKS the candidate
+    # pool toward clean daily breakouts; it can NEVER block a fill (the entry gate is
+    # untouched). A news-gap spike breaking a level scores HIGH (the CUPR guarantee).
+    # OFF ⇒ the selection is byte-identical (the liquidity-biased weights). Equities
+    # only; the daily fetch is cached (600s) on the viability-refresh pass.
+    chili_momentum_daily_context_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_CONTEXT_ENABLED"),
+        description="Enable the daily-chart selection tilt (5th pillar daily_structure, 10% weight; equities). RE-RANKS toward clean daily breakouts, never blocks a fill. 0 = selection byte-identical (liquidity-biased weights).",
+    )
+    chili_momentum_daily_lookback_days: int = Field(
+        default=20,
+        ge=3,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_LOOKBACK_DAYS"),
+        description="The ONE base structural knob for the daily-context layer: the swing-high/low window + daily-ATR period (days). Everything else derives from the daily ATR (equity-relative).",
+    )
     # ── Halt awareness (Ross low-floats halt constantly: LULD circuit breakers) ──
     # A trading HALT is observable as a SUSTAINED quote freeze: the stale_bbo gate
     # already blocks single stale ticks; this many CONSECUTIVE stale-quote ticks on

@@ -98,6 +98,28 @@ def test_structure_always_in_unit_range():
                 assert 0.0 <= c.daily_structure_pct <= 1.0
 
 
+def test_selection_pillar_parity_and_tilt():
+    """The 5th selection pillar: INERT under the deployed liquidity-biased weights
+    (daily_structure ignored → byte-identical selection), ACTIVE under the daily-
+    context weights (a high-daily-structure name ranks above a low one)."""
+    from app.services.trading.momentum_neural.ross_momentum import (
+        ROSS_PILLAR_WEIGHTS_DAILY_CONTEXT,
+        ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED,
+        score_universe,
+    )
+    sigs = {
+        "A": {"vol_ratio": 5, "gap_pct": 30, "dollar_volume": 5e6, "daily_structure_pct": 0.9},
+        "B": {"vol_ratio": 5, "gap_pct": 30, "dollar_volume": 5e6, "daily_structure_pct": 0.1},
+    }
+    # PARITY: with the liquidity-biased weights (no daily_structure key), A and B are
+    # identical on every other pillar → identical score (daily_structure ignored).
+    lb = score_universe(sigs, weights=ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED)
+    assert lb["A"].score == lb["B"].score
+    # TILT: with the daily-context weights, the high-daily-structure name ranks above.
+    dc = score_universe(sigs, weights=ROSS_PILLAR_WEIGHTS_DAILY_CONTEXT)
+    assert dc["A"].score > dc["B"].score
+
+
 def test_levels_are_populated_on_ok():
     df = _daily(np.linspace(3.0, 6.0, 24))
     ctx = compute_daily_context(df, lookback=20, price=6.5)
