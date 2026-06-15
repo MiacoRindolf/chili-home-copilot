@@ -2211,6 +2211,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_TICKBREAK_ATR_MULT"),
         description="The single adaptive base knob for the premarket tick-break buffer: required clearance above the level = atr_pct · this · level (equity-relative; auto-scales as ATR thickens into RTH).",
     )
+    chili_momentum_premarket_tickbreak_floor_bps: float = Field(
+        default=100.0, ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_TICKBREAK_FLOOR_BPS"),
+        description="Minimum premarket tick-break clearance (bps over the level) regardless of ATR. At the START of a premarket explosion the historical-bar ATR is LOW, so the ATR buffer alone is too thin to reject the false-pop (CUPR cleared a ~0.05-ATR buffer). The buffer = max(atr_pct·mult, floor). 0 = ATR-only (old behavior).",
+    )
     # Selection/data must be WARM before the entry window opens (operator
     # 2026-06-11, twice): the data-session open is DERIVED as entry start minus
     # this lead (never later than the exchange's 04:00 ET extended open) — the
