@@ -9,8 +9,20 @@ price) still apply; the stop anchors are the same keys.
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
+import app.services.trading.momentum_neural.entry_gates as eg
 from app.services.trading.momentum_neural.entry_gates import pullback_break_confirmation
+
+
+@pytest.fixture(autouse=True)
+def _disable_verticality_gate(monkeypatch):
+    """The 1m-EMA9 verticality skip (``chili_momentum_entry_verticality_atr_mult``,
+    added 2026-06-12 AFTER these tests) vetoes the deliberately-steep synthetic
+    impulse with ``extended_verticality`` before the tick-break path can return. These
+    tests isolate the tick-break + VWAP mechanics, not the verticality gate (its own
+    concern); turn it off so the structure under test reaches its real verdict."""
+    monkeypatch.setattr(eg.settings, "chili_momentum_entry_verticality_atr_mult", 0.0, raising=False)
 
 
 def _frame(rows, start="2026-06-10 14:00:00", freq="1min"):

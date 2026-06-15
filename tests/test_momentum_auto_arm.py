@@ -8,7 +8,7 @@ import pytest
 import app.services.trading.momentum_neural.auto_arm as aa
 from app.services import coinbase_service
 from app.services.trading import governance, portfolio_risk
-from app.services.trading.momentum_neural import automation_query, operator_actions
+from app.services.trading.momentum_neural import automation_query, market_profile, operator_actions
 
 
 class _FakeDB:
@@ -37,6 +37,25 @@ def happy(monkeypatch):
     monkeypatch.setattr(aa.settings, "chili_momentum_auto_arm_live_scheduler_enabled", True, raising=False)
     monkeypatch.setattr(aa.settings, "chili_momentum_live_runner_enabled", True, raising=False)
     monkeypatch.setattr(aa.settings, "chili_autotrader_user_id", 1, raising=False)
+    # ── Crypto live-arm gates added AFTER this fixture (PR #675 crypto-live-off,
+    #    PR #685 liquidity floor): the happy-path candidates are crypto (-USD), so
+    #    neutralize the new gates here. These are settings/time/data seams, not the
+    #    selection logic the tests exercise — left at prod defaults the crypto path
+    #    silently never arms (crypto_live_arm OFF, US-session pause, UTC dead-band). ──
+    monkeypatch.setattr(aa.settings, "chili_momentum_crypto_live_arm_enabled", True, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_momentum_crypto_pause_during_us_session", False, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_crypto_schedule_enabled", False, raising=False)
+    # Post-reap cooldown (#701) writes reaped crypto names into a module-global dict;
+    # disable it here so a happy-path arm is deterministic and never order-dependent on
+    # whatever the reaper unit-tests left in aa._REAP_COOLDOWN (0 = cooldown off).
+    monkeypatch.setattr(aa.settings, "chili_momentum_reap_cooldown_sec", 0, raising=False)
+    # Pin ONE arm per pass so the single-candidate selection assertions hold; the A6
+    # multi-arm fan-out (default 3) is a separate behaviour from WHICH name is chosen.
+    monkeypatch.setattr(aa.settings, "chili_momentum_auto_arm_max_arms_per_pass", 1, raising=False)
+    # The equity late-window gate in _live_armable (no NEW equity arms >=14:30 ET) is
+    # wall-clock driven — pin it to a productive window so the equity selection tests
+    # are deterministic regardless of when the suite runs (no test asserts the late path).
+    monkeypatch.setattr(market_profile, "schedule_window_now", lambda *a, **k: "midday", raising=False)
     monkeypatch.setattr(governance, "is_kill_switch_active", lambda: False)
     monkeypatch.setattr(aa, "_active_live_session_count", lambda db, *, user_id: 0)
     monkeypatch.setattr(portfolio_risk, "check_portfolio_drawdown_breaker", lambda db, uid: (False, None))
@@ -46,6 +65,11 @@ def happy(monkeypatch):
     # Broker for the candidate's venue is connected/ready by default; the
     # broker-not-ready guard test overrides this seam.
     monkeypatch.setattr(aa, "_venue_broker_ready_for", lambda sym, cache: True)
+    # Crypto liquidity floor (#685) is a data seam (the viability row carries no
+    # turnover for synthetic symbols -> "liquidity_data_missing"); happy path passes it.
+    monkeypatch.setattr(
+        aa, "crypto_liquidity_ok", lambda symbol, row, adapter=None: (True, {"liquidity_gate": "ok"}, None)
+    )
     monkeypatch.setattr(aa, "_entry_trigger_fires", lambda sym: (True, "pullback_break_ok"))
     # Default freshness UNKNOWN (None) — keeps existing tests network-free and on the
     # arm-on-active-break contract; freshness-specific tests override this seam.
