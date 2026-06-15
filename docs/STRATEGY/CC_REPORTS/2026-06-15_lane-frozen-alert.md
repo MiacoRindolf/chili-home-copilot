@@ -92,18 +92,40 @@ or alter sizing.
 * `trading_alerts` is **not currently read by any router** — so the in-app surface the
   operator sees is the cockpit band (via the rollup); the row is the durable audit log.
 
+## Deploy (COMPLETED + verified live)
+
+Merged to `main` as `90176f1` (PR #729). Built `chili-app:main-clean-90176f1` and
+recreated BOTH affected containers (old kept as `-pre90176f1` for instant rollback;
+env copied verbatim from the known-good running container → `DATABASE_URL` count = 1,
+the env-file-duplicate-keys defense):
+
+* **scheduler** (`chili-clean-recovery-scheduler`, role `cron_only`) — `Lane-health
+  FROZEN watch (every 30s)` + `Momentum auto-arm-live` jobs registered; 0 boot
+  tracebacks; auto-arm running (arming XLM-USD); lane-health correctly **silent** (real
+  kill switch off → no false positive).
+* **web** (`chili-clean-recovery-web`, 8001→8000) — uvicorn up, 0 tracebacks; new band
+  JS/CSS served; `pnl-rollup` returns `lane_health` (frozen=False, enabled=True).
+
+**Fires-when-frozen verified on the deployed image** via an *ephemeral* `docker exec -i`
+process that simulated a held kill switch in process-local memory only (no DB persist,
+no `activate_kill_switch` → live scheduler + real trading untouched, re-confirmed
+`kill_switch_active=False` after):
+`EVALUATE frozen=True severity=critical` → `HEADLINE MOMENTUM LANE FROZEN — global kill
+switch active 8h` → `logger.critical [lane_health] FROZEN …` → audit row written
+(id 77387, `sent_via=cockpit`) → the simulated row was deleted afterwards. I did NOT
+trip the real kill switch (that would halt live trading).
+
 ## Deferred
 
 * **Push/SMS on freeze.** The audit row does NOT itself dispatch SMS (separate delivery
   path). A push would be the most effective "8h → minutes" win; left out to avoid an
   unrequested external send. Easy follow-up: route `lane_health_frozen` through the
   existing alert delivery.
-* **Live scheduler deploy + on-system verify** — see Open questions.
+* **Pre-existing test drift** — `test_governance_daily_loss.py::…partial_option_leg_
+  without_db` (stale `_FakeQuery` missing `.join` at governance.py:680, from the
+  2026-06-12 alpaca-exclusion change) fails on `main`; spun off as a separate task chip.
 
 ## Open questions for Cowork
 
-* **Deploy:** ship a per-git-sha `main-clean-<sha>` image and recreate the
-  scheduler-worker (the feature only runs in the scheduler process). The
-  fires-when-frozen path is test-proven; I will not trip the *real* kill switch to
-  "verify live" (that would halt trading). Confirm you want me to build+recreate the
-  scheduler container now, or hold for review.
+* `NEXT_TASK.md` is still the stale Phase 5I post-rename soak. Please re-queue or mark
+  it so the next run isn't ambiguous.
