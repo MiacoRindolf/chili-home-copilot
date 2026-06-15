@@ -10,10 +10,24 @@ import inspect
 
 import pandas as pd
 
+from app.config import settings
 from app.services.trading.momentum_neural.entry_gates import (
     TICK_ARMED_WAIT_REASONS,
     pullback_break_confirmation,
 )
+
+
+def _isolate_trigger_logic(monkeypatch) -> None:
+    """Disable the ATR-scaled verticality skip for tests that isolate the
+    deep-reclaim TRIGGER mechanics (not the verticality gate).
+
+    These frames predate ``chili_momentum_entry_verticality_atr_mult`` (added
+    2026-06-12; covered by ``test_evening_batch3.py``). The synthetic recovery
+    bar closes well above the decayed EMA-9, which would now trip the
+    chase-suppression skip — a veto unrelated to the reclaim logic under test.
+    The gate keeps its own dedicated coverage; here we hold it off so the
+    reclaim assertions mean what they originally did."""
+    monkeypatch.setattr(settings, "chili_momentum_entry_verticality_atr_mult", 0.0, raising=False)
 
 
 def _frame(bars: list[tuple[float, float, float, float, float]]) -> pd.DataFrame:
@@ -66,7 +80,8 @@ _GATES = dict(
 )
 
 
-def test_deep_v_reclaim_break_fires_on_completed_bar() -> None:
+def test_deep_v_reclaim_break_fires_on_completed_bar(monkeypatch) -> None:
+    _isolate_trigger_logic(monkeypatch)
     df = _frame(_deep_v_bars())
     ok, reason, dbg = pullback_break_confirmation(df, **_GATES)
     assert ok and reason == "deep_reclaim_ok", (reason, dbg)
@@ -139,6 +154,7 @@ def test_tick_armed_tuple_is_shared_across_call_sites() -> None:
 
 
 def test_reclaim_morning_gate_does_not_leak_onto_crypto(monkeypatch) -> None:
+    _isolate_trigger_logic(monkeypatch)
     # CRYPTO PARITY: a 24/7 asset has no "open" — the morning window must not
     # block a crypto reclaim at e.g. 15:00 ET (equity: blocked past 10:30 ET)
     import pandas as pd
