@@ -425,7 +425,16 @@ def evaluate_proposed_momentum_automation(
     governance_state = {"kill_switch_active": bool(gov.get("active")), "kill_switch_reason": gov.get("reason")}
 
     # ── Governance / kill switch ──────────────────────────────────────
-    if is_kill_switch_active():
+    # A LEGACY single-global daily-loss breach is handled PER BROKER below
+    # (global_daily_loss_cap check) when per-broker is enabled, so it does NOT
+    # block here — only true-global halts (manual/emergency/price-monitor/backstop) do.
+    _ks_reason = str(gov.get("reason") or "")
+    _defer_daily_loss = (
+        bool(getattr(settings, "chili_per_broker_daily_loss_enabled", True))
+        and _ks_reason.startswith("global_daily_loss_breach")
+        and "backstop" not in _ks_reason
+    )
+    if is_kill_switch_active() and not _defer_daily_loss:
         if m == "live" and policy.disable_live_if_governance_inhibit:
             checks.append(
                 _check(
@@ -873,28 +882,50 @@ def evaluate_proposed_momentum_automation(
     # post-close hooks (feedback_emit / auto_trader_monitor) do the actual
     # activation when a realized-loss event lands.
     try:
-        from ..governance import check_daily_loss_breach
-        gdl = check_daily_loss_breach(db, user_id=user_id, activate=False)
-        ok_gdl = not bool(gdl.get("breached"))
-        if gdl.get("source") != "none":
+        if bool(getattr(settings, "chili_per_broker_daily_loss_enabled", True)):
+            # PER-BROKER: block this candidate only if ITS OWN broker breached its
+            # own real-equity cap — a Coinbase-sized breach can't block an RH arm
+            # (the literal 2026-06-15 incident). Read-only (activate=False).
+            from ..governance import _peek_broker_breach
+
+            _pb_breached, _pb = _peek_broker_breach(db, ef, user_id=user_id)
+            ok_gdl = not _pb_breached
             checks.append(
                 _check(
                     "global_daily_loss_cap",
                     ok_gdl,
                     severity="block" if not ok_gdl and m == "live" else ("warn" if not ok_gdl else "ok"),
                     message=(
-                        f"Global realized PnL ${float(gdl.get('realized_usd', 0.0)):+.2f} "
-                        f"vs cap -${float(gdl.get('limit_usd', 0.0)):.2f} "
-                        f"(src={gdl.get('source')})."
+                        f"Broker[{_pb.get('family')}] realized PnL "
+                        f"${float(_pb.get('realized', 0.0) or 0.0):+.2f} "
+                        f"vs cap -${float(_pb.get('limit', _pb.get('cap', 0.0)) or 0.0):.2f}."
                     ),
-                    detail={
-                        "realized_usd": gdl.get("realized_usd"),
-                        "limit_usd": gdl.get("limit_usd"),
-                        "source": gdl.get("source"),
-                        "breakdown": gdl.get("breakdown"),
-                    },
+                    detail=_pb,
                 )
             )
+        else:
+            from ..governance import check_daily_loss_breach
+            gdl = check_daily_loss_breach(db, user_id=user_id, activate=False)
+            ok_gdl = not bool(gdl.get("breached"))
+            if gdl.get("source") != "none":
+                checks.append(
+                    _check(
+                        "global_daily_loss_cap",
+                        ok_gdl,
+                        severity="block" if not ok_gdl and m == "live" else ("warn" if not ok_gdl else "ok"),
+                        message=(
+                            f"Global realized PnL ${float(gdl.get('realized_usd', 0.0)):+.2f} "
+                            f"vs cap -${float(gdl.get('limit_usd', 0.0)):.2f} "
+                            f"(src={gdl.get('source')})."
+                        ),
+                        detail={
+                            "realized_usd": gdl.get("realized_usd"),
+                            "limit_usd": gdl.get("limit_usd"),
+                            "source": gdl.get("source"),
+                            "breakdown": gdl.get("breakdown"),
+                        },
+                    )
+                )
     except Exception:
         # Non-fatal: the post-close hook is the real enforcement; this check
         # is additive / informational at pre-entry.

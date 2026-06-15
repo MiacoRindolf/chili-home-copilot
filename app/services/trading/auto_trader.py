@@ -4855,8 +4855,19 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
 
     from .governance import is_kill_switch_active_for_session
 
-    if is_kill_switch_active_for_session(db):
+    # Refresh cross-process kill-switch state, then apply the per-broker-aware gate.
+    # The v1 autotrader is the ROBINHOOD-equity lane: a true-global halt freezes it,
+    # and so does a robinhood_spot per-broker daily-loss block — but a Coinbase
+    # (crypto momentum) daily-loss breach must NOT freeze it (per-broker isolation).
+    is_kill_switch_active_for_session(db)
+    from .governance import is_broker_daily_loss_blocked, kill_switch_halts_new_entries
+
+    if kill_switch_halts_new_entries():
         return {"ok": True, "skipped": True, "reason": "kill_switch"}
+    if bool(getattr(settings, "chili_per_broker_daily_loss_enabled", True)) and is_broker_daily_loss_blocked(
+        "robinhood_spot"
+    ):
+        return {"ok": True, "skipped": True, "reason": "daily_loss_cap_broker"}
 
     rt = effective_autotrader_runtime(db)
     if not rt.get("tick_allowed"):

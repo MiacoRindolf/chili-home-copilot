@@ -287,6 +287,10 @@ def _auto_clear_stale_daily_breach() -> None:
 def is_kill_switch_active() -> bool:
     _refresh_kill_switch_from_db_if_due()
     _auto_clear_stale_daily_breach()
+    try:
+        clear_stale_broker_daily_loss_blocks()
+    except Exception:
+        pass
     with _kill_switch_lock:
         return _kill_switch
 
@@ -790,6 +794,297 @@ def check_daily_loss_breach(
             "momentum_usd": pnl["momentum_usd"],
         },
     }
+
+
+# ── Per-BROKER daily-loss caps ────────────────────────────────────────
+# The single global daily-loss cap (above) froze BOTH brokers when ONE broke,
+# and was sized off the WRONG broker (the None->Coinbase default in
+# _account_equity_usd). The per-broker model fixes both: each broker is capped
+# off ITS OWN real equity, and a breach blocks ONLY that broker — via a SEPARATE
+# process-local registry that NEVER touches the global _kill_switch boolean, so
+# exits stay live and true-global halts (manual/emergency/drawdown) still freeze
+# everything. Operator 2026-06-15: "dapat ang kill switch is by broker".
+REAL_DAILY_LOSS_FAMILIES = ("robinhood_spot", "coinbase_spot")
+
+# {family: {"reason": str, "et_date": date, "realized": float, "limit": float, "set_at": datetime}}
+_per_broker_daily_loss: dict[str, dict[str, Any]] = {}
+_per_broker_lock = threading.Lock()
+
+
+def _et_today_date():
+    from datetime import timezone as _tz
+    from zoneinfo import ZoneInfo
+
+    return datetime.utcnow().replace(tzinfo=_tz.utc).astimezone(ZoneInfo("America/New_York")).date()
+
+
+def realized_pnl_today_by_broker(
+    db: Session, user_id: int | None = None
+) -> dict[str, float]:
+    """Today's (ET-day) realized PnL split BY BROKER (execution_family).
+
+    Mirrors global_realized_pnl_today_et's window + sources but buckets per
+    broker so a per-broker cap can isolate a losing broker. alpaca_spot PAPER
+    twins are excluded from the real-money math. Returns
+    {"robinhood_spot": usd, "coinbase_spot": usd} (signed; negative == loss).
+    Trade rows (autotrader) split by Trade.broker_source ("coinbase" -> Coinbase,
+    else Robinhood; reconcile_import always excluded; manual excluded unless
+    chili_per_broker_count_manual_as_rh). Momentum outcomes split by the
+    session's execution_family (same proven join global_realized_pnl_today_et uses).
+    """
+    from datetime import timedelta as _td
+    from zoneinfo import ZoneInfo
+
+    from sqlalchemy import func as sa_func
+
+    from ...models.trading import (
+        MomentumAutomationOutcome,
+        Trade,
+        TradingAutomationSession as _TAS,
+    )
+
+    et = ZoneInfo("America/New_York")
+    now_et = datetime.now(et)
+    start_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_et = start_et + _td(days=1)
+    start_utc = start_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+    end_utc = end_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+
+    out: dict[str, float] = {"robinhood_spot": 0.0, "coinbase_spot": 0.0}
+
+    # (A) Autotrader Trade rows, bucketed by broker_source.
+    count_manual = bool(getattr(settings, "chili_per_broker_count_manual_as_rh", False))
+    tq = db.query(Trade).filter(
+        Trade.status == "closed",
+        Trade.exit_date.isnot(None),
+        Trade.exit_date >= start_utc,
+        Trade.exit_date < end_utc,
+    )
+    if user_id is not None:
+        tq = tq.filter(Trade.user_id == user_id)
+    for t in tq.all():
+        src = (getattr(t, "broker_source", None) or "").lower()
+        if src == "reconcile_import":
+            continue
+        if src == "manual" and not count_manual:
+            continue
+        pnl = _trade_realized_pnl_with_raw_fallback(t)
+        if pnl is None:
+            continue
+        out["coinbase_spot" if src == "coinbase" else "robinhood_spot"] += pnl
+
+    # (B) Momentum outcomes, grouped by the session's execution_family.
+    mq = db.query(
+        _TAS.execution_family,
+        sa_func.coalesce(sa_func.sum(MomentumAutomationOutcome.realized_pnl_usd), 0.0),
+    ).join(
+        _TAS, _TAS.id == MomentumAutomationOutcome.session_id
+    ).filter(
+        MomentumAutomationOutcome.terminal_at >= start_utc,
+        MomentumAutomationOutcome.terminal_at < end_utc,
+        _TAS.execution_family != "alpaca_spot",
+    )
+    if user_id is not None:
+        mq = mq.filter(MomentumAutomationOutcome.user_id == user_id)
+    for ef, total in mq.group_by(_TAS.execution_family).all():
+        fam = "coinbase_spot" if (ef or "").lower() == "coinbase_spot" else "robinhood_spot"
+        out[fam] += float(total or 0.0)
+
+    return out
+
+
+def per_broker_daily_loss_cap_usd(family: str) -> tuple[float, str]:
+    """(positive_cap_usd, source) for ONE broker's daily-loss cap.
+
+    RISK basis = the broker's REAL equity (NOT the margin-inflated buying power
+    that _account_equity_usd returns for SIZING — operator 2026-06-15: a Coinbase
+    balance of ~$2.4k was read as $3,989 via buying_power*2.0). pct reuses the
+    existing chili_global_max_daily_loss_pct_of_equity knob (no new magic number);
+    conservative-wins with the optional usd cap. Fail-CLOSED to a documented floor
+    when equity is unavailable (Hard Rule #2: never an uncapped path).
+    """
+    from .momentum_neural.risk_policy import _account_equity_usd
+
+    pct = float(getattr(settings, "chili_global_max_daily_loss_pct_of_equity", 0.0) or 0.0)
+    usd_cap = float(getattr(settings, "chili_global_max_daily_loss_usd", 0.0) or 0.0)
+    eq = _account_equity_usd(family, prefer_real_equity=True)
+
+    candidates: list[tuple[float, str]] = []
+    if usd_cap > 0:
+        candidates.append((usd_cap, "usd"))
+    if pct > 0 and eq is not None and float(eq) > 0:
+        candidates.append((pct * float(eq), "pct_real_equity"))
+    if not candidates:
+        floor = float(getattr(settings, "chili_global_daily_loss_failsafe_usd", 300.0) or 300.0)
+        return floor, "usd_failsafe"
+    return min(candidates, key=lambda kv: kv[0])
+
+
+def _normalize_real_family(family: str | None) -> str:
+    """Resolve to one of REAL_DAILY_LOSS_FAMILIES; default robinhood_spot.
+
+    We do NOT use normalize_execution_family here because its None default is
+    coinbase_spot (the very bug we are fixing); an unknown/blank broker for a
+    daily-loss cap is safer attributed to the larger equities account.
+    """
+    from .execution_family_registry import normalize_execution_family
+
+    if not family:
+        return "robinhood_spot"
+    fam = normalize_execution_family(family)
+    return fam if fam in REAL_DAILY_LOSS_FAMILIES else "robinhood_spot"
+
+
+def clear_stale_broker_daily_loss_blocks() -> None:
+    """Drop per-broker blocks whose ET day has rolled (a daily cap self-clears)."""
+    today = _et_today_date()
+    cleared: list[str] = []
+    with _per_broker_lock:
+        for fam in list(_per_broker_daily_loss.keys()):
+            if _per_broker_daily_loss[fam].get("et_date") != today:
+                _per_broker_daily_loss.pop(fam, None)
+                cleared.append(fam)
+    for fam in cleared:
+        logger.info("[governance] per-broker daily-loss block auto-cleared at ET roll: %s", fam)
+
+
+def set_broker_daily_loss_block(family: str, *, reason: str, realized: float, limit: float) -> None:
+    """Mark ONE broker daily-loss-blocked for today (sticky until ET roll). Loud."""
+    fam = _normalize_real_family(family)
+    with _per_broker_lock:
+        already = fam in _per_broker_daily_loss
+        _per_broker_daily_loss[fam] = {
+            "reason": reason,
+            "et_date": _et_today_date(),
+            "realized": float(realized),
+            "limit": float(limit),
+            "set_at": datetime.utcnow(),
+        }
+    if not already:
+        logger.warning(
+            "[governance] PER-BROKER DAILY-LOSS BLOCK %s realized=%.2f limit=-%.2f (%s) — "
+            "new %s entries halted for the ET day; exits + the OTHER broker stay live",
+            fam, realized, limit, reason, fam,
+        )
+
+
+def is_broker_daily_loss_blocked(family: str) -> bool:
+    """True if THIS broker is sticky-blocked for today (registry read)."""
+    clear_stale_broker_daily_loss_blocks()
+    fam = _normalize_real_family(family)
+    with _per_broker_lock:
+        return fam in _per_broker_daily_loss
+
+
+def broker_daily_loss_breached(
+    db: Session, family: str, *, user_id: int | None = None
+) -> tuple[bool, dict[str, Any]]:
+    """Authoritative per-broker daily-loss gate (self-healing + sticky).
+
+    Returns (blocked, info). Sticky: once a broker breaches today it stays
+    blocked until ET roll (mirrors the old once-per-day cap semantics — a late
+    winning exit does not re-open the budget). Recomputes from live DB PnL when
+    not yet blocked, and sets the sticky block on first breach so ANY gate that
+    notices a breach protects the broker without relying on the monitor pass.
+    """
+    fam = _normalize_real_family(family)
+    if is_broker_daily_loss_blocked(fam):
+        with _per_broker_lock:
+            blk = dict(_per_broker_daily_loss.get(fam, {}))
+        return True, {"family": fam, "sticky": True, **blk}
+    by_broker = realized_pnl_today_by_broker(db, user_id)
+    realized = float(by_broker.get(fam, 0.0))
+    cap, src = per_broker_daily_loss_cap_usd(fam)
+    breached = (realized <= -cap) if cap > 0 else (realized < 0.0)
+    info = {"family": fam, "realized": realized, "cap": cap, "source": src, "sticky": False}
+    if breached:
+        set_broker_daily_loss_block(
+            fam,
+            reason=f"broker_daily_loss_breach_{fam}_{src}_${cap:.0f}",
+            realized=realized,
+            limit=cap,
+        )
+    return breached, info
+
+
+def check_per_broker_daily_loss(
+    db: Session, *, user_id: int | None = None, activate: bool = True
+) -> dict[str, Any]:
+    """Per-broker replacement for check_daily_loss_breach. Evaluates EVERY broker
+    (so the monitor pass blocks any breached broker) and applies a GLOBAL backstop:
+    if the AGGREGATE loss exceeds the sum of per-broker caps (x mult), the TRUE
+    global kill switch trips (a real catastrophic-total halt). Per-broker breaches
+    never touch the global flag (exits stay live)."""
+    results: dict[str, Any] = {}
+    agg_realized = 0.0
+    agg_cap = 0.0
+    for fam in REAL_DAILY_LOSS_FAMILIES:
+        breached, info = (
+            broker_daily_loss_breached(db, fam, user_id=user_id)
+            if activate
+            else _peek_broker_breach(db, fam, user_id=user_id)
+        )
+        results[fam] = {**info, "breached": breached}
+        agg_realized += float(info.get("realized", 0.0) or 0.0)
+        agg_cap += float(info.get("cap", 0.0) or 0.0)
+    mult = float(getattr(settings, "chili_per_broker_aggregate_backstop_mult", 1.0) or 1.0)
+    backstop = agg_cap * max(1.0, mult)
+    if activate and backstop > 0 and agg_realized <= -backstop and not is_kill_switch_active():
+        activate_kill_switch(f"global_daily_loss_breach_backstop_${backstop:.0f}")
+        logger.critical(
+            "[governance] AGGREGATE daily-loss backstop (realized=%.2f limit=-%.2f) — global kill switch",
+            agg_realized, backstop,
+        )
+    return {"by_broker": results, "aggregate_realized": agg_realized, "aggregate_cap": agg_cap, "backstop": backstop}
+
+
+def _peek_broker_breach(
+    db: Session, family: str, *, user_id: int | None = None
+) -> tuple[bool, dict[str, Any]]:
+    """Non-activating read of a broker's breach (for status/alerts)."""
+    fam = _normalize_real_family(family)
+    if is_broker_daily_loss_blocked(fam):
+        with _per_broker_lock:
+            blk = dict(_per_broker_daily_loss.get(fam, {}))
+        return True, {"family": fam, "sticky": True, **blk}
+    by_broker = realized_pnl_today_by_broker(db, user_id)
+    realized = float(by_broker.get(fam, 0.0))
+    cap, src = per_broker_daily_loss_cap_usd(fam)
+    breached = (realized <= -cap) if cap > 0 else (realized < 0.0)
+    return breached, {"family": fam, "realized": realized, "cap": cap, "source": src, "sticky": False}
+
+
+def _kill_switch_halts_exits() -> bool:
+    """Whether the CURRENT global kill-switch reason should also halt EXITS.
+
+    A daily-loss breach (legacy global OR the per-broker aggregate backstop) must
+    stop NEW entries but NEVER strand an open position — you always manage out of
+    risk. Manual / emergency / price-monitor reasons DO halt exits. Callers that
+    gate exits should use `is_kill_switch_active() and _kill_switch_halts_exits()`.
+    """
+    with _kill_switch_lock:
+        if not _kill_switch:
+            return False
+        reason = _kill_switch_reason or ""
+    return not reason.startswith("global_daily_loss_breach")
+
+
+def kill_switch_halts_new_entries() -> bool:
+    """Whether the current global kill-switch state should halt NEW ENTRIES for
+    ALL brokers/lanes. True for manual / emergency / price-monitor / DB-fail-closed
+    AND the catastrophic aggregate BACKSTOP. When per-broker daily-loss is enabled,
+    a LEGACY single-global daily-loss breach (pct/usd — NOT the backstop) is handled
+    per broker instead, so this returns False for that reason (the per-broker gate
+    does the blocking; a Coinbase-sized global breach no longer freezes Robinhood).
+    """
+    if not is_kill_switch_active():
+        return False
+    with _kill_switch_lock:
+        reason = _kill_switch_reason or ""
+    per_broker = bool(getattr(settings, "chili_per_broker_daily_loss_enabled", True))
+    if per_broker and reason.startswith("global_daily_loss_breach") and "backstop" not in reason:
+        return False
+    return True
 
 
 # ── Trade Velocity Limits ─────────────────────────────────────────────

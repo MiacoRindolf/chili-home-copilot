@@ -231,6 +231,9 @@ def test_daily_loss_cap_skips_scan(happy, monkeypatch):
     # churning candidates that begin_live_arm would all risk_block on the same cap.
     from app.services.trading.momentum_neural import risk_evaluator, risk_policy
 
+    # Legacy single-cap Guard 4 (the per-broker path is its own, covered in
+    # tests/test_per_broker_daily_loss.py). Exercise the legacy branch explicitly.
+    monkeypatch.setattr(aa.settings, "chili_per_broker_daily_loss_enabled", False)
     monkeypatch.setattr(risk_policy, "equity_relative_daily_loss_cap", lambda *a, **k: 130.0)
     monkeypatch.setattr(risk_evaluator, "_daily_realized_pnl", lambda db, uid: -131.0)
     out = aa.run_auto_arm_pass(_FakeDB())
@@ -243,6 +246,7 @@ def test_within_daily_loss_cap_does_not_skip(happy, monkeypatch):
     # Comfortably within the cap -> Guard 4 must NOT trip (the pass proceeds to arm).
     from app.services.trading.momentum_neural import risk_evaluator, risk_policy
 
+    monkeypatch.setattr(aa.settings, "chili_per_broker_daily_loss_enabled", False)
     monkeypatch.setattr(risk_policy, "equity_relative_daily_loss_cap", lambda *a, **k: 130.0)
     monkeypatch.setattr(risk_evaluator, "_daily_realized_pnl", lambda db, uid: -10.0)
     out = aa.run_auto_arm_pass(_FakeDB())

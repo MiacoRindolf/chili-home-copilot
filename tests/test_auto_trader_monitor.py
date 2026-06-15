@@ -9,16 +9,39 @@ from app import models
 from app.models.trading import BreakoutAlert, PatternMonitorDecision, ScanPattern, Trade
 
 
+@patch("app.services.trading.governance.set_broker_daily_loss_block")
 @patch("app.services.trading.governance.activate_kill_switch")
 @patch(
     "app.services.trading.auto_trader_rules.autotrader_realized_pnl_today_et",
     return_value=-200.0,
 )
-def test_maybe_trip_daily_loss_kill_switch(_mock_pnl, mock_ks):
+def test_maybe_trip_daily_loss_per_broker(_mock_pnl, mock_ks, mock_block):
+    """Per-broker (default): the autotrader (Robinhood) daily-loss cap blocks ONLY
+    the robinhood_spot broker, NOT the single global kill switch — so a Coinbase
+    momentum lane keeps trading (the 2026-06-15 cross-lane-freeze fix)."""
     from app.services.trading.auto_trader_monitor import _maybe_trip_daily_loss_kill_switch
 
     with patch("app.services.trading.auto_trader_monitor.settings") as s:
         s.chili_autotrader_daily_loss_cap_usd = 150.0
+        s.chili_per_broker_daily_loss_enabled = True
+        _maybe_trip_daily_loss_kill_switch(MagicMock(), 1)
+    mock_block.assert_called_once()
+    assert mock_block.call_args.args[0] == "robinhood_spot"
+    mock_ks.assert_not_called()
+
+
+@patch("app.services.trading.governance.activate_kill_switch")
+@patch(
+    "app.services.trading.auto_trader_rules.autotrader_realized_pnl_today_et",
+    return_value=-200.0,
+)
+def test_maybe_trip_daily_loss_legacy_global(_mock_pnl, mock_ks):
+    """Legacy path (per-broker OFF): the autotrader cap still trips the global switch."""
+    from app.services.trading.auto_trader_monitor import _maybe_trip_daily_loss_kill_switch
+
+    with patch("app.services.trading.auto_trader_monitor.settings") as s:
+        s.chili_autotrader_daily_loss_cap_usd = 150.0
+        s.chili_per_broker_daily_loss_enabled = False
         _maybe_trip_daily_loss_kill_switch(MagicMock(), 1)
     mock_ks.assert_called_once_with("autotrader_daily_loss_cap")
 
