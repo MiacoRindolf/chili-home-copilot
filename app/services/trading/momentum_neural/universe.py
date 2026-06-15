@@ -186,8 +186,10 @@ def build_equity_universe(
 ) -> list[str]:
     """Resolve an equity ``UniverseProfile`` against the full-market snapshot.
 
-    Returns the screened ticker list (uppercased, de-duped, capped at
-    ``profile.max_universe``), ranked **freshest-strongest-mover first** —
+    Returns the screened ticker list (uppercased, de-duped, bounded by either
+    ``profile.max_universe`` or — when ``chili_momentum_universe_uncapped_enabled``
+    is on — the DB-safety ``chili_momentum_universe_hard_ceiling``), ranked
+    **freshest-strongest-mover first** —
     ``freshness × diminishing-returns(move)``, so a name still pinned near its
     high-of-day outranks one that ran huge and rolled over (Ross enters EARLY,
     not after a +1000% fade). The downstream per-ticker enrichment computes true
@@ -271,6 +273,30 @@ def build_equity_universe(
     # No fixed RVOL cut — the percentile ranking in score_universe (RVOL +
     # momentum + low-float) does the fine selection on the enriched survivors.
     rows.sort(key=lambda r: r[1], reverse=True)
+
+    # UNCAPPED (2026-06-15, the CUPR drop): the top-50 count cap truncated 296
+    # screened movers to 50, and a name that ran then faded (low pos_in_range,
+    # e.g. CUPR +125%) ranked OUT of the pool and never got a viability row at
+    # all. With the flag on, surface EVERY screen-passer (ranked order preserved
+    # for downstream ``[:N]`` consumers) bounded only by the DB-safety hard
+    # ceiling — the adaptive price/$-vol/change screen + the Ross percentile
+    # re-rank are the real selection, not a fixed count. Settings read LAZILY so
+    # tests/callers can flip the flag without re-import. OFF ⇒ the historical
+    # ``max_universe`` (top-50) break, byte-identical to current.
+    try:
+        from ....config import settings as _settings
+
+        _uncapped = bool(
+            getattr(_settings, "chili_momentum_universe_uncapped_enabled", False)
+        )
+        _hard_ceiling = int(
+            getattr(_settings, "chili_momentum_universe_hard_ceiling", 1500)
+        )
+    except Exception:
+        _uncapped = False
+        _hard_ceiling = 1500
+    cap = max(1, _hard_ceiling) if _uncapped else max(1, int(profile.max_universe))
+
     seen: set[str] = set()
     out: list[str] = []
     for ticker, *_ in rows:
@@ -278,7 +304,7 @@ def build_equity_universe(
             continue
         seen.add(ticker)
         out.append(ticker)
-        if len(out) >= max(1, int(profile.max_universe)):
+        if len(out) >= cap:
             break
     return out
 

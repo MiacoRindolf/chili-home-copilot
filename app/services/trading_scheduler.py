@@ -28,6 +28,11 @@ _scheduler: BackgroundScheduler | None = None
 _lock = threading.Lock()
 
 _VIABILITY_BRIDGE_MAX_TICKERS = 30
+# Uncapped-bridge chunk size: the pipeline tick caps each call's symbols at 32
+# (raising that cap = an OHLCV-fetch storm), so the uncapped bridge instead
+# processes the full universe in CHUNKS of this size, committing PER CHUNK to
+# avoid the long idle-in-transaction / deadlock class (#561/#610 lessons).
+_VIABILITY_BRIDGE_CHUNK = 32
 _BASELINE_AUDIT_SKIP_JOB_IDS = frozenset({"neural_mesh_drain"})
 
 
@@ -3558,6 +3563,20 @@ def _bridge_scanner_to_viability(
     except Exception:
         logger.debug("[scheduler] ross momentum universe sort skipped", exc_info=True)
 
+    # UNCAPPED bridge (2026-06-15): when the universe is uncapped, build the FULL
+    # Ross-ranked tickers list (no top-30 truncation) — the chunked tick below
+    # scores every screened mover into viability (CUPR-class names that ranked out
+    # of the old top-30 batch now get a row). OFF ⇒ the historical top-30 cut
+    # (single capped call), byte-identical to current.
+    try:
+        from ..config import settings as _bridge_settings
+
+        _bridge_uncapped = bool(
+            getattr(_bridge_settings, "chili_momentum_universe_uncapped_enabled", False)
+        )
+    except Exception:
+        _bridge_uncapped = False
+
     tickers: list[str] = []
     ross_signals: dict[str, dict] = {}
     for r in results:
@@ -3568,7 +3587,7 @@ def _bridge_scanner_to_viability(
             # scanner already computed instead of discarding them — the momentum
             # lane ranks explosive instruments from these (docs/DESIGN/MOMENTUM_LANE.md).
             ross_signals[t] = r
-        if len(tickers) >= _VIABILITY_BRIDGE_MAX_TICKERS:
+        if not _bridge_uncapped and len(tickers) >= _VIABILITY_BRIDGE_MAX_TICKERS:
             break
 
     # ROSS "RUNNING UP" FEEDER (2026-06-11, the SKYQ gap): the ranking above is a
@@ -3630,14 +3649,44 @@ def _bridge_scanner_to_viability(
     try:
         from .trading.momentum_neural.pipeline import run_momentum_neural_tick
 
-        run_momentum_neural_tick(
-            db, meta={"tickers": tickers, "ross_signals": ross_signals}
-        )
-        db.commit()
-        logger.info(
-            "[scheduler] viability bridge (%s): %d tickers → direct tick ok",
-            source, len(tickers),
-        )
+        if _bridge_uncapped and len(tickers) > _VIABILITY_BRIDGE_CHUNK:
+            # UNCAPPED: the pipeline tick caps symbols at 32 internally, so feed the
+            # full universe through in chunks of _VIABILITY_BRIDGE_CHUNK and COMMIT
+            # PER CHUNK — commit-between-chunks is mandatory (the idle-in-transaction
+            # / deadlock guard; #561/#610). A failed chunk is rolled back and skipped
+            # so one bad symbol can't sink the rest of the universe.
+            _chunks = 0
+            for _i in range(0, len(tickers), _VIABILITY_BRIDGE_CHUNK):
+                _chunk = tickers[_i : _i + _VIABILITY_BRIDGE_CHUNK]
+                _chunk_signals = {t: ross_signals[t] for t in _chunk if t in ross_signals}
+                try:
+                    run_momentum_neural_tick(
+                        db, meta={"tickers": _chunk, "ross_signals": _chunk_signals}
+                    )
+                    db.commit()
+                    _chunks += 1
+                except Exception as _ce:
+                    logger.warning(
+                        "[scheduler] viability bridge (%s) chunk %d failed: %s",
+                        source, (_i // _VIABILITY_BRIDGE_CHUNK), _ce,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+            logger.info(
+                "[scheduler] viability bridge (%s): %d tickers in %d chunk(s) → direct tick ok",
+                source, len(tickers), _chunks,
+            )
+        else:
+            run_momentum_neural_tick(
+                db, meta={"tickers": tickers, "ross_signals": ross_signals}
+            )
+            db.commit()
+            logger.info(
+                "[scheduler] viability bridge (%s): %d tickers → direct tick ok",
+                source, len(tickers),
+            )
     except Exception as e:
         logger.warning("[scheduler] viability bridge (%s) failed: %s", source, e)
         try:
@@ -6261,6 +6310,17 @@ def start_scheduler():
                     logger.info("[scheduler] WS tape recorder started (second-scale NBBO for traded names)")
                 except Exception as e:
                     logger.warning("[scheduler] WS tape recorder failed to start: %s", e)
+                # WS ignition scorer: subscribe the (uncapped) equity universe and
+                # score a name DIRECTLY into viability the instant a tick shows it
+                # igniting — surfaces vertical movers (RGNT-class) the EMA9
+                # continuation gate emits nothing for. Additive; flag-gated.
+                if settings.chili_momentum_ws_ignition_enabled:
+                    try:
+                        from .trading.momentum_neural.ignition_loop import start_ignition_loop
+                        start_ignition_loop()
+                        logger.info("[scheduler] WS ignition scorer started")
+                    except Exception as e:
+                        logger.warning("[scheduler] WS ignition scorer failed to start: %s", e)
 
         # Auto-arm-live: autonomously arm the surging Ross candidate (one live
         # session at a time). Only runs when the live runner is also on (no point

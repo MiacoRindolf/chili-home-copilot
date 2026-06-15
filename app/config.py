@@ -2236,6 +2236,43 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_GAP_FULL_UNIVERSE_ENABLED"),
         description="Equity Ross lane: when the equity-viability-refresh hands its already-SCREENED universe to the premarket-gap scan, size the scan's output cap to that screened pool (so EVERY screened gapper is scored into viability) instead of the fixed top-15-by-raw-gap-magnitude. Fixes fresh-catalyst mid-gap runners (low-float +7% name on an 8AM catalyst, e.g. QUCY) being truncated out by already-extended +200% gappers and thus never getting a fresh viability score → never armable. The downstream Ross percentile re-rank (+ the bridge top-30 cap) still makes the real selection; this only stops the premature magnitude truncation. Adaptive (cap = screened-universe size, no new magic number). 0 = old fixed top-15 cap (the broad default-universe sweep is byte-unchanged either way).",
     )
+    # ── UNCAPPED universe + WS ignition (surface EVERY explosive mover, fast) ─────
+    # ROOT CAUSE (verified live 2026-06-15): the day's biggest movers never enter the
+    # SCORED universe (momentum_symbol_viability) — so the lane can't even consider
+    # them. Two drop points: (1) the top-50 count cap in universe.build_equity_universe
+    # truncated 296 screened movers to 50 (CUPR +125% faded on pos_in_range and ranked
+    # out), and (2) the EMA9 continuation gate in scan_momentum_continuation emits NO
+    # signal for a VERTICAL name (RGNT +498% is nowhere near its EMA9) so it never gets
+    # a fresh per-symbol viability row even though build_equity_universe selects it.
+    # FIX: uncap the universe (the adaptive screen + a DB-safety hard ceiling are the
+    # only bounds — no top-N quality cap) and add an additive WS ignition scorer that
+    # scores a name DIRECTLY into viability the instant a price-bus tick shows it
+    # igniting (bypassing the EMA9 continuation gate). Both flag-gated; OFF ⇒ byte-
+    # identical to current (top-50 + scheduled-only). Adaptive / no-magic: ONE base
+    # FLOOR knob (chili_momentum_ignition_min_pct); the hard ceiling is a DB backstop,
+    # NOT a quality cap. See docs/DESIGN/MOMENTUM_LANE.md.
+    chili_momentum_universe_uncapped_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_UNIVERSE_UNCAPPED_ENABLED"),
+        description="Surface EVERY screen-passing mover into the scored universe instead of truncating to the top-50 by the freshness×move rank. The adaptive price/$-volume/change screen + the hard ceiling (DB-safety) are the only bounds; the downstream Ross percentile re-rank + the bridge chunking still make the real selection. Fixes the day's biggest movers (e.g. CUPR +125%) being ranked out of the candidate pool and thus never getting a viability row. 0 = old top-50 count cap (byte-identical to current).",
+    )
+    chili_momentum_universe_hard_ceiling: int = Field(
+        default=1500,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_UNIVERSE_HARD_CEILING"),
+        description="DB-safety backstop for the uncapped universe — the absolute max number of screen-passers surfaced per build (so a runaway snapshot can't flood viability). This is NOT a quality cap (the adaptive screen does the real selection); it exists only to bound the row count. Only consulted when chili_momentum_universe_uncapped_enabled is on.",
+    )
+    chili_momentum_ws_ignition_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WS_IGNITION_ENABLED"),
+        description="Enable the additive WS ignition scorer: subscribe the (uncapped) equity universe on the price bus and, the instant a tick shows a name igniting (intraday move% ≥ the ignition floor), score it DIRECTLY into momentum_symbol_viability — bypassing the EMA9 continuation gate that emits nothing for a vertical name (e.g. RGNT +498% nowhere near its EMA9). The scheduled 5-min batch builder + legacy pattern lane are unchanged; this path is purely additive. 0 = scheduled-only (no WS ignition; byte-identical to current).",
+    )
+    chili_momentum_ignition_min_pct: float = Field(
+        default=3.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_IGNITION_MIN_PCT"),
+        description="The single adaptive FLOOR knob for the WS ignition scorer: the minimum intraday move% (live price vs today's open / prev-close) for a tick to be treated as an ignition worth scoring into viability. A FLOOR / reference point, not a ceiling — the downstream Ross percentile re-rank does the real selection above it. Sized to drop dead tape while still catching the real igniters early.",
+    )
     # ── Daily-chart context (the multi-timeframe layer Ross STARTS with) ─────────
     # Adds a 5th SELECTION pillar (daily_structure, 10% weight) from
     # daily_levels.compute_daily_context — break ABOVE a major daily level + room to
