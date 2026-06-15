@@ -896,24 +896,25 @@ def realized_pnl_today_by_broker(
 def per_broker_daily_loss_cap_usd(family: str) -> tuple[float, str]:
     """(positive_cap_usd, source) for ONE broker's daily-loss cap.
 
-    RISK basis = the broker's REAL equity (NOT the margin-inflated buying power
-    that _account_equity_usd returns for SIZING — operator 2026-06-15: a Coinbase
-    balance of ~$2.4k was read as $3,989 via buying_power*2.0). pct reuses the
-    existing chili_global_max_daily_loss_pct_of_equity knob (no new magic number);
-    conservative-wins with the optional usd cap. Fail-CLOSED to a documented floor
-    when equity is unavailable (Hard Rule #2: never an uncapped path).
+    RISK basis = the broker's UNLEVERED BUYING POWER (operator 2026-06-15: "gamitin
+    mo buying power, hindi lang cash" — but NOT the 2x-margin-inflated sizing number;
+    a Coinbase ~$2.0k buying power must not read as $3,989 = bp*2.0). So pass
+    apply_margin_multiple=False (margin multiple forced to 1.0) -> RH ~$13.4k / CB ~$2.0k.
+    pct reuses the existing chili_global_max_daily_loss_pct_of_equity knob (no new magic
+    number); conservative-wins with the optional usd cap. Fail-CLOSED to a documented
+    floor when buying power is unavailable (Hard Rule #2: never an uncapped path).
     """
     from .momentum_neural.risk_policy import _account_equity_usd
 
     pct = float(getattr(settings, "chili_global_max_daily_loss_pct_of_equity", 0.0) or 0.0)
     usd_cap = float(getattr(settings, "chili_global_max_daily_loss_usd", 0.0) or 0.0)
-    eq = _account_equity_usd(family, prefer_real_equity=True)
+    eq = _account_equity_usd(family, apply_margin_multiple=False)
 
     candidates: list[tuple[float, str]] = []
     if usd_cap > 0:
         candidates.append((usd_cap, "usd"))
     if pct > 0 and eq is not None and float(eq) > 0:
-        candidates.append((pct * float(eq), "pct_real_equity"))
+        candidates.append((pct * float(eq), "pct_buying_power"))
     if not candidates:
         floor = float(getattr(settings, "chili_global_daily_loss_failsafe_usd", 300.0) or 300.0)
         return floor, "usd_failsafe"

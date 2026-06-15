@@ -472,7 +472,7 @@ def try_emit_momentum_session_feedback(
             check_daily_loss_breach(
                 db,
                 user_id=sess.user_id,
-                equity_usd=_account_equity_usd(_ef, prefer_real_equity=True),
+                equity_usd=_account_equity_usd(_ef, apply_margin_multiple=False),
             )
     except Exception as ex:
         _log.debug("[momentum_feedback] daily-loss check skipped: %s", ex)
