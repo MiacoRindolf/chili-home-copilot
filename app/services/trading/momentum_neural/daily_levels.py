@@ -40,11 +40,14 @@ class DailyContext:
     breaking_major_level: bool
     daily_structure_pct: float | None   # [0,1] selection sub-score; None = skip the pillar
     reason: str
+    sma_200: float | None = None        # Ross's daily macro-trend / support benchmark
+    above_sma_200: bool | None = None   # None when < 200 daily bars (fail-open)
+    dist_to_sma_200_atr: float | None = None  # signed daily-ATR units (+ above, − below)
 
 
 _NULL = DailyContext(
     None, None, None, None, None, None, None, None, 0.5, False, None,
-    "insufficient_daily_bars",
+    "insufficient_daily_bars", None, None, None,
 )
 
 
@@ -131,7 +134,24 @@ def compute_daily_context(df: Any, *, lookback: int = 20, price: float | None = 
         except (IndexError, ZeroDivisionError):
             ret = 0.0
         ret_score = max(0.0, min(1.0, 0.5 + ret * 2.5))  # +20%/N => ~1.0, -20% => ~0
-        trend = max(0.0, min(1.0, (above_ema + hh_hl_frac + ret_score) / 3.0))
+        # Ross macro-trend: the 200-day SMA (needs >=200 daily bars; fail-open to a
+        # NEUTRAL 0.5 macro read otherwise so a fresh listing is never penalized). A
+        # SOFT minority input to the broader-trend read — above the 200-SMA is bullish
+        # macro context, below is caution; it NEVER hard-filters (a news-gap spike below
+        # its 200-SMA breaking a level still scores HIGH — the CUPR guarantee).
+        sma200 = above200 = d200 = None
+        macro = 0.5
+        if len(close) >= 200:
+            try:
+                _s200 = float(close.rolling(200).mean().iloc[-1])
+                if math.isfinite(_s200) and _s200 > 0:
+                    sma200 = _s200
+                    above200 = bool(px > _s200)
+                    d200 = (px - _s200) / px / atr_pct      # signed daily-ATR units
+                    macro = 1.0 if above200 else 0.0
+            except Exception:
+                sma200 = above200 = d200 = None
+        trend = max(0.0, min(1.0, (above_ema + hh_hl_frac + ret_score + macro) / 4.0))
 
         # the SELECTION sub-score (the only decision-affecting output): break ABOVE a
         # major level dominates; jammed-under-resistance (small ceiling) scores low;
@@ -147,6 +167,7 @@ def compute_daily_context(df: Any, *, lookback: int = 20, price: float | None = 
             daily_atr_pct=atr_pct, dist_to_resistance_atr=d_res, dist_to_support_atr=d_sup,
             near_round_number=rn, trend_score=trend, breaking_major_level=breaking,
             daily_structure_pct=ds, reason="ok",
+            sma_200=sma200, above_sma_200=above200, dist_to_sma_200_atr=d200,
         )
     except Exception:
         return _NULL
