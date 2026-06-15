@@ -30,6 +30,7 @@ from .alert_formatter import (
     format_target_hit,
     format_time_exit,
 )
+from .stop_distance_guard import bound_stop_distance
 from .tick_normalizer import normalize_price as _norm_price
 
 logger = logging.getLogger(__name__)
@@ -416,6 +417,22 @@ def _compute_initial_stop(
         else:
             sl = entry * (1.0 + FALLBACK_STOP_PCT_SHORT)
             tp = entry * FALLBACK_TP_MULT_SHORT
+
+    # QTEX guard (2026-06-15, trade 2338): bound the stop DISTANCE for the live
+    # bracket too — the momentum lane, fast-path executor, and bracket_intent
+    # all flow through here. A hyper-mover's huge ATR must not anchor the stop
+    # ~83% below entry (whole-position risk). Tightens (never widens) and
+    # scales the target to preserve R:R; normal stops pass through unchanged.
+    # See stop_distance_guard for the adaptive env-knob / kill-switch.
+    b_stop, b_tp, _clamp = bound_stop_distance(
+        entry=entry, stop=sl, target=tp,
+        is_long=(direction == "long"), crypto=is_crypto,
+        context="stop_engine._compute_initial_stop",
+    )
+    if _clamp is not None:
+        sl = b_stop
+        if b_tp is not None:
+            tp = b_tp
 
     # Phase 1 (2026-05-01): align stop+target to the venue's actual tick
     # before storage. Previously this rounded equity to 4 decimals, which
