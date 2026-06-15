@@ -3325,6 +3325,23 @@ class Settings(BaseSettings):
         description="Global catastrophic backstop: if AGGREGATE realized loss across brokers exceeds (sum of per-broker caps) * this multiple, the true global kill switch trips. 1.0 = trip at the combined budget.",
     )
 
+    # Lane-health FROZEN alert. A tripped safety breaker (global kill switch or a
+    # per-broker daily-loss block) silently empties the momentum lane; on 2026-06-15
+    # the lane sat frozen ~8h before the operator noticed. This emits a LOUD signal
+    # (logger.critical + a cockpit banner + an audit row) so a frozen lane is never
+    # silent again. Reversible: =0 fully reverts to the prior silent behaviour.
+    chili_lane_health_alert_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_LANE_HEALTH_ALERT_ENABLED"),
+        description="When True, the scheduler watches the momentum lane and raises a loud FROZEN alert (critical log + cockpit banner + audit row) when a safety breaker has held the lane idle past the grace window. =0 disables the alert entirely (the breakers themselves are unaffected).",
+    )
+    chili_lane_health_freeze_alert_seconds: float = Field(
+        default=0.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_LANE_HEALTH_FREEZE_ALERT_SECONDS"),
+        description="Grace before a held safety state counts as FROZEN. 0 = ADAPTIVE (derive from the lane's own watch cadence: auto_arm max_watch + watch_extend) so there is no separate magic number; a positive value overrides it. The same value is reused as the re-remind cooldown so a long freeze keeps nagging without spamming.",
+    )
+
     # Cross-process kill switch. API and scheduler run in separate processes,
     # so live paths re-read durable state instead of trusting process memory.
     chili_kill_switch_db_poll_enabled: bool = Field(

@@ -38,6 +38,21 @@
     return d.trades + ' trades (' + d.wins + 'W–' + d.losses + 'L)';
   }
 
+  function renderLaneHealth(p) {
+    var el = document.getElementById('ap-lane-frozen');
+    if (!el) return;
+    var lh = p && p.lane_health;
+    if (!lh || !lh.frozen) {
+      el.hidden = true;
+      return;
+    }
+    var h = document.getElementById('ap-lane-frozen-headline');
+    var d = document.getElementById('ap-lane-frozen-detail');
+    if (h) h.textContent = lh.headline || 'MOMENTUM LANE FROZEN';
+    if (d) d.textContent = lh.detail || '';
+    el.hidden = false;
+  }
+
   function renderBand(p) {
     var live = p.buckets.live, paper = p.buckets.paper, alpaca = p.buckets.alpaca;
     var heroTotal = document.getElementById('ap-pnl-hero-total');
@@ -194,6 +209,7 @@
         _payload = p;
         _fetchedAtMs = Date.now();
         _fetchFailed = false;
+        renderLaneHealth(p);
         renderBand(p);
         renderLedger(p);
         renderStaleness();

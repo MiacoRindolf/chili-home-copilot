@@ -1028,7 +1028,11 @@ def _run_momentum_auto_arm_live_job():
         db = SessionLocal()
         try:
             from .trading.momentum_neural.auto_arm import run_auto_arm_pass
+            from .trading.momentum_neural.lane_health import record_auto_arm_run
 
+            # Heartbeat: prove the pass actually executed so lane-health can tell a
+            # wedged/dead auto-arm job from a legitimately quiet market.
+            record_auto_arm_run()
             summary = run_auto_arm_pass(db)
             db.commit()
             if summary.get("armed") or summary.get("begin_error") or summary.get("confirm_error"):
@@ -1066,6 +1070,40 @@ def _run_momentum_auto_arm_live_job():
             db.close()
 
     run_scheduler_job_guarded("momentum_auto_arm_live", _work)
+
+
+def _run_lane_health_check_job():
+    """Watch the momentum lane for a SILENT freeze (the 2026-06-15 incident: the global
+    daily-loss kill switch tripped at 05:18 ET and the lane sat empty ~8h before the
+    operator noticed). When a safety breaker has held the lane idle past the adaptive
+    grace window, emit a LOUD signal — logger.critical + a cockpit banner (via the P&L
+    rollup) + an audit row — so a tripped breaker is never silent.
+    (trading.momentum_neural.lane_health.run_lane_health_check)"""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+
+        if not getattr(_settings, "chili_lane_health_alert_enabled", True):
+            return
+
+        db = SessionLocal()
+        try:
+            from .trading.momentum_neural.lane_health import run_lane_health_check
+
+            run_lane_health_check(db)
+        except Exception:
+            db.rollback()
+            logger.warning("[scheduler] lane_health check failed", exc_info=True)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("lane_health_check", _work)
 
 
 def _run_momentum_post_exit_excursion_job():
@@ -6245,6 +6283,23 @@ def start_scheduler():
                 coalesce=True,
                 next_run_time=datetime.now() + timedelta(seconds=40),
             )
+
+            # Lane-health FROZEN watch: a tripped safety breaker silently empties the
+            # lane (the 06-15 ~8h frozen-lane incident). Runs at the lane's own cadence
+            # (the auto-arm interval — no new magic number); evaluates against the
+            # adaptive grace window and emits critical+banner+audit row when frozen.
+            # Gated on the same lane-on condition as auto-arm + its own kill-switch flag.
+            if getattr(settings, "chili_lane_health_alert_enabled", True):
+                _scheduler.add_job(
+                    _run_lane_health_check_job,
+                    trigger=IntervalTrigger(seconds=_aa_secs),
+                    id="lane_health_check",
+                    name=f"Lane-health FROZEN watch (every {_aa_secs}s; alerts on a stuck safety breaker)",
+                    replace_existing=True,
+                    max_instances=1,
+                    coalesce=True,
+                    next_run_time=datetime.now() + timedelta(seconds=55),
+                )
 
         # NBBO spread tape: persist the clean consolidated bid/ask (Massive snapshot
         # lastQuote) for the Ross universe each RTH cycle, so the spread-sensitive
