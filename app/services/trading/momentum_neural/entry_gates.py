@@ -257,7 +257,8 @@ def _dipbuy_signals_ok(
     high: pd.Series, low: pd.Series, close: pd.Series, vol: pd.Series, vwap: list,
     *, peak_idx: int, dip_idx: int, dip_low: float, run_high: float, depth: float,
     cur: int, w_start: int, atr_pct: float | None, tol: float, ema_wick: float,
-    ema9: list, symbol: str | None,
+    ema9: list, symbol: str | None, opn: pd.Series | None = None,
+    db: Any = None, l2_as_of: Any = None,
 ) -> tuple[str, float | None, float | None, dict[str, Any]]:
     """Ross "buy the FIRST reversal off the dip" gate — the EARLY deep-reclaim entry.
 
@@ -356,6 +357,48 @@ def _dipbuy_signals_ok(
         push_vm = sum(push_v) / len(push_v)
         if push_vm <= 0:
             return "PASS", None, None, {"dipbuy_declined": "zero_push_volume"}
+
+        # ── Gate 2b (dip-buy quality, flag-gated): impulse-ACCUMULATION confirm ──
+        # The up-impulse's per-bar volume should be NON-DECREASING (real buyers
+        # piling in, not fading into the high). Least-squares slope of push_v vs
+        # bar index, normalized by push_vm (self-relative, no fixed magic), must be
+        # >= the floor. Sentinel -1 = DISABLED ⇒ skipped ⇒ byte-identical. Fail-open
+        # when push_v is too short to fit a slope. (Reuses the SIGNAL-1 slope idiom.)
+        _accum_min = float(getattr(settings, "chili_momentum_dipbuy_impulse_accum_min_slope", -1.0))
+        if _accum_min != -1.0 and len(push_v) >= 2 and push_vm > 0:
+            _pxs = [float(i) for i in range(len(push_v))]
+            _pys = [float(v) for v in push_v]
+            _pmx = sum(_pxs) / len(_pxs)
+            _pmy = sum(_pys) / len(_pys)
+            _pcov = sum((x - _pmx) * (y - _pmy) for x, y in zip(_pxs, _pys))
+            _pvar = sum((x - _pmx) ** 2 for x in _pxs)
+            if _pvar > 0:
+                _pslope = (_pcov / _pvar) / push_vm
+                if _pslope < _accum_min:
+                    return "PASS", None, None, {"dipbuy_declined": "impulse_not_accumulating"}
+
+        # ── Gate 2a (dip-buy quality, flag-gated): high-volume SELLING-candle veto ──
+        # A pullback bar that is RED (close < open) AND prints >= mult × the impulse's
+        # mean per-bar volume is DISTRIBUTION (a big seller stepping in) — distinct
+        # from the AVERAGE dry-up check below (this is PER-CANDLE). Self-relative to
+        # push_vm (no fixed share). 0 = disabled ⇒ loop skipped ⇒ byte-identical.
+        _dist_mult = float(getattr(settings, "chili_momentum_dipbuy_distribution_vol_mult", 0.0))
+        if _dist_mult > 0 and opn is not None:
+            _ov = opn.values if hasattr(opn, "values") else None
+            if _ov is not None:
+                for i in range(peak_idx + 1, dip_idx + 1):
+                    if i >= len(vv) or i >= len(_ov) or i >= len(cl):
+                        continue
+                    _ci, _oi, _vi = cl[i], _ov[i], vv[i]
+                    # NaN-safe: skip any bar with a missing close/open/volume.
+                    if _ci != _ci or _oi != _oi or _vi != _vi:
+                        continue
+                    if float(_ci) < float(_oi) and float(_vi) >= _dist_mult * push_vm:
+                        return "PASS", None, None, {
+                            "dipbuy_declined": "distribution_candle",
+                            "dist_vol_ratio": round(float(_vi) / push_vm, 2),
+                        }
+
         if dip_vm > push_vm:  # heavy dip volume = sellers in control (the falling-knife signature)
             return "PASS", None, None, {"dipbuy_declined": "no_dryup_heavy_dip"}
         if dip_vm > dryup * push_vm:  # not enough dry-up
@@ -394,6 +437,14 @@ def _dipbuy_signals_ok(
             "dipbuy_dryup": round(dip_vm / push_vm, 3), "dipbuy_depth_pct": round(depth * 100.0, 2),
             "dipbuy_runway_rr": round(reward_runway / risk_runway, 2),
         }
+        # ── Gate 3 (dip-buy quality, flag-gated): L2 hidden-seller / big-seller veto ──
+        # BEFORE the FIRE/ARM returns: a large resting ask wall the price can't lift, or
+        # absorption/micro-price rollover despite buy-side OFI, makes this dip a
+        # round-trip → PASS. FAIL-OPEN (helper returns None on disabled/null/stale L2).
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of)
+        if _l2v is not None:
+            _reason, _l2patch = _l2v
+            return "PASS", None, None, {"dipbuy_declined": _reason, **_l2patch}
         cur_hi = float(hi[cur])
         cur_cl = float(cl[cur])
         cur_lo = float(lo[cur])
@@ -431,6 +482,9 @@ def _evaluate_deep_reclaim(
     symbol: str | None = None,
     vol: pd.Series | None = None,
     vwap: list | None = None,
+    opn: pd.Series | None = None,
+    db: Any = None,
+    l2_as_of: Any = None,
 ) -> tuple[bool, str, float | None, float | None, dict[str, Any]] | None:
     """Deep-retrace RECLAIM entry (the 2026-06-11 EDHL gap): after a retrace too
     deep for the flag checks, Ross does not walk away — he waits for price to
@@ -517,6 +571,7 @@ def _evaluate_deep_reclaim(
             peak_idx=peak_idx, dip_idx=dip_idx, dip_low=dip_low, run_high=run_high,
             depth=depth, cur=cur, w_start=w_start, atr_pct=atr_pct, tol=tol,
             ema_wick=ema_wick, ema9=ema9, symbol=symbol,
+            opn=opn, db=db, l2_as_of=l2_as_of,
         )
         if _dv in ("FIRE", "ARM"):
             _ddebug = dict(debug)
@@ -642,6 +697,9 @@ def _evaluate_break_retest(
     symbol: str | None = None,
     vol: pd.Series | None = None,
     vwap: list | None = None,
+    opn: pd.Series | None = None,
+    db: Any = None,
+    l2_as_of: Any = None,
 ) -> tuple[bool, str, float | None, float | None, dict[str, Any]]:
     """Break-AND-retest trigger (Ross's recent refinement: "I almost never buy the
     first break anymore — too many wick out and reverse. I wait for the break AND
@@ -692,7 +750,7 @@ def _evaluate_break_retest(
         window_bars=20 + int(max_pullback_bars) + look_bars,
         ema_wick=ema_wick, tol=tol, atr_pct=atr_pct, debug=debug,
         bar_ts=(high.index[cur] if hasattr(high, "index") and len(high.index) > cur else None),
-        symbol=symbol, vol=vol, vwap=vwap,
+        symbol=symbol, vol=vol, vwap=vwap, opn=opn, db=db, l2_as_of=l2_as_of,
     )
 
     retrace = (win_high - base_low) / impulse_range
@@ -816,6 +874,81 @@ def _dipbuy_tick_thrust_ok(*, live_price: float, level: float, atr_pct: float | 
         return True
 
 
+def _l2_entry_veto(
+    symbol: str | None, *, db: Any = None, l2_as_of: Any = None,
+) -> tuple[str, dict[str, Any]] | None:
+    """Gate 3 (dip-buy quality, flag-gated): L2 hidden-seller / big-seller veto.
+
+    Reuses the #699 OFI + #704 ladder readers (``read_ladder_distribution`` →
+    OFI/micro-price/depth-imbalance) — NOT a new L2 stack. CLASS-AWARE through that
+    reader (equity ``iqfeed_depth_snapshots`` / crypto ``fast_orderbook``). Returns:
+
+      * ``("l2_big_seller", patch)``    — a large resting ASK wall at/near the entry
+        level the price can't lift: the NEWEST book is ask-heavy and sits at/below the
+        big-seller percentile floor (a TREND of distribution in its own window, not a
+        single-snapshot spoof).
+      * ``("l2_hidden_seller", patch)`` — absorption / micro-price ROLLOVER despite a
+        buy-side OFI read (the #704 absorption shape applied at entry): supply is
+        eating the bid even as flow looks bid-side, so the breakout has no follow-through.
+      * ``None`` — NO veto (FAIL-OPEN): disabled, db None, blank symbol, empty/stale L2,
+        or a _NULL read. NEVER blocks a good entry on missing/bad data.
+
+    Pure read (no writes). Any error ⇒ None (fail-open)."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_entry_l2_veto_enabled", False)):
+            return None
+        if db is None or not symbol:
+            return None
+        from .pipeline import read_ladder_distribution
+
+        lr = read_ladder_distribution(symbol, db=db, as_of=l2_as_of)
+        if lr is None or int(getattr(lr, "n_snaps", 0) or 0) <= 0:
+            return None  # empty / _NULL read -> fail-open
+
+        # (a) BIG-SELLER wall: the newest book is ask-heavy relative to its own recent
+        #     window — depth-imbalance percentile at/below the floor. Self-relative
+        #     percentile (no absolute threshold a single spoof can trip). Fail-open
+        #     when the percentile is unavailable (too few snaps to rank).
+        try:
+            floor = float(getattr(settings, "chili_momentum_entry_l2_bigseller_pctile_floor", 0.15))
+        except (TypeError, ValueError):
+            floor = 0.15
+        pct = getattr(lr, "depth_imbal_pctile", None)
+        if pct is not None:
+            try:
+                if float(pct) <= floor:
+                    return "l2_big_seller", {
+                        "l2_pctile": round(float(pct), 3),
+                        "l2_floor": round(floor, 3),
+                    }
+            except (TypeError, ValueError):
+                pass
+
+        # (b) HIDDEN-SELLER absorption: micro-price ROLLED OVER (micro_edge < 0 =
+        #     book leans to the ask / supply at the touch) while OFI still reads buy-
+        #     side (>= +threshold) — the #704 absorption shape (supply eating demand)
+        #     applied at the ENTRY: a break with no real follow-through. Reuses the
+        #     entry's own chili_momentum_ofi_threshold (no new OFI knob).
+        try:
+            thr = abs(float(getattr(settings, "chili_momentum_ofi_threshold", 0.25) or 0.25))
+        except (TypeError, ValueError):
+            thr = 0.25
+        ofi = getattr(lr, "ofi", None)
+        micro = getattr(lr, "micro_edge", None)
+        if ofi is not None and micro is not None:
+            try:
+                if float(ofi) >= thr and float(micro) < 0.0:
+                    return "l2_hidden_seller", {
+                        "l2_ofi": round(float(ofi), 4),
+                        "l2_micro_edge": round(float(micro), 2),
+                    }
+            except (TypeError, ValueError):
+                pass
+        return None
+    except Exception:
+        return None  # any error -> fail-open (never block an entry on a bug)
+
+
 def first_pullback_break(
     df: pd.DataFrame,
     *,
@@ -825,6 +958,8 @@ def first_pullback_break(
     max_pullback_bars: int = 3,
     retracement_threshold: float = 0.50,
     top_fraction: float = 0.50,
+    db: Any = None,
+    l2_as_of: Any = None,
 ) -> tuple[str, float | None, float | None, dict[str, Any]]:
     """Ross's FIRST-PULLBACK entry — the EARLIEST, most aggressive momentum entry.
 
@@ -875,6 +1010,8 @@ def first_pullback_break(
         high = df["High"].astype(float)
         low = df["Low"].astype(float)
         vol = df["Volume"].astype(float)
+        # Open series for the Gate 2a distribution-candle veto (fail-open None if absent).
+        opn = df["Open"].astype(float) if "Open" in getattr(df, "columns", []) else None
         n = len(df)
         cur = n - 1
         arrays = compute_all_from_df(df, needed={"ema_9", "volume_ratio", "atr"})
@@ -962,6 +1099,48 @@ def first_pullback_break(
         if peak_idx > anchor and not _is_first_pullback(low.values, ema9, anchor, peak_idx, ema_wick):
             return "PASS", None, None, {"fp_declined": "not_first_pullback"}
 
+        # ── Gate 2 (dip-buy quality, flag-gated): distribution-candle veto + impulse-
+        # accumulation confirm — the SAME two checks as _dipbuy_signals_ok, applied to
+        # the first-pullback geometry. The IMPULSE bars = anchor..peak_idx (the run
+        # into the peak); the PULLBACK bars = pb_start..cur-1 (completed bars only —
+        # cur is the breaking bar). Both knobs default to a no-op so this whole block
+        # is byte-identical when OFF. NaN-safe; fail-open on thin windows.
+        _vv_fp = vol.values if hasattr(vol, "values") else None
+        if _vv_fp is not None:
+            _push_lo = anchor + 1 if (peak_idx - anchor) >= 2 else anchor
+            _push_v = [
+                float(_vv_fp[i]) for i in range(_push_lo, peak_idx + 1)
+                if i < len(_vv_fp) and float(_vv_fp[i]) == float(_vv_fp[i])
+            ]
+            _push_vm = (sum(_push_v) / len(_push_v)) if _push_v else 0.0
+            # Gate 2b — impulse accumulation (sentinel -1 = disabled ⇒ skipped).
+            _accum_min = float(getattr(settings, "chili_momentum_dipbuy_impulse_accum_min_slope", -1.0))
+            if _accum_min != -1.0 and len(_push_v) >= 2 and _push_vm > 0:
+                _pxs = [float(i) for i in range(len(_push_v))]
+                _pmx = sum(_pxs) / len(_pxs)
+                _pmy = sum(_push_v) / len(_push_v)
+                _pcov = sum((x - _pmx) * (y - _pmy) for x, y in zip(_pxs, _push_v))
+                _pvar = sum((x - _pmx) ** 2 for x in _pxs)
+                if _pvar > 0 and (_pcov / _pvar) / _push_vm < _accum_min:
+                    return "PASS", None, None, {"fp_declined": "impulse_not_accumulating"}
+            # Gate 2a — high-volume RED (distribution) pullback candle (0 = disabled).
+            _dist_mult = float(getattr(settings, "chili_momentum_dipbuy_distribution_vol_mult", 0.0))
+            if _dist_mult > 0 and opn is not None and _push_vm > 0:
+                _ov_fp = opn.values if hasattr(opn, "values") else None
+                _cl_fp = close.values if hasattr(close, "values") else None
+                if _ov_fp is not None and _cl_fp is not None:
+                    for i in range(pb_start, cur):
+                        if i >= len(_vv_fp) or i >= len(_ov_fp) or i >= len(_cl_fp):
+                            continue
+                        _ci, _oi, _vi = _cl_fp[i], _ov_fp[i], _vv_fp[i]
+                        if _ci != _ci or _oi != _oi or _vi != _vi:  # NaN-safe
+                            continue
+                        if float(_ci) < float(_oi) and float(_vi) >= _dist_mult * _push_vm:
+                            return "PASS", None, None, {
+                                "fp_declined": "distribution_candle",
+                                "dist_vol_ratio": round(float(_vi) / _push_vm, 2),
+                            }
+
         # ── GUARD 5: DEPTH — shallow pullback only (reuse the dipbuy yardsticks) ──
         retrace = (win_high - pb_low) / impulse_range
         depth = (win_high - pb_low) / win_high if win_high > 0 else 1.0
@@ -985,6 +1164,15 @@ def first_pullback_break(
             "fp_shallow_cap": round(eff_shallow, 3),
             "fp_explosive": True,
         }
+
+        # ── Gate 3 (dip-buy quality, flag-gated): L2 hidden-seller / big-seller veto ──
+        # BEFORE the FIRE/ARM returns: an ask-wall the price can't lift, or absorption/
+        # micro rollover despite buy-side OFI, makes this break a round-trip → PASS.
+        # FAIL-OPEN (helper None on disabled/null/stale L2).
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of)
+        if _l2v is not None:
+            _reason, _l2patch = _l2v
+            return "PASS", None, None, {"fp_declined": _reason, **_l2patch}
 
         # ── GUARD 3: TRIGGER — first NEW HIGH above the pullback swing high ──────
         cur_hi = float(hi_v[cur]) if cur < len(hi_v) else float(high.iloc[cur])
@@ -1020,6 +1208,8 @@ def pullback_break_confirmation(
     symbol: str | None = None,
     now: Any = None,
     first_pullback_interval: str | None = None,
+    db: Any = None,
+    l2_as_of: Any = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Ross-style pullback-break entry on intraday (1m/5m) bars.
 
@@ -1048,6 +1238,9 @@ def pullback_break_confirmation(
     high = df["High"].astype(float)
     low = df["Low"].astype(float)
     vol = df["Volume"].astype(float)
+    # Open series for the Gate 2a distribution-candle veto (df ALWAYS carries Open;
+    # fail-open to None if absent so a malformed df can never raise here).
+    opn = df["Open"].astype(float) if "Open" in getattr(df, "columns", []) else None
     n = len(df)
     cur = n - 1
     arrays = compute_all_from_df(
@@ -1086,6 +1279,9 @@ def pullback_break_confirmation(
             symbol=symbol,
             vol=vol,
             vwap=vwap,
+            opn=opn,
+            db=db,
+            l2_as_of=l2_as_of,
         )
     else:
         ok_t, reason_t, pb_high, pb_low, debug = _evaluate_raw_break(
@@ -1118,6 +1314,8 @@ def pullback_break_confirmation(
             symbol=symbol,
             max_pullback_bars=max_pullback_bars,
             retracement_threshold=retracement_threshold,
+            db=db,
+            l2_as_of=l2_as_of,
         )
         if _fpv == "FIRE":
             ok_t, reason_t, pb_high, pb_low, debug = (
@@ -1281,9 +1479,22 @@ def pullback_break_confirmation(
         m = macd[cur] if cur < len(macd) and macd[cur] is not None else None
         s = macd_sig[cur] if cur < len(macd_sig) and macd_sig[cur] is not None else None
         if hh is not None or (m is not None and s is not None):
-            bullish = (hh is not None and float(hh) >= 0.0) or (
-                m is not None and s is not None and float(m) >= float(s)
-            )
+            # Gate 1 (dip-buy quality, flag-gated): STRICT requires the MACD LINE
+            # strictly above SIGNAL (a true cross-up, not the lenient hist>=0 OR
+            # line>=signal). Warmup (line or signal None) STILL fails open under
+            # strict — never veto on missing MACD. OFF ⇒ the EXACT current
+            # expression (byte-identical). Self-relative (m vs s), no magic number.
+            _macd_strict = bool(getattr(settings, "chili_momentum_entry_macd_open_strict", False))
+            if _macd_strict and (m is None or s is None):
+                bullish = True  # fail-open on warmup (do NOT veto)
+            elif _macd_strict:
+                bullish = float(m) > float(s)
+                # A/B tag only when strict is ON (OFF leaves debug byte-identical).
+                debug["macd_open"] = {"m": m, "s": s}
+            else:
+                bullish = (hh is not None and float(hh) >= 0.0) or (
+                    m is not None and s is not None and float(m) >= float(s)
+                )
             debug["macd_hist"] = None if hh is None else round(float(hh), 6)
             if not bullish:
                 return False, "macd_not_bullish", debug
@@ -1413,7 +1624,7 @@ def hurst_proxy_from_closes(close: pd.Series) -> float:
 
 def momentum_pullback_trigger(
     df: pd.DataFrame, *, entry_interval: str, live_price: float | None = None,
-    symbol: str | None = None, now: Any = None,
+    symbol: str | None = None, now: Any = None, db: Any = None, l2_as_of: Any = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """The Ross pullback-break trigger resolved from live settings — the SINGLE
     source BOTH the live runner and the paper runner call, so the two paths make
@@ -1430,6 +1641,8 @@ def momentum_pullback_trigger(
         live_price=live_price,
         symbol=symbol,
         now=now,
+        db=db,
+        l2_as_of=l2_as_of,
         first_pullback_interval=str(
             getattr(settings, "chili_momentum_first_pullback_interval", "1m") or "1m"
         ),
@@ -1648,7 +1861,7 @@ def run_paper_entry_gates(
         df_entry = None
     if df_entry is None or getattr(df_entry, "empty", True):
         return False, "no_entry_data", {"interval": _interval}
-    ok_t, reason_t, pb = momentum_pullback_trigger(df_entry, entry_interval=_interval, symbol=sym)
+    ok_t, reason_t, pb = momentum_pullback_trigger(df_entry, entry_interval=_interval, symbol=sym, db=db)
     if not ok_t:
         return False, reason_t, {"trigger": True, "interval": _interval}
 
