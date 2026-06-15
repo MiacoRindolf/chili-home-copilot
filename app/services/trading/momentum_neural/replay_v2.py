@@ -460,7 +460,15 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             if _bar_key in trigger_cache:
                 ok = trigger_cache[_bar_key][0]
             else:
-                res = momentum_pullback_trigger(upto, entry_interval=ENTRY_INTERVAL)
+                # Same as_of L2 plumbing as the entry-decision call so the shared cache
+                # is consistent under Gate 3 (default-OFF ⇒ db unused ⇒ byte-identical).
+                try:
+                    _l2_asof = _aware(upto.index[-1]).replace(tzinfo=None)
+                except Exception:
+                    _l2_asof = None
+                res = momentum_pullback_trigger(
+                    upto, entry_interval=ENTRY_INTERVAL, db=_l2db, l2_as_of=_l2_asof,
+                )
                 trigger_cache[_bar_key] = res
                 ok = res[0]
             return bool(ok)
@@ -767,7 +775,13 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                 if _bar_key in trigger_cache:
                     ok, _treason, dbg = trigger_cache[_bar_key]
                 else:
-                    ok, _treason, dbg = momentum_pullback_trigger(upto, entry_interval=ENTRY_INTERVAL)
+                    # Gate 3 (L2 entry veto) is default-OFF ⇒ db unused ⇒ byte-identical;
+                    # when the operator flips it ON, the as-of L2 read exercises the veto
+                    # against the day's historical book (the same as_of the exit reads use).
+                    ok, _treason, dbg = momentum_pullback_trigger(
+                        upto, entry_interval=ENTRY_INTERVAL,
+                        db=_l2db, l2_as_of=_aware(now).replace(tzinfo=None),
+                    )
                     trigger_cache[_bar_key] = (ok, _treason, dbg)
                 # TICK-BREAK parity (live_runner does the same with the WS ask): the
                 # completed-bar structure is valid but waiting, and THIS minute's tape
@@ -785,7 +799,8 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                         # (CUPR guard) evaluates the right session, not wall-clock now.
                         ok, _treason, dbg = momentum_pullback_trigger(
                             upto, entry_interval=ENTRY_INTERVAL, live_price=float(_q_tb[1]),
-                            now=_aware(now))
+                            now=_aware(now),
+                            db=_l2db, l2_as_of=_aware(now).replace(tzinfo=None))
             if not ok:
                 _tr(s, "trigger_fail:" + str(_treason), now)
                 continue

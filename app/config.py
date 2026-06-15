@@ -3903,6 +3903,60 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_VERTICALITY_ATR_MULT"),
     )
+    # ── Ross dip-buy QUALITY gates (5 knobs, ALL default-off / byte-identical) ────
+    # Flag-gated discriminators that make MARGINAL/round-trip dip entries PASS while
+    # clean ones still FIRE. EVERY default is the value that is byte-identical to the
+    # current behavior (parity is load-bearing); the operator replay-validates ON vs
+    # OFF and flips safest-first. ADAPTIVE / self-relative (no fixed magic numbers):
+    # MACD self-relative, volume push-mean-relative, L2 ladder percentile.
+    # Gate 1 — MACD-open STRICT: require the MACD LINE above SIGNAL (not the lenient
+    # "hist>=0 OR line>=signal"). Only tightens the EXISTING macd-bullish veto (which
+    # is already ON live); fail-open on warmup (m/s None) is preserved. OFF ⇒ exact
+    # current expression.
+    chili_momentum_entry_macd_open_strict: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_MACD_OPEN_STRICT"),
+        description="Gate 1 (dip-buy quality): inside the existing require_macd_bullish veto, require the MACD LINE strictly above SIGNAL instead of the lenient hist>=0 OR line>=signal. Warmup (line/signal None) still fails OPEN. false = byte-identical current expression.",
+    )
+    # Gate 2a — high-volume SELLING-candle veto: a RED pullback candle (close<open)
+    # printing >= mult × the impulse's mean per-bar volume is distribution (a big
+    # seller stepping in) → PASS. Self-relative to the push volume (no fixed share).
+    # 0 disables (the per-candle loop is skipped) ⇒ byte-identical. Reference floor 2.5.
+    chili_momentum_dipbuy_distribution_vol_mult: float = Field(
+        default=0.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DIPBUY_DISTRIBUTION_VOL_MULT"),
+        description="Gate 2a (dip-buy quality): a RED pullback candle with per-bar volume >= mult × the impulse mean volume = distribution → veto the dip entry. 0 = disabled (loop skipped, byte-identical). Reference floor 2.5.",
+    )
+    # Gate 2b — impulse-ACCUMULATION confirm: the up-impulse's per-bar volume should be
+    # non-decreasing (real buyers piling in, not fading). Least-squares slope of the
+    # push volumes normalized by the push mean must be >= this floor. Sentinel -1 =
+    # DISABLED (byte-identical default); 0.0 = require non-decreasing volume.
+    chili_momentum_dipbuy_impulse_accum_min_slope: float = Field(
+        default=-1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DIPBUY_IMPULSE_ACCUM_MIN_SLOPE"),
+        description="Gate 2b (dip-buy quality): require the impulse's per-bar volume to be accumulating — normalized least-squares slope of push volumes >= this. Sentinel -1 = DISABLED (byte-identical). 0.0 = require non-decreasing.",
+    )
+    # Gate 3 — L2 hidden-seller / big-seller veto (reuses #699 OFI + #704 ladder
+    # readers). Before a dip/first-pullback FIRE/ARM, read the L2 ladder distribution
+    # at the entry level: veto on a large resting ASK wall the price can't lift
+    # (ladder ask-heavy, big-seller percentile BELOW the floor) OR absorption /
+    # micro-price rollover despite buy-side OFI. FAIL-OPEN: db None / empty / stale /
+    # _NULL read ⇒ NEVER veto. Class-aware (equity iqfeed / crypto fast_orderbook).
+    # OFF ⇒ branch skipped ⇒ byte-identical. The absorption side reuses
+    # chili_momentum_ofi_threshold (no new OFI knob).
+    chili_momentum_entry_l2_veto_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_L2_VETO_ENABLED"),
+        description="Gate 3 (dip-buy quality): enable the L2 hidden-seller / big-seller entry veto (reuses read_ladder_distribution + OFI/micro). FAIL-OPEN on any missing/stale L2. false = branch skipped, byte-identical.",
+    )
+    chili_momentum_entry_l2_bigseller_pctile_floor: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_L2_BIGSELLER_PCTILE_FLOOR"),
+        description="Gate 3 (dip-buy quality): depth-imbalance percentile at/below which the NEWEST book is treated as a big resting ASK wall (distribution trend) → veto. Self-relative to the symbol's own recent window. Only consulted when chili_momentum_entry_l2_veto_enabled is on.",
+    )
     # ── L2 microstructure (crypto full-book persistence + OFI/micro-price tilt) ──
     # Cadence to drain the warmed Coinbase WS full-book ring into fast_orderbook
     # (crypto only; persists L2 so the live OFI tilt is measurable). 5s start.

@@ -2582,7 +2582,7 @@ def tick_live_session(
                                     _live_px = None
                                 _trigger_ok, _trigger_reason, _pb_debug = momentum_pullback_trigger(
                                     _df_pb, entry_interval=_interval, live_price=_live_px,
-                                    symbol=sess.symbol,
+                                    symbol=sess.symbol, db=db,
                                 )
                     except Exception:
                         _trigger_ok = False
