@@ -944,23 +944,50 @@ def _maybe_trip_daily_loss_kill_switch(db: Session, user_id: int | None) -> None
     from .auto_trader_rules import autotrader_realized_pnl_today_et
     from .governance import activate_kill_switch, check_daily_loss_breach
 
-    # Path-local v1 cap (legacy, autotrader-only, stays as a tighter tripwire).
+    per_broker = bool(getattr(settings, "chili_per_broker_daily_loss_enabled", True))
+
+    # Path-local v1 cap (legacy, autotrader-only, a tighter tripwire). The autotrader
+    # is the Robinhood-equity lane — when per-broker is on, this blocks ONLY the
+    # robinhood_spot broker (NOT the single global kill switch), so an autotrader
+    # drawdown can no longer freeze the Coinbase momentum lane. Disabled => legacy.
     cap = float(getattr(settings, "chili_autotrader_daily_loss_cap_usd", 150.0))
     if cap > 0:
         total = autotrader_realized_pnl_today_et(db, user_id)
         if total <= -cap:
-            activate_kill_switch("autotrader_daily_loss_cap")
-            logger.critical(
-                "[autotrader_monitor] Daily loss cap hit (pnl_today=%.2f cap=%.2f) — kill switch",
-                total,
-                cap,
-            )
+            if per_broker:
+                from .governance import set_broker_daily_loss_block
 
-    # Global cap (P0.2) — spans autotrader + momentum_neural so a mixed-path
-    # drawdown can't sneak past either path-local cap. `check_daily_loss_breach`
-    # handles the kill-switch activation and no-op's if already active.
+                set_broker_daily_loss_block(
+                    "robinhood_spot",
+                    reason="autotrader_daily_loss_cap",
+                    realized=float(total),
+                    limit=cap,
+                )
+            else:
+                activate_kill_switch("autotrader_daily_loss_cap")
+                logger.critical(
+                    "[autotrader_monitor] Daily loss cap hit (pnl_today=%.2f cap=%.2f) — kill switch",
+                    total,
+                    cap,
+                )
+
+    # Global cap (P0.2). Per-broker: evaluate EACH broker off its own real equity
+    # (a breach blocks only that broker; the aggregate backstop still trips the true
+    # global kill switch). Legacy: the single global check, but now sized off the
+    # Robinhood equity (the autotrader's broker) instead of the None->Coinbase default.
     try:
-        check_daily_loss_breach(db, user_id=user_id)
+        if per_broker:
+            from .governance import check_per_broker_daily_loss
+
+            check_per_broker_daily_loss(db, user_id=user_id)
+        else:
+            from .momentum_neural.risk_policy import _account_equity_usd
+
+            check_daily_loss_breach(
+                db,
+                user_id=user_id,
+                equity_usd=_account_equity_usd("robinhood_spot", prefer_real_equity=True),
+            )
     except Exception:
         logger.debug(
             "[autotrader_monitor] Global daily-loss check failed (non-fatal)",

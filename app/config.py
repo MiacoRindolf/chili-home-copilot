@@ -3302,6 +3302,28 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_GLOBAL_DAILY_LOSS_FAILSAFE_USD"),
         description="Daily-loss floor used ONLY when pct-of-equity is configured but equity cannot be resolved (fail closed).",
     )
+    # PER-BROKER daily-loss caps (operator 2026-06-15: "dapat ang kill switch is
+    # by broker"). Each broker is capped off ITS OWN real equity; a breach blocks
+    # ONLY that broker (NOT the single global kill switch), so a Coinbase loss can
+    # never freeze Robinhood and exits/true-global halts are unaffected. Reuses the
+    # existing pct/usd knobs above (no new magic number for the cap itself).
+    chili_per_broker_daily_loss_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_PER_BROKER_DAILY_LOSS_ENABLED"),
+        description="When True, daily-loss caps are evaluated PER BROKER (off each broker's real equity). =0 reverts to the single global check (with the None->Coinbase equity-basis bug still fixed at the activator callsites).",
+    )
+    chili_per_broker_count_manual_as_rh: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_PER_BROKER_COUNT_MANUAL_AS_RH"),
+        description="When True, manual (broker_source='manual') Trade rows count against the Robinhood per-broker budget. Default False (operator-originated, not lane-generated). reconcile_import is always excluded.",
+    )
+    chili_per_broker_aggregate_backstop_mult: float = Field(
+        default=1.0,
+        ge=1.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_PER_BROKER_AGGREGATE_BACKSTOP_MULT"),
+        description="Global catastrophic backstop: if AGGREGATE realized loss across brokers exceeds (sum of per-broker caps) * this multiple, the true global kill switch trips. 1.0 = trip at the combined budget.",
+    )
 
     # Cross-process kill switch. API and scheduler run in separate processes,
     # so live paths re-read durable state instead of trusting process memory.

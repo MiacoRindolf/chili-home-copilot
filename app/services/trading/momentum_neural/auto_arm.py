@@ -961,9 +961,12 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
 
     # Guard 1: kill switch.
     try:
-        from ..governance import is_kill_switch_active
+        from ..governance import kill_switch_halts_new_entries
 
-        if is_kill_switch_active():
+        # True-global halts (manual/emergency/price-monitor/aggregate-backstop) still
+        # freeze the whole lane. A LEGACY single-global daily-loss breach is handled
+        # PER BROKER in Guard 4 below (so a Coinbase-sized cap can't freeze Robinhood).
+        if kill_switch_halts_new_entries():
             out["skipped"] = "kill_switch"
             return out
     except Exception:
@@ -1034,19 +1037,34 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     # cap is authoritatively re-enforced in begin_live_arm; this is a cheap early-out
     # that mirrors risk_evaluator's daily_loss_cap check. Fail-open. MOMENTUM_LANE.md
     try:
-        from .risk_evaluator import _daily_realized_pnl
-        from .risk_policy import equity_relative_daily_loss_cap
+        if bool(getattr(settings, "chili_per_broker_daily_loss_enabled", True)):
+            # PER-BROKER: the lane's daily-loss cap is THIS broker's own budget
+            # (off its real equity), not an all-families sum vs a single cap. A
+            # breach blocks only this broker's arming; the other broker keeps trading.
+            from ..governance import broker_daily_loss_breached
 
-        _max_dl = equity_relative_daily_loss_cap(
-            float(getattr(settings, "chili_momentum_risk_max_daily_loss_usd", 250.0)),
-            _lane_execution_family(),
-        )
-        _daily_pnl = _daily_realized_pnl(db, int(uid))
-        if _daily_pnl <= -_max_dl:
-            out["skipped"] = "daily_loss_cap"
-            out["daily_pnl_usd"] = round(float(_daily_pnl), 2)
-            out["max_daily_loss_usd"] = round(float(_max_dl), 2)
-            return out
+            _fam = _lane_execution_family()
+            _breached, _info = broker_daily_loss_breached(db, _fam, user_id=int(uid))
+            if _breached:
+                out["skipped"] = "daily_loss_cap_broker"
+                out["blocked_broker"] = _info.get("family")
+                out["daily_pnl_usd"] = round(float(_info.get("realized", 0.0) or 0.0), 2)
+                out["max_daily_loss_usd"] = round(float(_info.get("cap", 0.0) or 0.0), 2)
+                return out
+        else:
+            from .risk_evaluator import _daily_realized_pnl
+            from .risk_policy import equity_relative_daily_loss_cap
+
+            _max_dl = equity_relative_daily_loss_cap(
+                float(getattr(settings, "chili_momentum_risk_max_daily_loss_usd", 250.0)),
+                _lane_execution_family(),
+            )
+            _daily_pnl = _daily_realized_pnl(db, int(uid))
+            if _daily_pnl <= -_max_dl:
+                out["skipped"] = "daily_loss_cap"
+                out["daily_pnl_usd"] = round(float(_daily_pnl), 2)
+                out["max_daily_loss_usd"] = round(float(_max_dl), 2)
+                return out
     except Exception:
         pass
 

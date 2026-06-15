@@ -95,7 +95,9 @@ def adaptive_max_spread_bps(
     return adaptive
 
 
-def _account_equity_usd(execution_family: str | None = None) -> float | None:
+def _account_equity_usd(
+    execution_family: str | None = None, *, prefer_real_equity: bool = False
+) -> float | None:
     """Best-effort account SIZING BASIS (USD) for equity-relative caps, PER VENUE.
 
     robinhood_spot -> Robinhood account (equities); else Coinbase portfolio (crypto).
@@ -103,6 +105,11 @@ def _account_equity_usd(execution_family: str | None = None) -> float | None:
     so the lane utilizes available margin for sizing, NOT just settled cash/equity; falls
     back to equity if buying power is unavailable. Returns None when nothing is available
     so callers use the documented fixed cap (never size against an unknown account).
+
+    prefer_real_equity=True forces the REAL account equity (no buying power, no
+    margin multiple) — the correct basis for a daily-loss RISK cap (a fraction of
+    capital at risk), as opposed to the margin-inflated SIZING basis. Operator
+    2026-06-15: a ~$2.4k Coinbase balance must not read as $3,989 (= bp*2.0).
     docs/DESIGN/MOMENTUM_LANE.md
     """
     from ..execution_family_registry import (
@@ -111,7 +118,7 @@ def _account_equity_usd(execution_family: str | None = None) -> float | None:
     )
 
     ef = normalize_execution_family(execution_family)
-    use_bp = bool(getattr(settings, "chili_momentum_risk_size_use_buying_power", True))
+    use_bp = bool(getattr(settings, "chili_momentum_risk_size_use_buying_power", True)) and not prefer_real_equity
     try:
         if ef == EXECUTION_FAMILY_ROBINHOOD_SPOT:
             from ...broker_service import get_portfolio as _rh_portfolio

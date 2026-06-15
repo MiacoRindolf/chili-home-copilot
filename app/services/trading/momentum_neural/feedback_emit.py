@@ -453,14 +453,29 @@ def try_emit_momentum_session_feedback(
     except Exception as ex:
         _log.warning("[momentum_feedback] evolution ingest failed session_id=%s: %s", sess.id, ex)
 
-    # P0.2 — after a momentum session terminates with realized PnL, re-check
-    # the global daily-loss cap so a mixed-path drawdown (autotrader + momentum)
-    # can trip the kill switch. No-ops if already active or no limits configured.
+    # After a momentum session terminates with realized PnL, re-check the
+    # daily-loss cap. Per-broker: blocks only the breached broker (the aggregate
+    # backstop still trips the true global kill switch); legacy: the single global
+    # check, now sized off the session's broker equity (not the None->Coinbase default).
     try:
-        from ..governance import check_daily_loss_breach
-        check_daily_loss_breach(db, user_id=sess.user_id)
+        from ...config import settings as _s
+
+        if bool(getattr(_s, "chili_per_broker_daily_loss_enabled", True)):
+            from ..governance import check_per_broker_daily_loss
+
+            check_per_broker_daily_loss(db, user_id=sess.user_id)
+        else:
+            from ..governance import check_daily_loss_breach
+            from .risk_policy import _account_equity_usd
+
+            _ef = getattr(sess, "execution_family", None)
+            check_daily_loss_breach(
+                db,
+                user_id=sess.user_id,
+                equity_usd=_account_equity_usd(_ef, prefer_real_equity=True),
+            )
     except Exception as ex:
-        _log.debug("[momentum_feedback] global daily-loss check skipped: %s", ex)
+        _log.debug("[momentum_feedback] daily-loss check skipped: %s", ex)
 
     return {
         "ok": True,
