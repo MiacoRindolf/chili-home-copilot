@@ -2221,6 +2221,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_SELECTION_PREP_LEAD_MIN"),
         description="Minutes the data/selection window leads the entry window (data open = entry start − lead).",
     )
+    chili_momentum_premarket_change_fallback_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_CHANGE_FALLBACK_ENABLED"),
+        description="Premarket: when the snapshot's vendor todaysChangePerc is null, derive change% from today's open (else prevDay close) → live premarket price, so already-printing gappers enter the universe/viability board by ~04:00 ET (warm by the derived 03:00-03:45 prep window) instead of ~09:40 ET. Mirrors the proven nbbo_tape fallback; fail-closed (no usable base → dropped). RTH byte-unchanged (vendor field populated RTH → never consulted). 0 = old behavior.",
+    )
     # ── Halt awareness (Ross low-floats halt constantly: LULD circuit breakers) ──
     # A trading HALT is observable as a SUSTAINED quote freeze: the stale_bbo gate
     # already blocks single stale ticks; this many CONSECUTIVE stale-quote ticks on
