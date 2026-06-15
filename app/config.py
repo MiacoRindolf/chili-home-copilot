@@ -2231,6 +2231,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_CHANGE_FALLBACK_ENABLED"),
         description="Premarket: when the snapshot's vendor todaysChangePerc is null, derive change% from today's open (else prevDay close) → live premarket price, so already-printing gappers enter the universe/viability board by ~04:00 ET (warm by the derived 03:00-03:45 prep window) instead of ~09:40 ET. Mirrors the proven nbbo_tape fallback; fail-closed (no usable base → dropped). RTH byte-unchanged (vendor field populated RTH → never consulted). 0 = old behavior.",
     )
+    chili_momentum_premarket_gap_full_universe_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_GAP_FULL_UNIVERSE_ENABLED"),
+        description="Equity Ross lane: when the equity-viability-refresh hands its already-SCREENED universe to the premarket-gap scan, size the scan's output cap to that screened pool (so EVERY screened gapper is scored into viability) instead of the fixed top-15-by-raw-gap-magnitude. Fixes fresh-catalyst mid-gap runners (low-float +7% name on an 8AM catalyst, e.g. QUCY) being truncated out by already-extended +200% gappers and thus never getting a fresh viability score → never armable. The downstream Ross percentile re-rank (+ the bridge top-30 cap) still makes the real selection; this only stops the premature magnitude truncation. Adaptive (cap = screened-universe size, no new magic number). 0 = old fixed top-15 cap (the broad default-universe sweep is byte-unchanged either way).",
+    )
     # ── Daily-chart context (the multi-timeframe layer Ross STARTS with) ─────────
     # Adds a 5th SELECTION pillar (daily_structure, 10% weight) from
     # daily_levels.compute_daily_context — break ABOVE a major daily level + room to

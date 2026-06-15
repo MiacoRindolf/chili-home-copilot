@@ -202,12 +202,30 @@ def _auto_paper_candidates(
 def scan_premarket_gaps(
     tickers: list[str] | None = None,
     min_gap_pct: float = DEFAULT_PREMARKET_MIN_GAP_PCT,
+    *,
+    max_signals: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Detect pre-market gaps by comparing yesterday's close to current price."""
+    """Detect pre-market gaps by comparing yesterday's close to current price.
+
+    ``max_signals`` overrides the default ``PREMARKET_GAP_MAX_SIGNALS`` output cap.
+    The default cap is right for the BROAD default-universe sweep (an alerting tool
+    over the static large-cap list — keep only the few biggest gaps). It is WRONG
+    when the caller passes an already-SCREENED ``tickers`` pool (the Ross momentum
+    lane hands a ≤``max_universe`` set that has already cleared price / $-volume /
+    change floors): re-truncating that curated pool to the top-15 by RAW gap
+    magnitude silently DROPS fresh-catalyst mid-gap runners (a +7% low-float name on
+    an 8AM catalyst) in favour of already-extended +200% gappers — the opposite of
+    Ross's "enter the fresh mover EARLY". Such callers pass ``max_signals`` sized to
+    the screened pool so EVERY screened gapper reaches the downstream Ross
+    percentile re-rank, which makes the real selection. ``None`` ⇒ the historical
+    fixed cap, so every existing caller is byte-identical. docs/DESIGN/MOMENTUM_LANE.md
+    """
     from .market_data import fetch_quote, DEFAULT_SCAN_TICKERS
 
     if tickers is None:
         tickers = list(DEFAULT_SCAN_TICKERS)[:DEFAULT_PREMARKET_GAP_TICKER_LIMIT]
+
+    cap = PREMARKET_GAP_MAX_SIGNALS if max_signals is None else max(1, int(max_signals))
 
     gaps = []
     for ticker in tickers:
@@ -239,7 +257,7 @@ def scan_premarket_gaps(
             continue
 
     gaps.sort(key=lambda x: abs(x["gap_pct"]), reverse=True)
-    return gaps[:PREMARKET_GAP_MAX_SIGNALS]
+    return gaps[:cap]
 
 
 def scan_opening_range_breakout(
