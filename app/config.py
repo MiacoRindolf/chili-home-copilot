@@ -2921,6 +2921,17 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_REPLAY_REGRESSION_ENABLED"),
     )
+    # Replay selection->entry alignment (2026-06-15): the replay's as-of arming
+    # mirrors the live auto_arm's fresh-impulse discipline — a FADED 24h mover is
+    # not pinned to a watch slot unless its trigger is FIRING (a firing break is
+    # always valid). Reuses the SAME ``intraday_impulse_freshness`` helper the live
+    # auto_arm calls (parity by construction; no lookahead, completed-bars-only).
+    # ON by default = faithful; set =0 to restore the prior viability-rank-only
+    # arming (the reversible knob). docs/STRATEGY replay-lab convergence.
+    chili_momentum_replay_freshness_filter_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REPLAY_FRESHNESS_FILTER_ENABLED"),
+    )
     chili_momentum_spread_stability_min_samples: int = Field(
         default=5,
         ge=1,
