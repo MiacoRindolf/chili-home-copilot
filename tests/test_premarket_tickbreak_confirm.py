@@ -43,13 +43,16 @@ def _knobs():
     old_c = settings.chili_momentum_premarket_tickbreak_confirm
     old_m = settings.chili_momentum_premarket_tickbreak_atr_mult
     old_p = settings.chili_momentum_premarket_start_et
+    old_f = settings.chili_momentum_premarket_tickbreak_floor_bps
     settings.chili_momentum_premarket_tickbreak_confirm = True
     settings.chili_momentum_premarket_tickbreak_atr_mult = 0.10
     settings.chili_momentum_premarket_start_et = "04:00"
+    settings.chili_momentum_premarket_tickbreak_floor_bps = 100.0
     yield
     settings.chili_momentum_premarket_tickbreak_confirm = old_c
     settings.chili_momentum_premarket_tickbreak_atr_mult = old_m
     settings.chili_momentum_premarket_start_et = old_p
+    settings.chili_momentum_premarket_tickbreak_floor_bps = old_f
 
 
 def _confirm(live_price, *, symbol="CUPR", now, atr_pct=ATR_PCT):
@@ -94,9 +97,24 @@ def test_missing_atr_fails_open():
 
 
 def test_buffer_scales_with_atr():
-    """The buffer is ATR-relative: a LOWER ATR lets a smaller poke through; a HIGHER
-    ATR demands a bigger thrust (the adaptive single-knob, no fixed cents)."""
+    """With the floor OFF, the buffer is purely ATR-relative: a LOWER ATR lets a smaller
+    poke through; a HIGHER ATR demands a bigger thrust (the adaptive single-knob)."""
+    settings.chili_momentum_premarket_tickbreak_floor_bps = 0.0  # isolate the ATR term
     # low premarket ATR (3%): buffer ~ 4.04*1.003 = 4.052 => the 4.07 wick clears it
     assert _confirm(WICK, now=PRE_0914, atr_pct=0.03) is True
     # high ATR (30%): buffer ~ 4.04*1.03 = 4.16 => even 4.10 is rejected
     assert _confirm(4.10, now=PRE_0914, atr_pct=0.30) is False
+
+
+def test_floor_rejects_low_atr_wick():
+    """THE CUPR REPLAY FIX: at the start of a premarket explosion the bar-ATR is LOW, so
+    the ATR buffer alone let the 4.07-over-4.04 wick in. The 100bps FLOOR lifts the buffer
+    to ~4.08 and rejects it — while a real thrust still clears the floor easily."""
+    # floor = 100bps (the fixture default). atr_pct=0.05 => atr buffer 4.06 (would accept),
+    # floor buffer 4.0804 => 4.07 REJECTED.
+    assert _confirm(WICK, now=PRE_0914, atr_pct=0.05) is False
+    # the real 09:31-class thrust (4.49) clears the floor with room to spare:
+    assert _confirm(4.49, now=PRE_0920, atr_pct=0.05) is True
+    # floor=0 reverts to the old (too-thin) behavior — the wick gets in:
+    settings.chili_momentum_premarket_tickbreak_floor_bps = 0.0
+    assert _confirm(WICK, now=PRE_0914, atr_pct=0.05) is True

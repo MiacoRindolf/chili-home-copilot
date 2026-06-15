@@ -577,7 +577,15 @@ def _premarket_tickbreak_confirmed(
         if atr_pct is None:
             return True  # no volatility read -> fail-open (don't block on thin data)
         mult = float(getattr(settings, "chili_momentum_premarket_tickbreak_atr_mult", 0.10) or 0.10)
-        return float(live_price) >= (float(level) + max(0.0, float(atr_pct)) * mult * float(level))
+        # Adaptive ATR buffer, but never below a premarket FLOOR. At the START of a
+        # premarket explosion the historical-bar ATR is LOW (the name was quiet before
+        # the move), so the ATR buffer alone is too thin to reject the false-pop —
+        # CUPR's 4.07 over a 4.04 level cleared a ~0.05-ATR buffer and was let in, then
+        # shook out at 3.45 before running +92%. The floor catches the 1¢ wick while ATR
+        # has not yet caught up; a real thrust (>> the floor) still clears it.
+        floor_bps = float(getattr(settings, "chili_momentum_premarket_tickbreak_floor_bps", 100.0) or 0.0)
+        tol = max(max(0.0, float(atr_pct)) * mult, max(0.0, floor_bps) / 10_000.0)
+        return float(live_price) >= (float(level) + tol * float(level))
     except Exception:
         return True  # any error -> fail-open (never block an entry on a bug)
 
