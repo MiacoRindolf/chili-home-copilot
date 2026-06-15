@@ -3763,6 +3763,51 @@ class Settings(BaseSettings):
         ge=1,
         validation_alias=AliasChoices("CHILI_MICRO_LOG_RETAIN_DAYS"),
     )
+    # ── LOG-ONLY 10-second candle pattern layer (Ross's 10s chart; measurement) ──
+    # Aggregates the per-tick mid into 10s candles + runs ABCD / flat-top SHAPE
+    # detectors, persisting detections + forward-returns so a FRESH calibration can
+    # learn whether they predict BEFORE any wiring (the −1.58pp sub-bar lesson; the
+    # old baseline is STALE; pattern-SHAPE ≠ speed). ZERO decision path. Crypto-first
+    # (equity 60s tape is too sparse → the min_ticks guard fails closed; no fiction).
+    chili_tenbeat_candle_enabled: bool = Field(
+        default=True, validation_alias=AliasChoices("CHILI_TENBEAT_CANDLE_ENABLED"),
+        description="Master gate for the LOG-ONLY 10s-candle pattern layer (crypto). Pure measurement — no decision path. ON = a visible instrument like the micro_log.",
+    )
+    chili_tenbeat_candle_equity_enabled: bool = Field(
+        default=False, validation_alias=AliasChoices("CHILI_TENBEAT_CANDLE_EQUITY_ENABLED"),
+        description="Equity 10s candles — DATA-gated OFF (the 60s equity NBBO tape cannot form a 10s candle; the min_ticks guard fails closed). Un-gate only when a 2-3s equity mid source lands.",
+    )
+    chili_tenbeat_candle_drain_seconds: int = Field(
+        default=10, ge=5, validation_alias=AliasChoices("CHILI_TENBEAT_CANDLE_DRAIN_SECONDS"),
+    )
+    chili_tenbeat_bucket_seconds: int = Field(
+        default=10, ge=5, validation_alias=AliasChoices("CHILI_TENBEAT_BUCKET_SECONDS"),
+    )
+    chili_tenbeat_min_ticks_per_bar: int = Field(
+        default=2, ge=1, validation_alias=AliasChoices("CHILI_TENBEAT_MIN_TICKS_PER_BAR"),
+        description="A 10s bucket with fewer ticks is a GAP (skipped, never synthesized). The single guard that keeps a 60s-sparse equity source dark.",
+    )
+    chili_tenbeat_window_bars: int = Field(
+        default=12, ge=4, validation_alias=AliasChoices("CHILI_TENBEAT_WINDOW_BARS"),
+    )
+    chili_tenbeat_abcd_retrace_base: float = Field(
+        default=0.50, gt=0.0, validation_alias=AliasChoices("CHILI_TENBEAT_ABCD_RETRACE_BASE"),
+        description="The ONE ABCD base knob: the shallow-retrace cap (ATR-widened). Ross floor 0.50.",
+    )
+    chili_tenbeat_flatop_touches_min: int = Field(
+        default=3, ge=2, validation_alias=AliasChoices("CHILI_TENBEAT_FLATOP_TOUCHES_MIN"),
+        description="The ONE flat-top base knob: minimum highs clustered at the flat resistance.",
+    )
+    chili_tenbeat_flatop_lookback_bars: int = Field(
+        default=6, ge=2, validation_alias=AliasChoices("CHILI_TENBEAT_FLATOP_LOOKBACK_BARS"),
+    )
+    chili_tenbeat_backfill_maturity_minutes: int = Field(
+        default=6, ge=5, validation_alias=AliasChoices("CHILI_TENBEAT_BACKFILL_MATURITY_MINUTES"),
+        description="Forward-return maturity floor (the +5m tail must be fully past + persisted before labeling — no lookahead).",
+    )
+    chili_tenbeat_candle_log_retain_days: int = Field(
+        default=14, ge=1, validation_alias=AliasChoices("CHILI_TENBEAT_CANDLE_LOG_RETAIN_DAYS"),
+    )
     chili_micro_log_roundtrip_cost_bps_crypto: float = Field(
         default=100.0,
         ge=0.0,
