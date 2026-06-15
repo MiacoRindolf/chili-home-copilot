@@ -4806,6 +4806,8 @@ def _run_promotion_evidence_audit_job() -> None:
     demote evidence-incomplete promoted patterns; ``CHILI_PATTERN_EVIDENCE_AUTO_DEMOTE_DRY_RUN=true``
     logs what would be demoted without applying.
     """
+    from ..config import settings
+
     if not bool(getattr(settings, "chili_pattern_evidence_audit_enabled", True)):
         return
     try:
