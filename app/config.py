@@ -3719,6 +3719,22 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_REQUIRE_FRESH_IMPULSE"),
     )
+    # DUAL-PATH PARITY (2026-06-15): the auto-arm selection probe must evaluate the
+    # SAME settings-resolved Ross trigger the live + paper runners use
+    # (``momentum_pullback_trigger``: require_retest/sustained-vol/candle/VWAP/MACD/
+    # runaway/verticality + deep_reclaim + dip-buy, symbol-aware), NOT a raw
+    # ``pullback_break_confirmation`` with library defaults (require_retest=False).
+    # The defaults call dispatched ``_evaluate_raw_break``, which can NEVER reach the
+    # deep_reclaim path (only the require_retest=True ``_evaluate_break_retest`` does),
+    # so deep-retrace reclaim / dip-buy setups the live runner WOULD enter (MTEN,
+    # KAIO-USD, EDHL) were INVISIBLE to selection and never armed, while raw breaks the
+    # live runner then DECLINED were armed (wasted churn). ON = parity (the correct
+    # behaviour); set False to revert to the legacy library-defaults probe.
+    # docs/DESIGN/MOMENTUM_LANE.md [[project_equity_alist_a0_state]]
+    chili_momentum_auto_arm_trigger_parity_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_TRIGGER_PARITY_ENABLED"),
+    )
     # Auto-arm checks each candidate's entry trigger via an OHLCV fetch; run them
     # concurrently so a pass is ~the slowest single fetch (not the serial sum).
     chili_momentum_auto_arm_trigger_workers: int = Field(

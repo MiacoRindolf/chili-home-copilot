@@ -833,18 +833,44 @@ def _symbol_free(db: Session, symbol: str, user_id: int | None) -> bool:
 
 
 def _entry_trigger_fires(symbol: str) -> tuple[bool, str]:
-    """Replicate the live_runner WATCHING_LIVE hybrid trigger to find a name
-    whose momentum is breaking NOW (pullback-break preferred, volume fallback)."""
+    """Replicate the live_runner WATCHING_LIVE hybrid trigger to find a name whose
+    momentum is breaking NOW (pullback-break preferred, volume fallback).
+
+    DUAL-PATH PARITY: the pullback-break branch evaluates the SAME settings-resolved
+    Ross trigger the live + paper runners call (``momentum_pullback_trigger``), so the
+    selection probe makes the IDENTICAL bar-level entry decision as the live runner —
+    require_retest (deep_reclaim + dip-buy reachable), sustained-volume, candle, VWAP,
+    MACD, runaway, verticality, and symbol-awareness (equity-only morning gate /
+    premarket guards / crypto exemption). The probe is bar-only (no ``live_price``):
+    that is BY DESIGN — it arms a WATCH and the live runner does the final tick-break
+    confirmation before placing the order, so the probe should match the runner's
+    BAR-level fire/wait reason exactly. ``CHILI_MOMENTUM_AUTO_ARM_TRIGGER_PARITY_ENABLED=0``
+    reverts to the legacy library-defaults probe (require_retest=False → raw break,
+    deep_reclaim unreachable). docs/DESIGN/MOMENTUM_LANE.md
+    """
     try:
         from ..market_data import fetch_ohlcv_df
-        from .entry_gates import momentum_volume_confirmation, pullback_break_confirmation
+        from .entry_gates import (
+            momentum_pullback_trigger,
+            momentum_volume_confirmation,
+            pullback_break_confirmation,
+        )
 
         mode = str(getattr(settings, "chili_momentum_entry_trigger_mode", "hybrid") or "hybrid").lower()
         interval = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+        _parity = bool(getattr(settings, "chili_momentum_auto_arm_trigger_parity_enabled", True))
         if mode in ("hybrid", "pullback_break"):
             df_pb = fetch_ohlcv_df(symbol, interval=interval, period="5d")
             if df_pb is not None and not getattr(df_pb, "empty", True):
-                ok, reason, _ = pullback_break_confirmation(df_pb, entry_interval=interval)
+                if _parity:
+                    # The shared, settings-resolved trigger the live runner uses
+                    # (symbol-aware, bar-level — no live_price, no halt-resume state).
+                    ok, reason, _ = momentum_pullback_trigger(
+                        df_pb, entry_interval=interval, symbol=symbol
+                    )
+                else:
+                    # Legacy probe: raw library defaults (require_retest=False).
+                    ok, reason, _ = pullback_break_confirmation(df_pb, entry_interval=interval)
                 if ok:
                     return True, reason
                 if mode == "pullback_break":
