@@ -2788,6 +2788,49 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_RECLAIM_MAX_HOURS_AFTER_OPEN"),
         description="Deep reclaims arm only until this many hours after the 9:30 ET open (Ross: 'by 10:30 I'm done'); A/B-validated — morning reclaims paid (EDHL/LASE), afternoon ones bled (SPHL/GCDT/DBGI 06-10).",
     )
+    # ── Dip-buy (Ross "first reversal off the dip") evolution of deep_reclaim ─────
+    # Today's deep_reclaim waits for the RECOVERY swing-high break (held>=2 bars +
+    # break) = entering well off the dip low (a chase). Ross instead buys NEAR the
+    # dip on the FIRST candle to tick its OWN pullback-bar high, with a stop just
+    # under the dip low — EARLIER. This ADDITIVE branch (tried before the recovery
+    # path, falls through byte-identically on any decline) fires only behind a
+    # 3-signal AND gate that separates a buyable dip from a falling knife:
+    #  (1) rising trend (VWAP-proxy slope>0) + intact HH/HL + first-pullback + clear
+    #      runway, (2) volume DRY-UP on the dip then volume RETURN on the trigger,
+    #  (3) first reversal new-high off the dip bar (green close). Stop = the dip-low
+    # anchor (the authoritative vol-floor layer widens it; INVARIANT A lives there).
+    # ONE adaptive base = the VWAP-slope lookback; the rest are Ross-discipline
+    # floors. Only helps the BUYABLE-DEPTH class (<=25% dips, the collapse cap runs
+    # first); >25% collapses stay (correctly) rejected. docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_deep_reclaim_dipbuy_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DEEP_RECLAIM_DIPBUY_ENABLED"),
+        description="Buy the FIRST reversal off the dip (earlier than the recovery-high reclaim) when the 3-signal gate passes. KILL-SWITCH: False -> byte-identical to the current deep_reclaim.",
+    )
+    chili_momentum_deep_reclaim_dipbuy_vwap_lookback: int = Field(
+        default=12,
+        ge=4,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DEEP_RECLAIM_DIPBUY_VWAP_LOOKBACK"),
+        description="THE single adaptive base: bars over which the VWAP-proxy slope + the HH/HL structure anchor are measured (research 10-15-bar trend window).",
+    )
+    chili_momentum_deep_reclaim_dipbuy_dryup_ratio: float = Field(
+        default=0.85,
+        gt=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DEEP_RECLAIM_DIPBUY_DRYUP_RATIO"),
+        description="Dip-bar mean volume must be < this x the prior trend-push mean volume (volume DRY-UP). A floor the system can tighten.",
+    )
+    chili_momentum_deep_reclaim_dipbuy_pullback_bars: int = Field(
+        default=3,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DEEP_RECLAIM_DIPBUY_PULLBACK_BARS"),
+        description="Shallowness guard: the dip must be a SHALLOW 2-3 red-candle pullback (this many bars from peak to dip), not a long grind down.",
+    )
+    chili_momentum_deep_reclaim_dipbuy_stop_buffer_bps: float = Field(
+        default=10.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DEEP_RECLAIM_DIPBUY_STOP_BUFFER_BPS"),
+        description="Stop sits this many bps under the dip low (ATR-relative max with 0.25xATR%; bps not cents = class-aware). The vol-floor layer widens it if too tight.",
+    )
     # Pending-entry lifecycle is EVENT-DRIVEN (cancel on setup invalidation /
     # limit left behind), not clock-driven — this is only the BACKSTOP: a
     # submitted entry limit must not outlive the bar evidence that produced it,
