@@ -125,14 +125,19 @@ def test_candle_shape_tags():
 
 # ── the zero-decision-path guarantee ─────────────────────────────────────────
 
-def test_no_decision_path_imports_tenbeat():
-    """LOG-ONLY: nothing in the live decision path may import tenbeat_candle_log.
-    Only the scheduler (which schedules the log jobs) and tests may reference it."""
+def test_tenbeat_stays_out_of_execution_path():
+    """The 10s breakout is now a SELECTION/viability tilt (pipeline.py, agreement-guarded
+    + kill-switchable) — but it must NEVER leak into the EXECUTION / replay path: the
+    live exit (live_runner) and the replay must stay clean of it, and auto_trader must
+    not touch it. (Selection tilt = OK; execution-side use = a separate, gated decision.)"""
     root = Path(__file__).resolve().parents[1] / "app" / "services" / "trading"
-    targets = ["momentum_neural", "auto_trader.py", "pipeline.py", "replay_v2.py"]
+    forbidden = [
+        "auto_trader.py",
+        "momentum_neural/live_runner.py",
+        "momentum_neural/replay_v2.py",
+    ]
     out = subprocess.run(
-        ["grep", "-rl", "tenbeat_candle_log",
-         *[str(root / t) for t in targets]],
+        ["grep", "-rl", "tenbeat_candle_log", *[str(root / t) for t in forbidden]],
         capture_output=True, text=True,
     )
-    assert out.stdout.strip() == "", f"decision-path import of tenbeat_candle_log: {out.stdout}"
+    assert out.stdout.strip() == "", f"10s leaked into the execution/replay path: {out.stdout}"

@@ -3827,6 +3827,11 @@ class Settings(BaseSettings):
     chili_tenbeat_candle_log_retain_days: int = Field(
         default=14, ge=1, validation_alias=AliasChoices("CHILI_TENBEAT_CANDLE_LOG_RETAIN_DAYS"),
     )
+    chili_tenbeat_entry_tilt_weight: float = Field(
+        default=0.03, ge=0.0,
+        validation_alias=AliasChoices("CHILI_TENBEAT_ENTRY_TILT_WEIGHT"),
+        description="LIVE use of the 10s chart (Ross-style): a fresh 10s ABCD/flat-top BREAKOUT nudges a crypto name's viability up by this × the pattern score (bounded; a fired breakout is bullish ⇒ agreement-guarded for the long-only lane). 0 = log-only (kill-switch). The detections keep accruing forward-returns so the live A/B keeps measuring — revert if it turns negative.",
+    )
     chili_micro_log_roundtrip_cost_bps_crypto: float = Field(
         default=100.0,
         ge=0.0,

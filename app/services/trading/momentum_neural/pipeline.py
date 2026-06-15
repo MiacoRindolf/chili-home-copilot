@@ -704,9 +704,26 @@ def run_momentum_neural_tick(
         if _mpe is not None:
             _overrides["micro_price_edge"] = _mpe
         sym_feats = replace(feats, **_overrides) if _overrides else feats
+        # 10s-candle breakout tilt (Ross's 10s chart, LIVE + ON): a fresh ABCD/flat-top
+        # BREAKOUT on a crypto name nudges its viability UP (small, bounded, kill-switch
+        # chili_tenbeat_entry_tilt_weight). A fired breakout is bullish ⇒ naturally
+        # agreement-guarded for the long-only lane. The detections keep accruing forward-
+        # returns so the live A/B (realized-with-tilt vs counterfactual) keeps measuring;
+        # revert with the kill-switch if the A/B turns negative.
+        _tb_w = float(getattr(settings, "chili_tenbeat_entry_tilt_weight", 0.0) or 0.0)
+        _tbk = None
+        if _tb_w > 0:
+            try:
+                from ..fast_path.tenbeat_candle_log import latest_tenbeat_breakout
+                _tbk = latest_tenbeat_breakout(sym, db)
+            except Exception:
+                _tbk = None
         for family in iter_momentum_families():
             vr = score_viability(sym, family, ctx, sym_feats, db=db)
             d = vr.to_public_dict()
+            if _tb_w > 0 and _tbk is not None:
+                d["viability"] = min(1.0, float(d.get("viability") or 0.0) + _tb_w * _tbk)
+                d["tenbeat_breakout_tilt"] = round(_tb_w * _tbk, 4)
             d["scope"] = scope
             d["label"] = family.label
             d["entry_style"] = family.entry_style

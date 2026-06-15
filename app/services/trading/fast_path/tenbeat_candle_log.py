@@ -405,3 +405,36 @@ def run_tenbeat_candle_prune_job() -> None:
                     conn.execute(text(f"DROP TABLE IF EXISTS {relname}"))
     except Exception:
         logger.warning("[tenbeat] prune failed", exc_info=True)
+
+
+def latest_tenbeat_breakout(symbol, db, *, max_age_s: float = 30.0) -> float | None:
+    """The freshest 10s ABCD / flat-top BREAKOUT score for a symbol within
+    ``max_age_s`` — the LIVE entry tilt read. Returns ``max(abcd_score, flatop_score)``
+    of a FIRED breakout (``abcd_pattern`` OR ``flatop_pattern`` true), else ``None`` (no
+    tilt). A fired breakout is inherently BULLISH, so a long-only boost is naturally
+    agreement-guarded — there is no penalty path. Crypto-only (the 10s candles only form
+    for crypto; equity is dark). Fail-safe: any miss/stale/error → ``None``.
+
+    The detection rows continue to accrue forward-returns regardless, so the live A/B
+    (realized-with-tilt vs the counterfactual) keeps measuring while the tilt is used.
+    """
+    s = (symbol or "").strip().upper()
+    if not s.endswith("-USD") or db is None:
+        return None
+    try:
+        r = db.execute(text(
+            "SELECT abcd_pattern, abcd_score, flatop_pattern, flatop_score "
+            "FROM trading_tenbeat_candle_log WHERE symbol = :s "
+            "AND observed_at > (now() at time zone 'utc') - make_interval(secs => :w) "
+            "ORDER BY observed_at DESC LIMIT 1"
+        ), {"s": s, "w": float(max_age_s)}).fetchone()
+        if not r:
+            return None
+        scores = []
+        if r[0] and r[1] is not None:
+            scores.append(float(r[1]))
+        if r[2] and r[3] is not None:
+            scores.append(float(r[3]))
+        return max(scores) if scores else None
+    except Exception:
+        return None
