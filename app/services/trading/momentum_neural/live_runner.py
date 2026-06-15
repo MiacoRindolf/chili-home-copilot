@@ -1370,6 +1370,48 @@ def _notional_guard_multiplier() -> float:
     return 1.0 + max(0.0, bps) / 10_000.0
 
 
+def _entry_chase_ceiling_px(*, limit_px: float, expected_move_bps: float | None) -> float:
+    """Bid may drift this far ABOVE the buy limit before the resting marketable order
+    is abandoned as 'left behind'. ONE base knob (bps), widened by a fraction of the
+    name's own expected per-bar move (explosive names get proportionally more rope,
+    quiet names almost none — never a fixed cent), HARD-CAPPED at the same adaptive
+    max-spread the entry gate already enforces (the chase can never exceed the cost
+    the risk model sized against). It only TOLERATES the existing resting limit — it
+    never re-pegs the price up into a spike. base_bps=0 (default) ⇒ returns ``limit_px``
+    (today's cancel-on-first-tick — parity). Pure + side-effect-free."""
+    try:
+        base_bps = float(getattr(settings, "chili_momentum_entry_chase_ceiling_bps", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        base_bps = 0.0
+    if base_bps <= 0 or limit_px <= 0:
+        return limit_px
+    try:
+        ratio = float(getattr(settings, "chili_momentum_entry_chase_move_ratio", 0.25) or 0.0)
+    except (TypeError, ValueError):
+        ratio = 0.0
+    tol_bps = max(base_bps, (expected_move_bps or 0.0) * ratio)
+    tol_bps = min(tol_bps, _adaptive_live_max_spread_bps(expected_move_bps))
+    return limit_px * (1.0 + tol_bps / 10_000.0)
+
+
+def _adaptive_notional_guard_multiplier(*, expected_move_bps: float | None) -> float:
+    """Marketable-limit premium over the ask. Base = the documented notional-guard bps
+    (25 today); on a volatile name widen toward a fraction of its expected move so the
+    limit actually clears a wide offer, capped at the adaptive max-spread. With
+    ``guard_move_ratio=0`` (default) ⇒ returns ``_notional_guard_multiplier()`` exactly
+    (parity). Pure + side-effect-free."""
+    base_mult = _notional_guard_multiplier()
+    try:
+        ratio = float(getattr(settings, "chili_momentum_entry_guard_move_ratio", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        ratio = 0.0
+    if expected_move_bps is None or ratio <= 0:
+        return base_mult
+    base_bps = max(0.0, (base_mult - 1.0) * 10_000.0)
+    bps = min(max(base_bps, expected_move_bps * ratio), _adaptive_live_max_spread_bps(expected_move_bps))
+    return 1.0 + bps / 10_000.0
+
+
 def _expected_move_bps_from_ohlcv(df: Any) -> float | None:
     """Typical recent 15m bar range in bps (ATR / last close) as an expected-move
     proxy. The BBO spread is a round-trip cost, so the adaptive spread gate
@@ -1489,24 +1531,32 @@ def _pending_entry_cancel_reason(
     elapsed_s: float | None,
     rest_bars: float,
     interval_s: float,
+    chase_ceiling_px: float = 0.0,
 ) -> str | None:
     """EVENT-DRIVEN pending-entry lifecycle decision (operator 2026-06-11: "the
     right question is not how many seconds — it is what INVALIDATES the order").
 
     Returns the cancel reason, or None to keep resting:
       * ``entry_invalidated_stop_breach`` — live bid broke the structural stop:
-        the setup died; a fill now would be an instant bailout.
-      * ``entry_limit_left_behind`` — live bid is ABOVE our buy limit: the move
-        left without us; the order can only fill on the way back down (adverse
-        selection). Re-watch decides the chase with a fresh limit.
+        the setup died; a fill now would be an instant bailout. (Checked FIRST,
+        unconditional — never subject to the chase ceiling.)
+      * ``entry_limit_left_behind`` — live bid is ABOVE our buy limit BY MORE THAN
+        the adaptive ``chase_ceiling_px``: the move left without us. With the
+        default ceiling (0 ⇒ ceiling = limit_px) this is the original
+        cancel-on-first-tick; a non-zero ceiling TOLERATES the resting marketable
+        limit while the bid pips just past it (the fix for cancelling orders that
+        are at the front of the book and about to fill — BATL/CTNT/SDOT orphans).
+        It only TOLERATES the existing resting order — it never re-pegs the price up.
       * ``entry_rest_backstop`` — the order outlived the bar evidence that
         produced it (N entry-interval BARS — no free seconds).
     Pure + side-effect-free.
     """
     if bid is not None and structural_stop > 0 and bid < structural_stop:
         return "entry_invalidated_stop_breach"
-    if bid is not None and limit_px > 0 and bid > limit_px:
-        return "entry_limit_left_behind"
+    if bid is not None and limit_px > 0:
+        ceiling = chase_ceiling_px if chase_ceiling_px > limit_px else limit_px
+        if bid > ceiling:
+            return "entry_limit_left_behind"
     if elapsed_s is not None and elapsed_s > max(0.5, rest_bars) * interval_s:
         return "entry_rest_backstop"
     return None
@@ -2799,6 +2849,11 @@ def tick_live_session(
                 if submit_raw:
                     try:
                         t_sub = datetime.fromisoformat(str(submit_raw).replace("Z", "+00:00")).replace(tzinfo=None)
+                        _emb = le.get("entry_expected_move_bps")
+                        _chase_ceiling = _entry_chase_ceiling_px(
+                            limit_px=_lim_px,
+                            expected_move_bps=(float(_emb) if _emb else None),
+                        )
                         _cancel_why = _pending_entry_cancel_reason(
                             bid=_pbid,
                             structural_stop=_stop_px,
@@ -2807,6 +2862,7 @@ def tick_live_session(
                             rest_bars=float(getattr(
                                 settings, "chili_momentum_entry_max_rest_bars", 2.0) or 2.0),
                             interval_s=_entry_interval_seconds(),
+                            chase_ceiling_px=_chase_ceiling,
                         )
                         if _cancel_why is not None:
                             # RACE GUARD: the order may have FILLED between the 10s
@@ -2820,7 +2876,15 @@ def tick_live_session(
                             # fill-handler above ADOPTS it next tick; only cancel +
                             # re-watch a genuinely-still-open order. docs/DESIGN/MOMENTUM_LANE.md
                             _fresh, _ = adapter.get_order(str(le["entry_order_id"]))
-                            if _fresh and _order_done_for_entry(_fresh):
+                            # Adopt the moment ANY size is filled — a partial on a
+                            # marketable limit means we are AT THE FRONT and the rest is
+                            # in flight; cancelling now orphans the clip. Matches the
+                            # late-fill sweep predicate (`_order_done_for_entry(no) or
+                            # filled_size > 0`). [BATL/CTNT/SDOT orphan fix.]
+                            if _fresh and (
+                                float(getattr(_fresh, "filled_size", 0) or 0.0) > 0.0
+                                or _order_done_for_entry(_fresh)
+                            ):
                                 db.flush()
                                 return {
                                     "ok": True, "session_id": sess.id,
@@ -3092,7 +3156,7 @@ def tick_live_session(
 
         inc = prod.base_increment if prod else None
         mn = prod.base_min_size if prod else None
-        guarded_ask = ask * _notional_guard_multiplier()
+        guarded_ask = ask * _adaptive_notional_guard_multiplier(expected_move_bps=_expected_move_bps)
         # Risk-first sizing (Ross-style): qty = per-trade max-loss / stop distance,
         # capped at the (conviction-scaled, equity-relative) notional ceiling — a
         # tighter stop buys MORE size at constant risk. Falls back to notional-first
@@ -3468,6 +3532,8 @@ def tick_live_session(
         le["entry_submit_utc"] = _utcnow().isoformat()
         le["entry_order_type"] = "limit"
         le["entry_limit_price"] = entry_limit_str
+        # stash the name's expected-move so the chase ceiling can vol-widen at cancel time
+        le["entry_expected_move_bps"] = (None if _expected_move_bps is None else float(_expected_move_bps))
         le["entry_client_order_id"] = res.get("client_order_id") or cid
         le["entry_order_id"] = res.get("order_id")
         # History: the ack-timeout may wipe the ACTIVE pointer later, but this id is
