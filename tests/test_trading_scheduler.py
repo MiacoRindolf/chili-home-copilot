@@ -506,3 +506,47 @@ def test_brain_worker_default_interval_five_minutes():
     root = Path(__file__).resolve().parents[1]
     text = (root / "scripts" / "brain_worker.py").read_text(encoding="utf-8")
     assert "DEFAULT_CYCLE_INTERVAL = 5" in text
+
+
+def test_promotion_evidence_audit_job_disabled_returns_without_nameerror(monkeypatch):
+    """Regression: the guard line used a bare ``settings`` that was never imported,
+    so EVERY run crashed with NameError before the disable check could short-circuit.
+    With the flag off the job must return cleanly (and never touch the DB)."""
+    from app.services import trading_scheduler
+
+    monkeypatch.setattr(settings, "chili_pattern_evidence_audit_enabled", False)
+
+    called: list[bool] = []
+    monkeypatch.setattr(
+        "app.services.trading.promotion_evidence_audit.run_promotion_evidence_audit",
+        lambda *_a, **_k: called.append(True),
+    )
+
+    # Must not raise NameError (the bug) — and must short-circuit before any audit work.
+    assert trading_scheduler._run_promotion_evidence_audit_job() is None
+    assert called == []
+
+
+def test_promotion_evidence_audit_job_enabled_runs_and_closes_session(monkeypatch):
+    """When enabled the job resolves ``settings``, runs the audit, and rolls back +
+    closes its session (FIX 46 pattern) without raising."""
+    import app.db as app_db
+    from app.services import trading_scheduler
+    from app.services.trading import promotion_evidence_audit
+
+    monkeypatch.setattr(settings, "chili_pattern_evidence_audit_enabled", True)
+
+    audit_session = _FakeBatchSession("audit")
+    monkeypatch.setattr(app_db, "SessionLocal", lambda: audit_session)
+
+    ran: list[object] = []
+    monkeypatch.setattr(
+        promotion_evidence_audit,
+        "run_promotion_evidence_audit",
+        lambda sess: ran.append(sess),
+    )
+
+    assert trading_scheduler._run_promotion_evidence_audit_job() is None
+    assert ran == [audit_session]
+    assert audit_session.rollbacks == 1
+    assert audit_session.closed is True
