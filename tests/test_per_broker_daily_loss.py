@@ -36,15 +36,15 @@ def _reset_governance():
 
 @pytest.fixture
 def fake_equity(monkeypatch):
-    """Force per-broker REAL equity: RH $12,585, CB $2,404 (the operator's truth)."""
-    def _eq(execution_family=None, *, prefer_real_equity=False):
+    """Force per-broker UNLEVERED BUYING POWER: RH $13,424, CB $1,994 (operator's truth)."""
+    def _eq(execution_family=None, *, apply_margin_multiple=True):
         from app.services.trading.execution_family_registry import (
             EXECUTION_FAMILY_ROBINHOOD_SPOT,
             normalize_execution_family,
         )
 
         ef = normalize_execution_family(execution_family)
-        return 12585.0 if ef == EXECUTION_FAMILY_ROBINHOOD_SPOT else 2404.0
+        return 13424.0 if ef == EXECUTION_FAMILY_ROBINHOOD_SPOT else 1994.0
 
     monkeypatch.setattr(rp, "_account_equity_usd", _eq)
     return _eq
@@ -117,15 +117,15 @@ def _momentum(db, *, user_id, pnl, execution_family, symbol="TST"):
     return out
 
 
-# ── I1 / equity basis ─────────────────────────────────────────────────
-def test_cap_uses_real_equity_per_broker(fake_equity):
+# ── I1 / buying-power basis ───────────────────────────────────────────
+def test_cap_uses_buying_power_per_broker(fake_equity):
     rh_cap, rh_src = gov.per_broker_daily_loss_cap_usd("robinhood_spot")
     cb_cap, cb_src = gov.per_broker_daily_loss_cap_usd("coinbase_spot")
-    # pct default 0.015 (settings) * real equity — NOT buying-power*margin.
-    assert rh_cap == pytest.approx(0.015 * 12585.0, rel=1e-6)
-    assert cb_cap == pytest.approx(0.015 * 2404.0, rel=1e-6)
+    # pct default 0.015 (settings) * UNLEVERED buying power — NOT cash, NOT bp*margin.
+    assert rh_cap == pytest.approx(0.015 * 13424.0, rel=1e-6)  # ~$201
+    assert cb_cap == pytest.approx(0.015 * 1994.0, rel=1e-6)   # ~$30
     assert rh_cap > cb_cap  # the whole point: RH budget >> CB budget
-    assert "pct" in rh_src and "pct" in cb_src
+    assert "buying_power" in rh_src and "buying_power" in cb_src
 
 
 def test_cap_fail_closed_when_equity_unknown(monkeypatch):

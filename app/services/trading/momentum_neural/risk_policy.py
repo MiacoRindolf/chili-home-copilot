@@ -96,7 +96,7 @@ def adaptive_max_spread_bps(
 
 
 def _account_equity_usd(
-    execution_family: str | None = None, *, prefer_real_equity: bool = False
+    execution_family: str | None = None, *, apply_margin_multiple: bool = True
 ) -> float | None:
     """Best-effort account SIZING BASIS (USD) for equity-relative caps, PER VENUE.
 
@@ -106,10 +106,12 @@ def _account_equity_usd(
     back to equity if buying power is unavailable. Returns None when nothing is available
     so callers use the documented fixed cap (never size against an unknown account).
 
-    prefer_real_equity=True forces the REAL account equity (no buying power, no
-    margin multiple) — the correct basis for a daily-loss RISK cap (a fraction of
-    capital at risk), as opposed to the margin-inflated SIZING basis. Operator
-    2026-06-15: a ~$2.4k Coinbase balance must not read as $3,989 (= bp*2.0).
+    apply_margin_multiple=False returns the RAW broker buying power (margin multiple
+    forced to 1.0) — the basis for a daily-loss RISK cap. Operator 2026-06-15: "gamitin
+    mo buying power, hindi lang cash" — but NOT the 2x-margin-inflated sizing number
+    (a ~$2k Coinbase buying power must not read as $3,989 = bp*2.0). So the SIZING
+    default applies the margin multiple; the RISK cap passes apply_margin_multiple=False
+    to get the unlevered buying power (RH ~$13.4k / CB ~$2.0k).
     docs/DESIGN/MOMENTUM_LANE.md
     """
     from ..execution_family_registry import (
@@ -118,7 +120,7 @@ def _account_equity_usd(
     )
 
     ef = normalize_execution_family(execution_family)
-    use_bp = bool(getattr(settings, "chili_momentum_risk_size_use_buying_power", True)) and not prefer_real_equity
+    use_bp = bool(getattr(settings, "chili_momentum_risk_size_use_buying_power", True))
     try:
         if ef == EXECUTION_FAMILY_ROBINHOOD_SPOT:
             from ...broker_service import get_portfolio as _rh_portfolio
@@ -131,9 +133,14 @@ def _account_equity_usd(
         if use_bp:
             bp = float(pf.get("buying_power") or 0.0)
             if bp > 0:
-                # Apply the account's margin multiple (robin_stocks reports the ~1x base;
-                # e.g. 2.0 recovers the 2x Gold margin the app actually shows).
-                mult = float(getattr(settings, "chili_momentum_risk_buying_power_margin_multiple", 1.0) or 1.0)
+                # SIZING applies the account's margin multiple (robin_stocks reports the
+                # ~1x base; 2.0 recovers the 2x Gold margin the app shows). The RISK cap
+                # passes apply_margin_multiple=False to use the unlevered buying power.
+                mult = (
+                    float(getattr(settings, "chili_momentum_risk_buying_power_margin_multiple", 1.0) or 1.0)
+                    if apply_margin_multiple
+                    else 1.0
+                )
                 return bp * max(1.0, mult)
         eq = float(pf.get("equity") or 0.0)
         return eq if eq > 0 else None

@@ -986,7 +986,7 @@ def _maybe_trip_daily_loss_kill_switch(db: Session, user_id: int | None) -> None
             check_daily_loss_breach(
                 db,
                 user_id=user_id,
-                equity_usd=_account_equity_usd("robinhood_spot", prefer_real_equity=True),
+                equity_usd=_account_equity_usd("robinhood_spot", apply_margin_multiple=False),
             )
     except Exception:
         logger.debug(
