@@ -222,6 +222,7 @@ TICK_ARMED_WAIT_REASONS = (
     "waiting_for_reclaim",
     "waiting_for_reclaim_high",
     "waiting_for_dipbuy_break",
+    "waiting_for_first_pullback_break",
 )
 
 
@@ -231,6 +232,25 @@ def _collapse_cap(atr_pct: float | None) -> float:
     halt-resume dip trigger and the deep-retrace reclaim path (same Ross mechanic:
     buy the dip's reclaim, never a collapse)."""
     return min(0.25, max(0.06, 6.0 * (atr_pct or 0.01)))
+
+
+def _is_first_pullback(
+    lo: Any, ema9: list, anchor: int, peak_idx: int, ema_wick: float
+) -> bool:
+    """True if the run INTO ``peak_idx`` held the 9-EMA band the WHOLE way — i.e.
+    THIS pull off the peak is the FIRST pullback, with no earlier dip below the
+    (vol-aware) 9-EMA between ``anchor`` and the peak. A later/Nth pullback (an
+    earlier band-losing dip already happened) is chop — Ross buys only the first.
+
+    Pure + side-effect-free. ``lo`` is the low array (numpy or a list of floats),
+    ``ema9`` the per-bar 9-EMA series (``None`` entries skipped, same fail-open
+    semantics as the inline check it was extracted from), ``ema_wick`` the
+    vol-aware wick tolerance. Identical body to the loop in ``_dipbuy_signals_ok``."""
+    for i in range(anchor, peak_idx):
+        e = ema9[i] if (0 <= i < len(ema9) and ema9[i] is not None) else None
+        if e is not None and float(lo[i]) < float(e) * (1.0 - ema_wick):
+            return False
+    return True
 
 
 def _dipbuy_signals_ok(
@@ -313,10 +333,8 @@ def _dipbuy_signals_ok(
             if not (run_high > prior_hi and dip_low > prior_lo):
                 return "PASS", None, None, {"dipbuy_declined": "hh_hl_broken"}
             # (c) FIRST pullback: the run INTO the peak held the 9-EMA band (no earlier dip).
-            for i in range(anchor, peak_idx):
-                e = ema9[i] if (0 <= i < len(ema9) and ema9[i] is not None) else None
-                if e is not None and float(lo[i]) < float(e) * (1.0 - ema_wick):
-                    return "PASS", None, None, {"dipbuy_declined": "not_first_pullback"}
+            if not _is_first_pullback(lo, ema9, anchor, peak_idx, ema_wick):
+                return "PASS", None, None, {"dipbuy_declined": "not_first_pullback"}
         # (d) Runway clear: no completed-bar high since the dip overhangs the target (run_high).
         post_hi = float(hi[dip_idx + 1:cur + 1].max()) if cur > dip_idx else float(hi[cur])
         if run_high < post_hi * (1.0 - tol):
@@ -798,6 +816,186 @@ def _dipbuy_tick_thrust_ok(*, live_price: float, level: float, atr_pct: float | 
         return True
 
 
+def first_pullback_break(
+    df: pd.DataFrame,
+    *,
+    symbol: str | None = None,
+    batch: dict[str, dict] | None = None,
+    live_price: float | None = None,
+    max_pullback_bars: int = 3,
+    retracement_threshold: float = 0.50,
+    top_fraction: float = 0.50,
+) -> tuple[str, float | None, float | None, dict[str, Any]]:
+    """Ross's FIRST-PULLBACK entry — the EARLIEST, most aggressive momentum entry.
+
+    Ross buys the FIRST 1m candle to make a NEW HIGH after the FIRST shallow
+    pullback off a confirmed up-impulse (he caught JRSH this way for +$21k). The
+    existing retest/deep-reclaim ladder structurally enters LATER (on JRSH its only
+    setup fired at 09:26 during the collapse → a loss). This gate fires near the
+    resumption of the move, not a bar-close after a retest.
+
+    Returns ``(verdict, level, stop, debug)`` mirroring ``_dipbuy_signals_ok``:
+      * ``"FIRE"`` — a completed bar (or, downstream, the live tick) broke the
+        pullback's prior swing high → enter at ``level`` (that swing high) with the
+        stop at the pullback LOW. The vol-floor layer widens the stop downstream
+        (INVARIANT A lives there), so this gate does NOT pre-floor it.
+      * ``"ARM"``  — the structure is set (explosive + first-pullback + shallow) but
+        the new-high has not printed on a completed bar yet → arm a tick-watch at
+        ``level``; the caller routes it through the tick-break block + the dipbuy
+        tick-thrust buffer.
+      * ``"PASS"`` — not explosive / not the first pullback / too deep / no impulse /
+        thin data / any error → caller falls through BYTE-IDENTICALLY to the existing
+        retest / deep-reclaim ladder (fail-open, never raises).
+
+    GUARD STACK (every yardstick reused — no new magic numbers; CHOP is the dominant
+    risk and the explosive + first-pullback-only + depth guards are the defense):
+      1. EXPLOSIVE + tradeable-liquid (chop defense #1). With a ``batch`` context the
+         name must be a top-fraction mover by ``score_universe`` (the same adaptive
+         percentile ranker the selection layer uses) AND carry $-turnover. Per-symbol
+         (the live call site has no batch) it must clear the lane's own adaptive RVOL
+         floor (``chili_momentum_entry_sustained_rvol_floor`` over the sustain window —
+         the SAME yardstick the sustaining-volume gate uses) AND be already moving up
+         (a positive impulse — Ross: "never buy what isn't already moving").
+      2. FIRST-pullback-only via ``_is_first_pullback`` — no earlier dip below the
+         (vol-aware) 9-EMA between the impulse anchor and the peak (an Nth pullback is
+         chop).
+      3. The trigger = the first candle to make a NEW HIGH above the pullback's prior
+         swing high (FIRE on a completed-bar break, ARM when set but unbroken).
+      4. Tight stop = the pullback LOW (the vol-floor widening layer applies downstream,
+         identically to the dipbuy/raw-break paths).
+      5. Depth gate — reject a too-deep/choppy pullback via the shared ``_collapse_cap``
+         + the vol-aware shallow cap (the dipbuy depth yardstick).
+
+    docs/DESIGN/MOMENTUM_LANE.md
+    """
+    try:
+        if df is None or getattr(df, "empty", True) or len(df) < 10:
+            return "PASS", None, None, {"fp_declined": "insufficient_bars"}
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        vol = df["Volume"].astype(float)
+        n = len(df)
+        cur = n - 1
+        arrays = compute_all_from_df(df, needed={"ema_9", "volume_ratio", "atr"})
+        ema9 = arrays.get("ema_9") or []
+        vr = arrays.get("volume_ratio") or []
+        atr = arrays.get("atr") or []
+
+        # Instrument volatility (ATR/price) → vol-aware shallow / EMA-wick tolerances
+        # (calm name keeps the Ross floor; volatile small-cap gets proportional room).
+        atr_pct = None
+        try:
+            _a = float(atr[cur]) if cur < len(atr) and atr[cur] is not None else None
+            _p = float(close.iloc[cur])
+            if _a is not None and _p > 0:
+                atr_pct = _a / _p
+        except (TypeError, ValueError, IndexError):
+            atr_pct = None
+        eff_shallow, ema_wick, _ = _vol_aware_pullback_tolerances(atr_pct, retracement_threshold)
+
+        # ── GUARD 1: EXPLOSIVE + tradeable-liquid (chop defense #1) ──────────────
+        # Batch context → adaptive universe-percentile ranking (score_universe); the
+        # live per-symbol call site has no batch → the lane's own RVOL floor + an
+        # already-moving impulse. A thin top-mover you can't exit is REJECTED.
+        explosive = False
+        if batch:
+            try:
+                from .ross_momentum import (
+                    ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED,
+                    score_universe,
+                )
+
+                scores = score_universe(
+                    batch, weights=ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED
+                )
+                sc = scores.get(symbol) if symbol else None
+                # top-fraction mover AND has tradeable ($-turnover) liquidity present.
+                if sc is not None and sc.in_top_fraction(float(top_fraction)) and (
+                    sc.tradeable_liquidity_pct is None or sc.tradeable_liquidity_pct > 0.0
+                ):
+                    explosive = True
+            except Exception:
+                explosive = False
+        if not explosive:
+            rvol_floor = float(
+                getattr(settings, "chili_momentum_entry_sustained_rvol_floor", 1.0) or 0.0
+            )
+            sustain_n = int(getattr(settings, "chili_momentum_entry_sustain_lookback_bars", 5) or 5)
+            srv = _sustained_rvol(vr, cur, sustain_n)
+            # already-moving: a positive up-impulse over the structure window.
+            look = min(20, cur)
+            win_high = float(high.iloc[cur - look:cur + 1].max())
+            win_low = float(low.iloc[cur - look:cur + 1].min())
+            moving_up = (win_high - win_low) > 0 and float(close.iloc[cur]) > float(close.iloc[cur - look])
+            # Fail-OPEN on thin RVOL data (srv None) — never block on missing volume;
+            # the depth + first-pullback guards still defend chop.
+            rvol_ok = (srv is None) or (srv >= rvol_floor)
+            if not (rvol_ok and moving_up):
+                return "PASS", None, None, {
+                    "fp_declined": "not_explosive",
+                    "fp_sustained_rvol": (round(srv, 2) if srv is not None else None),
+                }
+
+        # ── Impulse + pullback structure (reuse the raw-break anchoring) ─────────
+        look = min(20, cur)
+        win_high = float(high.iloc[cur - look:cur].max())
+        win_low = float(low.iloc[cur - look:cur].min())
+        impulse_range = win_high - win_low
+        if impulse_range <= 0:
+            return "PASS", None, None, {"fp_declined": "no_impulse"}
+
+        # The peak = the impulse high's bar; the pullback = the recent bars before the
+        # current bar. Its prior swing HIGH is the breakout level, its LOW the stop.
+        hi_v = high.values
+        peak_idx = int(high.iloc[cur - look:cur].values.argmax()) + (cur - look)
+        pb_start = max(0, cur - int(max_pullback_bars))
+        # the swing high to break = the highest completed bar in the pullback window
+        # (NOT the current bar — that is the one doing the breaking).
+        pb_high = float(high.iloc[pb_start:cur].max())
+        pb_low = float(low.iloc[pb_start:cur].min())
+        if not (0.0 < pb_low < pb_high):
+            return "PASS", None, None, {"fp_declined": "bad_levels"}
+
+        # ── GUARD 2: FIRST pullback only (no earlier dip below the 9-EMA) ────────
+        anchor = max(0, peak_idx - look)
+        if peak_idx > anchor and not _is_first_pullback(low.values, ema9, anchor, peak_idx, ema_wick):
+            return "PASS", None, None, {"fp_declined": "not_first_pullback"}
+
+        # ── GUARD 5: DEPTH — shallow pullback only (reuse the dipbuy yardsticks) ──
+        retrace = (win_high - pb_low) / impulse_range
+        depth = (win_high - pb_low) / win_high if win_high > 0 else 1.0
+        if retrace > eff_shallow or depth > _collapse_cap(atr_pct):
+            return "PASS", None, None, {
+                "fp_declined": "too_deep",
+                "fp_retrace": round(retrace, 3),
+                "fp_shallow_cap": round(eff_shallow, 3),
+            }
+        # Held above the 9-EMA through the pullback (vol-aware wick tolerance).
+        ema_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+        if ema_cur is not None and pb_low < float(ema_cur) * (1.0 - ema_wick):
+            return "PASS", None, None, {"fp_declined": "pullback_below_ema9"}
+
+        debug: dict[str, Any] = {
+            "pattern": "first_pullback",
+            "first_pullback": True,
+            "pullback_high": pb_high,
+            "pullback_low": pb_low,
+            "fp_retrace": round(retrace, 3),
+            "fp_shallow_cap": round(eff_shallow, 3),
+            "fp_explosive": True,
+        }
+
+        # ── GUARD 3: TRIGGER — first NEW HIGH above the pullback swing high ──────
+        cur_hi = float(hi_v[cur]) if cur < len(hi_v) else float(high.iloc[cur])
+        if cur_hi <= pb_high:
+            # structure set, not broken on a completed bar yet → ARM a tick-watch.
+            return "ARM", pb_high, pb_low, debug
+        return "FIRE", pb_high, pb_low, debug
+    except Exception:
+        return "PASS", None, None, {"fp_declined": "error"}
+
+
 def pullback_break_confirmation(
     df: pd.DataFrame,
     *,
@@ -821,6 +1019,7 @@ def pullback_break_confirmation(
     live_price: float | None = None,
     symbol: str | None = None,
     now: Any = None,
+    first_pullback_interval: str | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Ross-style pullback-break entry on intraday (1m/5m) bars.
 
@@ -897,6 +1096,43 @@ def pullback_break_confirmation(
             atr_pct=atr_pct,
         )
 
+    # FIRST-PULLBACK (Ross's EARLIEST, most aggressive entry: the first candle to make
+    # a new high after the first shallow pullback off a confirmed impulse — JRSH +$21k).
+    # ADDITIVE + flag-gated: tried alongside the retest/deep-reclaim ladder. A FIRE WINS
+    # (it is the earlier, designed-for-this entry); an ARM sets the tick-watchable wait
+    # reason + pb levels and falls into the EXISTING tick-break block (so the 1m thrust +
+    # sustained-volume gate apply to the breakout tick); a PASS leaves the prior trigger
+    # result BYTE-IDENTICAL. Flag OFF ⇒ this whole branch is skipped ⇒ byte-identical to
+    # the current ladder. docs/DESIGN/MOMENTUM_LANE.md
+    _fp_on = bool(getattr(settings, "chili_momentum_entry_first_pullback_enabled", True))
+    # Timeframe guard: the first-pullback geometry (shallow pull -> immediate new high)
+    # only reads on the base interval (1m); a 5m bar structurally collapses it. When a
+    # first-pullback interval is specified and the entry df is on a DIFFERENT interval,
+    # skip the gate (the live runner supplies a 1m df when it wants this entry) — this
+    # keeps the 5m path byte-identical to before. None ⇒ no constraint (run on whatever
+    # df is given), which is the path the unit tests + the 1m runner take.
+    _fp_iv = first_pullback_interval if first_pullback_interval is not None else entry_interval
+    if _fp_on and str(_fp_iv) == str(entry_interval):
+        _fpv, _fp_high, _fp_low, _fp_dbg = first_pullback_break(
+            df,
+            symbol=symbol,
+            max_pullback_bars=max_pullback_bars,
+            retracement_threshold=retracement_threshold,
+        )
+        if _fpv == "FIRE":
+            ok_t, reason_t, pb_high, pb_low, debug = (
+                True, "first_pullback_break", _fp_high, _fp_low, _fp_dbg
+            )
+        elif _fpv == "ARM" and not ok_t:
+            # Structure set, not broken on a completed bar yet → arm the tick-watch.
+            # Carry the first-pullback marker + levels so the tick-break block routes
+            # this through _dipbuy_tick_thrust_ok exactly like a dipbuy arm.
+            reason_t = "waiting_for_first_pullback_break"
+            debug = dict(debug)
+            debug.update(_fp_dbg)
+            debug["pullback_high"] = float(_fp_high)
+            debug["pullback_low"] = float(_fp_low)
+
     # Runaway-break allowance: a break that RAN without offering a retest
     # (``waiting_for_retest``) — take the break itself rather than miss a vertical
     # runner that never comes back. STRICT, not the MRVL loosening: only the retest
@@ -943,13 +1179,20 @@ def pullback_break_confirmation(
             atr_pct=atr_pct, symbol=symbol, now=now,
         )
         _unconf = "premarket_tickbreak_unconfirmed"
-        # DIP-BUY arms on the dip bar's OWN high — the tightest level the lane arms.
-        # Require an ATR/floor thrust buffer in EVERY session (RTH + crypto too, not
-        # just premarket) so a 1-tick poke of that tight level is not a dead-cat entry.
-        if _confirmed and reason_t == "waiting_for_dipbuy_break" and not _dipbuy_tick_thrust_ok(
+        # DIP-BUY (the dip bar's OWN high) and FIRST-PULLBACK (the pullback swing high)
+        # both arm on a TIGHT level — the tightest the lane arms. Require an ATR/floor
+        # thrust buffer in EVERY session (RTH + crypto too, not just premarket) so a
+        # 1-tick poke of that tight level is not a dead-cat entry.
+        if _confirmed and reason_t in (
+            "waiting_for_dipbuy_break", "waiting_for_first_pullback_break"
+        ) and not _dipbuy_tick_thrust_ok(
             live_price=float(live_price), level=float(debug["pullback_high"]), atr_pct=atr_pct,
         ):
-            _confirmed, _unconf = False, "dipbuy_tickbreak_unconfirmed"
+            _confirmed, _unconf = False, (
+                "dipbuy_tickbreak_unconfirmed"
+                if reason_t == "waiting_for_dipbuy_break"
+                else "first_pullback_tickbreak_unconfirmed"
+            )
         if _confirmed:
             ok_t, _tick_break = True, True
             debug["tick_break"] = True
@@ -1071,6 +1314,10 @@ def pullback_break_confirmation(
             # deep_reclaim_ok and the 06/12 A/B could not attribute it)
             return True, ("deep_reclaim_dipbuy_tick_ok" if _tick_break else "deep_reclaim_dipbuy_ok"), debug
         return True, ("deep_reclaim_tick_ok" if _tick_break else "deep_reclaim_ok"), debug
+    # First-pullback gets its OWN observable reason (so the replay A/B can attribute the
+    # aggressive early entry vs the legacy ladder), bar-fired or tick-fired.
+    if debug.get("pattern") == "first_pullback":
+        return True, ("first_pullback_tick_ok" if _tick_break else "first_pullback_ok"), debug
     return True, ("pullback_break_tick_ok" if _tick_break else "pullback_break_ok"), debug
 
 
@@ -1183,6 +1430,9 @@ def momentum_pullback_trigger(
         live_price=live_price,
         symbol=symbol,
         now=now,
+        first_pullback_interval=str(
+            getattr(settings, "chili_momentum_first_pullback_interval", "1m") or "1m"
+        ),
         volume_spike_multiple=float(
             getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5
         ),

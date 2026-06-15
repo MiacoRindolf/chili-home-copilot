@@ -2873,6 +2873,27 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_DEEP_RECLAIM_DIPBUY_STOP_BUFFER_BPS"),
         description="Stop sits this many bps under the dip low (ATR-relative max with 0.25xATR%; bps not cents = class-aware). The vol-floor layer widens it if too tight.",
     )
+    # ── Ross FIRST-PULLBACK entry (the EARLIEST, most aggressive momentum entry) ──
+    # Ross buys the FIRST 1m candle to make a new high after the FIRST shallow pullback
+    # off a confirmed impulse (he caught JRSH this way for +$21k). CHILI's existing
+    # retest/deep-reclaim ladder enters structurally LATER (on JRSH its only setup fired
+    # at 09:26 during the collapse → a loss). This ADDITIVE branch (in entry_gates.
+    # first_pullback_break, tried alongside the ladder; a FIRE wins, an ARM tick-watches,
+    # a PASS falls through byte-identically) fires near the resumption of the move. CHOP
+    # is the dominant risk — the explosive-name + first-pullback-only + depth guards (all
+    # reusing existing yardsticks: the RVOL floor, _is_first_pullback, the dipbuy depth
+    # cap) are the defense; do NOT loosen them. This is a REAL risk change (aggressive
+    # entry), REPLAY-VALIDATED before live. docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_entry_first_pullback_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FIRST_PULLBACK_ENABLED"),
+        description="Enable Ross's first-pullback entry (first new-high after the first shallow pullback off an impulse) alongside the retest/deep-reclaim ladder. KILL-SWITCH: False -> byte-identical to the current ladder.",
+    )
+    chili_momentum_first_pullback_interval: str = Field(
+        default="1m",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FIRST_PULLBACK_INTERVAL"),
+        description="THE base timeframe knob for the first-pullback structure (1m; a 5m bar structurally collapses the shallow-pull->new-high geometry Ross trades).",
+    )
     # Pending-entry lifecycle is EVENT-DRIVEN (cancel on setup invalidation /
     # limit left behind), not clock-driven — this is only the BACKSTOP: a
     # submitted entry limit must not outlive the bar evidence that produced it,
