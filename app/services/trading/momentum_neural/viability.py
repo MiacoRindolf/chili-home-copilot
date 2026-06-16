@@ -155,12 +155,29 @@ def score_viability(
             warnings.append("High bid/ask drift — execution uncertainty")
         elif ad > 6.0:
             base -= 0.02
+    # Ross-style EXTREME-MOVER override (operator 2026-06-16, the TDIC/SUGP/OBAI miss):
+    # the biggest explosive movers Ross TRADES are often dilution-prone low-floats with
+    # choppy/selling L2 — CHILI's dilution-fade + L2-imbalance SELECTION de-rates were
+    # cancelling their Ross-quality boost and keeping them OUT of the armed set (TDIC
+    # +103%, Ross +$3,701 in it, NEVER armed). For an EXTREME Ross-quality name (>= the
+    # existing 0.8 "High" threshold) those de-rates are SWING/overnight concerns, not
+    # intraday-momentum vetoes (Ross is flat by close) — so SUPPRESS them at SELECTION and
+    # let the name arm; the dilution risk is reframed to an EXIT/no-overnight constraint.
+    # FAVORABLE (long-side) boosts are kept; only the de-rates skip. Non-extreme names
+    # (rqf < 0.8 or no ross score) are BYTE-IDENTICAL.
+    _extreme_mover = False
+    try:
+        _rs = ctx.meta.get("ross_scores") if isinstance(getattr(ctx, "meta", None), dict) else None
+        if isinstance(_rs, dict) and symbol in _rs:
+            _extreme_mover = float(_rs[symbol]) >= 0.8
+    except (TypeError, ValueError, AttributeError):
+        pass
     if imb is not None:
         try:
             im = float(imb)
             if im > 0.12:
                 base += 0.02
-            elif im < -0.18:
+            elif im < -0.18 and not _extreme_mover:
                 base -= 0.03
                 warnings.append("Order book imbalance against long bias")
         except (TypeError, ValueError):
@@ -182,7 +199,7 @@ def score_viability(
                 m = float(mpe)
                 if o > thr and m > 0:
                     base += w
-                elif o < -thr and m < 0:
+                elif o < -thr and m < 0 and not _extreme_mover:
                     base -= w
                     warnings.append("Order-flow imbalance against long bias (OFI+micro)")
         except (TypeError, ValueError):
@@ -190,7 +207,7 @@ def score_viability(
     if tape_z is not None:
         try:
             tz = float(tape_z)
-            if tz < -2.0:
+            if tz < -2.0 and not _extreme_mover:
                 base -= 0.04
                 warnings.append("Heavy sell-side tape velocity")
             elif tz > 1.5:
@@ -353,8 +370,14 @@ def score_viability(
             else None
         )
         if _dil and "-USD" not in str(symbol or "").upper() and str(symbol or "").upper() in _dil:
-            base -= 0.10
-            warnings.append("Recent dilution filing (S-1/424B*) — fade risk")
+            if not _extreme_mover:
+                base -= 0.10
+                warnings.append("Recent dilution filing (S-1/424B*) — fade risk")
+            else:
+                # Extreme Ross-quality mover with a dilution filing: Ross TRADES these
+                # intraday — the dilution fade is an OVERNIGHT/swing risk, not an entry veto.
+                # Keep the boost (no -0.10) so it arms; flag it for the EXIT/no-overnight guard.
+                warnings.append("Dilution filing present — Ross-style intraday entry (no overnight; tighten exit)")
     except (TypeError, ValueError, AttributeError):
         pass
 
