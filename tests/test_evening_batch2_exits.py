@@ -41,7 +41,11 @@ def test_ema5m_ignored_before_one_r():
 def test_exit_ladder_structure():
     src = open("app/services/trading/momentum_neural/live_runner.py", encoding="utf-8").read()
     i = src.index("EXIT LADDER (2026-06-12")
-    block = src[i:i + 2500]
+    # Window widened 2500→5000 (2026-06-16): the hours-aware equity-exit fix added the
+    # ext-hours/force-limit logic between the ladder comment and the place calls, so the
+    # market-order floor now sits ~4.3k chars in. (Behavioural parity is now pinned by
+    # tests/test_premarket_exit_hours_aware.py — this stays as a structure smoke check.)
+    block = src[i:i + 5000]
     assert 'str(reason or "") in ("kill_switch_flatten", "operator_flatten")' in block
     assert "place_limit_order_gtc" in block
     assert "place_market_order" in block  # the floor remains

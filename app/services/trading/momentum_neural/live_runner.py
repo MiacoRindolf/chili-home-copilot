@@ -545,6 +545,31 @@ def _submit_live_market_exit(
     # Kill-switch/operator/EOD flatten intent = OUT NOW = market immediately.
     # An unfilled limit is re-pegged by the poll loop (repeg knob) — each
     # repeg re-enters here with attempts+1, walking the ladder.
+    # HOURS-AWARE EQUITY EXIT (2026-06-16 — BEEM/AHMA stranded-long bug). In
+    # premarket/after-hours Robinhood REJECTS a regular-hours order ("no order_id"),
+    # so a premarket equity entry whose stop breached could NOT be flattened — the
+    # sell never placed → 8 rejects → live_error → naked long with no working stop
+    # (exactly the AHMA position the operator had to exit by hand). The ENTRY and
+    # scale-out already pass the ext-hours overrides (which DO work premarket); only
+    # this reactive exit was hours-blind. Mirror the entry idiom: when an RH equity
+    # session is non-regular, pass the RH-only overrides AND force a marketable LIMIT
+    # (a bare market order is rejected in extended hours even WITH the override).
+    # Overrides are RH-only kwargs — pass them ONLY for robinhood_spot (the coinbase
+    # adapter does not accept them; crypto + regular-hours stay byte-identical).
+    _exit_extended = False
+    if normalize_execution_family(sess.execution_family) == EXECUTION_FAMILY_ROBINHOOD_SPOT:
+        try:
+            from .market_profile import market_session_now
+
+            _exit_extended = market_session_now(sess.symbol) != "regular"
+        except Exception:
+            _exit_extended = False
+    _ext_kwargs: dict[str, Any] = (
+        {"market_hours_override": "all_day_hours", "extended_hours_override": True}
+        if _exit_extended
+        else {}
+    )
+
     _urgent = str(reason or "") in ("kill_switch_flatten", "operator_flatten")
     _lim_px = None
     if not _urgent and attempts <= 2:
@@ -559,23 +584,47 @@ def _submit_live_market_exit(
                 continue
         if _ref is not None:
             _lim_px = _ref * (1.0 - _g)
+    # Extended-hours equity: a market order is rejected outright, so ALWAYS price a
+    # marketable limit — even on an urgent flatten or the attempt-3+ market fallback.
+    # Cross the bid HARD (8× guard) so it fills immediately, like the market order it
+    # replaces. Regular hours / crypto: _exit_extended is False → branch unchanged.
+    if _exit_extended and _lim_px is None:
+        _ref = None
+        for _cand in (bid, mid):
+            try:
+                if _cand and float(_cand) > 0:
+                    _ref = float(_cand)
+                    break
+            except (TypeError, ValueError):
+                continue
+        if _ref is not None:
+            _lim_px = _ref * (1.0 - (_notional_guard_multiplier() - 1.0) * 8.0)
     if _lim_px is not None and hasattr(adapter, "place_limit_order_gtc"):
-        result = adapter.place_limit_order_gtc(
+        _lim_kwargs: dict[str, Any] = dict(
             product_id=product_id,
             side="sell",
             base_size=_fmt_base_size(quantity),
             limit_price=f"{_lim_px:.6f}".rstrip("0").rstrip("."),
             client_order_id=client_order_id,
-        ) or {}
+        )
+        if _ext_kwargs:
+            _lim_kwargs["extended_hours"] = True
+            _lim_kwargs.update(_ext_kwargs)
+        result = adapter.place_limit_order_gtc(**_lim_kwargs) or {}
         le["exit_order_type"] = "limit"
         le["exit_limit_price"] = _lim_px
+        if _exit_extended:
+            le["exit_session_extended"] = True
     else:
-        result = adapter.place_market_order(
+        _mkt_kwargs: dict[str, Any] = dict(
             product_id=product_id,
             side="sell",
             base_size=_fmt_base_size(quantity),
             client_order_id=client_order_id,
-        ) or {}
+        )
+        if _ext_kwargs:
+            _mkt_kwargs.update(_ext_kwargs)
+        result = adapter.place_market_order(**_mkt_kwargs) or {}
         le["exit_order_type"] = "market"
         le.pop("exit_limit_price", None)
     le["exit_order_id"] = result.get("order_id")
@@ -732,10 +781,47 @@ def _live_exit_submit_succeeded(
                 },
             )
             return True
+        # GENUINELY STRANDED POSITION (2026-06-16): the exit hit the retry cap AND
+        # the broker still HOLDS the position (not zero/dust) — a real naked long with
+        # no working exit (this is what stranded BEEM/AHMA premarket before the
+        # hours-aware-exit fix). Emit a LOUD, distinct alert so it is never lost in the
+        # cosmetic arm-twin live_errors (those are blocked AT ARM — no position, no
+        # money at risk). The operator's monitoring keys on this event to take over.
+        _held_qty = None
+        try:
+            from ...broker_service import get_open_position_quantity as _gq
+
+            if normalize_execution_family(sess.execution_family) == EXECUTION_FAMILY_ROBINHOOD_SPOT:
+                _held_qty = _gq(sess.symbol)
+        except Exception:
+            _held_qty = None
+        _emit(
+            db, sess, "live_exit_stranded_position",
+            {
+                "severity": "critical",
+                "reason": reason,
+                "symbol": sess.symbol,
+                "execution_family": sess.execution_family,
+                "broker_held_qty": (float(_held_qty) if _held_qty is not None else None),
+                "attempts": result.get("attempts"),
+                "last_error": (le.get("exit_place_result") or {}).get("error"),
+                "note": (
+                    "exit retry cap reached and broker STILL HOLDS the position — "
+                    "naked long, no working exit; operator action required"
+                ),
+            },
+        )
+        _log.error(
+            "[momentum_live] STRANDED POSITION sess=%s %s qty=%s — exit retry cap "
+            "exceeded and broker still holds; needs operator flatten",
+            sess.id, sess.symbol, _held_qty,
+        )
         le["last_exit_submit_failed"] = {
             "reason": reason,
             "error": "exit_retry_cap_exceeded",
             "attempts": result.get("attempts"),
+            "broker_held_qty": (float(_held_qty) if _held_qty is not None else None),
+            "stranded": True,
             "recorded_at_utc": _utcnow().isoformat(),
         }
         _commit_le(sess, le)
