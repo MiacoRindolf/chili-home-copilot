@@ -131,6 +131,7 @@ class LiveRunnerLoop:
         self._pool: ThreadPoolExecutor | None = None
         self._subscribed: set[str] = set()
         self._last_event_tick: dict[int, float] = {}
+        self._last_event_exit_log: dict[int, float] = {}
         self._inflight: set[int] = set()
         self._inflight_lock = threading.Lock()
 
@@ -204,6 +205,13 @@ class LiveRunnerLoop:
                     target_px > 0 and exit_ref >= target_px * 0.995
                 ):
                     self._dispatch(s["session_id"])
+                # EVENT-DRIVEN EXHAUSTION-EXIT HINT (2026-06-16, Ross "eject the moment
+                # the ask thickens"): a held CRYPTO trailing position whose order flow
+                # rolls over to the sell side wakes the runner NOW (up to 15s sooner than
+                # the poll). DISPATCH HINT ONLY — tick_live_session re-checks the full
+                # INVARIANT-A-safe confluence and is the sole decider of any sell.
+                elif state == STATE_LIVE_TRAILING and symbol.endswith("-USD"):
+                    self._maybe_event_exit_hint(s, symbol)
             elif state == STATE_LIVE_PENDING_ENTRY:
                 # resolve fills / the 10s ack-timeout at tick speed
                 self._dispatch(s["session_id"])
@@ -217,6 +225,46 @@ class LiveRunnerLoop:
                 ref = mid if (mid and mid > 0) else bid
                 if wl > 0 and ref and ref > wl:
                     self._dispatch(s["session_id"])
+
+    def _maybe_event_exit_hint(self, s: dict, symbol: str) -> None:
+        """Tick-level OFI-rollover EXIT dispatch hint for a held crypto position. A
+        cheap PURE in-process ring read (``db=None`` → ring-only, NO DB/broker on the
+        websocket receive thread). When the order flow rolls over to the sell side
+        (exhaustion of the up-move — Ross's "buying paused, a seller on the ask"), wake
+        the runner NOW so its FULL INVARIANT-A-safe exit confluence (peak_r>=arm_r,
+        micro rollover, OFI flip, giveback, continuation-veto in tick_live_session)
+        evaluates up to 15s sooner than the poll. DISPATCH HINT ONLY — never a sell, no
+        exit math here. Default OFF + observe-first: when not enabled, LOG the
+        would-dispatch counterfactual (rate-limited) so the operator can validate that
+        the hint fires sanely before flipping it live. Fail-open."""
+        enabled = bool(getattr(settings, "chili_momentum_exit_event_driven_enabled", False))
+        observe = bool(getattr(settings, "chili_momentum_exit_event_driven_observe", True))
+        if not (enabled or observe):
+            return
+        try:
+            from .pipeline import _live_ofi_microprice
+
+            ofi, _micro = _live_ofi_microprice(symbol, db=None)  # ring-only, no DB
+        except Exception:
+            return
+        if ofi is None:
+            return
+        thr = float(getattr(settings, "chili_momentum_exit_event_ofi_rollover_thr", -0.25) or -0.25)
+        if ofi >= thr:
+            return  # no sell-side exhaustion rollover
+        if enabled:
+            self._dispatch(s["session_id"])  # wake the runner; IT decides the sell
+            return
+        # observe-first: record the counterfactual without acting (rate-limited).
+        now = time.monotonic()
+        sid = s["session_id"]
+        if now - self._last_event_exit_log.get(sid, 0.0) >= _EVENT_TICK_MIN_SPACING_S:
+            self._last_event_exit_log[sid] = now
+            _log.info(
+                "[live_runner_loop] event_exit_hint observe-only (NOT dispatched): %s "
+                "ofi=%.3f < thr=%.3f sess=%s — would wake the exit runner",
+                symbol, ofi, thr, sid,
+            )
 
     def _dispatch(self, session_id: int) -> None:
         now = time.monotonic()
