@@ -486,6 +486,37 @@ def get_positions() -> list[dict[str, Any]]:
     return positions
 
 
+def get_all_spot_prices() -> dict[str, float]:
+    """Map of ``PRODUCT-USD`` -> last trade price for every USD product, fetched in
+    ONE batch call and cached. Used to value crypto holdings and to drop unsellable
+    DUST / delisted residue from the positions VIEW: a holding with no live product
+    (delisted) or a sub-floor USD value otherwise shows as a ``$0`` 'phantom
+    position' in the cockpit. Fail-soft: returns ``{}`` if the fetch fails, which the
+    caller treats as 'hide nothing' so a transient outage never blanks real positions."""
+    cached = _cache_get("all_spot_prices")
+    if cached is not None:
+        return cached
+    prices: dict[str, float] = {}
+    client = _get_client()
+    if client is None:
+        return prices
+    try:
+        resp = client.get_products()
+        products = resp.get("products", []) if isinstance(resp, dict) else getattr(resp, "products", [])
+        for pr in (products or []):
+            pid = pr.get("product_id") if isinstance(pr, dict) else getattr(pr, "product_id", None)
+            raw_px = pr.get("price") if isinstance(pr, dict) else getattr(pr, "price", None)
+            if not pid:
+                continue
+            px = _safe_float(raw_px)
+            if px > 0:
+                prices[str(pid)] = px
+    except Exception:
+        logger.debug("[coinbase] get_all_spot_prices failed", exc_info=True)
+    _cache_set("all_spot_prices", prices)
+    return prices
+
+
 def get_recent_orders(limit: int = 20) -> list[dict[str, Any]]:
     """Recent order history."""
     cached = _cache_get("recent_orders")
