@@ -40,6 +40,7 @@ from ....db import SessionLocal
 from ....config import settings
 from ..indicator_core import compute_atr
 from ..market_data import fetch_ohlcv_df
+from .micro_bars import _resample_micro_bars  # re-exported: shared live+replay util
 from .entry_gates import (
     TICK_ARMED_WAIT_REASONS,
     halt_resume_dip_trigger,
@@ -63,6 +64,7 @@ from .ross_momentum import (
     intraday_impulse_freshness,
     score_universe,
 )
+from .universe import EQUITY_ROSS_SMALLCAP, build_equity_universe
 from .strategy_params import family_default_params
 
 logger = logging.getLogger(__name__)
@@ -110,6 +112,17 @@ FRESHNESS_RETRACEMENT_THRESHOLD = float(
 REPLAY_FRESHNESS_FILTER = bool(
     getattr(settings, "chili_momentum_replay_freshness_filter_enabled", True)
 )
+# TICK-FAITHFUL ENTRY (2026-06-15): replay the densified sub-minute ticks inside the
+# entry window so a micro-pullback break fires at the true instant it broke (where WS
+# ticks exist). OFF ⇒ the prior single-sample tick-break (byte-identical / SUPERSET).
+REPLAY_TICK_ENTRY = bool(
+    getattr(settings, "chili_momentum_replay_tick_entry_enabled", False)
+)
+# FULL-PIPELINE armed_source: re-run the real as-of selection (build_equity_universe
+# re-screen → re-score → re-arm) from raw tape. OFF ⇒ 'live'/'asof' byte-identical.
+REPLAY_FULL_PIPELINE = bool(
+    getattr(settings, "chili_momentum_replay_full_pipeline_enabled", False)
+)
 
 REPLAY_RESULTS_DIR = os.environ.get("CHILI_REPLAY_RESULTS_DIR", "/app/data/replays")
 
@@ -132,15 +145,21 @@ def _premarket_utc_hhmm(date: str) -> str:
 
 
 class Tape:
-    """Real 1-min NBBO per symbol for one date, + halt windows from tape gaps."""
+    """Real 1-min NBBO per symbol for one date, + halt windows from tape gaps.
+
+    Each row is ``(ts, bid, ask, spread_bps, day_volume, source)``; ``source``
+    distinguishes the 1-min sampler ('massive_snapshot') from the densified
+    sub-minute WS ticks ('massive_ws' / 'coinbase_ws' / 'massive_ws_universe')
+    so the tick-faithful entry can resolve INSIDE a minute where ticks exist.
+    Consumers read by index ≤4 (the appended ``source`` never shifts them)."""
 
     def __init__(self, date: str):
-        self.by_sym: dict[str, list[tuple[datetime, float, float, float, float]]] = defaultdict(list)
+        self.by_sym: dict[str, list[tuple[datetime, float, float, float, float, str]]] = defaultdict(list)
         db = SessionLocal()
         try:
             rows = db.execute(
                 text(
-                    "SELECT symbol, observed_at, bid, ask, spread_bps, day_volume "
+                    "SELECT symbol, observed_at, bid, ask, spread_bps, day_volume, source "
                     "FROM momentum_nbbo_spread_tape "
                     "WHERE observed_at >= :lo AND observed_at < :hi AND bid > 0 AND ask > 0 "
                     "ORDER BY symbol, observed_at"
@@ -150,9 +169,11 @@ class Tape:
         finally:
             db.rollback()
             db.close()
-        for sym, ts, bid, ask, sbps, dvol in rows:
+        for sym, ts, bid, ask, sbps, dvol, src in rows:
             ts = _aware(ts)
-            self.by_sym[str(sym)].append((ts, float(bid), float(ask), float(sbps or 0), float(dvol or 0)))
+            self.by_sym[str(sym)].append(
+                (ts, float(bid), float(ask), float(sbps or 0), float(dvol or 0), str(src or ""))
+            )
         self._times: dict[str, list[datetime]] = {s: [r[0] for r in v] for s, v in self.by_sym.items()}
         # Global sampler heartbeat: the sampler skips whole minutes for ALL symbols
         # (cadence jitter / scheduler restarts). A per-symbol gap is a real HALT only
@@ -220,7 +241,7 @@ class Tape:
         return False
 
     def first_after(self, sym: str, ts) -> tuple | None:
-        """Full next tape row (ts, bid, ask, spread_bps, day_volume) after ts."""
+        """Full next tape row (ts, bid, ask, spread_bps, day_volume, source) after ts."""
         times = self._times.get(sym)
         if not times:
             return None
@@ -228,6 +249,24 @@ class Tape:
         if i >= len(times):
             return None
         return self.by_sym[sym][i]
+
+    def prices_between(self, sym: str, t0, t1) -> list[tuple[datetime, float, float, str]]:
+        """TICK-FAITHFUL ENTRY (2026-06-15): every (ts, bid, ask, source) row in the
+        HALF-OPEN window [t0, t1), in time order — the densified sub-minute ticks the
+        replay walks to fire the entry at the true instant it broke, not a 1-min
+        sample later. SUPERSET: where only the 1-min sampler exists, this returns the
+        same single (or zero) row .at() would have seen ⇒ byte-identical behavior.
+        Reuses the per-symbol bisected ``_times`` index (no scan)."""
+        times = self._times.get(sym)
+        if not times:
+            return []
+        lo = bisect.bisect_left(times, _aware(t0))
+        hi = bisect.bisect_left(times, _aware(t1))
+        out: list[tuple[datetime, float, float, str]] = []
+        for r in self.by_sym[sym][lo:hi]:
+            # r = (ts, bid, ask, spread_bps, day_volume, source)
+            out.append((r[0], r[1], r[2], r[5] if len(r) > 5 else ""))
+        return out
 
 
 def _expected_move_bps_15m(upto: pd.DataFrame, H: str, L: str, C: str) -> float | None:
@@ -357,7 +396,7 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
         if o <= 0:
             continue
         open_px[s] = o
-        for ts, bid, ask, _sbps, dvol in rows:
+        for ts, bid, ask, _sbps, dvol, *_rest in rows:
             mid = (bid + ask) / 2.0
             if not (PX_MIN <= mid <= PX_MAX):
                 continue
@@ -437,6 +476,82 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             return []
         scored = score_universe(sigs, weights=ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED)
         return [r.symbol for r in sorted(scored.values(), key=lambda r: r.rank)]
+
+    def _full_pipeline_rank(now) -> list[str]:
+        """FULL-PIPELINE armed_source (2026-06-15): re-run the REAL selection
+        pipeline AS-OF ``now`` from raw tape, so the replay can test whether a NEW
+        selection/scoring change would arm names the recorded day missed.
+
+        HONEST as-of scope (what IS / ISN'T re-run, no faking):
+          * Stage 1 (re-SCREEN) — IS as-of: a Massive-shaped snapshot is synthesized
+            from the tape state at ``now`` ONLY (each candidate's last bid/ask/dvol
+            ≤ now, change vs its tape open, the minute-bar accumulated volume = dvol),
+            and ``build_equity_universe(EQUITY_ROSS_SMALLCAP, snapshot=...)`` applies
+            the REAL price/$-vol/change screen + freshness×move rank. No EOD lookahead.
+          * Stage 2 (re-SCORE) — IS as-of: ``score_universe`` (the SAME liquidity-biased
+            Ross percentile ranker the live lane + asof_rank use) re-ranks the Stage-1
+            survivors from the same as-of signals.
+          * Stage 3/4 (re-ARM / re-ENTER) — IS as-of: the caller arms from THIS ranked
+            list through the SAME freshness filter, slot cap, and entry trigger the
+            'asof' path uses (shared code below).
+        LIMITATION (documented, not faked): the snapshot is built from the NBBO tape
+        the sampler recorded (Ross-universe names with a clean quote), NOT a frozen
+        copy of the full Massive market snapshot as it existed at ``now`` — a name the
+        live sampler never quoted that minute has no tape row and cannot re-enter the
+        pool here (the tape IS the candidate ceiling, same as 'asof'). Fields the
+        snapshot can't reconstruct (lastQuote sub-fields, prevDay) are omitted; the
+        screen reads the ones present (day.c/day.v/min.av/todaysChangePerc), which is
+        exactly what ``build_equity_universe`` needs.
+        """
+        snapshot: list[dict] = []
+        sigs: dict[str, dict] = {}
+        for s in cand:
+            if qualify_at[s] > _aware(now):
+                continue
+            q = tape.at(s, now)
+            if q is None:
+                continue
+            bid, ask, _sbps, dvol = q
+            mid = (bid + ask) / 2.0
+            if mid <= 0:
+                continue
+            o = open_px.get(s) or mid
+            chg = (mid - o) / o * 100.0 if o > 0 else 0.0
+            # Massive-snapshot shape build_equity_universe screens on (as-of fields only).
+            snapshot.append({
+                "ticker": s,
+                "day": {"c": mid, "v": dvol, "o": o},
+                "min": {"c": mid, "av": dvol},
+                "lastQuote": {"p": bid, "P": ask},
+                "todaysChangePerc": chg,
+            })
+            sig = {"daily_change_pct": chg, "dollar_volume": mid * dvol}
+            if adv.get(s):
+                sig["rvol"] = dvol / adv[s]
+            sigs[s] = sig
+        if not snapshot:
+            return []
+        # Stage 1: the REAL universe screen + freshness×move rank (as-of snapshot).
+        try:
+            screened = build_equity_universe(EQUITY_ROSS_SMALLCAP, snapshot=snapshot)
+        except Exception:
+            screened = []
+        screened_set = {str(x).upper() for x in screened}
+        if not screened_set:
+            return []
+        # Stage 2: re-score ONLY the Stage-1 survivors with the live percentile ranker.
+        sub = {s: sigs[s] for s in sigs if s.upper() in screened_set}
+        if not sub:
+            return []
+        scored = score_universe(sub, weights=ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED)
+        return [r.symbol for r in sorted(scored.values(), key=lambda r: r.rank)]
+
+    def _rank(now) -> list[str]:
+        """Dispatch the as-of ranker: full-pipeline re-screen+re-score when enabled,
+        else the standard as-of rank. Byte-identical to before when the flag is OFF."""
+        if armed_source == "full_pipeline":
+            return _full_pipeline_rank(now)
+        return asof_rank(now)
 
     def _completed_upto(s: str, now):
         """The completed-bars frame the entry trigger sees at ``now`` (no lookahead:
@@ -687,7 +802,7 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                     if armed_spans[s] and armed_spans[s][-1][1] is None:
                         armed_spans[s][-1][1] = str(now)[11:16]
                     del armed[s]
-            ranked = asof_rank(now)
+            ranked = _rank(now)   # full_pipeline re-screen+re-score when on; asof otherwise
             pos = {s: i for i, s in enumerate(ranked)}
             for s in ranked:
                 if s in armed or s in open_pos:
@@ -761,6 +876,11 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             if len(upto) < 12:
                 continue
             ok = False
+            # Per-entry fidelity (tick-faithful): a bar/dip fire is a 1-min snapshot
+            # entry; only the tick-faithful sub-minute walk below upgrades it to
+            # 'ws_tick'. Defaulted here so it's always defined for the trade meta.
+            _entry_fidelity = "snapshot_1min"
+            _fire_ts = now
             if _dip_window:
                 ok, _treason, dbg = halt_resume_dip_trigger(
                     upto, entry_interval=ENTRY_INTERVAL,
@@ -793,14 +913,42 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                     and isinstance(dbg, dict)
                     and dbg.get("pullback_high")
                 ):
-                    _q_tb = tape.at(s, now, max_stale_min=ENTRY_QUOTE_MAX_STALE_MIN)
-                    if _q_tb is not None and _q_tb[1] > float(dbg["pullback_high"]):
-                        # pass the SIM time so the premarket tick-break confirmation
-                        # (CUPR guard) evaluates the right session, not wall-clock now.
-                        ok, _treason, dbg = momentum_pullback_trigger(
-                            upto, entry_interval=ENTRY_INTERVAL, live_price=float(_q_tb[1]),
-                            now=_aware(now),
-                            db=_l2db, l2_as_of=_aware(now).replace(tzinfo=None))
+                    _lvl = float(dbg["pullback_high"])
+                    if REPLAY_TICK_ENTRY:
+                        # TICK-FAITHFUL: walk EVERY densified tick in the entry window in
+                        # time order; the FIRST whose ask > pullback_high fires at THAT
+                        # ts (true sub-minute resolution where WS ticks exist). SUPERSET:
+                        # where only the 1-min sampler exists, prices_between returns the
+                        # same single sample .at() saw ⇒ identical to the snapshot path.
+                        _win_lo = _aware(now) - timedelta(minutes=ENTRY_BAR_MIN)
+                        _hit = None
+                        for _t, _b, _a, _src in tape.prices_between(s, _win_lo, _aware(now) + timedelta(seconds=1)):
+                            if _a > _lvl:
+                                _hit = (_t, _a, _src)
+                                break
+                        if _hit is not None:
+                            _fire_ts = _hit[0]
+                            ok2, _tr2, dbg2 = momentum_pullback_trigger(
+                                upto, entry_interval=ENTRY_INTERVAL, live_price=float(_hit[1]),
+                                now=_aware(_fire_ts),
+                                db=_l2db, l2_as_of=_aware(_fire_ts).replace(tzinfo=None))
+                            if ok2:
+                                ok, _treason, dbg = ok2, _tr2, dbg2
+                                # 'massive_snapshot' is the 1-min sampler; anything else is
+                                # a real sub-minute WS tick (densified) → ws_tick fidelity.
+                                _entry_fidelity = (
+                                    "ws_tick" if _hit[2] and _hit[2] != "massive_snapshot"
+                                    else "snapshot_1min"
+                                )
+                    else:
+                        _q_tb = tape.at(s, now, max_stale_min=ENTRY_QUOTE_MAX_STALE_MIN)
+                        if _q_tb is not None and _q_tb[1] > _lvl:
+                            # pass the SIM time so the premarket tick-break confirmation
+                            # (CUPR guard) evaluates the right session, not wall-clock now.
+                            ok, _treason, dbg = momentum_pullback_trigger(
+                                upto, entry_interval=ENTRY_INTERVAL, live_price=float(_q_tb[1]),
+                                now=_aware(now),
+                                db=_l2db, l2_as_of=_aware(now).replace(tzinfo=None))
             if not ok:
                 _tr(s, "trigger_fail:" + str(_treason), now)
                 continue
@@ -871,10 +1019,10 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                 "entry": fill_px, "qty": qty, "qty0": qty, "stop": stop, "stop0": stop,
                 "target": target, "hwm": fill_px, "atrp": eff, "scaled": False,
                 "trail_armed": False, "scale_usd": 0.0,
-                "meta": {"sym": s, "t": str(now)[11:16], "entry": round(fill_px, 4),
+                "meta": {"sym": s, "t": str(_fire_ts)[11:16], "entry": round(fill_px, 4),
                          "qty": round(qty, 0), "spread_bps": round(sbps, 0),
                          "partial": round(qty / want_qty if want_qty > 0 else 1.0, 2),
-                         "fidelity": "tape"},
+                         "fidelity": "tape", "entry_fidelity": _entry_fidelity},
             }
     finally:
         _l2db.rollback()
@@ -1027,10 +1175,20 @@ def _build_divergence(date: str, trace: list[dict], trades: list[dict]) -> list[
     return out
 
 
+def _armed_source_suffix(armed_source: str | None) -> str:
+    """Filename suffix per armed_source so the three results don't clobber each other
+    ('asof' = no suffix → byte-identical to the historical path)."""
+    if armed_source == "live":
+        return "_live"
+    if armed_source == "full_pipeline":
+        return "_fullpipe"
+    return ""
+
+
 def _persist(result: dict) -> None:
     try:
         os.makedirs(REPLAY_RESULTS_DIR, exist_ok=True)
-        suffix = "_live" if result.get("armed_source") == "live" else ""
+        suffix = _armed_source_suffix(result.get("armed_source"))
         path = os.path.join(REPLAY_RESULTS_DIR, f"{result['date']}{suffix}.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=1)
@@ -1060,7 +1218,7 @@ def list_results() -> list[dict]:
 
 
 def load_result(date: str, armed_source: str = "asof") -> dict | None:
-    suffix = "_live" if armed_source == "live" else ""
+    suffix = _armed_source_suffix(armed_source)
     try:
         with open(os.path.join(REPLAY_RESULTS_DIR, f"{date}{suffix}.json"), encoding="utf-8") as f:
             return json.load(f)

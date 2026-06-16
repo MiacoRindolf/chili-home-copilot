@@ -158,6 +158,13 @@ def prune_nbbo_tape(db: Session, *, retention_days: Optional[int] = None) -> dic
     The observed_at index makes this cheap. Best-effort."""
     days = int(retention_days if retention_days is not None
                else getattr(settings, "chili_momentum_nbbo_tape_retention_days", 30) or 30)
+    # Densified universe ticks (source='massive_ws_universe', #2026-06-15) are a
+    # HIGHER-volume, SHORTER-lived class than the 1-min snapshot tape — prune them
+    # on their own (shorter) window so the densification can't regrow the table
+    # (the exit_parity_log bloat lesson: bound every high-cardinality write path).
+    uni_days = int(
+        getattr(settings, "chili_momentum_universe_tick_retention_days", 5) or 5
+    )
     try:
         res = db.execute(
             text("DELETE FROM momentum_nbbo_spread_tape WHERE observed_at < (now() - make_interval(days => :d))"),
@@ -165,9 +172,24 @@ def prune_nbbo_tape(db: Session, *, retention_days: Optional[int] = None) -> dic
         )
         db.commit()
         n = int(getattr(res, "rowcount", 0) or 0)
-        if n:
-            logger.info("[nbbo_tape] pruned %d rows older than %dd", n, days)
-        return {"ok": True, "pruned": n, "retention_days": days}
+        # Second bulk DELETE: trim densified universe ticks on their shorter window.
+        res_u = db.execute(
+            text(
+                "DELETE FROM momentum_nbbo_spread_tape "
+                "WHERE source = 'massive_ws_universe' "
+                "AND observed_at < (now() - make_interval(days => :n))"
+            ),
+            {"n": uni_days},
+        )
+        db.commit()
+        n_u = int(getattr(res_u, "rowcount", 0) or 0)
+        if n or n_u:
+            logger.info(
+                "[nbbo_tape] pruned %d rows older than %dd + %d universe ticks older than %dd",
+                n, days, n_u, uni_days,
+            )
+        return {"ok": True, "pruned": n, "pruned_universe": n_u,
+                "retention_days": days, "universe_retention_days": uni_days}
     except Exception as exc:
         db.rollback()
         logger.warning("[nbbo_tape] prune failed: %s", exc)
