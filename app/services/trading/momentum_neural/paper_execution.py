@@ -174,6 +174,62 @@ def crypto_paper_roundtrip_bps() -> float:
     return float(getattr(settings, "chili_coinbase_taker_fee_bps_round_trip", 120) or 120)
 
 
+# Never pull the first-scale target CLOSER than this many R from entry — selling a partial
+# at a sub-1R round number is the "sold a tiny gain" failure mode. One documented base.
+_FIRST_SCALE_MIN_R = 1.0
+
+
+def round_numbers_above(price: float) -> list[float]:
+    """Ascending psych levels strictly ABOVE ``price`` where sellers stack — Ross scales
+    into these (gap #2, videos 37/03/12/14/20/24/25). A MULTI-SCALE grid (decade, half-
+    decade, dollar, half-dollar relative to the price's magnitude) so a $12 name gets
+    $12.50 / $13 / $15, not just the far $20, and a $0.12 crypto gets $0.125 / $0.13.
+    Clamped exponent so sub-cent and 5-digit names compute an aligned grid. Pure."""
+    if price is None or price <= 0 or not math.isfinite(price):
+        return []
+    try:
+        exp = max(-4, min(6, math.floor(math.log10(price))))
+        step = 10.0 ** exp
+        levels: set[float] = set()
+        for s in (step, step * 0.5, step * 0.1, step * 0.05):
+            if s <= 0:
+                continue
+            lvl = (math.floor(price / s) + 1) * s  # smallest multiple of s strictly above
+            # strictly above with a relative margin so float noise (lvl == price at the
+            # 17th digit) can't admit the entry price itself as a "level above".
+            if math.isfinite(lvl) and lvl > price * (1.0 + 1e-9):
+                levels.add(round(lvl, 10))
+        return sorted(levels)
+    except (ValueError, OverflowError):
+        return []
+
+
+def round_number_first_scale_target(
+    entry: float, stop: float, rr_target: float, *, side_long: bool = True
+) -> float:
+    """First-scale target = the NEAREST round/half-dollar above entry that clears the 1R
+    floor and sits BELOW the R:R target — else the R:R target unchanged (gap #2). Ross
+    sells half into the round number where sellers stack rather than waiting for a far
+    fixed R:R that may never print and trails back (the MEGA give-back). The 1R floor
+    (``_FIRST_SCALE_MIN_R``) avoids selling a tiny gain; the < rr_target bound keeps this a
+    no-op (byte-identical) whenever no qualifying level exists. Long-only; the RUNNER
+    (balance) still trails up from the partial exactly as before — only the FIRST-scale
+    level moves."""
+    if not side_long:
+        return rr_target
+    try:
+        risk = float(entry) - float(stop)
+        if risk <= 0 or not math.isfinite(risk):
+            return rr_target
+        floor_px = float(entry) + _FIRST_SCALE_MIN_R * risk
+        for rn in round_numbers_above(float(entry)):  # ascending -> nearest qualifying
+            if rn >= floor_px and rn < float(rr_target):
+                return rn
+    except (TypeError, ValueError):
+        pass
+    return rr_target
+
+
 def stop_target_prices(
     entry: float,
     *,
@@ -202,7 +258,12 @@ def stop_target_prices(
         rr = 2.0
     if side_long:
         stop = entry * (1.0 - max(0.003, atr_pct * float(stop_atr_mult)))
-        target = entry + rr * (entry - stop)  # reward = rr x risk(stop distance)
+        rr_target = entry + rr * (entry - stop)  # reward = rr x risk(stop distance)
+        # Gap #2: pull the FIRST-scale target in to the next round number above entry when
+        # one sits between 1R and the R:R target — Ross sells half into the level where
+        # sellers stack rather than waiting for a far fixed R:R that trails back. No-op
+        # (rr_target) when no round number qualifies; the runner trails from the partial.
+        target = round_number_first_scale_target(entry, stop, rr_target, side_long=True)
     else:
         stop = entry * (1.0 + max(0.003, atr_pct * float(stop_atr_mult)))
         target = entry - rr * (stop - entry)
