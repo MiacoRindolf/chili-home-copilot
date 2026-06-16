@@ -1647,6 +1647,43 @@ def get_recent_news_tickers(*, limit: int = 200, max_age_min: int = 120) -> list
     return out
 
 
+def get_recent_news_items(*, limit: int = 200, max_age_min: int = 120) -> list[tuple[str, str]]:
+    """Like :func:`get_recent_news_tickers` but KEEPS the headline title — ``(ticker,
+    title)`` pairs for each fresh Polygon news result (within ``max_age_min``). The title
+    is what lets the catalyst tilt GRADE the catalyst TYPE (trial/M&A = strong, compliance/
+    vague = weak) instead of a binary present/absent. De-dupes to the FIRST (freshest, sort
+    desc) headline per ticker. Gracefully ``[]`` when the data plan lacks news access."""
+    cache_key = f"massive:recent_news_items:{int(max_age_min)}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    url = f"{_base()}/v2/reference/news"
+    data = _get(url, {"limit": str(limit), "order": "desc", "sort": "published_utc"})
+    if data is _NOT_FOUND or not data:
+        return []
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(1, int(max_age_min)))
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for item in data.get("results", []):
+        ts = item.get("published_utc")
+        if ts:
+            try:
+                if datetime.fromisoformat(str(ts).replace("Z", "+00:00")) < cutoff:
+                    continue
+            except (TypeError, ValueError):
+                pass
+        title = str(item.get("title") or "").strip()
+        for t in item.get("tickers") or []:
+            tt = str(t or "").upper().strip()
+            if tt and tt not in seen:
+                seen.add(tt)
+                out.append((tt, title))
+    _cache_set(cache_key, out)
+    return out
+
+
 def get_theme_news_tickers(keywords: list[str], *, limit: int = 200, max_age_min: int = 240) -> list[str]:
     """Tickers whose FRESH headline matches the active EVENT THEME keywords.
 
