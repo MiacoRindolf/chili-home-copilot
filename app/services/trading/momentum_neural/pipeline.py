@@ -625,6 +625,35 @@ def run_momentum_neural_tick(
         except Exception:
             pass
 
+        # Ross gap #4: sympathy/theme cluster. The day's EQUITY movers cluster by SIC
+        # sector; a sector whose LEADER is a big % gainer drags its peers (the "hot potato"
+        # sympathy run = the STI/ASTC-class moves). Resolve sectors for the strongest
+        # in-play equity movers (cached process-lifetime; bounded so a cold start can't
+        # flood the rate limiter), cluster, and forward the peer set so viability tilts the
+        # sympathy longs. Equity-only (crypto has no SIC sector) -> a no-op on the
+        # crypto-only lane (no equity movers -> no fetches). Fail-open.
+        try:
+            from ...massive_client import get_ticker_sector
+            from .catalyst import sympathy_peer_symbols
+            from .ross_momentum import _extract_pillars
+
+            _eq: list[tuple[str, float]] = []
+            for s, sig in _ross_signals.items():
+                su = str(s).upper()
+                if su.endswith("-USD") or not isinstance(sig, dict):
+                    continue
+                _, _mom, _, _ = _extract_pillars(sig)
+                if _mom is not None:
+                    _eq.append((su, float(_mom)))
+            _eq.sort(key=lambda x: x[1], reverse=True)
+            _eq = _eq[:40]  # only the strongest movers cluster; bounds cold-start fetches
+            _movers = {su: mom for su, mom in _eq}
+            _peers = sympathy_peer_symbols(_movers, {su: get_ticker_sector(su) for su in _movers})
+            if _peers:
+                meta["sympathy_symbols"] = sorted(_peers)
+        except Exception:
+            pass
+
     # E5: news-catalyst set (EARNINGS + fresh general NEWS headlines) for the catalyst
     # viability tilt. The fresh-news union is what catches Ross's explosive sympathy/
     # theme movers (a low-float small-cap that just printed a hot headline), not just
@@ -703,6 +732,7 @@ def run_momentum_neural_tick(
             "ross_below_floor",
             "catalyst_symbols",
             "weak_catalyst_symbols",
+            "sympathy_symbols",
             "hot_tape",
             "symbol_countries",
             "theme_symbols",

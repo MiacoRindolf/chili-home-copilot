@@ -166,6 +166,58 @@ def weak_catalyst_symbols() -> set[str]:
         return set()
 
 
+# Sympathy/theme cluster (Ross gap #4, videos 06/09/12): the day's movers cluster by
+# SECTOR; a sector whose LEADER is a big % gainer drags its peers (the "hot potato"
+# sympathy run that produces the STI/ASTC-class moves). A sympathy peer — same SIC sector
+# as a strong leader, itself in play but less extended — is a Ross sympathy long. Two
+# documented bases (the leader floor + the min cluster size); the sector data is reliable
+# SEC SIC (low mis-cluster risk).
+_SYMPATHY_LEADER_FLOOR_PCT = 15.0
+_SYMPATHY_MIN_CLUSTER = 2
+
+
+def sympathy_peer_symbols(
+    movers: dict[str, float],
+    sector_of: dict[str, str | None],
+    *,
+    leader_floor_pct: float = _SYMPATHY_LEADER_FLOOR_PCT,
+    min_cluster: int = _SYMPATHY_MIN_CLUSTER,
+) -> set[str]:
+    """Normalized tickers that are SYMPATHY PEERS of a hot sector cluster: same SIC sector
+    as a cluster whose LEADER (top % gainer) clears ``leader_floor_pct`` and that holds at
+    least ``min_cluster`` movers. The leader is NOT a peer (it is already ranked on its own
+    move); the rest get the sympathy tilt. ``movers`` = ``{ticker: change_pct}``,
+    ``sector_of`` = ``{ticker: sic_sector|None}``. Pure + side-effect-free."""
+    by_sector: dict[str, list[tuple[str, float]]] = {}
+    for sym, chg in (movers or {}).items():
+        sec = sector_of.get(str(sym).upper()) if sector_of else None
+        if not sec:
+            continue
+        try:
+            by_sector.setdefault(sec, []).append((str(sym).upper(), float(chg)))
+        except (TypeError, ValueError):
+            continue
+    peers: set[str] = set()
+    for members in by_sector.values():
+        if len(members) < int(min_cluster):
+            continue
+        members.sort(key=lambda x: x[1], reverse=True)
+        if members[0][1] < float(leader_floor_pct):
+            continue  # no strong leader -> not a hot cluster, no sympathy drag
+        for sym, _chg in members[1:]:
+            peers.add(_norm(sym))
+    return peers
+
+
+def sympathy_viability_delta(symbol: str, sympathy_symbols: set[str] | None) -> float:
+    """Additive viability tilt for a SYMPATHY peer of a hot sector cluster (gap #4). Same
+    magnitude as the catalyst half-tilt — a real but secondary confirming signal (the
+    leader's move is the primary). Crypto (-USD) / absent set -> 0 (never penalizes)."""
+    if not sympathy_symbols or "-USD" in str(symbol or "").upper():
+        return 0.0
+    return _catalyst_tilt() * 0.5 if _norm(symbol) in sympathy_symbols else 0.0
+
+
 # A "big mover" = a LULD-scale day move. Ross's hot days (2026-06-09/10) print
 # MULTIPLE +30%..+1000% names rotating ("hot potato"); a normal day has 0-1.
 HOT_TAPE_BIG_MOVE_PCT = 30.0

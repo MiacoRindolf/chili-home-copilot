@@ -309,6 +309,25 @@ def score_viability(
     except (TypeError, ValueError, AttributeError):
         pass
 
+    # Ross gap #4: sympathy/theme tilt — a SYMPATHY peer of a hot sector cluster (same SIC
+    # sector as a strong leader) gets an additive boost (the "hot potato" sympathy run
+    # Ross trades). Additive, never penalizes; no-op when the set is absent / for crypto.
+    try:
+        _symp = (
+            ctx.meta.get("sympathy_symbols")
+            if isinstance(getattr(ctx, "meta", None), dict)
+            else None
+        )
+        if _symp:
+            from .catalyst import sympathy_viability_delta
+
+            _symp_delta = sympathy_viability_delta(symbol, set(_symp))
+            if _symp_delta:
+                base += _symp_delta
+                warnings.append("Sector sympathy peer (Ross hot-potato) — Ross-style")
+    except (TypeError, ValueError, AttributeError):
+        pass
+
     viability = max(0.0, min(1.0, base))
 
     rationale = (

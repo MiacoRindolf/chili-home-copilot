@@ -1684,6 +1684,34 @@ def get_recent_news_items(*, limit: int = 200, max_age_min: int = 120) -> list[t
     return out
 
 
+# Sector (SIC) is STATIC per ticker — a dedicated process-lifetime cache (re-warms on a
+# restart) so the theme/sympathy clusterer never re-fetches. ``None`` = looked up, absent.
+_SECTOR_CACHE: dict[str, str | None] = {}
+
+
+def get_ticker_sector(ticker: str) -> str | None:
+    """SIC sector/industry description for a ticker — the input to the theme/sympathy
+    clusterer (gap #4). Reads Polygon ``/v3/reference/tickers/{t}`` ``sic_description``
+    (reliable SEC SIC classification, covers low-float small-caps; verified on STI ->
+    "Misc Electrical Machinery"). Cached for the process lifetime (sector is static).
+    ``None`` when the ticker / field is unavailable (fail-open — never raises)."""
+    tk = str(ticker or "").upper().strip()
+    if not tk:
+        return None
+    if tk in _SECTOR_CACHE:
+        return _SECTOR_CACHE[tk]
+    sec: str | None = None
+    try:
+        d = _get(f"{_base()}/v3/reference/tickers/{tk}", {})
+        if isinstance(d, dict):
+            r = d.get("results") if isinstance(d.get("results"), dict) else {}
+            sec = (str(r.get("sic_description") or "").strip() or None)
+    except Exception:
+        sec = None
+    _SECTOR_CACHE[tk] = sec
+    return sec
+
+
 def get_theme_news_tickers(keywords: list[str], *, limit: int = 200, max_age_min: int = 240) -> list[str]:
     """Tickers whose FRESH headline matches the active EVENT THEME keywords.
 
