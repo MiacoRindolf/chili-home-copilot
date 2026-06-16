@@ -253,6 +253,56 @@ def _is_first_pullback(
     return True
 
 
+# How many recent bars to scan for a MACD line->below->signal cross when reading the
+# back side (secondary to the dominant 9<20-EMA structural flip). A documented base
+# constant, not a magic number scattered at the call site.
+_BACKSIDE_MACD_CROSS_LOOKBACK = 3
+
+
+def _detect_back_side(
+    ema9: list, ema20: list, macd: list, macd_sig: list, cur: int, *, macd_lookback: int = 3
+) -> tuple[bool, str]:
+    """Ross's front/back-side read (gap #1): ``(True, reason)`` when the move has
+    rolled to the BACK side — where he STOPS taking continuation entries. Two
+    persistent signals, fail-OPEN (``False``) on any missing/short data so a thin
+    series can never veto:
+
+      (a) STRUCTURAL flip — the 9-EMA is below the 20-EMA at the current bar (the
+          classic trend-rollover line Ross watches on the 1m);
+      (b) MOMENTUM rollover — the MACD line crossed below its signal within the last
+          ``macd_lookback`` bars AND is STILL below now (a single stale cross with the
+          line already back above is ignored, so a brief dip doesn't bench the name).
+
+    Pure + side-effect-free; reads the exact series ``pullback_break_confirmation``
+    already computes. ``cur`` is the current (last) bar index."""
+    # (a) 9-EMA below 20-EMA — structural back side (dominant signal).
+    try:
+        e9 = ema9[cur] if 0 <= cur < len(ema9) else None
+        e20 = ema20[cur] if 0 <= cur < len(ema20) else None
+        if e9 is not None and e20 is not None and float(e9) < float(e20):
+            return True, "ema9_below_ema20"
+    except (TypeError, ValueError, IndexError):
+        pass
+    # (b) MACD crossed below signal within the lookback AND still below now.
+    try:
+        m_cur = macd[cur] if 0 <= cur < len(macd) else None
+        s_cur = macd_sig[cur] if 0 <= cur < len(macd_sig) else None
+        if m_cur is not None and s_cur is not None and float(m_cur) < float(s_cur):
+            lo_i = max(1, cur - int(macd_lookback) + 1)
+            for i in range(lo_i, cur + 1):
+                mp = macd[i - 1] if 0 <= i - 1 < len(macd) else None
+                sp = macd_sig[i - 1] if 0 <= i - 1 < len(macd_sig) else None
+                mi = macd[i] if 0 <= i < len(macd) else None
+                si = macd_sig[i] if 0 <= i < len(macd_sig) else None
+                if mp is None or sp is None or mi is None or si is None:
+                    continue
+                if float(mp) >= float(sp) and float(mi) < float(si):
+                    return True, "macd_crossed_below_signal"
+    except (TypeError, ValueError, IndexError):
+        pass
+    return False, ""
+
+
 def _dipbuy_signals_ok(
     high: pd.Series, low: pd.Series, close: pd.Series, vol: pd.Series, vwap: list,
     *, peak_idx: int, dip_idx: int, dip_low: float, run_high: float, depth: float,
@@ -1244,9 +1294,10 @@ def pullback_break_confirmation(
     n = len(df)
     cur = n - 1
     arrays = compute_all_from_df(
-        df, needed={"ema_9", "volume_ratio", "atr", "vwap", "macd", "macd_signal", "macd_hist"}
+        df, needed={"ema_9", "ema_20", "volume_ratio", "atr", "vwap", "macd", "macd_signal", "macd_hist"}
     )
     ema9 = arrays.get("ema_9") or []
+    ema20 = arrays.get("ema_20") or []
     vr = arrays.get("volume_ratio") or []
     atr = arrays.get("atr") or []
     vwap = arrays.get("vwap") or []
@@ -1406,6 +1457,23 @@ def pullback_break_confirmation(
     # structural prior than a clean shallow flag — the gates below treat it like
     # a runaway: raised volume floor + fail-CLOSED sustained-volume.
     _deep_reclaim = debug.get("pattern") == "deep_reclaim"
+
+    # FRONT/BACK-SIDE veto (Ross gap #1): once the move rolls to the back side
+    # (9<20-EMA, or MACD crossed below signal and still below) Ross STOPS taking
+    # continuation entries — it makes lower highs / distributes. CHILI's point-in-time
+    # MACD-bullish gate can't see the rollover, so it can re-arm a faded name every
+    # tick; the back-side state is itself persistent, so this point-in-time decline
+    # gives the sticky "benched for the move" semantics. EXEMPT the deep-reclaim/dip-buy
+    # reversal path — that mode intentionally catches the turn off a dip and carries its
+    # own dip-vs-dump discipline (#734). Always-on (no dark flags); fail-open on thin
+    # data so it can never veto on warmup; reversible by reverting the sha.
+    if not _deep_reclaim:
+        _bs, _bs_reason = _detect_back_side(
+            ema9, ema20, macd, macd_sig, cur, macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK
+        )
+        if _bs:
+            debug["back_side"] = _bs_reason
+            return False, "back_side_disabled", debug
 
     # Volume spike on the trigger (break / reclaim) bar.
     vol_ratio = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
