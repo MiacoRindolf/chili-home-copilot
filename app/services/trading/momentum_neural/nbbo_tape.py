@@ -158,7 +158,8 @@ def prune_nbbo_tape(db: Session, *, retention_days: Optional[int] = None) -> dic
     The observed_at index makes this cheap. Best-effort."""
     days = int(retention_days if retention_days is not None
                else getattr(settings, "chili_momentum_nbbo_tape_retention_days", 30) or 30)
-    # Densified universe ticks (source='massive_ws_universe', #2026-06-15) are a
+    # Densified universe ticks (source='massive_ws_universe' for equity, +
+    # 'coinbase_ws_universe' for the crypto L2-drain twin, #2026-06-15) are a
     # HIGHER-volume, SHORTER-lived class than the 1-min snapshot tape — prune them
     # on their own (shorter) window so the densification can't regrow the table
     # (the exit_parity_log bloat lesson: bound every high-cardinality write path).
@@ -176,7 +177,7 @@ def prune_nbbo_tape(db: Session, *, retention_days: Optional[int] = None) -> dic
         res_u = db.execute(
             text(
                 "DELETE FROM momentum_nbbo_spread_tape "
-                "WHERE source = 'massive_ws_universe' "
+                "WHERE source IN ('massive_ws_universe', 'coinbase_ws_universe') "
                 "AND observed_at < (now() - make_interval(days => :n))"
             ),
             {"n": uni_days},

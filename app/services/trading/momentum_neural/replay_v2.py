@@ -149,9 +149,11 @@ class Tape:
 
     Each row is ``(ts, bid, ask, spread_bps, day_volume, source)``; ``source``
     distinguishes the 1-min sampler ('massive_snapshot') from the densified
-    sub-minute WS ticks ('massive_ws' / 'coinbase_ws' / 'massive_ws_universe')
-    so the tick-faithful entry can resolve INSIDE a minute where ticks exist.
-    Consumers read by index ≤4 (the appended ``source`` never shifts them)."""
+    sub-minute WS ticks ('massive_ws' / 'coinbase_ws' armed names, plus the
+    whole-universe densifiers 'massive_ws_universe' for equity and
+    'coinbase_ws_universe' for the crypto L2-drain twin) so the tick-faithful
+    entry can resolve INSIDE a minute where ticks exist. Consumers read by
+    index ≤4 (the appended ``source`` never shifts them)."""
 
     def __init__(self, date: str):
         self.by_sym: dict[str, list[tuple[datetime, float, float, float, float, str]]] = defaultdict(list)
