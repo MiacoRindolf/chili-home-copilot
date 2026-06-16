@@ -680,6 +680,20 @@ def run_momentum_neural_tick(
         except Exception:
             pass
 
+        # Re-analysis survivor S1: cross-day close-strength prior. A name that closed near
+        # its HOD (and green) into the power hour gap-continues the next day — get warm on
+        # it BEFORE the tape forms (the proven "right name early" bottleneck). Compute the
+        # prior for the equity movers (bounded daily-bar reads, cached) -> viability tilt.
+        # Equity-only -> a no-op on the crypto-only lane. Fail-open.
+        try:
+            from .catalyst import close_strength_priors
+
+            _csp = close_strength_priors(_eq_syms)
+            if _csp:
+                meta["close_strength_priors"] = _csp
+        except Exception:
+            pass
+
     # E5: news-catalyst set (EARNINGS + fresh general NEWS headlines) for the catalyst
     # viability tilt. The fresh-news union is what catches Ross's explosive sympathy/
     # theme movers (a low-float small-cap that just printed a hot headline), not just
@@ -761,6 +775,7 @@ def run_momentum_neural_tick(
             "sympathy_symbols",
             "top_market_gainers",
             "dilution_symbols",
+            "close_strength_priors",
             "hot_tape",
             "symbol_countries",
             "theme_symbols",

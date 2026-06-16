@@ -218,6 +218,79 @@ def sympathy_viability_delta(symbol: str, sympathy_symbols: set[str] | None) -> 
     return _catalyst_tilt() * 0.5 if _norm(symbol) in sympathy_symbols else 0.0
 
 
+# Cross-day continuation prior (re-analysis survivor S1, video 43): a stock that CLOSED
+# near its high-of-day (and green) into the power hour is far likelier to gap-continue the
+# next day — Ross gets warm on it premarket BEFORE the tape forms. This is the only NEW
+# *selection* signal the 32-video re-analysis surfaced; it attacks CHILI's proven
+# bottleneck (be on the right name early). Weight is the ONE documented base.
+CLOSE_STRENGTH_PRIOR_WEIGHT = 0.10
+
+
+def _close_strength_score(o: float, h: float, lo: float, c: float) -> float:
+    """[0,1] daily close-strength: 0.65 x (close position in the day's range) + 0.35 x
+    green-close. 1.0 = closed at the HOD and green (strong power-hour close -> continuation
+    prior). Pure; 0.5 (neutral) on a degenerate range."""
+    rng = float(h) - float(lo)
+    if rng <= 0 or not (rng == rng):  # zero/NaN range
+        return 0.5
+    pos = (float(c) - float(lo)) / rng
+    green = 1.0 if float(c) > float(o) else 0.0
+    return max(0.0, min(1.0, 0.65 * pos + 0.35 * green))
+
+
+def close_strength_prior(symbol: str) -> float:
+    """[0,1] next-day continuation prior from the most recent daily close-strength. Reuses
+    the cached daily bars (get_aggregates_df). Crypto / no-data -> 0.5 (neutral, no tilt).
+    Fail-open."""
+    if "-USD" in str(symbol or "").upper():
+        return 0.5
+    try:
+        from ...massive_client import get_aggregates_df
+
+        df = get_aggregates_df(symbol, interval="1d", period="7d")
+        if df is None or getattr(df, "empty", True) or len(df) < 1:
+            return 0.5
+        row = df.iloc[-1]
+        return _close_strength_score(
+            float(row["Open"]), float(row["High"]), float(row["Low"]), float(row["Close"])
+        )
+    except Exception:
+        logger.debug("[catalyst] close-strength prior failed %s", symbol, exc_info=True)
+        return 0.5
+
+
+def close_strength_priors(symbols, *, max_lookups: int = 40) -> dict[str, float]:
+    """``{ticker: prior}`` for the equity ``symbols`` (bounded to ``max_lookups`` daily-bar
+    reads per call; the cache warms the rest next pass). Only ABOVE/BELOW-neutral priors
+    are returned (0.5 is dropped — no tilt) to keep the forwarded map compact. Fail-open."""
+    out: dict[str, float] = {}
+    looked = 0
+    for s in (symbols or []):
+        su = str(s or "").upper().strip()
+        if not su or su.endswith("-USD") or looked >= int(max_lookups):
+            continue
+        p = close_strength_prior(su)
+        looked += 1
+        if abs(p - 0.5) > 1e-9:
+            out[su] = round(p, 4)
+    return out
+
+
+def close_strength_viability_delta(symbol: str, priors: dict | None) -> float:
+    """Additive viability tilt from the cross-day close-strength prior (S1). Centered at
+    0.5 so a strong-close name is boosted and a weak-close one slightly discounted; scaled
+    by ``CLOSE_STRENGTH_PRIOR_WEIGHT``. Crypto / absent -> 0."""
+    if not priors or "-USD" in str(symbol or "").upper():
+        return 0.0
+    try:
+        p = priors.get(str(symbol or "").upper())
+        if p is None:
+            return 0.0
+        return CLOSE_STRENGTH_PRIOR_WEIGHT * (float(p) - 0.5)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # A "big mover" = a LULD-scale day move. Ross's hot days (2026-06-09/10) print
 # MULTIPLE +30%..+1000% names rotating ("hot potato"); a normal day has 0-1.
 HOT_TAPE_BIG_MOVE_PCT = 30.0
