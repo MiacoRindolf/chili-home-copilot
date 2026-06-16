@@ -337,6 +337,44 @@ def _detect_back_side(
     return False, ""
 
 
+# LULD halt-band proximity (re-analysis survivor S3, video 60): buying a dip whose STOP
+# sits inside (or just above) the LULD down-halt band risks getting halt-TRAPPED mid-
+# cascade — the stock halts on a further drop and the position can't be exited at the stop
+# (an asymmetric small-cap tail loss). A protective veto (can never create a bad fill).
+_HALT_BAND_K = 0.5  # the stop must clear the band by at least this fraction of the risk
+
+
+def luld_down_band(price: float) -> float:
+    """Approximate Reg-LULD LOWER price band for a stock (small-caps are Tier 2). A
+    downward move through this triggers a 5-min halt. Tiered by price; the first/last-15min
+    DOUBLING is omitted (fail-SAFE — omitting it only ever vetoes LESS). 0 on bad input."""
+    p = float(price or 0.0)
+    if p <= 0:
+        return 0.0
+    if p >= 3.0:
+        pct = 0.10
+    elif p >= 0.75:
+        pct = 0.20
+    else:
+        pct = min(0.75, 0.15 / p)
+    return p * (1.0 - pct)
+
+
+def halt_band_trapped(entry: float, stop: float, *, k: float = _HALT_BAND_K) -> bool:
+    """True when the dip-buy STOP sits at/below the LULD down-halt band (or within ``k`` x
+    the risk distance of it): a further drop would HALT the stock and trap the position.
+    Adaptive (band is %-of-price, the buffer is k x the trade's own risk — no magic $).
+    Pure; fail-open to ``False``."""
+    try:
+        band = luld_down_band(entry)
+        risk = float(entry) - float(stop)
+        if band <= 0 or risk <= 0:
+            return False
+        return float(stop) <= band + float(k) * risk
+    except (TypeError, ValueError):
+        return False
+
+
 def _dipbuy_signals_ok(
     high: pd.Series, low: pd.Series, close: pd.Series, vol: pd.Series, vwap: list,
     *, peak_idx: int, dip_idx: int, dip_low: float, run_high: float, depth: float,
@@ -500,6 +538,11 @@ def _dipbuy_signals_ok(
         stop = dip_low * (1.0 - buf)
         if not (0.0 < stop < pb_dip_high):
             return "PASS", None, None, {"dipbuy_declined": "bad_stop"}
+        # S3: halt-band proximity veto — if the stop sits inside/just above the LULD
+        # down-halt band, a further drop HALTS the stock and traps the dip (an asymmetric
+        # small-cap tail loss). Equity-only (crypto has no LULD halts). Protective.
+        if not str(symbol or "").upper().endswith("-USD") and halt_band_trapped(pb_dip_high, stop):
+            return "PASS", None, None, {"dipbuy_declined": "halt_band_trapped"}
         # Runway affordability: the STRUCTURAL reward:risk must clear the class floor
         # (do NOT tighten the stop to manufacture R:R — PASS instead). Reward is to the
         # MEASURED-MOVE continuation (peak + the dip's own depth), not the bare peak: a
