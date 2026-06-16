@@ -93,3 +93,56 @@ def topping_tail_from_df(df: Any, **kw: Any) -> bool:
     is unreadable so missing data never forces an exit."""
     ohlc = _last_ohlc_from_df(df)
     return False if ohlc is None else is_topping_tail(*ohlc, **kw)
+
+
+def _ema(values: list[float], span: int) -> list[float]:
+    """Recursive EWM (``adjust=False``, seeded with the first value) — matches
+    pandas ``Series.ewm(span=span, adjust=False).mean()`` so replay/live agree.
+    Pure, no pandas dependency (keeps these helpers testable on plain lists)."""
+    if not values or span <= 0:
+        return []
+    alpha = 2.0 / (float(span) + 1.0)
+    out = [float(values[0])]
+    for v in values[1:]:
+        out.append(alpha * float(v) + (1.0 - alpha) * out[-1])
+    return out
+
+
+def _closes_from_df(df: Any) -> list[float] | None:
+    """Close column of an OHLCV frame as a float list, or None if unavailable."""
+    try:
+        if df is None or getattr(df, "empty", True) or len(df) < 1:
+            return None
+        cols = {x.lower(): x for x in df.columns}
+        return [float(x) for x in df[cols["close"]].tolist()]
+    except Exception:
+        return None
+
+
+def macd_hist_rollover_from_df(
+    df: Any, *, fast: int = 12, slow: int = 26, signal: int = 9,
+) -> bool:
+    """1m MACD-histogram ROLLOVER = up-momentum decelerating: a POSITIVE histogram
+    that has peaked and is now declining (``hist[-1] < hist[-2] >= hist[-3]`` with
+    ``hist[-2] > 0``) OR a fresh cross below zero (``hist[-1] < 0 <= hist[-2]``).
+
+    The lagging-but-spoof-proof complement to the topping-tail wick: it catches the
+    real top that gave NO dominant upper wick (LNAI 5204, 2026-06-16 — the lock fire
+    the wick missed but MACD caught). An exhaustion CONFIRMER for the runner exit,
+    OR'd with the topping-tail. Standard MACD params (12/26/9), tunable. Fail-safe
+    False on short/unreadable data so missing data never forces an exit. Pure."""
+    closes = _closes_from_df(df)
+    need = int(slow) + int(signal) + 3
+    if closes is None or len(closes) < need:
+        return False
+    ema_fast = _ema(closes, fast)
+    ema_slow = _ema(closes, slow)
+    macd = [f - s for f, s in zip(ema_fast, ema_slow)]
+    sig = _ema(macd, signal)
+    hist = [m - s for m, s in zip(macd, sig)]
+    if len(hist) < 3:
+        return False
+    h0, h1, h2 = hist[-1], hist[-2], hist[-3]
+    peak_roll = (h0 < h1) and (h1 >= h2) and (h1 > 0.0)
+    zero_cross = (h0 < 0.0) and (h1 >= 0.0)
+    return bool(peak_roll or zero_cross)

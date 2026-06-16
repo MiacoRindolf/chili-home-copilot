@@ -218,3 +218,41 @@ for the first armed-tick counterfactuals to land, then flips ON within the same 
 (low-regret — resting-limit + veto + INVARIANT A bound the worst case). The ONE base
 knob is `CHILI_MOMENTUM_EXIT_LADDER_RUNG_BPS=60`; everything else derives from the
 plan's `rr`, the position's ATR risk unit, or window percentiles.
+
+## 1m-candle exhaustion confirmer (v1 corroborant, 2026-06-16)
+
+The exhaustion lock fires on **order-flow** (OFI flip ∧ micro rollover ∧ giveback). The
+live entry trigger runs on **1m** bars, but the only *candle* read in the runner is the
+standalone topping-tail exit on the coarse **15m** `_entry_df` — too slow to corroborate
+a fast 1m rollover. This adds a **1m topping-tail / MACD-hist rollover** as **one more
+AND-gate on the flow confluence**:
+
+- `candle_exhaustion = topping_tail_from_df(df_1m) OR macd_hist_rollover_from_df(df_1m)`
+  (the MACD term is OR'd in under `..._USE_MACD=true`; both pure helpers live in
+  `candles.py`). The 1m df is fetched **at most once/min/session**, cached in `le`
+  (mirrors the 5m-EMA anchor) — no new tick-rate I/O. The fetch is **never** on the WS
+  receive thread (that path, `_maybe_event_exit_hint`, stays a ring-only dispatch hint).
+- **AND-gate ⇒ it can only ever SUPPRESS** a flow fire whose 1m candle shows no
+  exhaustion (a noisy-OFI early-sell). It can **never manufacture a new fire**, so it
+  cannot sell a winner the lock wouldn't already. The absorption OR-bypass (the one
+  *leading* signal) is intentionally **not** candle-gated.
+- **Fail-OPEN**: a missing/thin 1m df ⇒ `candle_ok = True` ⇒ no restriction (existing
+  captures preserved). **INVARIANT A** is preserved either way — the gate only blocks a
+  fire, it never lowers a stop.
+
+**Staged rollout (observe-first):** `CHILI_MOMENTUM_EXIT_CANDLE_CONFIRM_ENABLED=true`
+(default) computes the confirmer and emits the `candle_would_suppress` A/B on every armed
+tick; `CHILI_MOMENTUM_EXIT_CANDLE_CONFIRM_LIVE=false` (default) leaves the **live lock
+decision byte-identical** and only records the counterfactual. Flip `_LIVE=true` once the
+A/B shows the would-suppress fires were early-sells (price recovered), not real tops.
+
+**Validation (LNAI 5170 / 5192 / 5204, live equity, 2026-06-16):** the confirmer AGREED
+with **2/2** live lock fires — 5170's fire was a clear topping-tail (`H4.33→C4.04`,
+upper-wick 0.61 of range); 5204's real top had **no dominant wick** and was caught
+**only by the MACD rollover** (`H6.16/C6.12`). ⇒ zero capture regression if flipped live,
+and the MACD term is load-bearing (wick-only would have wrongly suppressed 5204). 5192
+never fired (micro stayed +39, ran to +2.3R and scaled out at target) — the AND-gate
+cannot change that. No fire in this sample had a non-confirming candle, so the *added*
+capture (suppressing noisy early-sells) is unproven here ⇒ ships observe-first to gather
+those ticks. Gate: `tests/test_ofi_exhaustion_lock.py` (candle section) +
+`tests/test_candles.py` (MACD helper).
