@@ -163,7 +163,13 @@ def _extract_pillars(
     cands = [
         x
         for x in (
-            _first_float(signal, "daily_change_pct", "change_24h", "change_pct"),
+            # ``todays_change_perc`` is the VENDOR change-vs-prior-close field and the
+            # key the WS ignition loop emits (ignition_loop.py:346) for an exploding
+            # name. It was MISSING from this list, so every ignition-discovered mover
+            # (SLBT +479% on 2026-06-16) read momentum=None → Ross quality 0.00
+            # "generic setup" → out-ranked by smaller, fully-enriched names and never
+            # armed. Reading it here lets the biggest explosions rank by their move.
+            _first_float(signal, "daily_change_pct", "change_24h", "change_pct", "todays_change_perc"),
             _first_float(signal, "gap_pct"),
         )
         if x is not None
