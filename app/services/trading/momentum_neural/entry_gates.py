@@ -253,6 +253,40 @@ def _is_first_pullback(
     return True
 
 
+# Pullback ordinal (Ross gap #7, videos 04/15/17/24/26): the 1st/2nd pullback is an
+# A-setup; by the 3rd you are greedy and it usually fails (head-and-shoulders top). A
+# 3rd+-pullback break is treated as a WEAKER prior (raised volume floor, like runaway /
+# deep-reclaim), so the weak ones filter out and a genuinely strong 3rd still fires.
+# Documented bases (the de-rate ordinal + the bounded lookback), no scattered magic.
+_LATE_PULLBACK_ORDINAL = 3
+_PULLBACK_ORDINAL_LOOKBACK = 20
+
+
+def pullback_ordinal_recent(
+    low: Any, ema9: list, cur: int, ema_wick: float, lookback: int = _PULLBACK_ORDINAL_LOOKBACK
+) -> int:
+    """Count of distinct band-losing PULLBACKS in the last ``lookback`` bars up to ``cur``
+    (1 = the current dip is the first pullback in the window, 2 = second, ...). A pullback
+    is a contiguous run of bars whose low dips below the vol-aware 9-EMA band; consecutive
+    below-band bars count as ONE event. Pure + bounded-window (no impulse-origin state to
+    key across the runner's per-tick re-eval). Fails OPEN to 1 (treat as the first
+    pullback — never over-throttle) on thin/missing data."""
+    try:
+        start = max(0, int(cur) - int(lookback) + 1)
+        count = 0
+        below_prev = False
+        for i in range(start, int(cur) + 1):
+            e = ema9[i] if (0 <= i < len(ema9) and ema9[i] is not None) else None
+            lo = low[i] if (0 <= i < len(low) and low[i] is not None) else None
+            below = e is not None and lo is not None and float(lo) < float(e) * (1.0 - float(ema_wick))
+            if below and not below_prev:
+                count += 1
+            below_prev = below
+        return max(1, count)
+    except (TypeError, ValueError, IndexError):
+        return 1
+
+
 # How many recent bars to scan for a MACD line->below->signal cross when reading the
 # back side (secondary to the dominant 9<20-EMA structural flip). A documented base
 # constant, not a magic number scattered at the call site.
@@ -1482,13 +1516,25 @@ def pullback_break_confirmation(
         avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
         vol_ratio = (float(vol.iloc[-1]) / avg) if avg > 0 else 0.0
     debug["vol_ratio"] = round(vol_ratio, 2)
+    # Pullback ordinal (Ross gap #7): a 3rd+ pullback break is a weaker prior — Ross's
+    # 1st/2nd are A-setups, the 3rd is greedy and usually fails. Count the recent
+    # band-losing dips; a late pullback joins the runaway/deep-reclaim weaker-prior set
+    # below (raised volume floor) so only a strongly-confirmed 3rd still fires. No-op /
+    # byte-identical for the 1st-2nd pullback (the common case). Reuses the vol-aware band.
+    _, _ord_wick, _ = _vol_aware_pullback_tolerances(atr_pct, retracement_threshold)
+    _pb_ordinal = pullback_ordinal_recent(low.values, ema9, cur, _ord_wick)
+    _late_pullback = _pb_ordinal >= _LATE_PULLBACK_ORDINAL
+    if _late_pullback:
+        debug["pullback_ordinal"] = _pb_ordinal
     # Runaways need MORE conviction (chasing a break without a retest): raise the
     # volume floor to runaway_min_volume_spike for them; same for deep reclaims
-    # (buying without the classic shallow flag). Normal breaks keep the base.
-    # Tick-breaks skip the per-bar spike check (the breaking bar is still forming —
-    # its volume is unknowable); the sustained-volume gate below still applies.
+    # (buying without the classic shallow flag) and 3rd+ pullbacks. Normal breaks keep
+    # the base. Tick-breaks skip the per-bar spike check (the breaking bar is still
+    # forming — its volume is unknowable); the sustained-volume gate below still applies.
     _vol_floor = (
-        float(runaway_min_volume_spike) if (_runaway or _deep_reclaim) else float(volume_spike_multiple)
+        float(runaway_min_volume_spike)
+        if (_runaway or _deep_reclaim or _late_pullback)
+        else float(volume_spike_multiple)
     )
     if not _tick_break and vol_ratio < _vol_floor:
         return False, "break_low_volume", debug
