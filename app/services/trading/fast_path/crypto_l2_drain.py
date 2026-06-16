@@ -198,6 +198,19 @@ def _nbbo_row_for(pid: str) -> dict | None:
 
 def run_crypto_l2_drain_job() -> None:
     """Drain the warmed crypto book ring -> fast_orderbook. Fail-open."""
+    # WS WATCHDOG (2026-06-16): the Coinbase L2 feed silently dies on a socket flap
+    # (the SDK never fires on_close), so the ring + this drain go stale until a manual
+    # restart. Check liveness + force a clean reconnect BEFORE draining so the ring
+    # repopulates. Fail-open: a watchdog error never blocks the drain.
+    try:
+        from ..venue.coinbase_spot import get_coinbase_ws
+
+        _ws = get_coinbase_ws()
+        if _ws is not None:
+            _ws.watchdog_check()
+    except Exception:
+        logger.debug("[crypto_l2_drain] ws watchdog check failed (fail-open)", exc_info=True)
+
     from ....db import SessionLocal, engine
 
     db = SessionLocal()
