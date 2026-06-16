@@ -170,3 +170,36 @@ def test_reclaim_morning_gate_does_not_leak_onto_crypto(monkeypatch) -> None:
     assert not ok_eq and reason_eq in ("pullback_too_deep", "pullback_below_ema9")  # equity: gated
     ok_cr, reason_cr, dbg = pullback_break_confirmation(df, symbol="KAIO-USD", **_GATES)
     assert ok_cr and reason_cr == "deep_reclaim_ok", (reason_cr, dbg)  # crypto: fires
+
+
+# ── collapse-cap reclaim extension (2026-06-16 WNW: -31% dip that RECLAIMED to new
+#    highs but was rejected by the 25% collapse cap and never entered) ───────────
+
+def test_deep_but_reclaimed_dip_now_fires(monkeypatch) -> None:
+    """A dip DEEPER than the collapse cap (~27% here) that has RECLAIMED back to/above
+    the run-high is Ross's halt-resume dip-buy — it must now reach the reclaim logic
+    and fire, instead of dying on collapse_cap -> pullback_too_deep (the WNW miss)."""
+    _isolate_trigger_logic(monkeypatch)
+    df = _frame(_deep_v_bars(dip_low=11.0))   # depth ~27% > the 25% cap, price reclaims to ~15.3
+    ok, reason, dbg = pullback_break_confirmation(df, **_GATES)
+    assert ok and reason == "deep_reclaim_ok", (reason, dbg)
+    assert dbg["pattern"] == "deep_reclaim"
+
+
+def test_deep_dip_not_reclaimed_still_rejected(monkeypatch) -> None:
+    """Same deep dip, but the current bar has NOT reclaimed near the run-high (still
+    far below) -> a genuine breakdown/falling knife -> stays rejected (not a fire)."""
+    _isolate_trigger_logic(monkeypatch)
+    # last bar sits down near the dip (no reclaim): close ~11.3, well below run_high ~15
+    df = _frame(_deep_v_bars(dip_low=11.0, last_bar=(11.4, 11.6, 11.2, 11.3, 200_000.0)))
+    ok, reason, dbg = pullback_break_confirmation(df, **_GATES)
+    assert not (ok and reason == "deep_reclaim_ok"), (reason, dbg)
+
+
+def test_true_collapse_beyond_mult_still_rejected(monkeypatch) -> None:
+    """An EXTREME dip beyond cap*mult (~47% here) is a real collapse — rejected even if
+    it bounced back (the bound that keeps the extension from catching falling knives)."""
+    _isolate_trigger_logic(monkeypatch)
+    df = _frame(_deep_v_bars(dip_low=8.0))   # depth ~47% > 25%*1.6 = 40%
+    ok, reason, dbg = pullback_break_confirmation(df, **_GATES)
+    assert not (ok and reason == "deep_reclaim_ok"), (reason, dbg)
