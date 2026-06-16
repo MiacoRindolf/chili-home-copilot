@@ -2533,6 +2533,26 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_COINBASE_WS_ENABLED"),
     )
+    # WS WATCHDOG (2026-06-16): the Coinbase SDK silently drops the L2 feed on a socket
+    # flap (on_close never fires) — it stayed dead 65min until a manual restart. The
+    # drain job polls watchdog_check() to detect staleness + force a clean reconnect.
+    chili_coinbase_ws_watchdog_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_COINBASE_WS_WATCHDOG_ENABLED"),
+        description="Kill-switch: False => no auto-reconnect (manual restart on a dead feed).",
+    )
+    chili_coinbase_ws_watchdog_stale_s: float = Field(
+        default=45.0,
+        ge=5.0,
+        validation_alias=AliasChoices("CHILI_COINBASE_WS_WATCHDOG_STALE_S"),
+        description="Force a WS reconnect when no l2 message has arrived for this many seconds.",
+    )
+    chili_coinbase_ws_watchdog_min_reconnect_interval_s: float = Field(
+        default=30.0,
+        ge=5.0,
+        validation_alias=AliasChoices("CHILI_COINBASE_WS_WATCHDOG_MIN_RECONNECT_INTERVAL_S"),
+        description="Rate-limit: minimum seconds between watchdog force-reconnects (anti-storm).",
+    )
     chili_autopilot_price_bus_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_AUTOPILOT_PRICE_BUS_ENABLED"),

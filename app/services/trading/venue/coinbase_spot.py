@@ -1574,6 +1574,13 @@ class CoinbaseWebSocketSeam:
         # snapshot+update deltas. {pid: {"bids": {price: size}, "asks": {...}}}.
         # Bounded by subscribed-product count; each side trimmed in _handle_l2.
         self._cb_books: dict[str, dict[str, dict[float, float]]] = {}
+        # WS WATCHDOG (2026-06-16): last L2 message time (liveness heartbeat) + last
+        # force-reconnect time. The Coinbase SDK swallows a socket-flap drop without
+        # ever firing on_close (its internal retry exhausts after ~19min, clears the
+        # subscriptions, and the feed silently dies until a manual restart). The drain
+        # job polls watchdog_check() to detect the stale feed and rebuild it.
+        self._last_l2_monotonic: "float | None" = None
+        self._last_watchdog_reconnect_monotonic: float = 0.0
 
     # ── lifecycle ───────────────────────────────────────────────────
     def start(self, product_ids: list[str] | None = None) -> dict[str, Any]:
@@ -1616,6 +1623,54 @@ class CoinbaseWebSocketSeam:
             self._ws = None
         self._subscribed.clear()
         _log.info("[coinbase_ws] stopped")
+
+    def watchdog_check(self) -> dict[str, Any]:
+        """Detect a silently-dead L2 feed and force a clean reconnect. Called by the
+        5s crypto_l2_drain job. The Coinbase SDK does NOT fire on_close on a network
+        socket flap — its internal retry exhausts (~19min), clears the subscriptions,
+        and the feed dies with no signal (proven live: 44h of logs, one 'started' line,
+        zero reconnect lines, a 65-min fast_orderbook gap that only revived on a manual
+        restart). When no l2 message has arrived for ``stale_s`` seconds, tear down and
+        rebuild, re-subscribing the saved products. Rate-limited so it cannot storm.
+        Fail-open: any error returns without raising."""
+        if not self.enabled or not bool(
+            getattr(settings, "chili_coinbase_ws_watchdog_enabled", True)
+        ):
+            return {"checked": False, "reason": "disabled"}
+        if not self._running:
+            return {"checked": False, "reason": "not_running"}
+        now = time.monotonic()
+        last = self._last_l2_monotonic
+        if last is None:
+            return {"checked": True, "stale": False, "reason": "no_data_yet"}
+        age = now - last
+        stale_s = float(getattr(settings, "chili_coinbase_ws_watchdog_stale_s", 45.0) or 45.0)
+        if age < stale_s:
+            return {"checked": True, "stale": False, "age_s": round(age, 1)}
+        # Stale → force reconnect, rate-limited + single-flighted.
+        min_interval = float(
+            getattr(settings, "chili_coinbase_ws_watchdog_min_reconnect_interval_s", 30.0) or 30.0
+        )
+        if now - self._last_watchdog_reconnect_monotonic < min_interval:
+            return {"checked": True, "stale": True, "age_s": round(age, 1), "reconnect": "rate_limited"}
+        if getattr(self, "_reconnecting", False):
+            return {"checked": True, "stale": True, "age_s": round(age, 1), "reconnect": "in_progress"}
+        saved = sorted(self._subscribed) or None
+        self._last_watchdog_reconnect_monotonic = now
+        _log.warning(
+            "[coinbase_ws] WATCHDOG: L2 feed stale %.0fs (> %.0fs) — force reconnect, "
+            "re-subscribing %d product(s)", age, stale_s, len(saved or []),
+        )
+        try:
+            self.stop()
+            self.start(product_ids=saved)
+            # Reset the heartbeat so a slow first message doesn't immediately re-trip.
+            self._last_l2_monotonic = time.monotonic()
+            return {"checked": True, "stale": True, "age_s": round(age, 1),
+                    "reconnect": "done", "products": len(saved or [])}
+        except Exception as e:
+            _log.warning("[coinbase_ws] WATCHDOG reconnect failed: %s", e)
+            return {"checked": True, "stale": True, "reconnect": "error", "error": str(e)[:120]}
 
     def subscribe(self, product_ids: list[str]) -> None:
         if not self._ws or not self._running:
@@ -1701,6 +1756,7 @@ class CoinbaseWebSocketSeam:
         events = data.get("events", [])
 
         if channel == "l2_data":
+            self._last_l2_monotonic = time.monotonic()  # WS-feed liveness heartbeat (watchdog)
             self._handle_l2(events, data.get("timestamp"))
         elif channel == "market_trades":
             self._handle_trades(events)
