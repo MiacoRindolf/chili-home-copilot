@@ -172,6 +172,10 @@ class IgnitionScoringLoop:
                         unreg(sym, self._on_tick)
                     except Exception:
                         pass
+                    try:
+                        unreg(sym, self._record_universe_tick)
+                    except Exception:
+                        pass
         except Exception:
             pass
         self._subscribed = set()
@@ -193,10 +197,21 @@ class IgnitionScoringLoop:
         current = self._tracker.get_symbols()
         new = current - self._subscribed
         gone = self._subscribed - current
+        _densify = bool(
+            getattr(settings, "chili_momentum_universe_tick_record_enabled", True)
+        )
         for sym in new:
             try:
                 bus.subscribe_symbol(sym)
                 bus.register_tick_listener(sym, self._on_tick)
+                # UNIVERSE DENSIFICATION (2026-06-15): a SECOND, INDEPENDENT listener
+                # persists EVERY universe tick into the NBBO tape so the names the
+                # lane never armed (JRSH/CUPR-class) still leave a sub-minute tape
+                # for tomorrow's replay. It must be independent of ``_on_tick``,
+                # which early-returns below the ignition floor — the recorder has to
+                # capture quiet/sub-floor ticks too. Write-only; never blocks scoring.
+                if _densify:
+                    bus.register_tick_listener(sym, self._record_universe_tick)
             except Exception:
                 _log.debug("[momentum_ws_ignition] subscribe failed for %s", sym, exc_info=True)
         unreg = getattr(bus, "unregister_tick_listener", None)
@@ -204,6 +219,10 @@ class IgnitionScoringLoop:
             for sym in gone:
                 try:
                     unreg(sym, self._on_tick)
+                except Exception:
+                    pass
+                try:
+                    unreg(sym, self._record_universe_tick)
                 except Exception:
                     pass
         # Keep tracking only what is currently subscribed (drop departed names even
@@ -255,6 +274,18 @@ class IgnitionScoringLoop:
         if base is None or base <= 0:
             return None
         return (price - base) / base * 100.0
+
+    def _record_universe_tick(self, symbol: str, quote) -> None:
+        """INDEPENDENT densification listener (write-only side path). Persists this
+        universe tick to the NBBO tape via the tape recorder's bounded buffer — runs
+        REGARDLESS of the ignition floor (so quiet names leave a tape too). Cheap +
+        fail-silent: a recorder error must never affect scoring or the bus."""
+        try:
+            from .tape_ws_recorder import get_tape_ws_recorder
+
+            get_tape_ws_recorder().record_external(symbol, quote)
+        except Exception:
+            pass
 
     def _on_tick(self, symbol: str, quote) -> None:
         if not self._running:

@@ -1523,6 +1523,53 @@ def _entry_interval_seconds() -> float:
     return float(_INTERVAL_SECONDS.get(iv, 300.0))
 
 
+def _build_micro_bar_df(db, symbol: str, *, bar_seconds: int, lookback_minutes: float = 30.0):
+    """15s MICRO-PULLBACK (2026-06-15, "1m too slow"): build an OHLC micro-bar df
+    from the densified tick tape (``momentum_nbbo_spread_tape`` rows for ``symbol``
+    over the last ``lookback_minutes``) so the first-pullback trigger can run
+    sub-minute. Returns a Open/High/Low/Close/Volume DataFrame (same shape as
+    ``fetch_ohlcv_df``) or None.
+
+    FAIL-SAFE / SUPERSET: insufficient tick DENSITY (only the 1-min sampler exists
+    for this name) ⇒ ``_resample_micro_bars`` yields <2 micro-bars ⇒ this returns
+    None ⇒ the caller falls back to the 1m bars (byte-identical). Never raises — a
+    read/resample error returns None (fall back), so the micro path can only ADD an
+    earlier entry where the dense tape supports it, never break the 1m path.
+    """
+    try:
+        from datetime import timedelta as _td
+        from datetime import timezone as _tz
+
+        from sqlalchemy import text as _text
+
+        from .micro_bars import _resample_micro_bars
+
+        since = datetime.now(_tz.utc).replace(tzinfo=None) - _td(minutes=float(lookback_minutes))
+        rows = db.execute(
+            _text(
+                "SELECT observed_at, bid, ask FROM momentum_nbbo_spread_tape "
+                "WHERE symbol = :s AND observed_at >= :since AND bid > 0 AND ask > 0 "
+                "ORDER BY observed_at ASC"
+            ),
+            {"s": str(symbol).upper(), "since": since},
+        ).fetchall()
+        if not rows or len(rows) < 2:
+            return None
+        df = _resample_micro_bars(
+            [(r[0], float(r[1]), float(r[2])) for r in rows], bar_seconds=bar_seconds
+        )
+        # The trigger needs >=10 bars to evaluate (pullback_break_confirmation's own
+        # ``len(df) < 10`` floor). A name with only 1-min snapshots resamples to far
+        # fewer micro-bars, so this is exactly the SUPERSET/FAIL-SAFE boundary: too
+        # sparse ⇒ return None ⇒ the caller uses the 1m df (byte-identical). Enforcing
+        # the floor HERE keeps the density decision in one place.
+        if df is None or getattr(df, "empty", True) or len(df) < 10:
+            return None
+        return df
+    except Exception:
+        return None
+
+
 def _pending_entry_cancel_reason(
     *,
     bid: float | None,
@@ -2580,8 +2627,23 @@ def tick_live_session(
                                         _live_px = float(tick.ask or tick.mid or 0) or None
                                 except Exception:
                                     _live_px = None
+                                # 15s MICRO-PULLBACK (2026-06-15, "1m too slow"): when
+                                # enabled, run the trigger on a 15s micro-bar df built
+                                # from the densified tick tape so a micro-pullback break
+                                # INSIDE a 1m bar fires sub-minute. The first-pullback
+                                # branch in pullback_break_confirmation activates only
+                                # when entry_interval == chili_momentum_first_pullback_interval
+                                # (set both to '15s' to arm). FAIL-SAFE: insufficient
+                                # tick density ⇒ _build_micro_bar_df returns None ⇒ fall
+                                # back to the 1m df (byte-identical, no-op when off).
+                                _df_trig, _iv_trig = _df_pb, _interval
+                                if bool(getattr(settings, "chili_momentum_micropull_enabled", False)):
+                                    _bar_s = int(getattr(settings, "chili_momentum_micropull_bar_seconds", 15) or 15)
+                                    _df_micro = _build_micro_bar_df(db, sess.symbol, bar_seconds=_bar_s)
+                                    if _df_micro is not None and len(_df_micro) >= 10:
+                                        _df_trig, _iv_trig = _df_micro, "15s"
                                 _trigger_ok, _trigger_reason, _pb_debug = momentum_pullback_trigger(
-                                    _df_pb, entry_interval=_interval, live_price=_live_px,
+                                    _df_trig, entry_interval=_iv_trig, live_price=_live_px,
                                     symbol=sess.symbol, db=db,
                                 )
                     except Exception:

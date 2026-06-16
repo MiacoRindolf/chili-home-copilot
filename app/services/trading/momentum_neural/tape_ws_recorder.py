@@ -168,6 +168,21 @@ class TapeWsRecorder:
     # ── tick handler (WS receive thread — cheap only) ─────────────────────
 
     def _on_tick(self, symbol: str, snap) -> None:
+        self._record(symbol, snap, source=None)
+
+    def record_external(self, symbol: str, snap, source: str = "massive_ws_universe") -> None:
+        """UNIVERSE DENSIFICATION (2026-06-15): persist a WS quote for ANY symbol —
+        not just the armed/live-lane set — so the whole momentum universe leaves a
+        sub-minute tape forward. Runs the SAME throttle (>=1s/symbol), skip-unchanged
+        dedupe, and bounded-buffer body as ``_on_tick``, but tags the row with
+        ``source`` (default 'massive_ws_universe', a distinct, SHORTER-retention class)
+        and does NOT require the symbol to be in ``self._symbols``. Write-only side
+        path: a failure degrades to the 1-min sampler. The ignition loop registers
+        this as an INDEPENDENT listener so it fires regardless of the ignition floor.
+        """
+        self._record(symbol, snap, source=source)
+
+    def _record(self, symbol: str, snap, *, source: str | None) -> None:
         if not self._running:
             return
         sym = symbol.upper()
@@ -187,13 +202,17 @@ class TapeWsRecorder:
         self._last_quote[sym] = (bid, ask)
         self._last_row_t[sym] = now_m
         mid = (bid + ask) / 2.0
+        # Source: an explicit caller-supplied class (universe densification) wins;
+        # otherwise the armed-lane default by asset class (crypto vs equity).
+        if source is None:
+            source = "coinbase_ws" if sym.endswith("-USD") else "massive_ws"
         row = {
             "symbol": sym,
             "observed_at": datetime.now(timezone.utc).replace(tzinfo=None),
             "bid": float(bid), "ask": float(ask), "mid": mid,
             "spread_bps": (ask - bid) / mid * 10_000.0 if mid > 0 else None,
             "day_volume": self._vol_base.get(sym, 0.0) + self._vol_ws.get(sym, 0.0),
-            "source": "coinbase_ws" if sym.endswith("-USD") else "massive_ws",
+            "source": source,
         }
         with self._lock:
             self._buffer.append(row)

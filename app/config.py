@@ -2892,7 +2892,27 @@ class Settings(BaseSettings):
     chili_momentum_first_pullback_interval: str = Field(
         default="1m",
         validation_alias=AliasChoices("CHILI_MOMENTUM_FIRST_PULLBACK_INTERVAL"),
-        description="THE base timeframe knob for the first-pullback structure (1m; a 5m bar structurally collapses the shallow-pull->new-high geometry Ross trades).",
+        description="THE base timeframe knob for the first-pullback structure (1m; a 5m bar structurally collapses the shallow-pull->new-high geometry Ross trades). Set '15s' (with micropull enabled) to run it on tick-built 15s micro-bars.",
+    )
+    # 15s MICRO-PULLBACK (2026-06-15, operator "1m too slow for our style"): Ross's
+    # ~120s micro-pullback happens INSIDE a 1m bar, so a 1m trigger detects the
+    # break a bar-close late. When enabled, the live entry path builds a 15s
+    # micro-bar df from the densified tick tape and runs the first-pullback trigger
+    # on it — sub-minute entry. SUPERSET/FAIL-SAFE: where only 1-min snapshots
+    # exist the resampler yields <2 micro-bars → the trigger naturally no-fires →
+    # the path falls back to the existing 1m bars (byte-identical). The
+    # micro-pullback is the MOST aggressive entry: the existing chop guards
+    # (_dipbuy_tick_thrust_ok, premarket-confirm) still apply. Default OFF until
+    # replay-proven. docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_micropull_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULL_ENABLED"),
+        description="Run the first-pullback entry on tick-built 15s micro-bars (sub-minute entry). FAIL-SAFE: insufficient tick density ⇒ fall back to 1m (byte-identical). Default OFF.",
+    )
+    chili_momentum_micropull_bar_seconds: int = Field(
+        default=15, ge=5, le=30,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULL_BAR_SECONDS"),
+        description="THE single base knob for micro-bar width (seconds) — the tick tape is bucketed into OHLC bars of this size for the sub-minute first-pullback trigger.",
     )
     # Pending-entry lifecycle is EVENT-DRIVEN (cancel on setup invalidation /
     # limit left behind), not clock-driven — this is only the BACKSTOP: a
@@ -4148,6 +4168,47 @@ class Settings(BaseSettings):
     chili_momentum_nbbo_tape_retention_days: int = Field(
         default=30, ge=1, le=365,
         validation_alias=AliasChoices("CHILI_MOMENTUM_NBBO_TAPE_RETENTION_DAYS"),
+    )
+    # UNIVERSE TICK DENSIFICATION (2026-06-15, the JRSH/CUPR "missed name" gap):
+    # the tape recorder only persists ticks for ARMED names, so a name the lane
+    # never armed has only the 1-min sampler rows — too coarse to replay its
+    # micro-pullback faithfully. This densifies EVERY uncapped-universe member's
+    # WS quote into the tape (source='massive_ws_universe') via an INDEPENDENT
+    # listener on the ignition loop, so tomorrow's replay HAS sub-minute ticks for
+    # the names we missed today. FORWARD-only (no historical ticks). Write-only
+    # side path: no trading logic reads it; the densified rows carry a SHORTER
+    # retention than the 30d snapshot tape (bounded growth, the exit_parity bloat
+    # lesson). KILL-SWITCH: False ⇒ the ignition loop registers no extra listener
+    # ⇒ byte-identical to current.
+    chili_momentum_universe_tick_record_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_UNIVERSE_TICK_RECORD_ENABLED"),
+        description="Densify the whole momentum universe's WS quotes into the NBBO tape (source='massive_ws_universe') so missed names are replayable. KILL-SWITCH: False ⇒ no extra listener (byte-identical).",
+    )
+    chili_momentum_universe_tick_retention_days: int = Field(
+        default=5, ge=1, le=30,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_UNIVERSE_TICK_RETENTION_DAYS"),
+        description="Retention (days) for densified universe ticks — shorter than the snapshot tape's 30d; the prune drops source='massive_ws_universe' rows older than this.",
+    )
+    # TICK-FAITHFUL REPLAY (2026-06-15): replay the densified per-tick tape inside
+    # the 1-min entry grid so a micro-pullback break that happened INSIDE a minute
+    # fires at the true sub-minute instant where WS ticks exist (SUPERSET: where
+    # only the 1-min sampler exists, it degrades to exactly today's 1-sample
+    # behavior — byte-identical). Default OFF until replay-proven.
+    chili_momentum_replay_tick_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REPLAY_TICK_ENTRY_ENABLED"),
+        description="Replay every densified tick in the entry window (true sub-minute resolution where WS ticks exist; byte-identical where only 1-min snapshots exist). Default OFF.",
+    )
+    # FULL-PIPELINE REPLAY (2026-06-15): re-run the REAL selection pipeline as-of
+    # each replay step from raw tape — Stage1 build_equity_universe re-screen,
+    # Stage2 re-score, Stage3/4 re-arm/re-enter — so the replay can test whether a
+    # NEW selection/scoring change would arm names the recorded day missed. Default
+    # OFF; armed_source='live'/'asof' stay byte-identical when off.
+    chili_momentum_replay_full_pipeline_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REPLAY_FULL_PIPELINE_ENABLED"),
+        description="Replay armed_source='full_pipeline': re-run the real as-of selection pipeline (build_equity_universe re-screen → re-score → re-arm) from raw tape. Default OFF.",
     )
     # Alpaca execution lane (DMA-style limit-posting over RH). Off until keys are set;
     # PAPER by default — the free sandbox proves fills before any real money. Activation
