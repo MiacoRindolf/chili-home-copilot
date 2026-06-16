@@ -38,11 +38,22 @@ def test_delisted_dropped_when_map_substantial(monkeypatch):
     assert bm._drop_dust_positions([_cb("DEAD-USD", 100.0)]) == []
 
 
-def test_rh_position_always_kept(monkeypatch):
+def test_rh_stock_always_kept(monkeypatch):
     pm = {f"X{i}-USD": 1.0 for i in range(60)}
     _patch_prices(monkeypatch, pm)
     rh = {"ticker": "IYH", "quantity": 5, "equity": 500, "broker_source": bm.BROKER_ROBINHOOD}
-    assert bm._drop_dust_positions([rh]) == [rh]
+    assert bm._drop_dust_positions([rh]) == [rh]  # non -USD stock -> untouched
+
+
+def test_rh_crypto_dust_dropped_by_value(monkeypatch):
+    # a Robinhood crypto dust leg (1.3e-7 ETH-USD ~ $0.0003) must be dropped by value
+    # even though it's RH-source and its qty is above the zero threshold (-USD keyed).
+    pm = {f"X{i}-USD": 1.0 for i in range(60)}
+    pm["ETH-USD"] = 2500.0
+    _patch_prices(monkeypatch, pm)
+    rh_eth_dust = {"ticker": "ETH-USD", "quantity": 1.34927980988e-07, "equity": None,
+                   "broker_source": bm.BROKER_ROBINHOOD}
+    assert bm._drop_dust_positions([rh_eth_dust]) == []
 
 
 def test_fail_open_on_empty_price_map(monkeypatch):

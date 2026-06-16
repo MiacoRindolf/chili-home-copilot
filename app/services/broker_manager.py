@@ -254,9 +254,11 @@ _DUST_DISPLAY_FLOOR_USD = float(os.environ.get("CHILI_MIN_POSITION_DISPLAY_USD",
 def _drop_dust_positions(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop unsellable crypto dust / delisted residue from the positions view and
     enrich each surviving crypto holding with its live USD value (the raw Coinbase
-    position carries equity=0, so the cockpit otherwise shows $0). Non-Coinbase rows
-    pass through untouched. FAIL-OPEN: if the price map can't be fetched, nothing is
-    hidden — a transient price outage must never blank a real position."""
+    position carries equity=0, so the cockpit otherwise shows $0). Crypto is keyed by
+    the ``-USD`` suffix, NOT broker_source, so a Robinhood crypto dust leg (e.g. a
+    1.3e-7 ETH-USD residue) is dropped too — not just Coinbase. Stock rows pass
+    through untouched. FAIL-OPEN: if the price map can't be fetched, nothing is hidden
+    (beyond exact-zero qty) — a transient price outage must never blank a real position."""
     try:
         price_map = coinbase_service.get_all_spot_prices()
     except Exception:
@@ -271,12 +273,14 @@ def _drop_dust_positions(positions: list[dict[str, Any]]) -> list[dict[str, Any]
         # Robinhood crypto leg still reported with qty 0) — never show it, any broker.
         if float(p.get("quantity") or 0.0) <= 1e-9:
             continue
-        # Non-Coinbase rows, or no price map (fail-open: a price outage must never
-        # blank real positions), pass through untouched.
-        if p.get("broker_source") != BROKER_COINBASE or not price_map:
+        ticker = str(p.get("ticker") or "")
+        # Crypto holdings (``-USD``, ANY broker — a Robinhood 1.3e-7 ETH-USD dust leg
+        # AND Coinbase residue) are valued from the product price map and dropped
+        # below the floor. Stock rows and the price-outage fail-open path keep their
+        # broker-provided equity untouched.
+        if not price_map or not ticker.endswith("-USD"):
             kept.append(p)
             continue
-        ticker = str(p.get("ticker") or "")
         px = price_map.get(ticker)
         if px is None:
             if substantial:
