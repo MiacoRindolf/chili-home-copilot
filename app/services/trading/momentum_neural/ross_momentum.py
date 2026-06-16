@@ -79,6 +79,16 @@ ROSS_PILLAR_WEIGHTS_DAILY_CONTEXT: dict[str, float] = {
 # -0.10. Same order of magnitude as the existing hand-coded viability nudges.
 ROSS_QUALITY_VIABILITY_TILT = 0.20
 
+# Ross's two most-stated HARD FLOORS for a small-cap to even be a setup (videos
+# 01/05/17/29/36): relative volume >= ~5x and up >= ~10% on the day. Below these a
+# name is simply not a Ross trade no matter how it ranks WITHIN a dull batch — the
+# within-batch percentile (score_universe) only ORDERS names that already clear the
+# floor. Documented REFERENCE floors (the system may raise them), not ceilings
+# (a 50x-RVOL / +200% name is MORE eligible, never less). Equity-only — crypto RVOL/
+# change semantics differ (24h) and get their own calibration if/when needed.
+ROSS_ELIGIBILITY_RVOL_FLOOR = 5.0
+ROSS_ELIGIBILITY_CHANGE_FLOOR_PCT = 10.0
+
 
 @dataclass
 class RossMomentumScore:
@@ -178,6 +188,28 @@ def _extract_pillars(
     tradeable_liquidity = math.log10(dvol) if (dvol and dvol > 0) else None
 
     return rvol, momentum, liquidity, tradeable_liquidity
+
+
+def below_explosive_floor(
+    signal: dict,
+    *,
+    rvol_floor: float = ROSS_ELIGIBILITY_RVOL_FLOOR,
+    change_floor_pct: float = ROSS_ELIGIBILITY_CHANGE_FLOOR_PCT,
+) -> bool:
+    """True when an EQUITY name fails Ross's hard explosiveness floors and so is not a
+    LIVE setup regardless of its within-batch percentile rank: relative volume below
+    ``rvol_floor`` OR up-move below ``change_floor_pct``. Reuses the same raw fields as
+    ``_extract_pillars`` (``vol_ratio``/``rvol`` + ``daily_change_pct``/``gap_pct``).
+
+    Fails OPEN (returns ``False`` = "not below the floor") whenever a field is missing —
+    a name is never benched on absent data, only on data that AFFIRMATIVELY shows it is
+    not explosive. Caller is responsible for applying this to equities only."""
+    rvol, momentum, _liq, _tl = _extract_pillars(signal)
+    if rvol is not None and float(rvol) < float(rvol_floor):
+        return True
+    if momentum is not None and float(momentum) < float(change_floor_pct):
+        return True
+    return False
 
 
 def score_universe(

@@ -228,6 +228,24 @@ def score_viability(
     if ctx.vol_regime == VolatilityRegime.extreme:
         live_eligible = False
 
+    # Ross gap #3: absolute explosiveness FLOOR (videos 01/05/17/29/36). The pipeline
+    # marked the EQUITY symbols whose raw RVOL/change fall below Ross's hard floors
+    # (~5x / ~10%); a name below them is not a live setup no matter its within-batch
+    # percentile rank, so it is dropped from LIVE eligibility only (pool membership +
+    # paper scoring untouched). Crypto is never in the list (different 24h semantics);
+    # absent list -> no-op (fail-open).
+    try:
+        _below = (
+            ctx.meta.get("ross_below_floor")
+            if isinstance(getattr(ctx, "meta", None), dict)
+            else None
+        )
+        if _below and symbol in _below:
+            live_eligible = False
+            warnings.append("Below Ross explosiveness floor (RVOL/change) — not a live setup")
+    except (TypeError, AttributeError):
+        pass
+
     if db is not None:
         try:
             base += _symbol_family_memory_adjust(db, symbol, family.family_id)

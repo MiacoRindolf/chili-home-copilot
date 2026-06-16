@@ -605,6 +605,25 @@ def run_momentum_neural_tick(
             }
         except Exception:
             pass
+        # Ross gap #3: absolute RVOL/change FLOOR on top of the within-batch percentile.
+        # On a dull tape the best-of-a-dull-batch still percentile-ranks #1 and would arm
+        # a non-explosive name; Ross's rule is that <~5x RVOL or <~10% up is simply not a
+        # setup. Mark the EQUITY symbols (crypto 24h semantics differ) that fail the floor
+        # so score_viability can drop them from LIVE eligibility (pool membership +
+        # paper/scoring untouched). Compact symbol list — does not bloat the persisted
+        # ctx_meta the way the full signal dict would.
+        try:
+            from .ross_momentum import below_explosive_floor as _below_floor
+
+            meta["ross_below_floor"] = sorted(
+                s
+                for s, sig in _ross_signals.items()
+                if isinstance(sig, dict)
+                and not str(s).upper().endswith("-USD")
+                and _below_floor(sig)
+            )
+        except Exception:
+            pass
 
     # E5: news-catalyst set (EARNINGS + fresh general NEWS headlines) for the catalyst
     # viability tilt. The fresh-news union is what catches Ross's explosive sympathy/
@@ -670,6 +689,7 @@ def run_momentum_neural_tick(
             "adx",
             "adx_14",
             "ross_scores",
+            "ross_below_floor",
             "catalyst_symbols",
             "hot_tape",
             "symbol_countries",
