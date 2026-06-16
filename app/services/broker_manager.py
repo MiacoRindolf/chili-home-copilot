@@ -261,15 +261,19 @@ def _drop_dust_positions(positions: list[dict[str, Any]]) -> list[dict[str, Any]
         price_map = coinbase_service.get_all_spot_prices()
     except Exception:
         price_map = {}
-    if not price_map:
-        return positions
     # A complete product list is hundreds of entries; require a substantial map
     # before treating 'ticker absent' as delisted (else a partial fetch would hide
     # real positions).
     substantial = len(price_map) > 50
     kept: list[dict[str, Any]] = []
     for p in positions:
-        if p.get("broker_source") != BROKER_COINBASE:
+        # A zero/negative-quantity row is never a real position (e.g. a closed
+        # Robinhood crypto leg still reported with qty 0) — never show it, any broker.
+        if float(p.get("quantity") or 0.0) <= 1e-9:
+            continue
+        # Non-Coinbase rows, or no price map (fail-open: a price outage must never
+        # blank real positions), pass through untouched.
+        if p.get("broker_source") != BROKER_COINBASE or not price_map:
             kept.append(p)
             continue
         ticker = str(p.get("ticker") or "")

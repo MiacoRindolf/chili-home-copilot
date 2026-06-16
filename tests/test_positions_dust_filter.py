@@ -58,6 +58,17 @@ def test_fail_open_partial_map_keeps_absent_ticker(monkeypatch):
     assert len(bm._drop_dust_positions([_cb("SOL-USD", 10.0)])) == 1
 
 
+def test_zero_quantity_dropped_any_broker(monkeypatch):
+    # a closed leg reported with qty 0 is never a real position (RH crypto or Coinbase)
+    pm = {f"X{i}-USD": 1.0 for i in range(60)}
+    _patch_prices(monkeypatch, pm)
+    rh_zero = {"ticker": "ETH-USD", "quantity": 0.0, "equity": None,
+               "broker_source": bm.BROKER_ROBINHOOD}
+    cb_zero = _cb("BTC-USD", 0.0)
+    real = {"ticker": "IYH", "quantity": 5, "equity": 500, "broker_source": bm.BROKER_ROBINHOOD}
+    assert bm._drop_dust_positions([rh_zero, cb_zero, real]) == [real]
+
+
 def test_exactly_floor_is_kept(monkeypatch):
     pm = {f"X{i}-USD": 1.0 for i in range(60)}
     pm["ONE-USD"] = 1.0
