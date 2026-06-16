@@ -396,6 +396,41 @@ def evaluate_profit_giveback_halt(
     }
 
 
+# A green day worth protecting from a FULL round-trip into the red: at least half the
+# day's max-tolerable RED (the equity-relative daily-loss cap). Deliberately SMALLER than
+# the profit-giveback activation (the full cap) so this catches the small green day the
+# giveback — whose floor sits ABOVE $0 — cannot. One documented base, equity-relative.
+_GREEN_TO_RED_ACTIVATION_FRAC = 0.5
+
+
+def evaluate_green_to_red_halt(
+    db: Session, *, user_id: int, execution_family: str = "coinbase_spot"
+) -> dict[str, Any]:
+    """Ross green-to-red session breaker (gap #8, videos 37/38): going from green on the
+    day back to <= $0 is the emotional-hijack trigger — walk away. The profit-giveback
+    halt's floor (``peak * (1 - frac)``) sits ABOVE $0, so a TRUE round-trip into the red
+    on a smaller green day is not caught. Once today's realized PnL has PEAKED above a
+    small equity-relative activation (half the daily-loss-cap magnitude — no second
+    fixed-$ knob) AND current realized PnL is <= 0, new live arming is blocked for the
+    rest of the daily window. Read-only; same ``date.today()`` window + two-layer pattern
+    as the giveback halt. [[feedback_adaptive_no_magic]]
+    """
+    activation = _GREEN_TO_RED_ACTIVATION_FRAC * equity_relative_daily_loss_cap(
+        float(getattr(settings, "chili_momentum_risk_max_daily_loss_usd", 250.0)),
+        execution_family,
+    )
+    peak, current = _daily_realized_pnl_peak_and_current(db, int(user_id))
+    armed = bool(activation > 0.0 and peak >= activation)
+    halted = bool(armed and current <= 0.0)
+    return {
+        "halted": halted,
+        "armed": armed,
+        "peak_pnl_usd": round(float(peak), 2),
+        "daily_pnl_usd": round(float(current), 2),
+        "activation_threshold_usd": round(float(activation), 2),
+    }
+
+
 def evaluate_proposed_momentum_automation(
     db: Session,
     *,
@@ -873,6 +908,31 @@ def evaluate_proposed_momentum_automation(
                 )
             ),
             detail=gb,
+        )
+    )
+
+    # ── Green-to-red session breaker (Ross gap #8) ────────────────────────
+    # Stricter complement of the giveback halt: once the day PEAKED green above a small
+    # equity-relative activation and current realized PnL has round-tripped to <= $0,
+    # block new live arming (the green-to-red emotional-hijack walk-away the giveback's
+    # above-$0 floor misses). [[feedback_adaptive_no_magic]]
+    g2r = evaluate_green_to_red_halt(db, user_id=user_id, execution_family=ef)
+    checks.append(
+        _check(
+            "green_to_red",
+            not g2r["halted"],
+            severity="block" if g2r["halted"] and m == "live" else ("warn" if g2r["halted"] else "ok"),
+            message=(
+                f"Green-to-red halt: peaked ${g2r['peak_pnl_usd']:+.2f} (>= "
+                f"${g2r['activation_threshold_usd']:+.2f}) then round-tripped to "
+                f"${g2r['daily_pnl_usd']:+.2f} — walk away for the session."
+                if g2r["halted"]
+                else (
+                    f"Green-to-red ok (peak ${g2r['peak_pnl_usd']:+.2f}, "
+                    f"now ${g2r['daily_pnl_usd']:+.2f})."
+                )
+            ),
+            detail=g2r,
         )
     )
 
