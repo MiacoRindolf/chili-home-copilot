@@ -646,6 +646,13 @@ def run_momentum_neural_tick(
                 if _mom is not None:
                     _eq.append((su, float(_mom)))
             _eq.sort(key=lambda x: x[1], reverse=True)
+            # Ross gap #6: market-wide leading-gainer tilt — only the top few % gainers get
+            # the broker hot-lists / eyes that make a pattern resolve; a perfect pattern on
+            # a non-obvious name is a tree falling in an empty forest. The top-N equity
+            # movers by change get a small additive viability boost (Ross's "top 3-5"). The
+            # eligibility floor (#3) gates membership; this orders WITHIN it. Equity-only.
+            if _eq:
+                meta["top_market_gainers"] = sorted(su for su, _ in _eq[:5])
             _eq = _eq[:40]  # only the strongest movers cluster; bounds cold-start fetches
             _movers = {su: mom for su, mom in _eq}
             _peers = sympathy_peer_symbols(_movers, {su: get_ticker_sector(su) for su in _movers})
@@ -733,6 +740,7 @@ def run_momentum_neural_tick(
             "catalyst_symbols",
             "weak_catalyst_symbols",
             "sympathy_symbols",
+            "top_market_gainers",
             "hot_tape",
             "symbol_countries",
             "theme_symbols",
