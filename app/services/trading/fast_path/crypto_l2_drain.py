@@ -44,6 +44,27 @@ _INSERT_SQL = text(
     ":bid_total_size, :ask_total_size, :imbalance, :spread_bps, :source)"
 )
 
+# CRYPTO UNIVERSE DENSIFICATION (2026-06-15): the equity ignition loop densifies
+# the WHOLE equity universe into the NBBO tape (tape_ws_recorder.record_external,
+# source='massive_ws_universe') so every name leaves a sub-minute tape for the
+# replay. Crypto runs a SEPARATE path (no equity ignition loop), so historically
+# only ARMED crypto names left a 'coinbase_ws' tape — the rest of the eligible
+# crypto universe was only 60s-replayable. This drain job already holds each
+# eligible name's live book in memory; mirror its TOP-OF-BOOK into the same NBBO
+# tape (source='coinbase_ws_universe') so the whole crypto universe is tick-
+# replayable too. Zero new WS load (reuses the warmed L2 ring); write-only/fail-open.
+_NBBO_INSERT_SQL = text(
+    "INSERT INTO momentum_nbbo_spread_tape "
+    "(symbol, observed_at, bid, ask, mid, spread_bps, day_volume, source) VALUES "
+    "(:symbol, :observed_at, :bid, :ask, :mid, :spread_bps, :day_volume, :source)"
+)
+
+# Dedupe identical consecutive BBO writes (storage discipline — the exit_parity_log
+# bloat lesson). Bounded per the cache hard-max convention; the drain's fixed
+# interval is the throttle, so this only collapses unchanged-book cycles.
+_last_nbbo: dict[str, tuple[float, float]] = {}
+_NBBO_DEDUPE_MAX = 2048
+
 
 def _norm_imbalance(bid_total: float, ask_total: float) -> float:
     """Normalized book imbalance in [-1, 1] (>0 bid-heavy). Matches the
@@ -137,6 +158,44 @@ def _book_item_for(pid: str) -> dict | None:
     }
 
 
+def _nbbo_row_for(pid: str) -> dict | None:
+    """Derive a ``momentum_nbbo_spread_tape`` top-of-book row from the ring's latest
+    full-book snapshot — the CRYPTO twin of the equity ignition densifier. Uses the
+    SAME best-bid/ask extraction as ``_book_item_for`` (first level with size > 0).
+    Returns None when the book is unusable, the BBO is crossed/zero, OR the BBO is
+    unchanged since the last write (dedupe). Write-only; the caller is fail-open."""
+    buf = get_book_buffer()
+    snap = buf.latest(pid)
+    if snap is None or not snap.bids or not snap.asks:
+        return None
+    bid_levels = [(float(l.price), float(l.size)) for l in snap.bids[:5] if l.size > 0]
+    ask_levels = [(float(l.price), float(l.size)) for l in snap.asks[:5] if l.size > 0]
+    if not bid_levels or not ask_levels:
+        return None
+    bid = bid_levels[0][0]
+    ask = ask_levels[0][0]
+    if bid <= 0 or ask < bid:
+        return None
+    if _last_nbbo.get(pid) == (bid, ask):
+        return None  # unchanged BBO — skip the duplicate row
+    if len(_last_nbbo) > _NBBO_DEDUPE_MAX:
+        _last_nbbo.clear()
+    _last_nbbo[pid] = (bid, ask)
+    mid = (bid + ask) / 2.0
+    return {
+        "symbol": pid,
+        # naive UTC exchange event time (matches fast_orderbook + the recorder's
+        # naive-UTC tape rows so replay's _aware() handles every source uniformly).
+        "observed_at": datetime.utcfromtimestamp(snap.event_ts or snap.ts),
+        "bid": bid,
+        "ask": ask,
+        "mid": mid,
+        "spread_bps": (ask - bid) / mid * 10_000.0 if mid > 0 else None,
+        "day_volume": None,  # not derivable from the L2 book; replay tolerates None
+        "source": "coinbase_ws_universe",
+    }
+
+
 def run_crypto_l2_drain_job() -> None:
     """Drain the warmed crypto book ring -> fast_orderbook. Fail-open."""
     from ....db import SessionLocal, engine
@@ -162,20 +221,35 @@ def run_crypto_l2_drain_job() -> None:
         return
 
     params: list[dict] = []
+    nbbo_params: list[dict] = []
     for pid in targets:
         try:
             item = _book_item_for(pid)
         except Exception:
-            continue
+            item = None
         if item:
             params.append(item)
-    if not params:
+        # CRYPTO UNIVERSE DENSIFICATION: mirror the same book's top-of-book into the
+        # replay NBBO tape so the whole eligible crypto universe is tick-replayable.
+        try:
+            nbbo = _nbbo_row_for(pid)
+        except Exception:
+            nbbo = None
+        if nbbo:
+            nbbo_params.append(nbbo)
+    if not params and not nbbo_params:
         return
 
     try:
         with engine.begin() as conn:
             conn.execute(text("SET LOCAL statement_timeout = 1500"))
-            conn.execute(_INSERT_SQL, params)
-        logger.debug("[crypto_l2_drain] wrote %d crypto book snapshots", len(params))
+            if params:
+                conn.execute(_INSERT_SQL, params)
+            if nbbo_params:
+                conn.execute(_NBBO_INSERT_SQL, nbbo_params)
+        logger.debug(
+            "[crypto_l2_drain] wrote %d crypto book snapshots + %d universe nbbo ticks",
+            len(params), len(nbbo_params),
+        )
     except Exception:
         logger.warning("[crypto_l2_drain] insert failed; dropped cycle", exc_info=True)
