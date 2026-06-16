@@ -244,3 +244,88 @@ def test_hidden_seller_accelerant_still_requires_profit_arm(monkeypatch) -> None
     )
     assert r["armed"] is False
     assert r["fired"] is False
+
+
+# ------------------------------------------ 1m candle confirmer (AND-gate) ---
+# The candle confirmer can only ever RESTRICT the FLOW confluence; it never
+# creates a fire and never loosens a stop (INVARIANT A). Default is observe-
+# first: candle_gate_live=False leaves the live decision byte-identical and
+# only records the would-suppress A/B.
+
+def test_candle_default_unset_is_byte_identical_fire() -> None:
+    # No candle args at all (default None/False) -> exactly the legacy fire.
+    r = _call()
+    assert r["fired"] is True
+    assert r["candle_ok"] is True            # fail-open
+    assert r["candle_exhaustion"] is None
+    assert r["candle_gate_live"] is False
+    assert r["candle_would_suppress"] is False
+
+
+def test_candle_observe_first_does_not_change_live_fire() -> None:
+    # candle says NO exhaustion but the gate is NOT live -> the lock still fires
+    # (byte-identical) and only flags the would-suppress counterfactual.
+    base = _call()
+    r = _call(candle_exhaustion=False, candle_gate_live=False)
+    assert r["fired"] is True
+    assert r["new_stop_floor"] == base["new_stop_floor"]   # decision unchanged
+    assert r["candle_ok"] is False
+    assert r["candle_would_suppress"] is True              # the A/B is recorded
+
+
+def test_candle_gate_live_suppresses_when_candle_says_no() -> None:
+    r = _call(candle_exhaustion=False, candle_gate_live=True, current_stop=0.99)
+    assert r["fired"] is False
+    assert r["candle_would_suppress"] is True
+    # INVARIANT A: suppression NEVER loosens the stop (held at current_stop).
+    assert r["new_stop_floor"] == 0.99
+    assert r["partial_arm"] is False
+
+
+def test_candle_gate_live_preserves_capture_when_candle_confirms() -> None:
+    base = _call()
+    r = _call(candle_exhaustion=True, candle_gate_live=True)
+    assert r["fired"] is True
+    assert r["candle_ok"] is True
+    assert r["candle_would_suppress"] is False
+    assert r["new_stop_floor"] == base["new_stop_floor"]   # full capture preserved
+
+
+def test_candle_gate_fail_open_on_none_even_when_live() -> None:
+    # Missing 1m df (None) must never restrict -> the lock behaves as today.
+    base = _call()
+    r = _call(candle_exhaustion=None, candle_gate_live=True)
+    assert r["fired"] is True
+    assert r["candle_ok"] is True
+    assert r["candle_would_suppress"] is False
+    assert r["new_stop_floor"] == base["new_stop_floor"]
+
+
+def test_candle_gate_never_creates_a_fire() -> None:
+    # The flow confluence does NOT fire (micro still positive); a confirming
+    # candle must NOT manufacture a fire — the gate only ever restricts.
+    r = _call(micro_edge=+5.0, candle_exhaustion=True, candle_gate_live=True)
+    assert r["fired"] is False
+    assert r["candle_would_suppress"] is False  # nothing to suppress (didn't fire)
+
+
+def test_candle_gate_does_not_block_absorption(monkeypatch) -> None:
+    # The absorption OR-bypass (leading distribution signal) is intentionally
+    # NOT candle-gated: it fires even with candle_exhaustion=False + gate live.
+    from app.config import settings
+
+    monkeypatch.setattr(
+        settings, "chili_momentum_exit_ofi_hidden_seller_enabled", True, raising=False
+    )
+    hwm = _ENTRY + 2.0 * _RD
+    r = ofi_exhaustion_lock(
+        high_water_mark=hwm, entry_price=_ENTRY, bid=hwm,  # zero giveback (OR-bypass)
+        atr_pct=_ATR, stop_atr_mult=_MULT,
+        ofi=+0.5, micro_edge=-30.0, hidden_seller=5.0,
+        reward_risk=3.0, current_stop=0.99, breakeven_floor=1.00,
+        current_band_bps=800.0,
+        candle_exhaustion=False, candle_gate_live=True, side_long=True,
+    )
+    assert r["fired"] is True
+    assert r["trigger"] == "absorption"
+    assert r["candle_would_suppress"] is False  # absorption isn't a pure-confluence fire

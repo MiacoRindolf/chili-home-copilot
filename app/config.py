@@ -3191,6 +3191,35 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_OFI_HIDDEN_SELLER_ENABLED"),
         description="Accelerant: hidden-seller absorption at the highs arms the lock on profit-arm + micro-rollover alone (distribution is the one LEADING signal). OFF at ship — promote only after OFI+micro proves net-positive (log-only-first).",
     )
+    # 1m CANDLE EXHAUSTION CONFIRMER (2026-06-16): the live entry trigger runs on 1m,
+    # but the exhaustion lock's only candle read (the standalone topping-tail exit) uses
+    # the 15m _entry_df — too coarse to corroborate a fast 1m momentum rollover. Fetch a
+    # 1m df (cached once/min/session like the 5m-EMA anchor) and read a topping-tail (+
+    # optional MACD-hist rollover) as ONE MORE AND-gated corroborant fed into the lock's
+    # FLOW confluence (micro-rollover ∧ OFI-flip ∧ giveback). AND-gated ⇒ it can only ever
+    # SUPPRESS a flow fire whose 1m candle shows no exhaustion (a noisy-OFI early-sell);
+    # it never causes a new fire (so it can't sell a winner the lock wouldn't already).
+    # Fail-OPEN (no 1m df ⇒ candle_ok=True ⇒ existing captures untouched). Class-agnostic
+    # (crypto + equity identical — same fetch_ohlcv_df). The absorption OR-bypass is NOT
+    # candle-gated (it is the one LEADING signal). Validated on LNAI 5170/5192/5204
+    # (06-16): the confirmer AGREED with 2/2 live lock fires (MACD caught 5204 where the
+    # wick did not) ⇒ zero capture regression; ships OBSERVE-FIRST to measure the
+    # would-suppress ticks before gating live. docs/DESIGN/ADAPTIVE_OFI_EXIT.md
+    chili_momentum_exit_candle_confirm_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_CANDLE_CONFIRM_ENABLED"),
+        description="Kill-switch for the 1m candle exhaustion confirmer. ON = fetch the cached 1m df, compute topping-tail (+ MACD rollover), feed it to the exhaustion lock and emit the candle_would_suppress A/B on every armed tick. OFF = no 1m fetch, lock byte-identical (candle_ok fails open).",
+    )
+    chili_momentum_exit_candle_confirm_live: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_CANDLE_CONFIRM_LIVE"),
+        description="Gate the lock's FLOW confluence on the 1m candle. Default OFF = observe-first: the LIVE lock decision is byte-identical and only the would-suppress counterfactual logs. Flip ON once the A/B shows the would-suppress fires were early-sells (price recovered), not real tops. AND-gated ⇒ can only tighten the fire criterion, never loosen it (INVARIANT A preserved).",
+    )
+    chili_momentum_exit_candle_confirm_use_macd: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_CANDLE_CONFIRM_USE_MACD"),
+        description="Include the 1m MACD-hist rollover in the candle confirmer (OR'd with the topping-tail). Default ON — LNAI 5204's real top was caught ONLY by MACD (no dominant wick); topping-tail-only would have wrongly suppressed that capture. OFF = wick-only confirmer.",
+    )
     # ── Sell-into-strength ladder (v2 proactive exit) ────────────────────────────
     # Ross-style: post a SMALL resting limit at/above the bid into genuine strength
     # (unfilled = free option, fills only on a real up-trade). Safety = the mechanism

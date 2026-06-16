@@ -535,6 +535,8 @@ def ofi_exhaustion_lock(
     current_stop: float,
     breakeven_floor: float,
     current_band_bps: float,
+    candle_exhaustion: bool | None = None,
+    candle_gate_live: bool = False,
     side_long: bool = True,
 ) -> dict[str, Any]:
     """Adaptive order-flow exhaustion lock for the crypto momentum runner.
@@ -557,6 +559,19 @@ def ofi_exhaustion_lock(
 
     Accelerant (OR-bypass of 3+4): hidden-seller absorption ≥ threshold arms on
     1+2 alone — distribution is the one LEADING signal. Off by default.
+
+    1m-CANDLE CONFIRMER (``candle_exhaustion``, 2026-06-16): one MORE AND-gate on
+    the FLOW confluence — the live entry trigger runs on 1m, but the lock's only
+    candle read upstream is the coarse 15m bar. A 1m topping-tail / MACD-hist
+    rollover corroborates the flow rollover. AND-gated ⇒ it can only SUPPRESS a flow
+    fire whose 1m candle shows no exhaustion (a noisy-OFI early-sell); it never
+    causes a new fire. Fail-OPEN: ``candle_exhaustion=None`` ⇒ ``candle_ok=True`` ⇒
+    no restriction (existing captures preserved). OBSERVE-FIRST: when
+    ``candle_gate_live`` is False the LIVE decision is byte-identical and only
+    ``candle_would_suppress`` (the A/B) is populated; when True the gate applies to
+    the confluence path (the absorption OR-bypass is intentionally never candle-
+    gated). INVARIANT A is preserved either way (the gate only ever blocks a fire,
+    never lowers a stop).
 
     ADAPTIVE & single-knob: ``base_lock_bps`` is the only irreducible number.
     ``arm_r`` derives from the plan's own ``rr``; the giveback arm derives from
@@ -586,6 +601,11 @@ def ofi_exhaustion_lock(
         "peak_r": None,
         "lock_bps": None,
         "counterfactual_fixed_stop": current_stop,  # band-only stop, lock OFF
+        # 1m-candle confirmer A/B (observe-first); see the candle paragraph above.
+        "candle_exhaustion": candle_exhaustion,
+        "candle_ok": True,
+        "candle_gate_live": bool(candle_gate_live),
+        "candle_would_suppress": False,
     }
     if not side_long:
         return out
@@ -684,11 +704,24 @@ def ofi_exhaustion_lock(
     giveback = (hwm - b) >= giveback_dist
     confluence = micro_roll and ofi_flip and giveback
 
-    if not (confluence or absorption):
+    # ---- 1m candle confirmer: one MORE AND-gate on the FLOW path ----
+    # Fail-OPEN (None ⇒ ok). OBSERVE-FIRST: when candle_gate_live is False the live
+    # fire decision is UNCHANGED (byte-identical) and only the would-suppress A/B is
+    # recorded; when True the flow confluence additionally requires the candle. The
+    # absorption OR-bypass (leading distribution signal) is never candle-gated.
+    candle_ok = (candle_exhaustion is None) or bool(candle_exhaustion)
+    out["candle_ok"] = candle_ok
+    # A pure-confluence fire the candle gate would block (regardless of whether the
+    # gate is live this tick): the operator counts these vs subsequent price to prove
+    # they are early-sells (recoveries) before flipping candle_gate_live on.
+    out["candle_would_suppress"] = bool(confluence and not candle_ok and not absorption)
+    confluence_effective = (confluence and candle_ok) if candle_gate_live else confluence
+
+    if not (confluence_effective or absorption):
         return out
 
     out["fired"] = True
-    out["trigger"] = "absorption" if (absorption and not confluence) else "ofi_micro_confluence"
+    out["trigger"] = "absorption" if (absorption and not confluence_effective) else "ofi_micro_confluence"
 
     # ---- adaptive lock tightness (tighten with strength + flow) ----
     # strength_scale: stronger move (higher peak_r within its rr plan) ⇒ tighter

@@ -4120,6 +4120,41 @@ def tick_live_session(
                             _hs_x = None
                     # current_band_bps = the cushion band's REALIZED stop this tick.
                     _band_bps = ((_hwm_trail - stop_px) / _hwm_trail * 10_000.0) if _hwm_trail > 0 else 0.0
+                    # 1m candle exhaustion confirmer: the entry trigger runs on 1m but
+                    # the lock's only candle read upstream is the coarse 15m _entry_df.
+                    # Fetch a 1m df at most once/min/session (mirrors the 5m-EMA cache
+                    # above) and read a topping-tail (+ optional MACD-hist rollover) as
+                    # ONE MORE AND-gated corroborant into the lock's FLOW confluence.
+                    # Fail-open (None). The gate goes LIVE only under _confirm_live;
+                    # default emits the candle_would_suppress A/B only. Class-agnostic
+                    # (crypto + equity, same fetch). docs/DESIGN/ADAPTIVE_OFI_EXIT.md
+                    _candle_exh = None
+                    if bool(getattr(settings, "chili_momentum_exit_candle_confirm_enabled", True)):
+                        try:
+                            _cc_key = _utcnow().strftime("%Y%m%d%H%M")
+                            if le.get("exit_candle1m_min") == _cc_key:
+                                _candle_exh = le.get("exit_candle1m_exh")
+                            else:
+                                from ..market_data import fetch_ohlcv_df as _c1_fetch
+                                from .candles import (
+                                    topping_tail_from_df,
+                                    macd_hist_rollover_from_df,
+                                )
+
+                                _df1 = _c1_fetch(sess.symbol, interval="1m", period="1d")
+                                if _df1 is not None and len(_df1) >= 2:
+                                    _tt1 = bool(topping_tail_from_df(_df1))
+                                    _mh1 = (
+                                        bool(macd_hist_rollover_from_df(_df1))
+                                        if bool(getattr(settings, "chili_momentum_exit_candle_confirm_use_macd", True))
+                                        else False
+                                    )
+                                    _candle_exh = bool(_tt1 or _mh1)
+                                le["exit_candle1m_min"] = _cc_key
+                                le["exit_candle1m_exh"] = _candle_exh
+                                _commit_le(sess, le)
+                        except Exception:
+                            _candle_exh = None
                     _lock = ofi_exhaustion_lock(
                         high_water_mark=_hwm_trail,
                         entry_price=avg,
@@ -4133,6 +4168,10 @@ def tick_live_session(
                         current_stop=stop_px,
                         breakeven_floor=_be_floor,
                         current_band_bps=_band_bps,
+                        candle_exhaustion=_candle_exh,
+                        candle_gate_live=bool(
+                            getattr(settings, "chili_momentum_exit_candle_confirm_live", False)
+                        ),
                         side_long=True,
                     )
                     # A/B telemetry on every ARMED tick (winner past the profit-arm),
@@ -4151,6 +4190,10 @@ def tick_live_session(
                             "adaptive_stop": _lock.get("new_stop_floor"),
                             "counterfactual_fixed_stop": _lock.get("counterfactual_fixed_stop"),
                             "partial_arm": bool(_lock.get("partial_arm")),
+                            "candle_exhaustion": _lock.get("candle_exhaustion"),
+                            "candle_ok": _lock.get("candle_ok"),
+                            "candle_gate_live": _lock.get("candle_gate_live"),
+                            "candle_would_suppress": _lock.get("candle_would_suppress"),
                             "bid": bid,
                             "high_water_mark": _hwm_trail,
                         })
