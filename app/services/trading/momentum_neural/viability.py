@@ -358,6 +358,26 @@ def score_viability(
     except (TypeError, ValueError, AttributeError):
         pass
 
+    # Re-analysis survivor S1: cross-day close-strength prior — a strong power-hour close
+    # predicts next-day gap-continuation, so warm the lane on it early. Additive tilt
+    # centered at neutral (boost strong-close, slightly discount weak-close). Equity-only.
+    try:
+        _csp = (
+            ctx.meta.get("close_strength_priors")
+            if isinstance(getattr(ctx, "meta", None), dict)
+            else None
+        )
+        if _csp:
+            from .catalyst import close_strength_viability_delta
+
+            _csp_delta = close_strength_viability_delta(symbol, _csp)
+            if _csp_delta:
+                base += _csp_delta
+                if _csp_delta > 0:
+                    warnings.append("Strong prior-day close (continuation prior) — Ross-style")
+    except (TypeError, ValueError, AttributeError):
+        pass
+
     viability = max(0.0, min(1.0, base))
 
     rationale = (
