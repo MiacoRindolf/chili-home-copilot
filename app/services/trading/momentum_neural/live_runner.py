@@ -854,6 +854,40 @@ def _live_exit_submit_succeeded(
             {"reason": reason, "note": "broker holds 0 — position already exited externally; not retrying"},
         )
         return True
+    # BUGFIX (2026-06-16, the SLNH/LION phantom spin): the broker-qty clamp in
+    # _submit_live_market_exit returns broker_zero=True ONLY when a SUCCESSFUL broker
+    # read found the held qty at 0 (None / a failed fetch never sets it). That means
+    # the position is a PHANTOM — the session still thinks it holds shares, but the
+    # broker holds none (sold externally, a prior fill we missed, or the entry never
+    # actually filled). The generic failed path below returns False, so the trail /
+    # max-hold loop re-submits the SAME exit every tick forever (SLNH sess 5033 spun
+    # no_remaining_quantity for HOURS; LION sess 4996 the same) — pinning the slot AND
+    # showing a phantom position + phantom unrealized P&L in the cockpit (operator saw
+    # "profit" on a position that did not exist). Confirm with a second INDEPENDENT
+    # broker read (same belt-and-suspenders as the retry-cap reconcile @766) so a
+    # one-off spurious 0 can't close a real position, then reconcile to EXITED instead
+    # of spinning. Family-agnostic (Robinhood + Coinbase); never fires on a None/failed
+    # read (broker_zero is unset) so an API hiccup degrades to the safe retry path.
+    if result.get("broker_zero") is True and _broker_position_confirms_zero(sess):
+        le["position"] = None
+        le["last_exit_reason"] = (reason or "exit") + "_broker_zero_reconcile"
+        le.pop("pending_exit_reason", None)
+        le.pop("pending_exit_quantity", None)
+        le.pop("pending_exit_submitted_at_utc", None)
+        _commit_le(sess, le)
+        _safe_transition(db, sess, STATE_LIVE_EXITED)
+        _emit(
+            db, sess, "live_exit_reconciled_broker_zero",
+            {
+                "reason": reason,
+                "error": result.get("error"),
+                "note": (
+                    "broker-qty clamp + confirming read both 0 — phantom position; "
+                    "reconciled to EXITED, not retrying (was spinning no_remaining_quantity)"
+                ),
+            },
+        )
+        return True
     failed = {
         "reason": reason,
         "result": {
