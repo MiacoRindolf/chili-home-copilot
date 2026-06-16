@@ -75,22 +75,6 @@ def _auto_arm_crypto_only() -> bool:
     return bool(getattr(settings, "chili_momentum_auto_arm_crypto_only", True))
 
 
-# Late-session new-entry cutoff for the EQUITY lane (Ross gap #13, videos 13/23/26/39):
-# Ross's metrics show losses after late morning, so he stops taking NEW setups around
-# 11:00-noon ET. One documented base (hour, minute ET); crypto is 24/7 and exempt. Open
-# positions are unaffected — only NEW arming is blocked past the cutoff.
-_LATE_SESSION_CUTOFF_ET = (11, 30)
-
-
-def _late_session_cutoff_active(now_et: datetime, *, crypto_only: bool) -> bool:
-    """True when NEW equity arming should be blocked: the lane is in EQUITY mode and the
-    ET clock is at/past ``_LATE_SESSION_CUTOFF_ET``. Crypto (24/7) is never cut off. Pure
-    + side-effect-free (the caller supplies the ET ``datetime``)."""
-    if crypto_only:
-        return False
-    return (now_et.hour, now_et.minute) >= _LATE_SESSION_CUTOFF_ET
-
-
 def _auto_arm_equity_only() -> bool:
     """Equity-only focus (Ross lane): exclude crypto ('-USD') so the lane trades stocks
     only. Operator-controlled; revisit crypto later. Crypto-only takes precedence if both."""
@@ -984,21 +968,6 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         # PER BROKER in Guard 4 below (so a Coinbase-sized cap can't freeze Robinhood).
         if kill_switch_halts_new_entries():
             out["skipped"] = "kill_switch"
-            return out
-    except Exception:
-        pass
-
-    # Guard 1b: late-session new-entry cutoff (Ross gap #13). EQUITY-only — stop NEW
-    # arming after the cutoff ET time (Ross's afternoon losses); open positions still
-    # manage out. Crypto is 24/7, so this whole guard is skipped when the lane is
-    # crypto-only. Fail-open (a clock error never blocks arming).
-    try:
-        from zoneinfo import ZoneInfo
-
-        if _late_session_cutoff_active(
-            datetime.now(ZoneInfo("America/New_York")), crypto_only=_auto_arm_crypto_only()
-        ):
-            out["skipped"] = "late_session_cutoff"
             return out
     except Exception:
         pass
