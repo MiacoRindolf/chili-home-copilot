@@ -773,6 +773,27 @@ def _utcnow() -> datetime:
     return datetime.utcnow()
 
 
+def _adaptive_loss_cooldown_minutes(return_bps: float | None) -> float:
+    """Post-loss cooldown minutes scaled by the LOSS MAGNITUDE the tape delivered
+    (2026-06-16, Ross-discipline). A hard −892bps bailout must sit a name out far
+    longer than a −50bps scratch — CCTG machine-gunned a 2nd −892bps loss 11min after
+    a −159bps scratch, inside neither the fixed 5-min cooldown nor the 2-strike block.
+    Base = the existing fixed knob; +1min per ``bps_per_min`` of realized loss; hard
+    capped at ``max_base_mult``×base so a data glitch can never freeze a name for hours.
+    Kill-switch off / missing magnitude / non-positive per_min → byte-identical fixed
+    base (fail-open: thin data NEVER blocks longer)."""
+    base = float(getattr(settings, "chili_momentum_symbol_loss_cooldown_min", 5.0) or 5.0)
+    if not bool(getattr(settings, "chili_momentum_loss_cooldown_adaptive_enabled", True)):
+        return base
+    per_min = float(getattr(settings, "chili_momentum_loss_cooldown_bps_per_min", 500.0) or 0.0)
+    if per_min <= 0.0 or return_bps is None:
+        return base
+    loss_bps = abs(float(return_bps))
+    adaptive = base + loss_bps / per_min
+    cap = base * float(getattr(settings, "chili_momentum_loss_cooldown_max_base_mult", 4.0) or 4.0)
+    return min(adaptive, cap)
+
+
 def _symbol_loss_guards(db: Session) -> tuple[set[str], dict[str, datetime]]:
     """Churn guards from TODAY's closed live outcomes (UTC day):
 
@@ -794,6 +815,8 @@ def _symbol_loss_guards(db: Session) -> tuple[set[str], dict[str, datetime]]:
                 MomentumAutomationOutcome.symbol,
                 MomentumAutomationOutcome.terminal_at,
                 MomentumAutomationOutcome.realized_pnl_usd,
+                MomentumAutomationOutcome.return_bps,
+                MomentumAutomationOutcome.execution_family,
             )
             .filter(
                 MomentumAutomationOutcome.mode == "live",
@@ -806,10 +829,18 @@ def _symbol_loss_guards(db: Session) -> tuple[set[str], dict[str, datetime]]:
         cd_min = float(getattr(settings, "chili_momentum_symbol_loss_cooldown_min", 5) or 5)
         counts: dict[str, int] = {}
         cooldown_until: dict[str, datetime] = {}
-        for sym, t_at, _pnl in rows:
+        for sym, t_at, _pnl, _bps, _ef in rows:
             s = str(sym).upper()
             counts[s] = counts.get(s, 0) + 1
-            cd = (t_at if isinstance(t_at, datetime) else _utcnow()) + timedelta(minutes=cd_min)
+            # EQUITY: the post-loss cooldown SCALES with the loss magnitude — a hard
+            # bailout sits the name out far longer than a scratch (the CCTG re-entry).
+            # CRYPTO: fixed base, BYTE-IDENTICAL — it re-arms fast by design and is
+            # bounded by reap_cooldown below. The 2-strike day-block is unchanged for all.
+            if str(_ef or "") in ("robinhood_spot", "alpaca_spot"):
+                _mins = _adaptive_loss_cooldown_minutes(_bps)
+            else:
+                _mins = cd_min
+            cd = (t_at if isinstance(t_at, datetime) else _utcnow()) + timedelta(minutes=_mins)
             if cd > cooldown_until.get(s, _EPOCH):
                 cooldown_until[s] = cd
         blocked = {s for s, n in counts.items() if n >= max_stops}

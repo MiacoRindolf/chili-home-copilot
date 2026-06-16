@@ -2380,6 +2380,29 @@ class Settings(BaseSettings):
         default=5.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SYMBOL_LOSS_COOLDOWN_MIN"),
     )
+    # ADAPTIVE POST-LOSS COOLDOWN (2026-06-16, Ross-discipline / the CCTG re-entry):
+    # CCTG took a −159bps scratch then re-armed 11min later into a −892bps bailout —
+    # inside neither the FIXED 5-min cooldown nor the 2-strike block. A hard bailout
+    # should sit a name out FAR longer than a small scratch. The cooldown grows with
+    # the loss the tape actually delivered (return_bps, already persisted) — derived
+    # from data, NOT a scattered magic number. EQUITY-only (crypto keeps its fixed
+    # base + reap_cooldown). The existing _loss_cooldown_min stays THE documented base.
+    chili_momentum_loss_cooldown_adaptive_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LOSS_COOLDOWN_ADAPTIVE_ENABLED"),
+        description="Kill-switch: False => byte-identical fixed-base post-loss cooldown.",
+    )
+    chili_momentum_loss_cooldown_bps_per_min: float = Field(
+        default=500.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LOSS_COOLDOWN_BPS_PER_MIN"),
+        description="THE adaptive base knob: minutes added per this many bps of realized loss, on top of the fixed base. <=0 => no scaling (fixed base).",
+    )
+    chili_momentum_loss_cooldown_max_base_mult: float = Field(
+        default=4.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LOSS_COOLDOWN_MAX_BASE_MULT"),
+        description="Irreducible SAFETY clamp (not a tuning surface): max cooldown = this x base, so a data glitch can never freeze a name for hours.",
+    )
     # A CONFIGURED broker disconnected this long raises a loud ops alarm (websocket
     # broadcast + critical log). The RH refresh token died silently for ~7 weeks
     # (2026-04-19 -> 06-10) with only info-level log spam — never again.
