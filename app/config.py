@@ -3144,6 +3144,30 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_OFI_LOCK_ENABLED"),
         description="Master gate (kill-switch #1) for the crypto order-flow exhaustion lock. false = exact legacy cushion trail + fixed target; the A/B counterfactual still logs.",
     )
+    # EVENT-DRIVEN TICK EXIT (Lever B-2, 2026-06-16): a held crypto trailing position
+    # whose order flow rolls over (OFI < thr) wakes the exit runner on the WS tick —
+    # up to 15s sooner than the poll (Ross "eject the moment the ask thickens"). A
+    # DISPATCH HINT only — tick_live_session re-checks the full INVARIANT-A-safe
+    # confluence and is the sole decider of any sell. Ships OBSERVE-FIRST: _enabled
+    # OFF logs the would-dispatch counterfactual so the operator validates before the
+    # flip (it changes WHEN winners are sold). Flip _enabled=True to act.
+    chili_momentum_exit_event_driven_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_EVENT_DRIVEN_ENABLED"),
+        description="False => observe-only (log the would-dispatch hint, do not act). True => the WS-tick OFI rollover dispatches the exit runner.",
+    )
+    chili_momentum_exit_event_driven_observe: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_EVENT_DRIVEN_OBSERVE"),
+        description="When _enabled is False, still log the would-dispatch counterfactual for validation. Set both False to fully no-op the per-tick OFI read.",
+    )
+    chili_momentum_exit_event_ofi_rollover_thr: float = Field(
+        default=-0.25,
+        ge=-1.0,
+        le=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_EVENT_OFI_ROLLOVER_THR"),
+        description="OFI (normalized [-1,1]) below this = sell-side exhaustion rollover -> dispatch hint. Loose by design: the runner's real exit gate decides.",
+    )
     chili_momentum_exit_ofi_lock_partial_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_OFI_LOCK_PARTIAL_ENABLED"),
