@@ -36,6 +36,7 @@ _kill_switch_db_error: str | None = None
 _kill_switch_db_persisted: bool | None = None
 _kill_switch_db_fail_closed_active: bool = False
 _kill_switch_last_db_check_monotonic: float = 0.0
+_daily_breach_recovery_last_check_monotonic: float = 0.0
 _kill_switch_lock = threading.Lock()
 
 
@@ -284,9 +285,80 @@ def _auto_clear_stale_daily_breach() -> None:
         logger.debug("[governance] daily-breach auto-clear skipped", exc_info=True)
 
 
+def _auto_clear_recovered_daily_breach(db: Session | None = None) -> None:
+    """A DAILY-loss breach that has RECOVERED intraday self-clears (operator
+    2026-06-16: today a transient 09:10 ET −$300 blip recovered to +$265 realized
+    but stayed FROZEN all day because the only auto-clear was the ET-day-roll — the
+    whole profitable day was locked out, and CHILI missed every mover). When the
+    switch is active for a ``global_daily_loss_breach`` AND today's realized PnL has
+    climbed back to ABOVE ``-(cap * fraction)``, the breach no longer describes
+    reality → clear it. The fraction is a HYSTERESIS band (recovery must clear the
+    cap by a margin) so realized hovering at the threshold cannot trip/clear/trip.
+    Re-trips normally if realized falls back to ``<= -cap``. Manual / non-daily /
+    per-broker-backstop activations are untouched (operator action required)."""
+    global _daily_breach_recovery_last_check_monotonic
+    with _kill_switch_lock:
+        active = _kill_switch
+        reason = _kill_switch_reason or ""
+    if not active or not reason.startswith("global_daily_loss_breach"):
+        return
+    # The per-broker aggregate failsafe ('backstop') has its own clear path.
+    if "backstop" in reason:
+        return
+    frac = float(
+        getattr(settings, "chili_daily_loss_recovery_clear_fraction", 0.5) or 0.0
+    )
+    if frac <= 0.0:
+        return  # feature disabled → date-roll / manual only
+    # Throttle: this runs a DB PnL sum and is_kill_switch_active() is on the hot
+    # order path. Bound it to at most once per interval.
+    now = time.monotonic()
+    interval = float(
+        getattr(settings, "chili_daily_loss_recovery_check_interval_s", 30.0) or 0.0
+    )
+    with _kill_switch_lock:
+        if interval > 0 and (now - _daily_breach_recovery_last_check_monotonic) < interval:
+            return
+        _daily_breach_recovery_last_check_monotonic = now
+    _own_db = False
+    try:
+        if db is None:
+            from ...db import SessionLocal
+
+            db = SessionLocal()
+            _own_db = True
+        # Non-mutating re-evaluation (activate=False → never trips here).
+        res = check_daily_loss_breach(db, activate=False)
+        realized = float(res.get("realized_usd", 0.0))
+        limit = float(res.get("limit_usd", 0.0) or 0.0)
+        if limit <= 0:
+            return
+        if realized >= -(limit * frac):
+            logger.warning(
+                "[governance] daily-loss kill switch auto-cleared on intraday RECOVERY "
+                "(realized=%.2f >= -%.2f [cap=%.2f x frac=%.2f], was: %s)",
+                realized, limit * frac, limit, frac, reason,
+            )
+            deactivate_kill_switch()
+    except Exception:
+        if _own_db and db is not None:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        logger.debug("[governance] daily-breach recovery auto-clear skipped", exc_info=True)
+    finally:
+        if _own_db and db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
 def is_kill_switch_active() -> bool:
     _refresh_kill_switch_from_db_if_due()
     _auto_clear_stale_daily_breach()
+    _auto_clear_recovered_daily_breach()
     try:
         clear_stale_broker_daily_loss_blocks()
     except Exception:
@@ -298,6 +370,7 @@ def is_kill_switch_active() -> bool:
 def is_kill_switch_active_for_session(db: Session) -> bool:
     _refresh_kill_switch_from_db_if_due(db=db)
     _auto_clear_stale_daily_breach()
+    _auto_clear_recovered_daily_breach(db=db)
     with _kill_switch_lock:
         return _kill_switch
 

@@ -3386,6 +3386,27 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_GLOBAL_DAILY_LOSS_FAILSAFE_USD"),
         description="Daily-loss floor used ONLY when pct-of-equity is configured but equity cannot be resolved (fail closed).",
     )
+    # INTRADAY-RECOVERY SELF-HEAL (operator 2026-06-16: a transient morning −$300
+    # blip that recovered to +$265 stayed frozen ALL DAY because the only auto-clear
+    # was the ET-day-roll → the whole profitable day was locked out). When the daily
+    # kill switch is active for a global_daily_loss_breach AND today's realized PnL
+    # has climbed back to ABOVE -(cap * fraction), the breach no longer describes
+    # reality → self-clear. The fraction is a HYSTERESIS band (recovery must clear it
+    # by a margin, so realized hovering at the cap cannot trip/clear/trip). Relative
+    # to the cap (adaptive, not a fixed $). Set <= 0 to disable (date-roll-only).
+    chili_daily_loss_recovery_clear_fraction: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_DAILY_LOSS_RECOVERY_CLEAR_FRACTION"),
+        description="Auto-clear a daily-loss kill switch when realized recovers to >= -(cap*fraction). 0 disables (manual/date-roll only).",
+    )
+    chili_daily_loss_recovery_check_interval_s: float = Field(
+        default=30.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_DAILY_LOSS_RECOVERY_CHECK_INTERVAL_S"),
+        description="Throttle for the intraday-recovery auto-clear PnL check (is_kill_switch_active is on the hot order path).",
+    )
     # PER-BROKER daily-loss caps (operator 2026-06-15: "dapat ang kill switch is
     # by broker"). Each broker is capped off ITS OWN real equity; a breach blocks
     # ONLY that broker (NOT the single global kill switch), so a Coinbase loss can
