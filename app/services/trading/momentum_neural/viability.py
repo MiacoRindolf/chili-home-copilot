@@ -328,6 +328,21 @@ def score_viability(
     except (TypeError, ValueError, AttributeError):
         pass
 
+    # Ross gap #6: market-wide leading-gainer boost — the day's top-N % gainers get the
+    # eyes/hot-lists that make patterns resolve. Small additive tilt (orders WITHIN the
+    # eligible set; #3 gates membership). Equity-only; no-op when the set is absent.
+    try:
+        _topg = (
+            ctx.meta.get("top_market_gainers")
+            if isinstance(getattr(ctx, "meta", None), dict)
+            else None
+        )
+        if _topg and "-USD" not in str(symbol or "").upper() and str(symbol or "").upper() in _topg:
+            base += 0.03  # small confirming boost (vs Ross's 0.20 selection / 0.10 catalyst)
+            warnings.append("Top market gainer (broker hot-list) — Ross-style")
+    except (TypeError, ValueError, AttributeError):
+        pass
+
     viability = max(0.0, min(1.0, base))
 
     rationale = (
