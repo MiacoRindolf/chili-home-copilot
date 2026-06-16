@@ -343,6 +343,21 @@ def score_viability(
     except (TypeError, ValueError, AttributeError):
         pass
 
+    # Ross gap #16: dilution-risk PENALTY — a recent S-1/424B* offering means the low-float
+    # will issue shares and fade despite good news (CTNT vs SNTI). Subtract a catalyst-scale
+    # penalty (offsets a news boost). Not a hard veto; equity-only; no-op when absent.
+    try:
+        _dil = (
+            ctx.meta.get("dilution_symbols")
+            if isinstance(getattr(ctx, "meta", None), dict)
+            else None
+        )
+        if _dil and "-USD" not in str(symbol or "").upper() and str(symbol or "").upper() in _dil:
+            base -= 0.10
+            warnings.append("Recent dilution filing (S-1/424B*) — fade risk")
+    except (TypeError, ValueError, AttributeError):
+        pass
+
     viability = max(0.0, min(1.0, base))
 
     rationale = (

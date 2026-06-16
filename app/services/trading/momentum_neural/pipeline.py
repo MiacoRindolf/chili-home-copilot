@@ -661,6 +661,25 @@ def run_momentum_neural_tick(
         except Exception:
             pass
 
+        # Ross gap #16: dilution-risk penalty. A recent S-1/424B* (registration / offering)
+        # filing means the low-float will ISSUE SHARES and fade despite good news (CTNT vs
+        # SNTI). Flag the equity movers with a recent dilution filing (SEC EDGAR, free;
+        # per-ticker cached, bounded per pass) so viability PENALIZES them. Equity-only;
+        # a no-op on the crypto-only lane (no equity movers -> no lookups). Fail-open.
+        try:
+            from .edgar import dilution_risk_symbols
+
+            _eq_syms = [
+                str(s).upper()
+                for s, sig in _ross_signals.items()
+                if isinstance(sig, dict) and not str(s).upper().endswith("-USD")
+            ]
+            _dil = dilution_risk_symbols(_eq_syms)
+            if _dil:
+                meta["dilution_symbols"] = sorted(_dil)
+        except Exception:
+            pass
+
     # E5: news-catalyst set (EARNINGS + fresh general NEWS headlines) for the catalyst
     # viability tilt. The fresh-news union is what catches Ross's explosive sympathy/
     # theme movers (a low-float small-cap that just printed a hot headline), not just
@@ -741,6 +760,7 @@ def run_momentum_neural_tick(
             "weak_catalyst_symbols",
             "sympathy_symbols",
             "top_market_gainers",
+            "dilution_symbols",
             "hot_tape",
             "symbol_countries",
             "theme_symbols",
