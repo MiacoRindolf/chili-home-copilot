@@ -674,6 +674,17 @@ def run_momentum_neural_tick(
     except Exception:
         pass
 
+    # Gap #12: WEAK-catalyst de-boost set (dilution/compliance/legal headlines Ross
+    # distrusts). Computed once per pass like catalyst_symbols; JSON-safe sorted list.
+    try:
+        from .catalyst import weak_catalyst_symbols
+
+        _weak = weak_catalyst_symbols()
+        if _weak:
+            meta["weak_catalyst_symbols"] = sorted(_weak)
+    except Exception:
+        pass
+
     ctx_meta = {
         k: meta[k]
         for k in (
@@ -691,6 +702,7 @@ def run_momentum_neural_tick(
             "ross_scores",
             "ross_below_floor",
             "catalyst_symbols",
+            "weak_catalyst_symbols",
             "hot_tape",
             "symbol_countries",
             "theme_symbols",

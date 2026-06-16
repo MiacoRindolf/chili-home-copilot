@@ -127,6 +127,45 @@ def theme_catalyst_symbols() -> set[str]:
         return set()
 
 
+# Catalyst-TYPE grading (Ross gap #12, videos 06/36): a cash-raise / compliance / legal
+# headline is a WEAK (often bearish) "catalyst" Ross DISTRUSTS — a cash-poor low-float that
+# just funded a deal will issue shares and fade (CTNT vs SNTI). It must NOT earn the same
+# catalyst boost a trial / M&A / contract (STRONG) does. We only DE-BOOST the weak class
+# (to 0); strong/medium keep the existing tilt (minimal change, fail-open). Keyword list,
+# no magic constants.
+_WEAK_CATALYST_KEYWORDS = (
+    "offering", "registered direct", "at-the-market", "atm facility", "dilut",
+    "reverse split", "reverse stock split", "going concern", "regain compliance",
+    "compliance with", "notice of delisting", "delisting", "bankrupt", "chapter 11",
+    "default", "restatement", "securities fraud", "class action", "investigation",
+    "subpoena", "private placement", "warrant exercise", "shelf registration",
+)
+
+
+def _is_weak_catalyst(title: str) -> bool:
+    """True when a headline is a WEAK / distrusted catalyst (dilution, compliance, legal).
+    Pure; fail-open to False (an unreadable title is never down-graded)."""
+    t = str(title or "").lower()
+    return any(k in t for k in _WEAK_CATALYST_KEYWORDS)
+
+
+def weak_catalyst_symbols() -> set[str]:
+    """Normalized tickers whose freshest fresh-news headline is a WEAK catalyst (the
+    de-boost set). Uses the title-carrying news fetch; fail-open to empty (no de-boost)
+    when the news feed is unavailable, so a missing feed never strips the catalyst tilt."""
+    try:
+        from ...massive_client import get_recent_news_items
+
+        return {
+            _norm(tk)
+            for tk, title in get_recent_news_items(max_age_min=_news_catalyst_max_age_min())
+            if _is_weak_catalyst(title)
+        }
+    except Exception:
+        logger.debug("[catalyst] weak-catalyst grade fetch failed", exc_info=True)
+        return set()
+
+
 # A "big mover" = a LULD-scale day move. Ross's hot days (2026-06-09/10) print
 # MULTIPLE +30%..+1000% names rotating ("hot potato"); a normal day has 0-1.
 HOT_TAPE_BIG_MOVE_PCT = 30.0
@@ -161,6 +200,7 @@ def catalyst_viability_delta(
     hot_tape: bool = False,
     hq_country: str | None = None,
     theme_symbols: set[str] | None = None,
+    weak_symbols: set[str] | None = None,
 ) -> float:
     """The additive viability tilt for a symbol — REGIME-AWARE.
 
@@ -177,6 +217,11 @@ def catalyst_viability_delta(
         return 0.0
     half = _catalyst_tilt() * 0.5
     has_news = bool(catalyst_symbols) and _norm(symbol) in catalyst_symbols
+    # Gap #12: a WEAK catalyst (dilution / compliance / legal) earns NO boost — Ross
+    # distrusts a cash-raise/compliance headline (the name will issue shares and fade).
+    # Only the weak class is stripped; strong/medium keep the tilt below.
+    if has_news and weak_symbols and _norm(symbol) in weak_symbols:
+        return 0.0
     if not hot_tape:
         return half if has_news else 0.0
     if has_news:
