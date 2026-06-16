@@ -544,7 +544,22 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
         if not sub:
             return []
         scored = score_universe(sub, weights=ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED)
-        return [r.symbol for r in sorted(scored.values(), key=lambda r: r.rank)]
+        ranked = [r.symbol for r in sorted(scored.values(), key=lambda r: r.rank)]
+        # Stage 2b: reflect the LIVE eligibility FLOOR (gap #3) — live marks a name below
+        # Ross's RVOL/change floor as NOT live-eligible, so the replay must drop the same
+        # names or it would arm a set live never would. As-of faithful: reads the same
+        # as-of signals (daily_change_pct + rvol) the floor uses live. (The viability
+        # RANKING tilts — sympathy/gainer/catalyst-grade/dilution/close-strength — reorder
+        # WITHIN this set; the structural ones are as-of, the fetch-based ones would read
+        # CURRENT external data in replay, so they are intentionally NOT re-applied here —
+        # the floor is the gate that decides WHO arms, which is what changes the trade set.)
+        try:
+            from .ross_momentum import below_explosive_floor
+
+            ranked = [s for s in ranked if not below_explosive_floor(sub.get(s, sub.get(s.upper(), {})))]
+        except Exception:
+            pass
+        return ranked
 
     def _rank(now) -> list[str]:
         """Dispatch the as-of ranker: full-pipeline re-screen+re-score when enabled,
