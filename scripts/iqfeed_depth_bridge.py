@@ -42,6 +42,14 @@ HOST, PORT = "127.0.0.1", 9200
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili")
 SNAP_INTERVAL_S = 2.0     # per-symbol snapshot write cadence
 REFRESH_S = 20.0          # live-session symbol refresh cadence
+# STICKY RE-SUBSCRIBE (2026-06-16, the LION dead-L2 bug): IQFeed silently drops a
+# per-symbol depth subscription. The loop only sent WOR/WPL on FIRST-SEEN, so once a
+# held name was in ``watched`` it was never re-sent — LION's book went dark at 18:17
+# while the position was held to 20:17 (33 other names kept streaming), blinding the
+# exit (n_snaps=0 -> sell_into_strength gated 'stale_or_thin' 1111x). Re-send the depth
+# subscription for every live-session name each refresh so a silent drop self-heals.
+# Idempotent (deduped by the venue book). =0 reverts to first-seen-only.
+STICKY_RESUBSCRIBE = os.environ.get("CHILI_IQFEED_STICKY_RESUBSCRIBE", "1") != "0"
 DEPTH_LEVELS = 5
 STALE_VENUE_ROW_S = 900.0  # drop venue levels not refreshed in 15min (overnight ghosts)
 
@@ -198,6 +206,20 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
                 _send(f"w{sym}")
                 watched.add(sym)
                 log.info("watching depth: %s", sym)
+            # STICKY RE-SUBSCRIBE (LION dead-L2 fix): re-send the depth subscription for
+            # every live-session name each refresh (not just first-seen) so a silent
+            # IQFeed per-symbol drop self-heals. Held positions are few; the re-send is
+            # idempotent (venue-book deduped). Also surface a held name whose book has
+            # gone empty (a silent drop being healed) so we can SEE the gap.
+            if STICKY_RESUBSCRIBE and target:
+                with books_lock:
+                    _dark = [s for s in target if s not in books or books[s].snapshot() is None]
+                for sym in (target - fresh):
+                    _send(f"WOR,{sym}")
+                    _send(f"WPL,{sym}")
+                    _send(f"w{sym}")
+                if _dark:
+                    log.warning("depth re-subscribe (book empty): %s", ",".join(sorted(_dark)))
             for sym in watched - target:
                 _send(f"ROR,{sym}")
                 _send(f"RPL,{sym}")
