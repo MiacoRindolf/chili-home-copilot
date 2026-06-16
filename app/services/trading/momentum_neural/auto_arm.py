@@ -1091,6 +1091,24 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     except Exception:
         pass
 
+    # Guard 5b: green-to-red session breaker (Ross gap #8). Stricter complement of the
+    # giveback halt — once the day PEAKED green above a small equity-relative activation
+    # and current realized PnL has round-tripped to <= $0, STOP arming for the session
+    # (the giveback's above-$0 floor misses a true round-trip into the red). Fail-open.
+    try:
+        from .risk_evaluator import evaluate_green_to_red_halt
+
+        _g2r = evaluate_green_to_red_halt(
+            db, user_id=int(uid), execution_family=_lane_execution_family()
+        )
+        if _g2r.get("halted"):
+            out["skipped"] = "green_to_red"
+            out["daily_pnl_usd"] = _g2r.get("daily_pnl_usd")
+            out["peak_pnl_usd"] = _g2r.get("peak_pnl_usd")
+            return out
+    except Exception:
+        pass
+
     # Clear expired pending arms so they do not pin a concurrency slot.
     try:
         from .automation_query import expire_stale_live_arm_sessions
