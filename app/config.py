@@ -2873,6 +2873,12 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_DEEP_RECLAIM_DIPBUY_STOP_BUFFER_BPS"),
         description="Stop sits this many bps under the dip low (ATR-relative max with 0.25xATR%; bps not cents = class-aware). The vol-floor layer widens it if too tight.",
     )
+    chili_momentum_deep_reclaim_collapse_cap_mult: float = Field(
+        default=1.6,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DEEP_RECLAIM_COLLAPSE_CAP_MULT"),
+        description="Deep-reclaim dip-buy: a dip deeper than the (adaptive) collapse cap is normally a breakdown, but if price has ALREADY reclaimed back within tol of the run-high it was BOUGHT, not a collapse (Ross's halt-resume dip-buy; WNW 2026-06-16). Allow such RECLAIMED dips up to this multiple of the collapse cap (1.0 = off/old behavior). Bounded so a true -60% collapse is still rejected even if it bounced.",
+    )
     # ── Ross FIRST-PULLBACK entry (the EARLIEST, most aggressive momentum entry) ──
     # Ross buys the FIRST 1m candle to make a new high after the FIRST shallow pullback
     # off a confirmed impulse (he caught JRSH this way for +$21k). CHILI's existing

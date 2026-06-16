@@ -685,8 +685,22 @@ def _evaluate_deep_reclaim(
     if run_high <= 0:
         return None
     depth = (run_high - dip_low) / run_high
-    if depth > _collapse_cap(atr_pct):
-        return None
+    cap = _collapse_cap(atr_pct)
+    if depth > cap:
+        # A dip deeper than the vol-relative collapse cap is normally a BREAKDOWN —
+        # reject. EXCEPTION (Ross's halt-resume dip-buy; WNW 2026-06-16 dropped ~31%
+        # then RECLAIMED to new highs but was rejected here and never entered): when
+        # price has ALREADY reclaimed back to within `tol` of the run-high, the deep
+        # dip was BOUGHT, not a collapse — the downstream held>=confirm_bars +
+        # full_reclaim confirmation and the reclaim-low stop bound the risk. A still-
+        # FALLING knife never reaches this (its price is far below run_high). Bounded by
+        # ONE documented multiple so a true collapse (e.g. -60%) is still rejected even
+        # if it bounced. BYTE-IDENTICAL for shallow pullbacks (depth <= cap); only deep-
+        # but-reclaimed dips in (cap, cap*mult] change. Reuses the existing `tol`.
+        _cap_mult = float(getattr(settings, "chili_momentum_deep_reclaim_collapse_cap_mult", 1.6) or 1.6)
+        _reclaimed = float(close.iloc[cur]) >= run_high * (1.0 - tol)
+        if not (_reclaimed and depth <= cap * _cap_mult):
+            return None
     # EARLY DIP-BUY (Ross "first reversal off the dip"): try the earlier NEAR-DIP
     # entry BEFORE the recovery-high reclaim — fire/arm on the first candle to tick
     # the dip bar's OWN pullback high, behind the 3-signal knife gate. On ANY decline
