@@ -7,6 +7,7 @@ portfolio/positions views and smart order routing.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -236,8 +237,55 @@ def get_combined_positions() -> list[dict[str, Any]]:
             p["broker_source"] = BROKER_COINBASE
             positions.append(p)
 
+    positions = _drop_dust_positions(positions)
     positions.sort(key=lambda p: p.get("equity", 0) or 0, reverse=True)
     return positions
+
+
+# Hide crypto holdings worth less than this from the positions VIEW: unsellable
+# DUST and delisted residue (e.g. a 302,664-unit balance of a dead token) carry
+# equity=0 from the raw broker call and otherwise flood the cockpit as $0 'phantom
+# positions'. One documented display floor; override via env. DISPLAY-ONLY — the
+# trading/reconcile paths read coinbase_service.get_positions() directly and never
+# see this filter, so a sub-floor holding is still reconciled, just not shown.
+_DUST_DISPLAY_FLOOR_USD = float(os.environ.get("CHILI_MIN_POSITION_DISPLAY_USD", "1.0"))
+
+
+def _drop_dust_positions(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop unsellable crypto dust / delisted residue from the positions view and
+    enrich each surviving crypto holding with its live USD value (the raw Coinbase
+    position carries equity=0, so the cockpit otherwise shows $0). Non-Coinbase rows
+    pass through untouched. FAIL-OPEN: if the price map can't be fetched, nothing is
+    hidden — a transient price outage must never blank a real position."""
+    try:
+        price_map = coinbase_service.get_all_spot_prices()
+    except Exception:
+        price_map = {}
+    if not price_map:
+        return positions
+    # A complete product list is hundreds of entries; require a substantial map
+    # before treating 'ticker absent' as delisted (else a partial fetch would hide
+    # real positions).
+    substantial = len(price_map) > 50
+    kept: list[dict[str, Any]] = []
+    for p in positions:
+        if p.get("broker_source") != BROKER_COINBASE:
+            kept.append(p)
+            continue
+        ticker = str(p.get("ticker") or "")
+        px = price_map.get(ticker)
+        if px is None:
+            if substantial:
+                continue  # delisted / unsupported product → dust, hide
+            kept.append(p)
+            continue
+        value = float(p.get("quantity") or 0.0) * px
+        if value < _DUST_DISPLAY_FLOOR_USD:
+            continue  # unsellable dust
+        p["current_price"] = px
+        p["equity"] = round(value, 2)
+        kept.append(p)
+    return kept
 
 
 def check_duplicate_position(ticker: str) -> list[str]:
