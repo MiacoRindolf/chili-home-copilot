@@ -3144,6 +3144,29 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_OFI_LOCK_ENABLED"),
         description="Master gate (kill-switch #1) for the crypto order-flow exhaustion lock. false = exact legacy cushion trail + fixed target; the A/B counterfactual still logs.",
     )
+    # HARD MAX-LOSS-PER-TRADE CIRCUIT (#1 profitability lever, 2026-06-17). An 87-fill
+    # audit found the lane net -$157.68 BUT the entire deficit is a -$697.76 tail of 4
+    # RH low-float names (MTEN -896bps, SDOT -729bps, CCTG -893bps, CAST -497bps) that
+    # GAPPED 5-9% THROUGH their tight structural stops and got a deep market-exit fill.
+    # The circuit caps each trade's loss at K x the position's REALIZED structural risk
+    # (stop_distance x qty — NOT the frozen risk_usd budget, which overstates ~12x) and
+    # flattens at an ABSOLUTE loss-anchored limit (avg - K*stop_distance, place_limit_
+    # order_gtc, no repeg). Because the floor is anchored to entry+structural-risk (not a
+    # falling bid), a 9%-deep fill is mechanically impossible. RH-equity-first (where the
+    # tail lives); crypto may still fire but keeps the bid-relative ladder (dust, 24/7,
+    # no LULD). false = byte-identical legacy exits.
+    chili_momentum_max_loss_circuit_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_CIRCUIT_ENABLED"),
+        description="Kill-switch for the hard max-loss-per-trade circuit. false = exact legacy ladder/stop bailouts (byte-identical).",
+    )
+    chili_momentum_max_loss_risk_multiple: float = Field(
+        default=2.0,
+        ge=1.0,
+        le=6.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_RISK_MULTIPLE"),
+        description="K — the circuit fires when unrealized loss <= -(K x structural_risk) and flattens at avg - K*stop_distance. ge=1.0 so the floor can never sit looser than the structural stop.",
+    )
     # EVENT-DRIVEN TICK EXIT (Lever B-2, 2026-06-16): a held crypto trailing position
     # whose order flow rolls over (OFI < thr) wakes the exit runner on the WS tick —
     # up to 15s sooner than the poll (Ross "eject the moment the ask thickens"). A

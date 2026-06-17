@@ -425,6 +425,74 @@ def compute_risk_first_quantity(
     }
 
 
+def max_loss_circuit_decision(
+    *,
+    avg: float,
+    qty: float,
+    stop_distance: float,
+    bid: float | None,
+    k: float,
+) -> dict[str, Any]:
+    """Hard max-loss-per-trade circuit (pure, zero-I/O, unit-testable).
+
+    The threshold basis is the REALIZED STRUCTURAL RISK = ``stop_distance * qty``
+    (the per-share structural stop distance frozen in the position's entry sizing),
+    NOT the frozen ``risk_usd`` budget — verified live, ``risk_usd``=$19.30 vs
+    structural=$1.61, a 12x overstatement that would let a $38 hole open on a
+    $1.61-stop name. The flatten anchor ``floor_price = avg - k*stop_distance`` is an
+    ABSOLUTE loss floor (not a falling-bid ladder), so a deep gap-through fill is
+    mechanically impossible.
+
+    FAIL-CLOSED-SAFE: any unusable basis (non-positive/non-finite stop_distance, qty,
+    avg, or bid; bid None) returns ``breach=False`` with ``reason='insufficient_basis'``
+    — the circuit NEVER fires on bad basis.
+
+    Returns a dict: ``breach`` (bool), ``structural_risk_usd``, ``threshold_usd``,
+    ``unrealized_pnl``, ``floor_price``, ``reason``.
+    """
+    a = float(avg or 0.0)
+    q = float(qty or 0.0)
+    sd = float(stop_distance or 0.0)
+    kk = float(k or 0.0)
+    b = None
+    try:
+        b = float(bid) if bid is not None else None
+    except (TypeError, ValueError):
+        b = None
+    if (
+        sd <= 0
+        or not math.isfinite(sd)
+        or q <= 0
+        or not math.isfinite(q)
+        or a <= 0
+        or not math.isfinite(a)
+        or b is None
+        or not math.isfinite(b)
+        or b <= 0
+    ):
+        return {
+            "breach": False,
+            "structural_risk_usd": None,
+            "threshold_usd": None,
+            "unrealized_pnl": None,
+            "floor_price": None,
+            "reason": "insufficient_basis",
+        }
+    structural_risk_usd = sd * q
+    threshold_usd = kk * structural_risk_usd
+    unrealized_pnl = (b - a) * q
+    floor_price = a - kk * sd
+    breach = unrealized_pnl <= -threshold_usd
+    return {
+        "breach": bool(breach),
+        "structural_risk_usd": structural_risk_usd,
+        "threshold_usd": threshold_usd,
+        "unrealized_pnl": unrealized_pnl,
+        "floor_price": floor_price,
+        "reason": "max_loss_circuit_breach" if breach else "within_threshold",
+    }
+
+
 def liquidity_capped_notional(
     equity_notional_cap: float, dollar_volume: float | None, *, fraction: float | None = None
 ) -> float:
