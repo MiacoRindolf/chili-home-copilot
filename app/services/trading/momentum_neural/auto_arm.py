@@ -41,6 +41,15 @@ _REAPABLE_PRE_ENTRY_STATES = frozenset(
     {STATE_ARMED_PENDING_RUNNER, STATE_QUEUED_LIVE, STATE_WATCHING_LIVE}
 )
 
+# Rank-displacement reaps a STRICT SUBSET — only the two TRULY-INERT pre-entry states.
+# NOT watching_live: live_fsm makes watching_live -> live_entry_candidate a single legal
+# tick, so a watching_live name can fire (place a broker order) within one tick of a
+# reap — exactly the cancel-races-fill window that manufactured the CRVO orphan. Rank-
+# displacement only ever bumps names that are provably sitting still.
+_RANK_DISPLACE_REAPABLE_STATES = frozenset(
+    {STATE_ARMED_PENDING_RUNNER, STATE_QUEUED_LIVE}
+)
+
 
 def _auto_arm_user_id() -> int | None:
     return getattr(settings, "chili_autotrader_user_id", None) or getattr(
@@ -194,6 +203,20 @@ def _reap_cooldown_active(sym_u: str, now: datetime) -> bool:
     return at is not None and (now - at).total_seconds() < cd_sec
 
 
+def _write_reap_cooldown(sym_u: str, now: datetime) -> None:
+    """Record a pre-entry reap/displacement of ``sym_u`` (UPPER) so the name sits out
+    ``chili_momentum_reap_cooldown_sec`` before it can re-arm — the oscillation damper.
+    CLASS-AGNOSTIC (2026-06-17): generalized off the old '-USD'-only gate so EQUITIES are
+    damped too (the rank-displacement motivating case, UTSI, is an equity). Bounded prune."""
+    if not sym_u:
+        return
+    _REAP_COOLDOWN[sym_u] = now
+    if len(_REAP_COOLDOWN) > 500:
+        _stale = now - timedelta(hours=1)
+        for _k in [k for k, v in _REAP_COOLDOWN.items() if v < _stale]:
+            _REAP_COOLDOWN.pop(_k, None)
+
+
 def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: datetime) -> int:
     """Cancel PRE-ENTRY live sessions that have watched too long without entering,
     freeing the concurrency slot for a fresher surging candidate — Ross moves on
@@ -242,18 +265,12 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
             cancel_automation_session(db, user_id=int(user_id), session_id=int(s.id))
             reaped += 1
             # Cool this name down so it doesn't immediately re-arm the slot it just
-            # churned without firing (only PROGRESSING tick-armed setups got here are
-            # already excluded above via watch_break_level). CRYPTO-ONLY (-USD): the
-            # diagnosed churn (RENDER/WLD); equity arming stays byte-identical. Bounded
-            # prune to stay small.
+            # churned without firing (PROGRESSING tick-armed setups are already excluded
+            # above via watch_break_level). CLASS-AGNOSTIC (2026-06-17): now damps
+            # equities too (was '-USD'-only) so the rank-displacement loop can't
+            # oscillate on an equity it just freed.
             try:
-                _rs = str(s.symbol or "").upper()
-                if _rs.endswith("-USD"):
-                    _REAP_COOLDOWN[_rs] = now
-                    if len(_REAP_COOLDOWN) > 500:
-                        _stale = now - timedelta(hours=1)
-                        for _k in [k for k, v in _REAP_COOLDOWN.items() if v < _stale]:
-                            _REAP_COOLDOWN.pop(_k, None)
+                _write_reap_cooldown(str(s.symbol or "").upper(), now)
             except Exception:
                 pass
             logger.warning(
@@ -973,6 +990,254 @@ def _freshness_rank(fresh: Any) -> float:
     return float(getattr(fresh, "position_in_range", 0.0) or 0.0) if fresh is not None else 0.0
 
 
+def _current_viability_scores(db: Session, symbols: set[str]) -> dict[str, float]:
+    """Latest viability_score per symbol (keyed UPPER) from momentum_symbol_viability —
+    the SAME source/freshness as the newcomer's board score, so rank-displacement compares
+    like with like. A symbol absent from the table -> 0.0 (fell out of the universe =
+    maximally displaceable). Read-only; fail-open to {}."""
+    syms = {s for s in symbols if s}
+    if not syms:
+        return {}
+    try:
+        rows = (
+            db.query(MomentumSymbolViability.symbol, MomentumSymbolViability.viability_score)
+            .filter(MomentumSymbolViability.symbol.in_(tuple(syms)))
+            .order_by(MomentumSymbolViability.symbol, MomentumSymbolViability.freshness_ts.desc())
+            .all()
+        )
+    except Exception:
+        return {}
+    out: dict[str, float] = {}
+    for sym, score in rows:
+        su = str(sym or "").upper()
+        if su and su not in out:  # ordered freshness desc -> first row per symbol is latest
+            out[su] = float(score or 0.0)
+    return out
+
+
+def _symbols_with_inflight_entry(db: Session, *, user_id: int | None) -> set[str]:
+    """Symbols (UPPER) with ANY live session past the inert pre-entry stage OR carrying a
+    broker entry order — the PER-SYMBOL orphan veto for rank-displacement: never reap an
+    inert twin of a symbol whose SIBLING session has an in-flight order (the CRVO/MTEN twin
+    orphan). Fail-CLOSED: an unreadable snapshot vetoes that symbol."""
+    out: set[str] = set()
+    try:
+        from .live_runner import _unresolved_entry_order_ids
+    except Exception:
+        _unresolved_entry_order_ids = None  # type: ignore
+    try:
+        q = db.query(
+            TradingAutomationSession.symbol,
+            TradingAutomationSession.state,
+            TradingAutomationSession.risk_snapshot_json,
+        ).filter(
+            TradingAutomationSession.mode == "live",
+            TradingAutomationSession.state.in_(tuple(LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY)),
+        )
+        if user_id is not None:
+            q = q.filter(TradingAutomationSession.user_id == int(user_id))
+        rows = q.all()
+    except Exception:
+        return out
+    for sym, state, snap in rows:
+        su = str(sym or "").upper()
+        if not su:
+            continue
+        if state not in _RANK_DISPLACE_REAPABLE_STATES:
+            out.add(su)  # watching/candidate/pending/entered/... -> in-flight
+            continue
+        try:
+            le = (snap or {}).get("momentum_live_execution") or {}
+            _unres = _unresolved_entry_order_ids(le) if _unresolved_entry_order_ids else []
+            if le.get("entry_submitted") or le.get("entry_order_id") or _unres:
+                out.add(su)
+        except Exception:
+            out.add(su)  # cannot verify -> veto conservatively
+    return out
+
+
+def _guarded_reap_for_displacement(
+    db: Session, *, user_id: int | None, session_id: int, expected_symbol: str
+) -> bool:
+    """Reap ONE inert pre-entry session to free a slot — SAFELY. Mirrors the live runner's
+    row lock (with_for_update(nowait=True), live_runner.py:2283): if the runner holds the
+    row (mid-tick, possibly submitting an order), the lock fails -> ABORT, never reap. Under
+    the lock, re-verify the row is STILL inert + carries NO entry order (entry_submitted /
+    entry_order_id / unresolved history) before cancelling, then writes the reap cooldown and
+    COMMITS its own txn. Fail-CLOSED: any doubt -> rollback, no reap. True only on commit."""
+    from .automation_query import cancel_automation_session
+    from .live_runner import _unresolved_entry_order_ids
+
+    try:
+        q = db.query(TradingAutomationSession).filter(
+            TradingAutomationSession.id == int(session_id)
+        )
+        if user_id is not None:
+            q = q.filter(TradingAutomationSession.user_id == int(user_id))
+        locked = q.with_for_update(nowait=True).one_or_none()
+    except Exception:
+        # lock contention (runner mid-tick) or query error -> never reap on doubt
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return False
+    try:
+        if locked is None:
+            db.rollback()
+            return False
+        if locked.state not in _RANK_DISPLACE_REAPABLE_STATES:
+            db.rollback()
+            return False
+        if str(locked.symbol or "").upper() != str(expected_symbol or "").upper():
+            db.rollback()
+            return False
+        le: dict[str, Any] = {}
+        try:
+            _snap = locked.risk_snapshot_json or {}
+            _le = _snap.get("momentum_live_execution") if isinstance(_snap, dict) else None
+            le = _le if isinstance(_le, dict) else {}
+        except Exception:
+            le = {}
+        if le.get("entry_submitted") or le.get("entry_order_id") or _unresolved_entry_order_ids(le):
+            db.rollback()
+            return False
+        # Proven inert + orderless UNDER THE LOCK -> safe to cancel within this txn.
+        res = cancel_automation_session(
+            db, user_id=(int(user_id) if user_id is not None else None), session_id=int(session_id)
+        )
+        if not (isinstance(res, dict) and res.get("ok")):
+            db.rollback()
+            return False
+        _write_reap_cooldown(str(expected_symbol or "").upper(), _utcnow())
+        db.commit()
+        return True
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.debug(
+            "[auto_arm] guarded displacement reap failed session=%s", session_id, exc_info=True
+        )
+        return False
+
+
+def _maybe_rank_displace(
+    db: Session, *, user_id: int | None, newcomer: MomentumSymbolViability, busy_symbols: set[str]
+) -> tuple[bool, dict[str, Any]]:
+    """When arm slots are full, evict the worst-ranked INERT pre-entry watcher so a higher-
+    ranked NEWCOMER can arm. Ranks victims by CURRENT viability score (same source as the
+    newcomer). Guards: strict score margin, min-dwell (off updated_at), reap-cooldown,
+    per-symbol in-flight veto, and a row-locked guarded reap. PARITY: returns (False, ...)
+    without mutating any row when nothing qualifies."""
+    margin_floor = float(getattr(settings, "chili_momentum_rank_displacement_margin", 0.02) or 0.0)
+    min_dwell = float(getattr(settings, "chili_momentum_rank_displacement_min_dwell_sec", 45.0) or 0.0)
+    now = _utcnow()
+    nsym = str(newcomer.symbol or "").upper()
+    nscore = float(newcomer.viability_score or 0.0)
+    try:
+        q = db.query(TradingAutomationSession).filter(
+            TradingAutomationSession.mode == "live",
+            TradingAutomationSession.state.in_(tuple(_RANK_DISPLACE_REAPABLE_STATES)),
+            TradingAutomationSession.execution_family != "alpaca_spot",  # never reap a paper twin
+        )
+        if user_id is not None:
+            q = q.filter(TradingAutomationSession.user_id == int(user_id))
+        victims = q.all()  # .all() — NEVER .one_or_none() (would crash on the dupe-symbol rows)
+    except Exception:
+        return False, {"reason": "victim_query_failed"}
+    if not victims:
+        return False, {"reason": "no_reapable"}
+    score_map = _current_viability_scores(db, {str(v.symbol or "") for v in victims})
+
+    def _vscore(v) -> float:
+        return float(score_map.get(str(v.symbol or "").upper(), 0.0))
+
+    victims.sort(key=lambda v: (_vscore(v), v.updated_at or now))  # worst (lowest score) first
+    inflight = _symbols_with_inflight_entry(db, user_id=user_id)
+    for v in victims:
+        vsym = str(v.symbol or "").upper()
+        if not vsym or vsym == nsym:
+            continue
+        vscore = _vscore(v)
+        if nscore - vscore < margin_floor:
+            continue  # newcomer must STRICTLY beat by the margin (parity no-op otherwise)
+        try:
+            dwell = (now - (v.updated_at or v.started_at or now)).total_seconds()
+        except Exception:
+            dwell = 1e9
+        if dwell < min_dwell:
+            continue  # freshly-armed watcher — let it settle/fire before it can be bumped
+        if _reap_cooldown_active(vsym, now):
+            continue  # just churned/displaced — don't re-bump
+        if vsym in inflight:
+            continue  # PER-SYMBOL orphan veto: a sibling session holds an in-flight order
+        if _guarded_reap_for_displacement(
+            db, user_id=user_id, session_id=int(v.id), expected_symbol=v.symbol
+        ):
+            return True, {
+                "reaped_session": int(v.id),
+                "reaped_symbol": v.symbol,
+                "reaped_score": round(vscore, 4),
+                "newcomer": nsym,
+                "newcomer_score": round(nscore, 4),
+                "margin": round(nscore - vscore, 4),
+            }
+        # reap aborted (lock race / became non-inert) -> try the next-worst victim
+    return False, {"reason": "no_displaceable"}
+
+
+def _try_displacement_for_full_slots(db: Session, *, uid: int | None, out: dict[str, Any]) -> bool:
+    """Slot-full hook: if rank-displacement is ON and no per-pass cancel has fired yet,
+    pick the best fresh non-busy eligible NEWCOMER and try to displace the worst inert
+    watcher to free a slot. Returns True iff a slot was freed. PARITY: flag OFF -> returns
+    False immediately, touching nothing (byte-identical to skip-on-full)."""
+    if not bool(getattr(settings, "chili_momentum_rank_displacement_enabled", True)):
+        return False
+    # Per-pass cancel budget shared with the stale-reaper (out['reaped']) — at most 1/pass.
+    if out.get("reaped") or out.get("displaced"):
+        return False
+    try:
+        cands = _fresh_live_eligible_candidates(db, limit=_scan_limit())
+    except Exception:
+        return False
+    if not cands:
+        return False
+    try:
+        busy = _symbols_with_active_live_session(db, user_id=uid)
+    except Exception:
+        return False
+    newcomer = None
+    for c in cands:
+        su = str(c.symbol or "").upper()
+        if not su or su in busy:
+            continue
+        if _auto_arm_crypto_only() and not _is_coinbase_tradeable_symbol(c.symbol):
+            continue
+        if _auto_arm_equity_only() and _is_coinbase_tradeable_symbol(c.symbol):
+            continue
+        if not _symbol_market_open(c.symbol):
+            continue
+        if _reap_cooldown_active(su, _utcnow()):
+            continue
+        newcomer = c
+        break
+    if newcomer is None:
+        return False
+    displaced, info = _maybe_rank_displace(db, user_id=uid, newcomer=newcomer, busy_symbols=busy)
+    if displaced:
+        out["displaced"] = info
+        logger.warning(
+            "[auto_arm] rank_displaced session=%s %s (score %.4f) for newcomer %s (score %.4f, "
+            "margin %.4f) — freed a full slot for a higher-ranked mover",
+            info.get("reaped_session"), info.get("reaped_symbol"), info.get("reaped_score", 0.0),
+            info.get("newcomer"), info.get("newcomer_score", 0.0), info.get("margin", 0.0),
+        )
+        return True
+    return False
+
+
 def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     """Single auto-arm pass. Returns a summary dict (armed 0/1)."""
     out: dict[str, Any] = {"checked": 0, "scanned": 0, "armed": 0, "skipped": None}
@@ -1029,9 +1294,17 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         _fanout = int(getattr(settings, "chili_momentum_watch_fanout_max", 15) or 15)
         _watch_ct = _count_watching_prefill(db, user_id=uid)
         if _watch_ct >= _fanout:
-            out["skipped"] = "watch_fanout_full"
-            out["watching"] = _watch_ct
-            return out
+            # RANK-DISPLACEMENT: rather than skip, try to evict the worst inert watcher so
+            # a higher-ranked newcomer can take the slot. Parity: flag-off -> byte-identical.
+            if not _try_displacement_for_full_slots(db, uid=uid, out=out):
+                out["skipped"] = "watch_fanout_full"
+                out["watching"] = _watch_ct
+                return out
+            _watch_ct = _count_watching_prefill(db, user_id=uid)
+            if _watch_ct >= _fanout:
+                out["skipped"] = "watch_fanout_full"
+                out["watching"] = _watch_ct
+                return out
         try:
             _pos_ct = _count_open_positions(db, user_id=int(uid), mode="live")
             if _pos_ct >= _effective_position_cap(crypto=False):
@@ -1044,9 +1317,16 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         # LEGACY single-cap path — byte-identical to pre-decouple behaviour.
         active = _active_live_session_count(db, user_id=uid)
         if active >= _max_live_sessions():
-            out["skipped"] = "live_session_active"
-            out["active"] = active
-            return out
+            # RANK-DISPLACEMENT (legacy single-cap path): same as the decoupled path above.
+            if not _try_displacement_for_full_slots(db, uid=uid, out=out):
+                out["skipped"] = "live_session_active"
+                out["active"] = active
+                return out
+            active = _active_live_session_count(db, user_id=uid)
+            if active >= _max_live_sessions():
+                out["skipped"] = "live_session_active"
+                out["active"] = active
+                return out
 
     # Guard 3: portfolio drawdown breaker (Hard Rule 2 — not enforced in the
     # arm path; shadow mode returns not-tripped).
@@ -1199,9 +1479,9 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         if _sym_u in loss_blocked or _utcnow() < loss_cooldown_until.get(_sym_u, _EPOCH):
             out["loss_guard_skipped"] += 1
             continue  # 2-strike / post-loss cooldown — walk away like Ross does
-        if _sym_u.endswith("-USD") and _reap_cooldown_active(_sym_u, _utcnow()):
+        if _reap_cooldown_active(_sym_u, _utcnow()):
             out["reap_cooldown_skipped"] += 1
-            continue  # crypto just churned the slot without firing — let a different mover watch
+            continue  # just churned/displaced the slot without firing — let a different mover watch
         if not _symbol_market_open(c.symbol):
             continue  # equities only during their session; crypto always passes (24/7)
         # Crypto liquidity floor (A1): the Ross scorer is blind to executability,

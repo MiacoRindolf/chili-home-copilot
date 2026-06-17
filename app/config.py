@@ -4021,6 +4021,34 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_REAP_COOLDOWN_SEC"),
     )
+    # RANK-DISPLACEMENT (2026-06-17): when arm slots are FULL, evict the worst-ranked
+    # truly-inert pre-entry watcher (armed_pending_runner/queued_live ONLY) so a
+    # top-ranked NEWCOMER can arm — instead of first-come slots starving the best
+    # movers (UTSI #7 @0.7275 sat un-armed all session while 7/9 slots held 0.55-0.69
+    # names; Ross made +$52k on UTSI). Guarded: row-locked reap (no orphan), per-symbol
+    # in-flight veto, min-dwell + reap-cooldown anti-thrash, 1 displacement/pass.
+    # Kill-switch: set =0 to revert to byte-identical skip-on-full (no redeploy).
+    chili_momentum_rank_displacement_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RANK_DISPLACEMENT_ENABLED"),
+    )
+    # The ONE adaptive base knob: minimum CURRENT-viability-score gap a newcomer must
+    # STRICTLY exceed over the worst inert victim to displace it (hysteresis). Derived
+    # as a score-gap margin within the live batch — not a fixed per-class number. Raise
+    # to damp churn; 0.0 = any-better displaces.
+    chili_momentum_rank_displacement_margin: float = Field(
+        default=0.02,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RANK_DISPLACEMENT_MARGIN"),
+    )
+    # Anti-thrash: a victim must have sat in its inert state (updated_at) at least this
+    # long before it is displaceable, so a freshly-armed watcher is not instantly bumped.
+    chili_momentum_rank_displacement_min_dwell_sec: float = Field(
+        default=45.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RANK_DISPLACEMENT_MIN_DWELL_SEC"),
+    )
     # A6 (open-burst bandwidth): arm up to N distinct fresh candidates per
     # auto-arm pass while slots remain (was 1/pass; 74 fresh candidates in the
     # 13:30-13:50Z burst vs 6 armed).
