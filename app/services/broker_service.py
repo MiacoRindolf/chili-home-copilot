@@ -1883,6 +1883,44 @@ def _phase1_close_dropped_positions(
     db.commit()
 
 
+def _synced_position_management_scope(db: Session, ticker: str) -> str:
+    """Resolve the management_scope to stamp on a broker-synced open position.
+
+    momentum-orphan adopt-on-cancel (2026-06-17): when a momentum_neural session
+    lost track of a filled entry order (CRVO/FTHM: cancel raced the fill -> the
+    broker holds the position but the session went terminal), the broker-sync
+    backstop would mint/adopt the Trade as ``broker_sync`` and the legacy
+    reconciler would mint a SECOND manager (stop + Trade) -> double-sell risk.
+    The single-writer baton: if the symbol had a recent LIVE momentum session,
+    stamp ``momentum_neural`` so the reconciler's scope-skip yields management to
+    the momentum lane (which now adopts on cancel). FAIL-SAFE: any error -> the
+    legacy ``broker_sync`` default (today's behavior, never worse).
+
+    Kill-switch: when ``chili_momentum_adopt_on_cancel_fill_enabled`` is False this
+    returns ``broker_sync`` unconditionally — byte-identical to pre-fix behavior.
+    """
+    from .trading.management_scope import (
+        MANAGEMENT_SCOPE_BROKER_SYNC,
+        MANAGEMENT_SCOPE_MOMENTUM_NEURAL,
+    )
+
+    if not bool(getattr(settings, "chili_momentum_adopt_on_cancel_fill_enabled", True)):
+        return MANAGEMENT_SCOPE_BROKER_SYNC
+    try:
+        from .trading.bracket_reconciliation_service import (
+            _symbol_had_recent_momentum_live_session,
+        )
+
+        if _symbol_had_recent_momentum_live_session(db, ticker):
+            return MANAGEMENT_SCOPE_MOMENTUM_NEURAL
+    except Exception:
+        logger.debug(
+            "[broker_sync] momentum-scope probe failed for %s; defaulting broker_sync",
+            ticker, exc_info=True,
+        )
+    return MANAGEMENT_SCOPE_BROKER_SYNC
+
+
 def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     """Sync Robinhood positions into local Trade model."""
     from sqlalchemy import text
@@ -1974,8 +2012,12 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             existing.quantity = qty
             existing.entry_price = avg_price
             existing.last_broker_sync = datetime.utcnow()
+            # Only stamp a scope when blank — never downgrade an already-explicit
+            # scope (e.g. auto_trader_v1). The momentum-orphan baton overrides the
+            # broker_sync default to momentum_neural when this symbol had a recent
+            # live momentum session (see _synced_position_management_scope).
             if not existing.management_scope:
-                existing.management_scope = MANAGEMENT_SCOPE_BROKER_SYNC
+                existing.management_scope = _synced_position_management_scope(db, ticker)
             if not existing.indicator_snapshot:
                 existing.indicator_snapshot = _compute_trade_snapshot(ticker, avg_price)
             updated += 1
@@ -2295,7 +2337,7 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 status="open",
                 broker_source="robinhood",
                 tags="robinhood-sync",
-                management_scope=MANAGEMENT_SCOPE_BROKER_SYNC,
+                management_scope=_synced_position_management_scope(db, ticker),
                 indicator_snapshot=snapshot,
                 last_broker_sync=datetime.utcnow(),
                 stop_model="atr_crypto_breakout" if is_crypto else "atr_swing",
@@ -2728,7 +2770,12 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             )
 
         if not trade.management_scope:
-            trade.management_scope = MANAGEMENT_SCOPE_BROKER_SYNC
+            # Same momentum-orphan baton as the open-position sync sites: only
+            # stamp when blank, and prefer momentum_neural when the symbol had a
+            # recent live momentum session (never downgrade an explicit scope).
+            trade.management_scope = _synced_position_management_scope(
+                db, getattr(trade, "ticker", "") or ""
+            )
         # f-equity-broker-reconcile-wipeout-protection (2026-05-08):
         # structured close-event observability + wipeout-burst record.
         # Observability fires for BOTH exit-reason branches
