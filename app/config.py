@@ -4049,6 +4049,18 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RANK_DISPLACEMENT_MIN_DWELL_SEC"),
     )
+    # ADOPT-ON-CANCEL-FILL (2026-06-17 root fix for the CRVO/FTHM orphan): when
+    # cancel_automation_session's order-sweep finds the entry order already FILLED, ADOPT
+    # the position into a managed momentum session (re-point -> PENDING_ENTRY -> fill-
+    # handler -> soft stop + #704 adaptive exit) instead of orphaning it. Coordinated with
+    # the legacy bracket-reconciler via a single-writer management_scope='momentum_neural'
+    # BATON so exactly ONE subsystem ever manages the shares (no double-sell). This ONE
+    # flag moves BOTH the adopt branch AND the reconciler's momentum-owned skip together.
+    # Kill-switch: =0 -> byte-identical to today (orphan + slow legacy backstop).
+    chili_momentum_adopt_on_cancel_fill_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADOPT_ON_CANCEL_FILL_ENABLED"),
+    )
     # A6 (open-burst bandwidth): arm up to N distinct fresh candidates per
     # auto-arm pass while slots remain (was 1/pass; 74 fresh candidates in the
     # 13:30-13:50Z burst vs 6 armed).

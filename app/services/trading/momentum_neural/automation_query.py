@@ -1691,22 +1691,154 @@ def delete_automation_session(db: Session, *, user_id: int, session_id: int) -> 
     return archive_automation_session(db, user_id=user_id, session_id=session_id)
 
 
+def _try_adopt_filled_entry_on_cancel(
+    db: Session, sess: TradingAutomationSession
+) -> Optional[dict[str, Any]]:
+    """If a LIVE session being cancelled has an entry order that actually FILLED at
+    the broker, ADOPT it instead of orphaning the position. Mirrors
+    ``live_runner._sweep_unresolved_entry_orders``: re-point the session at the real
+    order, mark it resolved 'adopted', and walk the legal live FSM
+    (watching -> entry_candidate -> pending_entry) so the hardened pending-entry
+    fill-handler attaches the lane stop/target on the next tick.
+
+    Returns the adopt result dict when a fill was adopted (caller returns it and does
+    NOT mark the session terminal); returns ``None`` to fall through to the normal
+    cancel path (no fill, indeterminate broker I/O, or nothing to adopt).
+
+    FAIL-OPEN: if ``adapter.get_order`` raises (indeterminate), that order is left
+    UNRESOLVED and we do NOT adopt — the cancel proceeds and the legacy reconciler
+    still backstops the broker position, so the position is never left with NEITHER
+    manager. IDEMPOTENT: orders the runner already resolved are skipped, so a
+    runner-vs-cancel race cannot double-adopt.
+    """
+    # Lazy imports (live_runner imports from this module transitively — keep the
+    # dependency one-directional at module load, matching the file's convention).
+    from .live_runner import (
+        KEY_LIVE_EXEC,
+        _commit_le,
+        _emit,
+        _mark_entry_order_resolved,
+        _safe_transition,
+    )
+
+    snap = sess.risk_snapshot_json or {}
+    le = snap.get(KEY_LIVE_EXEC) if isinstance(snap, dict) else None
+    le = le if isinstance(le, dict) else {}
+
+    # Candidate entry order ids = the active pointer PLUS any placed-but-unresolved
+    # ids from history. Reuse the resolved-map so an order the runner already adopted
+    # (resolved 'adopted') is skipped -> idempotent under a concurrent tick.
+    resolved = le.get("entry_orders_resolved") or {}
+    candidates: list[str] = []
+    for _o in [le.get("entry_order_id")] + list(le.get("entry_order_ids_all") or []):
+        _os = str(_o or "").strip()
+        if _os and _os not in candidates and _os not in resolved:
+            candidates.append(_os)
+    if not candidates:
+        return None
+
+    from ..venue.factory import get_adapter
+
+    adapter = get_adapter(sess.execution_family)
+    if adapter is None:
+        return None  # no adapter -> cannot confirm a fill -> normal cancel path
+
+    for oid in candidates:
+        try:
+            no, _ = adapter.get_order(str(oid))
+        except Exception:
+            # FAIL-OPEN: indeterminate -> leave unresolved, do not adopt this order.
+            logger.debug(
+                "[automation_query] adopt-on-cancel get_order failed for %s",
+                oid, exc_info=True,
+            )
+            continue
+        if no is None:
+            continue
+        filled = float(getattr(no, "filled_size", 0) or 0)
+        if filled <= 0:
+            continue
+        # LATE/RACED FILL — ADOPT. Re-point + walk the legal FSM to pending-entry.
+        venue_status = str(getattr(no, "status", "") or "")
+        le["entry_order_id"] = str(oid)
+        le["entry_submitted"] = True
+        _mark_entry_order_resolved(le, oid, "adopted")
+        _commit_le(sess, le)
+        _emit(
+            db, sess, "entry_adopted_on_cancel",
+            {
+                "order_id": str(oid),
+                "filled_size": filled,
+                "venue_status": venue_status,
+                "by": "operator",
+            },
+        )
+        # Walk the LEGAL live FSM chain (no watching->pending shortcut exists).
+        # Guarded by state so an already-pending/entered session is left as-is
+        # (the runner's normal handler owns it from there).
+        if sess.state == STATE_WATCHING_LIVE:
+            _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
+        if sess.state == STATE_LIVE_ENTRY_CANDIDATE:
+            _safe_transition(db, sess, STATE_LIVE_PENDING_ENTRY)
+        db.flush()
+        return {
+            "ok": True,
+            "adopted": True,
+            "session_id": int(sess.id),
+            "state": sess.state,
+        }
+    return None
+
+
 def cancel_automation_session(db: Session, *, user_id: int, session_id: int) -> dict[str, Any]:
     if not _tables_present(db):
         return {"ok": False, "error": "tables_missing"}
 
-    sess = (
+    # momentum-orphan adopt-on-cancel (2026-06-17): SELECT ... FOR UPDATE so the
+    # cancel serializes against a concurrent live_runner tick on the same session.
+    # Without the row lock, the runner could be re-pointing/adopting the same late
+    # fill while we sweep + cancel -> two writers racing the position. The baton is
+    # a single ROW lock: whoever holds it owns the management decision. FOR UPDATE
+    # is a no-op on the test session double; on a real mapped row it blocks the tick.
+    _q = (
         db.query(TradingAutomationSession)
         .filter(TradingAutomationSession.id == int(session_id), TradingAutomationSession.user_id == user_id)
-        .one_or_none()
     )
+    if bool(getattr(settings, "chili_momentum_adopt_on_cancel_fill_enabled", True)):
+        try:
+            _q = _q.with_for_update()
+        except Exception:
+            # SQLite / unsupported dialect in some test paths — degrade to no lock.
+            pass
+    sess = _q.one_or_none()
     if not sess:
         return {"ok": False, "error": "not_found"}
     if sess.state not in CANCELLABLE_STATES:
         return {"ok": False, "error": "not_cancellable", "state": sess.state}
 
-    now = datetime.utcnow()
     prev = sess.state
+
+    # ── ADOPT-ON-CANCEL-FILL (the momentum-orphan root fix) ──────────────────
+    # BEFORE we mark the session terminal: if a LIVE session is being cancelled
+    # (operator OR the auto-arm reaper — both land here) but its entry order has
+    # actually FILLED at the broker, killing the session would ORPHAN the broker
+    # position (CRVO/FTHM 2026-06-16: cancel raced the fill, the sweep only logged
+    # FILLED_NEEDS_ADOPTION and never adopted -> unmanaged position). Instead we
+    # ADOPT: re-point the session at the real fill and walk the LEGAL live FSM to
+    # pending-entry so the hardened fill-handler attaches the lane stop/target on
+    # the next tick — exactly mirroring live_runner._sweep_unresolved_entry_orders.
+    # The reconciler's scope-skip (Step 2) keeps the legacy backstop off this
+    # symbol while THIS (now non-terminal) session manages it -> no double-sell.
+    if (
+        bool(getattr(settings, "chili_momentum_adopt_on_cancel_fill_enabled", True))
+        and sess.mode == "live"
+        and prev in LIVE_CANCELLABLE_STATES
+    ):
+        _adopt = _try_adopt_filled_entry_on_cancel(db, sess)
+        if _adopt is not None:
+            return _adopt
+
+    now = datetime.utcnow()
     if sess.mode == "live" and prev in LIVE_CANCELLABLE_STATES:
         sess.state = STATE_LIVE_CANCELLED
     else:

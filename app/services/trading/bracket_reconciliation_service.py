@@ -18,7 +18,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from ...config import settings
@@ -621,6 +621,49 @@ def _symbol_had_recent_momentum_live_session(db: Session, ticker: str) -> bool:
                 "AND created_at > now() - (:hrs || ' hours')::interval LIMIT 1"
             ),
             {"sym": str(ticker or "").strip().upper(), "hrs": _MOMENTUM_ORIGIN_LOOKBACK_HOURS},
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
+# momentum-orphan adopt-on-cancel baton (2026-06-17): the SINGLE-WRITER terminal
+# set. A momentum_neural-owned Trade is excluded from the legacy reconciler's sweep
+# ONLY while a NON-TERMINAL live momentum session exists for the symbol (the
+# momentum lane is actively managing / adopting). Once the session is terminal the
+# reconciler RESUMES coverage — it will only place a stop if the broker still shows
+# the position (a genuine leftover the momentum lane already exited or released),
+# which is safe: by terminal time the momentum lane has handed the position back.
+_MOMENTUM_LIVE_SESSION_TERMINAL_STATES = (
+    "live_cancelled",
+    "live_finished",
+    "live_error",
+    "live_exited",
+    "live_cooldown",
+    "cancelled",
+    "finished",
+    "error",
+    "exited",
+)
+
+
+def _symbol_has_live_momentum_session(db: Session, ticker: str) -> bool:
+    """True when ``ticker`` has a NON-TERMINAL live momentum automation session —
+    i.e. the momentum lane is still the active single-writer for any open position
+    on this symbol, so the legacy reconciler must yield (skip it). FAIL-SAFE: any
+    error returns False (reconciler keeps covering — never leaves a position
+    unmanaged)."""
+    try:
+        row = db.execute(
+            text(
+                "SELECT 1 FROM trading_automation_sessions "
+                "WHERE symbol = :sym AND mode = 'live' "
+                "AND state NOT IN :terminal LIMIT 1"
+            ).bindparams(bindparam("terminal", expanding=True)),
+            {
+                "sym": str(ticker or "").strip().upper(),
+                "terminal": list(_MOMENTUM_LIVE_SESSION_TERMINAL_STATES),
+            },
         ).fetchone()
         return row is not None
     except Exception:
@@ -2633,6 +2676,31 @@ def _load_local_view(
         filters.append("t.user_id = :uid")
         params["uid"] = int(user_id)
 
+    # momentum-orphan adopt-on-cancel baton (2026-06-17): when the flag is ON,
+    # EXCLUDE rows the momentum lane is the single-writer for — a Trade stamped
+    # ``momentum_neural`` whose symbol still has a NON-TERMINAL live momentum
+    # session. While that session lives, the momentum runner adopts/manages the
+    # position (entry re-point + lane stop/target); the legacy reconciler must NOT
+    # mint a SECOND manager (double-sell). Once the session is terminal the
+    # subquery no longer matches and coverage resumes (the reconciler will only
+    # act if the broker still holds the position — a genuine leftover).
+    # Kill-switch OFF -> no exclusion -> byte-identical to pre-fix behavior.
+    if bool(getattr(settings, "chili_momentum_adopt_on_cancel_fill_enabled", True)):
+        filters.append(
+            "NOT ("
+            " LOWER(COALESCE(t.management_scope, '')) = 'momentum_neural'"
+            " AND EXISTS ("
+            "   SELECT 1 FROM trading_automation_sessions s"
+            "   WHERE UPPER(s.symbol) = UPPER(t.ticker)"
+            "     AND s.mode = 'live'"
+            "     AND s.state NOT IN :momentum_terminal_states"
+            " )"
+            ")"
+        )
+        params["momentum_terminal_states"] = list(
+            _MOMENTUM_LIVE_SESSION_TERMINAL_STATES
+        )
+
     sql = text(f"""
         SELECT
             t.id AS trade_id,
@@ -2644,6 +2712,7 @@ def _load_local_view(
             t.pending_exit_status,
             t.pending_exit_reason,
             t.broker_source,
+            t.management_scope,
             bi.id AS bracket_intent_id,
             bi.intent_state,
             bi.stop_price,
@@ -2654,6 +2723,8 @@ def _load_local_view(
         WHERE {' AND '.join(filters)}
         ORDER BY t.id
     """)
+    if "momentum_terminal_states" in params:
+        sql = sql.bindparams(bindparam("momentum_terminal_states", expanding=True))
     rows = db.execute(sql, params).fetchall()
     return [
         {
@@ -2666,10 +2737,11 @@ def _load_local_view(
             "pending_exit_status": r[6],
             "pending_exit_reason": r[7],
             "broker_source": r[8],
-            "bracket_intent_id": int(r[9]) if r[9] is not None else None,
-            "intent_state": r[10],
-            "stop_price": float(r[11]) if r[11] is not None else None,
-            "target_price": float(r[12]) if r[12] is not None else None,
+            "management_scope": r[9],
+            "bracket_intent_id": int(r[10]) if r[10] is not None else None,
+            "intent_state": r[11],
+            "stop_price": float(r[12]) if r[12] is not None else None,
+            "target_price": float(r[13]) if r[13] is not None else None,
         }
         for r in rows
     ]
