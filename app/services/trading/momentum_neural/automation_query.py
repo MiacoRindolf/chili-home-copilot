@@ -653,10 +653,16 @@ def _compute_lane_status(db: Session, *, user_id: int) -> dict[str, Any]:
     try:
         from .risk_evaluator import _daily_realized_pnl, evaluate_profit_giveback_halt
         from .risk_policy import equity_relative_daily_loss_cap
+        from .auto_arm import _lane_execution_family
 
+        # Banner basis = the LANE's actual execution family (equity-only -> robinhood_spot),
+        # NOT a hardcoded Coinbase basis (2026-06-17 fix). With crypto disabled the banner was
+        # capping the equity lane's loss against the tiny Coinbase equity -> a FALSE "HALTED"
+        # display even though the real per-broker/global breaker was nowhere near tripped.
+        _lane_fam = _lane_execution_family()
         max_dl = equity_relative_daily_loss_cap(
             float(getattr(settings, "chili_momentum_risk_max_daily_loss_usd", 250.0)),
-            EXECUTION_FAMILY_COINBASE_SPOT,
+            _lane_fam,
         )
         daily_pnl = _daily_realized_pnl(db, int(user_id))
         resets_at = datetime.combine(date.today() + timedelta(days=1), datetime.min.time())
@@ -671,7 +677,7 @@ def _compute_lane_status(db: Session, *, user_id: int) -> dict[str, Any]:
             # when a meaningful green day has given back >= the giveback fraction of
             # its peak. Daily-loss cap takes precedence (checked first, more severe).
             gb = evaluate_profit_giveback_halt(
-                db, user_id=int(user_id), execution_family=EXECUTION_FAMILY_COINBASE_SPOT
+                db, user_id=int(user_id), execution_family=_lane_fam
             )
             status["peak_pnl_usd"] = gb.get("peak_pnl_usd")
             status["giveback_fraction"] = gb.get("giveback_fraction")
