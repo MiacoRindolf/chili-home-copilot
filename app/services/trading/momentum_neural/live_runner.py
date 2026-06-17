@@ -48,6 +48,7 @@ from .risk_policy import (
     RISK_SNAPSHOT_KEY,
     compute_risk_first_quantity,
     liquidity_capped_notional,
+    max_loss_circuit_decision,
     policy_float_cap,
     policy_int_cap,
 )
@@ -452,6 +453,7 @@ def _submit_live_market_exit(
     ask: float | None,
     mid: float | None,
     extra: dict[str, Any] | None = None,
+    hard_floor_price: float | None = None,
 ) -> dict[str, Any]:
     now = _utcnow()
     attempts = int(le.get("exit_submit_attempts", 0) or 0)
@@ -570,9 +572,26 @@ def _submit_live_market_exit(
         else {}
     )
 
+    # HARD MAX-LOSS-CIRCUIT FLOOR (2026-06-17): when the caller supplies an absolute
+    # loss-anchored floor (avg - K*stop_distance), OVERRIDE the entire bid-relative
+    # ladder — skip the attempt<=2 bid-guard branch, the extended-hours 8×-bid branch,
+    # AND the attempt-3+ naked-MARKET fallback. Place a SINGLE marketable-but-CAPPED
+    # sell at exactly the floor (no repeg, partial fills final, unfilled remainder
+    # bounded by the existing structural stop). Anchored to entry+structural-risk, NOT
+    # a falling bid, so a deep gap-through fill is mechanically impossible. Pass the RH
+    # ext-hours overrides through (_ext_kwargs) so a premarket equity floor still places.
+    # hard_floor_price=None => byte-identical legacy ladder for every existing caller.
+    _floor_override = None
+    try:
+        if hard_floor_price is not None and float(hard_floor_price) > 0:
+            _floor_override = float(hard_floor_price)
+    except (TypeError, ValueError):
+        _floor_override = None
     _urgent = str(reason or "") in ("kill_switch_flatten", "operator_flatten")
     _lim_px = None
-    if not _urgent and attempts <= 2:
+    if _floor_override is not None:
+        _lim_px = _floor_override
+    elif not _urgent and attempts <= 2:
         _g = (_notional_guard_multiplier() - 1.0) * (1.0 if attempts <= 1 else 4.0)
         _ref = None
         for _cand in (bid, mid):
@@ -588,7 +607,7 @@ def _submit_live_market_exit(
     # marketable limit — even on an urgent flatten or the attempt-3+ market fallback.
     # Cross the bid HARD (8× guard) so it fills immediately, like the market order it
     # replaces. Regular hours / crypto: _exit_extended is False → branch unchanged.
-    if _exit_extended and _lim_px is None:
+    if _floor_override is None and _exit_extended and _lim_px is None:
         _ref = None
         for _cand in (bid, mid):
             try:
@@ -613,6 +632,8 @@ def _submit_live_market_exit(
         result = adapter.place_limit_order_gtc(**_lim_kwargs) or {}
         le["exit_order_type"] = "limit"
         le["exit_limit_price"] = _lim_px
+        if _floor_override is not None:
+            le["exit_floor_order"] = True
         if _exit_extended:
             le["exit_session_extended"] = True
     else:
@@ -1012,7 +1033,11 @@ def _poll_live_exit_fill(
     # within the repeg window is resting above a falling market — cancel it
     # and clear pending state so the next pulse re-submits one rung down the
     # ladder (wider guard, then market). Market orders never repeg.
-    if le.get("exit_order_type") == "limit":
+    # MAX-LOSS-CIRCUIT FLOOR (2026-06-17): a floor-anchored remainder must NOT chase
+    # down — the floor IS the loss cap. Skip the repeg; the unfilled remainder is left
+    # resting at the absolute floor (bounded by the existing structural stop). Keyed on
+    # exit_floor_anchored, set ONLY by the circuit (RH path) — legacy limits unchanged.
+    if le.get("exit_order_type") == "limit" and not le.get("exit_floor_anchored"):
         _sub_at = le.get("pending_exit_submitted_at_utc")
         try:
             _sub_age = (
@@ -3845,6 +3870,79 @@ def tick_live_session(
                 db.flush()
                 return {"ok": True, "session_id": sess.id, "state": sess.state}
 
+        # C1b: HARD MAX-LOSS-PER-TRADE CIRCUIT (#1 profitability lever, 2026-06-17).
+        # The 1x C1 check above transitions to BAILOUT, but the bid-relative ladder then
+        # chases a falling/gapped book and fills 5-9% deep (the -$697.76 RH low-float
+        # tail: MTEN/SDOT/CCTG/CAST gapped THROUGH their tight stops). This circuit caps
+        # each trade's loss at K x the REALIZED STRUCTURAL RISK (stop_distance x qty — NOT
+        # the frozen risk_usd budget, ~12x overstated) and flattens at an ABSOLUTE loss
+        # anchor (avg - K*stop_distance) via a single capped limit (no repeg), so a deep
+        # gap-through fill is mechanically impossible. Fires INSIDE the 1x window when the
+        # structural threshold is the tighter cap. Guarded: flag, state (not BAILOUT),
+        # double-fire, fresh-quote (this tick was not stale), and a usable basis.
+        if (
+            getattr(settings, "chili_momentum_max_loss_circuit_enabled", True)
+            and st in (STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING)
+            and not le.get("max_loss_circuit_fired")
+        ):
+            # Fresh-quote gate: a finite positive bid AND this tick did NOT register a
+            # stale-quote streak (the halt-stale counter is reset to 0 by a fresh tick
+            # earlier this pulse; >=1 means staleness — never fire on a frozen/halted book).
+            _fresh_quote = (
+                bid is not None
+                and math.isfinite(float(bid))
+                and float(bid) > 0
+                and int(le.get("halt_stale_streak") or 0) == 0
+                and not le.get("suspected_halt_since_utc")
+            )
+            if _fresh_quote:
+                # Basis = the REALIZED per-share structural stop distance frozen at entry.
+                _stop_distance = None
+                _es = le.get("entry_sizing")
+                if isinstance(_es, dict):
+                    try:
+                        _sd = float(_es.get("stop_distance"))
+                        if _sd > 0 and math.isfinite(_sd):
+                            _stop_distance = _sd
+                    except (TypeError, ValueError):
+                        _stop_distance = None
+                # Fallback: derive the structural distance from the live stop price.
+                if _stop_distance is None:
+                    try:
+                        _sd2 = float(avg) - float(pos["stop_price"])
+                        if _sd2 > 0 and math.isfinite(_sd2):
+                            _stop_distance = _sd2
+                    except (TypeError, ValueError, KeyError):
+                        _stop_distance = None
+                if _stop_distance is not None:
+                    _k = float(getattr(settings, "chili_momentum_max_loss_risk_multiple", 2.0) or 2.0)
+                    _circuit = max_loss_circuit_decision(
+                        avg=avg, qty=qty, stop_distance=_stop_distance, bid=bid, k=_k
+                    )
+                    if _circuit.get("breach"):
+                        le["max_loss_circuit_fired"] = True
+                        le["max_loss_circuit_floor_price"] = _circuit["floor_price"]
+                        # EQUITY-FIRST: the absolute floor + repeg-skip apply to the RH
+                        # path only (where the gap-through tail lives). Crypto (-USD) may
+                        # fire but keeps the bid-relative ladder (dust, 24/7, no LULD).
+                        if (
+                            normalize_execution_family(sess.execution_family)
+                            == EXECUTION_FAMILY_ROBINHOOD_SPOT
+                        ):
+                            le["exit_floor_anchored"] = True
+                        _commit_le(sess, le)
+                        _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                        _emit(db, sess, "live_bailout", {
+                            "reason": "max_loss_circuit",
+                            "unrealized_pnl": _circuit["unrealized_pnl"],
+                            "structural_risk_usd": _circuit["structural_risk_usd"],
+                            "threshold_usd": _circuit["threshold_usd"],
+                            "floor_price": _circuit["floor_price"],
+                            "risk_multiple_used": _k,
+                        })
+                        db.flush()
+                        return {"ok": True, "session_id": sess.id, "state": sess.state}
+
         # #2 Breakout-or-bailout fast exit (Ross flat-top): within the early window
         # after a pullback_break entry, if the broken breakout level fails to HOLD on
         # the bid, cut NOW — well inside the structural stop — reusing the BAILOUT
@@ -3877,7 +3975,32 @@ def tick_live_session(
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
         if st == STATE_LIVE_BAILOUT:
+            # MAX-LOSS-CIRCUIT HALT GATE (2026-06-17): a circuit-originated bailout must
+            # NOT submit into a halted/frozen book — a marketable-but-capped floor cannot
+            # fill while quotes are stale, and submitting risks a stranded order or a fill
+            # the instant the halt lifts at a worse price. Hold in BAILOUT and re-attempt
+            # on the first fresh-quote tick after resume (suspected_halt cleared by
+            # _register_fresh_quote_tick). Keyed on max_loss_circuit_fired so legacy 1x /
+            # stop / breakout bailouts are byte-identical (they still submit through halts).
+            if le.get("max_loss_circuit_fired") and le.get("suspected_halt_since_utc"):
+                _emit(db, sess, "max_loss_circuit_halt_deferred", {
+                    "floor_price": le.get("max_loss_circuit_floor_price"),
+                    "suspected_halt_since_utc": le.get("suspected_halt_since_utc"),
+                })
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state, "halt_deferred": True}
             cid = f"chili_ml_b_{sess.id}_{uuid.uuid4().hex[:12]}"
+            # Circuit bailouts on the RH (equity) path flatten at the ABSOLUTE loss-anchored
+            # floor (no bid-relative ladder, no repeg). EQUITY-FIRST: keyed on
+            # exit_floor_anchored, which the circuit sets ONLY for robinhood_spot — crypto
+            # circuit fires but exit_floor_anchored is unset, so it falls through to None
+            # and keeps the legacy bid-relative ladder (dust, 24/7, no LULD). All OTHER
+            # bailout reasons pass None => byte-identical legacy ladder.
+            _bailout_floor = (
+                le.get("max_loss_circuit_floor_price")
+                if le.get("exit_floor_anchored")
+                else None
+            )
             sr = _submit_live_market_exit(
                 db,
                 sess,
@@ -3891,6 +4014,7 @@ def tick_live_session(
                 ask=ask,
                 mid=mid,
                 extra={"unrealized_pnl_usd": (bid - avg) * qty},
+                hard_floor_price=_bailout_floor,
             )
             if not _live_exit_submit_succeeded(db, sess, le=le, result=sr, reason="bailout"):
                 db.flush()
