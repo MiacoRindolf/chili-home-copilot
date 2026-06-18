@@ -111,6 +111,22 @@ def schedule_window_now(now: datetime | None = None) -> str:
     return "closed"
 
 
+def in_midday_lull(symbol: str | None, *, now: datetime | None = None) -> bool:
+    """True iff ``symbol`` is an EQUITY currently inside the documented midday-lull
+    window (the SAME 10:30-14:30 ET ``schedule_window_now`` "midday" band already
+    used for the 0.5x size cushion — reused here so there is ONE canonical window,
+    no second magic bound). Crypto is always False (24/7, no US midday concept; and
+    the lane is equity-only live). DST-correct via the shared _NY_TZ clock.
+
+    Used by the live runner to RAISE the entry viability bar during the lull (a
+    6%-win cohort in the live data) — an ADMISSION filter that complements, not
+    duplicates, the existing midday SIZE halving. (project_profitability_levers)
+    """
+    if asset_class_for_symbol(symbol) == "crypto":
+        return False
+    return schedule_window_now(now=now) == "midday"
+
+
 def crypto_session_active_now(now: datetime | None = None) -> bool:
     """Crypto entry-window clock (2026-06-13 crypto-live plan, A5).
 

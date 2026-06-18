@@ -1635,6 +1635,42 @@ def _stop_vol_floor_mult() -> float:
     return v if v >= 0 else 0.0
 
 
+def _midday_viability_bump() -> float:
+    """Additive raise to entry_viability_min during the 10:30-14:30 ET midday lull
+    (project_profitability_levers): the live data shows a 6% midday win-rate vs 29%
+    morning, so the lane should demand a HIGHER bar to admit a NEW entry in the chop.
+    Kill-switch OFF (or bump<=0) => 0.0 => byte-identical (caller never raises the
+    bar, never emits). Entry-side only; never reaches an exit path."""
+    if not bool(getattr(settings, "chili_momentum_midday_deweight_enabled", False)):
+        return 0.0
+    try:
+        v = float(getattr(settings, "chili_momentum_midday_viability_bump", 0.05) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return v if v > 0 else 0.0
+
+
+def _effective_entry_viability_min(
+    flat_min: float, symbol: str | None, *, now: datetime | None = None
+) -> tuple[float, bool, float]:
+    """Effective entry-viability bar at the WATCHING_LIVE advance, applying the midday
+    de-weight. Returns ``(eff_min, in_lull, bump)``.
+
+    OFF / bump<=0 / outside the lull / crypto  => ``(flat_min, False, bump)`` so the
+    caller's ``_score_ok`` is byte-identical. Equity inside the 10:30-14:30 ET lull =>
+    ``(min(0.95, flat_min + bump), True, bump)`` — a SOFT raise clamped to the schema
+    ceiling. Pure + unit-testable: reads only settings + the shared clock, never reads
+    or mutates a position, order, or exit. (project_profitability_levers)"""
+    bump = _midday_viability_bump()
+    if not bump:
+        return float(flat_min), False, 0.0
+    from .market_profile import in_midday_lull
+
+    if not in_midday_lull(symbol, now=now):
+        return float(flat_min), False, bump
+    return min(0.95, float(flat_min) + bump), True, bump
+
+
 _INTERVAL_SECONDS: dict[str, float] = {
     "1m": 60.0, "2m": 120.0, "5m": 300.0, "15m": 900.0, "30m": 1800.0,
     "60m": 3600.0, "90m": 5400.0, "1h": 3600.0, "1d": 86400.0,
@@ -2716,8 +2752,15 @@ def tick_live_session(
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
     if st == STATE_WATCHING_LIVE:
+        # MIDDAY-LULL DE-WEIGHT (project_profitability_levers): during the 10:30-14:30 ET
+        # midday chop (6% live win-rate vs 29% morning; Ross sits out midday) RAISE the
+        # effective viability bar so only an exceptional mover arms. SOFT (additive bump,
+        # not a ban); ENTRY-side only; crypto exempt; clamped to the 0.95 schema ceiling.
+        # OFF / bump<=0 => _flat_min unchanged => _score_ok byte-identical, no emit, no import.
+        _flat_min = float(params["entry_viability_min"])
+        _eff_min, _midday_lull, _midday_bump = _effective_entry_viability_min(_flat_min, sess.symbol)
         _score_ok = (
-            float(via.viability_score or 0) >= float(params["entry_viability_min"])
+            float(via.viability_score or 0) >= _eff_min
             and via.live_eligible
         )
         # M4.1: require an active momentum-continuation trigger (price > EMA-9 +
@@ -2885,6 +2928,15 @@ def tick_live_session(
             elif le.pop("watch_break_level", None) is not None:
                 _commit_le(sess, le)
             _emit(db, sess, "live_entry_trigger_wait", {"reason": _trigger_reason})
+        elif _midday_lull and via.live_eligible and float(via.viability_score or 0) >= _flat_min:
+            # Forward A/B observability: this equity WOULD have advanced at the flat
+            # viability bar but the midday de-weight held it back. Lets the operator
+            # validate the lever LIVE (did the de-weighted names actually underperform
+            # the rest-of-day?) without changing any trade. (project_profitability_levers)
+            _emit(db, sess, "live_entry_midday_deweighted", {
+                "viability_score": via.viability_score,
+                "flat_min": _flat_min, "eff_min": _eff_min, "bump": _midday_bump,
+            })
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
