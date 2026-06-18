@@ -3167,6 +3167,31 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_RISK_MULTIPLE"),
         description="K — the circuit fires when unrealized loss <= -(K x structural_risk) and flattens at avg - K*stop_distance. ge=1.0 so the floor can never sit looser than the structural stop.",
     )
+    # MIDDAY-LULL ENTRY DE-WEIGHT (2026-06-17, project_profitability_levers): raise the
+    # EFFECTIVE entry viability bar for NEW equity entries during the EXISTING schedule_window_now
+    # "midday" window (10:30-14:30 ET) — live data: midday win-rate 1/17 = 6% vs morning 7/24 =
+    # 29%, binomial P~0.02; Ross Cameron explicitly sits out midday. ORTHOGONAL to the existing
+    # midday 0.5x SIZE multiplier (live_runner day-cushion ladder): that halves SIZE on midday
+    # entries that happen anyway; THIS raises the ADMISSION bar so fewer marginal ones enter at
+    # all (a 6%-win cohort is better skipped than half-sized). SOFT additive bump (not a ban) so a
+    # 0.70+ exceptional mover still arms — it filters the 0.52-0.62 marginal setups the 78-min-hold
+    # chop-bleed losers came from. ENTRY/ARM-side ONLY — NEVER touches exits. Crypto exempt
+    # (in_midday_lull -> False for -USD). DST-correct (reuses schedule_window_now's America/New_York
+    # clock — ONE canonical window, no new magic bound). Separate from the #769 max-loss circuit:
+    # that bounds loss MAGNITUDE after entry (the morning gap-through tail); this prevents the
+    # midday ENTRY. enabled=False OR bump<=0 => byte-identical.
+    chili_momentum_midday_deweight_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MIDDAY_DEWEIGHT_ENABLED"),
+        description="Kill-switch for the 1030-1400 ET midday entry de-weight (equity-only, entry-side). false = byte-identical (no bar raise, no emit).",
+    )
+    chili_momentum_midday_viability_bump: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=0.30,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MIDDAY_VIABILITY_BUMP"),
+        description="Additive raise to entry_viability_min during the midday lull. ~0.05 filters marginal 0.52-0.62 setups while a 0.70+ exceptional mover still arms. <=0 == off. Keep <=0.10 (>=0.15 approaches a de-facto midday ban).",
+    )
     # EVENT-DRIVEN TICK EXIT (Lever B-2, 2026-06-16): a held crypto trailing position
     # whose order flow rolls over (OFI < thr) wakes the exit runner on the WS tick —
     # up to 15s sooner than the poll (Ross "eject the moment the ask thickens"). A
