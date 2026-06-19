@@ -51,6 +51,20 @@ def _fresh() -> FreshnessMeta:
     return FreshnessMeta(retrieved_at_utc=datetime.now(timezone.utc), max_age_seconds=120.0)
 
 
+@pytest.fixture(autouse=True)
+def _venue_connected_by_default(monkeypatch):
+    """The #565 venue-connectivity preflight (``live_runner._venue_broker_connected``)
+    short-circuits the tick with ``venue_broker_not_connected`` whenever the broker is
+    not connected — which is ALWAYS the case in the test env (no live creds). That
+    preflight was added AFTER these tick-logic tests were written, so without this
+    default they skip BEFORE the state-transition / kill-switch / order-adoption logic
+    they intend to exercise (8 stale failures — NOT a production bug; in prod the venue
+    IS connected so the preflight passes). Default it to CONNECTED; the disconnected-
+    skip test (``test_tick_skips_disconnected_venue``) overrides this back to False."""
+    import app.services.trading.momentum_neural.live_runner as _lr
+    monkeypatch.setattr(_lr, "_venue_broker_connected", lambda ef: True)
+
+
 def _mk_adapter():
     ad = MagicMock()
     ad.is_enabled.return_value = True
@@ -699,7 +713,11 @@ def test_ack_timeout_adopts_filled_order_not_orphan(monkeypatch, db: Session) ->
             "momentum_live_execution": {
                 "entry_submitted": True,
                 "entry_order_id": "o-race",
-                "entry_submit_utc": (datetime.utcnow() - timedelta(seconds=20)).isoformat(),
+                # Submitted long enough ago to trip the ack-timeout rest-backstop
+                # (now elapsed > max(0.5,rest_bars)*entry_interval_s, ~120s+ on a 1m
+                # interval — refactored 2026-06-11 from the old fixed ~10s, so 20s no
+                # longer fires). Large + interval-agnostic so the adopt path runs.
+                "entry_submit_utc": (datetime.utcnow() - timedelta(seconds=7200)).isoformat(),
             },
         },
     )
@@ -751,7 +769,11 @@ def test_ack_timeout_cancel_race_adopts_filled_order(monkeypatch, db: Session) -
             "momentum_live_execution": {
                 "entry_submitted": True,
                 "entry_order_id": "o-race2",
-                "entry_submit_utc": (datetime.utcnow() - timedelta(seconds=20)).isoformat(),
+                # Submitted long enough ago to trip the ack-timeout rest-backstop
+                # (now elapsed > max(0.5,rest_bars)*entry_interval_s, ~120s+ on a 1m
+                # interval — refactored 2026-06-11 from the old fixed ~10s, so 20s no
+                # longer fires). Large + interval-agnostic so the adopt path runs.
+                "entry_submit_utc": (datetime.utcnow() - timedelta(seconds=7200)).isoformat(),
             },
         },
     )
