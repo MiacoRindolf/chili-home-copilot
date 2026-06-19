@@ -10,6 +10,7 @@ Snapshot contract:
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import uuid
@@ -346,6 +347,142 @@ def _record_live_partial_exit_ledger_safe(
         )
     except Exception:
         _log.debug("live economic ledger partial exit hook skipped session=%s", sess.id, exc_info=True)
+
+
+def _fill_log_asset_class(sess: TradingAutomationSession) -> str:
+    """crypto for the Coinbase-style spot lane, else equity (RH/Alpaca)."""
+    if str(sess.symbol or "").upper().endswith("-USD"):
+        return "crypto"
+    fam = str(getattr(sess, "execution_family", "") or "").lower()
+    return "crypto" if "coinbase" in fam else "equity"
+
+
+def _fill_log_decision_packet_id(sess: TradingAutomationSession) -> int | None:
+    try:
+        snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
+        le = snap.get(KEY_LIVE_EXEC) if isinstance(snap.get(KEY_LIVE_EXEC), dict) else {}
+        dpid = le.get("entry_decision_packet_id")
+        return int(dpid) if dpid else None
+    except Exception:
+        return None
+
+
+def _record_fill_outcome_safe(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    side: str,
+    fill_source: str,
+    broker_order_id: str | None,
+    fill_price: float | None,
+    qty: float | None,
+    fees_usd: float | None,
+    order_status: str | None,
+    intended_price: float | None,
+    spread_bps_at_decision: float | None,
+    entry_price: float | None = None,
+    exit_reason: str | None = None,
+    realized_pnl_usd: float | None = None,
+    pnl_gross_usd: float | None = None,
+    fill_ts: datetime | None = None,
+    entry_l2_snapshot: dict | None = None,
+    raw: dict | None = None,
+) -> None:
+    """FILL_OUTCOME_LOG (mig308) — record ONE row per real broker fill leg.
+
+    KILL-SWITCH + LIVE-ONLY: returns IMMEDIATELY (before ANY DB work or broker read)
+    when the flag is off or the session is not live — byte-identical, no new SQL.
+    FAIL-OPEN: the whole body is guarded; the INSERT runs inside a SAVEPOINT
+    (``begin_nested``) so a write error rolls back ONLY the insert and never poisons
+    the shared trade transaction. IDEMPOTENT: ``leg_seq`` is the next int per
+    (session_id, side) and the INSERT is ``ON CONFLICT (session_id, side, leg_seq)
+    DO NOTHING`` — a retried/repegged poll cannot double-insert. Stage-1 write-only.
+    """
+    # Kill-switch + live-mode gate FIRST — no DB work, no broker read when off/paper.
+    if not getattr(settings, "chili_momentum_fill_log_enabled", False):
+        return
+    if str(getattr(sess, "mode", "") or "").lower() != "live":
+        return
+    try:
+        from sqlalchemy import text as _text
+
+        _raw_json = None
+        if raw is not None:
+            try:
+                _raw_json = json.loads(json.dumps(raw, default=str)[:8000])
+            except Exception:
+                _raw_json = None
+        params = {
+            "session_id": int(sess.id),
+            "user_id": sess.user_id,
+            "symbol": sess.symbol,
+            "side": str(side),
+            "mode": "live",
+            "asset_class": _fill_log_asset_class(sess),
+            "execution_family": str(getattr(sess, "execution_family", "") or "") or None,
+            "fill_source": str(fill_source),
+            "broker_order_id": str(broker_order_id) if broker_order_id else None,
+            "broker_fill_price": _float_or_none(fill_price),
+            "qty": _float_or_none(qty),
+            "fees_usd": _float_or_none(fees_usd),
+            "order_status": str(order_status) if order_status else None,
+            "fill_ts": fill_ts or _utcnow(),
+            "realized_pnl_usd": _float_or_none(realized_pnl_usd),
+            "pnl_gross_usd": _float_or_none(pnl_gross_usd),
+            "intended_price": _float_or_none(intended_price),
+            "entry_price": _float_or_none(entry_price),
+            "spread_bps_at_decision": _float_or_none(spread_bps_at_decision),
+            "exit_reason": (str(exit_reason)[:40] if exit_reason else None),
+            "decision_packet_id": (
+                int(le_dpid) if (le_dpid := _fill_log_decision_packet_id(sess)) is not None else None
+            ),
+            "entry_l2_snapshot_json": (
+                json.loads(json.dumps(entry_l2_snapshot, default=str))
+                if isinstance(entry_l2_snapshot, dict) else None
+            ),
+            "raw_json": _raw_json,
+        }
+        # SAVEPOINT: the insert (incl. its guarded leg_seq read) is fully isolated —
+        # any error rolls back ONLY this nested block, leaving the trade txn clean.
+        with db.begin_nested():
+            row = db.execute(
+                _text(
+                    "SELECT COALESCE(MAX(leg_seq), -1) + 1 FROM momentum_fill_outcomes "
+                    "WHERE session_id = :sid AND side = :side"
+                ),
+                {"sid": params["session_id"], "side": params["side"]},
+            ).scalar()
+            params["leg_seq"] = int(row or 0)
+            db.execute(
+                _text(
+                    "INSERT INTO momentum_fill_outcomes ("
+                    " session_id, leg_seq, user_id, symbol, side, mode, asset_class,"
+                    " execution_family, fill_source, broker_order_id, broker_fill_price,"
+                    " qty, fees_usd, order_status, fill_ts, realized_pnl_usd, pnl_gross_usd,"
+                    " intended_price, entry_price, spread_bps_at_decision, exit_reason,"
+                    " decision_packet_id, entry_l2_snapshot_json, raw_json"
+                    ") VALUES ("
+                    " :session_id, :leg_seq, :user_id, :symbol, :side, :mode, :asset_class,"
+                    " :execution_family, :fill_source, :broker_order_id, :broker_fill_price,"
+                    " :qty, :fees_usd, :order_status, :fill_ts, :realized_pnl_usd, :pnl_gross_usd,"
+                    " :intended_price, :entry_price, :spread_bps_at_decision, :exit_reason,"
+                    " :decision_packet_id,"
+                    " CAST(:entry_l2_snapshot_json AS JSONB), CAST(:raw_json AS JSONB)"
+                    ") ON CONFLICT (session_id, side, leg_seq) DO NOTHING"
+                ),
+                {
+                    **params,
+                    "entry_l2_snapshot_json": (
+                        json.dumps(params["entry_l2_snapshot_json"])
+                        if params["entry_l2_snapshot_json"] is not None else None
+                    ),
+                    "raw_json": (
+                        json.dumps(params["raw_json"]) if params["raw_json"] is not None else None
+                    ),
+                },
+            )
+    except Exception:
+        _log.debug("[momentum_fill_log] write skipped session=%s side=%s", sess.id, side, exc_info=True)
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -984,12 +1121,27 @@ def _poll_live_exit_fill(
         # ledger and nets it out of session PnL. le is the existing poll →
         # complete side channel — no caller signatures change.
         le["last_exit_fee_usd"] = _order_total_fees_usd(no)
+        # FILL_OUTCOME_LOG (mig308): stash the REAL polled broker exit truth so the
+        # completer flags fill_source='broker_confirmed' (vs the reconstructed
+        # broker-zero path). Side channel only — does not alter any behavior.
+        le["last_exit_broker_truth"] = {
+            "broker_order_id": str(oid) if oid else None,
+            "order_status": no.status,
+            "avg_px": avg_px,
+            "filled_size": filled_size,
+        }
         _commit_le(sess, le)
         return {"filled": True, "fill_price": avg_px, "filled_size": filled_size, "order_status": no.status}
 
     terminal_status = (no.status or "").lower() in ("filled", "done", "closed", "cancelled", "canceled", "expired", "failed")
     if terminal_status and filled_size > 1e-12 and avg_px is not None:
         le["last_exit_fee_usd"] = _order_total_fees_usd(no)
+        le["last_exit_broker_truth"] = {
+            "broker_order_id": str(oid) if oid else None,
+            "order_status": no.status,
+            "avg_px": avg_px,
+            "filled_size": filled_size,
+        }
         _commit_le(sess, le)
         return {
             "filled": False,
@@ -1138,6 +1290,30 @@ def _complete_confirmed_live_exit(
         reason=reason,
         fee=fees_usd,
     )
+    # FILL_OUTCOME_LOG (mig308) — Hook B: full exit. fill_source is broker_confirmed
+    # ONLY when the poll captured a real broker average fill price; the broker-zero
+    # reconcile-finalize path (no order poll → price RECONSTRUCTED, the CAST −$253
+    # case) is flagged 'reconstructed' so day-net can quarantine it.
+    _bt = le.pop("last_exit_broker_truth", None)
+    _bt = _bt if isinstance(_bt, dict) else None
+    _record_fill_outcome_safe(
+        db,
+        sess,
+        side="exit",
+        fill_source="broker_confirmed" if _bt is not None else "reconstructed",
+        broker_order_id=(_bt or {}).get("broker_order_id"),
+        fill_price=float(fill_price),
+        qty=float(quantity),
+        fees_usd=fees_usd,
+        order_status=(_bt or {}).get("order_status"),
+        intended_price=_float_or_none(le.get("last_exit_intended_price")),
+        spread_bps_at_decision=_float_or_none(le.get("entry_spread_bps_at_decision")),
+        entry_price=float(entry_price),
+        exit_reason=reason,
+        realized_pnl_usd=pnl,
+        pnl_gross_usd=pnl_gross,
+        raw={"slip_bps": slip_bps, "fees_usd": fees_usd, "reconciled": (_bt is None)},
+    )
     _finalize_live_decision_after_exit(db, sess, le=le, realized_pnl_usd=pnl, slip_bps=slip_bps)
     le["last_exit_reason"] = reason
     # Shake-out learning: stash the inputs (incl. the REAL momentum stop/target,
@@ -1217,6 +1393,30 @@ def _apply_confirmed_live_partial_exit(
         realized_pnl_usd=pnl,
         reason=reason,
         fee=_exit_fee,
+    )
+    # FILL_OUTCOME_LOG (mig308) — Hook C: partial / scale-out leg. The scale-out path
+    # (_scale_out_to_runner) calls THIS completer before popping the flag, so a truthy
+    # pending_exit_is_scale_out here means side='scale_out'; else a plain partial. Same
+    # broker-truth side channel as the full exit (broker_confirmed vs reconstructed).
+    _bt = le.pop("last_exit_broker_truth", None)
+    _bt = _bt if isinstance(_bt, dict) else None
+    _record_fill_outcome_safe(
+        db,
+        sess,
+        side="scale_out" if le.get("pending_exit_is_scale_out") else "partial_exit",
+        fill_source="broker_confirmed" if _bt is not None else "reconstructed",
+        broker_order_id=(_bt or {}).get("broker_order_id"),
+        fill_price=float(fill_price),
+        qty=qty,
+        fees_usd=_exit_fee,
+        order_status=(_bt or {}).get("order_status"),
+        intended_price=_float_or_none(le.get("last_exit_intended_price")),
+        spread_bps_at_decision=_float_or_none(le.get("entry_spread_bps_at_decision")),
+        entry_price=float(entry_price),
+        exit_reason=reason,
+        realized_pnl_usd=pnl,
+        pnl_gross_usd=(float(fill_price) - float(entry_price)) * qty,
+        raw={"fees_usd": _exit_fee, "remaining": remaining, "reconciled": (_bt is None)},
     )
     _commit_le(sess, le)
     _emit(
@@ -3056,6 +3256,31 @@ def tick_live_session(
                 _record_live_entry_ledger_safe(
                     db, sess, le=le, quantity=filled, fill_price=avg, fee=_entry_fee,
                 )
+                # FILL_OUTCOME_LOG (mig308) — Hook A: entry fill. broker_confirmed (we
+                # polled the real order object `no`). Carries the REAL decision-time
+                # spread (stashed at submit) + the entry L2 snapshot so the replay can
+                # reproduce the live fill. realized_pnl is None on entry.
+                _entry_intended = _float_or_none(le.get("entry_limit_price"))
+                _record_fill_outcome_safe(
+                    db,
+                    sess,
+                    side="entry",
+                    fill_source="broker_confirmed",
+                    broker_order_id=str(no.order_id) if getattr(no, "order_id", None) else None,
+                    fill_price=float(avg),
+                    qty=float(filled),
+                    fees_usd=_entry_fee,
+                    order_status=getattr(no, "status", None),
+                    intended_price=_entry_intended,
+                    spread_bps_at_decision=_float_or_none(le.get("entry_spread_bps_at_decision")),
+                    entry_price=None,
+                    exit_reason=None,
+                    realized_pnl_usd=None,
+                    entry_l2_snapshot=(
+                        le.get("entry_l2_snapshot") if isinstance(le.get("entry_l2_snapshot"), dict) else None
+                    ),
+                    raw={"entry_fee_usd": _entry_fee, "filled_size": float(filled)},
+                )
                 # Sell INTO strength: rest the scale-out limit AT the target now,
                 # while the move is paying the level (fail-open -> reactive path).
                 _place_scale_out_limit(
@@ -3792,6 +4017,16 @@ def tick_live_session(
         le["entry_submit_utc"] = _utcnow().isoformat()
         le["entry_order_type"] = "limit"
         le["entry_limit_price"] = entry_limit_str
+        # FILL_OUTCOME_LOG (mig308): capture the REAL decision-time BBO spread at the
+        # submit pulse so the fill row (and the replay) sees the spread the gate
+        # actually faced, not a later NBBO snapshot. Side channel only — no behavior.
+        try:
+            if mid and float(mid) > 0 and bid is not None and ask is not None:
+                le["entry_spread_bps_at_decision"] = max(
+                    0.0, (float(ask) - float(bid)) / float(mid) * 10_000.0
+                )
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
         # stash the name's expected-move so the chase ceiling can vol-widen at cancel time
         le["entry_expected_move_bps"] = (None if _expected_move_bps is None else float(_expected_move_bps))
         le["entry_client_order_id"] = res.get("client_order_id") or cid

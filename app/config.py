@@ -2179,6 +2179,17 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_FAMILY_REGIME_PREFILTER_ENABLED"),
     )
+    # FILL_OUTCOME_LOG (mig308) — WRITE-ONLY per-broker-fill ledger for the live
+    # momentum lane (one row per real fill leg). Stage-1 logger only; reconcile +
+    # reporting authority-flip + replay consumer are gated as a separate stage.
+    # KILL-SWITCH default OFF: when False the writer returns BEFORE any DB work or
+    # broker read — byte-identical, zero new SQL. Live-mode-only (paper/non-live =>
+    # zero rows). Fail-open + savepoint-isolated so it can never poison a trade txn.
+    chili_momentum_fill_log_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FILL_LOG_ENABLED"),
+        description="Kill-switch: True => the momentum live lane records one momentum_fill_outcomes row per real broker fill leg (entry/exit/partial/scale-out). Default OFF (no writes, byte-identical). Write-only Stage-1.",
+    )
     # ── Extended-hours trading window (Ross trades the pre-market gap-and-go) ──
     # The momentum equity lane is tradeable from premarket_start → afterhours_end ET.
     # Regular session (9:30–16:00 ET) is a fixed exchange fact in market_profile.py;
