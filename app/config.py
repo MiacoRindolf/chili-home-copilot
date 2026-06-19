@@ -3203,6 +3203,40 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_MIDDAY_VIABILITY_BUMP"),
         description="Additive raise to entry_viability_min during the midday lull. ~0.05 filters marginal 0.52-0.62 setups while a 0.70+ exceptional mover still arms. <=0 == off. Keep <=0.10 (>=0.15 approaches a de-facto midday ban).",
     )
+    # RISK-NEUTRAL CONFIRMATION-PYRAMID (the one genuine scale-IN gap vs Ross). A single
+    # ADD into an ALREADY-winning position (>1R banked) on confirmation (new HOD + OFI +
+    # ratcheted trail), sized via the SAME risk-first machinery against a FRACTION of the
+    # original R0, with the stop ratcheted to blended-breakeven and the #769 circuit
+    # CLAMPED to R0 (max_loss_circuit_decision risk_anchor_usd) so the enlarged position's
+    # worst-case loss stays <= the starter's original risk. RISK-ADDING => DEFAULT OFF;
+    # must prove out on replay A/B + paper before any live flip (unlike #770). Entry-side
+    # only — never blocks/delays an exit; the stop can only tighten (INVARIANT-A).
+    chili_momentum_pyramid_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PYRAMID_ENABLED"),
+        description="Kill-switch for the risk-neutral confirmation-pyramid single-add. false = byte-identical (no add, no pos mutation, #769 anchor None == legacy).",
+    )
+    chili_momentum_pyramid_min_cushion_r: float = Field(
+        default=1.0,
+        ge=1.0,
+        le=4.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PYRAMID_MIN_CUSHION_R"),
+        description="Banked-cushion floor (in original-R0 units) required before an add; >=1.0 funds the add's risk from realized cushion so the enlarged worst-case stays <= R0. Adaptive off the frozen R0, no magic $.",
+    )
+    chili_momentum_pyramid_add_risk_fraction: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PYRAMID_ADD_RISK_FRACTION"),
+        description="rho: the add's structural risk as a fraction of the original R0 (slippage/fee headroom; <1 keeps the add inside the banked cushion). Sized via compute_risk_first_quantity, never a hardcoded share block.",
+    )
+    chili_momentum_pyramid_max_adds: int = Field(
+        default=1,
+        ge=1,
+        le=3,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PYRAMID_MAX_ADDS"),
+        description="Documented small N of confirmation-adds per position (default single add).",
+    )
     # EVENT-DRIVEN TICK EXIT (Lever B-2, 2026-06-16): a held crypto trailing position
     # whose order flow rolls over (OFI < thr) wakes the exit runner on the WS tick —
     # up to 15s sooner than the poll (Ross "eject the moment the ask thickens"). A
