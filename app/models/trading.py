@@ -1890,6 +1890,74 @@ class MomentumAutomationOutcome(Base):
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
+class MomentumFillOutcome(Base):
+    """FILL_OUTCOME_LOG (mig308): one row per REAL broker fill leg in the live
+    momentum lane (entry | exit | partial_exit | scale_out).
+
+    WHY: day-net was inaccurate because neither internal table writes from the
+    broker's actual per-fill (both reconstruct from a snapshot diff, each dropping
+    a different trade). This table records each fill at the moment it confirms so
+    day-net == broker truth and the replay can reproduce live fills with the REAL
+    decision-time spread. Two-tier truth: PROVISIONAL at write (``fill_source``
+    flags broker_confirmed vs reconstructed); SETTLED back-filled by a later
+    reconcile pass (the ``settled_*`` columns). Stage-1 is WRITE-ONLY.
+
+    Column types/nullability mirror migration 308 exactly. Naive-UTC TIMESTAMPs to
+    match the trading tables. Dedupe key = (session_id, side, leg_seq).
+    """
+
+    __tablename__ = "momentum_fill_outcomes"
+    __table_args__ = (
+        Index("ux_mfo_session_side_leg", "session_id", "side", "leg_seq", unique=True),
+        Index("ix_mfo_session", "session_id"),
+        Index("ix_mfo_day", "mode", "fill_ts"),
+        Index("ix_mfo_order", "broker_order_id"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    session_id: int = Column(BigInteger, nullable=False)
+    leg_seq: int = Column(Integer, nullable=False, default=0)
+    user_id: Optional[int] = Column(Integer, nullable=True)
+    symbol: str = Column(String(32), nullable=False)
+    side: str = Column(String(16), nullable=False)
+    mode: str = Column(String(12), nullable=False)
+    asset_class: Optional[str] = Column(String(8), nullable=True)
+    execution_family: Optional[str] = Column(String(32), nullable=True)
+    # BROKER (provisional at write; corrected at reconcile)
+    fill_source: str = Column(String(24), nullable=False)
+    broker_order_id: Optional[str] = Column(String(64), nullable=True)
+    broker_fill_price: Optional[float] = Column(Float, nullable=True)
+    qty: Optional[float] = Column(Float, nullable=True)
+    fees_usd: Optional[float] = Column(Float, nullable=True)
+    order_status: Optional[str] = Column(String(32), nullable=True)
+    fill_ts: Optional[datetime] = Column(DateTime, nullable=True)
+    # SETTLED (back-filled by the reconcile pass; the day-net authority)
+    settled_fill_price: Optional[float] = Column(Float, nullable=True)
+    settled_fees_usd: Optional[float] = Column(Float, nullable=True)
+    settled_pnl_usd: Optional[float] = Column(Float, nullable=True)
+    reconciled_at: Optional[datetime] = Column(DateTime, nullable=True)
+    # PROVISIONAL lane PnL (drift audit; NOT authority)
+    realized_pnl_usd: Optional[float] = Column(Float, nullable=True)
+    pnl_gross_usd: Optional[float] = Column(Float, nullable=True)
+    # DECISION CONTEXT
+    intended_price: Optional[float] = Column(Float, nullable=True)
+    entry_price: Optional[float] = Column(Float, nullable=True)
+    spread_bps_at_decision: Optional[float] = Column(Float, nullable=True)
+    exit_reason: Optional[str] = Column(String(40), nullable=True)
+    decision_packet_id: Optional[int] = Column(BigInteger, nullable=True)
+    entry_l2_snapshot_json: Optional[dict] = Column(JSONB, nullable=True)
+    raw_json: Optional[dict] = Column(JSONB, nullable=True)
+    # server_default mirrors migration 308 so a raw INSERT that omits created_at is
+    # filled DB-side (the writer inserts via SQL, not the ORM). In test envs the
+    # ORM create_all builds the table, so the server default must live here too.
+    created_at: datetime = Column(
+        DateTime,
+        server_default=text("(now() AT TIME ZONE 'utc')"),
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+
 class TradingGovernanceApproval(Base):
     """Persistent governance approval/rejection record for trading actions."""
 

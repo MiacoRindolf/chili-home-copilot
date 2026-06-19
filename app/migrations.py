@@ -20793,6 +20793,85 @@ def _migration_307_trading_tenbeat_candle_log(conn) -> None:
     )
 
 
+def _migration_308_momentum_fill_outcomes(conn) -> None:
+    """Per-broker-fill ledger for the momentum lane (the FILL_OUTCOME_LOG).
+
+    WHY: the day-net was inaccurate (06/18 RH truth −$211.63 vs lane-log −$202.71 vs
+    broker-sync mirror +$41.40) because NEITHER internal table writes from the broker's
+    actual per-fill — both reconstruct from a snapshot-difference and each DROPS a
+    different trade (the CAST −$253 bailout that opened-and-closed between 2-min position
+    sweeps; the PBK −$8.92 the lane log missed). This table records ONE row per real
+    broker fill leg at the moment of the fill, so day-net == broker truth and the replay
+    can reproduce live fills (with the REAL decision-time spread, not an NBBO snapshot).
+
+    TWO-TIER truth: PROVISIONAL at write (gross-of-fees; on the broker-zero/reconcile
+    finalize path the price is RECONSTRUCTED → fill_source flags it so day-net quarantines
+    it) and SETTLED at a later reconcile pass (settled_* back-filled from RH order detail
+    incl. SEC/TAF/FINRA fees — the only path to the exact −$211.63). Stage-1 (this) is the
+    WRITE-ONLY logger; the reconcile pass + reporting-authority flip + replay consumer are
+    gated as a separate stage. Naive-UTC TIMESTAMP to match the trading tables. Idempotent.
+    """
+    conn.execute(text(
+        "CREATE TABLE IF NOT EXISTS momentum_fill_outcomes ("
+        " id BIGSERIAL PRIMARY KEY,"
+        " session_id BIGINT NOT NULL,"
+        " leg_seq INTEGER NOT NULL DEFAULT 0,"          # monotonic per (session_id, side) — the dedupe key
+        " user_id INTEGER,"
+        " symbol VARCHAR(32) NOT NULL,"
+        " side VARCHAR(16) NOT NULL,"                   # entry | exit | partial_exit | scale_out
+        " mode VARCHAR(12) NOT NULL,"                   # live | paper | alpaca
+        " asset_class VARCHAR(8),"
+        " execution_family VARCHAR(32),"
+        # BROKER (provisional at write; corrected at reconcile)
+        " fill_source VARCHAR(24) NOT NULL,"            # broker_confirmed | reconstructed | reconciled
+        " broker_order_id VARCHAR(64),"                 # an attribute, NOT the dedupe key
+        " broker_fill_price DOUBLE PRECISION,"
+        " qty DOUBLE PRECISION,"
+        " fees_usd DOUBLE PRECISION,"                   # NULL for RH equity at write time
+        " order_status VARCHAR(32),"
+        " fill_ts TIMESTAMP,"                           # naive UTC
+        # SETTLED (back-filled by the reconcile pass; the day-net authority)
+        " settled_fill_price DOUBLE PRECISION,"
+        " settled_fees_usd DOUBLE PRECISION,"
+        " settled_pnl_usd DOUBLE PRECISION,"
+        " reconciled_at TIMESTAMP,"
+        # PROVISIONAL lane PnL (drift audit; NOT authority)
+        " realized_pnl_usd DOUBLE PRECISION,"           # lane net for exit legs; NULL on entry
+        " pnl_gross_usd DOUBLE PRECISION,"
+        # DECISION CONTEXT
+        " intended_price DOUBLE PRECISION,"
+        " entry_price DOUBLE PRECISION,"                # position avg basis for exit legs
+        " spread_bps_at_decision DOUBLE PRECISION,"     # tick.spread_bps at the submit pulse — the real gate spread
+        " exit_reason VARCHAR(40),"                     # NULL on entry
+        " decision_packet_id BIGINT,"
+        " entry_l2_snapshot_json JSONB,"
+        " raw_json JSONB,"
+        " created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'utc')"
+        ")"
+    ))
+    # Idempotency keyed on lane bookkeeping (session_id, side, leg_seq), NOT order id —
+    # the lane submits MANY orders per leg (repegs/retries) so order id would let dups in.
+    conn.execute(text(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_mfo_session_side_leg "
+        "ON momentum_fill_outcomes (session_id, side, leg_seq)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_mfo_session ON momentum_fill_outcomes (session_id)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_mfo_day ON momentum_fill_outcomes (mode, fill_ts)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_mfo_order ON momentum_fill_outcomes (broker_order_id) "
+        "WHERE broker_order_id IS NOT NULL"
+    ))
+    conn.commit()
+    logger.info(
+        "[mig308] ensured momentum_fill_outcomes (per-broker-fill ledger) — "
+        "Stage-1 write-only; reconcile + authority-flip gated separately"
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -21169,6 +21248,8 @@ MIGRATIONS = [
      _migration_306_trading_microstructure_log),
     ("307_trading_tenbeat_candle_log",
      _migration_307_trading_tenbeat_candle_log),
+    ("308_momentum_fill_outcomes",
+     _migration_308_momentum_fill_outcomes),
 ]
 
 
