@@ -48,6 +48,7 @@ from .risk_evaluator import evaluate_proposed_momentum_automation
 from .risk_policy import (
     RISK_SNAPSHOT_KEY,
     compute_risk_first_quantity,
+    equity_relative_notional_cap,
     liquidity_capped_notional,
     max_loss_circuit_decision,
     policy_float_cap,
@@ -59,6 +60,8 @@ from .paper_execution import (
     class_aware_reward_risk,
     effective_stop_atr_pct,
     ofi_exhaustion_lock,
+    pyramid_add_decision,
+    pyramid_blend_on_fill,
     regime_atr_pct,
     runner_trail_stop,
     scale_out_fraction,
@@ -4203,8 +4206,15 @@ def tick_live_session(
                         _stop_distance = None
                 if _stop_distance is not None:
                     _k = float(getattr(settings, "chili_momentum_max_loss_risk_multiple", 2.0) or 2.0)
+                    # GUARD #1 (risk-neutral pyramid): when this position has been
+                    # pyramided, le["pyramid_risk_anchor_usd"] holds the STARTER's
+                    # original structural risk R0. Passing it clamps the #769 circuit
+                    # threshold to R0, so the ENLARGED qty cannot re-base the floor to
+                    # k*sd*q1 (~3-4.5x R0) — the enlarged worst-case stays <= R0. None
+                    # (no pyramid) => byte-identical legacy circuit (floor == avg-k*sd).
                     _circuit = max_loss_circuit_decision(
-                        avg=avg, qty=qty, stop_distance=_stop_distance, bid=bid, k=_k
+                        avg=avg, qty=qty, stop_distance=_stop_distance, bid=bid, k=_k,
+                        risk_anchor_usd=le.get("pyramid_risk_anchor_usd"),
                     )
                     if _circuit.get("breach"):
                         le["max_loss_circuit_fired"] = True
@@ -4746,6 +4756,285 @@ def tick_live_session(
                                 })
                 except Exception:
                     pass
+
+            # ── RISK-NEUTRAL CONFIRMATION PYRAMID (single add to a winner) ───────
+            # Placed AFTER the cushion-trail ratchet + OFI-lock + v2-ladder, so
+            # `stop_px` here is the FRESHEST ratcheted value, and BEFORE the
+            # stop-breach block below — the add is entry-side ONLY and physically
+            # cannot precede or delay an exit. The whole block is a no-op when the
+            # flag is OFF (byte-identical: no add, no pos mutation, no emit, no extra
+            # broker call, #769 anchor stays None). Two phases, both FALL THROUGH
+            # (never early-return) so the freshly-ratcheted stop-breach check still
+            # runs this same tick. (docs/DESIGN/MOMENTUM_LANE.md)
+            if bool(getattr(settings, "chili_momentum_pyramid_enabled", False)):
+                try:
+                    # PHASE 1 — resolve an IN-FLIGHT add order (mirror entry adopt).
+                    # Mutate pos ONLY on a CONFIRMED fill; a partial blends ONLY the
+                    # filled qty. While an order is in flight, PHASE 2 cannot submit a
+                    # second (idempotency). No early return: on a confirmed/partial
+                    # fill we fall through with the freshly-blended pos + ratcheted s1.
+                    _pyr_oid = le.get("pyramid_order_id")
+                    if _pyr_oid:
+                        _pno, _ = adapter.get_order(str(_pyr_oid))
+                        if _pno is not None and not _order_open(_pno):
+                            _pyr_filled = float(getattr(_pno, "filled_size", 0) or 0)
+                            if _pyr_filled > 0:
+                                # CONFIRMED ADD FILL — blend via the SHARED pure helper
+                                # (one source of truth with replay + tests). A partial add
+                                # blends ONLY the filled qty.
+                                _qa_f = _pyr_filled
+                                _Pa_f = float(
+                                    getattr(_pno, "average_filled_price", 0) or 0
+                                ) or float(le.get("pyramid_limit_px") or ask)
+                                _q0p = float(pos["quantity"])
+                                _a0p = float(pos["avg_entry_price"])
+                                _R0p = _float_or_none(le.get("pyramid_pending_R0"))
+                                _prev_stop = float(pos["stop_price"])
+                                _blend = pyramid_blend_on_fill(
+                                    q0=_q0p, a0=_a0p, qa_f=_qa_f, Pa_f=_Pa_f,
+                                    stop_px=_prev_stop,
+                                    original_quantity=_float_or_none(pos.get("original_quantity")),
+                                )
+                                _q1 = _blend["q1"]
+                                _a1 = _blend["a1"]
+                                # INVARIANT-A: stop only TIGHTENS (asserted in the helper).
+                                _s1 = _blend["s1"]
+                                pos["avg_entry_price"] = _a1
+                                pos["quantity"] = _q1
+                                # GROW original_quantity so the Ross scale-out de-risks
+                                # the ENLARGED position (scale_out_quantity bases its
+                                # fraction on original_quantity; the can_split dust guard
+                                # there is re-checked at scale time against the new size).
+                                pos["original_quantity"] = _blend["original_quantity"]
+                                pos["notional_usd"] = _q1 * _a1
+                                pos["stop_price"] = _s1
+                                stop_px = _s1
+                                # Freeze R0 as the #769 risk anchor so the circuit
+                                # re-bases to the STARTER's original risk (GUARD #1).
+                                if _R0p is not None and _R0p > 0:
+                                    le["pyramid_risk_anchor_usd"] = _R0p
+                                le["pyramid_add_count"] = int(le.get("pyramid_add_count") or 0) + 1
+                                # Book the add's entry fee (mirrors the entry adopt) so
+                                # realized PnL nets it at the full exit.
+                                _add_fee = _order_total_fees_usd(_pno) or 0.0
+                                if _add_fee > 0.0:
+                                    le["entry_fee_usd_unbooked"] = (
+                                        float(le.get("entry_fee_usd_unbooked") or 0.0) + _add_fee
+                                    )
+                                le.pop("pyramid_order_id", None)
+                                le.pop("pyramid_limit_px", None)
+                                le.pop("pyramid_pending_R0", None)
+                                le["position"] = pos
+                                _commit_le(sess, le)
+                                _emit(db, sess, "live_pyramid_add", {
+                                    "add_qty": _qa_f, "add_price": _Pa_f,
+                                    "q0": _q0p, "a0": _a0p, "q1": _q1, "a1": _a1,
+                                    "old_stop": float(le.get("pyramid_prev_stop") or _s1),
+                                    "new_stop": _s1, "R0": _R0p,
+                                    "rho": float(getattr(settings, "chili_momentum_pyramid_add_risk_fraction", 0.5) or 0.5),
+                                    "cushion_r": ((bid - _a0p) * _q0p / _R0p) if (_R0p and _R0p > 0) else None,
+                                    "ofi": le.get("pyramid_confirm_ofi"),
+                                    "risk_anchor_usd": _R0p,
+                                })
+                                le.pop("pyramid_prev_stop", None)
+                                le.pop("pyramid_confirm_ofi", None)
+                            else:
+                                # Order terminal with NO fill (rejected / cancelled /
+                                # post-only-cross) — clear the in-flight marker so a
+                                # future tick may try again. No pos mutation.
+                                le.pop("pyramid_order_id", None)
+                                le.pop("pyramid_limit_px", None)
+                                le.pop("pyramid_pending_R0", None)
+                                le.pop("pyramid_prev_stop", None)
+                                le.pop("pyramid_confirm_ofi", None)
+                                _commit_le(sess, le)
+                        # else: still working — leave it in flight, do NOT submit again.
+
+                    # PHASE 2 — TRIGGER a new add (only if none in flight + under cap).
+                    # EQUITY-FIRST: gate to equity. Crypto is deferred — its L2/OFI
+                    # ring is only partially populated in the scheduler process
+                    # (_live_ofi_microprice returns None for many crypto names), so the
+                    # confirmation can't be trusted to fire an extra BUY; revisit when
+                    # crypto L2 coverage is complete. (project_l2_integration)
+                    _is_equity_pyr = not str(sess.symbol or "").upper().endswith("-USD")
+                    _max_adds = int(getattr(settings, "chili_momentum_pyramid_max_adds", 1) or 1)
+                    if st == STATE_LIVE_TRAILING and not le.get("pyramid_order_id"):
+                        # R0 = the STARTER's ORIGINAL structural risk = d0 * q0, where
+                        # d0 is the frozen entry stop_distance (the C1b basis) and q0,a0
+                        # are the STARTER size/avg. Use original_quantity as q0 so a
+                        # post-partial runner still funds the add off the full starter R.
+                        _es_p = le.get("entry_sizing") if isinstance(le.get("entry_sizing"), dict) else {}
+                        _d0 = _float_or_none(_es_p.get("stop_distance"))
+                        if _d0 is None or _d0 <= 0:
+                            _d0 = max(0.0, float(avg) - float(pos["stop_price"])) or None
+                        _q0_starter = (
+                            _float_or_none(pos.get("original_quantity"))
+                            or _float_or_none(pos.get("quantity"))
+                            or 0.0
+                        )
+                        _a0_starter = float(pos["avg_entry_price"])
+                        # OFI thrust (the confirmation; None for many crypto → fail-closed).
+                        _pyr_ofi = None
+                        try:
+                            from .pipeline import _live_ofi_microprice as _pyr_ofi_fn
+                            _pyr_ofi, _ = _pyr_ofi_fn(sess.symbol, db=db)
+                        except Exception:
+                            _pyr_ofi = None
+                        # Anchor the entry-stop reference ONCE so "ratcheted since first
+                        # considered" is monotone (the headroom test). Persist it.
+                        _entry_stop0 = _float_or_none(le.get("pyramid_entry_stop_ref"))
+                        if _entry_stop0 is None:
+                            _entry_stop0 = float(pos["stop_price"])
+                            le["pyramid_entry_stop_ref"] = _entry_stop0
+                            _commit_le(sess, le)
+                        # Anti-Ross midday: no add during the equity midday lull
+                        # (entry-side parity with the #770 lull de-weight).
+                        _lull = False
+                        try:
+                            from .market_profile import in_midday_lull as _pyr_lull
+                            _lull = bool(_pyr_lull(sess.symbol))
+                        except Exception:
+                            _lull = False
+                        # SHARED pure predicate (one source of truth w/ replay + tests).
+                        _decn = pyramid_add_decision(
+                            enabled=True,  # outer block already gated on the flag
+                            is_equity=_is_equity_pyr,
+                            add_count=int(le.get("pyramid_add_count") or 0),
+                            max_adds=_max_adds,
+                            in_flight=bool(le.get("pyramid_order_id")),
+                            a0=_a0_starter,
+                            q0=_q0_starter,
+                            d0=_d0,
+                            bid=float(bid),
+                            stop_px=float(stop_px),
+                            entry_stop_ref=_entry_stop0,
+                            high_water_mark=_float_or_none(pos.get("high_water_mark")),
+                            ofi=_pyr_ofi,
+                            ofi_threshold=float(getattr(settings, "chili_momentum_ofi_threshold", 0.25) or 0.25),
+                            min_cushion_r=float(getattr(settings, "chili_momentum_pyramid_min_cushion_r", 1.0) or 1.0),
+                            midday_lull=_lull,
+                        )
+                        _R0 = _decn.get("R0")
+                        if _decn.get("fire"):
+                            # GUARD #4 ADMISSION — the add is the FIRST post-entry BUY;
+                            # it MUST be refused whenever a NEW entry would be refused.
+                            # Route through the SAME risk_evaluator admission the
+                            # decouple-watching entry path uses (kill-switch, per-broker
+                            # + global daily-loss registry, governance inhibit, position
+                            # cap, aggregate crypto risk). ABORT THE ADD on refusal —
+                            # NEVER the exit (we fall through to the stop-breach below).
+                            _adm_ok, _adm_ev = runner_boundary_risk_ok(
+                                db, sess, expected_move_bps=_expected_move_bps
+                            )
+                            if not _adm_ok:
+                                _emit(db, sess, "live_pyramid_add_blocked", {
+                                    "reason": "risk_admission_refused",
+                                    "severity": _adm_ev.get("severity"),
+                                    "errors": _adm_ev.get("errors"),
+                                })
+                            else:
+                                # SIZE THE ADD via the SAME machinery (never a hardcoded
+                                # share block): add_risk_budget = rho * R0, the SAME
+                                # frozen ATR (entry_stop_atr_pct => the same d0), at the
+                                # guarded ask; notional ceiling = the equity-relative
+                                # per-trade notional cap, liquidity-capped on $-vol.
+                                _rho = float(getattr(settings, "chili_momentum_pyramid_add_risk_fraction", 0.5) or 0.5)
+                                _add_budget = _rho * _R0
+                                _pyr_ask = float(ask) if (ask and float(ask) > 0) else float(bid)
+                                _pyr_guard_ask = _pyr_ask * _adaptive_notional_guard_multiplier(
+                                    expected_move_bps=_expected_move_bps
+                                )
+                                _inc = prod.base_increment if prod else None
+                                _mn = prod.base_min_size if prod else None
+                                _add_atr_pct = _float_or_none(le.get("entry_stop_atr_pct")) or 0.0
+                                _add_ceiling = equity_relative_notional_cap(
+                                    policy_float_cap(
+                                        caps, "max_notional_per_trade_usd",
+                                        settings.chili_momentum_risk_max_notional_per_trade_usd,
+                                    ),
+                                    normalize_execution_family(sess.execution_family),
+                                )
+                                try:
+                                    from .universe import snapshot_dollar_volumes as _pyr_dvol_fn
+                                    _pyr_dvol = (_pyr_dvol_fn([sess.symbol]) or {}).get(
+                                        str(sess.symbol or "").strip().upper()
+                                    )
+                                except Exception:
+                                    _pyr_dvol = None
+                                _add_ceiling = liquidity_capped_notional(_add_ceiling, _pyr_dvol)
+                                _qa, _qa_meta = compute_risk_first_quantity(
+                                    entry_price=_pyr_guard_ask,
+                                    atr_pct=_add_atr_pct,
+                                    max_loss_usd=_add_budget,
+                                    max_notional_ceiling_usd=_add_ceiling,
+                                    base_increment=_inc,
+                                    base_min_size=_mn,
+                                    stop_atr_mult=float(params.get("stop_atr_mult") or 0.60),
+                                )
+                                if not _qa or _qa <= 0:
+                                    _emit(db, sess, "live_pyramid_add_blocked", {
+                                        "reason": "add_size_zero",
+                                        "detail": _qa_meta.get("reason"),
+                                        "add_budget_usd": round(_add_budget, 2),
+                                    })
+                                else:
+                                    # SUBMIT a marketable-limit BUY (mirror the entry
+                                    # submit). post_only only for crypto-maker — but this
+                                    # path is equity-only, so post_only is never set (RH
+                                    # adapter has no such kwarg). DAY tif like the entry.
+                                    _pyr_limit_str = _fmt_limit_price_buy(_pyr_guard_ask)
+                                    _pyr_cid = (
+                                        f"chili_ml_pyr_{sess.id}_{uuid.uuid4().hex[:12]}"
+                                    )
+                                    try:
+                                        from .market_profile import market_session_now as _pyr_sess_now
+                                        _pyr_ext = _pyr_sess_now(sess.symbol) != "regular"
+                                    except Exception:
+                                        _pyr_ext = False
+                                    _pyr_kwargs = dict(
+                                        product_id=product_id,
+                                        side="buy",
+                                        base_size=_fmt_base_size(_qa),
+                                        limit_price=_pyr_limit_str,
+                                        client_order_id=_pyr_cid,
+                                        extended_hours=_pyr_ext,
+                                        time_in_force="gfd",
+                                    )
+                                    _pyr_res = adapter.place_limit_order_gtc(**_pyr_kwargs) or {}
+                                    if _pyr_res.get("ok") and _pyr_res.get("order_id"):
+                                        # Stash in-flight state. Mutate pos ONLY on the
+                                        # confirmed poll (PHASE 1) — NEVER on submit.
+                                        le["pyramid_order_id"] = str(_pyr_res["order_id"])
+                                        le["pyramid_limit_px"] = float(_pyr_guard_ask)
+                                        le["pyramid_pending_R0"] = float(_R0)
+                                        le["pyramid_prev_stop"] = float(stop_px)
+                                        le["pyramid_confirm_ofi"] = (
+                                            None if _pyr_ofi is None else float(_pyr_ofi)
+                                        )
+                                        _commit_le(sess, le)
+                                        _emit(db, sess, "live_pyramid_add_submitted", {
+                                            "order_id": le["pyramid_order_id"],
+                                            "client_order_id": _pyr_cid,
+                                            "add_qty": float(_qa),
+                                            "limit_price": _pyr_limit_str,
+                                            "R0": float(_R0), "rho": _rho,
+                                            "add_budget_usd": round(_add_budget, 2),
+                                            "cushion_r": (
+                                                round(_decn["cushion_r"], 3)
+                                                if _decn.get("cushion_r") is not None else None
+                                            ),
+                                            "ofi": (None if _pyr_ofi is None else float(_pyr_ofi)),
+                                            "stop_at_submit": float(stop_px),
+                                        })
+                                    else:
+                                        _emit(db, sess, "live_pyramid_add_blocked", {
+                                            "reason": "submit_failed",
+                                            "error": _pyr_res.get("error"),
+                                        })
+                except Exception:
+                    # Fail-safe: any pyramid error is swallowed so the exit path below
+                    # ALWAYS runs. The add never blocks/delays/loosens an exit.
+                    _log.debug("[momentum_live] pyramid add block error", exc_info=True)
 
         if bid > stop_px and le.pop("stop_breach_pending_utc", None) is not None:
             # breach -> recovery between reads = flicker dodged; clear the marker

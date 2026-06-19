@@ -52,6 +52,8 @@ from .paper_execution import (
     cushion_adaptive_trail_stop,
     effective_stop_atr_pct,
     ofi_exhaustion_lock,
+    pyramid_add_decision,
+    pyramid_blend_on_fill,
     scale_out_fraction,
     sell_into_strength_ladder,
     stop_target_prices,
@@ -763,6 +765,62 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                             p["stop"] = _ss  # INVARIANT A: ratchet-only
                     except Exception:
                         pass
+                # RISK-NEUTRAL CONFIRMATION PYRAMID (replay mirror of live_runner's
+                # add-decision block). Gated on the SAME flag => OFF is byte-identical
+                # in replay too. Same cushion+confirm predicate as live: cushion banked
+                # in original-R0 units, new-HOD (bid >= p["hwm"], already recomputed
+                # this minute), OFI thrust (as-of the sim minute), trail ratcheted since
+                # entry, equity-only, no midday lull. The add fills AT THE TAPE BID (the
+                # marketable-buy analog — replay exits already price at the bid). On add:
+                # blend entry/qty, GROW qty0 (so the scale-out de-risks the enlarged
+                # size), ratchet p["stop"] up (INVARIANT-A), and freeze p["pyr_R0"] (the
+                # GUARD-#1 loss-side clamp anchor applied at the breach below).
+                if bool(getattr(settings, "chili_momentum_pyramid_enabled", False)):
+                    try:
+                        # Freeze the STARTER basis ONCE (entry0/qty0_starter/d0) so a
+                        # prior add never re-bases R0. d0 = the original stop distance.
+                        p.setdefault("entry0", p["entry"])
+                        p.setdefault("qty0_starter", p["qty0"])
+                        p.setdefault("pyr_d0", p["entry0"] - p["stop0"])
+                        p.setdefault("pyr_entry_stop_ref", p["stop"])
+                        _a0s = p["entry0"]
+                        _q0s = p["qty0_starter"]
+                        _d0 = p["pyr_d0"]
+                        _o, _ = _live_ofi_microprice(s, db=_l2db, as_of=_as_of)
+                        # SHARED pure predicate — IDENTICAL to live_runner's gate.
+                        _decn = pyramid_add_decision(
+                            enabled=True,
+                            is_equity=not s.endswith("-USD"),
+                            add_count=int(p.get("pyr_adds") or 0),
+                            max_adds=int(getattr(settings, "chili_momentum_pyramid_max_adds", 1) or 1),
+                            in_flight=False,  # replay fills instantly; no in-flight order
+                            a0=_a0s, q0=_q0s, d0=_d0,
+                            bid=bid, stop_px=p["stop"],
+                            entry_stop_ref=p["pyr_entry_stop_ref"],
+                            high_water_mark=p["hwm"],
+                            ofi=_o,
+                            ofi_threshold=float(getattr(settings, "chili_momentum_ofi_threshold", 0.25) or 0.25),
+                            min_cushion_r=float(getattr(settings, "chili_momentum_pyramid_min_cushion_r", 1.0) or 1.0),
+                            midday_lull=False,  # tape day is RTH momentum; lull handled at arm
+                        )
+                        if _decn.get("fire") and _decn.get("R0"):
+                            _R0 = float(_decn["R0"])
+                            _rho = float(getattr(settings, "chili_momentum_pyramid_add_risk_fraction", 0.5) or 0.5)
+                            _qa = (_rho * _R0 / _d0) if _d0 > 0 else 0.0
+                            if _qa > 0:
+                                # The add fills AT THE TAPE BID (marketable-buy analog).
+                                _blend = pyramid_blend_on_fill(
+                                    q0=p["qty"], a0=p["entry"], qa_f=_qa, Pa_f=bid,
+                                    stop_px=p["stop"], original_quantity=p["qty0"],
+                                )
+                                p["qty"] = _blend["q1"]
+                                p["qty0"] = _blend["original_quantity"]  # grow original
+                                p["entry"] = _blend["a1"]
+                                p["stop"] = _blend["s1"]                 # INVARIANT-A
+                                p["pyr_R0"] = _R0                        # GUARD-#1 anchor
+                                p["pyr_adds"] = int(p.get("pyr_adds") or 0) + 1
+                    except Exception:
+                        pass
             # LOSS-SIDE BREACH **LAST** — vs the freshly-ratcheted stop (mirrors live
             # order). L2 anti-shake-out: a CHOP-classified breach rides one bounded beat
             # (the OPG-USD shake-out); a BREAKDOWN / stale-or-missing L2 sells now. The
@@ -788,7 +846,19 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                     continue  # ride one bounded beat
                 p.pop("stop_breach_chop_holds", None)
                 why = "trail_stop" if (p["scaled"] or p["trail_armed"]) and p["stop"] > p["stop0"] else "stop"
-                close_trade(s, p, bid, why, when=now)
+                # GUARD-#1 (replay mirror of the #769 max-loss circuit clamp): a
+                # pyramided position's worst-case realized loss is capped at the
+                # STARTER's original risk R0. On a gap-through below the absolute floor
+                # (entry - R0/qty) the exit prices AT the floor (not the deeper bid), so
+                # realized loss <= R0 — exactly what live's clamped circuit guarantees.
+                # No pyramid => p["pyr_R0"] absent => exits at the bid (byte-identical).
+                _exit_px = bid
+                _pyr_R0 = p.get("pyr_R0")
+                if _pyr_R0 and _pyr_R0 > 0 and p["qty"] > 0:
+                    _floor_px = p["entry"] - float(_pyr_R0) / p["qty"]
+                    if _exit_px < _floor_px:
+                        _exit_px = _floor_px
+                close_trade(s, p, _exit_px, why, when=now)
                 continue
             # flicker recovery: bid back above stop clears the hold counter (live 4047-4054)
             if p.get("stop_breach_chop_holds"):

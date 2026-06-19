@@ -402,6 +402,130 @@ def scale_out_quantity(
     return float(scale_qty), float(remainder), True
 
 
+def pyramid_add_decision(
+    *,
+    enabled: bool,
+    is_equity: bool,
+    add_count: int,
+    max_adds: int,
+    in_flight: bool,
+    a0: float,
+    q0: float,
+    d0: float | None,
+    bid: float,
+    stop_px: float,
+    entry_stop_ref: float | None,
+    high_water_mark: float | None,
+    ofi: float | None,
+    ofi_threshold: float,
+    min_cushion_r: float,
+    midday_lull: bool,
+) -> dict[str, Any]:
+    """Pure gate for the risk-neutral confirmation-pyramid ADD (no I/O, unit-testable).
+
+    Decides whether to FIRE a single add to an already-winning runner. Returns a dict:
+    ``{"fire": bool, "reason": str, "R0": float|None, "cushion_r": float|None,
+       "cushion_usd": float|None}``. The caller (live_runner / replay) then sizes via
+    ``compute_risk_first_quantity`` (never a hardcoded block), routes GUARD #4 admission,
+    and submits — this helper owns ONLY the cushion+confirmation predicate so the live
+    path and the replay A/B share ONE source of truth.
+
+    R0 = d0 * q0 is the STARTER's original structural risk. The add fires iff ALL hold:
+      * flag ON, EQUITY (crypto deferred — partial L2/OFI), under the max-adds cap, and
+        no add currently in flight (idempotency);
+      * GUARD #2 cushion BANKED: (bid - a0)*q0 >= min_cushion_r * R0 AND stop_px >= a0
+        (the starter stop already ratcheted to >= breakeven);
+      * CONFIRMATION (all AND): new-HOD proxy (bid >= high_water_mark), OFI thrust
+        (ofi >= ofi_threshold), and non-decreasing trail headroom (stop_px ratcheted up
+        since the add was first considered, entry_stop_ref);
+      * NOT inside the equity midday lull (anti-Ross midday).
+    Fail-CLOSED: a missing/zero R0, a None OFI, or any unusable basis => no fire.
+    docs/DESIGN/MOMENTUM_LANE.md"""
+    out: dict[str, Any] = {"fire": False, "reason": "", "R0": None, "cushion_r": None, "cushion_usd": None}
+    if not enabled:
+        out["reason"] = "flag_off"
+        return out
+    if not is_equity:
+        out["reason"] = "crypto_deferred"
+        return out
+    if in_flight:
+        out["reason"] = "add_in_flight"
+        return out
+    if int(add_count) >= int(max_adds):
+        out["reason"] = "max_adds_reached"
+        return out
+    try:
+        _d0 = float(d0) if d0 is not None else 0.0
+        _q0 = float(q0)
+        _a0 = float(a0)
+        _bid = float(bid)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_basis"
+        return out
+    if not (_d0 > 0 and math.isfinite(_d0) and _q0 > 0 and math.isfinite(_q0) and _a0 > 0):
+        out["reason"] = "bad_basis"
+        return out
+    R0 = _d0 * _q0
+    out["R0"] = R0
+    cushion_usd = (_bid - _a0) * _q0
+    out["cushion_usd"] = cushion_usd
+    out["cushion_r"] = (cushion_usd / R0) if R0 > 0 else None
+    # GUARD #2 — cushion banked + starter stop at/above breakeven.
+    if not (cushion_usd >= float(min_cushion_r) * R0 and float(stop_px) >= _a0):
+        out["reason"] = "cushion_not_banked"
+        return out
+    # CONFIRMATION — new-HOD AND OFI thrust AND non-decreasing trail headroom.
+    if high_water_mark is None or _bid < float(high_water_mark) - 1e-9:
+        out["reason"] = "not_new_hod"
+        return out
+    if ofi is None or float(ofi) < float(ofi_threshold):
+        out["reason"] = "ofi_below_threshold"
+        return out
+    _ref = float(entry_stop_ref) if entry_stop_ref is not None else float(stop_px)
+    if float(stop_px) < _ref - 1e-9:
+        out["reason"] = "trail_not_ratcheted"
+        return out
+    if midday_lull:
+        out["reason"] = "midday_lull"
+        return out
+    out["fire"] = True
+    out["reason"] = "confirmed"
+    return out
+
+
+def pyramid_blend_on_fill(
+    *,
+    q0: float,
+    a0: float,
+    qa_f: float,
+    Pa_f: float,
+    stop_px: float,
+    original_quantity: float | None = None,
+) -> dict[str, float]:
+    """Pure blend math for a CONFIRMED pyramid add fill (no I/O, unit-testable).
+
+    Given the held starter (q0, a0), the filled add (qa_f at Pa_f), and the freshly-
+    ratcheted live stop (stop_px), returns the ENLARGED position:
+      q1 = q0 + qa_f
+      a1 = (a0*q0 + Pa_f*qa_f) / q1                 (blended VWAP)
+      s1 = max(stop_px, a1)                          (INVARIANT-A: ratchet to blended
+                                                      breakeven, tighten-ONLY)
+      original_quantity grows by qa_f                (so the Ross scale-out de-risks the
+                                                      ENLARGED position)
+    Asserts s1 >= stop_px (the stop can only tighten). A partial add blends ONLY the
+    filled qty. Pure + side-effect-free. docs/DESIGN/MOMENTUM_LANE.md"""
+    _q0 = float(q0)
+    _a0 = float(a0)
+    _qa = float(qa_f)
+    _Pa = float(Pa_f)
+    q1 = _q0 + _qa
+    a1 = (_a0 * _q0 + _Pa * _qa) / q1 if q1 > 0 else _a0
+    s1 = max(float(stop_px), a1)
+    assert s1 >= float(stop_px) - 1e-9, "INVARIANT-A violated: pyramid stop loosened"
+    orig = (float(original_quantity) if original_quantity is not None else _q0) + _qa
+    return {"q1": q1, "a1": a1, "s1": s1, "original_quantity": orig}
+
+
 def runner_trail_stop(
     *,
     high_water_mark: float,

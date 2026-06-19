@@ -432,6 +432,7 @@ def max_loss_circuit_decision(
     stop_distance: float,
     bid: float | None,
     k: float,
+    risk_anchor_usd: float | None = None,
 ) -> dict[str, Any]:
     """Hard max-loss-per-trade circuit (pure, zero-I/O, unit-testable).
 
@@ -480,8 +481,21 @@ def max_loss_circuit_decision(
         }
     structural_risk_usd = sd * q
     threshold_usd = kk * structural_risk_usd
+    # GUARD #1 (risk-neutral pyramid): when a frozen risk anchor is supplied (the
+    # STARTER's original structural risk R0), the circuit threshold may only TIGHTEN
+    # to it — never sit above R0. This keeps an ENLARGED (pyramided) position's
+    # worst-case realized loss <= the starter's original risk, since the #769 floor
+    # would otherwise re-base on the bigger qty (k*sd*q1 ~ 3-4.5x R0). A TIGHTEN of
+    # the circuit, never a weaken (Hard-Rule compliant). None => byte-identical legacy
+    # (threshold_usd/q == k*sd, so floor_price == a - k*sd exactly as before).
+    try:
+        _anchor = float(risk_anchor_usd) if risk_anchor_usd is not None else None
+    except (TypeError, ValueError):
+        _anchor = None
+    if _anchor is not None and math.isfinite(_anchor) and _anchor > 0:
+        threshold_usd = min(threshold_usd, _anchor)
     unrealized_pnl = (b - a) * q
-    floor_price = a - kk * sd
+    floor_price = a - threshold_usd / q
     breach = unrealized_pnl <= -threshold_usd
     return {
         "breach": bool(breach),
