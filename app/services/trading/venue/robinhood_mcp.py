@@ -125,6 +125,19 @@ def _sf(x: Any) -> Optional[float]:
         return None
 
 
+def _unwrap_payload(data: Any) -> Any:
+    """Peel the RH MCP response envelope ``{"data": <payload>, "guide": "..."}``.
+
+    The live agentic tools (get_portfolio/get_accounts/orders/positions) nest the
+    real payload under ``data`` alongside a human-readable ``guide`` string; the
+    field-extractors below must see the inner payload, not the envelope. Keyed on
+    BOTH ``data`` and ``guide`` present so a legitimate payload that merely has a
+    ``data`` field is never mis-unwrapped. Idempotent + fail-soft."""
+    if isinstance(data, dict) and "guide" in data and "data" in data:
+        return data["data"]
+    return data
+
+
 def _load_tool_overrides() -> dict[str, str]:
     raw = os.environ.get("CHILI_ROBINHOOD_AGENTIC_MCP_TOOL_MAP") or ""
     if not raw:
@@ -311,6 +324,7 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
 
     @staticmethod
     def _as_order_dicts(data: Any) -> list[dict]:
+        data = _unwrap_payload(data)
         if isinstance(data, list):
             return [d for d in data if isinstance(d, dict)]
         if isinstance(data, dict):
@@ -471,6 +485,7 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
 
     @staticmethod
     def _as_account_dicts(data: Any) -> list[dict]:
+        data = _unwrap_payload(data)
         if isinstance(data, list):
             return [d for d in data if isinstance(d, dict)]
         if isinstance(data, dict):
@@ -493,7 +508,7 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
             res = self._call("preview_order", review_args)
         except (VenueAdapterError, RhMcpError):
             return None  # fail-open: review unavailable does not block
-        data = res.data()
+        data = _unwrap_payload(res.data())
         od = data if isinstance(data, dict) else {}
         # Only abort on a clearly-blocking marker. RH review surfaces alerts under
         # "alerts"/"warnings"; we treat severity in {error, blocking, reject} OR an
@@ -541,7 +556,7 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
         return self._call(capability, args)
 
     def _order_result(self, res: McpToolResult, client_order_id: Optional[str]) -> dict:
-        data = res.data()
+        data = _unwrap_payload(res.data())
         od = data if isinstance(data, dict) else {}
         if not od:
             dicts = self._as_order_dicts(data)
@@ -752,7 +767,7 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
             res = self._call("portfolio", {_ARG_KEYS["account_number"]: self._account_number})
         except (VenueAdapterError, RhMcpError):
             return None
-        data = res.data()
+        data = _unwrap_payload(res.data())
         od = data if isinstance(data, dict) else {}
         if not od:
             dicts = self._as_account_dicts(data)
