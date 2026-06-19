@@ -648,3 +648,27 @@ def test_gitignore_patterns_present():
         content = fh.read()
     for pat in ("*agentic*token*.json", "*rh_agentic*.json", "*.client.json", ".rh_tok_*.tmp", "/secrets/"):
         assert pat in content, f"missing .gitignore pattern: {pat}"
+
+
+# ── 21. real RH response envelope {"data": <payload>, "guide": "..."} unwrap ──
+# Live-verified 2026-06-19: get_portfolio/get_accounts/orders nest the payload under
+# "data" alongside a "guide" string. The flat-mock tests missed this; this locks it.
+
+
+def test_response_envelope_unwrap():
+    from app.services.trading.venue.robinhood_mcp import (
+        _unwrap_payload,
+        RobinhoodAgenticMcpAdapter as A,
+    )
+
+    # envelope peeled to the inner payload (real get_portfolio shape)
+    env = {"data": {"buying_power": {"buying_power": "13800.0000"}}, "guide": "info"}
+    assert _unwrap_payload(env) == {"buying_power": {"buying_power": "13800.0000"}}
+    # a plain payload (no "guide") is NOT mis-unwrapped, even with a "data" field
+    assert _unwrap_payload({"data": [1], "x": 2}) == {"data": [1], "x": 2}
+    assert _unwrap_payload([1, 2]) == [1, 2]
+    # accounts/orders envelopes resolve to their inner lists (real get_accounts shape)
+    acc = {"data": {"accounts": [{"account_number": "674153143", "agentic_allowed": True}]}, "guide": "x"}
+    assert A._as_account_dicts(acc) == [{"account_number": "674153143", "agentic_allowed": True}]
+    orders = {"data": {"orders": [{"id": "o1"}]}, "guide": "x"}
+    assert A._as_order_dicts(orders) == [{"id": "o1"}]
