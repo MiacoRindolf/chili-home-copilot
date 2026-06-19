@@ -115,12 +115,30 @@ def _account_equity_usd(
     docs/DESIGN/MOMENTUM_LANE.md
     """
     from ..execution_family_registry import (
+        EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
         EXECUTION_FAMILY_ROBINHOOD_SPOT,
         normalize_execution_family,
     )
 
     ef = normalize_execution_family(execution_family)
     use_bp = bool(getattr(settings, "chili_momentum_risk_size_use_buying_power", True))
+
+    # Agentic MCP rail: the isolated agentic account is a CASH account — its reported
+    # buying_power IS the real, unleveraged spendable amount (no margin). Size against
+    # it DIRECTLY with NO margin multiple (the 2x multiple exists only to recover
+    # robin_stocks' under-reporting on the MARGIN main account; the MCP reports true BP).
+    # Applying 2x here would submit orders exceeding the cash balance -> RH rejects.
+    if ef == EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP:
+        try:
+            from ..venue.robinhood_mcp import RobinhoodAgenticMcpAdapter
+
+            bp = RobinhoodAgenticMcpAdapter().get_buying_power_usd()
+            if bp is not None and bp > 0:
+                return float(bp)  # effective margin multiple = 1.0 (cash account)
+            return None
+        except Exception:
+            return None
+
     try:
         if ef == EXECUTION_FAMILY_ROBINHOOD_SPOT:
             from ...broker_service import get_portfolio as _rh_portfolio
