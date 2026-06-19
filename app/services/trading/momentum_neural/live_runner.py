@@ -10,6 +10,7 @@ Snapshot contract:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -2468,6 +2469,45 @@ def cleanup_leaked_lane_locks(db: Session) -> int:
         return 0
 
 
+# B3 — agentic-account orphan backstop. The broker-sync reconciler runs on the MAIN
+# Robinhood account and is BLIND to the isolated Agentic account, and the lane places no
+# broker-side stop — so a position that filled on the agentic rail then lost its session
+# (cancel-races-fill / restart) is an unmanaged orphan with no stop at RH. This sweep
+# SURFACES such orphans (error-log + event) so the operator / monitor can act. It is
+# INERT unless the agentic rail is the active equity rail, and rate-limited.
+# RESIDUAL: detect+surface only — auto-adopt/flatten is the final hardening before
+# FULLY-unattended operation (see docs/DESIGN/ROBINHOOD_AGENTIC_MCP.md §10).
+_AGENTIC_SWEEP_INTERVAL = timedelta(seconds=60)
+_agentic_sweep_last = [datetime.min]
+
+
+def _maybe_sweep_agentic_orphans(db: Session) -> None:
+    """Rate-limited, agentic-rail-only orphan detection. Fail-soft — never blocks the lane."""
+    try:
+        from ..execution_family_registry import EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP
+
+        rail = str(getattr(settings, "chili_equity_execution_rail", "") or "").strip().lower()
+        if rail != EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP:
+            return  # inert until the operator opts the equity lane onto the agentic rail
+        if not str(getattr(settings, "chili_robinhood_agentic_mcp_account_number", "") or "").strip():
+            return
+        now = datetime.utcnow()
+        if now - _agentic_sweep_last[0] < _AGENTIC_SWEEP_INTERVAL:
+            return
+        _agentic_sweep_last[0] = now
+        from ..venue.rh_agentic_orphan_sweep import sweep_agentic_orphans
+
+        report = sweep_agentic_orphans(db)
+        if report.orphan_symbols:
+            _log.error(
+                "[live_runner] B3 agentic orphan sweep: %d UNMANAGED position(s) %s "
+                "(account_tail=%s) — no broker-side stop at RH; needs adopt/flatten",
+                len(report.orphan_symbols), report.orphan_symbols, report.account_tail,
+            )
+    except Exception:
+        _log.debug("[live_runner] agentic orphan sweep skipped (non-fatal)", exc_info=True)
+
+
 def run_live_runner_batch(
     db: Session,
     *,
@@ -2475,6 +2515,7 @@ def run_live_runner_batch(
     adapter_factory: Optional[AdapterFactory] = None,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    _maybe_sweep_agentic_orphans(db)
     for sess in list_runnable_live_sessions(db, limit=limit):
         try:
             out.append(tick_live_session(db, int(sess.id), adapter_factory=adapter_factory))
@@ -3878,7 +3919,16 @@ def tick_live_session(
         )
         _commit_le(sess, le)
 
-        cid = f"chili_ml_e_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{uuid.uuid4().hex[:10]}"[:120]
+        # B1: DETERMINISTIC entry id (idempotency). The agentic rail passes this cid as
+        # ref_id; a random suffix would let a retried logical entry get a NEW id, so RH
+        # could not dedup -> double-submit. Derive the suffix from stable inputs so a
+        # re-submit of the SAME logical entry reuses the SAME cid. Format/length are
+        # byte-identical to the old uuid form (robin_stocks ignores ref_id; only the
+        # string identity matters for that path). Exit/scale/bailout cids stay random
+        # this pass (documented follow-up).
+        _entry_id_seed = f"{sess.id}|{sess.correlation_id or 'x'}|entry".encode("utf-8")
+        _entry_suffix = hashlib.sha1(_entry_id_seed).hexdigest()[:10]
+        cid = f"chili_ml_e_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{_entry_suffix}"[:120]
         # Pre-market / after-hours entries must be flagged so the venue routes them
         # (Alpaca: limit + DAY tif + extended_hours; RH: extended_hours_override). In
         # the regular session this is False and the order stays a plain marketable GTC.

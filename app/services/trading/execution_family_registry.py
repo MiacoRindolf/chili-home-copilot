@@ -175,12 +175,16 @@ def momentum_execution_seam_meta() -> dict[str, Any]:
 
 def _equity_rail_is_agentic_mcp() -> bool:
     """True when the operator has selected the sanctioned MCP rail for equities AND a
-    bearer token is configured.
+    ROUTABLE bearer is configured.
 
-    Token-presence is the activation switch (a real dependency, not a default-OFF dark
-    flag); rail selection (``chili_equity_execution_rail``) is a conscious account-routing
+    Rail selection (``chili_equity_execution_rail``) is a conscious account-routing
     choice — which Robinhood account trades — defaulting to ``robinhood_spot`` so live
     equity flow is unchanged until the operator opts in.
+
+    Activation is no longer mere token-presence: a bundle must be ROUTABLE
+    (``bundle_is_routable`` — token + refresh present + not hard-dead, cheap/no-network)
+    so a dead or refreshless bundle that can never recover headlessly does NOT select
+    the rail. A legacy env / explicit raw token (no bundle file) still activates the rail.
     """
     try:
         from ...config import settings
@@ -191,9 +195,16 @@ def _equity_rail_is_agentic_mcp() -> bool:
     if rail != EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP:
         return False
     try:
-        from .venue.rh_mcp_client import resolve_mcp_token
+        import os as _os
 
-        return bool(resolve_mcp_token())
+        from .venue.rh_mcp_client import bundle_is_routable
+
+        # A routable on-disk bundle (refreshable) — the headless path.
+        if bundle_is_routable():
+            return True
+        # Legacy raw token via env (no bundle file) still activates the rail.
+        env = _os.environ.get("CHILI_ROBINHOOD_AGENTIC_MCP_TOKEN")
+        return bool(env and env.strip())
     except Exception:
         return False
 

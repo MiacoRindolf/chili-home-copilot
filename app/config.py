@@ -2508,6 +2508,19 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("CHILI_ROBINHOOD_AGENTIC_MCP_TOOL_MAP"),
     )
+    # The dedicated isolated Agentic account number every order is PINNED to. Empty ->
+    # the adapter raises no_agentic_account rather than ever using the brain's account
+    # (structurally impossible to hit the main portfolio). Set to 674153143 to activate.
+    chili_robinhood_agentic_mcp_account_number: str = Field(
+        default="",
+        validation_alias=AliasChoices("CHILI_ROBINHOOD_AGENTIC_MCP_ACCOUNT_NUMBER"),
+    )
+    # When True (default), every order previews via review_equity_order first and
+    # aborts on a HARD pre-trade alert (conservative: soft alerts pass, fail-open).
+    chili_robinhood_agentic_mcp_review_before_place: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_ROBINHOOD_AGENTIC_MCP_REVIEW_BEFORE_PLACE"),
+    )
     # Which rail equities route to: "robinhood_spot" (default, unofficial robin_stocks) or
     # "robinhood_agentic_mcp" (sanctioned rail; trades the isolated Agentic account). A
     # conscious account-routing choice — only takes effect when a token is also present.

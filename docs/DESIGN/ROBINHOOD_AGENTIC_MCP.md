@@ -1,8 +1,8 @@
 # Robinhood Agentic Trading — sanctioned MCP execution rail
 
-**Status:** spike (foundation landed; live finalization blocked on operator OAuth + funded account)
+**Status:** headless-refresh + safety core landed (INERT until operator runs the one-time consent + pins the account); live flip still operator-gated
 **Owner:** trading-brain / execution layer
-**Related:** `docs/DESIGN/MOMENTUM_LANE.md`, `app/services/trading/venue/protocol.py`, `app/services/trading/execution_family_registry.py`
+**Related:** `docs/DESIGN/MOMENTUM_LANE.md`, `app/services/trading/venue/protocol.py`, `app/services/trading/execution_family_registry.py`, `app/services/trading/venue/rh_oauth.py`, `app/services/trading/venue/rh_mcp_client.py`, `app/services/trading/venue/robinhood_mcp.py`, `app/services/trading/venue/rh_agentic_orphan_sweep.py`, `scripts/rh_agentic_oauth.py`
 
 ## 1. What Robinhood shipped (2026-05-27)
 
@@ -108,14 +108,109 @@ Components (this spike):
 CHILI cannot open the account, run the OAuth flow, fund it, or place the first live order on your behalf —
 those are yours by design (and by the financial-safety rule).
 
-## 6. Open questions (resolve in P1/P2)
+## 6. Headless OAuth refresh — RESOLVED (the P3 token-refresh open question)
 
-- **Token lifetime / refresh.** OAuth tokens are short-lived. Headless persistence needs a refresh strategy
-  (own OAuth client registration against the advertised auth server, or a token-refresh side-channel). The
-  introspection step tells us the observed lifetime.
-- **Tool schema.** Exact tool names, argument shapes, supported order types (market/limit, TIF), and the
-  response JSON for orders/fills/positions — captured by the introspect dump, not assumed.
+Headless persistence is built. The bearer is short-lived; CHILI runs OAuth **refresh** out of a
+self-contained on-disk **token bundle** (access + refresh + rotation metadata + endpoints + client_id).
+
+- **Consent (operator, ONE time, on the desktop):** `scripts/rh_agentic_oauth.py` runs the full
+  authorization-code + PKCE (S256) flow as a **public client** (`token_endpoint_auth_method=none`):
+  RFC 7591 dynamic registration → PKCE → print the auth URL → capture the loopback callback (or `--paste`
+  the URL headless) → exchange the code → write the bundle via `rh_oauth.write_bundle_atomic`. It prints
+  **only** `bundle.redacted()` — never the access/refresh token, the auth code, or the code_verifier.
+- **Refresh (headless, in-process):** `RhRefreshingTokenSource` refreshes proactively (300s skew before
+  expiry) and reactively (on a transport 401 → one forced refresh + replay). It is:
+  - **single-flight** (in-process `threading.Lock`; a peer thread that already rotated is detected and its
+    token reused without a 2nd network call);
+  - **multi-process safe** (write-ahead `pending_refresh`; on an `invalid_grant` rejection it re-reads the
+    bundle and adopts a peer's externally-rotated refresh token rather than forcing re-consent);
+  - **fail-closed** (`NeedsReauth` on no-bundle / no-refresh-token / refresh-rejected / grant-revoked →
+    the rail reports DISABLED and **never** places an order with stale/ambiguous auth);
+  - **transient-tolerant** (5xx / 429 / network keep the still-valid token and retry next tick).
+- **Transport hardening:** every token/transport POST asserts `https` + host ∈ RH allow-list and
+  `allow_redirects=False`; a 3xx on a credentialed call is a transient error, never followed. Token-endpoint
+  errors carry **no** raw body (`RhMcpError.__repr__` omits `.raw`), so a traceback can't leak token text.
+- **Bundle storage (out of repo by default):** `rh_oauth.default_bundle_path()` resolves OUTSIDE the repo
+  (`%LOCALAPPDATA%\chili\rh_agentic\token.json` on Windows; `~/.chili/rh_agentic/token.json` /
+  `$CHILI_SECRETS_DIR` in the container — mount this into the scheduler). 0600 / owner-only ACL, atomic write.
+  `.gitignore` also anchors `*agentic*token*.json`, `*rh_agentic*.json`, `*.client.json`, `.rh_tok_*.tmp`,
+  `/secrets/` as defense-in-depth. Override the path via `CHILI_ROBINHOOD_AGENTIC_MCP_TOKEN_FILE`.
+
+## 7. Account pin — the safety latch (blast-radius bound)
+
+Every order on the rail is **structurally** pinned to the isolated Agentic account:
+
+- The pinned account (`CHILI_ROBINHOOD_AGENTIC_MCP_ACCOUNT_NUMBER`, e.g. **674153143**) is frozen at adapter
+  construction. `_build_order_args` injects it UNCONDITIONALLY — there is **no parameter** that lets the
+  caller/brain supply an account, so a misrouted order to the main portfolio (`5UV17626`,
+  `agentic_allowed=false`) is impossible. An empty pin → `no_agentic_account` (order blocked, zero transport).
+- Every order/cancel/review/BP-read routes through one chokepoint (`_place` for orders) that (1) asserts the
+  pin is on the args, (2) verifies via `get_accounts` that the pinned account's `agentic_allowed == True`
+  (latching `_pin_invalid` and reporting the rail DISABLED if not), (3) optionally previews via
+  `review_equity_order` and aborts on a HARD pre-trade alert (conservative + fail-open on soft/ambiguous),
+  (4) passes `ref_id = client_order_id` (the runner's **deterministic** idempotency token — see §9).
+
+## 8. Tool map (default for `CHILI_ROBINHOOD_AGENTIC_MCP_TOOL_MAP`)
+
+Finalized against the real RH Agentic schema:
+
+```json
+{"place_order":"place_equity_order","preview_order":"review_equity_order",
+ "cancel_order":"cancel_equity_order","list_orders":"get_equity_orders",
+ "get_order":"get_equity_orders","positions":"get_equity_positions","account":"get_accounts"}
+```
+
+`place_equity_order(account_number, symbol, side, type[market/limit/stop_market/stop_limit],
+quantity|dollar_amount, limit_price, stop_price, time_in_force[gfd/gtc], market_hours[regular_hours/
+extended_hours/all_day_hours], ref_id)`; `review_equity_order` = same minus `ref_id`. CHILI defaults TIF
+`gfd` (day) / `gtc` (resting limit) and `market_hours=regular_hours`. The adapter still capability-matches
+off a live `tools/list` when no override is set, so the keyword hints resolve to these names automatically.
+
+### BP-based sizing (operator-critical)
+`risk_policy._account_equity_usd` has a `robinhood_agentic_mcp` branch that reads the agentic account's
+**buying_power** (the real, unleveraged spendable amount — the agentic account is a **CASH** account) via
+`adapter.get_buying_power_usd()` (`get_accounts` → confirm pin → `get_portfolio` → `buying_power.buying_power`).
+The 2× margin multiple (which exists only to recover robin_stocks' under-reporting on the MARGIN main
+account) is **NOT** applied here — effective multiple = 1.0 — so CHILI never submits orders exceeding the
+cash balance (~$13,800). Fail-open (None → documented fixed cap). The `robinhood_spot` + coinbase branches
+are byte-identical.
+
+## 9. Idempotency — deterministic entry order-id (B1)
+
+`live_runner.py` builds the entry `client_order_id` as
+`chili_ml_e_{sess.id}_{corr[:8]}_{sha1(f"{sess.id}|{sess.correlation_id}|entry")[:10]}`. The suffix is now
+**deterministic** (was `uuid4().hex[:10]`), so a re-submit of the SAME logical entry reuses the SAME id —
+with the agentic rail's `ref_id=cid`, RH can dedup and a retried entry can't double-submit. Format/length are
+byte-identical to the old form; `robin_stocks` ignores `ref_id` so that path is unchanged.
+
+**Follow-up (NOT this pass):** the exit / scale-out / bailout cids still carry random suffixes. They are
+idempotent enough today (CHILI manages those in-process and the agentic rail's exit path is taker-side), but
+for full ref_id dedup on those legs they should get the same deterministic treatment before heavy live use.
+
+## 10. B3 residual — agentic-account orphan protection (ACTIVATION BLOCKER)
+
+CHILI's momentum lane places **no broker-side stop** (it polls price in-process, then places a market/limit
+exit). The broker-sync reconciler runs a separate `robin_stocks` session on the **MAIN** account and is
+**blind to the Agentic account** → a filled agentic position has no reconciler backstop → on a scheduler
+restart it is an unmanaged orphan at RH **with no stop**.
+
+`venue/rh_agentic_orphan_sweep.py` (`sweep_agentic_orphans`) is the minimal, agentic-rail-ONLY backstop: it
+reads the agentic account's open positions/orders (`get_agentic_open_positions` /
+`get_agentic_open_orders(placed_agent="agentic")`) and surfaces (error-level log + structured report) any
+momentum position with **no live in-process session** so it can be re-adopted — mirroring the robin_stocks
+adoption (`cancel_automation_session` `FILLED_NEEDS_ADOPTION` + `management_scope='momentum_neural'`). It
+never touches the robin_stocks reconciler or the main account.
+
+**Residual / blocker:** this is **detect + surface**, not yet a fully-automated continuous reconciliation
+loop wired into the runner's restart/adopt path. Before flipping the rail LIVE, the operator must (a) wire
+`sweep_agentic_orphans` into the restart/adopt path or a scheduled job, and (b) confirm the adopt branch
+re-adopts a real agentic orphan. Until then, a restart with an open agentic position is unprotected.
+
+## 11. Open questions (still to resolve in P1/P2 with live access)
+
+- **Tool schema confirmation.** The default map above is finalized from the documented schema; confirm against
+  a live `tools/list` / `review_equity_order` response (alert/severity field names for the HARD-block check).
 - **Rate limits / latency.** Undocumented. Measure vs `robin_stocks` to confirm the rail is viable for
   Ross-style fast entries (P2).
-- **Account selection.** Confirm the tool surface lets us target the Agentic account explicitly and read its
-  positions/P&L for reconciliation.
+- **Token lifetime.** The first live consent reveals the real `expires_in`; the refresh skew (300s) and the
+  hard-dead heuristic assume a multi-minute-to-hours TTL — verify and tune if RH issues very short tokens.

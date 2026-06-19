@@ -1,3 +1,12 @@
+# Robinhood Agentic OAuth secrets — token bundles + client sidecars + temp writes
+# (MUST be ignored first; these carry access/refresh tokens and client_ids and must
+# never be committed). The bundle path also defaults out-of-repo (rh_oauth.default_bundle_path).
+*agentic*token*.json
+*rh_agentic*.json
+*.client.json
+.rh_tok_*.tmp
+/secrets/
+
 __pycache__/
 *.pyc
 .venv/
