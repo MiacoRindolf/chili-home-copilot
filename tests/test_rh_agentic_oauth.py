@@ -672,3 +672,53 @@ def test_response_envelope_unwrap():
     assert A._as_account_dicts(acc) == [{"account_number": "674153143", "agentic_allowed": True}]
     orders = {"data": {"orders": [{"id": "o1"}]}, "guide": "x"}
     assert A._as_order_dicts(orders) == [{"id": "o1"}]
+
+
+# ── 22. runner↔adapter kwarg parity (BLOCKER #1/#2/#3 regression) ──────────────
+# The live_runner passes extended_hours + time_in_force="gfd" (ENTRY) and
+# market_hours_override/extended_hours_override (EXIT) to place_*; the agentic
+# adapter MUST accept them (no TypeError) and translate to the MCP market_hours.
+
+
+def test_runner_kwargs_parity_no_typeerror(monkeypatch):
+    from app.services.trading.venue.robinhood_mcp import RobinhoodAgenticMcpAdapter as A
+
+    # pure translation
+    assert A._resolve_market_hours("regular_hours", None, None, False) == "regular_hours"
+    assert A._resolve_market_hours("regular_hours", None, None, True) == "all_day_hours"
+    assert A._resolve_market_hours("regular_hours", None, True, False) == "all_day_hours"
+    assert A._resolve_market_hours("regular_hours", "all_day_hours", None, False) == "all_day_hours"
+
+    ad = A(account_number="674153143")
+    cap = {}
+    monkeypatch.setattr(ad, "_place", lambda capability, args, **kw: cap.update(args=args) or "OK")
+    monkeypatch.setattr(ad, "_order_result", lambda res, cid: {"ok": True, "order_id": "x", "client_order_id": cid})
+
+    # ENTRY — premarket: the runner's EXACT _entry_kwargs
+    out = ad.place_limit_order_gtc(
+        product_id="AAPL", side="buy", base_size="10", limit_price="100.00",
+        client_order_id="cid1", extended_hours=True, time_in_force="gfd",
+    )
+    assert out["ok"] is True
+    assert cap["args"]["market_hours"] == "all_day_hours"   # premarket → all_day
+    assert cap["args"]["time_in_force"] == "gfd"            # DAY, not the gtc resting default
+
+    # ENTRY — regular hours → regular_hours
+    ad.place_limit_order_gtc(
+        product_id="AAPL", side="buy", base_size="10", limit_price="100.00",
+        client_order_id="cid2", extended_hours=False, time_in_force="gfd",
+    )
+    assert cap["args"]["market_hours"] == "regular_hours"
+
+    # EXIT — premarket: the runner's EXACT _ext_kwargs (robin_stocks override names)
+    ad.place_market_order(
+        product_id="AAPL", side="sell", base_size="10", client_order_id="cid3",
+        market_hours_override="all_day_hours", extended_hours_override=True,
+    )
+    assert cap["args"]["market_hours"] == "all_day_hours"
+    ad.place_limit_order_gtc(
+        product_id="AAPL", side="sell", base_size="10", limit_price="99.00",
+        client_order_id="cid4", extended_hours=True,
+        market_hours_override="all_day_hours", extended_hours_override=True,
+    )
+    assert cap["args"]["market_hours"] == "all_day_hours"

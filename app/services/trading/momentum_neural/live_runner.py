@@ -25,6 +25,7 @@ from ....config import settings
 from ....models.trading import MomentumSymbolViability, TradingAutomationSession
 from ..execution_family_registry import (
     EXECUTION_FAMILY_COINBASE_SPOT,
+    EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
     EXECUTION_FAMILY_ROBINHOOD_SPOT,
     ExecutionFamilyNotImplementedError,
     normalize_execution_family,
@@ -700,7 +701,10 @@ def _submit_live_market_exit(
     # Overrides are RH-only kwargs — pass them ONLY for robinhood_spot (the coinbase
     # adapter does not accept them; crypto + regular-hours stay byte-identical).
     _exit_extended = False
-    if normalize_execution_family(sess.execution_family) == EXECUTION_FAMILY_ROBINHOOD_SPOT:
+    if normalize_execution_family(sess.execution_family) in (
+        EXECUTION_FAMILY_ROBINHOOD_SPOT,
+        EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
+    ):
         try:
             from .market_profile import market_session_now
 
