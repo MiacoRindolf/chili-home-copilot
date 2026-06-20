@@ -93,7 +93,7 @@ _RESP_KEYS = {
     "side": ("side", "direction"),
     "status": ("state", "status"),
     "order_type": ("type", "order_type"),
-    "filled_size": ("filled_quantity", "cumulative_quantity", "filled_qty", "quantity"),
+    "filled_size": ("filled_quantity", "cumulative_quantity", "filled_qty"),
     "avg_price": ("average_price", "avg_price", "executed_price", "price"),
     "created_time": ("created_at", "created_time", "createdAt"),
     "fee": ("fees", "fee", "total_fees"),
@@ -362,7 +362,16 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
         try:
             res = self._call("get_order", self._read_args({"order_id": order_id, "id": order_id}))
             dicts = self._as_order_dicts(res.data())
-            return (self._normalize_order(dicts[0]) if dicts else None), fresh
+            # get_equity_orders is a LIST endpoint — match the row whose id == order_id.
+            # Never trust [0]: a server that ignores the id filter hands back the
+            # most-recent order, and the runner would poll the WRONG status/fill.
+            match = next(
+                (d for d in dicts if str(_pick(d, _RESP_KEYS["order_id"]) or "") == str(order_id)),
+                None,
+            )
+            if match is None and len(dicts) == 1:
+                match = dicts[0]  # single-row response ⇒ the server applied the filter
+            return (self._normalize_order(match) if match else None), fresh
         except (VenueAdapterError, RhMcpError) as exc:
             logger.warning("[rh_mcp_adapter] get_order(%s) failed: %s", order_id, exc)
             return None, fresh
@@ -399,6 +408,25 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
 
     # ── Account pin (the safety latch) ──────────────────────────────────
 
+    @staticmethod
+    def _resolve_market_hours(
+        market_hours: str,
+        market_hours_override: Optional[str],
+        extended_hours_override: Optional[bool],
+        extended_hours: bool,
+    ) -> str:
+        """Normalize the runner's ext-hours signals into the MCP ``market_hours`` enum.
+
+        The runner uses TWO conventions: the ENTRY passes ``extended_hours`` (bool); the
+        EXIT passes the robin_stocks kwarg names ``market_hours_override`` /
+        ``extended_hours_override``. Any premarket/extended hint maps to ``all_day_hours``
+        (pre + regular + post) so a resting order survives the session boundary."""
+        if market_hours_override:
+            return str(market_hours_override)
+        if extended_hours_override or extended_hours:
+            return "all_day_hours"
+        return market_hours or _DEFAULT_MARKET_HOURS
+
     def _build_order_args(
         self,
         *,
@@ -409,6 +437,7 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
         limit_price: Optional[str] = None,
         stop_price: Optional[str] = None,
         market_hours: str = _DEFAULT_MARKET_HOURS,
+        time_in_force: Optional[str] = None,
         client_order_id: Optional[str] = None,
     ) -> dict:
         """Build the order args, UNCONDITIONALLY injecting the pinned account.
@@ -431,11 +460,15 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
             _ARG_KEYS["order_type"]: order_type,
             _ARG_KEYS["market_hours"]: market_hours,
         }
+        # Honor the caller's TIF (the runner sends "gfd" for DAY entry limits — a
+        # resting GTC buy filling hours later is the KMRK -21.9% incident); fall back
+        # to the limit/market default only when unspecified.
+        _tif = (str(time_in_force).strip().lower() if time_in_force else "") or None
         if limit_price is not None:
             args[_ARG_KEYS["limit_price"]] = limit_price
-            args[_ARG_KEYS["time_in_force"]] = _DEFAULT_TIF_RESTING
+            args[_ARG_KEYS["time_in_force"]] = _tif or _DEFAULT_TIF_RESTING
         else:
-            args[_ARG_KEYS["time_in_force"]] = _DEFAULT_TIF
+            args[_ARG_KEYS["time_in_force"]] = _tif or _DEFAULT_TIF
         if stop_price is not None:
             args[_ARG_KEYS["stop_price"]] = stop_price
         if client_order_id:
@@ -582,6 +615,10 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
         base_size: str,
         client_order_id: Optional[str] = None,
         market_hours: str = _DEFAULT_MARKET_HOURS,
+        market_hours_override: Optional[str] = None,
+        extended_hours_override: Optional[bool] = None,
+        extended_hours: bool = False,
+        time_in_force: Optional[str] = None,
     ) -> dict:
         try:
             res = self._place(
@@ -591,7 +628,10 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
                     side=side,
                     base_size=base_size,
                     order_type="market",
-                    market_hours=market_hours,
+                    market_hours=self._resolve_market_hours(
+                        market_hours, market_hours_override, extended_hours_override, extended_hours
+                    ),
+                    time_in_force=time_in_force,
                     client_order_id=client_order_id,
                 ),
             )
@@ -612,6 +652,10 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
         limit_price: str,
         client_order_id: Optional[str] = None,
         market_hours: str = _DEFAULT_MARKET_HOURS,
+        market_hours_override: Optional[str] = None,
+        extended_hours_override: Optional[bool] = None,
+        extended_hours: bool = False,
+        time_in_force: Optional[str] = None,
     ) -> dict:
         try:
             res = self._place(
@@ -622,7 +666,10 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
                     base_size=base_size,
                     order_type="limit",
                     limit_price=limit_price,
-                    market_hours=market_hours,
+                    market_hours=self._resolve_market_hours(
+                        market_hours, market_hours_override, extended_hours_override, extended_hours
+                    ),
+                    time_in_force=time_in_force,
                     client_order_id=client_order_id,
                 ),
             )

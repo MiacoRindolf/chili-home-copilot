@@ -95,6 +95,38 @@ def adaptive_max_spread_bps(
     return adaptive
 
 
+# Short-TTL cache for the agentic cash-account buying power: a Monday burst of
+# candidate sizings must NOT fire a fresh adapter + tools/list + get_accounts +
+# get_portfolio per name (rate-limit / latency → missed fast Ross breaks). Serve a
+# recent value on a transient read miss so the basis never drops to None mid-burst.
+_AGENTIC_BP_CACHE: dict[str, float] = {"value": 0.0, "ts": 0.0}
+_AGENTIC_BP_TTL_SEC = 10.0
+_AGENTIC_BP_STALE_GRACE = 60.0
+
+
+def _agentic_buying_power_cached() -> float | None:
+    import time as _time
+
+    now = _time.monotonic()
+    cached = _AGENTIC_BP_CACHE.get("value") or 0.0
+    age = now - (_AGENTIC_BP_CACHE.get("ts") or 0.0)
+    if cached > 0 and age < _AGENTIC_BP_TTL_SEC:
+        return cached
+    try:
+        from ..venue.robinhood_mcp import RobinhoodAgenticMcpAdapter
+
+        bp = RobinhoodAgenticMcpAdapter().get_buying_power_usd()
+    except Exception:
+        bp = None
+    if bp is not None and bp > 0:
+        _AGENTIC_BP_CACHE["value"] = float(bp)
+        _AGENTIC_BP_CACHE["ts"] = now
+        return float(bp)
+    if cached > 0 and age < _AGENTIC_BP_STALE_GRACE:
+        return cached  # transient miss → recent cached value, not None
+    return None
+
+
 def _account_equity_usd(
     execution_family: str | None = None, *, apply_margin_multiple: bool = True
 ) -> float | None:
@@ -129,15 +161,10 @@ def _account_equity_usd(
     # robin_stocks' under-reporting on the MARGIN main account; the MCP reports true BP).
     # Applying 2x here would submit orders exceeding the cash balance -> RH rejects.
     if ef == EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP:
-        try:
-            from ..venue.robinhood_mcp import RobinhoodAgenticMcpAdapter
-
-            bp = RobinhoodAgenticMcpAdapter().get_buying_power_usd()
-            if bp is not None and bp > 0:
-                return float(bp)  # effective margin multiple = 1.0 (cash account)
-            return None
-        except Exception:
-            return None
+        # Cash account: reported BP IS the real spendable (NO margin multiple). Cached
+        # (short TTL) so a burst of candidate sizings reuses one read.
+        bp = _agentic_buying_power_cached()
+        return float(bp) if (bp is not None and bp > 0) else None
 
     try:
         if ef == EXECUTION_FAMILY_ROBINHOOD_SPOT:
