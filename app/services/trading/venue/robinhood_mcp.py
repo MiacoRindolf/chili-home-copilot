@@ -360,7 +360,7 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
     def get_order(self, order_id: str):
         fresh = _now_freshness()
         try:
-            res = self._call("get_order", self._read_args({"order_id": order_id, "id": order_id}))
+            res = self._call("get_order", self._read_args({"order_id": order_id}))
             dicts = self._as_order_dicts(res.data())
             # get_equity_orders is a LIST endpoint — match the row whose id == order_id.
             # Never trust [0]: a server that ignores the id filter hands back the
@@ -591,14 +591,42 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
     def _order_result(self, res: McpToolResult, client_order_id: Optional[str]) -> dict:
         data = _unwrap_payload(res.data())
         od = data if isinstance(data, dict) else {}
-        if not od:
-            dicts = self._as_order_dicts(data)
-            od = dicts[0] if dicts else {}
         order_id = _pick(od, _RESP_KEYS["order_id"])
+        # A place response may nest the order under a singular "order"/"result" key, or
+        # arrive as a list — descend/peel BEFORE giving up on the id (do this whenever the
+        # id is unresolved, not only when od is empty: a non-empty dict with no id is
+        # exactly the case that would otherwise orphan a real fill).
+        if order_id is None and isinstance(od, dict):
+            for _k in ("order", "result"):
+                _inner = od.get(_k)
+                if isinstance(_inner, dict) and _pick(_inner, _RESP_KEYS["order_id"]) is not None:
+                    od = _inner
+                    order_id = _pick(od, _RESP_KEYS["order_id"])
+                    break
+        if order_id is None:
+            _dicts = self._as_order_dicts(data)
+            if _dicts:
+                od = _dicts[0]
+                order_id = _pick(od, _RESP_KEYS["order_id"])
+        # An ACCEPTED order with no resolvable order_id is unmanageable — the runner could
+        # not poll its fill or place a stop, leaving a naked, unmanaged long. Fail the place
+        # (ok=False) so the caller takes the place-failed branch and re-watches, rather than
+        # advancing to PENDING_ENTRY with a None id. Loud: should never happen on the real
+        # RH place schema (docs/DESIGN/ROBINHOOD_AGENTIC_MCP.md §11).
+        if order_id is None:
+            logger.error(
+                "[rh_mcp_adapter] place response had NO resolvable order_id (cid=%s) — "
+                "failing the place to avoid a naked unmanaged position; raw=%r",
+                client_order_id, res.raw,
+            )
+            return {
+                "ok": False, "venue": _VENUE, "error": "no_order_id_in_place_response",
+                "client_order_id": client_order_id, "raw": res.raw,
+            }
         return {
             "ok": True,
             "venue": _VENUE,
-            "order_id": str(order_id) if order_id is not None else None,
+            "order_id": str(order_id),
             "client_order_id": client_order_id,
             "status": _pick(od, _RESP_KEYS["status"]),
             "raw": res.raw,
@@ -754,7 +782,7 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
             self._assert_account_is_agentic()
             res = self._call(
                 "cancel_order",
-                {_ARG_KEYS["account_number"]: self._account_number, "order_id": order_id, "id": order_id},
+                {_ARG_KEYS["account_number"]: self._account_number, "order_id": order_id},
             )
             return {"ok": True, "venue": _VENUE, "order_id": order_id, "raw": res.raw}
         except NeedsReauth as e:
