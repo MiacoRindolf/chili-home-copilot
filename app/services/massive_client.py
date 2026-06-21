@@ -1712,6 +1712,43 @@ def get_ticker_sector(ticker: str) -> str | None:
     return sec
 
 
+_FLOAT_CACHE: dict[str, float | None] = {}
+
+
+def get_ticker_float(ticker: str) -> float | None:
+    """REAL share count for the low-float (squeeze-ability) pillar, from the SAME
+    ``/v3/reference/tickers/{t}`` endpoint as ``get_ticker_sector``:
+    ``share_class_shares_outstanding`` (fallback ``weighted_shares_outstanding``). This is
+    the actual SHARE COUNT the pillar wants — not the market_cap ``$`` proxy it currently
+    falls back to. Cached for the process lifetime (~static; reverse-splits are rare).
+    ``None`` when the ticker / field is unavailable (caller keeps the proxy; fail-open)."""
+    tk = str(ticker or "").upper().strip()
+    if not tk:
+        return None
+    if tk in _FLOAT_CACHE:
+        return _FLOAT_CACHE[tk]
+    val: float | None = None
+    try:
+        d = _get(f"{_base()}/v3/reference/tickers/{tk}", {})
+        if isinstance(d, dict):
+            r = d.get("results") if isinstance(d.get("results"), dict) else {}
+            for k in ("share_class_shares_outstanding", "weighted_shares_outstanding"):
+                v = r.get(k)
+                if v is None:
+                    continue
+                try:
+                    fv = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if fv > 0:
+                    val = fv
+                    break
+    except Exception:
+        val = None
+    _FLOAT_CACHE[tk] = val
+    return val
+
+
 def get_theme_news_tickers(keywords: list[str], *, limit: int = 200, max_age_min: int = 240) -> list[str]:
     """Tickers whose FRESH headline matches the active EVENT THEME keywords.
 

@@ -2297,6 +2297,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_CONTEXT_ENABLED"),
         description="Enable the daily-chart selection tilt (5th pillar daily_structure, 10% weight; equities). RE-RANKS toward clean daily breakouts, never blocks a fill. 0 = selection byte-identical (liquidity-biased weights).",
     )
+    chili_momentum_use_real_float: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_USE_REAL_FLOAT"),
+        description="Feed the low-float pillar the REAL share count (Polygon reference share_class_shares_outstanding) instead of the market_cap $-proxy; names without it use a consistent market_cap/price share-count estimate (never mixes units). Kill-switch: 0 = the pillar keeps the market_cap proxy (selection byte-identical).",
+    )
     chili_momentum_daily_lookback_days: int = Field(
         default=20,
         ge=3,
