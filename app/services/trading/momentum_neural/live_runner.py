@@ -4282,11 +4282,15 @@ def tick_live_session(
                         le["max_loss_circuit_fired"] = True
                         le["max_loss_circuit_floor_price"] = _circuit["floor_price"]
                         # EQUITY-FIRST: the absolute floor + repeg-skip apply to the RH
-                        # path only (where the gap-through tail lives). Crypto (-USD) may
-                        # fire but keeps the bid-relative ladder (dust, 24/7, no LULD).
-                        if (
-                            normalize_execution_family(sess.execution_family)
-                            == EXECUTION_FAMILY_ROBINHOOD_SPOT
+                        # EQUITY paths only (where the gap-through tail lives) — BOTH the
+                        # unofficial robin_stocks rail (robinhood_spot) AND the sanctioned
+                        # Agentic Trading MCP rail (robinhood_agentic_mcp), which trade the
+                        # SAME RH low-float names with the SAME gap-through risk (LULD halts,
+                        # overnight gaps). Crypto (-USD) may fire but keeps the bid-relative
+                        # ladder (dust, 24/7, no LULD).
+                        if normalize_execution_family(sess.execution_family) in (
+                            EXECUTION_FAMILY_ROBINHOOD_SPOT,
+                            EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
                         ):
                             le["exit_floor_anchored"] = True
                         _commit_le(sess, le)
@@ -4351,10 +4355,11 @@ def tick_live_session(
             cid = f"chili_ml_b_{sess.id}_{uuid.uuid4().hex[:12]}"
             # Circuit bailouts on the RH (equity) path flatten at the ABSOLUTE loss-anchored
             # floor (no bid-relative ladder, no repeg). EQUITY-FIRST: keyed on
-            # exit_floor_anchored, which the circuit sets ONLY for robinhood_spot — crypto
-            # circuit fires but exit_floor_anchored is unset, so it falls through to None
-            # and keeps the legacy bid-relative ladder (dust, 24/7, no LULD). All OTHER
-            # bailout reasons pass None => byte-identical legacy ladder.
+            # exit_floor_anchored, which the circuit sets ONLY for the RH equity rails
+            # (robinhood_spot AND robinhood_agentic_mcp) — crypto circuit fires but
+            # exit_floor_anchored is unset, so it falls through to None and keeps the legacy
+            # bid-relative ladder (dust, 24/7, no LULD). All OTHER bailout reasons pass None
+            # => byte-identical legacy ladder.
             _bailout_floor = (
                 le.get("max_loss_circuit_floor_price")
                 if le.get("exit_floor_anchored")
