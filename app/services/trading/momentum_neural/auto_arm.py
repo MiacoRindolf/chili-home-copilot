@@ -100,16 +100,36 @@ def _auto_arm_liquidity_bias() -> bool:
 
 def _lane_execution_family() -> str:
     """The venue whose ACCOUNT EQUITY the lane's equity-relative caps should scale against.
-    crypto-only -> Coinbase; else (equity-only or mixed) -> Robinhood (the equity lane).
+    crypto-only -> Coinbase; else the EQUITY lane's configured execution rail — the Robinhood
+    Agentic MCP cash account when that rail is active, otherwise legacy robinhood_spot.
     Fixes the daily-loss / giveback breakers being computed against the SMALL crypto
     equity — which made them trip on tiny losses and never grow with the (much larger)
-    equities account. docs/DESIGN/MOMENTUM_LANE.md [[feedback_adaptive_no_magic]]"""
+    equities account. The agentic branch fixes the SAME class of bug for the cash-account
+    migration: the legacy robinhood_spot account was drained to ~$950 when funds moved to
+    the agentic account, so basing the cap on it froze the lane at ~$95/day (one trade)
+    while the lane actually trades the $13,800 agentic account. docs/DESIGN/MOMENTUM_LANE.md
+    [[feedback_adaptive_no_magic]] [[project_per_broker_daily_loss]]
+
+    FOLLOW-UP (per-broker path, currently OFF via chili_per_broker_daily_loss_enabled): the
+    per-broker breaker (governance.broker_daily_loss_breached) still treats only
+    robinhood_spot / coinbase_spot as first-class — an agentic family normalizes to
+    robinhood_spot there. BEFORE enabling that flag with the agentic rail, make
+    robinhood_agentic_mcp first-class in REAL_DAILY_LOSS_FAMILIES + realized_pnl_today_by_broker
+    (and re-tune the aggregate-backstop test), else the per-broker cap reverts to the drained
+    legacy basis. The ACTIVE path (flag OFF) is already correct via THIS function +
+    equity_relative_daily_loss_cap."""
     from ..execution_family_registry import (
         EXECUTION_FAMILY_COINBASE_SPOT,
+        EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
         EXECUTION_FAMILY_ROBINHOOD_SPOT,
     )
 
-    return EXECUTION_FAMILY_COINBASE_SPOT if _auto_arm_crypto_only() else EXECUTION_FAMILY_ROBINHOOD_SPOT
+    if _auto_arm_crypto_only():
+        return EXECUTION_FAMILY_COINBASE_SPOT
+    rail = str(getattr(settings, "chili_equity_execution_rail", "") or "").strip().lower()
+    if rail == EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP:
+        return EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP
+    return EXECUTION_FAMILY_ROBINHOOD_SPOT
 
 
 def _is_coinbase_tradeable_symbol(symbol: str) -> bool:

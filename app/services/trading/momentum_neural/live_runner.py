@@ -1518,8 +1518,9 @@ def _place_scale_out_limit(
     trigger (which pays the give-back). Fail-open: any failure here leaves the
     reactive market scale-out path fully in charge."""
     try:
-        inc = prod.base_increment if prod else None
-        mn = prod.base_min_size if prod else None
+        _eq_shares = not str(sess.symbol or "").upper().endswith("-USD")
+        inc = prod.base_increment if prod else (1.0 if _eq_shares else None)
+        mn = prod.base_min_size if prod else (1.0 if _eq_shares else None)
         scale_qty, _runner_qty, can_split = scale_out_quantity(
             current_qty=float(filled),
             original_qty=float(filled),
@@ -3687,8 +3688,15 @@ def tick_live_session(
         snap = dict(sess.risk_snapshot_json or {})
         le = _live_exec(snap)
 
-        inc = prod.base_increment if prod else None
-        mn = prod.base_min_size if prod else None
+        # Equity rejects FRACTIONAL shares on a LIMIT / extended-hours order (RH allows
+        # fractional only on type=market + regular hours), and the momentum entry is a
+        # marketable LIMIT often placed premarket. A transient get_product REST miss
+        # (prod=None) must therefore default to WHOLE shares for equity (inc=mn=1.0) —
+        # never a None that rounds to a fractional qty the venue rejects (a wasted live
+        # entry). Crypto (-USD) keeps None (its venue quantizes fractional base size).
+        _equity_share_default = not str(sess.symbol or "").upper().endswith("-USD")
+        inc = prod.base_increment if prod else (1.0 if _equity_share_default else None)
+        mn = prod.base_min_size if prod else (1.0 if _equity_share_default else None)
         guarded_ask = ask * _adaptive_notional_guard_multiplier(expected_move_bps=_expected_move_bps)
         # Risk-first sizing (Ross-style): qty = per-trade max-loss / stop distance,
         # capped at the (conviction-scaled, equity-relative) notional ceiling — a
@@ -4998,8 +5006,9 @@ def tick_live_session(
                                 _pyr_guard_ask = _pyr_ask * _adaptive_notional_guard_multiplier(
                                     expected_move_bps=_expected_move_bps
                                 )
-                                _inc = prod.base_increment if prod else None
-                                _mn = prod.base_min_size if prod else None
+                                _eq_shares = not str(sess.symbol or "").upper().endswith("-USD")
+                                _inc = prod.base_increment if prod else (1.0 if _eq_shares else None)
+                                _mn = prod.base_min_size if prod else (1.0 if _eq_shares else None)
                                 _add_atr_pct = _float_or_none(le.get("entry_stop_atr_pct")) or 0.0
                                 _add_ceiling = equity_relative_notional_cap(
                                     policy_float_cap(
@@ -5300,8 +5309,9 @@ def tick_live_session(
             # and HOLD the runner (-> TRAILING). A position too small to leave a
             # sellable runner is flattened whole at target (the old flat exit) so we
             # never strand un-sellable dust. (docs/DESIGN/MOMENTUM_LANE.md)
-            inc = prod.base_increment if prod else None
-            mn = prod.base_min_size if prod else None
+            _eq_shares = not str(sess.symbol or "").upper().endswith("-USD")
+            inc = prod.base_increment if prod else (1.0 if _eq_shares else None)
+            mn = prod.base_min_size if prod else (1.0 if _eq_shares else None)
             orig_qty = _float_or_none(pos.get("original_quantity")) or qty
             frac = scale_out_fraction(symbol=sess.symbol)
             scale_qty, runner_qty, can_split = scale_out_quantity(

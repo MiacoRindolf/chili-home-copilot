@@ -41,6 +41,11 @@ def _build_coinbase() -> VenueAdapter:
     return CoinbaseSpotAdapter()
 
 
+def _build_robinhood_agentic_mcp() -> VenueAdapter:
+    from .robinhood_mcp import RobinhoodAgenticMcpAdapter
+    return RobinhoodAgenticMcpAdapter()
+
+
 _BUILDERS: dict[str, Callable[[], VenueAdapter]] = {
     "robinhood": _build_robinhood,
     "coinbase": _build_coinbase,
@@ -48,10 +53,18 @@ _BUILDERS: dict[str, Callable[[], VenueAdapter]] = {
     # is one lookup, not a scatter of ``.lower().strip()`` calls.
     "coinbase_spot": _build_coinbase,
     "robinhood_spot": _build_robinhood,
+    # Robinhood Agentic MCP (isolated cash account) — the momentum equity rail.
+    # Registering it here lets the cancel/death orphan-safety net (automation_query
+    # _try_adopt_filled_entry_on_cancel + session-death sweep) resolve a real adapter
+    # so an operator-cancel that raced a fill is adopted and resting orders cancelled,
+    # instead of leaving an unmanaged naked long (the CRVO/FTHM orphan class).
+    "robinhood_agentic_mcp": _build_robinhood_agentic_mcp,
 }
 
 
-SUPPORTED_BROKER_SOURCES: frozenset[str] = frozenset({"robinhood", "coinbase"})
+SUPPORTED_BROKER_SOURCES: frozenset[str] = frozenset(
+    {"robinhood", "coinbase", "robinhood_agentic_mcp"}
+)
 
 
 def is_supported(broker_source: str | None) -> bool:
