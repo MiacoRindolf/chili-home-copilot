@@ -563,6 +563,43 @@ def run_momentum_neural_tick(
             # 11-day previous-days A/B replay: +6 fills, +$914 PnL vs baseline
             # (scripts/_sim_liquidity_selection.py, 2026-06-10).
             _weights = ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED
+            # REAL-FLOAT enrichment (GAP 1, off => byte-identical): the low-float pillar
+            # wants a SHARE COUNT but without a producer it falls back to market_cap ($,
+            # wrong units, price-contaminated). Inject the real float (share count) from
+            # the reference endpoint; for names it can't resolve, use a CONSISTENT
+            # share-count estimate (market_cap / price) so the pillar never MIXES
+            # share-count and $ across names (which would corrupt the -log10 ranking).
+            # Cached + fail-open. Kill-switch chili_momentum_use_real_float=False.
+            if bool(getattr(settings, "chili_momentum_use_real_float", True)):
+                try:
+                    from ...massive_client import get_ticker_float
+
+                    def _pick_num(_d, _keys):
+                        for _k in _keys:
+                            _v = _d.get(_k)
+                            if _v is not None:
+                                try:
+                                    return float(_v)
+                                except (TypeError, ValueError):
+                                    continue
+                        return None
+
+                    for _sym, _sig in _ross_signals.items():
+                        if not isinstance(_sig, dict) or "-USD" in str(_sym):
+                            continue  # equities only
+                        try:
+                            _f = get_ticker_float(_sym)
+                            if _f and _f > 0:
+                                _sig["float_shares"] = float(_f)
+                                continue
+                            _mc = _pick_num(_sig, ("market_cap", "marketcap"))
+                            _px = _pick_num(_sig, ("price", "last", "close", "last_price"))
+                            if _mc and _px and _px > 0:
+                                _sig["float_shares"] = _mc / _px
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
             # Daily-chart context TILT (off => byte-identical): enrich each candidate
             # with daily_structure_pct (break ABOVE a major daily level + room to the
             # next level + soft trend) and switch to the 5-pillar weights. The daily
