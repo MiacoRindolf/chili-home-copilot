@@ -223,17 +223,32 @@ def test_place_market_order_builds_args_and_normalizes():
         },
     )
     a = _adapter(transport=t)
+    a._account_number = "acct-test"  # place requires a pinned agentic account (PR #779)
+    a._account_verified = True  # skip the get_accounts agentic re-check (covered elsewhere)
     out = a.place_market_order(product_id="AAPL", side="buy", base_size="3", client_order_id="cid-1")
     assert out["ok"] is True
     assert out["order_id"] == "ord-77"
     assert out["client_order_id"] == "cid-1"
     call = [r for r in t.requests if r["method"] == "tools/call"][-1]
     args = call["params"]["arguments"]
-    assert args == {"symbol": "AAPL", "side": "buy", "quantity": "3", "type": "market", "client_order_id": "cid-1"}
+    # PR #779 contract: pinned account injected, market_hours + day TIF defaulted,
+    # client_order_id carried as the idempotency ref_id (NOT a 'client_order_id' key).
+    assert args == {
+        "account_number": "acct-test",
+        "symbol": "AAPL",
+        "side": "buy",
+        "quantity": "3",
+        "type": "market",
+        "market_hours": "regular_hours",
+        "time_in_force": "gfd",
+        "ref_id": "cid-1",
+    }
 
 
 def test_place_market_order_unresolved_tool_fails_loud():
     a = _adapter(transport=FakeTransport(tools=[{"name": "unrelated_tool"}]))
+    a._account_number = "acct-test"  # get past the account-pin gate to reach tool resolution
+    a._account_verified = True
     out = a.place_market_order(product_id="AAPL", side="buy", base_size="1")
     assert out["ok"] is False
     assert "no Robinhood Agentic MCP tool" in out["error"]
@@ -256,6 +271,43 @@ def test_list_open_orders_normalizes_and_filters():
     assert orders[0].order_id == "o1"
     assert orders[0].product_id == "AAPL"
     assert orders[0].filled_size == 2.0
+
+
+def test_get_order_request_args_omit_unknown_id_key():
+    """Lock the order-id fix (PR #779): get_equity_orders declares
+    additionalProperties:false and its single-order filter param is 'order_id' ONLY.
+    A stray 'id' key — the old bug — would be rejected by a strict gateway and break
+    the live momentum_neural fill-poll path. FakeTransport ignores the args, so the
+    request-arg assertion is the only thing that locks this against regression."""
+    t = FakeTransport(
+        tools=[{"name": "get_equity_orders"}],
+        call_result={
+            "content": [{"type": "text", "text": json.dumps({"id": "ord-5", "status": "queued"})}],
+            "isError": False,
+        },
+    )
+    _order, _fresh = _adapter(transport=t).get_order("ord-5")
+    call = [r for r in t.requests if r["method"] == "tools/call"][-1]
+    args = call["params"]["arguments"]
+    # 'order_id' is the only legal filter key; the stray 'id' must never reappear.
+    assert args["order_id"] == "ord-5"
+    assert "id" not in args
+
+
+def test_cancel_order_request_args_omit_unknown_id_key():
+    """Lock the order-id fix (PR #779): cancel_equity_order declares
+    additionalProperties:false and accepts only {account_number, order_id}. A stray
+    'id' key would be rejected and break the live cancel path."""
+    t = FakeTransport(tools=[{"name": "cancel_equity_order"}])
+    a = _adapter(transport=t)
+    a._account_number = "acct-test"
+    a._account_verified = True  # skip the get_accounts agentic re-check (covered elsewhere)
+    out = a.cancel_order("ord-9")
+    assert out["ok"] is True
+    call = [r for r in t.requests if r["method"] == "tools/call"][-1]
+    args = call["params"]["arguments"]
+    assert args == {"account_number": "acct-test", "order_id": "ord-9"}
+    assert "id" not in args
 
 
 # ── Registry routing ────────────────────────────────────────────────────────
