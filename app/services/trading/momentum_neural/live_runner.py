@@ -764,11 +764,30 @@ def _submit_live_market_exit(
         if _ref is not None:
             _lim_px = _ref * (1.0 - (_notional_guard_multiplier() - 1.0) * 8.0)
     if _lim_px is not None and hasattr(adapter, "place_limit_order_gtc"):
+        # TICK-VALID SELL PRICE (SMCX premarket stranded-position fix, 2026-06-22): an
+        # RH-agentic equity limit finer than a penny on a $1+ stock is rejected by
+        # place_equity_order (SEC/NMS Rule 612) -> isError -> exit retry cap exhausted
+        # -> STRANDED POSITION. This reactive trail-stop priced bid*0.9975 =
+        # 11.98*0.9975 = 11.95005 (sub-penny via the attempts<=2 rung) and was rejected,
+        # while the ENTRY (_fmt_limit_price_buy) and the resting SCALE-OUT
+        # (_fmt_limit_price_sell) both penny-round and DID fill premarket. Use the SAME
+        # penny-FLOOR helper for RH equity sells (a lower sell limit is strictly MORE
+        # marketable -> never starves the fill). Crypto (coinbase) keeps its fine
+        # 6-decimal precision byte-identical.
+        _is_rh_equity_exit = normalize_execution_family(sess.execution_family) in (
+            EXECUTION_FAMILY_ROBINHOOD_SPOT,
+            EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
+        )
+        _exit_limit_str = (
+            _fmt_limit_price_sell(_lim_px)
+            if _is_rh_equity_exit
+            else f"{_lim_px:.6f}".rstrip("0").rstrip(".")
+        )
         _lim_kwargs: dict[str, Any] = dict(
             product_id=product_id,
             side="sell",
             base_size=_fmt_base_size(quantity),
-            limit_price=f"{_lim_px:.6f}".rstrip("0").rstrip("."),
+            limit_price=_exit_limit_str,
             client_order_id=client_order_id,
         )
         if _ext_kwargs:
