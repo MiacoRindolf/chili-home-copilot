@@ -807,8 +807,20 @@ def check_daily_loss_breach(
     if pct_cap > 0 and (equity_usd is None or float(equity_usd) <= 0):
         try:
             from .momentum_neural.risk_policy import _account_equity_usd
+            from .execution_family_registry import EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP
 
-            equity_usd = _account_equity_usd()
+            # BASIS FIX (2026-06-22): size the GLOBAL daily-loss cap off the account the
+            # LIVE lane actually trades — the agentic equity rail (~$10.3k BP) — NOT the
+            # legacy None->Coinbase default (~$3.7k) documented as buggy below. That default
+            # froze the $13.7k agentic lane at a spurious 1.5% x $3.7k = $55 cap, tripping on
+            # an -$84 day that is well within the real ~5% x $10.3k ≈ $515 budget. The
+            # per-broker model (below) is the long-term fix but is currently disabled + has an
+            # agentic-family realized-PnL bug; this resolves the GLOBAL basis correctly now.
+            # apply_margin_multiple=False -> unlevered buying power (the RISK-cap basis).
+            # [[project_per_broker_daily_loss]] [[feedback_adaptive_no_magic]]
+            equity_usd = _account_equity_usd(
+                EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP, apply_margin_multiple=False
+            )
         except Exception:
             equity_usd = None
 
