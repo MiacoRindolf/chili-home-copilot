@@ -21,12 +21,16 @@ logger = logging.getLogger(__name__)
 # A leveraged/inverse ETF's NAME states its gearing. The near-zero-false-positive marker is a
 # stated MULTIPLE ("2X" / "3X" / "-1X" / "1.5X") bounded as a standalone token — plain companies
 # almost never carry "3X" in their name ("3M"/"2U" have a letter, not X, after the digit). Backed
-# up by the explicit issuer leverage/inverse qualifiers ("UltraPro" = 3x, "Ultra" (ProShares) = 2x,
-# "Inverse"/"Leveraged"). We deliberately do NOT flag plain index ETFs ("SPDR S&P 500 ETF Trust").
+# up by explicit issuer leverage/inverse qualifiers. CRITICAL (verified live 2026-06-22): the
+# fundamentals ``short_name`` is TRUNCATED to ~31 chars, which CUTS OFF the trailing multiple of
+# Direxion's geared series ("Direxion Daily Real Estate Bull" — the "3X Shares" is gone). So the
+# multiple alone misses them; the issuer-series PHRASES that survive truncation ("Direxion Daily"
+# = the geared series by construction; "ProShares Ultra*") catch them. We deliberately do NOT flag
+# plain index ETFs ("SPDR S&P 500 ETF Trust", "Invesco QQQ Trust").
 _MULT = re.compile(r"(?<![A-Za-z0-9])-?\d(?:\.\d+)?[xX](?![A-Za-z0-9])")
 _LEV_WORDS = (
     "leveraged", "inverse", "ultrapro", "ultrashort", "ultra short", "ultra pro",
-    "proshares ultra", "-1x", "1.5x",
+    "proshares ultra", "direxion daily", "-1x", "1.5x",
 )
 
 

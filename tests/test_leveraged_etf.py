@@ -16,6 +16,10 @@ def test_flags_leveraged_and_inverse_by_name():
     assert is_leveraged_etf_name("Direxion Daily S&P 500 Bear 1X Shares")           # inverse 1x
     assert is_leveraged_etf_name("Defiance Daily Target 2X Long MSTR ETF")          # SMCX-class
     assert is_leveraged_etf_name("GraniteShares 1.5x Long TSLA Daily ETF")          # 1.5x
+    # TRUNCATED short_name (verified live: ~31 chars, "3X Shares" cut off) — caught by the
+    # surviving issuer-series phrase "Direxion Daily" (the geared series by construction).
+    assert is_leveraged_etf_name("Direxion Daily Real Estate Bull")                 # DRN (truncated)
+    assert is_leveraged_etf_name("Direxion Daily Semiconductor Bu")                 # SOXL (truncated)
 
 
 def test_does_not_flag_real_companies_or_plain_etfs():
@@ -27,6 +31,7 @@ def test_does_not_flag_real_companies_or_plain_etfs():
     assert not is_leveraged_etf_name("SPDR S&P 500 ETF Trust")    # plain index ETF (no gearing)
     assert not is_leveraged_etf_name("Invesco QQQ Trust")         # plain index ETF
     assert not is_leveraged_etf_name("Ultra Clean Holdings, Inc.")  # "Ultra" company, not ProShares
+    assert not is_leveraged_etf_name("K-Tech Solutions Company Limited")  # KMRK — a REAL small-cap, NOT leveraged
     assert not is_leveraged_etf_name(None)
     assert not is_leveraged_etf_name("")
 
