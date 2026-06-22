@@ -3599,7 +3599,13 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_GLOBAL_MAX_DAILY_LOSS_USD"),
     )
     chili_global_max_daily_loss_pct_of_equity: float = Field(
-        default=0.015,
+        # 5% of the live trading account = the operator's equity-relative daily-loss budget
+        # (~$515 off $10.3k BP / ~$687 off $13.7k equity). Raised 2026-06-22 from a spurious
+        # 1.5% that, combined with the wrong None->Coinbase equity basis (~$3.7k), produced a
+        # $55 cap that froze the $13.7k agentic lane on an -$84 day. 5% matches the momentum
+        # per-family daily-loss fraction so the global + lane caps are now ONE coherent number.
+        # [[feedback_adaptive_no_magic]] [[project_per_broker_daily_loss]]
+        default=0.05,
         ge=0.0,
         le=1.0,
         validation_alias=AliasChoices("CHILI_GLOBAL_MAX_DAILY_LOSS_PCT_OF_EQUITY"),
