@@ -129,6 +129,25 @@ REPLAY_FULL_PIPELINE = bool(
 REPLAY_RESULTS_DIR = os.environ.get("CHILI_REPLAY_RESULTS_DIR", "/app/data/replays")
 
 
+def _run_r_value(entry: float, stop0: float, mfe_px: float) -> float:
+    """Favorable excursion in R: (peak_mark − entry) / (entry − original_stop).
+
+    The MESO follow-through separator surfaced by the 2026-06-22 loss decomposition
+    (wf w6c11y2s9): winners thrust >=~1.3R, losers run <=~0.18R before fading to the
+    stop — so run_r is the metric A/Bs read instead of the (skewed) replay dollars.
+    Normalized by the ORIGINAL structural risk (entry − stop0) so a replay run_r is
+    directly comparable to the live lane. Returns 0.0 for a degenerate/non-positive
+    risk and never goes negative (the MFE is floored at entry). [momentum_neural]
+    """
+    try:
+        risk0 = float(entry) - float(stop0)
+        if risk0 <= 0:
+            return 0.0
+        return max(0.0, (float(mfe_px) - float(entry)) / risk0)
+    except Exception:
+        return 0.0
+
+
 def _aware(ts) -> datetime:
     t = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
     return t.replace(tzinfo=timezone.utc) if t.tzinfo is None else t.astimezone(timezone.utc)
@@ -641,10 +660,17 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
         pnl = (exit_px - p["entry"]) * p["qty"]
         state["cum"] += pnl
         state["peak"] = max(state["peak"], state["cum"])
+        # run-R instrumentation (additive — does NOT touch pnl/cum/fills/exits, so the
+        # day totals stay byte-identical). MFE = the maintained bid high-water over the
+        # hold (what we could have realized); run_R normalizes it by the ORIGINAL
+        # structural risk. The MESO separator: winners thrust, losers fade (~0R).
+        _mfe_px = max(float(p.get("hwm", p["entry"])), float(p["entry"]))
+        _run_r = _run_r_value(p["entry"], p.get("stop0", p["stop"]), _mfe_px)
         trades.append({**p["meta"], "exit": round(exit_px, 4), "why": why,
                        "exit_t": (str(when)[11:16] if when is not None else None),
                        "stop": round(p.get("stop0", p["stop"]), 4),
                        "target": round(p["target"], 4),
+                       "mfe_px": round(_mfe_px, 4), "run_r": round(_run_r, 2),
                        "usd": round(pnl + p.get("scale_usd", 0.0), 0)})
         # G2: per-symbol post-loss discipline — mirror live _symbol_loss_guards (only a
         # net LOSS cools down + strikes; a WIN stays re-armable, preserving the legit
@@ -1170,6 +1196,18 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
     result["total_usd"] = round(state["cum"], 0)
     result["wins"] = sum(1 for t in trades if t["usd"] > 0)
     result["losses"] = sum(1 for t in trades if t["usd"] <= 0)
+    # DOLLAR-SKEW LABELS (replay $ are NOT the live lane's expectancy — the shared leaf
+    # math makes setup-shape / run_r live-faithful, but the dollars are not). Surface the
+    # known skews so any A/B reads run_r, not usd. (wf w6c11y2s9.)
+    result["sizing_basis_usd"] = BASIS_USD
+    result["daily_loss_cap_usd"] = DAILY_LOSS_CAP_USD
+    result["dollar_skew_note"] = (
+        "Replay $ are NOT live expectancy: fixed $%.0f basis + $%.0f daily cap (live cap "
+        "is adaptive per-broker off real equity, ~$686), frictionless ask/bid fills, no "
+        "#789 entry re-peg (under-counts fills live now takes), no #769 early-flatten "
+        "(per-trade losses run deeper). Use run_r for setup-quality A/Bs, not usd."
+        % (BASIS_USD, DAILY_LOSS_CAP_USD)
+    )
     result["day_halted"] = state["halted"]
     result["duration_s"] = round((datetime.now(timezone.utc) - started).total_seconds(), 1)
     if persist:
