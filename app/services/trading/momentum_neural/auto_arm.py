@@ -605,7 +605,11 @@ def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[Momentum
         try:
             extra = (r.execution_readiness_json or {}).get("extra") or {}
             rs = extra.get("ross_scores") or {}
-            ross = float(rs.get("score", rs.get("ross_score", 0.0)) or 0.0)
+            # ross_scores is keyed BY SYMBOL ({'SKYQ': 0.93}) — read THIS row's own
+            # score (mirrors viability.py). The old rs.get("score"/"ross_score") never
+            # matched a key -> ross=0.0 for EVERY row -> the arm queue silently ranked by
+            # viability alone (the A0 study's zero-discrimination signal). 2026-06-22 S1.
+            ross = float(rs.get(str(getattr(r, "symbol", "") or "").upper(), 0.0) or 0.0)
         except Exception:
             ross = 0.0
         return (ross, float(r.viability_score or 0.0))
