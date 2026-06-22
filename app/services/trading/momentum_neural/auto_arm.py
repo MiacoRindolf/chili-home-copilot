@@ -612,7 +612,23 @@ def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[Momentum
             ross = float(rs.get(str(getattr(r, "symbol", "") or "").upper(), 0.0) or 0.0)
         except Exception:
             ross = 0.0
-        return (ross, float(r.viability_score or 0.0))
+        _vb = float(r.viability_score or 0.0)
+        # DOWN-WEIGHT leveraged/inverse ETFs (DRN/KMRK/SOXL/...): they top the raw RVOL/gap
+        # ranking but are geared INDEX products, not the low-float company squeezes Ross trades
+        # (KMRK already cost the lane -$58). Scale their rank score down so a real mover outranks
+        # them; they still arm if nothing better is up (down-weight, NOT ban). 1.0 = kill-switch.
+        # Equity-only. [operator 2026-06-22 choice A] [[feedback_adaptive_no_magic]]
+        try:
+            _lw = float(getattr(settings, "chili_momentum_leveraged_etf_rank_weight", 1.0) or 1.0)
+            if _lw < 1.0:
+                from .leveraged_etf import symbol_is_leveraged_etf as _sym_lev
+
+                if _sym_lev(getattr(r, "symbol", "")):
+                    ross *= _lw
+                    _vb *= _lw
+        except Exception:
+            pass
+        return (ross, _vb)
 
     rows = sorted(rows, key=_ross_rank_key, reverse=True)
     if rows:
