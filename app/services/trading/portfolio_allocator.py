@@ -918,13 +918,18 @@ def allocate_momentum_session_entry(
     if execution_mode == "paper" and not bool(getattr(settings, "brain_paper_deployment_enforcement", True)):
         mult = 1.0
 
-    # ADAPTIVE SIZE BY CONVICTION (operator idea, 2026-06-06): scale the entry
-    # notional by CHILI's confidence in the setup — the viability/conviction score
-    # in [0,1]. A tentative setup risks little; a high-conviction one earns more.
-    # No fixed cap; combined with the deployment-ladder `mult` the lane also starts
-    # small and scales as it proves itself. (See feedback_adaptive_no_magic.)
-    _conf = max(0.0, min(1.0, _safe_float(getattr(viability, "viability_score", None), 0.0)))
-    intended_notional = max(10.0, base_cap * max(0.0, min(1.0, mult)) * _conf)
+    # SIZE = risk-first + equity-relative ceiling (THE SMCX fix, 2026-06-22). The old
+    # `base_cap * mult * _conf` multiplied the equity-relative notional ceiling by the
+    # raw viability/conviction score in [0,1], collapsing it to a FRACTION of itself
+    # (viability ~0.23 premarket -> the $2,070 ceiling cut to ~$468; a $13.8k account
+    # throttled to 41 shares). Conviction ALREADY gates whether we arm/enter (the
+    # viability gate) and the per-trade max-loss cap bounds RISK — multiplying it into
+    # SIZE again was a hidden double-count fighting the documented risk-first /
+    # equity-relative model. The ceiling stays the equity-relative cap; risk-first
+    # (qty = max_loss / stop_distance) binds the actual share count, and perf_mult /
+    # ERC / the capacity governor below remain legitimate adaptive reducers. No
+    # conviction shrink, no magic ceiling. (feedback_adaptive_no_magic, feedback_no_dark_flags)
+    intended_notional = max(10.0, base_cap * max(0.0, min(1.0, mult)))
     alloc = build_session_allocation_decision(
         db,
         session,
