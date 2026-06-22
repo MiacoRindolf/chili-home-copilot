@@ -4464,6 +4464,18 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_LIQUIDITY_BIAS"),
     )
+    chili_momentum_leveraged_etf_rank_weight: float = Field(
+        # DOWN-WEIGHT leveraged/inverse ETFs (DRN/KMRK/SOXL/...) in the arm queue: they top the
+        # raw RVOL/gap ranking but are geared index products, not the low-float company squeezes
+        # the lane trades (and KMRK already cost -$58 on 2026-06-22). Their ross+viability rank
+        # score is scaled by this factor (0.5 = halved -> a real mover outranks them; they still
+        # arm if nothing better is up = down-weight, not ban). 1.0 = kill-switch (no down-weight).
+        # Equity-only (crypto is never an equity ETF). [operator 2026-06-22 choice A]
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LEVERAGED_ETF_RANK_WEIGHT"),
+    )
     # NBBO spread tape (ON): each RTH cycle, persist the CLEAN consolidated bid/ask
     # (Massive snapshot lastQuote) for the Ross universe so the spread-sensitive
     # replay uses REAL spreads, not a proxy (the dollar-volume proxy read PAVS at
