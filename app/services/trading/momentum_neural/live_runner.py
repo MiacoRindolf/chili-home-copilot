@@ -3957,7 +3957,17 @@ def tick_live_session(
         # byte-identical to the old uuid form (robin_stocks ignores ref_id; only the
         # string identity matters for that path). Exit/scale/bailout cids stay random
         # this pass (documented follow-up).
-        _entry_id_seed = f"{sess.id}|{sess.correlation_id or 'x'}|entry".encode("utf-8")
+        # REF-ID UNIQUENESS (2026-06-22): the agentic rail passes this cid as ref_id, so
+        # it MUST be unique per place ATTEMPT — a re-watch / entry-chase re-peg that reused
+        # the stable {sess|corr|entry} seed got RH "API 409: Reference ID must be unique"
+        # and could NEVER re-enter (the entry-chase was dead the moment the rail unblocked).
+        # Bump a per-session entry-place counter into the seed so each attempt is unique;
+        # double-submit of the SAME attempt is guarded by the FSM transition to
+        # pending_entry + the late-fill-sweep (tracked order_id). Counter persists via the
+        # _commit_le after the place. Format/length byte-identical (robin_stocks ignores ref_id).
+        _entry_place_n = int(le.get("entry_place_count", 0) or 0) + 1
+        le["entry_place_count"] = _entry_place_n
+        _entry_id_seed = f"{sess.id}|{sess.correlation_id or 'x'}|entry|{_entry_place_n}".encode("utf-8")
         _entry_suffix = hashlib.sha1(_entry_id_seed).hexdigest()[:10]
         cid = f"chili_ml_e_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{_entry_suffix}"[:120]
         # Pre-market / after-hours entries must be flagged so the venue routes them
