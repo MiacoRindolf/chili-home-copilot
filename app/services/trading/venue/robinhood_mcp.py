@@ -274,8 +274,24 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
         name = self._require_tool(capability)
         res = self._get_client().call_tool(name, arguments)
         if res.is_error:
+            # Surface the BROKER'S actual rejection text in the message — not a bare
+            # "returned isError". RH puts the real reason (suitability / collar / an
+            # open-position restriction / buying-power / ...) in the content text blocks;
+            # it was attached as .raw but str(exc) dropped it, so entry_place_result.error
+            # and the log read an opaque "returned isError" and the failure was
+            # UNDIAGNOSABLE (RKLZ/CORD 2026-06-22: both whole-share, penny-priced,
+            # all_day_tradable, yet isError'd — the reason was invisible).
+            _detail = (res.text or "").strip()
+            if not _detail:
+                try:
+                    _detail = str(_unwrap_payload(res.data()) or "")
+                except Exception:
+                    _detail = ""
             raise VenueAdapterError(
-                f"MCP tool {name!r} returned isError", code="tool_error", raw=res.data()
+                f"MCP tool {name!r} returned isError"
+                + (f": {_detail[:500]}" if _detail else ""),
+                code="tool_error",
+                raw=res.data(),
             )
         return res
 
