@@ -3453,6 +3453,23 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_GUARD_MOVE_RATIO"),
         description="Fraction of expected move added to the marketable-limit guard premium over the ask (born-marketable on volatile names, capped at the spread cap). 0 = the fixed 25bps notional guard (parity).",
     )
+    # MARKETABLE RE-PEG ENTRY CHASE (2026-06-22): on a left-behind runaway, cancel+replace
+    # the resting buy UP to the live ask so a fast vertical actually FILLS instead of being
+    # abandoned. SAFETY (red-teamed): equity-only (crypto maker-only never chased); fails
+    # CLOSED on a stale/blocked quote; the chase price is bounded by a CUMULATIVE ceiling
+    # off the ORIGINAL limit (the adaptive spread budget the risk model already accepts), so
+    # total entry drift — and thus 2:1 R:R against the fixed structural stop — can never
+    # erode past one spread budget no matter how many re-pegs; capped at max_repegs.
+    chili_momentum_entry_chase_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_CHASE_ENABLED"),
+        description="Master switch for the marketable re-peg entry chase. False = byte-identical cancel-on-first-tick (parity). Equity-only.",
+    )
+    chili_momentum_entry_max_repegs: int = Field(
+        default=3, ge=0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_MAX_REPEGS"),
+        description="Max cancel-and-replace re-pegs per entry before falling back to cancel+re-watch. Bounds the chase so a runaway can't loop forever. 0 = no re-peg even with chase_enabled (parity).",
+    )
     chili_momentum_risk_max_position_size_base: float = Field(
         default=1_000_000.0,
         ge=0.0,

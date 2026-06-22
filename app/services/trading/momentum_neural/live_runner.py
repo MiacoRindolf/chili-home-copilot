@@ -1767,6 +1767,29 @@ def _entry_chase_ceiling_px(*, limit_px: float, expected_move_bps: float | None)
     return limit_px * (1.0 + tol_bps / 10_000.0)
 
 
+def _entry_repeg_price(
+    *, original_limit_px: float, live_ask: float, expected_move_bps: float | None
+) -> float | None:
+    """Bounded marketable RE-PEG price for a left-behind entry chase. Returns a new buy
+    limit (a guarded live ask, so marketable) capped by a CUMULATIVE ceiling =
+    ``original_limit_px x (1 + adaptive_max_spread_bps)`` — the ONE spread budget the risk
+    model already accepts — so TOTAL entry drift (hence the 2:1 R:R against the FIXED
+    structural stop) can never erode past that budget no matter how many re-pegs
+    accumulate. Returns ``None`` when the live ask has already run PAST the ceiling (the
+    move left for good -> cancel + re-watch) or inputs are invalid. Pure, side-effect-free.
+    Bounds R:R erosion + thin-book sweep by construction (red-team corrections C + sweep)."""
+    try:
+        if original_limit_px <= 0 or live_ask <= 0:
+            return None
+    except (TypeError, ValueError):
+        return None
+    ceiling = original_limit_px * (1.0 + _adaptive_live_max_spread_bps(expected_move_bps) / 10_000.0)
+    if live_ask > ceiling:
+        return None  # ran past the cumulative spread budget -> do not chase
+    new_px = live_ask * _adaptive_notional_guard_multiplier(expected_move_bps=expected_move_bps)
+    return min(new_px, ceiling)
+
+
 def _adaptive_notional_guard_multiplier(*, expected_move_bps: float | None) -> float:
     """Marketable-limit premium over the ask. Base = the documented notional-guard bps
     (25 today); on a volatile name widen toward a fraction of its expected move so the
@@ -3391,8 +3414,11 @@ def tick_live_session(
                 try:
                     _ptick, _pfr = adapter.get_best_bid_ask(product_id)
                     _pbid = float(_ptick.bid) if (_ptick is not None and _ptick.bid) else None
+                    _pask = float(_ptick.ask) if (_ptick is not None and _ptick.ask) else None
                 except Exception:
                     _pbid = None
+                    _pask = None
+                    _pfr = None
                 _stop_px = float(le.get("structural_stop_price") or 0.0)
                 try:
                     _lim_px = float(le.get("entry_limit_price") or 0.0)
@@ -3477,6 +3503,64 @@ def tick_live_session(
                                     "ok": True, "session_id": sess.id, "state": sess.state,
                                     "pending": "cancel_unconfirmed",
                                 }
+                            # MARKETABLE RE-PEG (2026-06-22 G1): a left-behind RUNAWAY is the
+                            # Ross play, not a miss. The cancel above is confirmed gone, so
+                            # cancel-and-replace the resting buy UP to the live ask instead of
+                            # abandoning it. SAFE (red-teamed): equity-only (crypto maker never
+                            # chased), fail-CLOSED on a stale quote, price bounded by the
+                            # CUMULATIVE spread budget off the original limit (R:R + thin-book
+                            # sweep guard), capped at max_repegs. Any miss -> the cancel+re-watch
+                            # below (byte-identical to today).
+                            _rp_maker = (
+                                str(sess.symbol or "").upper().endswith("-USD")
+                                and bool(getattr(settings, "chili_coinbase_maker_only_enabled", False))
+                            )
+                            _rp_n = int(le.get("entry_repeg_count", 0) or 0)
+                            _rp_max = int(getattr(settings, "chili_momentum_entry_max_repegs", 3) or 0)
+                            if (
+                                _cancel_why == "entry_limit_left_behind"
+                                and bool(getattr(settings, "chili_momentum_entry_chase_enabled", True))
+                                and not _rp_maker
+                                and _rp_n < _rp_max
+                                and _pask and _pask > 0
+                                and _pfr is not None and is_fresh_enough(_pfr)
+                            ):
+                                _rp_new = _entry_repeg_price(
+                                    original_limit_px=float(le.get("entry_original_limit_px") or _lim_px or 0.0),
+                                    live_ask=float(_pask),
+                                    expected_move_bps=(float(_emb) if _emb else None),
+                                )
+                                _rp_maxn = float((le.get("entry_notional_guard") or {}).get("max_notional_usd") or 0.0)
+                                if _rp_new and _rp_new > _lim_px and _rp_maxn > 0:
+                                    _rp_qty = float(int(_rp_maxn / _rp_new))  # whole shares, notional-capped
+                                    if _rp_qty >= 1.0:
+                                        _rp_pn = int(le.get("entry_place_count", 0) or 0) + 1
+                                        le["entry_place_count"] = _rp_pn
+                                        _rp_seed = f"{sess.id}|{sess.correlation_id or 'x'}|entry|{_rp_pn}".encode("utf-8")
+                                        _rp_cid = f"chili_ml_e_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{hashlib.sha1(_rp_seed).hexdigest()[:10]}"[:120]
+                                        _rp_res = adapter.place_limit_order_gtc(
+                                            product_id=product_id,
+                                            side="buy",
+                                            base_size=_fmt_base_size(_rp_qty),
+                                            limit_price=_fmt_limit_price_buy(_rp_new),
+                                            client_order_id=_rp_cid,
+                                            extended_hours=bool(le.get("entry_session_extended")),
+                                        ) or {}
+                                        if _rp_res.get("ok"):
+                                            le["entry_order_id"] = _rp_res.get("order_id")
+                                            le["entry_client_order_id"] = _rp_res.get("client_order_id") or _rp_cid
+                                            le["entry_limit_price"] = _fmt_limit_price_buy(_rp_new)
+                                            le["entry_repeg_count"] = _rp_n + 1
+                                            le["entry_submit_utc"] = _utcnow().isoformat()
+                                            le["entry_submitted"] = True
+                                            _record_entry_order_placed(le, _rp_res.get("order_id"))
+                                            _commit_le(sess, le)
+                                            _emit(db, sess, "entry_repegged", {
+                                                "old_limit": _lim_px, "new_limit": _rp_new,
+                                                "live_ask": _pask, "n": _rp_n + 1,
+                                            })
+                                            db.flush()
+                                            return {"ok": True, "session_id": sess.id, "state": sess.state, "pending": "entry_repegged"}
                             _emit(db, sess, "entry_ack_timeout", {
                                 "elapsed_sec": (_utcnow() - t_sub).total_seconds(),
                                 "reason": _cancel_why,
@@ -3912,6 +3996,10 @@ def tick_live_session(
         else:
             entry_limit_px = guarded_ask
             entry_limit_str = _fmt_limit_price_buy(entry_limit_px)
+            # Anchor for the marketable re-peg chase: the ORIGINAL limit bounds the
+            # cumulative drift (the R:R guard), and the re-peg counter resets per fresh entry.
+            le["entry_original_limit_px"] = entry_limit_px
+            le["entry_repeg_count"] = 0
         le["entry_notional_guard"] = {
             "max_notional_usd": max_notional,
             "ask": ask,
