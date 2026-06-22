@@ -127,8 +127,38 @@ def _agentic_buying_power_cached() -> float | None:
     return None
 
 
+_AGENTIC_EQ_CACHE: dict[str, float] = {"value": 0.0, "ts": 0.0}
+
+
+def _agentic_equity_cached() -> float | None:
+    """Total agentic account EQUITY (total_value), short-TTL cached like the BP read. The
+    daily-loss RISK cap uses THIS (stable cash+positions value) instead of the fluctuating
+    buying power (operator 2026-06-22: "equity based naman dapat"). Fail-open."""
+    import time as _time
+
+    now = _time.monotonic()
+    cached = _AGENTIC_EQ_CACHE.get("value") or 0.0
+    age = now - (_AGENTIC_EQ_CACHE.get("ts") or 0.0)
+    if cached > 0 and age < _AGENTIC_BP_TTL_SEC:
+        return cached
+    try:
+        from ..venue.robinhood_mcp import RobinhoodAgenticMcpAdapter
+
+        eq = RobinhoodAgenticMcpAdapter().get_account_equity_usd()
+    except Exception:
+        eq = None
+    if eq is not None and eq > 0:
+        _AGENTIC_EQ_CACHE["value"] = float(eq)
+        _AGENTIC_EQ_CACHE["ts"] = now
+        return float(eq)
+    if cached > 0 and age < _AGENTIC_BP_STALE_GRACE:
+        return cached
+    return None
+
+
 def _account_equity_usd(
-    execution_family: str | None = None, *, apply_margin_multiple: bool = True
+    execution_family: str | None = None, *, apply_margin_multiple: bool = True,
+    prefer_equity: bool = False,
 ) -> float | None:
     """Best-effort account SIZING BASIS (USD) for equity-relative caps, PER VENUE.
 
@@ -162,7 +192,12 @@ def _account_equity_usd(
     # Applying 2x here would submit orders exceeding the cash balance -> RH rejects.
     if ef == EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP:
         # Cash account: reported BP IS the real spendable (NO margin multiple). Cached
-        # (short TTL) so a burst of candidate sizings reuses one read.
+        # (short TTL) so a burst of candidate sizings reuses one read. prefer_equity (the
+        # daily-loss RISK cap) reads the STABLE total account value instead of fluctuating BP.
+        if prefer_equity:
+            eq = _agentic_equity_cached()
+            if eq is not None and eq > 0:
+                return float(eq)
         bp = _agentic_buying_power_cached()
         return float(bp) if (bp is not None and bp > 0) else None
 
@@ -194,7 +229,8 @@ def _account_equity_usd(
 
 
 def _equity_relative_cap(
-    fixed_fallback_usd: float, fraction: Any, execution_family: str | None = None
+    fixed_fallback_usd: float, fraction: Any, execution_family: str | None = None,
+    *, prefer_equity: bool = False,
 ) -> float:
     """Cap = account_equity x fraction (equity-relative, not a fixed $), per venue.
 
@@ -212,7 +248,7 @@ def _equity_relative_cap(
         frac = 0.0
     if frac <= 0 or not math.isfinite(frac):
         return fixed
-    eq = _account_equity_usd(execution_family)
+    eq = _account_equity_usd(execution_family, prefer_equity=prefer_equity)
     if eq is None or eq <= 0:
         return fixed
     return round(eq * frac, 2)
@@ -246,6 +282,7 @@ def equity_relative_daily_loss_cap(fixed_fallback_usd: float, execution_family: 
         fixed_fallback_usd,
         getattr(settings, "chili_momentum_risk_daily_loss_fraction_of_equity", 0.05),
         execution_family,
+        prefer_equity=True,  # daily-loss cap off STABLE account equity, not fluctuating BP
     )
 
 

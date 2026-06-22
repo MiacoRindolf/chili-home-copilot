@@ -261,9 +261,10 @@ def test_daily_loss_basis_resolves_off_agentic_account(db, monkeypatch):
 
     calls: dict = {}
 
-    def _rec(execution_family=None, *, apply_margin_multiple=True):
+    def _rec(execution_family=None, *, apply_margin_multiple=True, prefer_equity=False):
         calls["execution_family"] = execution_family
         calls["apply_margin_multiple"] = apply_margin_multiple
+        calls["prefer_equity"] = prefer_equity
         return 10_000.0
 
     monkeypatch.setattr(rp, "_account_equity_usd", _rec, raising=False)
@@ -274,7 +275,8 @@ def test_daily_loss_basis_resolves_off_agentic_account(db, monkeypatch):
     res = governance.check_daily_loss_breach(db, user_id=None)  # equity_usd unset -> auto-resolve
 
     assert calls.get("execution_family") == EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP  # right account
-    assert calls.get("apply_margin_multiple") is False                              # unlevered BP
+    assert calls.get("apply_margin_multiple") is False                              # unlevered
+    assert calls.get("prefer_equity") is True                                       # stable equity basis
     assert res["source"] == "pct_equity"
     assert res["limit_usd"] == pytest.approx(500.0)   # 0.05 * 10_000 (NOT ~$55 off the wrong basis)
     assert res["breached"] is False                   # -$30 within $500

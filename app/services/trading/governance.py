@@ -819,7 +819,8 @@ def check_daily_loss_breach(
             # apply_margin_multiple=False -> unlevered buying power (the RISK-cap basis).
             # [[project_per_broker_daily_loss]] [[feedback_adaptive_no_magic]]
             equity_usd = _account_equity_usd(
-                EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP, apply_margin_multiple=False
+                EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP, apply_margin_multiple=False,
+                prefer_equity=True,  # stable account equity (~$13.8k) not fluctuating BP
             )
         except Exception:
             equity_usd = None

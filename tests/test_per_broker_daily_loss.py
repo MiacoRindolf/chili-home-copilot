@@ -37,7 +37,7 @@ def _reset_governance():
 @pytest.fixture
 def fake_equity(monkeypatch):
     """Force per-broker UNLEVERED BUYING POWER: RH $13,424, CB $1,994 (operator's truth)."""
-    def _eq(execution_family=None, *, apply_margin_multiple=True):
+    def _eq(execution_family=None, *, apply_margin_multiple=True, prefer_equity=False):
         from app.services.trading.execution_family_registry import (
             EXECUTION_FAMILY_ROBINHOOD_SPOT,
             normalize_execution_family,
@@ -47,6 +47,12 @@ def fake_equity(monkeypatch):
         return 13424.0 if ef == EXECUTION_FAMILY_ROBINHOOD_SPOT else 1994.0
 
     monkeypatch.setattr(rp, "_account_equity_usd", _eq)
+    # Pin the daily-loss pct the breach amounts below are calibrated to (per-broker caps =
+    # pct x BP -> RH ~$201, CB ~$30). The GLOBAL default moved 1.5% -> 5% (#788), which
+    # tripled the live caps; pin it here so these breach-LOGIC tests stay deterministic and
+    # decoupled from the default. (Production correctly uses 5%.)
+    from app.services.trading import governance as _gov
+    monkeypatch.setattr(_gov.settings, "chili_global_max_daily_loss_pct_of_equity", 0.015, raising=False)
     return _eq
 
 
