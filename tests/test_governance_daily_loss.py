@@ -251,6 +251,35 @@ def test_within_caps_does_not_trip(db, monkeypatch):
     assert governance.is_kill_switch_active() is False
 
 
+def test_daily_loss_basis_resolves_off_agentic_account(db, monkeypatch):
+    """BASIS FIX (2026-06-22): with no explicit equity, check_daily_loss_breach must size
+    the cap off the AGENTIC account (apply_margin_multiple=False = unlevered BP), NOT the
+    legacy None->Coinbase default — else the $13.7k lane re-freezes at the spurious $55 cap.
+    Regression guard: the prior stubs swallowed all args, so a revert would pass silently."""
+    from app.services.trading.momentum_neural import risk_policy as rp
+    from app.services.trading.execution_family_registry import EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP
+
+    calls: dict = {}
+
+    def _rec(execution_family=None, *, apply_margin_multiple=True):
+        calls["execution_family"] = execution_family
+        calls["apply_margin_multiple"] = apply_margin_multiple
+        return 10_000.0
+
+    monkeypatch.setattr(rp, "_account_equity_usd", _rec, raising=False)
+    monkeypatch.setattr(governance.settings, "chili_global_max_daily_loss_usd", 0.0, raising=False)
+    monkeypatch.setattr(governance.settings, "chili_global_max_daily_loss_pct_of_equity", 0.05, raising=False)
+    _add_closed_trade(db, user_id=None, pnl=-30.0, version="v1")  # within the $500 cap
+
+    res = governance.check_daily_loss_breach(db, user_id=None)  # equity_usd unset -> auto-resolve
+
+    assert calls.get("execution_family") == EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP  # right account
+    assert calls.get("apply_margin_multiple") is False                              # unlevered BP
+    assert res["source"] == "pct_equity"
+    assert res["limit_usd"] == pytest.approx(500.0)   # 0.05 * 10_000 (NOT ~$55 off the wrong basis)
+    assert res["breached"] is False                   # -$30 within $500
+
+
 def test_activate_false_does_not_trip_kill_switch(db, monkeypatch):
     """Pre-entry evaluations must be able to check WITHOUT mutating state."""
     monkeypatch.setattr(
