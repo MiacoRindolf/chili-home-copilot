@@ -870,6 +870,29 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
         # Flat fallback: a scalar buying_power.
         return _sf(bp_obj)
 
+    def get_account_equity_usd(self) -> Optional[float]:
+        """Total ACCOUNT VALUE (equity) of the pinned agentic account, in USD — the stable
+        cash+positions value (``total_value``), NOT the intraday-fluctuating buying_power. The
+        daily-loss RISK cap sizes off THIS (operator 2026-06-22: "equity based naman dapat
+        talaga") so the cap is steady (~5% x $13.8k ~= $690), not jittering with settled-cash /
+        BP swings. Same portfolio call as get_buying_power_usd. Fail-open: None on any error."""
+        if not self._account_number:
+            return None
+        try:
+            self._assert_account_is_agentic()
+            res = self._call("portfolio", {_ARG_KEYS["account_number"]: self._account_number})
+        except (VenueAdapterError, RhMcpError):
+            return None
+        data = _unwrap_payload(res.data())
+        od = data if isinstance(data, dict) else {}
+        if not od:
+            dicts = self._as_account_dicts(data)
+            od = dicts[0] if dicts else {}
+        v = _sf(_pick(od, ("total_value", "equity", "equity_value", "portfolio_value")))
+        if v is not None and v > 0:
+            return v
+        return _sf(od.get("cash"))
+
     # ── B3: agentic-account orphan sweep (the reconciler is blind to this account) ──
 
     def get_agentic_open_positions(self) -> list[dict]:
