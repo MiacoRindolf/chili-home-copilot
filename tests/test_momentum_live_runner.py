@@ -1017,3 +1017,122 @@ def test_tick_skips_disconnected_venue(monkeypatch, db: Session) -> None:
     assert out.get("skipped") == "venue_broker_not_connected", out
     ad.get_best_bid_ask.assert_not_called()   # no broker call while the lock is held
     ad.get_order.assert_not_called()
+
+
+# ── G1 marketable re-peg LOOP (2026-06-22 review-driven coverage) ──────────
+def _mk_pending_repeg_session(db, monkeypatch, symbol, *, post_order, max_notional=2000.0):
+    """A LIVE_PENDING_ENTRY session whose resting buy is 'left behind' (live bid above
+    the limit) so the ack-timeout path reaches the re-peg branch. ``post_order`` is what
+    the POST-cancel get_order refetch returns (returned only AFTER cancel_order fires, so
+    the pre-cancel fill-handler/race-guard refetches always see OPEN — robust to count)."""
+    from datetime import datetime, timedelta
+    from app.services.trading.momentum_neural.persistence import create_trading_automation_session
+    reset_duplicate_client_order_guard_for_tests()
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_entry_chase_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_entry_max_repegs", 3)
+    vid, vrow = _seed_live_eligible_row(db, symbol=symbol)
+    _is_crypto = symbol.upper().endswith("-USD")
+    _ef = "coinbase_spot" if _is_crypto else "robinhood_spot"
+    _venue = "coinbase" if _is_crypto else "robinhood"
+    vrow.execution_family = _ef     # equity symbol -> equity venue (asset-class alignment)
+    db.commit()
+    uid = _uid(db, "rp_" + symbol.replace("-", "_"))
+    sess = create_trading_automation_session(
+        db, user_id=uid, venue=_venue, execution_family=_ef, symbol=symbol,
+        variant_id=vid, mode="live", state=STATE_LIVE_PENDING_ENTRY,
+        risk_snapshot_json={
+            RISK_SNAPSHOT_KEY: {"allowed": True},
+            "momentum_risk_policy_summary": {"disable_live_if_governance_inhibit": True},
+            "momentum_live_execution": {
+                "entry_submitted": True,
+                "entry_order_id": "o-rp",
+                "entry_submit_utc": (datetime.utcnow() - timedelta(seconds=7200)).isoformat(),
+                "entry_limit_price": "10.0",
+                "entry_original_limit_px": 10.0,
+                "entry_repeg_count": 0,
+                "entry_expected_move_bps": 5000.0,
+                "structural_stop_price": 9.0,
+                "entry_notional_guard": {"max_notional_usd": max_notional},
+                "entry_resize_basis": {
+                    "max_loss_usd": 50.0, "atr_pct": 0.05, "stop_atr_mult": 0.6,
+                    "base_increment": 1.0, "base_min_size": 1.0,
+                },
+            },
+        },
+    )
+    db.commit()
+    ad = _mk_adapter()
+    ad.get_best_bid_ask.return_value = (
+        NormalizedTicker(product_id=symbol, bid=10.10, ask=10.15, mid=10.125,
+                         spread_bps=50.0, freshness=_fresh()),
+        _fresh(),
+    )
+    _open = NormalizedOrder(order_id="o-rp", client_order_id="cid", product_id=symbol,
+                            side="buy", status="OPEN", order_type="limit",
+                            filled_size=0.0, average_filled_price=None)
+    _state = {"cancelled": False}
+    def _cancel(_oid):
+        _state["cancelled"] = True
+        return {"ok": True, "raw": {}}
+    ad.cancel_order.side_effect = _cancel
+    def _get_order(_oid):
+        return (post_order, _fresh()) if _state["cancelled"] else (_open, _fresh())
+    ad.get_order.side_effect = _get_order
+    ad.place_limit_order_gtc.return_value = {"ok": True, "order_id": "o-rp-2", "client_order_id": "cid-rp-2"}
+    return sess, ad
+
+
+def test_repeg_fires_gfd_riskfirst_resolves_old(monkeypatch, db: Session) -> None:
+    """G1 re-peg LOOP (equity): a left-behind entry within the cumulative ceiling is
+    cancel-replaced UP to the live ask with (1) time_in_force='gfd' (never GTC),
+    (2) RISK-FIRST qty (not notional-only), (3) the OLD order marked resolved (no orphan)."""
+    from app.services.trading.momentum_neural.risk_policy import compute_risk_first_quantity
+    from app.services.trading.momentum_neural.live_runner import _entry_repeg_price
+    _cancelled = NormalizedOrder(order_id="o-rp", client_order_id="cid", product_id="RPEG",
+                                 side="buy", status="cancelled", order_type="limit",
+                                 filled_size=0.0, average_filled_price=None)
+    sess, ad = _mk_pending_repeg_session(db, monkeypatch, "RPEG", post_order=_cancelled)
+    with patch("app.services.trading.momentum_neural.live_runner.is_kill_switch_active", return_value=False):
+        out = tick_live_session(db, sess.id, adapter_factory=lambda: ad)
+    db.commit(); db.refresh(sess)
+
+    assert out.get("pending") == "entry_repegged", out
+    _kw = ad.place_limit_order_gtc.call_args.kwargs
+    assert _kw.get("time_in_force") == "gfd"                       # (1) DAY, never GTC
+    _rp_new = _entry_repeg_price(original_limit_px=10.0, live_ask=10.15, expected_move_bps=5000.0)
+    _rf_q, _ = compute_risk_first_quantity(
+        entry_price=_rp_new, atr_pct=0.05, max_loss_usd=50.0, max_notional_ceiling_usd=2000.0,
+        base_increment=1.0, base_min_size=1.0, stop_atr_mult=0.6)
+    assert float(_kw.get("base_size")) == pytest.approx(_rf_q, abs=1e-6)   # (2) risk-first qty
+    assert int(_rf_q) < int(2000.0 / _rp_new)                              # risk-first binds, < notional-only
+    le = (sess.risk_snapshot_json or {})["momentum_live_execution"]
+    assert (le.get("entry_orders_resolved") or {}).get("o-rp") == "void"   # (3) old resolved (no orphan)
+    assert le.get("entry_order_id") == "o-rp-2"
+    assert int(le.get("entry_repeg_count") or 0) == 1
+
+
+def test_repeg_blocked_on_indeterminate_cancel_state(monkeypatch, db: Session) -> None:
+    """G1 #4: if the POST-cancel get_order returns None (unknown), DON'T place a 2nd
+    order — return pending=cancel_indeterminate so the next tick re-checks venue truth."""
+    sess, ad = _mk_pending_repeg_session(db, monkeypatch, "RPEG2", post_order=None)
+    with patch("app.services.trading.momentum_neural.live_runner.is_kill_switch_active", return_value=False):
+        out = tick_live_session(db, sess.id, adapter_factory=lambda: ad)
+    db.commit()
+    assert out.get("pending") == "cancel_indeterminate", out
+    ad.place_limit_order_gtc.assert_not_called()   # no naked second order
+
+
+def test_repeg_excluded_for_crypto_symbol(monkeypatch, db: Session) -> None:
+    """G1 #5: crypto (-USD) is NEVER chased (asset-class gated) even when left behind —
+    it falls through to the safe cancel + re-watch, no marketable re-peg."""
+    _cancelled = NormalizedOrder(order_id="o-rp", client_order_id="cid", product_id="RPEG-USD",
+                                 side="buy", status="cancelled", order_type="limit",
+                                 filled_size=0.0, average_filled_price=None)
+    sess, ad = _mk_pending_repeg_session(db, monkeypatch, "RPEG-USD", post_order=_cancelled)
+    with patch("app.services.trading.momentum_neural.live_runner.is_kill_switch_active", return_value=False):
+        out = tick_live_session(db, sess.id, adapter_factory=lambda: ad)
+    db.commit(); db.refresh(sess)
+    assert out.get("pending") != "entry_repegged", out   # no chase on crypto
+    ad.place_limit_order_gtc.assert_not_called()
+    assert sess.state == STATE_WATCHING_LIVE              # safe re-watch

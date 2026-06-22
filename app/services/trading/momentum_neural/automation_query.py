@@ -199,6 +199,15 @@ def expire_stale_live_arm_sessions(db: Session, *, user_id: int) -> int:
     if not _tables_present(db):
         return 0
     now = datetime.utcnow()
+    # FALLBACK cutoff for arm_pending rows that carry NO expires_at_utc (begin_live_arm
+    # succeeded but confirm never landed — a risk-block or crash mid-arm): without this they
+    # linger FOREVER (the multi-hour orphans found 2026-06-22 — never reaped, never expired).
+    # Once older than the max a watch would ever live, the row is a definitive orphan (it
+    # never progressed past arm). Adaptive — reuses the watch-max setting, no new magic
+    # number. [[feedback_adaptive_no_magic]]
+    _stale_no_expiry_cutoff_s = max(
+        60, int(getattr(settings, "chili_momentum_auto_arm_max_watch_seconds", 1800) or 1800)
+    )
     rows = (
         db.query(TradingAutomationSession)
         .filter(
@@ -211,8 +220,15 @@ def expire_stale_live_arm_sessions(db: Session, *, user_id: int) -> int:
     for sess in rows:
         snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
         exp = _parse_expires(snap)
-        if exp is None or now <= exp:
-            continue
+        if exp is not None:
+            if now <= exp:
+                continue
+            _reason = "expires_at_utc_passed"
+        else:
+            _created = sess.started_at or getattr(sess, "created_at", None) or sess.updated_at
+            if _created is None or (now - _created).total_seconds() <= _stale_no_expiry_cutoff_s:
+                continue
+            _reason = "stale_arm_no_expiry"
         sess.state = STATE_EXPIRED
         sess.ended_at = now
         sess.updated_at = now
@@ -222,7 +238,7 @@ def expire_stale_live_arm_sessions(db: Session, *, user_id: int) -> int:
             db,
             sess.id,
             "live_arm_expired",
-            {"reason": "expires_at_utc_passed", "arm_token_prefix": str(snap.get("arm_token", ""))[:8]},
+            {"reason": _reason, "arm_token_prefix": str(snap.get("arm_token", ""))[:8]},
             correlation_id=sess.correlation_id,
             source_node_id="momentum_automation_monitor",
         )

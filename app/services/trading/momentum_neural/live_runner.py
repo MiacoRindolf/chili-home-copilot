@@ -3503,24 +3503,38 @@ def tick_live_session(
                                     "ok": True, "session_id": sess.id, "state": sess.state,
                                     "pending": "cancel_unconfirmed",
                                 }
+                            # UNKNOWN post-cancel state (get_order failed / not-found): NEVER
+                            # place a second order while the old order's fate is indeterminate
+                            # (naked double-long guard). Keep PENDING with the pointer intact;
+                            # the next tick re-checks venue truth. [G1 review #4]
+                            if _post is None:
+                                _emit(db, sess, "entry_cancel_indeterminate", {
+                                    "order_id": str(le.get("entry_order_id")),
+                                    "reason": _cancel_why,
+                                })
+                                db.flush()
+                                return {
+                                    "ok": True, "session_id": sess.id, "state": sess.state,
+                                    "pending": "cancel_indeterminate",
+                                }
                             # MARKETABLE RE-PEG (2026-06-22 G1): a left-behind RUNAWAY is the
-                            # Ross play, not a miss. The cancel above is confirmed gone, so
-                            # cancel-and-replace the resting buy UP to the live ask instead of
-                            # abandoning it. SAFE (red-teamed): equity-only (crypto maker never
-                            # chased), fail-CLOSED on a stale quote, price bounded by the
-                            # CUMULATIVE spread budget off the original limit (R:R + thin-book
-                            # sweep guard), capped at max_repegs. Any miss -> the cancel+re-watch
-                            # below (byte-identical to today).
-                            _rp_maker = (
-                                str(sess.symbol or "").upper().endswith("-USD")
-                                and bool(getattr(settings, "chili_coinbase_maker_only_enabled", False))
-                            )
+                            # Ross play, not a miss. Reaching here, _post is a CONFIRMED
+                            # terminal-cancelled order (not done, not open, not None) -> the OLD
+                            # order is definitively gone -> cancel-and-replace the resting buy UP
+                            # to the live ask instead of abandoning it. SAFE (red-teamed):
+                            # EQUITY-ONLY (asset-class gated, crypto -USD NEVER chased),
+                            # fail-CLOSED on a stale quote, price bounded by the CUMULATIVE spread
+                            # budget off the original limit (R:R + thin-book sweep), RISK-FIRST
+                            # re-sized (honors max_loss, not notional-only), DAY tif (never GTC),
+                            # the old order marked resolved (no orphan), capped at max_repegs. Any
+                            # miss -> the cancel+re-watch below.
                             _rp_n = int(le.get("entry_repeg_count", 0) or 0)
                             _rp_max = int(getattr(settings, "chili_momentum_entry_max_repegs", 3) or 0)
+                            _rp_is_equity = not str(sess.symbol or "").upper().endswith("-USD")
                             if (
                                 _cancel_why == "entry_limit_left_behind"
                                 and bool(getattr(settings, "chili_momentum_entry_chase_enabled", True))
-                                and not _rp_maker
+                                and _rp_is_equity
                                 and _rp_n < _rp_max
                                 and _pask and _pask > 0
                                 and _pfr is not None and is_fresh_enough(_pfr)
@@ -3532,8 +3546,21 @@ def tick_live_session(
                                 )
                                 _rp_maxn = float((le.get("entry_notional_guard") or {}).get("max_notional_usd") or 0.0)
                                 if _rp_new and _rp_new > _lim_px and _rp_maxn > 0:
-                                    _rp_qty = float(int(_rp_maxn / _rp_new))  # whole shares, notional-capped
-                                    if _rp_qty >= 1.0:
+                                    # RISK-FIRST re-size at the chased price (notional is the
+                                    # CEILING only) so a chase can't over-risk past max_loss.
+                                    # [G1 review #2]
+                                    _rb = le.get("entry_resize_basis") or {}
+                                    _rp_qty, _ = compute_risk_first_quantity(
+                                        entry_price=_rp_new,
+                                        atr_pct=float(_rb.get("atr_pct") or 0.0),
+                                        max_loss_usd=float(_rb.get("max_loss_usd") or 0.0),
+                                        max_notional_ceiling_usd=_rp_maxn,
+                                        base_increment=float(_rb.get("base_increment") or 1.0),
+                                        base_min_size=float(_rb.get("base_min_size") or 1.0),
+                                        stop_atr_mult=float(_rb.get("stop_atr_mult") or 0.60),
+                                    )
+                                    if _rp_qty and _rp_qty >= 1.0:
+                                        _rp_old_eid = le.get("entry_order_id")
                                         _rp_pn = int(le.get("entry_place_count", 0) or 0) + 1
                                         le["entry_place_count"] = _rp_pn
                                         _rp_seed = f"{sess.id}|{sess.correlation_id or 'x'}|entry|{_rp_pn}".encode("utf-8")
@@ -3544,9 +3571,14 @@ def tick_live_session(
                                             base_size=_fmt_base_size(_rp_qty),
                                             limit_price=_fmt_limit_price_buy(_rp_new),
                                             client_order_id=_rp_cid,
+                                            time_in_force="gfd",
                                             extended_hours=bool(le.get("entry_session_extended")),
                                         ) or {}
                                         if _rp_res.get("ok"):
+                                            # OLD order confirmed terminal-cancelled above -> mark
+                                            # resolved so it can never resurface as an orphan.
+                                            # [G1 review #3]
+                                            _mark_entry_order_resolved(le, str(_rp_old_eid), "void")
                                             le["entry_order_id"] = _rp_res.get("order_id")
                                             le["entry_client_order_id"] = _rp_res.get("client_order_id") or _rp_cid
                                             le["entry_limit_price"] = _fmt_limit_price_buy(_rp_new)
@@ -3557,7 +3589,7 @@ def tick_live_session(
                                             _commit_le(sess, le)
                                             _emit(db, sess, "entry_repegged", {
                                                 "old_limit": _lim_px, "new_limit": _rp_new,
-                                                "live_ask": _pask, "n": _rp_n + 1,
+                                                "live_ask": _pask, "qty": _rp_qty, "n": _rp_n + 1,
                                             })
                                             db.flush()
                                             return {"ok": True, "session_id": sess.id, "state": sess.state, "pending": "entry_repegged"}
@@ -3920,13 +3952,23 @@ def tick_live_session(
             _emit(db, sess, "live_entry_wait_late_window", {"window": "late"})
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state, "skipped": "late_window"}
+        _eff_max_loss = min(
+            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult),
+            float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
+        )
+        # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE
+        # risk-first at the chased price instead of over-sizing off notional. [G1 review #2]
+        le["entry_resize_basis"] = {
+            "max_loss_usd": _eff_max_loss,
+            "atr_pct": float(_eff_atr_pct),
+            "stop_atr_mult": float(_stop_atr_mult),
+            "base_increment": float(inc) if inc else 1.0,
+            "base_min_size": float(mn) if mn else 1.0,
+        }
         _rf_qty, _rf_meta = compute_risk_first_quantity(
             entry_price=guarded_ask,
             atr_pct=_eff_atr_pct,
-            max_loss_usd=min(
-                float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult),
-                float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
-            ),
+            max_loss_usd=_eff_max_loss,
             max_notional_ceiling_usd=max_notional,
             base_increment=inc,
             base_min_size=mn,
