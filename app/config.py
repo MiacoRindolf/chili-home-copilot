@@ -4132,6 +4132,21 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_REAP_COOLDOWN_SEC"),
     )
+    # ENTRY-REJECT cooldown (seconds): when the broker REFUSES a live entry
+    # (place_equity_order isError — e.g. a leveraged/inverse ETF tripping
+    # EQUITY_SUITABILITY like RKLZ/CORD, or a name untradable in the current session),
+    # sit that name out this long before it can re-arm, so the lane stops looping
+    # arm->break->reject->reap on a name the rail won't fill and a FILLABLE mover gets
+    # the slot. ADAPTIVE: the lane learns the unfillable names from the real rejections
+    # (no hardcoded leveraged-ETF list, no per-tick broker call); SELF-HEALING via this
+    # TTL (a transient halt re-arms after it clears). 3x the reap window (suitability
+    # blocks are more persistent than a no-break reap). 0 disables (instant kill-switch).
+    # Diagnosed 2026-06-22 (RKLZ 5x/CORD 4x isError loop). env-tunable.
+    chili_momentum_entry_reject_cooldown_sec: float = Field(
+        default=900.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_REJECT_COOLDOWN_SEC"),
+    )
     # RANK-DISPLACEMENT (2026-06-17): when arm slots are FULL, evict the worst-ranked
     # truly-inert pre-entry watcher (armed_pending_runner/queued_live ONLY) so a
     # top-ranked NEWCOMER can arm — instead of first-come slots starving the best

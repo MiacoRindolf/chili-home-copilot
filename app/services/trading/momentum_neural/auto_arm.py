@@ -237,6 +237,41 @@ def _write_reap_cooldown(sym_u: str, now: datetime) -> None:
             _REAP_COOLDOWN.pop(_k, None)
 
 
+# Per-symbol ENTRY-REJECTED cooldown (in-process, scheduler-local). A name whose LIVE
+# ENTRY the broker REFUSED (place_equity_order isError) rejects again the instant it is
+# re-armed — looping arm->break->reject->reap and starving the single slot. Cool it down
+# so a FILLABLE mover gets the slot. ADAPTIVE: the lane LEARNS which names the rail won't
+# fill from the real rejections (no hardcoded leveraged-ETF list, no per-tick broker
+# call); SELF-HEALING via the TTL (a transient halt re-arms after it clears). Diagnosed
+# 2026-06-22: RKLZ (2x Short RKLB) + CORD (2x Inverse CRWV) trip EQUITY_SUITABILITY on the
+# agentic rail and isError'd 5x/4x in 16min; also catches session-untradable names.
+_ENTRY_REJECT_COOLDOWN: dict[str, datetime] = {}
+
+
+def _entry_reject_cooldown_active(sym_u: str, now: datetime) -> bool:
+    """True if ``sym_u`` (upper) had its live ENTRY rejected by the broker within
+    ``chili_momentum_entry_reject_cooldown_sec``. 0 disables (instant kill-switch)."""
+    cd_sec = float(getattr(settings, "chili_momentum_entry_reject_cooldown_sec", 900.0) or 0.0)
+    if cd_sec <= 0:
+        return False
+    at = _ENTRY_REJECT_COOLDOWN.get(sym_u)
+    return at is not None and (now - at).total_seconds() < cd_sec
+
+
+def _write_entry_reject_cooldown(sym_u: str, now: datetime | None = None) -> None:
+    """Record a broker ENTRY rejection for ``sym_u`` (UPPER) so auto-arm stops looping on
+    a name the rail won't fill (leveraged-ETF suitability block, session-untradable).
+    Called best-effort from the live runner's entry-place failure path. Bounded prune."""
+    if not sym_u:
+        return
+    now = now or _utcnow()
+    _ENTRY_REJECT_COOLDOWN[sym_u] = now
+    if len(_ENTRY_REJECT_COOLDOWN) > 500:
+        _stale = now - timedelta(hours=2)
+        for _k in [k for k, v in _ENTRY_REJECT_COOLDOWN.items() if v < _stale]:
+            _ENTRY_REJECT_COOLDOWN.pop(_k, None)
+
+
 def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: datetime) -> int:
     """Cancel PRE-ENTRY live sessions that have watched too long without entering,
     freeing the concurrency slot for a fresher surging candidate — Ross moves on
@@ -1482,6 +1517,7 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     _broker_ready_cache: dict[str, bool] = {}
     out["crypto_illiquid_skipped"] = 0
     out["reap_cooldown_skipped"] = 0
+    out["entry_reject_cooldown_skipped"] = 0
     eligible: list[MomentumSymbolViability] = []
     for c in candidates:
         out["checked"] += 1
@@ -1502,6 +1538,9 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         if _reap_cooldown_active(_sym_u, _utcnow()):
             out["reap_cooldown_skipped"] += 1
             continue  # just churned/displaced the slot without firing — let a different mover watch
+        if _entry_reject_cooldown_active(_sym_u, _utcnow()):
+            out["entry_reject_cooldown_skipped"] += 1
+            continue  # broker REFUSED this name's entry recently (suitability/untradable) — don't loop on it
         if not _symbol_market_open(c.symbol):
             continue  # equities only during their session; crypto always passes (24/7)
         # Crypto liquidity floor (A1): the Ross scorer is blind to executability,
