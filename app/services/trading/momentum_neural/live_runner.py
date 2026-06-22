@@ -4128,6 +4128,19 @@ def tick_live_session(
             "result": res,
         })
         if not res.get("ok"):
+            # ADAPTIVE ENTRY-REJECT COOLDOWN (2026-06-22): the broker REFUSED this entry
+            # (place_equity_order isError — a leveraged/inverse ETF tripping
+            # EQUITY_SUITABILITY like RKLZ/CORD, or a name untradable in the session).
+            # It will reject again the instant it re-arms; tell auto-arm to sit it out so
+            # the lane stops looping arm->break->reject->reap and a FILLABLE mover gets the
+            # slot. Lazy import dodges a load-time cycle; best-effort (never block the
+            # error transition). Equity OR crypto — any rail that refuses an entry.
+            try:
+                from .auto_arm import _write_entry_reject_cooldown
+
+                _write_entry_reject_cooldown(str(sess.symbol or "").upper())
+            except Exception:
+                pass
             _safe_transition(db, sess, STATE_LIVE_ERROR)
             db.flush()
             return {"ok": False, "error": res.get("error") or "place_failed"}
