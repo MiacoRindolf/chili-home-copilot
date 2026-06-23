@@ -27,7 +27,7 @@ _lock = threading.Lock()
 _job: dict[str, Any] = {"state": "idle", "date": None, "started_at": None, "error": None}
 
 
-def _run_in_thread(date: str, armed_source: str = "asof") -> None:
+def _run_in_thread(date: str, armed_source: str = "live") -> None:
     global _job
     try:
         from ...services.trading.momentum_neural.replay_v2 import run_replay
@@ -53,7 +53,7 @@ def _run_in_thread(date: str, armed_source: str = "asof") -> None:
 @router.post("/run")
 def run_replay_endpoint(payload: dict):
     date = str((payload or {}).get("date") or "").strip()
-    armed_source = str((payload or {}).get("armed_source") or "asof").strip()
+    armed_source = str((payload or {}).get("armed_source") or "live").strip()
     if armed_source not in ("asof", "live"):
         raise HTTPException(status_code=400, detail="armed_source must be asof|live")
     if not _DATE_RE.match(date):

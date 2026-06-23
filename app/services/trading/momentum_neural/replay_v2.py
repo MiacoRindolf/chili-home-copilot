@@ -74,7 +74,7 @@ logger = logging.getLogger(__name__)
 # ── live-lane parameters — read from the SAME sources the live runner uses ────
 # Trigger timeframe: the SAME setting live_runner reads (live_runner.py:1904) —
 # parity by construction; flipping live to 1m flips the replay with it.
-ENTRY_INTERVAL = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m").lower()
+ENTRY_INTERVAL = str(getattr(settings, "chili_momentum_pullback_entry_interval", "1m") or "1m").lower()
 ENTRY_BAR_MIN = int(ENTRY_INTERVAL[:-1]) if ENTRY_INTERVAL.endswith("m") and ENTRY_INTERVAL[:-1].isdigit() else 5
 _LIVE_PARAMS = family_default_params("default")
 STOP_ATR_MULT = float(_LIVE_PARAMS["stop_atr_mult"])                      # 0.60 default family
@@ -337,7 +337,7 @@ def freshness_arm_decision(upto, *, firing: bool) -> bool:
     return bool(getattr(fr, "is_fresh", False))
 
 
-def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -> dict:
+def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -> dict:
     """Run the high-fidelity replay for ``date`` (YYYY-MM-DD). Returns the structured
     result dict; persists it to REPLAY_RESULTS_DIR/<date>.json when ``persist``."""
     started = datetime.now(timezone.utc)
@@ -1104,7 +1104,14 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             em_bps = _expected_move_bps_15m(upto, H, L, C)
             max_spread = adaptive_max_spread_bps(
                 SPREAD_BASE_BPS, em_bps, SPREAD_EM_RATIO, abs_cap_bps=SPREAD_ABS_CAP_BPS)
-            if sbps > max_spread:
+            # SKIP-FOR-LIMITS PARITY (2026-06-23): mirror live_runner.py:2828-2839. When the
+            # live default chili_momentum_skip_spread_gate_for_limit_entry is on, the marketable
+            # LIMIT price bounds the cost, so the adaptive spread gate is skipped and only the
+            # abs-cap broken-quote ceiling applies. Without this the replay UNDER-fills the wide
+            # low-float movers live now accepts (the NXTS-class divergence on the under-fill side).
+            _skip_spread = bool(getattr(settings, "chili_momentum_skip_spread_gate_for_limit_entry", True))
+            _spread_ceiling = SPREAD_ABS_CAP_BPS if _skip_spread else max_spread
+            if sbps > _spread_ceiling:
                 _tr(s, "gate_fail:wide_spread_%.0fbps" % sbps, now)
                 continue
             armed[s]["last_try"] = now
