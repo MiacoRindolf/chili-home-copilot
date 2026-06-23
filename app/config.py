@@ -2297,6 +2297,15 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_CONTEXT_ENABLED"),
         description="Enable the daily-chart selection tilt (5th pillar daily_structure, 10% weight; equities). RE-RANKS toward clean daily breakouts, never blocks a fill. 0 = selection byte-identical (liquidity-biased weights).",
     )
+    # ATTENTION-LEADERSHIP selection pillar (2026-06-22 Ross study — the TRUE winner/loser
+    # separator). Ranks each EQUITY mover by its amplitude share+rank of the live mover-field
+    # (the dominant leader holds + squeezes; followers round-trip). A re-rank pillar (never a
+    # veto → no winner-kill, breadth kept). 0 = selection byte-identical (liquidity-biased weights).
+    chili_momentum_attention_leadership_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ATTENTION_LEADERSHIP_ENABLED"),
+        description="Enable the attention-leadership selection pillar (amplitude share+rank over the full mover field, +dormant->explosive vol; equities). RE-RANKS toward the dominant leader, never blocks a fill. 0 = byte-identical.",
+    )
     chili_momentum_use_real_float: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_USE_REAL_FLOAT"),
