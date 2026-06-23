@@ -816,6 +816,107 @@ def bounded_by_rolling_median(
     return raw, deriv
 
 
+def _recent_realized_r(
+    db: Any, *, execution_family: str | None, lookback: int
+) -> list[float]:
+    """Recent per-trade realized-R for the lane, MOST-RECENT FIRST, REAL ENTERED trades only.
+
+    realized_R = realized_pnl_usd / frozen max_loss_per_trade_usd (the admission risk
+    budget the lane sizes qty against, so it ~= the structural stop_distance*qty) — a
+    clean R-multiple computable from data that ALWAYS exists (no MFE persistence needed).
+
+    Mirrors streak_risk_multiplier's discipline (is_real_entry_outcome): a $0.00
+    cancelled_pre_entry carries realized_pnl_usd=0.0 (NOT NULL) and would slip past a
+    realized-not-null filter — and this lane churns FAR more cancels than fills, so those
+    never-entered 0.0-R rows would dominate the window and dilute both means toward 0,
+    neutering the breaker. Prune them so the metric measures ENTERED-trade follow-through.
+
+    Best-effort, read-only: any failure / a missing cap -> that trade is skipped; an empty
+    list -> the caller applies no bump. LIVE mode only. [momentum_neural]"""
+    if db is None or lookback <= 0 or not execution_family:
+        return []
+    try:
+        from ....models.trading import MomentumAutomationOutcome, TradingAutomationSession
+        from .outcome_labels import is_real_entry_outcome
+
+        # Fetch headroom (NOT a risk parameter): pull more than `lookback` so the post-filter
+        # prune of never-entered (cancel / no-fill / risk-block) rows still yields ~lookback
+        # REAL entries in this churn-heavy lane. Bounded + indexed (execution_family, terminal_at desc).
+        fetch = max(int(lookback) * 5, 80)
+        rows = (
+            db.query(
+                MomentumAutomationOutcome.realized_pnl_usd,
+                MomentumAutomationOutcome.outcome_class,
+                TradingAutomationSession.risk_snapshot_json,
+            )
+            .join(TradingAutomationSession, MomentumAutomationOutcome.session_id == TradingAutomationSession.id)
+            .filter(MomentumAutomationOutcome.execution_family == execution_family)
+            .filter(MomentumAutomationOutcome.mode == "live")
+            .filter(MomentumAutomationOutcome.realized_pnl_usd.isnot(None))
+            .order_by(MomentumAutomationOutcome.terminal_at.desc())
+            .limit(fetch)
+            .all()
+        )
+    except Exception:
+        logger.debug("[momentum_neural] run-R history read failed", exc_info=True)
+        return []
+    out: list[float] = []
+    for pnl, oc, snap in rows:
+        if not is_real_entry_outcome(oc):
+            continue  # never-entered (cancel / no-fill / risk-block) — not real follow-through
+        caps = snap.get("momentum_policy_caps") if isinstance(snap, dict) else None
+        if not isinstance(caps, dict):
+            continue
+        try:
+            cap = float(caps.get("max_loss_per_trade_usd"))
+            pv = float(pnl)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(cap) and cap > 0 and math.isfinite(pv):
+            out.append(pv / cap)
+        if len(out) >= int(lookback):
+            break
+    return out
+
+
+def run_r_viability_bump(
+    db: Any, execution_family: str | None
+) -> tuple[float, dict[str, Any]]:
+    """MACRO run-R breaker (L2.1): a SOFT, regime-RELATIVE entry-bar raise.
+
+    Returns ``(bump, meta)``. The lane's recent realized-R (a follow-through proxy — the
+    2026-06-22 decomposition found winners thrust, losers fade) is taken as a SHORT recent
+    window mean vs the full-lookback baseline mean. When the recent stretch is BOTH
+    loss-making in R AND below the lane's own baseline (a no-follow-through regime), raise
+    entry_viability_min by the configured bump so fewer marginal setups arm. RELATIVE +
+    graduated => it releases the moment the recent stretch recovers to baseline, so it can
+    NEVER permanently freeze the lane (the failure mode an absolute floor would have).
+
+    Entry-side ONLY: the result is consumed by ``_effective_entry_viability_min``; it never
+    reads or mutates a position/order and is never called from an exit path. Disabled /
+    thin-history => ``(0.0, ...)`` so the caller's ``_score_ok`` is byte-identical.
+    [momentum_neural] project_profitability_levers"""
+    if not bool(getattr(settings, "chili_momentum_run_r_breaker_enabled", True)):
+        return 0.0, {"reason": "disabled"}
+    bump_cfg = float(getattr(settings, "chili_momentum_run_r_breaker_viability_bump", 0.05) or 0.0)
+    if bump_cfg <= 0:
+        return 0.0, {"reason": "bump_disabled"}
+    n = int(getattr(settings, "chili_momentum_run_r_breaker_lookback", 40) or 40)
+    short_k = int(getattr(settings, "chili_momentum_run_r_breaker_short_window", 10) or 10)
+    min_hist = int(getattr(settings, "chili_momentum_run_r_breaker_min_history", 8) or 8)
+    rr = _recent_realized_r(db, execution_family=execution_family, lookback=n)
+    meta: dict[str, Any] = {"n": len(rr), "lookback": n, "short_window": short_k}
+    if len(rr) < max(1, min_hist):
+        return 0.0, {**meta, "reason": "thin_history", "triggered": False}
+    short = rr[: max(1, min(short_k, len(rr)))]
+    long_mean = statistics.fmean(rr)
+    short_mean = statistics.fmean(short)
+    meta.update({"short_mean_r": round(short_mean, 3), "long_mean_r": round(long_mean, 3)})
+    if short_mean < 0.0 and short_mean < long_mean:
+        return round(bump_cfg, 4), {**meta, "reason": "below_baseline_and_losing", "triggered": True}
+    return 0.0, {**meta, "reason": "ok", "triggered": False}
+
+
 def build_session_risk_snapshot(
     *,
     policy_full: dict[str, Any],
