@@ -2825,7 +2825,18 @@ def tick_live_session(
             _adaptive_max_spread,
         )
 
-    quote_block = _quote_quality_block(tick, _fr, max_spread_bps=_adaptive_max_spread)
+    # SKIP-FOR-LIMITS (operator 2026-06-23): the momentum entry is a marketable LIMIT whose
+    # price bounds the fill cost, so the adaptive wide-spread gate is redundant. When enabled,
+    # gate the ENTRY on only the abs-cap BROKEN-QUOTE ceiling (a halted/broken book still
+    # rejects) — stale_bbo + invalid_bbo reliability checks inside _quote_quality_block ALWAYS
+    # apply regardless. Spread becomes a sized COST (L2.2) + the bounded limit, not a veto.
+    _skip_spread_gate = bool(getattr(settings, "chili_momentum_skip_spread_gate_for_limit_entry", True))
+    _entry_spread_ceiling = (
+        float(getattr(settings, "chili_momentum_risk_max_spread_bps_abs_cap", 1500.0) or 1500.0)
+        if _skip_spread_gate
+        else _adaptive_max_spread
+    )
+    quote_block = _quote_quality_block(tick, _fr, max_spread_bps=_entry_spread_ceiling)
     # Halt tracking: a SUSTAINED stale-quote streak = suspected LULD halt; quotes
     # returning = resume (starts the entry whipsaw-cooldown). A wide-but-live quote
     # is NOT a halt signal — only staleness is.
@@ -2840,7 +2851,7 @@ def tick_live_session(
     # the market. Window = 1 entry bar (derived). Fails OPEN below the sample
     # floor (thin tape coverage must not block; the instantaneous gate + ack
     # lifecycle still protect).
-    if quote_block is None and _live_entry_quote_gate_applies(sess, le) and _adaptive_max_spread is not None:
+    if not _skip_spread_gate and quote_block is None and _live_entry_quote_gate_applies(sess, le) and _adaptive_max_spread is not None:
         try:
             from .nbbo_tape import recent_spread_median_bps
 
