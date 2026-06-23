@@ -72,6 +72,26 @@ ROSS_PILLAR_WEIGHTS_DAILY_CONTEXT: dict[str, float] = {
     "daily_structure": 0.10,
 }
 
+# ATTENTION-LEADERSHIP variant (opt-in via chili_momentum_attention_leadership_enabled):
+# the 2026-06-22 Ross study's TRUE winner/loser separator. Position (pos-in-range, VWAP
+# extension) does NOT separate — NXTS-winner and QXL-loser both break to new highs near
+# VWAP (which is why L3 + front_side fail and a position-veto kills winners). What DOES
+# separate: AMPLITUDE-LEADERSHIP — the winners (NXTS, CRMT) were rank #1 carrying ~30-36%
+# of the live mover-field's amplitude; every loser was a follower (QXL was DOWN -2% while
+# NXTS sat +186% beside it). `attention` = the name's share+rank of the field's amplitude
+# (a 6th pillar, percentile-ranked like the rest — it RE-RANKS the pool toward the dominant
+# leader, NEVER vetoes, so a fresh-breakout leader near VWAP scores HIGH and breadth is kept:
+# the #2-#5 movers still rank + can arm). `dormant` = today's vol vs the name's own prior-day
+# baseline (Ross's dormant->explosive precondition; best-effort, graceful-degrades).
+ROSS_PILLAR_WEIGHTS_ATTENTION: dict[str, float] = {
+    "rvol": 0.30,
+    "momentum": 0.20,
+    "liquidity": 0.10,
+    "tradeable_liquidity": 0.10,
+    "attention": 0.20,
+    "dormant": 0.10,
+}
+
 # Max tilt the Ross momentum quality applies to a momentum-neural viability
 # score. ``ross_score`` in [0,1] is centered at 0.5, so the applied tilt is
 # +/- (TILT/2): at 0.20 a top-decile explosive setup gets +0.10 — enough to
@@ -254,6 +274,16 @@ def score_universe(
     _ds_raw = {sym: _first_float(sig or {}, "daily_structure_pct") for sym, sig in signals.items()}
     ds_sorted = sorted(v for v in _ds_raw.values() if v is not None)
     _w_ds = float(w.get("daily_structure") or 0.0)
+    # 6th/7th pillars (attention-leadership variant): the name's amplitude-leadership
+    # share+rank of the live mover-field (the TRUE winner/loser separator) + its
+    # dormant->explosive volume. Stamped cross-sectionally in _bridge_scanner_to_viability
+    # over the full field; graceful-degrade (absent / zero-weight ⇒ not in the blend).
+    _att_raw = {sym: _first_float(sig or {}, "attention_leadership") for sym, sig in signals.items()}
+    att_sorted = sorted(v for v in _att_raw.values() if v is not None)
+    _w_att = float(w.get("attention") or 0.0)
+    _dorm_raw = {sym: _first_float(sig or {}, "dormant_rvol") for sym, sig in signals.items()}
+    dorm_sorted = sorted(v for v in _dorm_raw.values() if v is not None)
+    _w_dorm = float(w.get("dormant") or 0.0)
 
     out: dict[str, RossMomentumScore] = {}
     for sym, (rvol, mom, liq, tliq) in pillars.items():
@@ -263,6 +293,10 @@ def score_universe(
         tliq_pct = _percentile_rank(tliq, tliq_sorted) if tliq is not None else None
         _ds = _ds_raw.get(sym)
         ds_pct = _percentile_rank(_ds, ds_sorted) if _ds is not None else None
+        _att = _att_raw.get(sym)
+        att_pct = _percentile_rank(_att, att_sorted) if _att is not None else None
+        _dorm = _dorm_raw.get(sym)
+        dorm_pct = _percentile_rank(_dorm, dorm_sorted) if _dorm is not None else None
 
         present: list[tuple[float, float]] = []  # (percentile, weight)
         if rvol_pct is not None:
@@ -275,6 +309,10 @@ def score_universe(
             present.append((tliq_pct, _w_tliq))
         if ds_pct is not None and _w_ds > 0:
             present.append((ds_pct, _w_ds))
+        if att_pct is not None and _w_att > 0:
+            present.append((att_pct, _w_att))
+        if dorm_pct is not None and _w_dorm > 0:
+            present.append((dorm_pct, _w_dorm))
 
         wsum = sum(wt for _, wt in present)
         score = (sum(pct * wt for pct, wt in present) / wsum) if wsum > 0 else 0.0

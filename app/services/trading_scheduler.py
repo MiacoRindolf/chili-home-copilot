@@ -3517,6 +3517,7 @@ def _bridge_scanner_to_viability(
     # See docs/DESIGN/MOMENTUM_LANE.md.
     try:
         from .trading.momentum_neural.ross_momentum import (
+            ROSS_PILLAR_WEIGHTS_ATTENTION,
             ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED,
             score_universe as _ross_su,
         )
@@ -3550,9 +3551,55 @@ def _bridge_scanner_to_viability(
         # the lane can actually FILL, not only the most explosive spread-gated names.
         # Validated on the 11-day previous-days A/B replay: +6 fills, +$914 PnL vs
         # baseline (scripts/_sim_liquidity_selection.py, 2026-06-10).
+        _ross_weights = ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED
+        try:
+            from ..config import settings as _att_settings
+            _att_on = bool(getattr(_att_settings, "chili_momentum_attention_leadership_enabled", True))
+        except Exception:
+            _att_on = False
+        if _att_on:
+            # ATTENTION-LEADERSHIP (2026-06-22 Ross study — the TRUE winner/loser separator,
+            # NOT position): stamp each EQUITY mover's amplitude-leadership share+rank over the
+            # FULL field, computed HERE (pre-chunk — pipeline.py only sees a 32-symbol chunk, so
+            # a market-wide measure must be computed at this site). The winners (NXTS, CRMT) were
+            # rank #1 owning ~30-36% of the field's amplitude; every loser was a follower. A
+            # re-rank PILLAR, never a veto → a fresh-breakout leader near VWAP still scores HIGH
+            # (no winner-kill) and the #2-#5 movers still rank (breadth kept). Equity-only; fail-open.
+            try:
+                _amps = []
+                for r in results:
+                    _su = _bsym(r)
+                    if not _su or _su.endswith("-USD"):
+                        continue  # equity-only; crypto field amplitude semantics differ (24h)
+                    try:
+                        _a = max(0.0, float(r.get("daily_change_pct") or r.get("change_pct") or 0.0))
+                    except (TypeError, ValueError):
+                        _a = 0.0
+                    if _a > 0:
+                        _amps.append((r, _a))
+                if len(_amps) >= 2:
+                    _field = sorted((a for _, a in _amps), reverse=True)
+                    _total = float(sum(_field))
+                    _n = len(_field)
+                    _max_share = (_field[0] / _total) if _total > 0 else 0.0
+                    for r, a in _amps:
+                        _rank = _field.index(a) + 1  # 1 = field leader (ties share the top rank)
+                        _grp = (1.0 - (_rank - 1) / (_n - 1)) if _n > 1 else 1.0
+                        _share_norm = ((a / _total) / _max_share) if (_total > 0 and _max_share > 0) else 0.0
+                        r["attention_leadership"] = round(_grp * (0.5 + 0.5 * _share_norm), 4)
+                        try:  # dormant->explosive: today's vol vs the name's OWN prior-day baseline (best-effort)
+                            _dv = float(r.get("volume") or r.get("day_volume") or 0.0)
+                            _pv = float(r.get("prev_day_volume") or r.get("prev_volume") or r.get("prevDayVolume") or 0.0)
+                            if _dv > 0 and _pv > 0:
+                                r["dormant_rvol"] = round(_dv / _pv, 4)
+                        except (TypeError, ValueError):
+                            pass
+                    _ross_weights = ROSS_PILLAR_WEIGHTS_ATTENTION
+            except Exception:
+                logger.debug("[scheduler] attention-leadership field compute skipped", exc_info=True)
         _ross_ranked = _ross_su(
             {_bsym(r): r for r in results if _bsym(r)},
-            weights=ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED,
+            weights=_ross_weights,
         )
         results = sorted(
             results,
