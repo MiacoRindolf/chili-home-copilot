@@ -1089,6 +1089,14 @@ def broker_daily_loss_breached(
     notices a breach protects the broker without relying on the monitor pass.
     """
     fam = _normalize_real_family(family)
+    # Honor the operator's per-broker disable flag. When OFF, this gate must NOT block —
+    # the momentum lane's equity-relative daily-loss cap (off the REAL account equity) +
+    # the global failsafe remain the daily breakers. Bug 2026-06-23: the agentic lane
+    # normalizes to robinhood_spot, whose tiny $38.92 buying power yields a ~$0.97 cap
+    # that HALTED the lane on a -$17 loss — while this flag was ALREADY False but never
+    # consulted here. Returning early also bypasses any in-memory sticky block.
+    if not bool(getattr(settings, "chili_per_broker_daily_loss_enabled", True)):
+        return False, {"family": fam, "disabled": True, "sticky": False}
     if is_broker_daily_loss_blocked(fam):
         with _per_broker_lock:
             blk = dict(_per_broker_daily_loss.get(fam, {}))
@@ -1144,6 +1152,8 @@ def _peek_broker_breach(
 ) -> tuple[bool, dict[str, Any]]:
     """Non-activating read of a broker's breach (for status/alerts)."""
     fam = _normalize_real_family(family)
+    if not bool(getattr(settings, "chili_per_broker_daily_loss_enabled", True)):
+        return False, {"family": fam, "disabled": True, "sticky": False}
     if is_broker_daily_loss_blocked(fam):
         with _per_broker_lock:
             blk = dict(_per_broker_daily_loss.get(fam, {}))

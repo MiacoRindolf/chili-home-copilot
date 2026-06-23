@@ -4585,6 +4585,17 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_QUALITY_SLOT_PRIORITY_ENABLED"),
     )
+    # AGENTIC EXIT — cancel covering SELLs before a full-position exit (2026-06-23 strand
+    # fix). A resting partial-target SELL (tracked OR untracked) locks shares, so the
+    # agentic stop/trail/bailout is rejected "Not enough shares to sell" -> 8 retries ->
+    # live_error -> stranded (PALI/LILA/RDGT/AIIO). Cancel ANY working agentic sell for
+    # the symbol first (mirrors crypto _cancel_coinbase_open_sell_orders); re-runs each
+    # attempt to clear a cancel-propagation race. Agentic-only; spot/crypto byte-identical.
+    # Default-ON; kill-switch CHILI_MOMENTUM_EXIT_CANCEL_COVERING_SELLS=0.
+    chili_momentum_exit_cancel_covering_sells: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_CANCEL_COVERING_SELLS"),
+    )
     # NBBO spread tape (ON): each RTH cycle, persist the CLEAN consolidated bid/ask
     # (Massive snapshot lastQuote) for the Ross universe so the spread-sensitive
     # replay uses REAL spreads, not a proxy (the dollar-volume proxy read PAVS at
