@@ -337,6 +337,24 @@ def freshness_arm_decision(upto, *, firing: bool) -> bool:
     return bool(getattr(fr, "is_fresh", False))
 
 
+def _capture_entry_features(s, dbg, upto, fill_px, stop, target, qty, want_qty, sbps, atrp,
+                            eff, mid, dvol, minute_vol, liq_mult, fire_ts, entry_fidelity,
+                            l2db, Hc, Lc, Cc, Vc):
+    """Replay adapter for the SHARED entry_features.capture_entry_features — maps the replay's
+    fill locals to the shared signature so replay + live produce parity-identical vectors.
+    dollar_vol=mid*dvol; l2_as_of=the historical fire ts (live passes None for the in-process
+    WS ring). Byte-identical to the prior inline version (pure refactor)."""
+    from .entry_features import capture_entry_features
+
+    return capture_entry_features(
+        s, fill_px=fill_px, stop=stop, target=target, qty=qty, want_qty=want_qty,
+        spread_bps=sbps, atr_pct=atrp, stop_atr_pct_eff=eff, mid=mid,
+        dollar_vol=(mid * dvol), liq_mult=liq_mult, fire_ts=fire_ts,
+        entry_fidelity=entry_fidelity, trigger_debug=dbg, session_df=upto,
+        df_cols=(Hc, Lc, Cc, Vc), minute_vol=minute_vol, l2_db=l2db,
+        l2_as_of=_aware(fire_ts).replace(tzinfo=None))
+
+
 def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -> dict:
     """Run the high-fidelity replay for ``date`` (YYYY-MM-DD). Returns the structured
     result dict; persists it to REPLAY_RESULTS_DIR/<date>.json when ``persist``."""
@@ -1166,6 +1184,11 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                 _tr(s, "gate_fail:no_liquidity_printed", now)
                 continue
             _tr(s, "fill@%.4g" % fill_px, now)
+            _feat = None
+            if bool(getattr(settings, "chili_momentum_replay_capture_features", False)):
+                _feat = _capture_entry_features(
+                    s, dbg, upto, fill_px, stop, target, qty, want_qty, sbps, atrp, eff,
+                    mid, dvol, minute_vol, _liq_mult, _fire_ts, _entry_fidelity, _l2db, H, L, C, V)
             open_pos[s] = {
                 "entry": fill_px, "qty": qty, "qty0": qty, "stop": stop, "stop0": stop,
                 "target": target, "hwm": fill_px, "atrp": eff, "scaled": False,
@@ -1173,7 +1196,8 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                 "meta": {"sym": s, "t": str(_fire_ts)[11:16], "entry": round(fill_px, 4),
                          "qty": round(qty, 0), "spread_bps": round(sbps, 0),
                          "partial": round(qty / want_qty if want_qty > 0 else 1.0, 2),
-                         "fidelity": "tape", "entry_fidelity": _entry_fidelity},
+                         "fidelity": "tape", "entry_fidelity": _entry_fidelity,
+                         **({"features": _feat} if _feat else {})},
             }
     finally:
         _l2db.rollback()

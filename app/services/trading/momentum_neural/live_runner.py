@@ -3473,6 +3473,43 @@ def tick_live_session(
                         "filled_size": filled,
                     },
                 )
+                # ENTRY-FEATURE CAPTURE (2026-06-23): record the lookahead-free entry-moment
+                # feature vector onto `le` for the winner/loser META-LABEL dataset (mirrors the
+                # paper path; today entry features are PAPER-ONLY so live has none). POST-
+                # transition + best-effort -> can NEVER affect the fill or management. Uses the
+                # SHARED helper (parity with replay). Flag chili_momentum_live_capture_features.
+                if bool(getattr(settings, "chili_momentum_live_capture_features", True)):
+                    try:
+                        from ..market_data import fetch_ohlcv_df
+                        from .entry_features import capture_entry_features
+
+                        _cap_df = fetch_ohlcv_df(sess.symbol, interval="15m", period="5d")
+                        if _cap_df is not None and len(_cap_df):
+                            try:  # 5d frame -> slice to TODAY so session_vwap anchors correctly
+                                _ld = _cap_df.index[-1].date()
+                                _cap_df = _cap_df[_cap_df.index.date == _ld]
+                            except Exception:
+                                pass
+                        _ef = capture_entry_features(
+                            sess.symbol, fill_px=float(avg), stop=float(stop_px),
+                            target=float(target_px), qty=float(filled),
+                            want_qty=float(le.get("entry_want_qty") or filled),
+                            spread_bps=float(le.get("entry_spread_bps_at_decision") or 0.0),
+                            atr_pct=float(regime_atr_pct(regime) or 0.0),
+                            stop_atr_pct_eff=float(atrp or 0.0),
+                            mid=float(avg),
+                            dollar_vol=(float(le["entry_dollar_vol"]) if le.get("entry_dollar_vol") else None),
+                            liq_mult=float(le.get("entry_liq_mult") or 1.0),
+                            fire_ts=_utcnow(), entry_fidelity="live",
+                            trigger_debug=(le.get("entry_trigger_debug") if isinstance(le.get("entry_trigger_debug"), dict) else None),
+                            session_df=_cap_df, l2_db=db, l2_as_of=None,
+                        )
+                        le["entry_regime_snapshot_json"] = dict(regime)
+                        if _ef:
+                            le["entry_features"] = _ef
+                        _commit_le(sess, le)
+                    except Exception:
+                        _log.debug("entry-feature capture skipped session=%s", sess.id, exc_info=True)
                 db.flush()
                 return {"ok": True, "session_id": sess.id, "state": sess.state}
             if no and _order_open(no):
