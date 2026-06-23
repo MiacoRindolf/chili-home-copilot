@@ -4756,6 +4756,29 @@ def _run_pattern_quality_score_refresh_job() -> None:
     run_scheduler_job_guarded("pattern_quality_score_refresh", _work)
 
 
+def _run_meta_label_retrain_job() -> None:
+    """Momentum LEARNING step (2026-06-23): DATA-DRIVEN re-train of the adaptive meta-label
+    de-rate. maybe_retrain_meta_label re-fits ONLY when new contributing outcomes have accrued
+    (not a clock) and is cheap (<1s); the live sizing reads the saved model -> it AUTO-UPDATES
+    as trades accumulate. Integrated into the lane's learning cadence (NOT a standalone cron),
+    so it self-improves alongside the rest of the neural learning. Best-effort."""
+    from ..db import SessionLocal
+    from .trading.momentum_neural.meta_label import maybe_retrain_meta_label
+
+    db = SessionLocal()
+    try:
+        out = maybe_retrain_meta_label(db)
+        if out.get("status") == "retrained":
+            logger.info(
+                "[scheduler] meta-label re-trained: n=%s grew_from=%s confidence=%s status=%s",
+                out.get("n"), out.get("grew_from"), out.get("confidence"), out.get("model_status"),
+            )
+    except Exception:
+        logger.exception("[scheduler] meta-label re-train job failed")
+    finally:
+        db.close()
+
+
 def _run_realized_stats_sync_job() -> None:
     """Refresh raw realized EV so paper/pilot outcomes can clear gate debt."""
     from ..config import settings as _settings
@@ -5825,6 +5848,20 @@ def start_scheduler():
                     replace_existing=True,
                     max_instances=1,
                     next_run_time=datetime.now() + timedelta(seconds=55),
+                )
+
+                # Adaptive meta-label de-rate re-train (2026-06-23): a 20min CHECK cadence; the
+                # job itself is DATA-DRIVEN (re-fits only when new contributing outcomes accrued),
+                # so this integrates the self-improving de-rate into the lane's learning loop
+                # (not a standalone cron). Cheap + best-effort; the live sizing auto-reads the model.
+                _scheduler.add_job(
+                    _run_meta_label_retrain_job,
+                    trigger=IntervalTrigger(minutes=20),
+                    id="meta_label_retrain",
+                    name="Meta-label de-rate re-train (data-driven, every 20min check)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=90),
                 )
 
                 _scheduler.add_job(
