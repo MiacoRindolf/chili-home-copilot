@@ -711,8 +711,15 @@ def _submit_live_market_exit(
             _exit_extended = market_session_now(sess.symbol) != "regular"
         except Exception:
             _exit_extended = False
+    # ⚠️ 2026-06-23 STRANDED-EXIT FIX: use extended_hours, NOT all_day_hours. all_day_hours
+    # is RH's 24-HOUR market — only valid for the few 24h-eligible names; for ~every Ross
+    # low-float mover RH rejects it ("untradable for 24 hour trading"), and the AGENTIC MCP
+    # adapter (this lane) has NO all_day_hours->fallback (robinhood_spot.py:909 does; the MCP
+    # rail does not), so a premarket/after-hours STOP-OUT could not flatten -> naked stranded
+    # long (the exact AHMA/SMCX class). extended_hours covers pre+regular+post (the lane's
+    # 04:00-20:00 ET window) and is accepted for ALL equities. Mirrors the entry-side fix.
     _ext_kwargs: dict[str, Any] = (
-        {"market_hours_override": "all_day_hours", "extended_hours_override": True}
+        {"market_hours_override": "extended_hours", "extended_hours_override": True}
         if _exit_extended
         else {}
     )
