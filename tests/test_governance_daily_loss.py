@@ -100,6 +100,9 @@ class _FakeQuery:
         self._rows = list(rows or [])
         self._scalar_value = scalar_value
 
+    def join(self, *_args, **_kwargs):
+        return self
+
     def filter(self, *_args, **_kwargs):
         return self
 
