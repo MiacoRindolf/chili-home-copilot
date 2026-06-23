@@ -43,6 +43,7 @@ def capture_entry_features(
     minute_vol: float | None = None,
     l2_db: Any = None,
     l2_as_of: Any = None,
+    macro: dict | None = None,
 ) -> dict | None:
     f: dict[str, Any] = {}
     try:
@@ -118,6 +119,61 @@ def capture_entry_features(
                     f["px_vs_session_vwap"] = float((fill_px - float(sv)) / float(sv))
         except Exception:
             pass
+        # MACRO-REGIME features (computed by the caller via macro_regime_features, passed in to
+        # keep this fn pure/parity-testable). Daniel-Moskowitz: momentum follow-through crashes
+        # in high-vol bear regimes -> the model weighs the bear x vol interaction.
+        if isinstance(macro, dict):
+            for k, v in macro.items():
+                if v is not None:
+                    try:
+                        f[k] = float(v)
+                    except Exception:
+                        pass
         return f or None
     except Exception:
         return None
+
+
+# tiny TTL cache so SPY/IWM aren't refetched per candidate (keyed by symbol; wall-clock is fine
+# live — this module is never imported into a workflow/replay-determinism path for macro).
+_MACRO_CACHE: dict = {}
+
+
+def macro_regime_features(now_ts: float | None = None) -> dict:
+    """Lookahead-free MACRO-REGIME features (Daniel-Moskowitz panic-regime encoding):
+    BEAR indicator (market below its 20d trend) x trailing realized VOLATILITY interaction —
+    momentum follow-through historically CRASHES in high-vol bear regimes (Sharpe flips
+    +0.016 -> -0.042). Best-effort IO (SPY = market, IWM = small-cap proxy); absent fields are
+    simply omitted (the model median-imputes). Cached ~300s to avoid per-candidate refetch."""
+    import time as _t
+
+    out: dict = {}
+    try:
+        import numpy as np
+
+        from ..market_data import fetch_ohlcv_df
+
+        ts = now_ts if now_ts is not None else _t.time()
+        for sym, key, is_smallcap in (("SPY", "spy", False), ("IWM", "iwm", True)):
+            try:
+                cached = _MACRO_CACHE.get(sym)
+                if cached and (ts - cached[0]) < 300.0:
+                    c = cached[1]
+                else:
+                    df = fetch_ohlcv_df(sym, interval="1d", period="3mo")
+                    if df is None or len(df) < 21:
+                        continue
+                    c = df["Close"].astype(float).values[-21:]
+                    _MACRO_CACHE[sym] = (ts, c)
+                out[f"{key}_trend"] = 1.0 if float(c[-1]) >= float(c[-20:].mean()) else 0.0
+                if is_smallcap:
+                    rets = np.diff(np.log(c))
+                    out["mkt_vol"] = float(np.std(rets) * (252.0 ** 0.5))
+            except Exception:
+                continue
+        bear = 1.0 - out.get("iwm_trend", out.get("spy_trend", 1.0))
+        if "mkt_vol" in out:
+            out["bear_x_vol"] = bear * out["mkt_vol"]   # the panic-regime interaction
+    except Exception:
+        pass
+    return out

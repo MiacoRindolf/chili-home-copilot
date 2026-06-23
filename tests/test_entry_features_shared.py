@@ -70,6 +70,14 @@ def test_fail_open_no_df():
     assert "minute_vol" not in f
 
 
+def test_macro_merged_into_features():
+    # macro-regime features (computed by the caller, passed in) merge into the vector
+    f = capture_entry_features("AAA", **_COMMON, dollar_vol=1e6, trigger_debug=_DBG,
+                               session_df=_df(), l2_db=None, l2_as_of=None,
+                               macro={"spy_trend": 1.0, "bear_x_vol": 0.3, "mkt_vol": 0.25})
+    assert f["spy_trend"] == 1.0 and f["bear_x_vol"] == 0.3 and f["mkt_vol"] == 0.25
+
+
 def test_noncanonical_cols_renamed():
     # replay-style lowercase columns must rename to canonical for front_side_state
     df = _df().rename(columns={"High": "high", "Low": "low", "Close": "close", "Volume": "volume"})
