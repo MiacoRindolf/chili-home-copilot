@@ -3578,6 +3578,20 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_SPREAD_BPS_ABS_CAP"),
     )
+    # SKIP-FOR-LIMITS (operator 2026-06-23): the momentum entry is a marketable LIMIT
+    # (place_limit_order_gtc at/above the guarded ask) — the LIMIT PRICE itself bounds the
+    # fill cost, so the adaptive wide-spread gate is redundant for it (it protects against
+    # MARKET-order slippage we don't do; it was rejecting the inherently-wide volatile
+    # low-float movers the strategy targets — 2111 wide + the abs cap clipped NXTS 413bps).
+    # When True, the ENTRY quote gate skips the tighter adaptive spread + stability checks and
+    # uses only the abs_cap as a BROKEN-QUOTE ceiling (a halted/broken book is still rejected);
+    # stale_bbo + invalid_bbo reliability checks ALWAYS apply. Spread is then handled as a sized
+    # COST (the L2.2 liquidity risk multiplier) + the bounded limit, not a binary gate. 0 =
+    # the full adaptive spread gate applies (legacy). EXITS / market paths unaffected.
+    chili_momentum_skip_spread_gate_for_limit_entry: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SKIP_SPREAD_GATE_FOR_LIMIT_ENTRY"),
+    )
     chili_momentum_risk_max_estimated_slippage_bps: float = Field(
         default=18.0,
         ge=0.0,
