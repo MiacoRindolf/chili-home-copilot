@@ -3274,6 +3274,16 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_LIQUIDITY_RISK_FLOOR"),
         description="Max risk shrink for the widest-spread admitted name (mult floor; 0.5 = at most half-size). The one documented base; the spread tolerance itself is adaptive (no magic).",
     )
+    # REPLAY→LIVE sizing parity ("walang mintis"): pin the replay's equity sizing basis (USD).
+    # 0 = read the live agentic account equity (the SAME source the live lane sizes off);
+    # >0 pins it (deterministic A/B + a local run without the broker token). Falls back to
+    # the replay's fixed BASIS_USD only if both are unavailable.
+    chili_replay_equity_basis_usd: float = Field(
+        default=0.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_REPLAY_EQUITY_BASIS_USD"),
+        description="Replay equity sizing basis in USD. 0 = use the live account equity (parity with live); >0 pins it.",
+    )
     # RISK-NEUTRAL CONFIRMATION-PYRAMID (the one genuine scale-IN gap vs Ross). A single
     # ADD into an ALREADY-winning position (>1R banked) on confirmation (new HOD + OFI +
     # ratcheted trail), sized via the SAME risk-first machinery against a FRACTION of the
