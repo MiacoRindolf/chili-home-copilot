@@ -507,6 +507,48 @@ def compute_risk_first_quantity(
     }
 
 
+def spread_liquidity_risk_multiplier(
+    spread_bps: float | None,
+    expected_move_bps: float | None,
+    *,
+    floor: float = 0.5,
+    ratio: float | None = None,
+    abs_cap_bps: float | None = None,
+) -> tuple[float, dict[str, Any]]:
+    """Shrink per-trade RISK as the live spread consumes the name's ADAPTIVE spread
+    tolerance — wide-spread / illiquid names (the −$697 low-float gap-through tail; e.g.
+    QXL −$229 on a 119bps name, 2026-06-22) get SIZED DOWN, never REJECTED. This is the
+    surgical fix the failed L3 entry filter was NOT: it cuts the loser tail without
+    killing a single trade or winner (an entry filter can't tell winner from loser at
+    fire-time; SIZE can — the risky-liquidity names are systematically over-sized).
+
+    ``mult = clamp(1 − spread/tolerance, floor, 1.0)``: a tight name → 1.0; a name eating
+    its full allowable spread → ``floor``. ``tolerance`` = ``adaptive_max_spread_bps``
+    (the SAME gate that admitted the name) which scales UP for explosive movers, so a
+    high-move runner with a proportionate spread is NOT shrunk. Returns ``(1.0, …)``
+    fail-NEUTRAL on unusable inputs (never increases risk). Reads settings only.
+    [momentum_neural] project_profitability_levers / docs/DESIGN/SCALING_ENGINE.md P1"""
+    try:
+        sb = float(spread_bps) if spread_bps is not None else None
+        if sb is None or not math.isfinite(sb) or sb <= 0:
+            return 1.0, {"reason": "no_spread"}
+        if ratio is None:
+            ratio = float(getattr(settings, "chili_momentum_risk_spread_to_expected_move_ratio", 0.5) or 0.5)
+        if abs_cap_bps is None:
+            abs_cap_bps = float(getattr(settings, "chili_momentum_risk_max_spread_bps_abs_cap", 800.0) or 800.0)
+        base = float(getattr(settings, "chili_momentum_risk_max_spread_bps_live", 60.0) or 60.0)
+        tol = adaptive_max_spread_bps(base, expected_move_bps, ratio, abs_cap_bps=abs_cap_bps)
+        if not math.isfinite(tol) or tol <= 0:
+            return 1.0, {"reason": "no_tolerance"}
+        flo = float(floor)
+        if not (0.0 < flo <= 1.0):
+            flo = 0.5
+        mult = max(flo, min(1.0, 1.0 - (sb / tol)))
+        return mult, {"spread_bps": round(sb, 1), "tolerance_bps": round(tol, 1), "mult": round(mult, 4), "floor": flo}
+    except (TypeError, ValueError):
+        return 1.0, {"reason": "error_fail_neutral"}
+
+
 def max_loss_circuit_decision(
     *,
     avg: float,

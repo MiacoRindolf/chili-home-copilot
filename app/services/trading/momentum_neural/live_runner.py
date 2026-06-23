@@ -3972,8 +3972,26 @@ def tick_live_session(
             _emit(db, sess, "live_entry_wait_late_window", {"window": "late"})
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state, "skipped": "late_window"}
+        # L2.2 LIQUIDITY-SCALED RISK CAP (project_profitability_levers): the biggest losers
+        # are wide-spread illiquid names sized too big (QXL −$229 @119bps; the −$697 low-float
+        # gap-through tail). SHRINK the risk budget as the live spread eats the name's adaptive
+        # tolerance — sizes the risky names DOWN without rejecting any trade (the L3 entry filter
+        # killed winners; this never does). Entry sizing only, never an exit. OFF / mult==1.0 =>
+        # the product is byte-identical. Replay applies the SAME helper with the SAME inputs => parity.
+        _liq_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_liquidity_risk_cap_enabled", True)):
+            try:
+                from .risk_policy import spread_liquidity_risk_multiplier
+                _liq_mult, _liq_meta = spread_liquidity_risk_multiplier(
+                    spread_bps_live, _expected_move_bps,
+                    floor=float(getattr(settings, "chili_momentum_liquidity_risk_floor", 0.5) or 0.5),
+                )
+                if _liq_mult < 1.0:
+                    le["liquidity_risk"] = _liq_meta
+            except Exception:
+                _liq_mult = 1.0
         _eff_max_loss = min(
-            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult),
+            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE
