@@ -3097,6 +3097,15 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_REPLAY_FRESHNESS_FILTER_ENABLED"),
     )
+    # Replay feature-capture (2026-06-23): when ON, the replay attaches a lookahead-free
+    # entry-moment FEATURE VECTOR to each trade record (front_side_state, OFI/micro,
+    # spread/atr/rr geometry, entry-gate dbg, context flags) alongside run_r — the labeled
+    # dataset for the winner/loser DISCRIMINATOR search. DEFAULT-OFF: when off, _feat is
+    # None and trade records (pnl/cum/fills) are byte-identical to today (replay invariant).
+    chili_momentum_replay_capture_features: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REPLAY_CAPTURE_FEATURES"),
+    )
     chili_momentum_spread_stability_min_samples: int = Field(
         default=5,
         ge=1,
