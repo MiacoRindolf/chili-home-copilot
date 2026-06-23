@@ -3117,6 +3117,20 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_CAPTURE_FEATURES"),
     )
+    # META-LABEL DE-RATE: size DOWN a low-edge/loser-profile entry per the adaptive, regime-aware
+    # meta-label model (evidence-scaled -> INERT until it earns confidence; NEVER a veto). Default-ON;
+    # =0 -> byte-identical (multiplier 1.0). Instant per-sha rollback.
+    chili_momentum_meta_label_derate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_META_LABEL_DERATE_ENABLED"),
+    )
+    # The ONE documented irreducible base (operator: "irreducible base = ONE documented setting"):
+    # the smallest size fraction the meta-label de-rate may shrink an entry to. NEVER 0 -> never a
+    # veto, so a rare below-VWAP explosive winner is sized-down at worst, never killed.
+    chili_momentum_meta_label_min_size: float = Field(
+        default=0.4, ge=0.05, le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_META_LABEL_MIN_SIZE"),
+    )
     chili_momentum_spread_stability_min_samples: int = Field(
         default=5,
         ge=1,

@@ -3481,7 +3481,7 @@ def tick_live_session(
                 if bool(getattr(settings, "chili_momentum_live_capture_features", True)):
                     try:
                         from ..market_data import fetch_ohlcv_df
-                        from .entry_features import capture_entry_features
+                        from .entry_features import capture_entry_features, macro_regime_features
 
                         _cap_df = fetch_ohlcv_df(sess.symbol, interval="15m", period="5d")
                         if _cap_df is not None and len(_cap_df):
@@ -3503,6 +3503,7 @@ def tick_live_session(
                             fire_ts=_utcnow(), entry_fidelity="live",
                             trigger_debug=(le.get("entry_trigger_debug") if isinstance(le.get("entry_trigger_debug"), dict) else None),
                             session_df=_cap_df, l2_db=db, l2_as_of=None,
+                            macro=macro_regime_features(),
                         )
                         le["entry_regime_snapshot_json"] = dict(regime)
                         if _ef:
@@ -4091,8 +4092,43 @@ def tick_live_session(
                     le["liquidity_risk"] = _liq_meta
             except Exception:
                 _liq_mult = 1.0
+        # META-LABEL DE-RATE (2026-06-23, adaptive + regime-aware, NEVER a veto): size DOWN a
+        # low-edge / loser-profile entry per the meta-label model (evidence-scaled -> INERT until
+        # it earns confidence from the growing live dataset; bounded [floor,1.0], never zeroes ->
+        # preserves the explosive tail). Best-effort + LIGHT (in-process L2 ring + cached macro,
+        # NO df refetch -> no submit latency; front_side median-imputed). Multiplies the risk
+        # budget like the other size-down levers, capped by the 3x clamp. Kill-switch
+        # chili_momentum_meta_label_derate_enabled.
+        _meta_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_meta_label_derate_enabled", True)):
+            try:
+                from .meta_label import load_model, size_multiplier
+
+                _mm_model = load_model("/app/data/_meta_label_model.json")
+                if _mm_model and float(_mm_model.get("confidence") or 0.0) > 0.0:
+                    from .entry_features import capture_entry_features, macro_regime_features
+
+                    _mm_stop = guarded_ask * (1.0 - float(_eff_atr_pct) * float(_stop_atr_mult))
+                    _mm_rr = class_aware_reward_risk(sess.symbol)
+                    _mm_tgt = (guarded_ask + _mm_rr * (guarded_ask - _mm_stop)) if guarded_ask > _mm_stop else guarded_ask
+                    _mm_feats = capture_entry_features(
+                        sess.symbol, fill_px=float(guarded_ask), stop=float(_mm_stop),
+                        target=float(_mm_tgt), qty=1.0, want_qty=1.0,
+                        spread_bps=float(spread_bps_live or 0.0), atr_pct=float(_eff_atr_pct or 0.0),
+                        stop_atr_pct_eff=float(_eff_atr_pct or 0.0), mid=float(guarded_ask),
+                        dollar_vol=None, liq_mult=1.0, fire_ts=_utcnow(), entry_fidelity="live",
+                        trigger_debug=(le.get("entry_trigger_debug") if isinstance(le.get("entry_trigger_debug"), dict) else None),
+                        session_df=None, l2_db=db, l2_as_of=None, macro=macro_regime_features())
+                    _mm = size_multiplier(_mm_feats or {}, _mm_model,
+                                          floor=float(getattr(settings, "chili_momentum_meta_label_min_size", 0.4)))
+                    if 0.0 < _mm < 1.0:
+                        _meta_mult = _mm
+                        le["meta_label_derate"] = {"mult": round(_mm, 4),
+                                                   "conf": round(float(_mm_model.get("confidence") or 0.0), 4)}
+            except Exception:
+                _meta_mult = 1.0
         _eff_max_loss = min(
-            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult),
+            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE
