@@ -435,12 +435,20 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
 
         The runner uses TWO conventions: the ENTRY passes ``extended_hours`` (bool); the
         EXIT passes the robin_stocks kwarg names ``market_hours_override`` /
-        ``extended_hours_override``. Any premarket/extended hint maps to ``all_day_hours``
-        (pre + regular + post) so a resting order survives the session boundary."""
+        ``extended_hours_override``. Any premarket/extended hint maps to ``extended_hours``
+        (pre + regular + post, 04:00-20:00 ET — valid for ALL equities).
+
+        ⚠️ 2026-06-23 LIVE 0-FILL ROOT CAUSE: this previously returned ``all_day_hours``
+        (RH's 24-HOUR market), but that designation is only accepted for the small set of
+        24h-eligible instruments — for ~every Ross low-float mover (NXTS et al.) RH rejects
+        the order with API 400 ``"instrument is untradable for 24 hour trading"``. That single
+        wrong enum errored ~every momentum entry at the rail (372 submits -> 4 fills / 44h;
+        NXTS submitted 26x, ALL isError). ``extended_hours`` covers the lane's full window and
+        is accepted for normal equities, so the order actually rests + fills."""
         if market_hours_override:
             return str(market_hours_override)
         if extended_hours_override or extended_hours:
-            return "all_day_hours"
+            return "extended_hours"
         return market_hours or _DEFAULT_MARKET_HOURS
 
     def _build_order_args(
