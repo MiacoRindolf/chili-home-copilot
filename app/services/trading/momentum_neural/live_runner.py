@@ -640,6 +640,19 @@ def _submit_live_market_exit(
     if quantity <= 0:
         _emit(db, sess, "live_exit_noop_scale_limit_consumed", {"reason": reason})
         return {"ok": False, "error": "no_remaining_quantity", "noop": True}
+    # AGENTIC COVERING-SELL RELEASE (2026-06-23 strand fix): the TRACKED scale-out is
+    # cancelled above, but an UNTRACKED resting sell — or a cancel not yet propagated at
+    # the broker — still locks shares, so the full exit is rejected 'Not enough shares to
+    # sell' (-> 8 retries -> live_error -> stranded naked). Cancel ANY working agentic sell
+    # for this symbol so the whole position is sellable; re-runs each attempt to clear the
+    # propagation race. Agentic-only; spot/crypto byte-identical. Kill-switch default-ON.
+    if (
+        bool(getattr(settings, "chili_momentum_exit_cancel_covering_sells", True))
+        and normalize_execution_family(sess.execution_family) == EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP
+    ):
+        _ncov = _cancel_agentic_covering_sells(adapter, sess.symbol)
+        if _ncov:
+            _emit(db, sess, "live_exit_cancelled_covering_sells", {"count": _ncov, "reason": reason})
     # BROKER-QTY CLAMP (2026-06-12 quant pass v2 A6): sell what the BROKER
     # says we hold, not what the session remembers — selling phantom shares
     # produced the "Not enough shares to sell"/"cannot be sold short" reject
@@ -1646,6 +1659,39 @@ def _cancel_scale_limit_and_clamp(
     pos2 = le.get("position") if isinstance(le.get("position"), dict) else {}
     remaining = float(_float_or_none(pos2.get("quantity")) or 0.0)
     return max(0.0, min(float(requested_qty), remaining))
+
+
+_OPEN_ORDER_STATES_FOR_CANCEL = frozenset(
+    {"open", "confirmed", "queued", "unconfirmed", "partially_filled", "pending", "accepted", "new"}
+)
+
+
+def _cancel_agentic_covering_sells(adapter: Any, symbol: str) -> int:
+    """Cancel ANY working SELL on the pinned agentic account for ``symbol`` so a
+    full-position stop/trail/bailout isn't rejected 'Not enough shares to sell' by a
+    resting partial-target that locks shares (the 2026-06-23 strand bug:
+    PALI/LILA/RDGT/AIIO -> 8 rejects -> live_error). Generalizes the tracked-only
+    _cancel_scale_limit_and_clamp (catches an UNTRACKED sell) and, by re-running each
+    exit attempt, clears a cancel-propagation race. Mirrors crypto
+    _cancel_coinbase_open_sell_orders. Best-effort; returns count cancelled."""
+    n = 0
+    try:
+        if not (hasattr(adapter, "get_agentic_open_orders") and hasattr(adapter, "cancel_order")):
+            return 0
+        for o in (adapter.get_agentic_open_orders(symbol=symbol) or []):
+            try:
+                get = o.get if isinstance(o, dict) else (lambda k, d=None: getattr(o, k, d))
+                side = str(get("side") or "").lower()
+                state = str(get("state") or get("status") or "").lower()
+                oid = get("id") or get("order_id")
+                if side == "sell" and oid and state in _OPEN_ORDER_STATES_FOR_CANCEL:
+                    adapter.cancel_order(str(oid))
+                    n += 1
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return n
 
 
 def _safe_transition(db: Session, sess: TradingAutomationSession, new_state: str) -> None:
