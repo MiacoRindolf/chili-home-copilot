@@ -3258,6 +3258,22 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_RUN_R_BREAKER_MIN_HISTORY"),
         description="Minimum closed-fill history before the breaker can trigger; below this it fails OPEN (bump 0).",
     )
+    # L2.2 LIQUIDITY-SCALED RISK CAP (project_profitability_levers): shrink per-trade RISK
+    # as the live spread eats the name's adaptive tolerance — wide-spread/illiquid names
+    # (the −$697 low-float tail; QXL −$229 @119bps) get SIZED DOWN, never rejected (cuts the
+    # loser tail without killing trades/winners — the surgical fix the L3 entry filter wasn't).
+    chili_momentum_liquidity_risk_cap_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIQUIDITY_RISK_CAP_ENABLED"),
+        description="Kill-switch for the liquidity-scaled per-trade risk cap. false = mult 1.0 = byte-identical sizing.",
+    )
+    chili_momentum_liquidity_risk_floor: float = Field(
+        default=0.5,
+        ge=0.1,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIQUIDITY_RISK_FLOOR"),
+        description="Max risk shrink for the widest-spread admitted name (mult floor; 0.5 = at most half-size). The one documented base; the spread tolerance itself is adaptive (no magic).",
+    )
     # RISK-NEUTRAL CONFIRMATION-PYRAMID (the one genuine scale-IN gap vs Ross). A single
     # ADD into an ALREADY-winning position (>1R banked) on confirmation (new HOD + OFI +
     # ratcheted trail), sized via the SAME risk-first machinery against a FRACTION of the

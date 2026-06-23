@@ -1116,7 +1116,16 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             if not (0 < stop < fill_px):
                 continue
             max_notional = min(NOTIONAL_CAP_USD, LIQ_FRACTION * mid * dvol)
-            want_qty = min(RISK_PER_TRADE_USD / max(fill_px - stop, 1e-9), max_notional / fill_px)
+            # L2.2 liquidity-scaled risk cap — PARITY with live: the SAME helper with the SAME
+            # sbps + em_bps the spread gate above already computed (so the replay's size-shrink
+            # == live's). OFF / mult==1.0 => byte-identical want_qty.
+            _liq_mult = 1.0
+            if bool(getattr(settings, "chili_momentum_liquidity_risk_cap_enabled", True)):
+                from .risk_policy import spread_liquidity_risk_multiplier
+                _liq_mult, _ = spread_liquidity_risk_multiplier(
+                    sbps, em_bps,
+                    floor=float(getattr(settings, "chili_momentum_liquidity_risk_floor", 0.5) or 0.5))
+            want_qty = min((RISK_PER_TRADE_USD * _liq_mult) / max(fill_px - stop, 1e-9), max_notional / fill_px)
             # shares printed over the next ~minute: diff day-volume against the row
             # ~55s ahead — on the dense WS tape (rows every ~1s) the immediate next
             # row would show a near-zero diff and falsely reject for no liquidity
