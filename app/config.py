@@ -4562,6 +4562,29 @@ class Settings(BaseSettings):
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_LEVERAGED_ETF_RANK_WEIGHT"),
     )
+    # FIX A (2026-06-23): HARD-VETO leveraged/inverse ETFs from the Ross lane at the
+    # viability eligibility gate (live AND paper). The rank down-weight above only
+    # demotes them and LEAKED — SOXS (3x-inverse semis) armed + traded, and 11 of 18
+    # eligible names that morning were the Tradr/Defiance/T-REX "2X Short XXX" wave.
+    # The lane is for low-float COMMON stock; these geared trackers do not belong.
+    # Default-ON; kill-switch CHILI_MOMENTUM_EXCLUDE_LEVERAGED_ETFS=0 (reverts to the
+    # soft down-weight-only behavior above). [operator 2026-06-23 choice A]
+    chili_momentum_exclude_leveraged_etfs: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXCLUDE_LEVERAGED_ETFS"),
+    )
+    # FIX B (2026-06-23): QUALITY SLOT-PRIORITY TIER in the arm queue. The
+    # multiplicative ETF down-weight above leaks (a fresh-ross ETF at ×0.5 still
+    # outranks a real company whose ross score went stale -> 0.0; 13 such inversions
+    # live on 2026-06-23). Make instrument CLASS a LEADING tier key so genuine
+    # low-float companies are floored STRICTLY above any leveraged/inverse ETF, with
+    # the existing (ross, viability) order preserved WITHIN each tier. Backstops Fix
+    # A's fail-open (an ETF with missing fundamentals stays eligible -> still floored
+    # here). Default-ON; =0 restores byte-identical (ross, viability) ordering.
+    chili_momentum_quality_slot_priority_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_QUALITY_SLOT_PRIORITY_ENABLED"),
+    )
     # NBBO spread tape (ON): each RTH cycle, persist the CLEAN consolidated bid/ask
     # (Massive snapshot lastQuote) for the Ross universe so the spread-sensitive
     # replay uses REAL spreads, not a proxy (the dollar-volume proxy read PAVS at

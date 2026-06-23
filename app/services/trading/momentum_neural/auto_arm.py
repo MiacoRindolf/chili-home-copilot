@@ -628,6 +628,22 @@ def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[Momentum
                     _vb *= _lw
         except Exception:
             pass
+        # FIX B (2026-06-23): QUALITY SLOT-PRIORITY TIER. The multiplicative
+        # down-weight above LEAKS — a fresh-ross ETF (1.0->0.5) still outranks a real
+        # company whose ross score went stale (0.0); 13 such inversions live that day.
+        # Make instrument CLASS a LEADING tier key (1 = real low-float company,
+        # 0 = leveraged/inverse ETF) so a real company is floored STRICTLY above any
+        # ETF; the (ross, viability) order is preserved WITHIN each tier. Backstops the
+        # viability-gate veto (Fix A) for its fundamentals fail-open. Default-ON;
+        # =False restores the byte-identical (ross, _vb) ordering returned today.
+        if bool(getattr(settings, "chili_momentum_quality_slot_priority_enabled", True)):
+            try:
+                from .leveraged_etf import symbol_is_leveraged_etf as _sym_lev_tier
+
+                _tier = 0 if _sym_lev_tier(getattr(r, "symbol", "")) else 1
+            except Exception:
+                _tier = 1  # fail-open: unknown class treated as a real company (never demoted on error)
+            return (_tier, ross, _vb)
         return (ross, _vb)
 
     rows = sorted(rows, key=_ross_rank_key, reverse=True)

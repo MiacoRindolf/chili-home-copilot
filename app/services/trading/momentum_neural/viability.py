@@ -10,6 +10,7 @@ from sqlalchemy import desc
 from ....config import settings
 from .context import MomentumRegimeContext, VolatilityRegime
 from .features import ExecutionReadinessFeatures
+from .leveraged_etf import symbol_is_leveraged_etf
 from .variants import MomentumStrategyFamily
 
 if TYPE_CHECKING:
@@ -217,6 +218,31 @@ def score_viability(
 
     paper_eligible = True
     live_eligible = True
+
+    # Ross lane = low-float small-cap COMMON stock. HARD-VETO leveraged/inverse ETPs
+    # (SOXS/SQQQ/SOXL + the Tradr/Defiance/T-REX "2X Short XXX" single-stock wave that
+    # flooded the lane 2026-06-23: 11 of 18 eligible names were these). They are geared
+    # index/single-name trackers, not the low-float squeezes the lane trades. This
+    # forces BOTH eligibility flags False at the single authoritative producer, so they
+    # cannot arm in live OR paper — upgrading the prior soft arm-queue down-weight
+    # (#790), which LEAKED (a fresh-ross ETF at ×0.5 still outranked stale-ross real
+    # companies, so SOXS armed + traded breakeven). Reuses the adaptive name-based
+    # classifier (no hardcoded list); fail-open there means a fundamentals miss does
+    # not veto a real mover — the arm-queue quality tier is the backstop. Default-ON;
+    # kill-switch CHILI_MOMENTUM_EXCLUDE_LEVERAGED_ETFS=0.
+    if bool(getattr(settings, "chili_momentum_exclude_leveraged_etfs", True)) and symbol_is_leveraged_etf(symbol):
+        return ViabilityResult(
+            symbol=symbol,
+            family_id=family.family_id,
+            family_version=family.version,
+            viability=0.0,
+            paper_eligible=False,
+            live_eligible=False,
+            freshness_hint="mesh_tick",
+            regime_fit="leveraged_inverse_etf_vetoed",
+            rationale=f"{symbol}: leveraged/inverse ETF — excluded from Ross momentum lane (low-float common only)",
+            warnings=("Leveraged/inverse ETF vetoed from momentum lane",),
+        )
 
     if spread_bps is not None:
         if spread_bps > 25:
