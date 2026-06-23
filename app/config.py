@@ -3221,6 +3221,43 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_MIDDAY_VIABILITY_BUMP"),
         description="Additive raise to entry_viability_min during the midday lull. ~0.05 filters marginal 0.52-0.62 setups while a 0.70+ exceptional mover still arms. <=0 == off. Keep <=0.10 (>=0.15 approaches a de-facto midday ban).",
     )
+    # MACRO RUN-R BREAKER (L2.1, project_profitability_levers): the 2026-06-22 loss
+    # decomposition (wf w6c11y2s9) found the loss is 65-83% MESO — the lane buys the top
+    # of a leg / late extension with no follow-through. This breaker is the cheapest MACRO
+    # guard: when the lane's recent realized-R turns negative AND worse than its OWN baseline
+    # (a no-follow-through regime), SOFT-raise the entry bar so fewer marginal setups arm.
+    # RELATIVE + graduated => releases the moment the recent stretch recovers (never a hard
+    # freeze, unlike an absolute floor). Entry-side ONLY; never blocks exits. OFF = byte-identical.
+    chili_momentum_run_r_breaker_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RUN_R_BREAKER_ENABLED"),
+        description="Kill-switch for the MACRO run-R breaker. false = byte-identical (no bump, no query, no emit).",
+    )
+    chili_momentum_run_r_breaker_viability_bump: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=0.30,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RUN_R_BREAKER_VIABILITY_BUMP"),
+        description="Additive raise to entry_viability_min when the run-R breaker triggers (mirrors the midday bump; clamped to the 0.95 ceiling so an exceptional mover still arms). <=0 == off.",
+    )
+    chili_momentum_run_r_breaker_lookback: int = Field(
+        default=40,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RUN_R_BREAKER_LOOKBACK"),
+        description="How many recent closed live momentum fills (per execution family) form the run-R baseline window.",
+    )
+    chili_momentum_run_r_breaker_short_window: int = Field(
+        default=10,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RUN_R_BREAKER_SHORT_WINDOW"),
+        description="The recent sub-window whose mean realized-R is compared against the full-lookback baseline; the breaker triggers only when this recent stretch is BOTH negative and below baseline, so it releases when performance recovers (never a permanent freeze).",
+    )
+    chili_momentum_run_r_breaker_min_history: int = Field(
+        default=8,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RUN_R_BREAKER_MIN_HISTORY"),
+        description="Minimum closed-fill history before the breaker can trigger; below this it fails OPEN (bump 0).",
+    )
     # RISK-NEUTRAL CONFIRMATION-PYRAMID (the one genuine scale-IN gap vs Ross). A single
     # ADD into an ALREADY-winning position (>1R banked) on confirmation (new HOD + OFI +
     # ratcheted trail), sized via the SAME risk-first machinery against a FRACTION of the

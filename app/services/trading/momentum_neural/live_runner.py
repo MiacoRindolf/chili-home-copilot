@@ -3050,6 +3050,26 @@ def tick_live_session(
         # OFF / bump<=0 => _flat_min unchanged => _score_ok byte-identical, no emit, no import.
         _flat_min = float(params["entry_viability_min"])
         _eff_min, _midday_lull, _midday_bump = _effective_entry_viability_min(_flat_min, sess.symbol)
+        # MACRO RUN-R BREAKER (project_profitability_levers L2.1): when the lane's recent
+        # realized-R turns negative AND worse than its own baseline (a no-follow-through
+        # regime), SOFT-raise the entry bar so fewer marginal setups arm; RELATIVE so it
+        # releases when the recent stretch recovers. Entry-side ONLY (never touches exits);
+        # OFF / not-triggered / thin-history => _eff_min unchanged => _score_ok byte-identical.
+        try:
+            from .risk_policy import run_r_viability_bump
+            _rr_bump, _rr_meta = run_r_viability_bump(db, sess.execution_family)
+        except Exception:
+            _rr_bump, _rr_meta = 0.0, None
+        if _rr_bump and _rr_bump > 0:
+            _new_eff = min(0.95, float(_eff_min) + float(_rr_bump))
+            _vscore = float(via.viability_score or 0)
+            if _vscore >= _eff_min > 0 and _vscore < _new_eff:
+                # the bump actually blocked an otherwise-passing entry — the meaningful A/B event
+                _emit(db, sess, "live_run_r_deweighted", {
+                    **(_rr_meta or {}), "eff_min_prev": round(float(_eff_min), 3),
+                    "eff_min": round(_new_eff, 3), "score": round(_vscore, 3),
+                })
+            _eff_min = _new_eff
         _score_ok = (
             float(via.viability_score or 0) >= _eff_min
             and via.live_eligible
