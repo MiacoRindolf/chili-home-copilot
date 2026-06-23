@@ -367,6 +367,28 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             _persist(result)
         return result
 
+    # REPLAY->LIVE SIZING PARITY (operator "walang mintis", 2026-06-23): size off the SAME
+    # real account equity the live lane uses, NOT a stale fixed basis, so the replay's
+    # per-trade risk / notional + the daily-loss cap track LIVE (a fixed $22551 basis sized
+    # ~1.6x too big and capped at $1127 vs live's equity-based ~$686). Override pins it
+    # (deterministic A/B); else read the live agentic equity; else fall back to BASIS_USD
+    # (e.g. a local run without the broker token). SAME equity-fractions live uses.
+    basis_usd = float(getattr(settings, "chili_replay_equity_basis_usd", 0.0) or 0.0)
+    if basis_usd <= 0:
+        try:
+            from .risk_policy import _account_equity_usd
+            from ..execution_family_registry import EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP
+
+            basis_usd = float(_account_equity_usd(
+                EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP, apply_margin_multiple=False, prefer_equity=True) or 0.0)
+        except Exception:
+            basis_usd = 0.0
+    if basis_usd <= 0:
+        basis_usd = BASIS_USD  # fixed-basis fallback (broker equity unavailable)
+    risk_per_trade_usd = basis_usd * float(getattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.01) or 0.01)
+    notional_cap_usd = basis_usd * float(getattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.15) or 0.15)
+    daily_loss_cap_usd = basis_usd * float(getattr(settings, "chili_global_max_daily_loss_pct_of_equity", 0.05) or 0.05)
+
     bars_cache: dict[str, object] = {}
 
     def bars(sym: str):
@@ -680,9 +702,9 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             loss_strikes[s] = loss_strikes.get(s, 0) + 1
             loss_cooldown_until[s] = _aware(_w) + timedelta(minutes=LOSS_COOLDOWN_MIN)
         del open_pos[s]
-        if state["halted"] is None and state["cum"] <= -DAILY_LOSS_CAP_USD:
+        if state["halted"] is None and state["cum"] <= -daily_loss_cap_usd:
             state["halted"] = "daily_loss"
-        elif state["halted"] is None and state["peak"] >= DAILY_LOSS_CAP_USD and state["cum"] <= state["peak"] * (1 - GIVEBACK_FRAC):
+        elif state["halted"] is None and state["peak"] >= daily_loss_cap_usd and state["cum"] <= state["peak"] * (1 - GIVEBACK_FRAC):
             state["halted"] = "giveback"
 
     def manage_open(now, _l2db=None) -> None:
@@ -1115,7 +1137,7 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                 reward_risk=class_aware_reward_risk(s))
             if not (0 < stop < fill_px):
                 continue
-            max_notional = min(NOTIONAL_CAP_USD, LIQ_FRACTION * mid * dvol)
+            max_notional = min(notional_cap_usd, LIQ_FRACTION * mid * dvol)
             # L2.2 liquidity-scaled risk cap — PARITY with live: the SAME helper with the SAME
             # sbps + em_bps the spread gate above already computed (so the replay's size-shrink
             # == live's). OFF / mult==1.0 => byte-identical want_qty.
@@ -1125,7 +1147,7 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                 _liq_mult, _ = spread_liquidity_risk_multiplier(
                     sbps, em_bps,
                     floor=float(getattr(settings, "chili_momentum_liquidity_risk_floor", 0.5) or 0.5))
-            want_qty = min((RISK_PER_TRADE_USD * _liq_mult) / max(fill_px - stop, 1e-9), max_notional / fill_px)
+            want_qty = min((risk_per_trade_usd * _liq_mult) / max(fill_px - stop, 1e-9), max_notional / fill_px)
             # shares printed over the next ~minute: diff day-volume against the row
             # ~55s ahead — on the dense WS tape (rows every ~1s) the immediate next
             # row would show a near-zero diff and falsely reject for no liquidity
@@ -1208,14 +1230,14 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
     # DOLLAR-SKEW LABELS (replay $ are NOT the live lane's expectancy — the shared leaf
     # math makes setup-shape / run_r live-faithful, but the dollars are not). Surface the
     # known skews so any A/B reads run_r, not usd. (wf w6c11y2s9.)
-    result["sizing_basis_usd"] = BASIS_USD
-    result["daily_loss_cap_usd"] = DAILY_LOSS_CAP_USD
+    result["sizing_basis_usd"] = round(basis_usd, 2)
+    result["daily_loss_cap_usd"] = round(daily_loss_cap_usd, 2)
     result["dollar_skew_note"] = (
-        "Replay $ are NOT live expectancy: fixed $%.0f basis + $%.0f daily cap (live cap "
-        "is adaptive per-broker off real equity, ~$686), frictionless ask/bid fills, no "
-        "#789 entry re-peg (under-counts fills live now takes), no #769 early-flatten "
-        "(per-trade losses run deeper). Use run_r for setup-quality A/Bs, not usd."
-        % (BASIS_USD, DAILY_LOSS_CAP_USD)
+        "Sizing basis is now LIVE-faithful (real account equity, same equity-fractions + "
+        "daily-loss cap as live). RESIDUAL replay->live gaps (decision-side, being closed "
+        "next): no #789 entry re-peg (can under-count a runaway fill), no #769 early-flatten "
+        "(a gap-through loss runs deeper than live), frictionless ask/bid fills. Lead A/Bs "
+        "with run_r; absolute $ are now ~live-scale, treat the residual gaps as noise."
     )
     result["day_halted"] = state["halted"]
     result["duration_s"] = round((datetime.now(timezone.utc) - started).total_seconds(), 1)
