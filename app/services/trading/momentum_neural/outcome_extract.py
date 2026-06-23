@@ -212,9 +212,17 @@ def extract_momentum_session_outcome(
         )
         .one_or_none()
     )
+    # Entry regime/features frozen at the entry fill — mode-symmetric: paper stores it on
+    # `pe`, live on `le` (2026-06-23: live capture mirrors paper so the meta-label dataset
+    # grows from real trades, not just paper). The rich entry-feature vector rides INTO the
+    # existing entry_regime_snapshot_json JSONB under ["features"] (no new column/migration).
+    # Pre-change sessions lack both keys -> {} (byte-identical to before).
     entry_regime_snapshot_json: dict[str, Any] = {}
-    if mode == "paper" and isinstance(pe.get("entry_regime_snapshot_json"), dict):
-        entry_regime_snapshot_json = dict(pe["entry_regime_snapshot_json"])
+    _entry_exec = le if mode == "live" else pe
+    if isinstance(_entry_exec.get("entry_regime_snapshot_json"), dict):
+        entry_regime_snapshot_json = dict(_entry_exec["entry_regime_snapshot_json"])
+    if isinstance(_entry_exec.get("entry_features"), dict):
+        entry_regime_snapshot_json["features"] = dict(_entry_exec["entry_features"])
 
     if via:
         regime_snapshot_json = dict(via.regime_snapshot_json or {})

@@ -3106,6 +3106,17 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_REPLAY_CAPTURE_FEATURES"),
     )
+    # LIVE feature-capture (2026-06-23): when ON, the live runner records the SAME
+    # lookahead-free entry-feature vector (shared entry_features.capture_entry_features)
+    # onto the session's live-exec blob at the entry fill, so outcome_extract reads it for
+    # mode==live and the meta-label dataset GROWS from real trades (today it's PAPER-ONLY ->
+    # empty for live). READ-ONLY + POST-transition + best-effort (a capture error is logged
+    # and skipped; it can NEVER affect the fill/management). Kill-switch -> instant per-sha
+    # rollback. Default-ON: the operator wants data flowing; the capture is side-effect-free.
+    chili_momentum_live_capture_features: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_CAPTURE_FEATURES"),
+    )
     chili_momentum_spread_stability_min_samples: int = Field(
         default=5,
         ge=1,
