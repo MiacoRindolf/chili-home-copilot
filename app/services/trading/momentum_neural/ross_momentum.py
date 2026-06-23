@@ -425,3 +425,118 @@ def intraday_impulse_freshness(
             "lookback": int(look),
         },
     )
+
+
+@dataclass
+class FrontSideState:
+    """Session-anchored front-side (fresh, buyable) vs backside (extended/faded) read
+    of TODAY's move — where the name sits in its OWN session, which ``position_in_range``
+    (a 20-bar window) cannot tell: a fresh breakout near VWAP and an extended backside
+    blow-off top both sit near a recent high. Pure + side-effect-free."""
+
+    is_backside: bool
+    front_side_score: float            # [0,1]; 0.5 neutral, higher = more front-side
+    above_vwap: bool
+    session_vwap: float | None
+    vwap_dist_sigma: float | None
+    retrace_from_hod: float | None
+    day_range_pos: float | None
+    reason: str
+    debug: dict = field(default_factory=dict)
+
+
+def front_side_state(
+    df,
+    *,
+    top_range_pct: float = 0.85,
+    retrace_veto: float = 0.66,
+    ext_sigma: float = 2.0,
+) -> FrontSideState:
+    """Front-side vs backside lifecycle read of TODAY's session move (the QXL/NXTS fix).
+
+    2026-06-22 study: CHILI bought QXL at 98.6% of HOD (top of the day-range AND far above
+    VWAP = a backside blow-off top) and MISSED NXTS (a fresh thrust that broke to a NEW HIGH
+    near VWAP). ``intraday_impulse_freshness.position_in_range`` cannot separate them — both
+    sit near a recent high — and is ranked DESCENDING, so the extended top wins the slot.
+    The SESSION anchors separate them.
+
+    ``is_backside`` (hard veto; ANY of) =
+      * below session VWAP (Ross: below-VWAP is inherently bearish — the SAGT skip), OR
+      * retraced > ``retrace_veto`` of the day's up-move from the open (already faded), OR
+      * in the top ``top_range_pct`` of the day-range AND > ``ext_sigma`` above VWAP in the
+        name's OWN close-vs-VWAP sigma (the QXL chase).
+    CRITICAL: a fresh breakout that broke to a new high but is NEAR VWAP has a LOW
+    ``vwap_dist_sigma`` -> NOT ``chasing_top`` -> NOT vetoed. So this does NOT kill the
+    NXTS-type front-side entry the way a naive 'near-HOD' veto would (that mistake killed
+    the NVCT winner in the L3 study).
+
+    Adaptive: ``vwap_dist_sigma`` floats with the name's own close-vs-VWAP dispersion;
+    ``day_range_pos``/``retrace`` are name-relative ratios. The three knobs are the only
+    documented bases. Pure (operates on the session OHLCV frame the caller already fetched;
+    premarket-inclusive). Thin/degenerate data -> fail-OPEN (not backside, neutral score),
+    preserving current arm/entry behaviour.
+    """
+    def _unknown(reason: str, **dbg) -> FrontSideState:
+        return FrontSideState(False, 0.5, True, None, None, None, None, reason, debug=dbg)
+
+    if df is None or getattr(df, "empty", True):
+        return _unknown("insufficient_bars", bars=0)
+    highs = _df_col_floats(df, "High")
+    lows = _df_col_floats(df, "Low")
+    closes = _df_col_floats(df, "Close")
+    vols = _df_col_floats(df, "Volume")
+    n = len(closes)
+    if n < 5 or len(highs) != n or len(lows) != n:
+        return _unknown("insufficient_bars", bars=n)
+    last = closes[-1]
+    hod, lod, sess_open = max(highs), min(lows), closes[0]
+    rng = hod - lod
+    if not (rng > 0) or last <= 0:
+        return _unknown("no_range", hod=hod, lod=lod)
+    # session-anchored cumulative VWAP + the name's OWN close-vs-VWAP dispersion (sigma)
+    vwap = None
+    dist_sigma = None
+    if len(vols) == n and sum(vols) > 0:
+        cum_pv = cum_v = 0.0
+        dists: list[float] = []
+        for i in range(n):
+            typ = (highs[i] + lows[i] + closes[i]) / 3.0
+            cum_pv += typ * max(0.0, vols[i])
+            cum_v += max(0.0, vols[i])
+            if cum_v > 0:
+                dists.append(closes[i] - cum_pv / cum_v)
+        if cum_v > 0:
+            vwap = cum_pv / cum_v
+            if len(dists) >= 5:
+                m = sum(dists) / len(dists)
+                sd = (sum((d - m) ** 2 for d in dists) / len(dists)) ** 0.5
+                if sd > 0:
+                    dist_sigma = (last - vwap) / sd
+    above_vwap = (vwap is None) or (last >= vwap)          # unknown vwap -> don't penalize
+    day_range_pos = (last - lod) / rng
+    up_move = hod - sess_open
+    retrace_from_hod = ((hod - last) / up_move) if up_move > 0 else 0.0
+    below_vwap = (vwap is not None) and (last < vwap)
+    faded = retrace_from_hod > float(retrace_veto)
+    chasing_top = (day_range_pos >= float(top_range_pct)
+                   and dist_sigma is not None and dist_sigma >= float(ext_sigma))
+    is_backside = below_vwap or faded or chasing_top
+    reason = ("below_vwap" if below_vwap else "already_faded" if faded
+              else "chasing_top" if chasing_top else "front_side")
+    # front_side_score in [0,1], centered ~0.5 — a backside-PRESSURE penalty (extension is
+    # the discriminator, NOT 'low retrace': being at-the-high is exactly the QXL backside, so
+    # rewarding low retrace would re-invert). Penalize extension-above-VWAP, below-VWAP, and
+    # deep fade; a fresh dip near VWAP carries ~no penalty -> high score.
+    pen_ext = 0.0 if dist_sigma is None else max(0.0, min(1.0, max(0.0, dist_sigma) / float(ext_sigma)))
+    pen_below = 0.0 if above_vwap else 1.0
+    pen_faded = max(0.0, min(1.0, retrace_from_hod / float(retrace_veto)))
+    score = round(max(0.0, min(1.0, 1.0 - (0.5 * pen_ext + 0.3 * pen_below + 0.2 * pen_faded))), 4)
+    return FrontSideState(
+        is_backside=bool(is_backside), front_side_score=float(score),
+        above_vwap=bool(above_vwap),
+        session_vwap=(round(vwap, 6) if vwap is not None else None),
+        vwap_dist_sigma=(round(dist_sigma, 3) if dist_sigma is not None else None),
+        retrace_from_hod=round(retrace_from_hod, 4), day_range_pos=round(day_range_pos, 4),
+        reason=reason,
+        debug={"hod": round(hod, 6), "lod": round(lod, 6), "open": round(sess_open, 6), "last": round(last, 6)},
+    )
