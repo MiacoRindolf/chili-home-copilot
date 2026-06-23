@@ -164,6 +164,61 @@ def save_model(model: dict, path: str) -> None:
         json.dump(model, fh)
 
 
+def load_training_rows(db, *, replay_path: str = "/app/data/_disc_dataset.json") -> list[dict]:
+    """The labeled dataset = replay bootstrap (run_r) + LIVE outcomes (return_bps + entry
+    features). Reused by the scheduled re-train and the CLI trainer."""
+    import os
+
+    rows: list[dict] = []
+    if os.path.exists(replay_path):
+        try:
+            rows.extend(json.load(open(replay_path)))
+        except Exception:
+            pass
+    try:
+        from app.models.trading import MomentumAutomationOutcome as _MAO
+
+        eq = ["robinhood_spot", "alpaca_spot", "robinhood_agentic_mcp"]
+        q = db.query(_MAO).filter(_MAO.execution_family.in_(eq), _MAO.return_bps.isnot(None))
+        for o in q.limit(20000):
+            ers = o.entry_regime_snapshot_json
+            if isinstance(ers, dict) and isinstance(ers.get("features"), dict) and ers["features"]:
+                rows.append({
+                    "return_bps": float(o.return_bps), "features": ers["features"],
+                    "day": (str(o.terminal_at)[:10] if o.terminal_at else ""), "sym": o.symbol,
+                })
+    except Exception:
+        pass
+    return rows
+
+
+def maybe_retrain_meta_label(db, *, model_path: str = "/app/data/_meta_label_model.json",
+                             marker_path: str = "/app/data/_meta_label_last_train.json") -> dict:
+    """DATA-DRIVEN re-train (operator: triggered when may sapat na BAGONG outcomes — NOT a fixed
+    clock). Re-fits ONLY when the labeled dataset GREW since the last train; the logistic is <1s on
+    a few-hundred rows so re-fitting on any growth is cheap. Saves the model the live sizing reads
+    -> it AUTO-UPDATES. Best-effort (returns a status dict, never raises). This is the learning-
+    cadence step that makes the de-rate self-improve as trades accumulate."""
+    rows = load_training_rows(db)
+    cur = len(rows)
+    last = 0
+    try:
+        last = int(json.load(open(marker_path)).get("n", 0))
+    except Exception:
+        last = 0
+    if cur <= last:
+        return {"status": "skip_no_new_data", "n": cur, "last": last}
+    model = train_meta_label(rows)
+    save_model(model, model_path)
+    try:
+        with open(marker_path, "w") as fh:
+            json.dump({"n": cur, "confidence": model.get("confidence"), "model_status": model.get("status")}, fh)
+    except Exception:
+        pass
+    return {"status": "retrained", "n": cur, "grew_from": last,
+            "confidence": model.get("confidence"), "model_status": model.get("status")}
+
+
 def load_model(path: str) -> dict | None:
     try:
         with open(path) as fh:
