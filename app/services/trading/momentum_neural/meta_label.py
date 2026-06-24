@@ -22,8 +22,11 @@ dataset grows (scripts/train_meta_label.py).
 from __future__ import annotations
 
 import json
+import logging
 import math
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Mechanism-backed features (OFI #1). EXCLUDED on purpose: rr (label-coupled artifact),
 # minute_vol (lookahead), price (absolute), partial/ws_tick (path-specific), px_vs_session_vwap
@@ -50,6 +53,192 @@ DERATE_FLOOR = 0.4
 # confidence gate: below it the fit can't run, so confidence stays 0 (neutral) — never "wait for N".
 _MIN_FITTABLE_PER_CLASS = 3
 _PERM_ITERS = 1000
+
+# ===== DATA-SNOOPING-CORRECTED FEATURE SCREEN (CALIB-BY-DayRestrict, keep-all-dominant) =====
+# Designed + adversarially hardened 2026-06-23 (workflow wf_faa694d3). The screen picks ONLY the
+# logistic's column subset S; DERATE_FLOOR / the [floor,1] clip / confidence / side are FROZEN
+# downstream, so NEVER-VETO holds by construction. The explosive below-VWAP winner is protected on
+# TWO axes: (1) PROTECTED_TAIL_FEATURES are unioned into S unconditionally (BY-FDR ranks by MARGINAL
+# correlation and is biased to drop these CONDITIONAL discriminators), (2) a tested tail-monotone
+# revert. The ONE documented irreducible base is the FDR rate SCREEN_Q_BASE; every other threshold
+# is derived from n / n_pos / the family size.
+PROTECTED_TAIL_FEATURES = ("above_vwap", "vwap_dist_sigma", "is_backside", "retrace_from_hod")
+SCREEN_Q_BASE = 0.20
+SCREEN_NULL_DISCLAIMER = "within-day restricted marginal-preserving permutation (weak day-regime null)"
+
+
+def _screen_enabled() -> bool:
+    try:
+        from ....config import settings
+        return bool(settings.chili_momentum_meta_label_feature_screen_enabled)
+    except Exception:
+        return True
+
+
+def _within_day_permute(yv, day_ids, rng):
+    """Marginal-PRESERVING grouped null: shuffle labels WITHIN each day, holding every day's #wins
+    EXACTLY fixed -> global positive count fixed -> null marginal == observed (the fix for the
+    broadcast-null 0.22->0.54 marginal-inflation defect the adversary found). Preserves day-level
+    regime structure (a 0-win day stays all-zero; a k-win day keeps k)."""
+    import numpy as np
+
+    out = np.asarray(yv, dtype=float).copy()
+    day_ids = np.asarray(day_ids)
+    for d in np.unique(day_ids):
+        idx = np.where(day_ids == d)[0]
+        if idx.size > 1:
+            out[idx] = rng.permutation(out[idx])
+    return out
+
+
+def _feature_clusters(Xs, rho_thr):
+    """y-INDEPENDENT Spearman-rank correlation clusters (rank corr catches sign/monotone duplicates
+    like above_vwap=sign(vwap_dist_sigma) that Pearson misses). |rho|>=rho_thr -> same cluster."""
+    import numpy as np
+    from scipy.stats import rankdata
+
+    p = Xs.shape[1]
+    if p <= 1:
+        return [[0]] if p == 1 else []
+    R = np.column_stack([rankdata(Xs[:, j]) for j in range(p)])
+    with np.errstate(all="ignore"):
+        Cmat = np.nan_to_num(np.corrcoef(R, rowvar=False))
+    assigned = [False] * p
+    clusters = []
+    for j in range(p):
+        if assigned[j]:
+            continue
+        cl = [j]
+        assigned[j] = True
+        for k in range(j + 1, p):
+            if not assigned[k] and abs(Cmat[j, k]) >= rho_thr:
+                cl.append(k)
+                assigned[k] = True
+        clusters.append(cl)
+    return clusters
+
+
+def _screen_select(Xs, yv, day_ids, clusters, protected_idx, q, B, rng):
+    """One screen pass -> (sorted keep-idx, pruned_bool). Vectorized |point-biserial| (= Pearson on
+    standardized cols), within-day permutation null, Phipson-Smyth p, BY-FDR(q) under arbitrary
+    dependence, protected-tail union. Pure column selection; protected-union guarantees it never
+    empties and never prunes the tail discriminators."""
+    import numpy as np
+    from scipy.stats import false_discovery_control
+
+    p = Xs.shape[1]
+    yv = np.asarray(yv, dtype=float)
+    n = len(yv)
+    ybar = yv.mean()
+    sd_y = yv.std()
+    if sd_y <= 0 or p == 0:
+        return list(range(p)), False
+    # all-feature |point-biserial| in ONE matmul (Xs standardized -> denom = n*sd_y)
+    pb = np.abs((yv - ybar) @ Xs) / (n * sd_y)
+    # cluster representative: a protected member if any, else max |point-biserial|
+    reps = []
+    for cl in clusters:
+        prot = [c for c in cl if c in protected_idx]
+        reps.append(prot[0] if prot else int(max(cl, key=lambda c: pb[c])))
+    reps = sorted(set(reps))
+    T_obs = pb[reps]
+    Xr = Xs[:, reps]
+    # within-day permutation null, stacked over B then one matmul
+    Yc = np.empty((n, B))
+    for b in range(B):
+        Yc[:, b] = _within_day_permute(yv, day_ids, rng) - ybar
+    nulls = np.abs((Xr.T @ Yc) / (n * sd_y))          # (|reps| x B)
+    cnt = (nulls >= (T_obs[:, None] - 1e-12)).sum(axis=1)
+    pvals = (1.0 + cnt) / (B + 1.0)                    # Phipson-Smyth (edge_evidence idiom)
+    try:
+        adj = np.asarray(false_discovery_control(pvals, method="by"))  # BY: arbitrary dependence
+    except Exception:
+        adj = pvals
+    survivors = {reps[i] for i in range(len(reps)) if adj[i] <= q}
+    keep = survivors | set(protected_idx)
+    if not keep:
+        return list(range(p)), False
+    return sorted(keep), (len(keep) < p)
+
+
+def _calibrate_false_prune(Xs, yv, day_ids, clusters, protected_idx, q, B, C_calib, rng):
+    """Empirical type-I control: run the SAME screen on within-day pure-null replays; the fraction
+    that prune = false-prune-rate. If it exceeds q the screen is anti-conservative on THIS design
+    (the adversary measured ~38% at n~43) -> the caller keeps ALL features."""
+    pruned = 0
+    for _ in range(C_calib):
+        ynull = _within_day_permute(yv, day_ids, rng)
+        _, pr = _screen_select(Xs, ynull, day_ids, clusters, protected_idx, q, B, rng)
+        if pr:
+            pruned += 1
+    return pruned / max(1, C_calib)
+
+
+def _feature_screen(Xs, yv, groups, feats, *, seed: int = 12345):
+    """Orchestrate the keep-all-DOMINANT screen. Returns (keep_idx, telemetry). keep_idx == all
+    features UNLESS every guard clears: the pre-test power gate AND empirical self-calibration<=q."""
+    import math as _m
+
+    import numpy as np
+
+    p = Xs.shape[1]
+    yv = np.asarray(yv, dtype=float)
+    day_ids = np.asarray(groups)
+    n = len(yv)
+    n_pos = int(yv.sum())
+    n_eff = len({day_ids[i] for i in range(n) if yv[i] == 1})     # distinct WIN-days (grouped n)
+    n_days = len(set(day_ids.tolist()))
+    q = min(SCREEN_Q_BASE, 1.0 / _m.sqrt(max(1, n_pos)))          # self-tightens when wins scarce
+    rho_thr = 1.0 - 1.0 / _m.sqrt(max(2, n))                      # data-adaptive de-dup cutoff
+    clusters = _feature_clusters(Xs, rho_thr)
+    p_fam = len(clusters)
+    protected_idx = {i for i, f in enumerate(feats) if f in PROTECTED_TAIL_FEATURES}
+    tel = {"enabled": True, "n": n, "n_pos": n_pos, "n_eff": n_eff, "p_fam": p_fam,
+           "q": round(q, 4), "kept": p, "calibration_passed": False, "false_prune_rate": None,
+           "null": SCREEN_NULL_DISCLAIMER}
+    n_pos_min = _m.ceil(1.0 / q)
+    n_eff_min = _m.ceil(_m.sqrt(max(1, p_fam)))
+    if n_pos < n_pos_min or n_eff < n_eff_min or n_pos in (0, n) or n_days < 2:
+        tel["reason"] = f"pre-test keep-all (n_pos={n_pos}<{n_pos_min} or n_eff={n_eff}<{n_eff_min})"
+        return list(range(p)), tel
+    B = int(max(_PERM_ITERS, _m.ceil(20.0 / q)))
+    C_calib = int(max(200, _m.ceil(1.0 / (q * q))))
+    rng = np.random.default_rng(seed)
+    fpr = _calibrate_false_prune(Xs, yv, day_ids, clusters, protected_idx, q, B, C_calib, rng)
+    tel["false_prune_rate"] = round(fpr, 4)
+    if fpr > q:
+        tel["reason"] = f"self-calibration keep-all (false_prune_rate={fpr:.3f}>q={q:.3f})"
+        return list(range(p)), tel
+    keep_idx, pruned = _screen_select(Xs, yv, day_ids, clusters, protected_idx, q, B, rng)
+    tel["calibration_passed"] = True
+    tel["kept"] = len(keep_idx)
+    tel["reason"] = "pruned" if pruned else "screen kept all"
+    return keep_idx, tel
+
+
+def _tail_monotone_ok(rows, y, model_pruned, model_keepall, *, frac: float = 0.10) -> bool:
+    """The explosive-tail-survives invariant, MEASURED: the pruned model must not assign any realized
+    top-decile-R WIN a smaller de-rate than keep-all would. True if too few wins to assess (the
+    protected-union already structurally guards the tail discriminators)."""
+    wins = []
+    for i, lab in enumerate(y):
+        if lab != 1:
+            continue
+        rr = rows[i].get("run_r")
+        if rr is None:
+            continue
+        try:
+            wins.append((i, float(rr)))
+        except Exception:
+            continue
+    if len(wins) < 3:
+        return True
+    wins.sort(key=lambda t: t[1], reverse=True)
+    k = max(1, int(len(wins) * frac))
+    top = [i for i, _ in wins[:k]]
+    mp = min(size_multiplier(_features_of(rows[i]), model_pruned) for i in top)
+    mk = min(size_multiplier(_features_of(rows[i]), model_keepall) for i in top)
+    return mp >= mk - 1e-6
 
 
 def _label(row: dict) -> int | None:
@@ -88,7 +277,7 @@ def train_meta_label(rows: list[dict], *, feature_list: list[str] | None = None)
     sample_fd = _features_of(rows[0]) if rows else {}
     feats = base_feats + [m for m in MACRO_FEATURES if isinstance(sample_fd, dict) and m in sample_fd]
 
-    X_rows, y, groups = [], [], []
+    X_rows, y, groups, kept_rows = [], [], [], []
     for r in rows:
         lab = _label(r)
         if lab is None:
@@ -97,6 +286,7 @@ def train_meta_label(rows: list[dict], *, feature_list: list[str] | None = None)
         X_rows.append([fd.get(k) for k in feats])
         y.append(lab)
         groups.append(str(r.get("day") or r.get("terminal_at") or ""))
+        kept_rows.append(r)
     n = len(y)
     pos = int(sum(y))
     neg = n - pos
@@ -118,45 +308,79 @@ def train_meta_label(rows: list[dict], *, feature_list: list[str] | None = None)
     from sklearn.model_selection import GroupKFold, cross_val_predict
     from sklearn.metrics import roc_auc_score
 
-    # C shrinks with sample size (more data -> looser prior -> larger effects). This is the
-    # Bayesian/ridge shrinkage, derived from n (no hand-tuned constant): C = n / (n + #features).
-    n_feat = Xs.shape[1]
-    C = max(1e-3, n / (n + n_feat))
-    clf = LogisticRegression(C=C, class_weight="balanced", max_iter=4000)
+    def _fit(idx):
+        """Fit + score a model dict on the column subset ``idx`` (feature indices). C = n/(n+|idx|)
+        is the ridge shrinkage from sample size + survivor count (no hand-tuned constant); the
+        confidence/floor/clip are computed identically regardless of |idx| -> never-veto preserved."""
+        Xsub = Xs[:, idx]
+        nf = Xsub.shape[1]
+        C = max(1e-3, n / (n + nf))
+        clf = LogisticRegression(C=C, class_weight="balanced", max_iter=4000)
+        uniq = sorted(set(groups))
+        auc = None
+        perm_p = 1.0
+        if len(uniq) >= 2:
+            n_splits = min(5, len(uniq))
+            try:
+                oof = cross_val_predict(clf, Xsub, yv, cv=GroupKFold(n_splits=n_splits),
+                                        groups=np.array(groups), method="predict_proba")[:, 1]
+                auc = float(roc_auc_score(yv, oof))
+                base = abs(auc - 0.5)
+                hits = 0
+                for i in range(_PERM_ITERS):
+                    a = roc_auc_score(np.roll(yv, i * 3 + 1), oof)
+                    if abs(a - 0.5) >= base:
+                        hits += 1
+                perm_p = (hits + 1) / (_PERM_ITERS + 1)
+            except Exception:
+                auc = None
+        clf.fit(Xsub, yv)
+        # CONFIDENCE = significance (1 - perm_p) x effect-size (2*(AUC-0.5) clipped); both from the
+        # data, perm_p inherently accounts for sample size. NO magic threshold. FROZEN downstream.
+        eff = 0.0 if auc is None else max(0.0, min(1.0, 2.0 * (auc - 0.5)))
+        confidence = float(max(0.0, 1.0 - perm_p) * eff)
+        return {
+            "status": "trained", "confidence": confidence, "n": n, "positives": pos,
+            "base_rate": float(yv.mean()), "heldout_auc": auc, "perm_p": perm_p,
+            "n_day_groups": len(uniq), "features": [feats[i] for i in idx], "C": C,
+            "coef": [float(c) for c in clf.coef_[0]], "intercept": float(clf.intercept_[0]),
+            "mean": [float(mu[i]) for i in idx], "std": [float(sd[i]) for i in idx],
+            "median": [float(med[i]) for i in idx],
+        }
 
-    uniq = sorted(set(groups))
-    auc = None
-    perm_p = 1.0
-    if len(uniq) >= 2:
-        n_splits = min(5, len(uniq))
+    all_idx = list(range(Xs.shape[1]))
+    # ---- DATA-SNOOPING-CORRECTED FEATURE SCREEN (kill-switchable, keep-all-dominant) ----
+    keep_idx = all_idx
+    screen_tel = {"enabled": False, "reason": "off", "kept": len(all_idx)}
+    if _screen_enabled():
         try:
-            oof = cross_val_predict(clf, Xs, yv, cv=GroupKFold(n_splits=n_splits),
-                                    groups=np.array(groups), method="predict_proba")[:, 1]
-            auc = float(roc_auc_score(yv, oof))
-            base = abs(auc - 0.5)
-            hits = 0
-            for i in range(_PERM_ITERS):
-                a = roc_auc_score(np.roll(yv, i * 3 + 1), oof)
-                if abs(a - 0.5) >= base:
-                    hits += 1
-            perm_p = (hits + 1) / (_PERM_ITERS + 1)
+            keep_idx, screen_tel = _feature_screen(Xs, yv, groups, feats)
         except Exception:
-            auc = None
+            keep_idx = all_idx
+            screen_tel = {"enabled": True, "reason": "screen error -> keep all", "kept": len(all_idx)}
 
-    clf.fit(Xs, yv)
-    # CONFIDENCE = statistical-significance (1 - perm_p) x effect-size (2*(AUC-0.5) clipped).
-    # Both derived from the data; perm_p inherently accounts for sample size (thin -> not
-    # significant -> confidence ~0 -> de-rate ~neutral). NO magic threshold.
-    eff = 0.0 if auc is None else max(0.0, min(1.0, 2.0 * (auc - 0.5)))
-    confidence = float(max(0.0, 1.0 - perm_p) * eff)
-    return {
-        "status": "trained", "confidence": confidence, "n": n, "positives": pos,
-        "base_rate": float(yv.mean()), "heldout_auc": auc, "perm_p": perm_p,
-        "n_day_groups": len(uniq), "features": feats, "C": C,
-        "coef": [float(c) for c in clf.coef_[0]], "intercept": float(clf.intercept_[0]),
-        "mean": [float(x) for x in mu], "std": [float(x) for x in sd],
-        "median": [float(x) for x in med],
-    }
+    model = _fit(keep_idx)
+    tail_revert = False
+    if len(keep_idx) < len(all_idx):
+        # TAIL-MONOTONE invariant: pruning must NOT lower the de-rate of any realized top-decile-R
+        # winner vs keep-all; else revert (explosive-tail-survives, MEASURED not assumed).
+        try:
+            model_all = _fit(all_idx)
+            if not _tail_monotone_ok(kept_rows, y, model, model_all):
+                model, keep_idx, tail_revert = model_all, all_idx, True
+                screen_tel["reason"] = "tail-monotone revert -> keep all"
+                screen_tel["kept"] = len(all_idx)
+        except Exception:
+            pass
+    screen_tel["tail_revert"] = tail_revert
+    model["feature_screen"] = screen_tel
+    try:
+        logger.info("[meta_label_screen] %s", {k: screen_tel.get(k) for k in (
+            "enabled", "reason", "kept", "n_pos", "n_eff", "p_fam", "q",
+            "false_prune_rate", "calibration_passed", "tail_revert") if k in screen_tel})
+    except Exception:
+        pass
+    return model
 
 
 def save_model(model: dict, path: str) -> None:
