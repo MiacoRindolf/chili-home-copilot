@@ -1501,6 +1501,32 @@ def first_pullback_break(
         return "PASS", None, None, {"fp_declined": "error"}
 
 
+def _today_session_frame(df):
+    """Slice a (possibly multi-day) intraday OHLCV frame to its most recent session for the
+    SESSION-anchored backside read. front_side_state anchors on the frame first bar + cumulative
+    VWAP + day-range, so it must see TODAY only; the live runner fetches period=5d. Returns
+    today bars when the index is a DatetimeIndex spanning >1 date; otherwise returns the frame
+    unchanged (single-session or non-datetime -> front_side_state own fail-open applies).
+    Premarket-inclusive (matches front_side_state contract)."""
+    try:
+        idx = df.index
+        if isinstance(idx, pd.DatetimeIndex) and len(idx) > 1:
+            # Key the session on EXCHANGE-LOCAL (ET) date, not UTC: the lane trades extended
+            # hours (04:00-20:00 ET) and in winter after-hours (16:00-20:00 ET) the session
+            # straddles UTC midnight, so a UTC-date key would slice off the morning. The live
+            # index is tz-aware UTC; convert to ET. tz-naive -> fall back to its naive date.
+            if idx.tz is not None:
+                d = idx.tz_convert("America/New_York").date
+            else:
+                d = idx.date
+            last = d[-1]
+            if d[0] != last:
+                return df[d == last]
+    except Exception:
+        pass
+    return df
+
+
 def pullback_break_confirmation(
     df: pd.DataFrame,
     *,
@@ -1759,7 +1785,7 @@ def pullback_break_confirmation(
         try:
             from .ross_momentum import front_side_state
 
-            _fs = front_side_state(df)
+            _fs = front_side_state(_today_session_frame(df))
             if getattr(_fs, "is_backside", False):
                 debug["front_side_state"] = getattr(_fs, "reason", "backside")
                 debug["front_side_score"] = getattr(_fs, "front_side_score", None)
