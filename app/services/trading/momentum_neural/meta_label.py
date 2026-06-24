@@ -219,6 +219,89 @@ def maybe_retrain_meta_label(db, *, model_path: str = "/app/data/_meta_label_mod
             "confidence": model.get("confidence"), "model_status": model.get("status")}
 
 
+def analyze_learning_gaps(db, *, model_path: str = "/app/data/_meta_label_model.json",
+                          report_path: str = "/app/data/_learning_self_report.json") -> dict:
+    """SELF-CRITIC / gap-analyst (operator's "open-minded critical thinker"): a data-driven
+    critical review of the lane's LEARNING health. It does NOT just compute scores — it FINDS
+    the system's GAPS and PROPOSES enhancement steps:
+      - dataset thinness / class imbalance (can the model even fit?),
+      - feature COVERAGE holes (a 0-coverage feature => a capture bug or dead data source;
+        a feature << the best-covered => a sparse/unreliable signal),
+      - statistical significance per the DATA-SNOOPING discipline (a not-yet-significant model
+        means its weights are spurious-shrunk to ~neutral — correct, but don't trust them yet),
+      - confidence TREND vs the last report (is the learning actually improving?),
+      - known MISSING signal categories (the deferred engineerable features).
+    Deterministic + offline + best-effort. Emits a structured report (logged + saved) so the
+    operator (and the watch) can see the self-critique. v1 is rule-based; a later 'researcher'
+    phase can auto-launch deep-research for the top gap. Thresholds are RELATIVE/natural
+    (0-coverage, <0.5x-best-coverage, perm_p>0.5=worse-than-coin-flip), not magic caps."""
+    import json as _json
+    import os as _os
+
+    rows = load_training_rows(db)
+    n = len(rows)
+    pos = sum(1 for r in rows if _label(r) == 1)
+    model = load_model(model_path)
+    feats = (model or {}).get("features") or (DEFAULT_FEATURES + MACRO_FEATURES)
+    cov: dict = {}
+    for ft in feats:
+        present = sum(1 for r in rows if isinstance(_features_of(r).get(ft), (int, float)))
+        cov[ft] = round(present / n, 3) if n else 0.0
+    maxcov = max(cov.values()) if cov else 0.0
+
+    gaps: list = []
+    proposals: list = []
+    if pos < _MIN_FITTABLE_PER_CLASS or (n - pos) < _MIN_FITTABLE_PER_CLASS:
+        gaps.append(f"thin dataset: n={n}, positives={pos} — cannot fit a stable model")
+        proposals.append("the lane must TRADE to grow the labeled set; the de-rate stays neutral until then")
+    for ft, c in cov.items():
+        if maxcov > 0 and c == 0.0:
+            gaps.append(f"feature '{ft}' has ZERO coverage — likely a capture bug or dead data source")
+            proposals.append(f"investigate the live capture path for '{ft}' (is the signal computed at the fill?)")
+        elif maxcov > 0 and 0.0 < c < 0.5 * maxcov:
+            gaps.append(f"feature '{ft}' coverage {c} << best {maxcov} — sparse/unreliable signal")
+
+    conf = float((model or {}).get("confidence") or 0.0)
+    perm_p = (model or {}).get("perm_p")
+    auc = (model or {}).get("heldout_auc")
+    status = (model or {}).get("status", "none")
+    if status == "trained":
+        if perm_p is not None and perm_p > 0.5:
+            gaps.append(f"model NOT statistically significant (perm_p={perm_p}, AUC={auc}) — "
+                        "weights are data-snooping-shrunk to ~neutral (correct; de-rate inert)")
+            proposals.append("accumulate more data; do NOT trust individual feature weights yet (spurious-fit risk)")
+        elif conf < 0.3:
+            proposals.append(f"model emerging (confidence={conf}); keep accumulating to firm up the weights")
+        else:
+            proposals.append(f"model has real signal (confidence={conf}); monitor the de-rate's live A/B effect")
+
+    prev = None
+    if _os.path.exists(report_path):
+        try:
+            prev = _json.load(open(report_path))
+        except Exception:
+            prev = None
+    conf_trend = None
+    if prev and isinstance(prev.get("confidence"), (int, float)):
+        conf_trend = round(conf - float(prev["confidence"]), 4)
+        if n > int(prev.get("n_samples") or 0) and conf_trend is not None and conf_trend <= 0:
+            gaps.append(f"confidence NOT improving despite more data (Δconf={conf_trend}) — current features "
+                        "may not separate; consider a new signal category")
+
+    proposals.append("deferred engineerable features (prioritize when ready): tick-level trade-flow "
+                     "(Massive WS tape), multi-level OFI FLOW (needs iqfeed raw-ladder infra), opening-range-RVOL rank")
+
+    report = {"n_samples": n, "positives": pos, "model_status": status,
+              "confidence": conf, "confidence_trend": conf_trend, "heldout_auc": auc, "perm_p": perm_p,
+              "feature_coverage": cov, "n_gaps": len(gaps), "gaps": gaps, "proposals": proposals}
+    try:
+        with open(report_path, "w") as fh:
+            _json.dump(report, fh)
+    except Exception:
+        pass
+    return report
+
+
 def load_model(path: str) -> dict | None:
     try:
         with open(path) as fh:
