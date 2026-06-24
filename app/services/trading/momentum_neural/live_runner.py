@@ -3508,6 +3508,26 @@ def tick_live_session(
                         le["entry_regime_snapshot_json"] = dict(regime)
                         if _ef:
                             le["entry_features"] = _ef
+                            # Log the meta-label's EMITTED (p, de_rate) on the AUTHORITATIVE entry
+                            # features -> flows into the outcome snapshot so the self-critic can later
+                            # check CALIBRATION decay + output-de-rate shift (priority-1 sizer self-
+                            # monitoring, wf_a7af66e3). Stored in the snapshot dict (sibling to
+                            # features, NOT inside it -> never a leakage feature). Best-effort.
+                            try:
+                                from .meta_label import load_model, score_probability, size_multiplier
+
+                                _ml = load_model("/app/data/_meta_label_model.json")
+                                if _ml and _ml.get("status") == "trained":
+                                    _pp = score_probability(_ef, _ml)
+                                    _dr = size_multiplier(_ef, _ml, floor=float(getattr(
+                                        settings, "chili_momentum_meta_label_min_size", 0.4)))
+                                    le["entry_regime_snapshot_json"]["meta_label_emit"] = {
+                                        "p": (round(float(_pp), 5) if _pp is not None else None),
+                                        "de_rate": round(float(_dr), 4),
+                                        "conf": round(float(_ml.get("confidence") or 0.0), 4),
+                                    }
+                            except Exception:
+                                pass
                         _commit_le(sess, le)
                     except Exception:
                         _log.debug("entry-feature capture skipped session=%s", sess.id, exc_info=True)

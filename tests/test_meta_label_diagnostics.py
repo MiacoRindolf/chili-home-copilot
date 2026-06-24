@@ -91,3 +91,50 @@ def test_analyze_surfaces_diagnostics_block(monkeypatch):
     assert "diagnostics" in rep and "research_agenda" in rep
     assert any("LEAKAGE" in g for g in rep["gaps"])
     assert "PROPOSE-only" in rep["research_agenda"]["note"]
+
+
+def _emit_rows(n_win, n_loss, p_win, p_loss):
+    feats = list(ml.DEFAULT_FEATURES)
+    rows = []
+    for i in range(n_win + n_loss):
+        win = i < n_win
+        rows.append({"features": {f: 0.0 for f in feats}, "run_r": 1.5 if win else -1.0,
+                     "day": f"2026-06-{10 + i % 5:02d}", "meta_p": p_win if win else p_loss,
+                     "meta_de_rate": 1.0})
+    return rows
+
+
+def test_calibration_gap_fires_when_anticalibrated(monkeypatch):
+    rows = _emit_rows(6, 6, p_win=0.1, p_loss=0.9)            # anti-calibrated -> Brier >> base
+    monkeypatch.setattr(ml, "load_training_rows", lambda db, **k: rows)
+    monkeypatch.setattr(ml, "load_model", lambda p: None)
+    rep = ml.analyze_learning_gaps(db=None, report_path=str(__import__("tempfile").mktemp()))
+    assert any("CALIBRATION decay" in g for g in rep["gaps"])
+
+
+def test_calibration_silent_when_insufficient(monkeypatch):
+    rows = _emit_rows(3, 3, 0.1, 0.9)                          # 6 < ceil(1/0.10)=10 -> insufficient
+    monkeypatch.setattr(ml, "load_training_rows", lambda db, **k: rows)
+    monkeypatch.setattr(ml, "load_model", lambda p: None)
+    rep = ml.analyze_learning_gaps(db=None, report_path=str(__import__("tempfile").mktemp()))
+    assert not any("CALIBRATION decay" in g for g in rep["gaps"])
+
+
+def test_output_shift_gap_fires(monkeypatch):
+    rows = _emit_rows(12, 12, 0.5, 0.5)                        # 24 >= 2*10
+    for i, r in enumerate(rows):
+        r["meta_de_rate"] = 1.0 if i < 12 else 0.5            # emitted de-rate drifts 1.0 -> 0.5
+    monkeypatch.setattr(ml, "load_training_rows", lambda db, **k: rows)
+    monkeypatch.setattr(ml, "load_model", lambda p: None)
+    rep = ml.analyze_learning_gaps(db=None, report_path=str(__import__("tempfile").mktemp()))
+    assert any("OUTPUT de-rate SHIFT" in g for g in rep["gaps"])
+
+
+def test_emission_detectors_silent_without_emissions(monkeypatch):
+    rows = _emit_rows(8, 8, 0.5, 0.5)
+    for r in rows:
+        r.pop("meta_p"); r.pop("meta_de_rate")               # no live emissions yet -> silent
+    monkeypatch.setattr(ml, "load_training_rows", lambda db, **k: rows)
+    monkeypatch.setattr(ml, "load_model", lambda p: None)
+    rep = ml.analyze_learning_gaps(db=None, report_path=str(__import__("tempfile").mktemp()))
+    assert not any("CALIBRATION" in g or "OUTPUT de-rate" in g for g in rep["gaps"])
