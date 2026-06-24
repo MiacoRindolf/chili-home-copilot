@@ -952,6 +952,12 @@ def run_momentum_neural_tick(
             _overrides["ofi"] = _ofi
         if _mpe is not None:
             _overrides["micro_price_edge"] = _mpe
+        # executed-tape aggressor imbalance (CONFIRMS OFI; scales the OFI tilt, never votes alone).
+        # None when the trade-tape bridge / hours / watch are absent -> not in overrides -> tilt
+        # mult 1.0 -> byte-identical to the bare OFI tilt (no regression).
+        _tf = _live_trade_flow(sym, db=db)
+        if _tf is not None:
+            _overrides["trade_flow"] = _tf
         sym_feats = replace(feats, **_overrides) if _overrides else feats
         # 10s-candle breakout tilt (Ross's 10s chart, LIVE + ON): a fresh ABCD/flat-top
         # BREAKOUT on a crypto name nudges its viability UP (small, bounded, kill-switch

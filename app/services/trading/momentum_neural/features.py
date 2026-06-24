@@ -16,6 +16,9 @@ class ExecutionReadinessFeatures:
     ofi: float | None = None
     # Micro-price (Stoikov) edge vs mid, in bps; >0 = micro above mid (bid-heavy).
     micro_price_edge: float | None = None
+    # Executed-tape AGGRESSOR imbalance in [-1, 1] (signed-volume; Ross's "ask getting
+    # eaten" = real buying thrust). CONFIRMS OFI; scales the OFI tilt, never votes alone.
+    trade_flow: float | None = None
     tape_velocity_z: float | None = None
     slippage_estimate_bps: float | None = None
     fee_to_target_ratio: float | None = None
@@ -35,6 +38,7 @@ class ExecutionReadinessFeatures:
             book_imbalance=_f(meta.get("book_imbalance")),
             ofi=_f(meta.get("ofi")),
             micro_price_edge=_f(meta.get("micro_price_edge")),
+            trade_flow=_f(meta.get("trade_flow")),
             tape_velocity_z=_f(meta.get("tape_velocity_z")),
             slippage_estimate_bps=_f(meta.get("slippage_estimate_bps")),
             fee_to_target_ratio=_f(meta.get("fee_to_target_ratio")),
@@ -55,6 +59,8 @@ class ExecutionReadinessFeatures:
             out["ofi"] = self.ofi
         if self.micro_price_edge is not None:
             out["micro_price_edge"] = self.micro_price_edge
+        if self.trade_flow is not None:
+            out["trade_flow"] = self.trade_flow
         if self.tape_velocity_z is not None:
             out["tape_velocity_z"] = self.tape_velocity_z
         if self.slippage_estimate_bps is not None:

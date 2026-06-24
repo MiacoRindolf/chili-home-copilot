@@ -198,10 +198,20 @@ def score_viability(
             if w > 0.0:
                 o = float(ofi)
                 m = float(mpe)
+                # trade_flow (executed-tape aggressor imbalance [-1,1]; Ross's "ask getting eaten")
+                # CONFIRMS the book signal — it NEVER fires a tilt alone; it SCALES the magnitude of
+                # the already-OFI+micro-confirmed tilt by a bounded premium (1+g), and ONLY when its
+                # sign AGREES with OFI + clears the threshold. None / contra / below-threshold ->
+                # mult==1.0 (byte-identical to the bare OFI tilt -> no regression when the tape is
+                # absent, the common case). g<=1 hard-caps the 3-way tilt at w*(1+g)<2w (never
+                # double-counts the correlated buying pressure). g=0 -> trade_flow inert (kill-switch).
+                tf = feats.trade_flow
+                g = float(getattr(settings, "chili_momentum_trade_flow_agreement_gain", 0.5) or 0.0)
+                tf_thr = float(getattr(settings, "chili_momentum_trade_flow_threshold", thr) or thr)
                 if o > thr and m > 0:
-                    base += w
+                    base += w * (1.0 + g if (tf is not None and tf > tf_thr) else 1.0)
                 elif o < -thr and m < 0 and not _extreme_mover:
-                    base -= w
+                    base -= w * (1.0 + g if (tf is not None and tf < -tf_thr) else 1.0)
                     warnings.append("Order-flow imbalance against long bias (OFI+micro)")
         except (TypeError, ValueError):
             pass

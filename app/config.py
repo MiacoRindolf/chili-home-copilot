@@ -4451,6 +4451,23 @@ class Settings(BaseSettings):
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_OFI_THRESHOLD"),
     )
+    # trade_flow (executed-tape aggressor imbalance) CONFIRMATION premium: scales the OFI+micro tilt
+    # magnitude by (1+gain) when the EXECUTED tape AGREES in direction (and clears the threshold).
+    # le=1.0 is the STRUCTURAL guarantee that trade_flow can never out-tilt OFI nor reach the 2x
+    # double-count (3-way tilt = w*(1+gain) < 2w for gain<1). gain=0 -> trade_flow inert (kill-switch);
+    # trade_flow absent (no tape) -> mult 1.0 -> byte-identical to the bare OFI tilt. No redeploy.
+    chili_momentum_trade_flow_agreement_gain: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TRADE_FLOW_AGREEMENT_GAIN"),
+    )
+    chili_momentum_trade_flow_threshold: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TRADE_FLOW_THRESHOLD"),
+    )
     # ── microstructure_log (#698, parallel agent): background signal-LOG layer
     # (trading_microstructure_log). MEASUREMENT only — does not gate the live OFI
     # tilt above; persists OFI/micro/ask-eaten/etc + (later) forward returns so the

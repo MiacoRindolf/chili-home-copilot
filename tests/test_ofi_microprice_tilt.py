@@ -121,3 +121,72 @@ def test_features_roundtrip_includes_ofi_microprice():
     assert f.ofi == 0.4 and f.micro_price_edge == 5.5
     d = f.to_public_dict()
     assert d["ofi"] == 0.4 and d["micro_price_edge"] == 5.5
+
+
+# ── trade_flow confirmation premium (scales the OFI tilt; NEVER votes alone) ──
+
+def _w():
+    return float(settings.chili_momentum_ofi_tilt_weight)
+
+
+def _g():
+    return float(settings.chili_momentum_trade_flow_agreement_gain)
+
+
+def test_trade_flow_none_no_regression():
+    # trade_flow absent (the common case today) -> byte-identical to the bare OFI tilt
+    fam = get_family("vwap_reclaim_continuation"); ctx = _ctx()
+    ofi_alone = score_viability("ETH-USD", fam, ctx, _feats(ofi=0.5, micro_price_edge=8.0)).viability
+    none = score_viability("ETH-USD", fam, ctx, _feats(ofi=0.5, micro_price_edge=8.0, trade_flow=None)).viability
+    assert none == ofi_alone
+
+
+def test_trade_flow_agree_adds_exactly_w_times_g_never_doubles():
+    fam = get_family("vwap_reclaim_continuation"); ctx = _ctx()
+    ofi_alone = score_viability("ETH-USD", fam, ctx, _feats(ofi=0.5, micro_price_edge=8.0)).viability
+    three = score_viability("ETH-USD", fam, ctx, _feats(ofi=0.5, micro_price_edge=8.0, trade_flow=0.9)).viability
+    assert three > ofi_alone
+    assert abs((three - ofi_alone) - _w() * _g()) < 1e-9          # exactly the w*g premium
+    assert three < ofi_alone + _w()                               # never reaches 2x -> no double-count
+
+
+def test_trade_flow_contra_and_below_threshold_noop():
+    fam = get_family("vwap_reclaim_continuation"); ctx = _ctx()
+    ofi_alone = score_viability("ETH-USD", fam, ctx, _feats(ofi=0.5, micro_price_edge=8.0)).viability
+    contra = score_viability("ETH-USD", fam, ctx, _feats(ofi=0.5, micro_price_edge=8.0, trade_flow=-0.9)).viability
+    weak = score_viability("ETH-USD", fam, ctx, _feats(ofi=0.5, micro_price_edge=8.0, trade_flow=0.1)).viability
+    assert contra == ofi_alone                                    # contra tape: no penalty, no shrink
+    assert weak == ofi_alone                                      # below tf_thr: no premium
+
+
+def test_trade_flow_kill_switch_gain_zero(monkeypatch):
+    monkeypatch.setattr(settings, "chili_momentum_trade_flow_agreement_gain", 0.0)
+    fam = get_family("vwap_reclaim_continuation"); ctx = _ctx()
+    ofi_alone = score_viability("ETH-USD", fam, ctx, _feats(ofi=0.5, micro_price_edge=8.0)).viability
+    with_tf = score_viability("ETH-USD", fam, ctx, _feats(ofi=0.5, micro_price_edge=8.0, trade_flow=0.9)).viability
+    assert with_tf == ofi_alone                                   # gain 0 -> trade_flow inert (kill-switch)
+
+
+def test_trade_flow_alone_fires_nothing():
+    # strong trade_flow but OFI below threshold -> NO tilt (no book confirmation -> no vote)
+    fam = get_family("vwap_reclaim_continuation"); ctx = _ctx()
+    base = score_viability("ETH-USD", fam, ctx, _feats()).viability
+    tf_only = score_viability("ETH-USD", fam, ctx, _feats(ofi=0.1, micro_price_edge=2.0, trade_flow=0.9)).viability
+    assert tf_only == base
+
+
+def test_trade_flow_extreme_mover_no_bearish_discount():
+    # extreme Ross mover: the bearish OFI+trade_flow discount is SKIPPED (never penalize the explosive tail)
+    fam = get_family("vwap_reclaim_continuation")
+    ctx = build_momentum_regime_context(
+        now=datetime(2026, 4, 7, 17, 0, tzinfo=timezone.utc), atr_pct=0.018,
+        meta={"spread_regime": "tight", "ross_scores": {"ETH-USD": 0.85}})
+    no_ofi = score_viability("ETH-USD", fam, ctx, _feats()).viability
+    bear_tf = score_viability("ETH-USD", fam, ctx, _feats(ofi=-0.5, micro_price_edge=-8.0, trade_flow=-0.9)).viability
+    assert bear_tf == no_ofi                                      # discount skipped -> no change vs no-OFI
+
+
+def test_trade_flow_features_roundtrip():
+    f = ExecutionReadinessFeatures.from_meta({"ofi": 0.4, "trade_flow": 0.7})
+    assert f.trade_flow == 0.7
+    assert f.to_public_dict()["trade_flow"] == 0.7
