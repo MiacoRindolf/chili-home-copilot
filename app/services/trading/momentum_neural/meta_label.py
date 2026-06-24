@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # (proven non-separating). Macro features (vix_pct, spy_trend, ...) are appended by the trainer
 # when present in the rows; partial-pooling lets them borrow strength from the global fit.
 DEFAULT_FEATURES = [
-    "ofi", "micro_edge_bps", "book_imbalance",
+    "ofi", "micro_edge_bps", "book_imbalance", "trade_flow",
     "vol_ratio", "sustained_rvol",
     "front_side_score", "vwap_dist_sigma",
     "day_range_pos", "retrace_from_hod", "range_contraction",

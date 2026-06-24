@@ -81,7 +81,7 @@ def capture_entry_features(
         # order-flow as-of the fire instant (replay: historical table at l2_as_of;
         # live: in-process WS ring with l2_as_of=None). Fail-open to absent fields.
         try:
-            from .pipeline import _live_book_imbalance, _live_ofi_microprice
+            from .pipeline import _live_book_imbalance, _live_ofi_microprice, _live_trade_flow
 
             ofi, micro = _live_ofi_microprice(symbol, db=l2_db, as_of=l2_as_of)
             if ofi is not None:
@@ -94,6 +94,12 @@ def capture_entry_features(
             _bi = _live_book_imbalance(symbol, db=l2_db)
             if _bi is not None:
                 f["book_imbalance"] = float(_bi)
+            # TRADE-FLOW: signed-volume AGGRESSOR imbalance from the trade TAPE (equity: IQFeed L1
+            # trade-tape iqfeed_trade_ticks; crypto: microstructure). Ross's "ask getting eaten" =
+            # real thrust — distinct from OFI (book FLOW) + book_imbalance (book STATE). as_of-symmetric.
+            _tf = _live_trade_flow(symbol, db=l2_db, as_of=l2_as_of)
+            if _tf is not None:
+                f["trade_flow"] = float(_tf)
         except Exception:
             pass
         # session structure on completed bars (front_side_state — premarket-inclusive,
