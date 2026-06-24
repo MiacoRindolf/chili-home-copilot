@@ -73,3 +73,15 @@ def test_multiplier_missing_feature_uses_median():
     model = {"status": "trained", "confidence": 1.0, "base_rate": 0.3, "features": ["ofi"],
              "coef": [2.0], "intercept": 0.0, "mean": [0.0], "std": [1.0], "median": [0.0]}
     assert size_multiplier({}, model) == 1.0                          # median(0)->P=0.5>=base->1.0
+
+
+def test_self_critic_report_structure(monkeypatch):
+    # the self-critic: data-driven gap-analysis + proposals, structured report
+    import app.services.trading.momentum_neural.meta_label as ml
+    monkeypatch.setattr(ml, "load_training_rows", lambda db, **k: _rows(4))   # 3 pos / 1 neg -> thin
+    monkeypatch.setattr(ml, "load_model", lambda p: None)
+    rep = ml.analyze_learning_gaps(db=None, report_path="_nonexistent_dir_/x.json")
+    assert rep["n_samples"] == 4 and isinstance(rep["feature_coverage"], dict)
+    assert isinstance(rep["gaps"], list) and isinstance(rep["proposals"], list)
+    assert len(rep["proposals"]) >= 1                          # always proposes something
+    assert any("thin dataset" in g for g in rep["gaps"])       # 1 neg < min-per-class

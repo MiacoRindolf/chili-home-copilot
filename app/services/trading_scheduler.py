@@ -4779,6 +4779,33 @@ def _run_meta_label_retrain_job() -> None:
         db.close()
 
 
+def _run_learning_self_critic_job() -> None:
+    """SELF-CRITIC / gap-analyst step (2026-06-23, operator's "open-minded critical thinker"):
+    a data-driven critical review of the momentum lane's LEARNING health — finds gaps (feature
+    coverage holes / capture bugs, dataset thinness, not-yet-significant weights per the
+    data-snooping discipline, confidence stalls) and logs concrete enhancement proposals. The
+    report is also saved to /app/data/_learning_self_report.json. Best-effort, offline."""
+    from ..db import SessionLocal
+    from .trading.momentum_neural.meta_label import analyze_learning_gaps
+
+    db = SessionLocal()
+    try:
+        rep = analyze_learning_gaps(db)
+        logger.info(
+            "[scheduler] learning self-critic: n=%s positives=%s confidence=%s (Δ=%s) gaps=%s",
+            rep.get("n_samples"), rep.get("positives"), rep.get("confidence"),
+            rep.get("confidence_trend"), rep.get("n_gaps"),
+        )
+        for g in (rep.get("gaps") or [])[:6]:
+            logger.info("[scheduler] learning GAP -> %s", g)
+        for p in (rep.get("proposals") or [])[:3]:
+            logger.info("[scheduler] learning PROPOSAL -> %s", p)
+    except Exception:
+        logger.exception("[scheduler] learning self-critic job failed")
+    finally:
+        db.close()
+
+
 def _run_realized_stats_sync_job() -> None:
     """Refresh raw realized EV so paper/pilot outcomes can clear gate debt."""
     from ..config import settings as _settings
@@ -5862,6 +5889,17 @@ def start_scheduler():
                     replace_existing=True,
                     max_instances=1,
                     next_run_time=datetime.now() + timedelta(seconds=90),
+                )
+                # Self-critic / gap-analyst: a data-driven critical review of the lane's learning
+                # health (gaps + enhancement proposals). Every 4h — it's an analysis, not time-critical.
+                _scheduler.add_job(
+                    _run_learning_self_critic_job,
+                    trigger=IntervalTrigger(hours=4),
+                    id="learning_self_critic",
+                    name="Learning self-critic / gap-analyst (every 4h)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=120),
                 )
 
                 _scheduler.add_job(
