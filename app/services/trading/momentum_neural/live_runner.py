@@ -92,7 +92,7 @@ from .live_fsm import (
 )
 from .session_lifecycle import is_operator_paused
 from .strategy_params import normalize_strategy_params
-from .entry_gates import breakout_failed_to_hold
+from .entry_gates import _entry_extension_veto, _entry_flow_veto, breakout_failed_to_hold
 
 _log = logging.getLogger(__name__)
 
@@ -4431,6 +4431,97 @@ def tick_live_session(
                         "skipped": "crypto_dollar_cap",
                     }
         # ── end atomic position cap; the lock releases when this tick's txn commits ─
+        # ── ENTRY-TIME FLOW VETO: never BUY this exact tick into max selling. Keys on
+        # LIVE flow (OFI + trade_flow), NOT the static book_imbalance the L2 seller-veto
+        # reads. Applies to extreme movers too (selection vs entry-timing). ADDITIVE:
+        # flag OFF or either flow absent (None) ⇒ no veto. On veto: stay WATCHING
+        # (re-enter when flow flips positive). ──
+        #
+        # DATA SOURCE (deploy-blocker fix 2026-06-24): ofi/trade_flow are sourced FRESH
+        # for sess.symbol from the SAME readers viability/entry_features use
+        # (_live_ofi_microprice / _live_trade_flow) — NOT ex_live (execution_readiness_json),
+        # which NEVER carries these keys (0 of 80,493 momentum_symbol_viability rows had
+        # ofi/trade_flow; the batch-shared exec_json only persists batch feats, which have
+        # them None). Reading ex_live made the None-guard ALWAYS fire ⇒ the veto was inert.
+        # These are the EXACT readers capture_entry_features uses (so the value matches the
+        # logged entry_features ofi=-1.0/trade_flow=-0.51 for the PLSM flush). Live default
+        # as_of=None (crypto -> in-process Coinbase L2 ring + fast_orderbook fallback;
+        # equity -> iqfeed_depth_snapshots / iqfeed_trade_ticks). Cheap (one short 15s-window
+        # read) + exception-safe; any error -> None -> no veto (fail-open, byte-identical).
+        try:
+            from .pipeline import _live_ofi_microprice, _live_trade_flow
+
+            _fv_ofi, _ = _live_ofi_microprice(sess.symbol, db=db)
+            _fv_tf = _live_trade_flow(sess.symbol, db=db)
+            _fv_ofi = None if _fv_ofi is None else float(_fv_ofi)
+            _fv_tf = None if _fv_tf is None else float(_fv_tf)
+        except Exception:
+            _fv_ofi = _fv_tf = None
+        if _entry_flow_veto(_fv_ofi, _fv_tf, settings):
+            _log.info(
+                "[momentum_neural] entry FLOW-VETO %s: OFI=%s trade_flow=%s — deferring buy into selling",
+                sess.symbol, _fv_ofi, _fv_tf,
+            )
+            _emit(db, sess, "live_entry_flow_veto", {
+                "ofi": round(_fv_ofi, 4) if _fv_ofi is not None else None,
+                "trade_flow": round(_fv_tf, 4) if _fv_tf is not None else None,
+                "ofi_thr": float(getattr(settings, "chili_momentum_entry_flow_veto_ofi", -0.6)),
+                "trade_flow_thr": float(getattr(settings, "chili_momentum_entry_flow_veto_trade_flow", -0.25)),
+            })
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            db.flush()
+            return {
+                "ok": True, "session_id": sess.id, "state": sess.state,
+                "skipped": "entry_flow_veto",
+            }
+        # ── ENTRY-EXTENSION (chase) VETO: never BUY this exact tick when the entry sits
+        # too far ABOVE the breakout level (bought near a local top after the move ran;
+        # 06-24 RUN +19.9% / PLSM +33.8% above the break). Cap is ADAPTIVE to volatility
+        # (max(floor, K·atr_pct)). entry_price = the marketable limit (entry_limit_px,
+        # set just above); breakout_level = le["breakout_level_price"]; atr_pct = the
+        # eff stop ATR% local. ADDITIVE: flag OFF or breakout_level/atr missing ⇒ no veto
+        # (byte-identical). On veto: stay WATCHING (re-enter on a pullback toward the
+        # level), NOT terminal — same defer pattern as the flow-veto + crypto_dollar_cap. ──
+        try:
+            _ev_lvl = _float_or_none(le.get("breakout_level_price"))
+            # Extension-veto vol input = the CLEAN intraday-range proxy regime_atr_pct(_regime),
+            # NOT _eff_atr_pct. _eff_atr_pct is the STOP-focused ATR after (a) effective_stop_atr_pct
+            # vol-flooring and (b) the structural_or_vol_floored_atr_pct override = (entry-pullback_low)
+            # /entry / stop_atr_mult. On the pullback-break path the structural override is ACTIVE, and a
+            # MORE-extended chase (deeper pullback_low) INFLATES _eff_atr_pct, which would LOOSEN the cap
+            # (max(floor, K*atr_pct)) on exactly the names the chase-veto must block (RUN +19.9% / PLSM
+            # +33.8% slipped through). The clean regime ATR is the true intraday volatility, unaffected by
+            # how deep the entry chased — so the cap stays tight as the chase extends. (06-24 recalibration.)
+            _clean_regime_atr = regime_atr_pct(_regime)
+            _ev_atr = float(_clean_regime_atr) if _clean_regime_atr is not None else None
+            _ev_entry = float(entry_limit_px) if entry_limit_px is not None else None
+        except (TypeError, ValueError):
+            _ev_lvl = _ev_atr = _ev_entry = None
+        if _entry_extension_veto(_ev_entry, _ev_lvl, _ev_atr, settings):
+            _ext_cap = max(
+                float(getattr(settings, "chili_momentum_entry_extension_floor_pct", 0.05)),
+                float(getattr(settings, "chili_momentum_entry_extension_atr_mult", 1.0)) * max(0.0, float(_ev_atr or 0.0)),
+            )
+            _log.info(
+                "[momentum_neural] entry EXTENSION-VETO %s: entry=%s vs break=%s (cap=%.4f atr_pct=%s) — deferring chase",
+                sess.symbol, _ev_entry, _ev_lvl, _ext_cap, _ev_atr,
+            )
+            _emit(db, sess, "live_entry_extension_veto", {
+                "entry_price": round(_ev_entry, 6) if _ev_entry is not None else None,
+                "breakout_level": round(_ev_lvl, 6) if _ev_lvl is not None else None,
+                "atr_pct": round(_ev_atr, 6) if _ev_atr is not None else None,
+                "extension_cap_pct": round(_ext_cap, 6),
+                "extension_pct": (
+                    round((_ev_entry / _ev_lvl) - 1.0, 6)
+                    if (_ev_entry is not None and _ev_lvl) else None
+                ),
+            })
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            db.flush()
+            return {
+                "ok": True, "session_id": sess.id, "state": sess.state,
+                "skipped": "entry_extension_veto",
+            }
         res = adapter.place_limit_order_gtc(**_entry_kwargs)
         le["entry_submitted"] = True
         le["entry_submit_utc"] = _utcnow().isoformat()

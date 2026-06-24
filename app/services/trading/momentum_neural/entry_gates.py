@@ -1090,6 +1090,101 @@ def _l2_entry_veto(
         return None  # any error -> fail-open (never block an entry on a bug)
 
 
+def _entry_flow_veto(
+    ofi: float | None,
+    trade_flow: float | None,
+    settings: Any,
+) -> bool:
+    """Entry-TIME flow veto (separate from selection): if the LIVE OFI AND the
+    executed-tape trade_flow are BOTH sufficiently negative, the tape is actively
+    SELLING this exact tick → defer the buy (caller keeps the symbol WATCHING; it
+    can re-enter when flow flips back positive). This is an ENTRY-TIMING gate, NOT a
+    selection de-rate — it MUST run for ALL names including extreme movers
+    (ross>=0.8): the never-penalize-the-tail rule keeps explosives on the watchlist,
+    but we still must never BUY into max selling.
+
+    Keys on LIVE FLOW (OFI + trade_flow), NOT the static book_imbalance the existing
+    L2 seller-veto reads (the PLSM flush had book_imbalance=+0.21 stale yet OFI=-1.0,
+    trade_flow=-0.51). Lookahead-free: uses only the entry features already computed.
+
+    Two veto legs (OR):
+      * AND-leg (both-bearish): OFI <= ofi_thr AND trade_flow <= tf_thr — both the
+        resting-book pressure and the executed tape lean net-selling.
+      * STRONG-tape OR-leg: trade_flow <= tf_strong_thr ALONE, regardless of OFI — the
+        executed tape (trade_flow) is the most direct "are sellers winning RIGHT NOW"
+        signal, so a STRONGLY-selling tape vetoes even when OFI looks mildly positive
+        (06-24 RUN: ofi=+0.5 mild buy yet trade_flow=-0.63 strong executed selling —
+        the strict AND-leg missed it).
+
+    Returns True ⇒ VETO the buy this tick. ADDITIVE / byte-identical when the flag is
+    OFF or the relevant flow is None (absent / no L2 / no tape). Pure; no I/O or mutation.
+    """
+    try:
+        if not bool(getattr(settings, "chili_momentum_entry_flow_veto_enabled", True)):
+            return False
+        ofi_thr = float(getattr(settings, "chili_momentum_entry_flow_veto_ofi", -0.6))
+        tf_thr = float(getattr(settings, "chili_momentum_entry_flow_veto_trade_flow", -0.25))
+        tf_strong_thr = float(
+            getattr(settings, "chili_momentum_entry_flow_veto_trade_flow_strong", -0.5)
+        )
+        # AND-leg: both the book (OFI) and the tape (trade_flow) lean net-selling.
+        and_leg = (
+            ofi is not None
+            and trade_flow is not None
+            and float(ofi) <= ofi_thr
+            and float(trade_flow) <= tf_thr
+        )
+        # STRONG-tape OR-leg: the executed tape alone is strongly selling (ignore OFI).
+        strong_leg = trade_flow is not None and float(trade_flow) <= tf_strong_thr
+        return bool(and_leg or strong_leg)
+    except Exception:
+        return False  # any error -> fail-open (never block an entry on a bug)
+
+
+def _entry_extension_veto(
+    entry_price: float | None,
+    breakout_level: float | None,
+    atr_pct: float | None,
+    settings: Any,
+) -> bool:
+    """Entry-EXTENSION (chase) veto: defer the buy when the entry sits too far ABOVE
+    the breakout level — i.e. we are buying NEAR a local top after the move already
+    ran (06-24: RUN entered @15.51 vs break 12.94 = +19.9% extended; PLSM @10.21 vs
+    break 7.63 = +33.8%). Ross's discipline: enter AT the break / on the pullback to
+    it, never chase the extension into a reversal.
+
+    The cap is ADAPTIVE to volatility (no flat magic %): the allowed extension above
+    the level = ``max(floor, K · atr_pct)`` so a calm name gets the floor and a
+    volatile small-cap gets proportional room. Veto when::
+
+        entry_price >= breakout_level · (1 + max(floor, K · atr_pct))
+
+    With the defaults (floor 0.08, K 8.0, atr_pct~0.015 -> cap ~0.12) this blocks
+    RUN(+19.9%) and PLSM(+33.8%) while allowing entries within ~12% of the break.
+
+    Returns True ⇒ VETO the buy this tick (caller defers to WATCHING so it can re-enter
+    on a pullback toward the level — NOT terminal). ADDITIVE / byte-identical when the
+    flag is OFF, the breakout_level is missing/non-positive, or atr_pct is missing
+    (None). Pure; no I/O or mutation.
+    """
+    try:
+        if not bool(getattr(settings, "chili_momentum_entry_extension_veto_enabled", True)):
+            return False
+        if entry_price is None or breakout_level is None or atr_pct is None:
+            return False  # missing level/atr -> never veto (parity)
+        ep = float(entry_price)
+        lvl = float(breakout_level)
+        a = float(atr_pct)
+        if lvl <= 0 or ep <= 0:
+            return False  # bad level/price -> never veto (parity)
+        k = float(getattr(settings, "chili_momentum_entry_extension_atr_mult", 8.0))
+        floor = float(getattr(settings, "chili_momentum_entry_extension_floor_pct", 0.08))
+        cap = max(floor, k * max(0.0, a))
+        return ep >= lvl * (1.0 + cap)
+    except Exception:
+        return False  # any error -> fail-open (never block an entry on a bug)
+
+
 def first_pullback_break(
     df: pd.DataFrame,
     *,

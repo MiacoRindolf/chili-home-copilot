@@ -4418,6 +4418,66 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_L2_BIGSELLER_PCTILE_FLOOR"),
         description="Gate 3 (dip-buy quality): depth-imbalance percentile at/below which the NEWEST book is treated as a big resting ASK wall (distribution trend) → veto. Self-relative to the symbol's own recent window. Only consulted when chili_momentum_entry_l2_veto_enabled is on.",
     )
+    # ── ENTRY-TIME FLOW VETO (separate from selection): never BUY this exact tick into
+    # max selling. Keys on LIVE FLOW (OFI + trade_flow), NOT the static book_imbalance
+    # the existing L2 veto reads — the PLSM flush had book_imbalance=+0.21 (stale) but
+    # OFI=-1.0 / trade_flow=-0.51 (tape actively selling). Applies to ALL names incl
+    # extreme movers (ross>=0.8): the never-penalize-the-tail rule is a SELECTION rule
+    # (keep on watchlist); ENTRY-TIMING must respect live flow. Defers the buy (stays
+    # WATCHING, can re-enter when flow flips). ADDITIVE: OFF or OFI/trade_flow absent
+    # (None) ⇒ no veto ⇒ byte-identical. Both thresholds are NEGATIVE (signed [-1,1]).
+    chili_momentum_entry_flow_veto_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FLOW_VETO_ENABLED"),
+        description="Entry-time flow veto: defer the buy this tick when OFI AND trade_flow are both sufficiently negative (tape actively selling). Applies to extreme movers too (selection vs entry-timing). false / either flow None = no veto, byte-identical.",
+    )
+    chili_momentum_entry_flow_veto_ofi: float = Field(
+        default=-0.6,
+        ge=-1.0,
+        le=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FLOW_VETO_OFI"),
+        description="Entry-time flow veto: OFI (signed [-1,1], <0 = net selling) at/below this triggers the veto leg. Must be negative. Only consulted with chili_momentum_entry_flow_veto_enabled on (AND-ed with the trade_flow leg).",
+    )
+    chili_momentum_entry_flow_veto_trade_flow: float = Field(
+        default=-0.25,
+        ge=-1.0,
+        le=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FLOW_VETO_TRADE_FLOW"),
+        description="Entry-time flow veto: executed-tape aggressor imbalance (signed [-1,1], <0 = sellers hitting the bid) at/below this triggers the veto leg. Must be negative. AND-ed with the OFI leg.",
+    )
+    chili_momentum_entry_flow_veto_trade_flow_strong: float = Field(
+        default=-0.5,
+        ge=-1.0,
+        le=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FLOW_VETO_TRADE_FLOW_STRONG"),
+        description="Entry-time flow veto STRONG-tape OR-leg: executed-tape trade_flow (signed [-1,1]) at/below this STRONG-negative bar vetoes the buy ALONE, regardless of OFI (06-24 RUN: ofi=+0.5 mild buy but trade_flow=-0.63 strong executed selling — the strict AND-leg missed it). -0.5 is a strong bar (most healthy entries have trade_flow > -0.5). Only consulted with chili_momentum_entry_flow_veto_enabled on; trade_flow None = no veto, byte-identical.",
+    )
+    # ── Entry-EXTENSION (chase) veto ─────────────────────────────────────────────
+    # Defer the buy when the entry sits too far ABOVE the breakout level (bought near a
+    # local top after the move already ran; 06-24 RUN @15.51 vs break 12.94 = +19.9%,
+    # PLSM @10.21 vs break 7.63 = +33.8%). Ross enters AT the break / on the pullback to
+    # it, never chases the extension. The allowed extension above the level is ADAPTIVE
+    # to volatility = max(floor, K·atr_pct) (no flat magic %). Defers to WATCHING (can
+    # re-enter on a pullback toward the level). ADDITIVE: OFF or breakout_level/atr_pct
+    # absent ⇒ no veto ⇒ byte-identical.
+    chili_momentum_entry_extension_veto_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_EXTENSION_VETO_ENABLED"),
+        description="Entry-extension (chase) veto: defer the buy this tick when entry_price >= breakout_level * (1 + max(floor, K*atr_pct)) — i.e. bought too far above the break (near a local top). Defers to WATCHING (re-enter on a pullback). false / breakout_level or atr_pct absent = no veto, byte-identical.",
+    )
+    chili_momentum_entry_extension_atr_mult: float = Field(
+        default=1.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_EXTENSION_ATR_MULT"),
+        description="Entry-extension veto: volatility multiplier K. Allowed extension above the breakout level = max(floor_pct, K*atr_pct), so a volatile small-cap gets proportional room. Recalibrated 06-24 8.0->1.0: the veto is now fed the CLEAN regime_atr_pct (intraday-range vol, clamped 0.004-0.12) instead of the stop-focused _eff_atr_pct that the structural override inflated (a deeper chase used to LOOSEN the cap). K must be low enough that the cap stays BELOW the RUN(+19.9%)/PLSM(+33.8%) chase distance even at the top of the regime-ATR range (K*0.15=0.15 < 0.199) so those chases are vetoed across the FULL realistic vol range — a +10% follow-through is then allowed only when the regime is genuinely explosive (atr_pct>=~0.10), which is exactly when +10% above the break is proportionate. (The task's K~3-4 hint was validated only at the cherry-picked atr_pct~0.015 and FAILS the full-range RUN/PLSM veto at atr_pct>=0.06; the safety MUST wins.) Only consulted with chili_momentum_entry_extension_veto_enabled on.",
+    )
+    chili_momentum_entry_extension_floor_pct: float = Field(
+        default=0.10,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_EXTENSION_FLOOR_PCT"),
+        description="Entry-extension veto: minimum allowed extension above the breakout level (fraction, e.g. 0.10 = 10%) regardless of ATR — a calm name still gets at least this room. Recalibrated 06-24 0.05->0.10: the high-ATR binding constraint that vetoes RUN(+19.9%)/PLSM(+33.8%) is K*0.12=0.12 (K=1.0, regime_atr clamp ceiling 0.12), governed by K NOT the floor, so raising the floor to 0.10 keeps RUN/PLSM vetoed across the full vol range while ALLOWING a calm +9.9% break-and-go (cap = max(0.10, 1.0*atr)). The cap is max(this, K*atr_pct).",
+    )
     # ── L2 microstructure (crypto full-book persistence + OFI/micro-price tilt) ──
     # Cadence to drain the warmed Coinbase WS full-book ring into fast_orderbook
     # (crypto only; persists L2 so the live OFI tilt is measurable). 5s start.

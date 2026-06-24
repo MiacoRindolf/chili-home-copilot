@@ -156,6 +156,73 @@ def _agentic_equity_cached() -> float | None:
     return None
 
 
+# ── LAST-GOOD account-equity guard (FIX: spurious daily-loss-cap collapse) ───────────
+# _account_equity_usd does a LIVE broker portfolio read on every cap evaluation. Robinhood
+# reads are FLAKY (phoenix.robinhood.com SSL handshake failures fall back to api.robinhood.com,
+# which can return a tiny/partial equity, or the lane family can momentarily resolve to a
+# near-empty account). When the basis collapses to ~$20, 5% collapses to ~$1 and any small
+# realized loss (-$44) trips a SPURIOUS daily-loss HALT (the recurring "$1 cap" bug, same class
+# as the 06-15 Coinbase-basis freeze). The existing rolling-median spike guard
+# (bounded_by_rolling_median) only catches HIGH spikes (inflation); there was no LOW/failed-read
+# guard. This module-level cache, keyed by execution_family, holds the LAST REAL POSITIVE read.
+# On a None/0/implausibly-tiny live read we reuse the last-good value for a SHORT grace window
+# instead of collapsing the cap.
+#
+# SAFETY (load-bearing — do NOT let this mask a real drawdown):
+#   * The cache is updated ONLY from a successful positive live read. It is the LAST REAL READ,
+#     never an invented floor — it can NEVER inflate the cap above what the account actually had.
+#   * It is used ONLY when the live read is missing/degraded; a normal read always wins, so a
+#     genuine sustained drawdown lowers the cap on the very next good read (and fully expires
+#     within the grace window).
+#   * Past the grace window the cache is discarded and the caller falls back to the documented
+#     fixed cap — a persistent broker outage is NOT hidden indefinitely.
+#   * The "implausibly tiny" guard fires ONLY when a fresh read is < _ACCOUNT_EQUITY_TINY_FRAC of
+#     a still-fresh last-good (the legacy-account bleed-through case); a true ~90%+ drawdown
+#     within one TTL is rare, and even then the next-tick good read corrects it.
+_ACCOUNT_EQUITY_LAST_GOOD: dict[str, dict[str, float]] = {}
+_ACCOUNT_EQUITY_LAST_GOOD_TTL_SEC = 180.0  # reuse last-good across transient read misses (~3min)
+_ACCOUNT_EQUITY_TINY_FRAC = 0.10  # a live read < 10% of a fresh last-good == implausible flake
+
+
+def _stabilize_account_equity(ef: str, eq: float | None) -> float | None:
+    """LOW/failed-read stabilizer for the per-family account-equity basis.
+
+    Returns the live ``eq`` when it is a plausible positive value (and refreshes the
+    last-good cache). When the live read is None/0/implausibly-tiny, returns the last-good
+    cached value if it is within the short grace TTL, else None (caller -> fixed fallback).
+    Never inflates above a real read; see the cache docstring above for the safety contract."""
+    import time as _time
+
+    now = _time.monotonic()
+    slot = _ACCOUNT_EQUITY_LAST_GOOD.get(ef)
+    cached = float(slot["value"]) if slot else 0.0
+    age = (now - float(slot["ts"])) if slot else 1e9
+
+    live_ok = eq is not None and eq > 0
+    # "Implausibly tiny" = a fresh read that is a tiny fraction of a STILL-FRESH last-good
+    # (the near-empty legacy account bleeding through an RH fallback read). Treat as a flake.
+    tiny_flake = (
+        live_ok
+        and cached > 0
+        and age < _ACCOUNT_EQUITY_LAST_GOOD_TTL_SEC
+        and float(eq) < cached * _ACCOUNT_EQUITY_TINY_FRAC
+    )
+
+    if live_ok and not tiny_flake:
+        _ACCOUNT_EQUITY_LAST_GOOD[ef] = {"value": float(eq), "ts": now}
+        return float(eq)
+
+    # Degraded/failed/tiny read -> reuse the last REAL read within the grace window.
+    if cached > 0 and age < _ACCOUNT_EQUITY_LAST_GOOD_TTL_SEC:
+        logger.warning(
+            "[momentum_neural] account-equity read DEGRADED for %s (live=%s) — reusing last-good "
+            "$%.2f (age=%.0fs, ttl=%.0fs) to avoid a spurious daily-loss-cap collapse",
+            ef, eq, cached, age, _ACCOUNT_EQUITY_LAST_GOOD_TTL_SEC,
+        )
+        return cached
+    return None
+
+
 def _account_equity_usd(
     execution_family: str | None = None, *, apply_margin_multiple: bool = True,
     prefer_equity: bool = False,
@@ -194,10 +261,14 @@ def _account_equity_usd(
         # Cash account: reported BP IS the real spendable (NO margin multiple). Cached
         # (short TTL) so a burst of candidate sizings reuses one read. prefer_equity (the
         # daily-loss RISK cap) reads the STABLE total account value instead of fluctuating BP.
+        # prefer_equity reads route through the last-good stabilizer so a transient RH-MCP
+        # read miss (SSL flake / partial response) reuses the last real equity instead of
+        # collapsing the daily-loss cap to ~$1. (Sizing/BP keeps its own short-TTL cache.)
         if prefer_equity:
             eq = _agentic_equity_cached()
-            if eq is not None and eq > 0:
-                return float(eq)
+            stable = _stabilize_account_equity(ef, eq)
+            if stable is not None and stable > 0:
+                return float(stable)
         bp = _agentic_buying_power_cached()
         return float(bp) if (bp is not None and bp > 0) else None
 
@@ -221,10 +292,23 @@ def _account_equity_usd(
                     if apply_margin_multiple
                     else 1.0
                 )
-                return bp * max(1.0, mult)
+                # RISK-cap reads (prefer_equity, unlevered) get the last-good LOW guard so a
+                # flaky RH portfolio read can't collapse the daily-loss cap. SIZING reads
+                # (apply_margin_multiple=True) keep raw fail-to-None behaviour (never size
+                # against a stale basis); the guard is risk-cap-only.
+                basis = bp * max(1.0, mult)
+                if prefer_equity:
+                    return _stabilize_account_equity(ef, basis)
+                return basis
         eq = float(pf.get("equity") or 0.0)
+        if prefer_equity:
+            return _stabilize_account_equity(ef, eq if eq > 0 else None)
         return eq if eq > 0 else None
     except Exception:
+        # On a hard read failure the RISK-cap path still tries the last-good cache so a
+        # transient broker outage does not collapse the daily-loss cap; sizing fails to None.
+        if prefer_equity:
+            return _stabilize_account_equity(ef, None)
         return None
 
 
