@@ -174,6 +174,43 @@ def macro_regime_features(now_ts: float | None = None) -> dict:
         bear = 1.0 - out.get("iwm_trend", out.get("spy_trend", 1.0))
         if "mkt_vol" in out:
             out["bear_x_vol"] = bear * out["mkt_vol"]   # the panic-regime interaction
+
+        # VIX TERM-STRUCTURE SLOPE (Johnson 2017, JFQA): VIX3M/VIX — >1 contango (risk-on),
+        # <1 backwardation (panic onset). Carries the PRICE of variance risk, ORTHOGONAL to
+        # VIX level + bear×vol. The model should de-rate longs as it inverts toward backwardation.
+        try:
+            cached = _MACRO_CACHE.get("VIXSLOPE")
+            if cached and (ts - cached[0]) < 300.0:
+                out["vix_slope"] = cached[1]
+            else:
+                _v = fetch_ohlcv_df("^VIX", interval="1d", period="5d")
+                _v3 = fetch_ohlcv_df("^VIX3M", interval="1d", period="5d")
+                if _v is not None and _v3 is not None and len(_v) and len(_v3):
+                    _vix = float(_v["Close"].astype(float).values[-1])
+                    _vix3 = float(_v3["Close"].astype(float).values[-1])
+                    if _vix > 0:
+                        out["vix_slope"] = _vix3 / _vix
+                        _MACRO_CACHE["VIXSLOPE"] = (ts, out["vix_slope"])
+        except Exception:
+            pass
+
+        # FOMC-CYCLE PHASE (Cieslak-Morse-Vissing-Jorgensen): even weeks (0/2/4/6) since the last
+        # FOMC meeting carry the equity risk-on / high-beta premium; small-cap momentum longs ARE
+        # high-beta risk-on -> the model can up-weight in even weeks. Deterministic, lookahead-free.
+        # NOTE: scheduled 2026 FOMC announcement dates — verify/extend annually; if stale, the
+        # meta-label simply down-weights the feature (safe).
+        try:
+            from datetime import datetime, timezone
+
+            _fomc = ["2026-01-28", "2026-03-18", "2026-04-29", "2026-06-17",
+                     "2026-07-29", "2026-09-16", "2026-10-28", "2026-12-09"]
+            _today = (datetime.fromtimestamp(ts, tz=timezone.utc) if ts else datetime.now(timezone.utc)).date()
+            _past = [d for d in (datetime.strptime(x, "%Y-%m-%d").date() for x in _fomc) if d <= _today]
+            if _past:
+                _days = (_today - max(_past)).days
+                out["fomc_even_week"] = 1.0 if ((_days // 7) % 2 == 0) else 0.0
+        except Exception:
+            pass
     except Exception:
         pass
     return out
