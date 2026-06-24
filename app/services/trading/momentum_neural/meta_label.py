@@ -33,7 +33,7 @@ DEFAULT_FEATURES = [
     "ofi", "micro_edge_bps", "book_imbalance",
     "vol_ratio", "sustained_rvol",
     "front_side_score", "vwap_dist_sigma",
-    "day_range_pos", "retrace_from_hod",
+    "day_range_pos", "retrace_from_hod", "range_contraction",
     "spread_bps", "atr_pct", "stop_pct_eff", "dollar_vol", "liq_mult",
     "above_vwap", "is_backside", "premarket",
 ]

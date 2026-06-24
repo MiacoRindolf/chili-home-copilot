@@ -123,6 +123,23 @@ def capture_entry_features(
                 sv = getattr(fs, "session_vwap", None)
                 if sv:
                     f["px_vs_session_vwap"] = float((fill_px - float(sv)) / float(sv))
+                # MESO: volatility-CONTRACTION tightness (Crabel C-E / VCP — coiling precedes
+                # expansion). recent-quarter avg bar-range vs full-session avg: <1 = contraction
+                # (the statistically-supported breakout precursor). Session-relative FRACTION (the
+                # quarter scales with session length — no fixed/magic window). The meta-label learns
+                # the weight; data-snooping-guarded by the perm-null + confidence-shrinkage.
+                try:
+                    _hi = _df["High"].astype(float).values
+                    _lo = _df["Low"].astype(float).values
+                    _nb = len(_hi)
+                    if _nb >= 8:
+                        _rng = _hi - _lo
+                        _full_rng = float(_rng.mean())
+                        _q = max(2, _nb // 4)
+                        if _full_rng > 0:
+                            f["range_contraction"] = float(_rng[-_q:].mean()) / _full_rng
+                except Exception:
+                    pass
         except Exception:
             pass
         # MACRO-REGIME features (computed by the caller via macro_regime_features, passed in to
