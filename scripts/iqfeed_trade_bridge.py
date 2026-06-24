@@ -34,14 +34,16 @@ import sqlalchemy as sa
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("iqfeed_trade_bridge")
 
-HOST, PORT = "127.0.0.1", 9100          # IQConnect Level-1 port (depth bridge uses :9200)
+HOST, PORT = "127.0.0.1", 5009          # IQConnect Level-1 STREAMING port (:9100=lookup, :9200=L2 depth)
 DB_URL = os.environ.get("DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili")
 FLUSH_INTERVAL_S = 1.0                   # batch-insert cadence
 REFRESH_S = 20.0                         # live-session symbol refresh cadence
 STICKY_RESUBSCRIBE = os.environ.get("CHILI_IQFEED_STICKY_RESUBSCRIBE", "1") != "0"
-# The deterministic L1 field set we SELECT so the Q/P frame layout is fixed + parseable.
-UPDATE_FIELDS = ["Symbol", "Most Recent Trade", "Most Recent Trade Size", "Bid", "Ask",
-                 "Most Recent Trade Time"]
+# We use IQFeed's DEFAULT 6.2 update layout (NO `SELECT UPDATE FIELDS` — it raised !SYNTAX_ERROR! and
+# is unnecessary). Verified live layout (S,CURRENT UPDATE FIELDNAMES): Symbol, Most Recent Trade,
+# Most Recent Trade Size, Most Recent Trade Time, Most Recent Trade Market Center, Total Volume, Bid,
+# Bid Size, Ask, Ask Size, ... -> p[1]=symbol p[2]=last p[3]=size p[4]=time p[7]=bid p[9]=ask.
+L1_LAST, L1_SIZE, L1_TIME, L1_BID, L1_ASK = 2, 3, 4, 7, 9
 
 engine = sa.create_engine(DB_URL, pool_pre_ping=True)
 
@@ -94,25 +96,25 @@ def _live_symbols() -> set[str]:
 
 
 def _parse_l1(line: str) -> None:
-    """Parse one L1 update frame ('Q'/'P') under our SELECTED field set; record a row only on a
-    GENUINELY NEW trade (Most-Recent-Trade-Time advanced) with a positive size."""
+    """Parse one L1 update frame ('Q'/'P') under IQFeed's DEFAULT 6.2 layout; record a row only on a
+    GENUINELY NEW trade (Most-Recent-Trade-Time advanced) with a positive size (quote-only updates
+    that don't move the trade time are skipped)."""
     p = line.split(",")
-    # p[0] = 'Q'|'P'; then our fields: Symbol, Last, Last Size, Bid, Ask, Last Time
-    if len(p) < 7:
+    if len(p) <= L1_ASK:
         return
     try:
         sym = p[1].strip().upper()
         if not sym:
             return
-        last_t = p[6].strip()
+        last_t = p[L1_TIME].strip()
         if not last_t or _last_trade.get(sym) == last_t:
             return                              # not a new trade (quote-only update or dup)
-        px = float(p[2] or 0)
-        sz = float(p[3] or 0)
+        px = float(p[L1_LAST] or 0)
+        sz = float(p[L1_SIZE] or 0)
         if px <= 0 or sz <= 0:
             return
-        bid = float(p[4]) if p[4].strip() else None
-        ask = float(p[5]) if p[5].strip() else None
+        bid = float(p[L1_BID]) if p[L1_BID].strip() else None
+        ask = float(p[L1_ASK]) if p[L1_ASK].strip() else None
         _last_trade[sym] = last_t
         row = {"sym": sym, "at": datetime.now(timezone.utc).replace(tzinfo=None),
                "px": px, "sz": sz, "bid": bid, "ask": ask}
@@ -230,8 +232,7 @@ def main() -> None:
             running = True
             watched.clear()
             _last_trade.clear()
-            _send("S,SET PROTOCOL,6.2")
-            _send("S,SELECT UPDATE FIELDS," + ",".join(UPDATE_FIELDS))
+            _send("S,SET PROTOCOL,6.2")          # default update layout (no SELECT -> see L1_* indices)
             log.info("connected to IQConnect %s:%s (L1 trades, protocol 6.2)", HOST, PORT)
             t = threading.Thread(target=reader, daemon=True, name="iqfeed-trade-reader")
             t.start()
