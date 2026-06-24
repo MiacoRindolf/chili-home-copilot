@@ -3451,6 +3451,61 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_PYRAMID_MAX_ADDS"),
         description="Documented small N of confirmation-adds per position (default single add).",
     )
+    # ── MICRO-PULLBACK RE-ENTRY (Ross "scale out into the pop, re-load on the next
+    # micro-pullback dip"). A SEPARATE sub-branch inside the pyramid block with its OWN
+    # predicate, OWN counter (micropullback_reentry_count), OWN kill-switch. ADDITIVE:
+    # when _enabled is False the block is a no-op — the #772 continuation-add is byte-
+    # identical. EQUITY-FIRST (crypto deferred, _is_equity_pyr). Re-loads route through
+    # pyramid_blend_on_fill + pyramid_risk_anchor_usd VERBATIM so the max-loss circuit
+    # keeps re-basing to the STARTER R0 (worst-case add risk = max_reentries * fraction
+    # * R0 ≈ 3 * 0.30 * R0 = 0.9*R0 on top of the starter). docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_micropullback_reentry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_ENABLED"),
+        description="Kill-switch for the Ross micro-pullback re-load (a bounded ADD on a held runner's dip-and-curl). false = byte-identical (the #772 pyramid add is unchanged; no re-load, no pos mutation, no emit).",
+    )
+    chili_momentum_micropullback_reentry_max: int = Field(
+        default=3,
+        ge=1,
+        le=8,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_MAX"),
+        description="Per-name/per-session cap on micro-pullback re-loads (bounds total re-load risk = max * fraction * R0). Separate counter from pyramid_add_count for clean attribution.",
+    )
+    chili_momentum_micropullback_reentry_cooldown_seconds: float = Field(
+        default=30.0,
+        ge=0.0,
+        le=600.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_COOLDOWN_SECONDS"),
+        description="Cooldown between re-loads. PINNED to the bar cadence: enforced >= 2 * micropull_bar_seconds (min 30s @ 15s bars) so one wiggle cannot fire two re-loads before the ratcheting shelf re-ratchets.",
+    )
+    chili_momentum_micropullback_reentry_risk_fraction: float = Field(
+        default=0.30,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_RISK_FRACTION"),
+        description="rho_reload: each re-load's structural risk as a fraction of the STARTER R0. Sized via compute_risk_first_quantity (never a hardcoded block); 3 re-loads * 0.30 = 0.9*R0 worst-case on top of the starter.",
+    )
+    chili_momentum_micropullback_reentry_ofi_thr: float = Field(
+        default=0.30,
+        ge=-1.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_OFI_THR"),
+        description="Positive-confirm OFI floor for a re-load (book turning up). FAILS-CLOSED on None (an extra discretionary BUY needs proof). Required simultaneously with the trade_flow floor.",
+    )
+    chili_momentum_micropullback_reentry_trade_flow_thr: float = Field(
+        default=0.20,
+        ge=-1.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_TRADE_FLOW_THR"),
+        description="Positive-confirm trade_flow floor for a re-load (executed tape turning up). FAILS-CLOSED on None. NOTE: a guessed constant — calibrate in replay before any live reliance (sweep on PLSM/RUN 2026-06-24).",
+    )
+    chili_momentum_micropullback_reentry_max_dip_pct: float = Field(
+        default=0.04,
+        gt=0.0,
+        le=0.30,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_MAX_DIP_PCT"),
+        description="Shallow-dip cap: the micro-pullback dip from the local bounce-high must be <= this fraction (a deep rollover is NOT a micro-pullback). Adaptive convention; keep small.",
+    )
     # EVENT-DRIVEN TICK EXIT (Lever B-2, 2026-06-16): a held crypto trailing position
     # whose order flow rolls over (OFI < thr) wakes the exit runner on the WS tick —
     # up to 15s sooner than the poll (Ross "eject the moment the ask thickens"). A

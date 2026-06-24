@@ -5562,6 +5562,366 @@ def tick_live_session(
                     # ALWAYS runs. The add never blocks/delays/loosens an exit.
                     _log.debug("[momentum_live] pyramid add block error", exc_info=True)
 
+            # ── MICRO-PULLBACK RE-ENTRY (Ross "scale out into the pop, RE-LOAD on the
+            # next micro-pullback dip"). A PARALLEL sub-branch to the #772 pyramid add:
+            # OWN predicate, OWN counter (micropullback_reentry_count), OWN kill-switch,
+            # OWN in-flight marker (micropullback_reentry_order_id). The #772 add above
+            # is byte-identical when this flag is on/off — they share NOTHING but the
+            # pyramid_blend_on_fill / pyramid_risk_anchor_usd rails (so the max-loss
+            # circuit keeps re-basing to the STARTER R0). EQUITY-FIRST (crypto deferred).
+            #
+            # ADDITIVE: when chili_momentum_micropullback_reentry_enabled is False the
+            # whole block is a no-op (no re-load, no pos mutation, no emit, no broker
+            # call). Two phases (resolve-in-flight, trigger-new), both FALL THROUGH so
+            # the stop-breach/exit block below ALWAYS runs this tick. The entire block is
+            # in a try/except that swallows to the fall-through — a re-load NEVER blocks,
+            # delays, or loosens an exit. SESSION-SCOPED 15s frame from _build_micro_bar_df
+            # (the momentum_nbbo_spread_tape resampler), NEVER the 5d fetch_ohlcv_df.
+            # (docs/DESIGN/MOMENTUM_LANE.md)
+            if bool(getattr(settings, "chili_momentum_micropullback_reentry_enabled", True)):
+                try:
+                    # PHASE 1 — resolve an IN-FLIGHT re-load order (mirror the pyramid
+                    # adopt). Blend ONLY on a CONFIRMED fill via the SHARED helper; the
+                    # circuit re-bases to the STARTER R0 (pyramid_risk_anchor_usd). While
+                    # an order is in flight PHASE 2 cannot submit a second (idempotency).
+                    _mpr_oid = le.get("micropullback_reentry_order_id")
+                    if _mpr_oid:
+                        _mno, _ = adapter.get_order(str(_mpr_oid))
+                        if _mno is not None and not _order_open(_mno):
+                            _mpr_filled = float(getattr(_mno, "filled_size", 0) or 0)
+                            if _mpr_filled > 0:
+                                _qa_f = _mpr_filled
+                                _Pa_f = float(
+                                    getattr(_mno, "average_filled_price", 0) or 0
+                                ) or float(le.get("micropullback_reentry_limit_px") or ask)
+                                _q0m = float(pos["quantity"])
+                                _a0m = float(pos["avg_entry_price"])
+                                _R0m = _float_or_none(le.get("micropullback_reentry_pending_R0"))
+                                _prev_stop_m = float(pos["stop_price"])
+                                _blend_m = pyramid_blend_on_fill(
+                                    q0=_q0m, a0=_a0m, qa_f=_qa_f, Pa_f=_Pa_f,
+                                    stop_px=_prev_stop_m,
+                                    original_quantity=_float_or_none(pos.get("original_quantity")),
+                                )
+                                _q1m = _blend_m["q1"]
+                                _a1m = _blend_m["a1"]
+                                _s1m = _blend_m["s1"]  # INVARIANT-A: tighten-only (asserted)
+                                pos["avg_entry_price"] = _a1m
+                                pos["quantity"] = _q1m
+                                pos["original_quantity"] = _blend_m["original_quantity"]
+                                pos["notional_usd"] = _q1m * _a1m
+                                pos["stop_price"] = _s1m
+                                stop_px = _s1m
+                                # Re-base the max-loss circuit to the STARTER R0 (GUARD #1),
+                                # VERBATIM with the pyramid add — re-loads NEVER inflate the
+                                # per-trade loss budget.
+                                if _R0m is not None and _R0m > 0:
+                                    le["pyramid_risk_anchor_usd"] = _R0m
+                                le["micropullback_reentry_count"] = (
+                                    int(le.get("micropullback_reentry_count") or 0) + 1
+                                )
+                                _add_fee_m = _order_total_fees_usd(_mno) or 0.0
+                                if _add_fee_m > 0.0:
+                                    le["entry_fee_usd_unbooked"] = (
+                                        float(le.get("entry_fee_usd_unbooked") or 0.0) + _add_fee_m
+                                    )
+                                # RATCHET the shelf to THIS re-load's higher-low so the
+                                # NEXT re-load must hold above this dip, not the stale
+                                # original breakout (a refinement vs a fixed shelf).
+                                _mpr_dip = _float_or_none(le.get("micropullback_pending_dip_low"))
+                                if _mpr_dip is not None and _mpr_dip > 0:
+                                    le["micropullback_last_shelf"] = _mpr_dip
+                                from datetime import timezone as _tz_m
+                                _cool_s = max(
+                                    float(getattr(settings, "chili_momentum_micropullback_reentry_cooldown_seconds", 30.0) or 30.0),
+                                    2.0 * float(getattr(settings, "chili_momentum_micropull_bar_seconds", 15) or 15),
+                                )
+                                le["micropullback_reentry_cooldown_until_utc"] = (
+                                    datetime.now(_tz_m.utc) + timedelta(seconds=_cool_s)
+                                ).replace(tzinfo=None).isoformat()
+                                le.pop("micropullback_reentry_order_id", None)
+                                le.pop("micropullback_reentry_limit_px", None)
+                                le.pop("micropullback_reentry_pending_R0", None)
+                                le.pop("micropullback_pending_dip_low", None)
+                                le["position"] = pos
+                                _commit_le(sess, le)
+                                _emit(db, sess, "live_micro_pullback_reentry_fill", {
+                                    "add_qty": _qa_f, "add_price": _Pa_f,
+                                    "q0": _q0m, "a0": _a0m, "q1": _q1m, "a1": _a1m,
+                                    "old_stop": float(le.get("micropullback_prev_stop") or _s1m),
+                                    "new_stop": _s1m, "R0": _R0m,
+                                    "reentry_count": le["micropullback_reentry_count"],
+                                    "shelf": le.get("micropullback_last_shelf"),
+                                    "confirm_ofi": le.get("micropullback_confirm_ofi"),
+                                    "confirm_trade_flow": le.get("micropullback_confirm_trade_flow"),
+                                })
+                                le.pop("micropullback_prev_stop", None)
+                                le.pop("micropullback_confirm_ofi", None)
+                                le.pop("micropullback_confirm_trade_flow", None)
+                            else:
+                                # Terminal with NO fill — clear the in-flight marker (a
+                                # future tick may try again). No pos mutation.
+                                le.pop("micropullback_reentry_order_id", None)
+                                le.pop("micropullback_reentry_limit_px", None)
+                                le.pop("micropullback_reentry_pending_R0", None)
+                                le.pop("micropullback_pending_dip_low", None)
+                                le.pop("micropullback_prev_stop", None)
+                                le.pop("micropullback_confirm_ofi", None)
+                                le.pop("micropullback_confirm_trade_flow", None)
+                                _commit_le(sess, le)
+
+                    # PHASE 2 — TRIGGER a new re-load (only if none in flight + under cap
+                    # + cooldown elapsed). EQUITY-FIRST (crypto deferred per the pyramid
+                    # _is_equity_pyr gate). Only on a winning runner (STATE_LIVE_TRAILING).
+                    _is_equity_mpr = not str(sess.symbol or "").upper().endswith("-USD")
+                    _max_reentries = int(
+                        getattr(settings, "chili_momentum_micropullback_reentry_max", 3) or 3
+                    )
+                    if (
+                        _is_equity_mpr
+                        and st == STATE_LIVE_TRAILING
+                        and not le.get("micropullback_reentry_order_id")
+                        and not le.get("pyramid_order_id")  # never two adds in flight at once
+                    ):
+                        _mpr_count = int(le.get("micropullback_reentry_count") or 0)
+                        if _mpr_count >= _max_reentries:
+                            pass  # cap reached — no re-load (silently, not every tick noise)
+                        else:
+                            # COOLDOWN (pinned to >= 2*bar_seconds in the fill handler).
+                            _cool_ok = True
+                            _cool_raw = le.get("micropullback_reentry_cooldown_until_utc")
+                            if _cool_raw:
+                                try:
+                                    _cool_ok = datetime.utcnow() >= datetime.fromisoformat(str(_cool_raw))
+                                except (TypeError, ValueError):
+                                    _cool_ok = True
+                            if not _cool_ok:
+                                _emit(db, sess, "live_micro_pullback_reentry_blocked", {
+                                    "reason": "cooldown", "until": _cool_raw})
+                            else:
+                                # GUARD #2 cushion (knife defense) — only re-load when the
+                                # runner has ALREADY banked >= min_cushion_r * R0 AND the
+                                # stop is at/above the starter entry (breakeven+). A falling
+                                # knife never banks cushion ⇒ structurally cannot re-load.
+                                _es_m = le.get("entry_sizing") if isinstance(le.get("entry_sizing"), dict) else {}
+                                _d0m = _float_or_none(_es_m.get("stop_distance"))
+                                if _d0m is None or _d0m <= 0:
+                                    _d0m = max(0.0, float(avg) - float(pos["stop_price"])) or None
+                                _q0s = (
+                                    _float_or_none(pos.get("original_quantity"))
+                                    or _float_or_none(pos.get("quantity"))
+                                    or 0.0
+                                )
+                                _a0s = float(pos["avg_entry_price"])
+                                _R0_m = (float(_d0m) * float(_q0s)) if (_d0m and _q0s) else None
+                                _min_cush = float(
+                                    getattr(settings, "chili_momentum_pyramid_min_cushion_r", 1.0) or 1.0
+                                )
+                                _cushion_usd = (float(bid) - _a0s) * float(_q0s)
+                                _cushion_banked = bool(
+                                    _R0_m is not None and _R0_m > 0
+                                    and _cushion_usd >= _min_cush * _R0_m
+                                    and float(stop_px) >= _a0s
+                                )
+                                if not _cushion_banked:
+                                    pass  # no cushion -> no re-load (silent; the common case)
+                                else:
+                                    # Anti-Ross midday lull (parity with the pyramid add).
+                                    _lull_m = False
+                                    try:
+                                        from .market_profile import in_midday_lull as _mpr_lull
+                                        _lull_m = bool(_mpr_lull(sess.symbol))
+                                    except Exception:
+                                        _lull_m = False
+                                    # RATCHETING SHELF: max(starter entry, breakout level,
+                                    # last re-load's higher-low). Re-load N must hold above
+                                    # re-load N-1's dip, never the stale original breakout.
+                                    _shelf = _a0s
+                                    _bk = _float_or_none(le.get("breakout_level_price"))
+                                    if _bk is not None and _bk > _shelf:
+                                        _shelf = _bk
+                                    _last_shelf = _float_or_none(le.get("micropullback_last_shelf"))
+                                    if _last_shelf is not None and _last_shelf > _shelf:
+                                        _shelf = _last_shelf
+                                    # SESSION-SCOPED 15s micro-bar frame (NOT the 5d frame).
+                                    _bar_s_m = int(
+                                        getattr(settings, "chili_momentum_micropull_bar_seconds", 15) or 15
+                                    )
+                                    _df_mpr = _build_micro_bar_df(db, sess.symbol, bar_seconds=_bar_s_m)
+                                    from .entry_gates import micro_pullback_reentry_detect
+                                    from .candles import bounce_curl_from_df
+                                    _det = micro_pullback_reentry_detect(
+                                        _df_mpr,
+                                        shelf=_shelf,
+                                        max_dip_pct=float(
+                                            getattr(settings, "chili_momentum_micropullback_reentry_max_dip_pct", 0.04) or 0.04
+                                        ),
+                                    )
+                                    # Per-bar curl-conviction confirm (fail-SAFE to False).
+                                    _curl_ok = bounce_curl_from_df(_df_mpr)
+                                    if not (_det.get("fire") and _curl_ok):
+                                        pass  # no micro-pullback geometry this tick (silent)
+                                    elif _lull_m:
+                                        _emit(db, sess, "live_micro_pullback_reentry_blocked", {
+                                            "reason": "midday_lull"})
+                                    else:
+                                        _emit(db, sess, "live_micro_pullback_detected", {
+                                            "bounce_high": _det.get("bounce_high"),
+                                            "dip_low": _det.get("dip_low"),
+                                            "shelf": _shelf, "curl_ok": _curl_ok,
+                                        })
+                                        # FLOW GATE — route EVERY re-load through the SAME
+                                        # _entry_flow_veto VERBATIM (hard negative-side
+                                        # precondition: defer if True — never buy into
+                                        # selling, the 06-24 fix), THEN require POSITIVE
+                                        # confirmation (ofi & trade_flow turning up). The
+                                        # veto fails-OPEN on None; the positive-confirm
+                                        # fails-CLOSED on None (an extra BUY needs proof).
+                                        _mpr_ofi = None
+                                        _mpr_tf = None
+                                        try:
+                                            from .pipeline import _live_ofi_microprice as _mpr_ofi_fn
+                                            from .pipeline import _live_trade_flow as _mpr_tf_fn
+                                            _mpr_ofi, _ = _mpr_ofi_fn(sess.symbol, db=db)
+                                            _mpr_tf = _mpr_tf_fn(sess.symbol, db=db)
+                                            _mpr_ofi = None if _mpr_ofi is None else float(_mpr_ofi)
+                                            _mpr_tf = None if _mpr_tf is None else float(_mpr_tf)
+                                        except Exception:
+                                            _mpr_ofi = _mpr_tf = None
+                                        _ofi_floor = float(
+                                            getattr(settings, "chili_momentum_micropullback_reentry_ofi_thr", 0.30) or 0.30
+                                        )
+                                        _tf_floor = float(
+                                            getattr(settings, "chili_momentum_micropullback_reentry_trade_flow_thr", 0.20) or 0.20
+                                        )
+                                        _veto = _entry_flow_veto(_mpr_ofi, _mpr_tf, settings)
+                                        _pos_confirm = (
+                                            _mpr_ofi is not None and _mpr_tf is not None
+                                            and _mpr_ofi >= _ofi_floor and _mpr_tf >= _tf_floor
+                                        )
+                                        if _veto or not _pos_confirm:
+                                            _emit(db, sess, "live_micro_pullback_reentry_blocked", {
+                                                "reason": "flow",
+                                                "veto": bool(_veto),
+                                                "ofi": _mpr_ofi, "trade_flow": _mpr_tf,
+                                                "ofi_floor": _ofi_floor, "tf_floor": _tf_floor,
+                                            })
+                                        else:
+                                            # ADMISSION — route the re-load through the SAME
+                                            # risk_evaluator gate a NEW entry uses (kill-
+                                            # switch, per-broker + global daily-loss,
+                                            # drawdown, position cap, aggregate crypto risk).
+                                            # ABORT THE ADD on refusal — NEVER the exit.
+                                            _adm_ok_m, _adm_ev_m = runner_boundary_risk_ok(
+                                                db, sess, expected_move_bps=_expected_move_bps
+                                            )
+                                            if not _adm_ok_m:
+                                                _emit(db, sess, "live_micro_pullback_reentry_blocked", {
+                                                    "reason": "risk_admission",
+                                                    "severity": _adm_ev_m.get("severity"),
+                                                    "errors": _adm_ev_m.get("errors"),
+                                                })
+                                            elif not (_R0_m and _R0_m > 0):
+                                                _emit(db, sess, "live_micro_pullback_reentry_blocked", {
+                                                    "reason": "bad_R0"})
+                                            else:
+                                                # SIZE via the SAME machinery as the pyramid
+                                                # add: re-load risk budget = rho_reload * R0,
+                                                # at the guarded ask, liquidity-capped on
+                                                # $-vol, equity-relative notional ceiling.
+                                                _rho_m = float(
+                                                    getattr(settings, "chili_momentum_micropullback_reentry_risk_fraction", 0.30) or 0.30
+                                                )
+                                                _budget_m = _rho_m * _R0_m
+                                                _mpr_ask = float(ask) if (ask and float(ask) > 0) else float(bid)
+                                                _mpr_guard_ask = _mpr_ask * _adaptive_notional_guard_multiplier(
+                                                    expected_move_bps=_expected_move_bps
+                                                )
+                                                _inc_m = prod.base_increment if prod else 1.0
+                                                _mn_m = prod.base_min_size if prod else 1.0
+                                                _atr_m = _float_or_none(le.get("entry_stop_atr_pct")) or 0.0
+                                                _ceil_m = equity_relative_notional_cap(
+                                                    policy_float_cap(
+                                                        caps, "max_notional_per_trade_usd",
+                                                        settings.chili_momentum_risk_max_notional_per_trade_usd,
+                                                    ),
+                                                    normalize_execution_family(sess.execution_family),
+                                                )
+                                                try:
+                                                    from .universe import snapshot_dollar_volumes as _mpr_dvol_fn
+                                                    _mpr_dvol = (_mpr_dvol_fn([sess.symbol]) or {}).get(
+                                                        str(sess.symbol or "").strip().upper()
+                                                    )
+                                                except Exception:
+                                                    _mpr_dvol = None
+                                                _ceil_m = liquidity_capped_notional(_ceil_m, _mpr_dvol)
+                                                _qa_m, _qa_meta_m = compute_risk_first_quantity(
+                                                    entry_price=_mpr_guard_ask,
+                                                    atr_pct=_atr_m,
+                                                    max_loss_usd=_budget_m,
+                                                    max_notional_ceiling_usd=_ceil_m,
+                                                    base_increment=_inc_m,
+                                                    base_min_size=_mn_m,
+                                                    stop_atr_mult=float(params.get("stop_atr_mult") or 0.60),
+                                                )
+                                                if not _qa_m or _qa_m <= 0:
+                                                    _emit(db, sess, "live_micro_pullback_reentry_blocked", {
+                                                        "reason": "size_zero",
+                                                        "detail": _qa_meta_m.get("reason"),
+                                                        "budget_usd": round(_budget_m, 2),
+                                                    })
+                                                else:
+                                                    _mpr_limit_str = _fmt_limit_price_buy(_mpr_guard_ask)
+                                                    _mpr_cid = (
+                                                        f"chili_ml_mpr_{sess.id}_{uuid.uuid4().hex[:12]}"
+                                                    )
+                                                    try:
+                                                        from .market_profile import market_session_now as _mpr_sess_now
+                                                        _mpr_ext = _mpr_sess_now(sess.symbol) != "regular"
+                                                    except Exception:
+                                                        _mpr_ext = False
+                                                    _mpr_res = adapter.place_limit_order_gtc(
+                                                        product_id=product_id,
+                                                        side="buy",
+                                                        base_size=_fmt_base_size(_qa_m),
+                                                        limit_price=_mpr_limit_str,
+                                                        client_order_id=_mpr_cid,
+                                                        extended_hours=_mpr_ext,
+                                                        time_in_force="gfd",
+                                                    ) or {}
+                                                    if _mpr_res.get("ok") and _mpr_res.get("order_id"):
+                                                        le["micropullback_reentry_order_id"] = str(_mpr_res["order_id"])
+                                                        le["micropullback_reentry_limit_px"] = float(_mpr_guard_ask)
+                                                        le["micropullback_reentry_pending_R0"] = float(_R0_m)
+                                                        le["micropullback_prev_stop"] = float(stop_px)
+                                                        le["micropullback_pending_dip_low"] = _float_or_none(_det.get("dip_low"))
+                                                        le["micropullback_confirm_ofi"] = _mpr_ofi
+                                                        le["micropullback_confirm_trade_flow"] = _mpr_tf
+                                                        _commit_le(sess, le)
+                                                        _emit(db, sess, "live_micro_pullback_reentry_submitted", {
+                                                            "order_id": le["micropullback_reentry_order_id"],
+                                                            "client_order_id": _mpr_cid,
+                                                            "add_qty": float(_qa_m),
+                                                            "limit_price": _mpr_limit_str,
+                                                            "R0": float(_R0_m), "rho": _rho_m,
+                                                            "budget_usd": round(_budget_m, 2),
+                                                            "reentry_count": _mpr_count,
+                                                            "shelf": _shelf,
+                                                            "bounce_high": _det.get("bounce_high"),
+                                                            "dip_low": _det.get("dip_low"),
+                                                            "ofi": _mpr_ofi, "trade_flow": _mpr_tf,
+                                                            "stop_at_submit": float(stop_px),
+                                                        })
+                                                    else:
+                                                        _emit(db, sess, "live_micro_pullback_reentry_blocked", {
+                                                            "reason": "submit_failed",
+                                                            "error": _mpr_res.get("error"),
+                                                        })
+                except Exception:
+                    # Fail-safe: any re-load error is swallowed so the exit path below
+                    # ALWAYS runs. The re-load NEVER blocks/delays/loosens an exit.
+                    _log.debug("[momentum_live] micro-pullback re-entry block error", exc_info=True)
+
         if bid > stop_px and le.pop("stop_breach_pending_utc", None) is not None:
             # breach -> recovery between reads = flicker dodged; clear the marker
             # AND the L2 chop-hold counter (the shake-out recovered — exactly the

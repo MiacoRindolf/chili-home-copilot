@@ -1185,6 +1185,87 @@ def _entry_extension_veto(
         return False  # any error -> fail-open (never block an entry on a bug)
 
 
+def micro_pullback_reentry_detect(
+    df: Any,
+    *,
+    shelf: float,
+    max_dip_pct: float,
+    ema_span: int = 9,
+) -> dict[str, Any]:
+    """Ross MICRO-PULLBACK re-load geometry on the SESSION-scoped 15s micro-bar frame
+    (NOT the 5d frame — the caller passes the ``_build_micro_bar_df`` output). PURE; no
+    I/O. Returns ``{"fire": bool, "reason": str, "bounce_high": float|None,
+    "dip_low": float|None}``.
+
+    A micro-pullback re-load fires iff ALL hold (price-structure leg; the FLOW gate +
+    cushion + caps + cooldown are applied by the caller):
+      * the 9-EMA stack is RISING (ema9[-1] >= ema9[-2] — up-structure intact);
+      * a higher-low DIP printed: the recent window made a local high (bounce_high),
+        then a dip_low ABOVE the ratcheting ``shelf`` (max(starter entry, breakout, or
+        the last re-load's higher-low) — the caller persists + ratchets the shelf);
+      * the dip is SHALLOW: (bounce_high - dip_low) / bounce_high <= max_dip_pct (a deep
+        rollover is NOT a micro-pullback);
+      * the LAST bar CURLS BACK UP: it is a green bounce-curl candle (the caller checks
+        ``bounce_curl_from_df`` for the per-bar conviction shape) AND prints a higher-low
+        (last bar's low >= dip_low - epsilon, the dip held).
+
+    FAIL-SAFE / SUPERSET: a None/empty/short (<10 bars) frame ⇒ no fire (the caller's
+    micro-bar build already returns None on sparse tape so a no-tape name never re-loads).
+    Any error ⇒ no fire. ADDITIVE: never consulted when the flag is OFF.
+    docs/DESIGN/MOMENTUM_LANE.md"""
+    out: dict[str, Any] = {"fire": False, "reason": "", "bounce_high": None, "dip_low": None}
+    try:
+        if df is None or getattr(df, "empty", True) or len(df) < 10:
+            out["reason"] = "frame_too_sparse"
+            return out
+        cols = {x.lower(): x for x in df.columns}
+        highs = [float(x) for x in df[cols["high"]].tolist()]
+        lows = [float(x) for x in df[cols["low"]].tolist()]
+        closes = [float(x) for x in df[cols["close"]].tolist()]
+        _shelf = float(shelf)
+        # Rising 9-EMA stack (up-structure intact).
+        from .candles import _ema as _ema_helper
+        ema = _ema_helper(closes, int(ema_span))
+        if len(ema) < 2 or not (ema[-1] >= ema[-2] - 1e-12):
+            out["reason"] = "ema_not_rising"
+            return out
+        # Bounce-high = max over the recent window; dip_low = the lowest low AFTER that
+        # high (the pullback that followed the local high).
+        win = min(len(highs), 8)
+        seg_h = highs[-win:]
+        seg_l = lows[-win:]
+        hi_rel = max(range(len(seg_h)), key=lambda i: seg_h[i])
+        bounce_high = seg_h[hi_rel]
+        if hi_rel >= len(seg_l) - 1:
+            out["reason"] = "no_dip_after_high"      # high is the last bar — no pullback yet
+            return out
+        dip_low = min(seg_l[hi_rel + 1:])
+        out["bounce_high"] = bounce_high
+        out["dip_low"] = dip_low
+        if bounce_high <= 0:
+            out["reason"] = "bad_bounce_high"
+            return out
+        # Higher-low dip must HOLD the ratcheting shelf (not a deep rollover below it).
+        if dip_low < _shelf - 1e-9:
+            out["reason"] = "dip_below_shelf"
+            return out
+        # Shallow-dip cap: a deep rollover is not a micro-pullback.
+        dip_pct = (bounce_high - dip_low) / bounce_high
+        if dip_pct > float(max_dip_pct) + 1e-12:
+            out["reason"] = "dip_too_deep"
+            return out
+        # The dip must HOLD on the last (curl) bar — its low at/above dip_low.
+        if lows[-1] < dip_low - 1e-9:
+            out["reason"] = "last_bar_undercut_dip"
+            return out
+        out["fire"] = True
+        out["reason"] = "micro_pullback_curl"
+        return out
+    except Exception:
+        out["reason"] = "error"
+        return out  # any error -> no fire (an extra BUY needs proof)
+
+
 def first_pullback_break(
     df: pd.DataFrame,
     *,

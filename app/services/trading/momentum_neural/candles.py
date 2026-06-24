@@ -65,6 +65,40 @@ def is_topping_tail(
     return True
 
 
+def is_bounce_curl_candle(
+    o: float, h: float, l: float, c: float,
+    *, min_close_pos: float = 0.55,
+) -> bool:
+    """The CURL-BACK-UP bar after a micro-pullback dip: a GREEN candle that closes in
+    the upper part of its range (the bounce is reasserting). Distinct from the BREAK
+    candle (``is_strong_bull_break_candle``) — this is the re-load trigger Ross buys
+    on the dip-and-curl during a run, so the geometry is the same conviction shape but
+    the SEMANTICS are the bounce off a higher-low, not the initial break.
+
+    Green (close >= open) AND close in the upper ``min_close_pos`` of the range. The
+    higher-low / shelf-hold / shallow-dip checks live in the caller (they need the
+    multi-bar pullback context); this is the per-bar conviction confirm. Fail-safe: a
+    zero-range bar yields False (NO fire — an extra discretionary BUY needs proof,
+    opposite of the break candle's fail-open). Range-relative, no fixed cents."""
+    rng, _body, _upper, _lower = _ohlc(o, h, l, c)
+    if rng <= 0:
+        return False
+    if float(c) < float(o):                                  # red curl -> no reassert
+        return False
+    if (float(c) - float(l)) / rng < float(min_close_pos):   # closed weak (low in range)
+        return False
+    return True
+
+
+def bounce_curl_from_df(df: Any, **kw: Any) -> bool:
+    """``is_bounce_curl_candle`` on the last bar of ``df``; False (fail-SAFE, NO fire)
+    when the bar is unreadable — the OPPOSITE of ``break_candle_ok_from_df``'s fail-
+    open, because a re-load is an extra discretionary BUY that needs proof, not the
+    benefit of the doubt. Thin/unreadable micro-bars therefore never fire a re-load."""
+    ohlc = _last_ohlc_from_df(df)
+    return False if ohlc is None else is_bounce_curl_candle(*ohlc, **kw)
+
+
 def _last_ohlc_from_df(df: Any) -> tuple[float, float, float, float] | None:
     """(o,h,l,c) of the last bar of an OHLCV frame, or None if unavailable."""
     try:
