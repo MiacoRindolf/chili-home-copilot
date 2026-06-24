@@ -37,7 +37,7 @@ DEFAULT_FEATURES = [
     "spread_bps", "atr_pct", "stop_pct_eff", "dollar_vol", "liq_mult",
     "above_vwap", "is_backside", "premarket",
 ]
-MACRO_FEATURES = ["spy_trend", "iwm_trend", "mkt_vol", "bear_x_vol"]
+MACRO_FEATURES = ["spy_trend", "iwm_trend", "mkt_vol", "bear_x_vol", "vix_slope", "fomc_even_week"]
 
 # Follow-through label = the trade made at least its OWN risk back (run_r >= 1.0). 1R is the
 # RISK UNIT (entry-stop distance) — the natural instrument-relative breakeven, NOT a tunable cap.
