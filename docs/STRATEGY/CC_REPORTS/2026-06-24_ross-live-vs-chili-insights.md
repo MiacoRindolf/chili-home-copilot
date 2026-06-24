@@ -167,6 +167,112 @@ lift (a new news-data integration) — this is why #1 is NOT a same-day flag-fli
 
 ---
 
+## ⭐ REGRESSION AUDIT — "bakit puro talo recently vs before?" (operator, 2026-06-24)
+
+Pulled momentum-lane realized PnL by day (06-07 → 06-24) + correlated with the git change timeline. FINDING:
+the live lane has been **net-losing the ENTIRE 18-day window** — only ONE green day (06-16 +$161) in 13 trading
+days. Daily: 06-07 −$136, 06-12 −$79, 06-15 −$59, 06-16 +$161, **06-17 −$843**, **06-18 −$324**, 06-19 −$23,
+06-22 −$90, 06-23 −$136, 06-24 −$74. Win rate structurally LOW (~15-25%).
+
+NOT a recent regression from a profitable state. What actually happened:
+1. The lane started **FILLING / trading live more** — the long-standing "no-fill" problem was fixed + the Agentic
+   equity rail went LIVE ~06-22 (#779-799). Before: barely filled (≈$0 flat). After: fills at NEGATIVE
+   expectancy → fills = losses. From the operator's view it "got worse" because it finally started TRADING
+   (and losing) instead of sitting flat.
+2. The big damage = **tail losses**: 06-17 −$843 + 06-18 −$324 = the equity stop-blow-through / chase / into-
+   selling pattern (the exact failure modes today's defensive bundle + the #769 max-loss circuit target).
+3. **06-23 was a 16+ commit "learning" burst** (meta-label de-rate, self-critic, research-proposer, feature
+   screen, macro features) — mostly INERT / log-only / de-rate. Heavy SELF-MEASUREMENT instrumentation, but the
+   per-trade EDGE did not improve and the lane kept losing.
+
+HONEST LESSON (ties to [[feedback_evolve_not_devolve]]): this is NOT devolution of a profitable system — it is
+MANY changes shipped without proven live net-positive edge. The "prove every change net-positive (parity +
+measure before/after)" discipline lapsed: the lane was instrumented heavily while edge stayed unproven. The fix
+is NOT to revert — it is to (a) STOP the bleeding (today's defensive vetoes: into-selling, chase, spurious-halt),
+then (b) build proven EDGE (pullback-entry #2, news-conviction #1, the Ross course study) and PROVE each net-
+positive in replay+live before the next, rather than stacking more inert learning machinery.
+
+## ⭐⭐ CRITICAL — LEARNING-DATA INTEGRITY: CHILI's recorded PnL is contaminated → the learning trains on bad labels
+
+Operator (2026-06-24) flagged the recorded-PnL table is inaccurate because of the session bugs. CONFIRMED
+against BROKER TRUTH (RH agentic 674153143, get_realized_pnl):
+- Broker: 06-22 −$67.18 (5 trades), 06-23 −$125.92 (23), 06-24 −$73.20 (13) = **−$266.30 / 41 closing trades**.
+- CHILI's recorded realized_pnl_usd: ~−$90 / −$136 / −$74, and only ~4 / 19 / 10 trades (~33 total).
+- => CHILI is MISSING ~8 trades and is off by $10-25/day. The session records (phantom/stale/reconciliation
+  bugs — RUN phantom live_trailing, UBXG stale-cancelled, double-counts) under-record + mis-label outcomes.
+
+TWO truths, both important:
+1. The lane IS genuinely net-losing on BROKER TRUTH (−$266 / 3d, all red) — NOT just buggy data. No proven edge.
+2. But the per-trade WIN/LOSS LABELS CHILI feeds its LEARNING system (meta-label, self-critic, feature screen)
+   are contaminated — some real broker wins likely recorded as losses/scratches. So the entire 06-23 learning
+   buildout trains on GARBAGE LABELS → it cannot improve regardless of how much machinery is added.
+
+CRITICAL FIX (new, high priority): RECONCILE every trade's outcome against the BROKER's realized P&L (the
+authority — get_realized_pnl / per-fill ledger) BEFORE it is used as a learning label or PnL stat. Until the
+outcome labels are broker-true, (a) all PnL dashboards/audits are unreliable, and (b) the learning is poisoned.
+This sits UPSTREAM of edge-building: clean labels first, then the meta-label/self-critic can actually learn.
+Relates to the session-recycling / reconciliation bug cluster (RUN/UBXG/PLSM phantoms) — same root: CHILI's
+session-state diverges from broker truth.
+
+## ⭐⭐⭐ BROKER-TRUTH RECONCILIATION DEPLOYED (a677aef, mig309) — divergence report = the contamination is 98%
+
+Shipped the #1 fix (operator-authorized): per-trade outcomes now reconciled against broker fills; learning reads
+an authoritative broker-true label (READ flag OFF until operator inspects; WRITE pass ON). First reconcile pass
+over 8,506 momentum outcomes (30d):
+- reconciled=55 ; unreconciled_no_fills=**8,339 (98%)** ; phantom_no_broker_match=88 ; residual_open=22 ; fee_unconfirmed=2
+- reconciled_legacy_sum=$203.32 (CHILI) vs reconciled_broker_sum=$323.68 (BROKER) → divergence **+$120.36**
+
+TWO findings, both validating the operator:
+1. **The learning was ~98% POISONED** — 8,339 of 8,506 "outcomes" are phantom NO-FILLS (sessions that never
+   filled at the broker) fed to the meta-label/self-critic as labels. THIS (not merely "no edge") is why the
+   learning never improved: it trained on 98% noise. Now EXCLUDED (never fabricated as $0).
+2. **Of the 55 broker-matched real trades, the broker shows +$323.68 vs CHILI's recorded +$203.32 — CHILI
+   UNDER-recorded real outcomes by $120.** Confirms "my broker wins weren't captured."
+
+REFRAME: the earlier "net-losing 18d / no edge" read was built on contaminated records (98% phantom + $120
+under-record on the matched set), so the lane's TRUE edge was UNKNOWABLE from that data. Don't double down on
+"no edge" — measure it CLEAN now. CAVEAT: the 55 reconciled are the matched subset, NOT the full lane PnL (recent
+agentic = -$266 broker); not a profitability claim. The READ flag stays OFF (flipping it changes daily-loss/
+giveback gate inputs = trading-behavior) — operator inspects the divergence distribution, then decides.
+Follow-up (task_f0e23c6d): route the remaining legacy-label readers (family_regime_stats/feedback_query/ab_test)
+through the accessor before relying on the READ flag for fully-clean learning.
+
+## ⭐ ROSS RECAP VIDEO (yt D8Guwf84eAA "The Blue Sky Day Trading Pattern", 2026-06-24) — teaches today's exact names
+
+Ross's own recap of TODAY (PLSM/FRTT/ROC — the exact names CHILI engaged). Transcript:
+D:\CHILI-Docker\chili-data\ross_stream\yt_BlueSky_D8Guwf84eAA.txt. KEY for CHILI:
+
+1. **BLUE-SKY setup (NEW edge):** a stock breaking its ALL-TIME HIGH has NO overhead resistance → "blue sky is
+   the limit" → squeezes fast. PLSM broke ATH @ $10.28 → +100% to $20. Confluence = blue-sky + recent-IPO-
+   breakout + low-volume parabolic. CHILI has daily_levels S&R but NO all-time-high-breakout / blue-sky
+   detection, and no recent-IPO-breakout stock type. NEW EDGE: detect ATH-breakout (price clears the max of all
+   available history with no resistance above) + tag recent IPOs → a high-conviction long setup.
+2. **MICRO-PULLBACK entry (validates + refines #2):** Ross buys EVERY micro-pullback bounce during the squeeze
+   (PLSM: 5→6→9→11→12→18→19 each on a micro-pullback; FRTT: micro-pullback under 4.50, dip 3.90, curl up →
+   punch). This is exactly the pullback-entry/re-entry #2 — refine to SUB-MINUTE micro-pullbacks (the 15s bars)
+   + re-enter on each, scale out on the curl. THE method to build.
+3. **The failure is the ENTRY METHOD, not which name (CORRECTED — an earlier draft wrongly said "skip the
+   leader"; operator caught it):** Ross DID trade PLSM (the leader) in his MAIN account, riding MANY micro-
+   pullback entries (5→6→9→11→12→18→19). He skipped it ONLY in the $2k SMALL account — a SIZE constraint
+   (too few shares at $10-20), NOT a "leaders are bad" rule. CHILI's real failure was NOT trading PLSM — it was
+   entering it ONCE, LATE, into SELLING (trade_flow ≈ -0.5) instead of riding the micro-pullback bounces. EDGE:
+   trade the leader AND the sympathy names via MICRO-PULLBACK BOUNCES (buy each higher-low on the squeeze, scale
+   out, re-enter) — CHILI's ~$13k account is big enough for PLSM-priced names (unlike Ross's $2k). The flow-veto
+   + micro-pullback together = enter on the BOUNCE (flow turning back up), never a late chase into a fade. Do
+   NOT build a skip-the-leader / sympathy-only bias — the micro-pullback method applies to leaders AND sympathy.
+   (Sympathy detection E7 is an ADDITIONAL opportunity, not a replacement.)
+4. **Continuation/exit read (validates flow-veto + VWAP):** FRTT failed because "light volume UP, heavy volume
+   DOWN, then back below VWAP." = exactly the trade_flow/OFI sell signal (our flow-veto) + a VWAP-loss exit.
+   Confirms the flow-veto direction; add a VWAP-loss exit if not present.
+5. **Float-from-FILING (selection refinement):** PLSM's data showed 50M float but the real float was ~3.5M (new-
+   IPO data wrong) — Ross checks the filing. CHILI's low-float pillar should verify recent-IPO float against the
+   filing (the low-float is the explosive driver; bad vendor float mis-ranks it).
+
+NEW edge builds to add to the backlog (Ross-validated, high priority): E-BLUESKY (ATH-breakout + recent-IPO
+detection), E-MICROPULLBACK (the precise micro-pullback re-entry = the real #2), plus refinements to E7
+(sympathy-after-blue-sky) and the float-from-filing selection. These came from Ross teaching TODAY's tape — the
+highest-fidelity source.
+
 ## Recurring theme
 
 CHILI's SELECTION is good (it sees the same movers, excludes warrants smartly). The losses come from EXECUTION +

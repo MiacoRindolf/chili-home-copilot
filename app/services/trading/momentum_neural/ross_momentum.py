@@ -489,6 +489,7 @@ def front_side_state(
     top_range_pct: float = 0.85,
     retrace_veto: float = 0.66,
     ext_sigma: float = 2.0,
+    rollover_min_range_frac: float = 0.02,
 ) -> FrontSideState:
     """Front-side vs backside lifecycle read of TODAY's session move (the QXL/NXTS fix).
 
@@ -501,16 +502,25 @@ def front_side_state(
     ``is_backside`` (hard veto; ANY of) =
       * below session VWAP (Ross: below-VWAP is inherently bearish — the SAGT skip), OR
       * retraced > ``retrace_veto`` of the day's up-move from the open (already faded), OR
-      * in the top ``top_range_pct`` of the day-range AND > ``ext_sigma`` above VWAP in the
-        name's OWN close-vs-VWAP sigma (the QXL chase).
-    CRITICAL: a fresh breakout that broke to a new high but is NEAR VWAP has a LOW
-    ``vwap_dist_sigma`` -> NOT ``chasing_top`` -> NOT vetoed. So this does NOT kill the
-    NXTS-type front-side entry the way a naive 'near-HOD' veto would (that mistake killed
-    the NVCT winner in the L3 study).
+      * EXTENDED-AND-ROLLING: in the top ``top_range_pct`` of the day-range AND > ``ext_sigma``
+        above VWAP in the name's OWN close-vs-VWAP sigma AND the move has ROLLED OVER — the HOD
+        is NOT the most recent bar and a confirmed LOWER HIGH has formed after the HOD bar
+        (best post-HOD high below the HOD by > ``rollover_min_range_frac`` of the day-range).
+        That STRUCTURE leg is the discriminator (the QXL chase): pure extension alone does not
+        separate a fresh thrust from a rolled-over top.
+    CRITICAL: a fresh front-side thrust making (or just breaking to) a NEW HIGH has its HOD on
+    (or very near) the most recent bar -> NO confirmed lower-high -> NOT ``chasing_top`` ->
+    NOT vetoed, even when it sits top-of-range AND far above VWAP (low-noise clean climbs blow
+    ``vwap_dist_sigma`` up). Only a name that is extended AND has started to FADE off the top is
+    ``chasing_top``. This is why the recalibration uses an OFF-THE-HIGH structure condition, not
+    a brittle ``ext_sigma`` bump — and does NOT kill the NXTS-type front-side entry (that mistake
+    killed the NVCT winner in the L3 study).
 
     Adaptive: ``vwap_dist_sigma`` floats with the name's own close-vs-VWAP dispersion;
-    ``day_range_pos``/``retrace`` are name-relative ratios. The three knobs are the only
-    documented bases. Pure (operates on the session OHLCV frame the caller already fetched;
+    ``day_range_pos``/``retrace`` are name-relative ratios; the rollover lower-high test is
+    measured as a fraction of the name's OWN day-range (``rollover_min_range_frac``), so it has
+    no fixed-price magnitude. The four knobs are the only documented bases. Pure (operates on
+    the session OHLCV frame the caller already fetched;
     premarket-inclusive). Thin/degenerate data -> fail-OPEN (not backside, neutral score),
     preserving current arm/entry behaviour.
     """
@@ -556,8 +566,20 @@ def front_side_state(
     retrace_from_hod = ((hod - last) / up_move) if up_move > 0 else 0.0
     below_vwap = (vwap is not None) and (last < vwap)
     faded = retrace_from_hod > float(retrace_veto)
+    # OFF-THE-HIGH structure: the move has ROLLED OVER iff the HOD is NOT the most recent bar
+    # AND a confirmed LOWER HIGH has formed after the HOD bar (the best post-HOD high sits below
+    # the HOD by more than rollover_min_range_frac of the day-range). A name AT/NEAR a fresh HOD
+    # (HOD on the last bar, or only a wick below) is NEVER rolled_over -> NEVER chasing_top, so a
+    # clean front-side thrust to a new high is kept even when extended. Pure structure, range-
+    # relative (no fixed-price magnitude) -> not the brittle ext_sigma-bump path.
+    hod_idx = max(i for i in range(n) if highs[i] == hod)
+    rolled_over = False
+    if hod_idx < (n - 1):
+        post_hod_high = max(highs[hod_idx + 1:])
+        rolled_over = ((hod - post_hod_high) / rng) > float(rollover_min_range_frac)
     chasing_top = (day_range_pos >= float(top_range_pct)
-                   and dist_sigma is not None and dist_sigma >= float(ext_sigma))
+                   and dist_sigma is not None and dist_sigma >= float(ext_sigma)
+                   and rolled_over)
     is_backside = below_vwap or faded or chasing_top
     reason = ("below_vwap" if below_vwap else "already_faded" if faded
               else "chasing_top" if chasing_top else "front_side")
@@ -576,5 +598,6 @@ def front_side_state(
         vwap_dist_sigma=(round(dist_sigma, 3) if dist_sigma is not None else None),
         retrace_from_hod=round(retrace_from_hod, 4), day_range_pos=round(day_range_pos, 4),
         reason=reason,
-        debug={"hod": round(hod, 6), "lod": round(lod, 6), "open": round(sess_open, 6), "last": round(last, 6)},
+        debug={"hod": round(hod, 6), "lod": round(lod, 6), "open": round(sess_open, 6),
+               "last": round(last, 6), "rolled_over": bool(rolled_over)},
     )

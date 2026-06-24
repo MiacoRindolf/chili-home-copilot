@@ -1785,11 +1785,31 @@ def pullback_break_confirmation(
         try:
             from .ross_momentum import front_side_state
 
-            _fs = front_side_state(_today_session_frame(df))
+            _sess = _today_session_frame(df)
+            _fs = front_side_state(_sess)
             if getattr(_fs, "is_backside", False):
-                debug["front_side_state"] = getattr(_fs, "reason", "backside")
-                debug["front_side_score"] = getattr(_fs, "front_side_score", None)
-                return False, "backside_lifecycle_veto", debug
+                # LIVE-TICK NEW-HIGH carve-out for chasing_top ONLY. front_side_state reads
+                # COMPLETED bars; on a tick-break entry the live_price can be breaking to a
+                # NEW high ABOVE the completed-bar HOD. The chasing_top read keys off an
+                # OFF-THE-HIGH (rolled-over) structure in the completed bars — but a live tick
+                # making a fresh high IS the new high, so that rolled-over read is stale and
+                # the name is front-side RIGHT NOW. Skip the veto in that exact case (mirrors
+                # front_side_state's own 'fresh HOD is never chasing_top' rule, extended to the
+                # live tick the frame can't see). below_vwap / already_faded stay HARD vetoes —
+                # a live tick over the bar-HOD does not undo being below VWAP or deeply faded.
+                _reason = getattr(_fs, "reason", "backside")
+                _live_new_high = False
+                if _reason == "chasing_top" and live_price is not None:
+                    try:
+                        _frame_hod = float(_sess["High"].astype(float).max())
+                        _live_new_high = float(live_price) > _frame_hod
+                    except (TypeError, ValueError, KeyError):
+                        _live_new_high = False
+                if not _live_new_high:
+                    debug["front_side_state"] = _reason
+                    debug["front_side_score"] = getattr(_fs, "front_side_score", None)
+                    return False, "backside_lifecycle_veto", debug
+                debug["front_side_state_live_new_high"] = _reason
         except (TypeError, ValueError, AttributeError, KeyError):
             pass  # thin/degenerate frame or other error -> fail-open (never block on a bug)
 

@@ -104,6 +104,35 @@ def _prior_runup_day(n=30):
     return np.linspace(10.0, 20.0, n), np.full(n, 1000.0)
 
 
+def _blowoff_chasing_top_day():
+    """A GENUINE extended-AND-ROLLING blow-off (the QXL chase the recalibration KEEPS catching):
+    a long flat base drags the cumulative VWAP low, a parabolic spike makes the HOD, then the
+    name comes OFF the high making confirmed LOWER highs. Last close is still top-of-range AND
+    far above VWAP (high vwap_dist_sigma) AND a lower high has formed after the HOD ->
+    front_side_state reads is_backside=True reason='chasing_top'. Distinct from a CLEAN
+    new-high thrust (HOD on the last bar -> NOT rolled over -> NOT chasing_top)."""
+    base = np.full(18, 10.0)
+    up = np.array([11.0, 13.0, 16.0, 19.0, 20.0])    # parabolic peak (HOD) at 20
+    roll = np.array([19.2, 19.4, 19.3])              # confirmed lower highs AFTER the HOD
+    closes = np.concatenate([base, up, roll])
+    vols = np.full(len(closes), 1000.0)
+    return closes, vols
+
+
+def _clean_new_high_thrust_day():
+    """A CLEAN front-side thrust that breaks to a NEW HIGH on the most recent bar: long base,
+    then a steady climb to a fresh HOD as the LAST bar. Top-of-range AND (low-noise) far above
+    VWAP -> the OLD chasing_top would have mis-vetoed it (the over-veto bug). With the
+    OFF-THE-HIGH recalibration the HOD is the last bar -> no lower high -> NOT chasing_top ->
+    NOT vetoed. This is the canonical clean breakout that MUST pass with the flag ON."""
+    base = np.full(18, 10.0)
+    climb = np.array([11.0, 13.0, 16.0, 19.0, 22.0])  # fresh HOD on the LAST bar
+    closes = np.concatenate([base, climb])
+    vols = np.full(len(closes), 1000.0)
+    vols[-1] = 4000.0
+    return closes, vols
+
+
 # --------------------------------------------------------------------------- #
 # Direct unit tests of the slice helper.
 # --------------------------------------------------------------------------- #
@@ -357,3 +386,112 @@ def test_dip_buy_deep_reclaim_exempt_from_e1(monkeypatch):
     df = _entry_frame(closes, vols)
     ok, reason, debug = pullback_break_confirmation(df, entry_interval="1m")
     assert reason != "backside_lifecycle_veto"
+
+
+# --------------------------------------------------------------------------- #
+# (6) CHASING-TOP RECALIBRATION — the OFF-THE-HIGH structure discriminator (the flip-ON
+# fix). A GENUINE extended-AND-ROLLING blow-off (top-of-range, far above VWAP, made a LOWER
+# high after the HOD) is STILL vetoed; a CLEAN front-side thrust to a NEW HIGH (HOD on the
+# last bar, equally top-of-range + far above VWAP) is NOT — even though pure extension cannot
+# tell them apart. This is what lets the E1 flag ship ON without killing clean breakouts.
+# --------------------------------------------------------------------------- #
+def test_chasing_top_blowoff_still_vetoed(monkeypatch):
+    _patch_trigger_pass(monkeypatch)
+    monkeypatch.setattr(settings, "chili_momentum_backside_veto_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_explosive_floor_enabled", False, raising=False)
+
+    closes, vols = _blowoff_chasing_top_day()      # extended AND rolled over -> chasing_top
+    df = _entry_frame(closes, vols)                 # 5-day frame; the slice reads TODAY only
+
+    # front_side_state (on the today-slice) reads the genuine blow-off as chasing_top.
+    assert front_side_state(_today_session_frame(df)).reason == "chasing_top"
+
+    ok, reason, debug = pullback_break_confirmation(df, entry_interval="1m")
+    assert ok is False
+    assert reason == "backside_lifecycle_veto"
+    assert debug.get("front_side_state") == "chasing_top"
+
+
+def test_clean_new_high_thrust_not_vetoed_with_flag_on(monkeypatch):
+    # The canonical CLEAN breakout: a fresh new high on the most recent bar, top-of-range AND
+    # far above VWAP (the exact shape the OLD chasing_top over-vetoed). With the recalibration
+    # it is NOT rolled over -> NOT chasing_top -> NOT vetoed, even with the flag ON.
+    _patch_trigger_pass(monkeypatch)
+    monkeypatch.setattr(settings, "chili_momentum_backside_veto_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_explosive_floor_enabled", False, raising=False)
+
+    closes, vols = _clean_new_high_thrust_day()
+    df = _entry_frame(closes, vols)
+
+    fs = front_side_state(_today_session_frame(df))
+    assert fs.day_range_pos >= 0.85                          # top of range
+    assert fs.vwap_dist_sigma is not None and fs.vwap_dist_sigma >= 2.0   # far above VWAP
+    assert fs.reason == "front_side"                         # but a FRESH high -> not chasing_top
+
+    ok, reason, debug = pullback_break_confirmation(df, entry_interval="1m")
+    assert reason != "backside_lifecycle_veto"               # the over-veto bug is gone
+
+
+# --------------------------------------------------------------------------- #
+# (7) LIVE-TICK NEW-HIGH carve-out. front_side_state reads COMPLETED bars; a tick-break
+# entry can fire with a live_price ABOVE the completed-bar HOD (the live tick IS the fresh
+# new high). The rolled-over read is then stale -> the chasing_top veto must be SKIPPED.
+# But the carve-out is chasing_top-ONLY and gated on live_price > frame-HOD: a blow-off
+# whose live tick does NOT exceed the bar HOD is STILL vetoed (no hole opened), and a
+# below-VWAP / faded backside is NEVER reprieved by a live tick.
+# --------------------------------------------------------------------------- #
+def test_chasing_top_live_tick_new_high_not_vetoed(monkeypatch):
+    # The first-pullback tick-break case: the completed bars rolled over off the HOD
+    # (chasing_top) but the live_price breaks to a NEW high above the bar HOD -> front-side
+    # RIGHT NOW -> the veto is skipped (the test_first_pullback ARM-then-tick regression).
+    _patch_trigger_pass(monkeypatch)
+    monkeypatch.setattr(settings, "chili_momentum_backside_veto_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_explosive_floor_enabled", False, raising=False)
+
+    closes, vols = _blowoff_chasing_top_day()
+    df = _entry_frame(closes, vols)
+    assert front_side_state(_today_session_frame(df)).reason == "chasing_top"  # completed-bar read
+
+    frame_hod = float(_today_session_frame(df)["High"].astype(float).max())
+    ok, reason, debug = pullback_break_confirmation(
+        df, entry_interval="1m", live_price=frame_hod * 1.05,   # decisive NEW high
+    )
+    assert reason != "backside_lifecycle_veto"                  # carve-out skips the veto
+    assert debug.get("front_side_state_live_new_high") == "chasing_top"
+
+
+def test_chasing_top_live_tick_below_hod_still_vetoed(monkeypatch):
+    # Same blow-off, but the live tick does NOT exceed the completed-bar HOD -> still an
+    # extended-and-rolling top -> STILL vetoed (the carve-out opens no hole).
+    _patch_trigger_pass(monkeypatch)
+    monkeypatch.setattr(settings, "chili_momentum_backside_veto_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_explosive_floor_enabled", False, raising=False)
+
+    closes, vols = _blowoff_chasing_top_day()
+    df = _entry_frame(closes, vols)
+    frame_hod = float(_today_session_frame(df)["High"].astype(float).max())
+    ok, reason, debug = pullback_break_confirmation(
+        df, entry_interval="1m", live_price=frame_hod * 0.98,   # below the bar HOD
+    )
+    assert ok is False
+    assert reason == "backside_lifecycle_veto"
+    assert debug.get("front_side_state") == "chasing_top"
+
+
+def test_below_vwap_not_reprieved_by_live_new_high(monkeypatch):
+    # The carve-out is chasing_top-ONLY: a below-VWAP / faded backside is a HARD veto that a
+    # live tick over the bar HOD does NOT undo (being below VWAP is bearish regardless).
+    _patch_trigger_pass(monkeypatch)
+    monkeypatch.setattr(settings, "chili_momentum_backside_veto_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_explosive_floor_enabled", False, raising=False)
+
+    closes, vols = _faded_backside_day()
+    df = _entry_frame(closes, vols)
+    assert front_side_state(_today_session_frame(df)).reason in ("below_vwap", "already_faded")
+
+    frame_hod = float(_today_session_frame(df)["High"].astype(float).max())
+    ok, reason, debug = pullback_break_confirmation(
+        df, entry_interval="1m", live_price=frame_hod * 1.10,   # a live new high
+    )
+    assert ok is False
+    assert reason == "backside_lifecycle_veto"                  # still vetoed (not chasing_top)

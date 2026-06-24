@@ -2896,9 +2896,9 @@ class Settings(BaseSettings):
     # Front-side, unknown, or thin data ⇒ NO change (fail-open). Distinct from the
     # point-in-time MACD/EMA _detect_back_side gate (rollover), which still runs.
     chili_momentum_backside_veto_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BACKSIDE_VETO_ENABLED"),
-        description="E1: veto an entry when the SESSION-anchored front_side_state reads backside (post-peak/declining lifecycle). Fail-open on unknown/thin data. KILL-SWITCH: False -> byte-identical. STAYS OFF: front_side_state.chasing_top over-vetoes CLEAN front-side new-high breakouts (vwap_dist_sigma blows up on low-noise trends) — needs recalibration before flip-ON. The today-session frame fix is landed/correct.",
+        description="E1: veto an entry when the SESSION-anchored front_side_state reads backside (post-peak/declining lifecycle). Fail-open on unknown/thin data. KILL-SWITCH: False -> byte-identical. ON by default: chasing_top recalibrated to an OFF-THE-HIGH STRUCTURE condition (extended AND a confirmed lower-high after the HOD) so a CLEAN front-side new-high thrust (HOD on the most recent bar) is never vetoed — only an extended-AND-rolling blow-off top is. The today-session frame fix is landed/correct.",
     )
     # E3 — EXPLOSIVE-FLOOR HARD GATE. Selection ranks by within-batch PERCENTILE, so on a
     # dull tape the best-of-a-dull-batch ranks #1 and arms a non-explosive name. Ross's
