@@ -362,6 +362,40 @@ def score_viability(
     except (TypeError, ValueError, AttributeError):
         pass
 
+    # E2: CATALYST GRADING + WEAK HARD GATE (Ross course study, build_order #3). The
+    # existing catalyst tilt above boosts ANY catalyst; this GRADES the type. A WEAK
+    # catalyst (dilution/compliance/legal — Ross's fade predictors) is SUPPRESSED: a
+    # negative tilt AND dropped from LIVE eligibility (the hard gate — a diluting low-float
+    # is not a live Ross long no matter how it ranks). A STRONG catalyst (FDA/trial/
+    # partnership/contract/M&A/beat) is BOOSTED. MEDIUM / crypto / absent feed -> 0 (no
+    # change). Flag OFF -> the whole block is skipped -> byte-identical (the weak set still
+    # feeds the soft catalyst_viability_delta de-boost above, unchanged).
+    # docs/STRATEGY/CC_REPORTS/2026-06-24_ross-course-study.md
+    try:
+        if bool(getattr(settings, "chili_momentum_catalyst_grade_gate_enabled", True)):
+            _meta2 = ctx.meta if isinstance(getattr(ctx, "meta", None), dict) else {}
+            _weak_g = _meta2.get("weak_catalyst_symbols")
+            _strong_g = _meta2.get("strong_catalyst_symbols")
+            if _weak_g or _strong_g:
+                from .catalyst import catalyst_grade_selection_delta
+
+                _grade_delta = catalyst_grade_selection_delta(
+                    symbol,
+                    weak_symbols=set(_weak_g) if _weak_g else None,
+                    strong_symbols=set(_strong_g) if _strong_g else None,
+                )
+                if _grade_delta < 0:
+                    base += _grade_delta
+                    live_eligible = False
+                    warnings.append(
+                        "Weak catalyst (dilution/compliance/legal) — not a live Ross setup"
+                    )
+                elif _grade_delta > 0:
+                    base += _grade_delta
+                    warnings.append("Strong catalyst (FDA/M&A/contract) — Ross-style")
+    except (TypeError, ValueError, AttributeError):
+        pass
+
     # Ross gap #4: sympathy/theme tilt — a SYMPATHY peer of a hot sector cluster (same SIC
     # sector as a strong leader) gets an additive boost (the "hot potato" sympathy run
     # Ross trades). Additive, never penalizes; no-op when the set is absent / for crypto.

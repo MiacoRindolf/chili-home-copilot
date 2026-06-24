@@ -898,6 +898,18 @@ def run_momentum_neural_tick(
     except Exception:
         pass
 
+    # E2: STRONG-catalyst boost set (FDA/trial/partnership/contract/M&A/beat headlines Ross
+    # FAVORS). Same once-per-pass best-effort fetch as the weak set; JSON-safe sorted list.
+    # Empty / absent feed -> no-op. docs/STRATEGY/CC_REPORTS/2026-06-24_ross-course-study.md
+    try:
+        from .catalyst import strong_catalyst_symbols
+
+        _strong = strong_catalyst_symbols()
+        if _strong:
+            meta["strong_catalyst_symbols"] = sorted(_strong)
+    except Exception:
+        pass
+
     ctx_meta = {
         k: meta[k]
         for k in (
@@ -916,6 +928,7 @@ def run_momentum_neural_tick(
             "ross_below_floor",
             "catalyst_symbols",
             "weak_catalyst_symbols",
+            "strong_catalyst_symbols",
             "sympathy_symbols",
             "top_market_gainers",
             "dilution_symbols",

@@ -1661,6 +1661,31 @@ def pullback_break_confirmation(
             debug["back_side"] = _bs_reason
             return False, "back_side_disabled", debug
 
+    # E1: SESSION-ANCHORED backside veto (Ross gap #1, build_order #1). The point-in-time
+    # _detect_back_side above reads the 1m EMA/MACD ROLLOVER; front_side_state reads WHERE
+    # the name sits in its OWN session today — below VWAP / faded past the retrace veto /
+    # chasing an extended blow-off top (the QXL chase) — which the EMA cross cannot see.
+    # CHILI computes front_side_state (#798) but it was UNWIRED in the entry path; this
+    # wires it as a HARD veto. ADDITIVE: fires only when the state AFFIRMATIVELY reads
+    # backside; front-side / unknown / thin data -> NO change (front_side_state fails OPEN
+    # to is_backside=False). EXEMPT the deep-reclaim/dip-buy reversal path (same carve-out
+    # as the MACD/EMA gate — that mode intentionally catches the turn off a dip). Reuses the
+    # session OHLCV frame already passed in; flag OFF -> the whole block is skipped ->
+    # byte-identical. docs/STRATEGY/CC_REPORTS/2026-06-24_ross-course-study.md
+    if not _deep_reclaim and bool(
+        getattr(settings, "chili_momentum_backside_veto_enabled", True)
+    ):
+        try:
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(df)
+            if getattr(_fs, "is_backside", False):
+                debug["front_side_state"] = getattr(_fs, "reason", "backside")
+                debug["front_side_score"] = getattr(_fs, "front_side_score", None)
+                return False, "backside_lifecycle_veto", debug
+        except (TypeError, ValueError, AttributeError, KeyError):
+            pass  # thin/degenerate frame or other error -> fail-open (never block on a bug)
+
     # Volume spike on the trigger (break / reclaim) bar.
     vol_ratio = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
     if vol_ratio is None:
@@ -1668,6 +1693,45 @@ def pullback_break_confirmation(
         avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
         vol_ratio = (float(vol.iloc[-1]) / avg) if avg > 0 else 0.0
     debug["vol_ratio"] = round(vol_ratio, 2)
+
+    # E3: EXPLOSIVE-FLOOR HARD GATE (Ross gap #3, build_order #2). Selection ranks names
+    # by within-batch PERCENTILE, so on a dull tape the best-of-a-dull-batch ranks #1 and
+    # arms a slow mover Ross would not touch. Ross's floors are ABSOLUTE: RVOL >= ~5x AND
+    # day-change >= ~10%. ADD that hard floor at the entry tick (the OHLCV frame already
+    # carries today's vol-ratio + session open), on TOP of the percentile rank. EQUITY-only
+    # (crypto 24h RVOL/change semantics differ and get their own calibration — symbols are
+    # bare tickers here, crypto carries '-USD'). Fail-OPEN on missing data and flag-OFF ->
+    # the whole block is skipped -> byte-identical. This RAISES the floor for the weak-batch
+    # case; the genuine explosive tail (50x / +200%) clears it trivially.
+    # docs/STRATEGY/CC_REPORTS/2026-06-24_ross-course-study.md
+    _is_crypto = bool(symbol) and str(symbol).upper().endswith("-USD")
+    if (
+        not _is_crypto
+        and bool(getattr(settings, "chili_momentum_explosive_floor_enabled", True))
+    ):
+        try:
+            _rvol_floor = float(getattr(settings, "chili_momentum_explosive_floor_rvol", 5.0))
+            _change_floor = float(
+                getattr(settings, "chili_momentum_explosive_floor_change_pct", 10.0)
+            )
+            # RVOL: reuse the trigger-bar vol_ratio already computed above.
+            if vol_ratio is not None and float(vol_ratio) < _rvol_floor:
+                debug["explosive_floor_rvol"] = round(float(vol_ratio), 2)
+                debug["explosive_floor_rvol_required"] = _rvol_floor
+                return False, "below_explosive_floor_rvol", debug
+            # Day-change %: session open (first bar) -> current close. Fail-open if the
+            # frame is empty or the open is non-positive.
+            if len(df) >= 1:
+                _sess_open = float(df["Open"].iloc[0])
+                if _sess_open > 0:
+                    _daily_change_pct = (float(close.iloc[cur]) - _sess_open) / _sess_open * 100.0
+                    if _daily_change_pct < _change_floor:
+                        debug["explosive_floor_change_pct"] = round(_daily_change_pct, 2)
+                        debug["explosive_floor_change_pct_required"] = _change_floor
+                        return False, "below_explosive_floor_change", debug
+        except (TypeError, ValueError, AttributeError, IndexError, KeyError):
+            pass  # thin data / malformed frame -> fail-open (never block on a bug)
+
     # Pullback ordinal (Ross gap #7): a 3rd+ pullback break is a weaker prior — Ross's
     # 1st/2nd are A-setups, the 3rd is greedy and usually fails. Count the recent
     # band-losing dips; a late pullback joins the runaway/deep-reclaim weaker-prior set

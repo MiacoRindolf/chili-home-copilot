@@ -166,6 +166,79 @@ def weak_catalyst_symbols() -> set[str]:
         return set()
 
 
+# E2 catalyst GRADING (Ross course study, build_order #3, videos 06/36): Ross DISTRUSTS
+# weak catalysts (dilution/compliance/legal — fade predictors, above) and FAVORS strong
+# catalysts — a binary trial result, FDA decision, partnership, contract, M&A. A strong
+# headline is a real reason a low-float runs; a strong-titled mover is a higher-grade Ross
+# setup than a no-news spike. Keyword list (mirrors the weak list's structure), no magic
+# constants. STRONG / WEAK / (everything else = MEDIUM/neutral).
+_STRONG_CATALYST_KEYWORDS = (
+    "fda approval", "fda approves", "fda clearance", "fda grants", "breakthrough therapy",
+    "phase 3", "phase iii", "phase 2", "phase ii", "topline results", "primary endpoint",
+    "met its primary", "positive results", "trial results", "clinical trial",
+    "partnership", "strategic partnership", "collaboration agreement", "definitive agreement",
+    "merger", "acquisition", "to acquire", "to be acquired", "buyout", "takeover",
+    "awarded contract", "wins contract", "contract award", "government contract",
+    "defense contract", "purchase order", "letter of intent", "joint venture",
+    "record revenue", "raises guidance", "beats", "earnings beat", "tender offer",
+)
+
+
+def _is_strong_catalyst(title: str) -> bool:
+    """True when a headline is a STRONG / trusted catalyst (FDA/trial/partnership/contract/
+    M&A/beat). Pure; fail-open to False (an unreadable title is never up-graded)."""
+    t = str(title or "").lower()
+    return any(k in t for k in _STRONG_CATALYST_KEYWORDS)
+
+
+def strong_catalyst_symbols() -> set[str]:
+    """Normalized tickers whose freshest fresh-news headline is a STRONG catalyst (the
+    boost set). Same title-carrying fetch as ``weak_catalyst_symbols``; fail-open to empty
+    (no boost) when the news feed is unavailable. A weak headline that ALSO matches a strong
+    keyword is intentionally NOT excluded here — the consumer treats weak as the dominant
+    (suppressing) grade (Ross distrusts a name that is BOTH diluting and 'partnering')."""
+    try:
+        from ...massive_client import get_recent_news_items
+
+        return {
+            _norm(tk)
+            for tk, title in get_recent_news_items(max_age_min=_news_catalyst_max_age_min())
+            if _is_strong_catalyst(title)
+        }
+    except Exception:
+        logger.debug("[catalyst] strong-catalyst grade fetch failed", exc_info=True)
+        return set()
+
+
+def catalyst_grade_selection_delta(
+    symbol: str,
+    *,
+    weak_symbols: set[str] | None = None,
+    strong_symbols: set[str] | None = None,
+) -> float:
+    """E2 catalyst-GRADE viability delta for SELECTION (gap #12, build_order #3) — distinct
+    from the regime-aware ``catalyst_viability_delta`` (which boosts ANY catalyst). Grades
+    the catalyst TYPE:
+
+      * WEAK (dilution/compliance/legal) -> a SUPPRESSION (negative tilt of the full
+        catalyst-tilt magnitude). Weak DOMINATES strong (a name that is both diluting and
+        'partnering' is still a dilution fade for Ross).
+      * STRONG (FDA/trial/partnership/contract/M&A/beat) -> a BOOST (+ half tilt — the same
+        magnitude the news tilt uses; a confirming, not standalone, signal).
+      * MEDIUM / no headline / crypto / absent feed -> 0 (neutral, no change).
+
+    Pure + fail-open. The CALLER decides whether a negative delta also drops live
+    eligibility (the hard gate) — this only returns the magnitude."""
+    if "-USD" in str(symbol or "").upper():
+        return 0.0
+    sym = _norm(symbol)
+    if weak_symbols and sym in weak_symbols:
+        return -_catalyst_tilt()
+    if strong_symbols and sym in strong_symbols:
+        return _catalyst_tilt() * 0.5
+    return 0.0
+
+
 # Sympathy/theme cluster (Ross gap #4, videos 06/09/12): the day's movers cluster by
 # SECTOR; a sector whose LEADER is a big % gainer drags its peers (the "hot potato"
 # sympathy run that produces the STI/ASTC-class moves). A sympathy peer — same SIC sector

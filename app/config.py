@@ -2885,6 +2885,60 @@ class Settings(BaseSettings):
         le=0.5,
         validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_VIABILITY_TILT"),
     )
+    # ── Ross course-study P1 edges (E1 backside veto, E3 explosive floor, E2 catalyst
+    # grading). Each is ADDITIVE + has its OWN kill-switch (default True per the
+    # no-dark-flags MO). Flag-off OR input-absent ⇒ byte-identical to prior behavior. ──
+    #
+    # E1 — BACKSIDE VETO (Ross gap: front-side vs back-side of a move). CHILI computes
+    # the session-anchored front_side_state (#798) but it was UNWIRED in the entry path.
+    # When ON and the session frame AFFIRMATIVELY reads backside (below VWAP / faded past
+    # the retrace veto / chasing an extended top), VETO the otherwise-valid pullback break.
+    # Front-side, unknown, or thin data ⇒ NO change (fail-open). Distinct from the
+    # point-in-time MACD/EMA _detect_back_side gate (rollover), which still runs.
+    chili_momentum_backside_veto_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BACKSIDE_VETO_ENABLED"),
+        description="E1: veto an entry when the SESSION-anchored front_side_state reads backside (post-peak/declining lifecycle). Fail-open on unknown/thin data. KILL-SWITCH: False -> byte-identical.",
+    )
+    # E3 — EXPLOSIVE-FLOOR HARD GATE. Selection ranks by within-batch PERCENTILE, so on a
+    # dull tape the best-of-a-dull-batch ranks #1 and arms a non-explosive name. Ross's
+    # stated floors (RVOL >= ~5x AND day-change >= ~10%) are absolute, not relative. When
+    # ON, an EQUITY entry must clear BOTH floors at the entry tick regardless of its rank.
+    # Crypto (24h semantics differ) is exempt; missing data ⇒ fail-open (never blocks).
+    chili_momentum_explosive_floor_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_FLOOR_ENABLED"),
+        description="E3: hard entry gate — an equity name must clear absolute RVOL + day-change floors (on top of percentile rank) to be live-eligible. Crypto/missing-data exempt. KILL-SWITCH: False -> byte-identical.",
+    )
+    # Documented absolute floors for E3 (Ross's stated minima; FLOORS the system may raise,
+    # never ceilings — a 50x-RVOL / +200% name is MORE eligible). One source for each, no
+    # scattered magic. Mirror ross_momentum.ROSS_ELIGIBILITY_* defaults so the entry-tick
+    # gate and the selection-time filter agree.
+    chili_momentum_explosive_floor_rvol: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=100.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_FLOOR_RVOL"),
+        description="E3: absolute relative-volume floor (Ross's '5x minimum') an equity must clear at entry to be a live setup.",
+    )
+    chili_momentum_explosive_floor_change_pct: float = Field(
+        default=10.0,
+        ge=0.0,
+        le=500.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_FLOOR_CHANGE_PCT"),
+        description="E3: absolute day-change %% floor (Ross's 'never buy what isn't already moving') an equity must clear at entry to be a live setup.",
+    )
+    # E2 — CATALYST GRADING + WEAK HARD GATE. weak_catalyst_symbols() (dilution/compliance/
+    # legal) existed only as a soft viability de-boost; it never gated the arm queue. Ross
+    # DISTRUSTS weak catalysts (fade predictors) and favors STRONG (FDA/M&A/contract). When
+    # ON: a weak-catalyst equity is SUPPRESSED at selection (dropped from live eligibility)
+    # and a strong-catalyst name is BOOSTED; MEDIUM stays neutral. Absent news feed / crypto
+    # ⇒ no-op (fail-open).
+    chili_momentum_catalyst_grade_gate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_GRADE_GATE_ENABLED"),
+        description="E2: grade catalysts — suppress weak-catalyst (dilution/compliance/legal) equities from live eligibility and boost strong-catalyst (FDA/M&A/contract) names; medium neutral. Absent feed/crypto -> no-op. KILL-SWITCH: False -> byte-identical.",
+    )
     # Entry trigger mode: "hybrid" (Ross pullback-break on 1m/5m, momentum_volume
     # fallback), "pullback_break" (pullback only), or "momentum_volume" (legacy 15m).
     chili_momentum_entry_trigger_mode: str = Field(
