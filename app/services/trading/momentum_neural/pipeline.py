@@ -278,6 +278,113 @@ def _live_ofi_microprice(
     return None, None
 
 
+def _live_trade_flow(
+    symbol: str, db: Any = None, as_of: "datetime | None" = None
+) -> float | None:
+    """Live TRADE-FLOW: signed-volume AGGRESSOR imbalance in [-1, 1] over the short OFI window.
+
+    The research's #2 micro signal (Ross's "ask getting eaten" = aggressive buying = real thrust),
+    distinct from OFI (book flow) and book_imbalance (book state) — this is the TAPE.
+      Equity: from ``iqfeed_trade_ticks`` (the IQFeed L1 trade-tape bridge). Each trade is aggressor-
+        classified by the QUOTE RULE (Lee-Ready: px>=ask -> buy +1, px<=bid -> sell -1, else mid
+        split) when the prevailing bid/ask is present, else the TICK RULE (px vs the prior trade;
+        zero-tick carries the prior sign). imbalance = Σ(sign·size) / Σ(size).
+      Crypto: from the in-process microstructure tape (``trade_aggression`` = buy_vol/total in [0,1])
+        re-centered to 2·aggr-1 in [-1, 1].
+    Returns ``None`` when no live tape covers the symbol (then the feature is simply absent). ``as_of``
+    reads the tape AS-OF a historical instant for the replay instrument (window ``(as_of-w, as_of]``);
+    ``as_of=None`` is the LIVE default (trailing ``now()``)."""
+    s = (symbol or "").strip().upper()
+    if not s:
+        return None
+    try:
+        window = float(getattr(settings, "chili_crypto_l2_ofi_window_s", 15.0) or 15.0)
+    except (TypeError, ValueError):
+        window = 15.0
+    # crypto: in-process microstructure tape (no historical as_of -> live ring only)
+    if s.endswith("-USD"):
+        if as_of is not None:
+            return None
+        try:
+            from ..microstructure import get_features
+
+            aggr = getattr(get_features(s), "trade_aggression", None)
+            if aggr is not None:
+                return float(max(-1.0, min(1.0, 2.0 * float(aggr) - 1.0)))
+        except Exception:
+            return None
+        return None
+    # equity: the IQFeed L1 trade-tape table (defensive — absent table/rows -> None)
+    if db is None:
+        return None
+    try:
+        from sqlalchemy import text as _sql
+
+        if as_of is None:
+            q = ("SELECT price, size, bid, ask FROM iqfeed_trade_ticks WHERE symbol = :s AND "
+                 "observed_at > (now() at time zone 'utc') - make_interval(secs => :w) ORDER BY observed_at ASC")
+            p = {"s": s, "w": window}
+        else:
+            _ao = as_of.replace(tzinfo=None) if getattr(as_of, "tzinfo", None) is not None else as_of
+            q = ("SELECT price, size, bid, ask FROM iqfeed_trade_ticks WHERE symbol = :s AND "
+                 "observed_at > :as_of - make_interval(secs => :w) AND observed_at <= :as_of ORDER BY observed_at ASC")
+            p = {"s": s, "w": window, "as_of": _ao}
+        rows = db.execute(_sql(q), p).fetchall()
+    except Exception:
+        return None
+    return _aggressor_imbalance(rows)
+
+
+def _aggressor_imbalance(rows) -> float | None:
+    """Pure: signed-volume aggressor imbalance in [-1,1] from oldest-first ``(price, size, bid, ask)``
+    trades. QUOTE RULE (Lee-Ready) when bid/ask present, TICK RULE fallback (zero-tick carries prior
+    sign). ``None`` on empty/zero-volume. Separated for lookahead-free unit testing (no DB)."""
+    if not rows:
+        return None
+    signed = 0.0
+    total = 0.0
+    prev_px = None
+    last_sign = 0
+    for r in rows:
+        try:
+            px = float(r[0])
+            sz = float(r[1])
+        except (TypeError, ValueError):
+            continue
+        if px <= 0 or sz <= 0:
+            continue
+        bid, ask = r[2], r[3]
+        sign = 0
+        if bid is not None and ask is not None:
+            try:
+                fb, fa = float(bid), float(ask)
+            except (TypeError, ValueError):
+                fb = fa = 0.0
+            if fa > fb > 0:
+                mid = (fa + fb) / 2.0
+                if px >= fa:
+                    sign = 1
+                elif px <= fb:
+                    sign = -1
+                elif px > mid:
+                    sign = 1
+                elif px < mid:
+                    sign = -1
+        if sign == 0:                                   # tick-rule fallback
+            if prev_px is not None and px != prev_px:
+                sign = 1 if px > prev_px else -1
+            else:
+                sign = last_sign                        # zero-tick / first trade carries prior sign
+        prev_px = px
+        if sign != 0:
+            last_sign = sign
+        signed += sign * sz
+        total += sz
+    if total <= 0:
+        return None
+    return float(max(-1.0, min(1.0, signed / total)))
+
+
 @dataclass(frozen=True)
 class LadderRead:
     """Multi-level L2 distribution read for the proactive sell-into-strength exit.
