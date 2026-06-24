@@ -416,10 +416,17 @@ def load_training_rows(db, *, replay_path: str = "/app/data/_disc_dataset.json")
         for o in q.limit(20000):
             ers = o.entry_regime_snapshot_json
             if isinstance(ers, dict) and isinstance(ers.get("features"), dict) and ers["features"]:
-                rows.append({
+                row = {
                     "return_bps": float(o.return_bps), "features": ers["features"],
                     "day": (str(o.terminal_at)[:10] if o.terminal_at else ""), "sym": o.symbol,
-                })
+                }
+                _emit = ers.get("meta_label_emit")
+                if isinstance(_emit, dict):
+                    if _emit.get("p") is not None:
+                        row["meta_p"] = float(_emit["p"])
+                    if _emit.get("de_rate") is not None:
+                        row["meta_de_rate"] = float(_emit["de_rate"])
+                rows.append(row)
     except Exception:
         pass
     return rows
@@ -697,6 +704,37 @@ def analyze_learning_gaps(db, *, model_path: str = "/app/data/_meta_label_model.
                     f"{diag.get('coef_median_rho')}) — they don't replicate across days; the de-rate is "
                     "injecting SIZE NOISE from them (the tiny-n-valid overfit signal)")
         proposals.append(f"down-weight/deprioritize {unstable}; they do not generalize across trading days")
+
+    # ---- EMISSION-BASED detectors (priority-1 sizer self-monitoring; need the live-logged emitted
+    #      (p, de_rate); DEGRADE silently to 'insufficient' until live trades populate them) ----
+    _need = math.ceil(1.0 / SELFCRITIC_FDR_Q)
+    emit = [(float(r["meta_p"]), 1 if _label(r) == 1 else 0)
+            for r in rows if r.get("meta_p") is not None and _label(r) is not None]
+    if len(emit) >= _need:
+        import numpy as _np
+
+        ps = _np.array([e[0] for e in emit], dtype=float)
+        ys = _np.array([e[1] for e in emit], dtype=float)
+        brier = float(_np.mean((ps - ys) ** 2))
+        base_brier = float(ys.mean() * (1.0 - ys.mean()))          # no-skill base-rate Brier (data-derived)
+        if brier >= base_brier:
+            gaps.append(f"CALIBRATION decay: live Brier {brier:.3f} >= no-skill base-rate Brier "
+                        f"{base_brier:.3f} on {len(emit)} matched (p,y) — the de-rate is mis-SIZING "
+                        "capital (it is a monotone fn of p), even if ranking/AUC is intact")
+            proposals.append("recalibrate the meta-label probabilities (Platt/temperature) — the SIZE "
+                             "map is the single most consequential decay mode for a sizing head")
+    de_rates = [float(r["meta_de_rate"]) for r in rows if r.get("meta_de_rate") is not None]
+    if len(de_rates) >= 2 * _need:
+        import numpy as _np
+        from scipy.stats import norm as _norm
+
+        half = len(de_rates) // 2
+        ref = _np.array(de_rates[:half], dtype=float)
+        rec = _np.array(de_rates[half:], dtype=float)
+        band = float(_norm.ppf(1.0 - SELFCRITIC_FDR_Q)) * float((ref.var() / len(ref) + rec.var() / len(rec)) ** 0.5)
+        if abs(float(rec.mean()) - float(ref.mean())) > band:
+            gaps.append(f"OUTPUT de-rate SHIFT: emitted de-rate mean moved {ref.mean():.3f}->{rec.mean():.3f} "
+                        f"(> SE band {band:.3f}) — the sizer's emitted behavior DRIFTED; check regime/feature drift")
 
     proposals.append("deferred engineerable features (prioritize when ready): tick-level trade-flow "
                      "(Massive WS tape), multi-level OFI FLOW (needs iqfeed raw-ladder infra), opening-range-RVOL rank")
