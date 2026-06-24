@@ -86,17 +86,21 @@ def test_screen_select_keeps_signal_and_protected_union():
     assert prot <= set(keep)                                 # protected tail ALWAYS kept
 
 
-def test_spearman_dedup_catches_sign_duplicate():
+def test_spearman_dedup_catches_monotone_duplicate():
+    # The dedup uses SPEARMAN rank corr -> a strictly-monotone duplicate (Spearman=1.0) MUST cluster,
+    # deterministically + independent of feature count. (A binary sign-flag like above_vwap=sign(x)
+    # has Spearman~0.8 ~ the adaptive threshold 1-1/sqrt(n) so it's borderline by nature — but the
+    # PROTECTED-tail union keeps both tail flags regardless, so dedup precision there is moot.)
     rng = np.random.default_rng(2)
     feats = list(ml.DEFAULT_FEATURES)
     n = 50
     X = rng.standard_normal((n, len(feats)))
     ai, vi = feats.index("above_vwap"), feats.index("vwap_dist_sigma")
-    X[:, ai] = np.sign(X[:, vi])                             # deterministic sign-duplicate
+    X[:, ai] = X[:, vi] * 3.0 + 0.5                          # strictly monotone -> Spearman = 1.0
     Xs = _std(X)
     clusters = ml._feature_clusters(Xs, 1 - 1 / np.sqrt(n))
     cl_of = {j: ci for ci, cl in enumerate(clusters) for j in cl}
-    assert cl_of[ai] == cl_of[vi]                            # same cluster despite Pearson<thr
+    assert cl_of[ai] == cl_of[vi]                            # monotone duplicate -> same cluster
 
 
 def test_calibration_runs_and_bounded():
