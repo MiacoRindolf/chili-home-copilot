@@ -3131,6 +3131,15 @@ class Settings(BaseSettings):
         default=0.4, ge=0.05, le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_META_LABEL_MIN_SIZE"),
     )
+    # DATA-SNOOPING-CORRECTED FEATURE SCREEN: prune the meta-label's spurious feature columns
+    # (CALIB-BY-DayRestrict — marginal-preserving within-day permutation null + BY-FDR + empirical
+    # self-calibration + protected-tail union + tail-monotone revert). Keep-all-DOMINANT: INERT at
+    # today's n (byte-identical to the all-feature ridge) and self-activates only when type-I error
+    # is provably controlled as data grows. Default-ON; =0 -> screen bypassed entirely (keep all).
+    chili_momentum_meta_label_feature_screen_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_META_LABEL_FEATURE_SCREEN_ENABLED"),
+    )
     chili_momentum_spread_stability_min_samples: int = Field(
         default=5,
         ge=1,
