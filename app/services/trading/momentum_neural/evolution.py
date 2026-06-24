@@ -342,15 +342,26 @@ def _aggregate_rows(rows: list[MomentumAutomationOutcome]) -> dict[str, Any]:
     w_setup_q = 0.0
     credited = 0
     shakeouts = 0
+    used = 0
+    # Broker-truth label switch (mig309), mode-aware: paper rows keep their self-report,
+    # live rows route through the broker-truth accessor (flag-OFF byte-identical; flag-ON
+    # reconciled-live = broker-true, unreconciled-live EXCLUDED). n reflects USED rows so
+    # flag-ON the paper/live slices report the trustworthy sample size.
+    from .outcome_reconcile import mode_aware_label_for_outcome
+
     for r in rows:
+        rb_val, pnl_val, usable = mode_aware_label_for_outcome(r)
+        if not usable:
+            continue
+        used += 1
         w = _finite_float_or_default(getattr(r, "evidence_weight", None), 1.0)
         w_sum += w
-        rb = r.return_bps
+        rb = rb_val
         raw_rb = float(rb) if rb is not None else None
         if raw_rb is not None:
             wrb += raw_rb * w
-        if r.realized_pnl_usd is not None:
-            wp += float(r.realized_pnl_usd) * w
+        if pnl_val is not None:
+            wp += float(pnl_val) * w
         oc = r.outcome_class or ""
         if oc in ("governance_exit", "risk_block", "stale_data_abort"):
             gr += 1
@@ -383,7 +394,7 @@ def _aggregate_rows(rows: list[MomentumAutomationOutcome]) -> dict[str, Any]:
     mean_setup_adj = (w_setup_adj_rb / w_sum) if w_sum > 0 else None
     mean_setup_q = (w_setup_q / w_sum) if w_sum > 0 else None
     return {
-        "n": len(rows),
+        "n": used,
         "weighted_return_bps_sum": round(wrb, 6),
         "weighted_pnl_sum": round(wp, 6),
         "weight_sum": round(w_sum, 6),
@@ -423,9 +434,16 @@ def apply_outcome_feedback_to_viability(db: Session, outcome_row: MomentumAutoma
     n = int(side.get("n") or 0) + 1
     evidence_weight = _finite_float_or_default(getattr(outcome_row, "evidence_weight", None), 1.0)
     wsum = float(side.get("weight_sum") or 0.0) + evidence_weight
+    # Broker-truth label switch (mig309), mode-aware: paper keeps self-report, live uses
+    # the broker-true return_bps (flag-ON) — a reconciled live row must nudge viability
+    # off its BROKER label, not the contaminated self-report. (Flag-ON unreconciled-live
+    # rows are already gated out upstream by ingest_session_outcome's contributes=False.)
+    from .outcome_reconcile import mode_aware_label_for_outcome
+
+    _rb, _pnl, _usable = mode_aware_label_for_outcome(outcome_row)
     wrb = float(side.get("weighted_return_bps_sum") or 0.0)
-    if outcome_row.return_bps is not None:
-        wrb += float(outcome_row.return_bps) * evidence_weight
+    if _usable and _rb is not None:
+        wrb += float(_rb) * evidence_weight
     side.update(
         {
             "n": n,
@@ -479,7 +497,13 @@ def maybe_pause_symbol_variant_after_losses(db: Session, outcome_row: MomentumAu
     )
     if len(rows) < 3:
         return
-    if not all((r.return_bps is not None and float(r.return_bps) < 0.0) for r in rows):
+    # Broker-truth label switch (mig309), mode-aware. Flag-OFF every row is usable with
+    # its legacy bps → byte-identical. Flag-ON a live row with no trustworthy broker label
+    # is NOT usable, so a 3-loss streak cannot be confirmed → do not pause (conservative).
+    from .outcome_reconcile import mode_aware_label_for_outcome
+
+    labels = [mode_aware_label_for_outcome(r) for r in rows]
+    if not all(usable and rb is not None and float(rb) < 0.0 for (rb, _pnl, usable) in labels):
         return
     until = datetime.utcnow() + timedelta(hours=4)
     uts = until.isoformat()
@@ -497,12 +521,22 @@ def maybe_pause_symbol_variant_after_losses(db: Session, outcome_row: MomentumAu
 def maybe_kill_underperforming_variant(db: Session, *, variant_id: int) -> dict[str, Any]:
     """Deactivate variant + viability if sustained poor track record (Phase 5c)."""
     outcomes = _recent_outcomes_for_variant(db, variant_id=int(variant_id), days=90)
-    considered = [o for o in outcomes if o.return_bps is not None]
+    # Broker-truth label switch (mig309), mode-aware: paper keeps self-report; live uses
+    # the broker-true bps (flag-ON) and unreconciled-live rows are EXCLUDED — never KILL a
+    # variant off the contaminated self-report. Flag-OFF: every legacy bps is usable →
+    # byte-identical considered set.
+    from .outcome_reconcile import mode_aware_label_for_outcome
+
+    considered: list[float] = []
+    for o in outcomes:
+        rb, _pnl, usable = mode_aware_label_for_outcome(o)
+        if usable and rb is not None:
+            considered.append(float(rb))
     if len(considered) < 5:
         return {"ok": True, "skipped": "insufficient"}
-    wins = sum(1 for o in considered if float(o.return_bps or 0.0) > 0.0)
+    wins = sum(1 for rb in considered if rb > 0.0)
     wr = wins / len(considered)
-    mean_bps = sum(float(o.return_bps or 0.0) for o in considered) / len(considered)
+    mean_bps = sum(considered) / len(considered)
     if wr >= 0.35 or mean_bps >= -30.0:
         return {"ok": True, "skipped": "above_threshold"}
 
