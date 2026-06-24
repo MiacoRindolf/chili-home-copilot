@@ -65,6 +65,9 @@ _PERM_ITERS = 1000
 PROTECTED_TAIL_FEATURES = ("above_vwap", "vwap_dist_sigma", "is_backside", "retrace_from_hod")
 SCREEN_Q_BASE = 0.20
 SCREEN_NULL_DISCLAIMER = "within-day restricted marginal-preserving permutation (weak day-regime null)"
+# The ONE documented self-critic FDR base (inherited from edge_evidence.apply_fdr_correction's q=0.10
+# default — NOT a new scattered magic number). Used by the self-monitoring DIAGNOSTICS below.
+SELFCRITIC_FDR_Q = 0.10
 
 
 def _screen_enabled() -> bool:
@@ -374,6 +377,12 @@ def train_meta_label(rows: list[dict], *, feature_list: list[str] | None = None)
             pass
     screen_tel["tail_revert"] = tail_revert
     model["feature_screen"] = screen_tel
+    # SELF-MONITORING DIAGNOSTICS (analysis-only; the self-critic reads model["diagnostics"] — NEVER
+    # feeds sizing). Computed on the FINAL fitted columns. Best-effort.
+    try:
+        model["diagnostics"] = _compute_diagnostics(Xs[:, keep_idx], yv, groups, [feats[i] for i in keep_idx])
+    except Exception:
+        model["diagnostics"] = {}
     try:
         logger.info("[meta_label_screen] %s", {k: screen_tel.get(k) for k in (
             "enabled", "reason", "kept", "n_pos", "n_eff", "p_fam", "q",
@@ -441,6 +450,161 @@ def maybe_retrain_meta_label(db, *, model_path: str = "/app/data/_meta_label_mod
         pass
     return {"status": "retrained", "n": cur, "grew_from": last,
             "confidence": model.get("confidence"), "model_status": model.get("status")}
+
+
+def _kish_n_eff(groups) -> float:
+    """Kish EFFECTIVE sample size over day clusters: down-weights same-day (correlated) rows so the
+    self-critic's CIs are honest. n_eff = (Σw)^2/Σw^2, w_i = 1/size(day of row i). Conservative,
+    n_eff<=n; cannot false-alarm (it only inflates other bands)."""
+    import numpy as np
+
+    g = np.asarray(groups)
+    sizes = {d: int((g == d).sum()) for d in set(g.tolist())}
+    w = np.array([1.0 / max(1, sizes[d]) for d in g], dtype=float)
+    ss = float((w * w).sum())
+    return float((w.sum() ** 2) / ss) if ss > 0 else float(len(g))
+
+
+def _compute_diagnostics(Xs, yv, groups, feats, *, seed: int = 12345) -> dict:
+    """Self-monitoring DIAGNOSTICS for the self-critic (ANALYSIS-ONLY; NEVER feeds sizing). Designed
+    from the self-monitoring research (wf_a7af66e3); each detector is cheap + tiny-n-safe (DEGRADES
+    to 'insufficient' rather than false-alarming):
+      - n_eff (Kish, day-clustered) + deflation defl=n/n_eff (re-expresses every CI honestly),
+      - target-LEAKAGE univariate-AUC soft-flag (a feature that separates near-perfectly ALONE,
+        above the permutation-null max-AUC ceiling — the ASYMMETRIC catastrophe for a never-veto
+        sizer, which would over-size on a phantom edge),
+      - coefficient SIGN/RANK STABILITY across the per-day GroupKFold (the tiny-n-VALID overfit
+        detector — uses sign/rank not magnitude, rides the day-grouping; gated OFF when day-groups<6).
+    """
+    import numpy as np
+
+    n = len(yv)
+    n_days = len(set(np.asarray(groups).tolist()))
+    n_eff = _kish_n_eff(groups)
+    n_eff_report = min(float(n_days), n_eff)
+    diag = {"n_eff": round(n_eff, 2), "n_eff_report": round(n_eff_report, 2),
+            "deflation": round(n / max(n_eff_report, 1.0), 3), "n_day_groups": n_days}
+
+    # LEAKAGE univariate-AUC soft-flag vs a permutation-null max-AUC ceiling
+    try:
+        from sklearn.metrics import roc_auc_score
+
+        rng = np.random.default_rng(seed)
+        aucs = {}
+        for j, f in enumerate(feats):
+            try:
+                a = float(roc_auc_score(yv, Xs[:, j]))
+                aucs[f] = max(a, 1.0 - a)
+            except Exception:
+                continue
+        ceil_draws = []
+        for _ in range(200):
+            yp = rng.permutation(yv)
+            best = 0.5
+            for j in range(Xs.shape[1]):
+                try:
+                    a = float(roc_auc_score(yp, Xs[:, j]))
+                    best = max(best, a, 1.0 - a)
+                except Exception:
+                    continue
+            ceil_draws.append(best)
+        ceiling = float(np.quantile(ceil_draws, 1.0 - SELFCRITIC_FDR_Q)) if ceil_draws else 1.0
+        diag["leakage_ceiling"] = round(ceiling, 3)
+        diag["suspected_leak_features"] = [f for f, a in aucs.items() if a > ceiling]
+    except Exception:
+        diag["suspected_leak_features"] = []
+
+    # coefficient SIGN/RANK STABILITY across the per-day folds (gate OFF below 6 day-groups)
+    if n_days >= 6:
+        try:
+            from scipy.stats import binom, spearmanr
+            from sklearn.linear_model import LogisticRegression
+            from sklearn.model_selection import GroupKFold
+
+            ga = np.asarray(groups)
+            K = min(5, n_days)
+            coefs = []
+            for tr, _te in GroupKFold(n_splits=K).split(Xs, yv, groups=ga):
+                if len(set(yv[tr].tolist())) < 2:
+                    continue
+                c = LogisticRegression(C=max(1e-3, n / (n + Xs.shape[1])),
+                                       class_weight="balanced", max_iter=4000)
+                c.fit(Xs[tr], yv[tr])
+                coefs.append(c.coef_[0])
+            if len(coefs) >= 3:
+                Cf = np.array(coefs)
+                Kf = len(coefs)
+                lo = binom.ppf(SELFCRITIC_FDR_Q, Kf, 0.5)        # sign-agreement lower tail
+                unstable = []
+                for j, f in enumerate(feats):
+                    pos = int((Cf[:, j] > 0).sum())
+                    if max(pos, Kf - pos) <= lo:
+                        unstable.append(f)
+                rhos = []
+                for a in range(Kf):
+                    for b in range(a + 1, Kf):
+                        try:
+                            r, _ = spearmanr(Cf[a], Cf[b])
+                            if np.isfinite(r):
+                                rhos.append(float(r))
+                        except Exception:
+                            continue
+                diag["coef_folds"] = Kf
+                diag["coef_sign_unstable"] = unstable
+                diag["coef_median_rho"] = round(float(np.median(rhos)), 3) if rhos else None
+        except Exception:
+            pass
+    else:
+        diag["coef_stability"] = f"insufficient day-groups ({n_days}<6)"
+    return diag
+
+
+def _propose_research_agenda(gaps: list, *, backlog_path: str = "/app/data/_research_backlog.json") -> dict:
+    """The RESEARCHER phase — PROPOSE-only, NEVER auto-launch (decision from wf_a7af66e3: a deep-
+    research run is ~5M tokens, and a single false-positive gap would burn it on noise, so the heavy
+    launch stays OPERATOR-GATED). The self-critic turns its top ACTIONABLE gap into a bounded,
+    concrete research question + enhancement, ranks them, and dedup-appends to an operator-reviewed
+    backlog. The operator launches the deep-research; the critic only makes the budget high-yield."""
+    import json as _json
+    import os as _os
+
+    proposals = []
+    for g in gaps:
+        gl = g.lower()
+        if "leakage" in gl:
+            proposals.append({"gap": g, "priority": 1,
+                "research_question": "audit + point-in-time lookahead-test the suspected-leakage features for the momentum meta-label: confirm each feature's compute-window-end <= the decision timestamp; quantify the univariate edge that VANISHES under a strict point-in-time recompute",
+                "enhancement": "instrument per-feature lineage timestamps; drop/repair any feature that fails the point-in-time assertion"})
+        elif "zero coverage" in gl:
+            proposals.append({"gap": g, "priority": 1, "research_question": None,
+                "enhancement": "fix the live capture path for the zero-coverage feature (a capture bug, not a research question)"})
+        elif "sign-unstable" in gl or "sign unstable" in gl or "not improving" in gl or "may not separate" in gl:
+            proposals.append({"gap": g, "priority": 2,
+                "research_question": "what lookahead-free entry-moment signals separate intraday small-cap momentum WINNERS from LOSERS that CHILI's current meta-label feature set is MISSING (the current features do not separate / are sign-unstable across days)?",
+                "enhancement": "research + engineer a new lookahead-free signal category as a capture feature; the meta-label learns its weight"})
+    proposals.sort(key=lambda x: x["priority"])
+
+    backlog = []
+    if _os.path.exists(backlog_path):
+        try:
+            backlog = _json.load(open(backlog_path))
+        except Exception:
+            backlog = []
+    seen = {(b.get("gap") or "")[:80] for b in backlog if isinstance(b, dict)}
+    n_new = 0
+    for p in proposals:
+        key = (p["gap"] or "")[:80]
+        if key not in seen:
+            backlog.append(p)
+            seen.add(key)
+            n_new += 1
+    try:
+        with open(backlog_path, "w") as fh:
+            _json.dump(backlog[-50:], fh)
+    except Exception:
+        pass
+    return {"top": proposals[0] if proposals else None, "n_open": len(backlog), "n_new": n_new,
+            "note": "PROPOSE-only — the operator launches the deep-research (heavy spend is operator-gated)"}
 
 
 def analyze_learning_gaps(db, *, model_path: str = "/app/data/_meta_label_model.json",
@@ -512,12 +676,38 @@ def analyze_learning_gaps(db, *, model_path: str = "/app/data/_meta_label_model.
             gaps.append(f"confidence NOT improving despite more data (Δconf={conf_trend}) — current features "
                         "may not separate; consider a new signal category")
 
+    # ---- SELF-MONITORING DIAGNOSTICS (analysis-only; from model["diagnostics"], computed at train) ----
+    diag = (model or {}).get("diagnostics") or {}
+    n_eff_r = diag.get("n_eff_report")
+    if n_eff_r is not None and n_eff_r < math.ceil(1.0 / SELFCRITIC_FDR_Q):
+        # estimability honesty re-expressed in EFFECTIVE (day-clustered) sample size — so the operator
+        # knows the inert de-rate is CORRECT, not broken. Floor derived from the ONE FDR base.
+        gaps.append(f"the sizer is NOT yet statistically estimable: n_eff≈{n_eff_r} (Kish day-clustered) "
+                    f"over {diag.get('n_day_groups')} day-groups < {math.ceil(1.0 / SELFCRITIC_FDR_Q)} — the "
+                    "INERT de-rate is CORRECT not a bug; same-day trades are correlated")
+    leak = diag.get("suspected_leak_features") or []
+    if leak:
+        gaps.append(f"SUSPECTED LEAKAGE: {leak} separate near-perfectly ALONE (univariate AUC > perm-null "
+                    f"ceiling {diag.get('leakage_ceiling')}) — a never-veto sizer OVER-sizes on a phantom "
+                    "edge; verify each feature's compute-window-end <= the decision timestamp")
+        proposals.append(f"audit {leak} for lookahead/leakage (lineage assertion) BEFORE trusting their weight")
+    unstable = diag.get("coef_sign_unstable") or []
+    if unstable:
+        gaps.append(f"coefficient SIGN-UNSTABLE across day-folds for {unstable} (median coef ρ="
+                    f"{diag.get('coef_median_rho')}) — they don't replicate across days; the de-rate is "
+                    "injecting SIZE NOISE from them (the tiny-n-valid overfit signal)")
+        proposals.append(f"down-weight/deprioritize {unstable}; they do not generalize across trading days")
+
     proposals.append("deferred engineerable features (prioritize when ready): tick-level trade-flow "
                      "(Massive WS tape), multi-level OFI FLOW (needs iqfeed raw-ladder infra), opening-range-RVOL rank")
 
+    # ---- RESEARCHER phase: PROPOSE (NEVER auto-launch) a ranked research agenda from the gaps ----
+    agenda = _propose_research_agenda(gaps)
+
     report = {"n_samples": n, "positives": pos, "model_status": status,
               "confidence": conf, "confidence_trend": conf_trend, "heldout_auc": auc, "perm_p": perm_p,
-              "feature_coverage": cov, "n_gaps": len(gaps), "gaps": gaps, "proposals": proposals}
+              "feature_coverage": cov, "diagnostics": diag, "research_agenda": agenda,
+              "n_gaps": len(gaps), "gaps": gaps, "proposals": proposals}
     try:
         with open(report_path, "w") as fh:
             _json.dump(report, fh)

@@ -4791,15 +4791,22 @@ def _run_learning_self_critic_job() -> None:
     db = SessionLocal()
     try:
         rep = analyze_learning_gaps(db)
+        _dg = rep.get("diagnostics") or {}
         logger.info(
-            "[scheduler] learning self-critic: n=%s positives=%s confidence=%s (Δ=%s) gaps=%s",
+            "[scheduler] learning self-critic: n=%s positives=%s confidence=%s (Δ=%s) n_eff=%s gaps=%s",
             rep.get("n_samples"), rep.get("positives"), rep.get("confidence"),
-            rep.get("confidence_trend"), rep.get("n_gaps"),
+            rep.get("confidence_trend"), _dg.get("n_eff_report"), rep.get("n_gaps"),
         )
         for g in (rep.get("gaps") or [])[:6]:
             logger.info("[scheduler] learning GAP -> %s", g)
         for p in (rep.get("proposals") or [])[:3]:
             logger.info("[scheduler] learning PROPOSAL -> %s", p)
+        # RESEARCHER phase: PROPOSE-only (operator launches; never auto-spent here)
+        _ag = rep.get("research_agenda") or {}
+        if _ag.get("top"):
+            logger.info("[scheduler] learning RESEARCH-AGENDA (propose-only, operator-gated) -> top(p%s): %s | open=%s new=%s",
+                        (_ag["top"] or {}).get("priority"), (_ag["top"] or {}).get("research_question"),
+                        _ag.get("n_open"), _ag.get("n_new"))
     except Exception:
         logger.exception("[scheduler] learning self-critic job failed")
     finally:
