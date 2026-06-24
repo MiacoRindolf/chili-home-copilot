@@ -446,7 +446,14 @@ def _broker_truth_realized_for_session(db, sess, le: dict) -> Optional[float]:
 
 
 def backfill_outcomes_from_broker_truth(db, *, lookback_days: float = 30.0) -> dict:
-    """Repair censored outcome rows from broker truth (2026-06-12 quant pass v2
+    """DEPRECATED (mig309): superseded by
+    ``outcome_reconcile.reconcile_momentum_outcomes_to_broker_truth``, which writes a
+    SEPARATE authoritative broker_* label (never overwrites realized_pnl_usd, uses a
+    COUNT==1 trade-row guard, and EXCLUDES rather than mis-labels pyramids/ambiguous
+    matches). Kept as a fallback path only — DO NOT call from new code; this function
+    still OVERWRITES realized_pnl_usd in place on a LIMIT-1 non-unique-key join.
+
+    Repair censored outcome rows from broker truth (2026-06-12 quant pass v2
     A1): flatten cascades / reconcile paths wrote NULL/zero realized while the
     broker filled real money — the 30d ledger read −$234 vs +$2,568 broker
     truth, and the streak multiplier halved size off the phantom record.

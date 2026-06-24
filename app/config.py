@@ -2190,6 +2190,33 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FILL_LOG_ENABLED"),
         description="Kill-switch: True => the momentum live lane records one momentum_fill_outcomes row per real broker fill leg (entry/exit/partial/scale-out). Default OFF (no writes, byte-identical). Write-only Stage-1.",
     )
+    # BROKER-TRUTH RECONCILIATION (mig309) — TWO decoupled flags (write-then-verify-then-read):
+    #
+    #   chili_momentum_broker_truth_reconciliation_enabled — gates the WRITE pass
+    #     (reconcile_momentum_outcomes_to_broker_truth). When ON the pass matches CLOSED
+    #     momentum sessions to broker fills and stamps the authoritative broker_* label
+    #     columns + divergence audit. ADDITIVE: never touches legacy realized_pnl_usd /
+    #     return_bps. When OFF: pass is a no-op, zero new SQL, byte-identical.
+    #
+    #   chili_momentum_broker_truth_label_enabled — gates the learning READ switch via
+    #     authoritative_label_for_outcome(). When OFF (default) the accessor returns the
+    #     LEGACY label byte-for-byte (no behavior change). When ON it returns the broker-true
+    #     label for reconciled rows and EXCLUDES (is_reconciled=False) any unreconciled row
+    #     so the trainer drops it (never a fabricated $0). ⚠️ Flipping the READ flag ON also
+    #     changes the daily-loss-cap / profit-giveback GATE inputs (risk_evaluator reads the
+    #     same field) — it is a TRADING-BEHAVIOR change to soak deploy-when-flat, NOT a pure
+    #     data relabel. Operator flips READ only after inspecting the divergence distribution
+    #     + day-net cross-check from the WRITE pass.
+    chili_momentum_broker_truth_reconciliation_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BROKER_TRUTH_RECONCILIATION_ENABLED"),
+        description="Kill-switch: True => the reconcile pass writes the authoritative broker-truth label columns on momentum_automation_outcomes (additive, never overwrites legacy fields). Default OFF (pass is a no-op).",
+    )
+    chili_momentum_broker_truth_label_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BROKER_TRUTH_LABEL_ENABLED"),
+        description="Kill-switch: True => learning consumers read the broker-true label via authoritative_label_for_outcome (reconciled rows use broker PnL/bps; unreconciled are EXCLUDED). Default OFF (legacy field, byte-identical). Flipping ON changes daily-loss/giveback gate inputs — soak deploy-when-flat.",
+    )
     # ── Extended-hours trading window (Ross trades the pre-market gap-and-go) ──
     # The momentum equity lane is tradeable from premarket_start → afterhours_end ET.
     # Regular session (9:30–16:00 ET) is a fixed exchange fact in market_profile.py;

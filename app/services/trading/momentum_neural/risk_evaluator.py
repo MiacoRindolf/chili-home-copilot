@@ -280,20 +280,35 @@ def _readiness_numbers(exec_json: dict[str, Any]) -> dict[str, Any]:
 
 
 def _daily_realized_pnl(db: Session, user_id: int) -> float:
-    """Sum realized_pnl_usd from all sessions that terminated today for this user."""
+    """Sum realized PnL from all sessions that terminated today for this user.
+
+    Routes through ``authoritative_label_for_outcome``: flag-OFF this is the legacy
+    ``realized_pnl_usd`` sum byte-for-byte (accessor returns legacy pnl,
+    is_reconciled=True). Flag-ON, the broker-true pnl is summed for reconciled rows
+    and unreconciled rows are EXCLUDED (not summed as $0) — ⚠️ this changes the
+    daily-loss-cap GATE input, a trading-behavior change to soak deploy-when-flat.
+    """
     from datetime import date
-    from sqlalchemy import func as sa_func
+
+    from .outcome_reconcile import authoritative_label_for_outcome
 
     today_start = datetime.combine(date.today(), datetime.min.time())
     rows = (
-        db.query(sa_func.coalesce(sa_func.sum(MomentumAutomationOutcome.realized_pnl_usd), 0.0))
+        db.query(MomentumAutomationOutcome)
         .filter(
             MomentumAutomationOutcome.user_id == user_id,
             MomentumAutomationOutcome.terminal_at >= today_start,
         )
-        .scalar()
+        .all()
     )
-    return float(rows or 0.0)
+    total = 0.0
+    for o in rows:
+        pnl, _bps, _win, is_rec = authoritative_label_for_outcome(o)
+        if not is_rec:
+            continue
+        if pnl is not None:
+            total += float(pnl)
+    return total
 
 
 def _running_peak_and_total(pnls: Iterable[float]) -> tuple[float, float]:
@@ -328,9 +343,11 @@ def _daily_realized_pnl_peak_and_current(db: Session, user_id: int) -> tuple[flo
     """
     from datetime import date
 
+    from .outcome_reconcile import authoritative_label_for_outcome
+
     today_start = datetime.combine(date.today(), datetime.min.time())
     rows = (
-        db.query(MomentumAutomationOutcome.realized_pnl_usd)
+        db.query(MomentumAutomationOutcome)
         .filter(
             MomentumAutomationOutcome.user_id == user_id,
             MomentumAutomationOutcome.terminal_at >= today_start,
@@ -341,7 +358,18 @@ def _daily_realized_pnl_peak_and_current(db: Session, user_id: int) -> tuple[flo
         )
         .all()
     )
-    return _running_peak_and_total(r[0] for r in rows)
+
+    # Flag-OFF: legacy realized_pnl_usd in terminal_at order, byte-identical.
+    # Flag-ON: broker-true pnl for reconciled rows; unreconciled EXCLUDED from the
+    # high-water walk (a $0 fill-in would distort the giveback peak).
+    def _ordered_pnls():
+        for o in rows:
+            pnl, _bps, _win, is_rec = authoritative_label_for_outcome(o)
+            if not is_rec:
+                continue
+            yield pnl
+
+    return _running_peak_and_total(_ordered_pnls())
 
 
 def evaluate_profit_giveback_halt(

@@ -1888,6 +1888,21 @@ class MomentumAutomationOutcome(Base):
     evidence_weight: float = Column(Float, nullable=False, default=1.0)
     contributes_to_evolution: bool = Column(Boolean, nullable=False, default=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    # BROKER-TRUTH LABEL (mig309) — a SEPARATE authoritative outcome label written by
+    # the reconcile pass (outcome_reconcile.py). The legacy realized_pnl_usd/return_bps
+    # above are LEFT UNTOUCHED so lane-self-report-vs-broker divergence stays auditable.
+    # broker_recon_status=NULL => never reconciled (legacy-only). Non-`reconciled`
+    # statuses are EXCLUDED from learning by authoritative_label_for_outcome (never
+    # fabricated as $0). Reconcile WRITE gated by reconciliation flag; learning READ
+    # gated by the label flag (decoupled: write-then-verify-then-read).
+    broker_recon_status: Optional[str] = Column(String(40), nullable=True, index=True)
+    broker_realized_pnl_usd: Optional[float] = Column(Float, nullable=True)
+    broker_return_bps: Optional[float] = Column(Float, nullable=True)
+    broker_notional_basis_usd: Optional[float] = Column(Float, nullable=True)
+    broker_win: Optional[bool] = Column(Boolean, nullable=True)
+    broker_divergence_usd: Optional[float] = Column(Float, nullable=True)
+    broker_reconciled_at: Optional[datetime] = Column(DateTime, nullable=True)
+    broker_recon_detail_json: Optional[dict] = Column(JSONB, nullable=True)
 
 
 class MomentumFillOutcome(Base):

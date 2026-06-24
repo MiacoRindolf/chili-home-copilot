@@ -142,6 +142,21 @@ def ingest_session_outcome(
     trace_recorded = bool(marker.get("trace_recorded_at_utc"))
     contribution_applied = bool(marker.get("contribution_applied_at_utc"))
     contributes = bool(outcome_row.contributes_to_evolution)
+
+    # Broker-truth label switch: when ON, an UNRECONCILED outcome must NOT update
+    # evolution (its self-report label is the contaminated one this fix supersedes).
+    # Flag-OFF: accessor returns is_reconciled=True → no behavior change. The trace
+    # row is still recorded (audit) but the viability nudge / variant pause/kill are
+    # gated off for unreconciled rows.
+    try:
+        from .outcome_reconcile import authoritative_label_for_outcome
+
+        _p, _b, _w, _is_rec = authoritative_label_for_outcome(outcome_row)
+        if not _is_rec:
+            contributes = False
+            marker["broker_truth_excluded"] = True
+    except Exception:
+        pass
     if not force and trace_recorded and (not contributes or contribution_applied):
         return {
             "ok": True,
