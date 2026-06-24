@@ -49,11 +49,19 @@ def _symbol_family_memory_adjust(db: "Session", symbol: str, family_id: str) -> 
     """Boost/penalize from recent symbol × family outcomes (Phase 4b)."""
     from ....models.trading import MomentumAutomationOutcome, MomentumStrategyVariant
 
+    # Broker-truth label switch (mig309). Flag-OFF: the accessor returns the legacy
+    # return_bps (is_reconciled=True) so this viability nudge is byte-identical. Flag-ON:
+    # reconciled-live rows use the broker-true return_bps and unreconciled rows (incl. all
+    # paper) are EXCLUDED — the symbol×family memory boost/penalty then reflects only
+    # broker-true track record. Full ORM rows loaded so the accessor can read broker_*
+    # columns. Mirrors the meta_label/risk_evaluator routing pattern.
+    from .outcome_reconcile import authoritative_label_for_outcome
+
     sym = (symbol or "").strip().upper()
     if sym in ("", "__AGGREGATE__"):
         return 0.0
     rows = (
-        db.query(MomentumAutomationOutcome.return_bps)
+        db.query(MomentumAutomationOutcome)
         .join(MomentumStrategyVariant, MomentumStrategyVariant.id == MomentumAutomationOutcome.variant_id)
         .filter(
             MomentumAutomationOutcome.symbol == sym,
@@ -64,7 +72,12 @@ def _symbol_family_memory_adjust(db: "Session", symbol: str, family_id: str) -> 
         .limit(10)
         .all()
     )
-    vals = [float(r[0]) for r in rows if r[0] is not None]
+    vals: list[float] = []
+    for o in rows:
+        _pnl, rb, _win, is_rec = authoritative_label_for_outcome(o)
+        if not is_rec or rb is None:
+            continue
+        vals.append(float(rb))
     n = len(vals)
     if n < 3:
         return 0.0
