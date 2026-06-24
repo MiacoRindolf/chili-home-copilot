@@ -81,13 +81,19 @@ def capture_entry_features(
         # order-flow as-of the fire instant (replay: historical table at l2_as_of;
         # live: in-process WS ring with l2_as_of=None). Fail-open to absent fields.
         try:
-            from .pipeline import _live_ofi_microprice
+            from .pipeline import _live_book_imbalance, _live_ofi_microprice
 
             ofi, micro = _live_ofi_microprice(symbol, db=l2_db, as_of=l2_as_of)
             if ofi is not None:
                 f["ofi"] = float(ofi)
             if micro is not None:
                 f["micro_edge_bps"] = float(micro)
+            # DEPTH-normalized book imbalance (the research's NOBI / 5-level depth signal —
+            # equity reads imbalance5 from iqfeed_depth_snapshots, crypto the WS book). Book
+            # STATE, orthogonal to OFI FLOW. Live-fresh (15s window) so replay -> None/imputed.
+            _bi = _live_book_imbalance(symbol, db=l2_db)
+            if _bi is not None:
+                f["book_imbalance"] = float(_bi)
         except Exception:
             pass
         # session structure on completed bars (front_side_state — premarket-inclusive,
