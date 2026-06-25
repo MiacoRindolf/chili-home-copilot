@@ -226,6 +226,65 @@ _ADV_WEIGHT_FLOOR = 0.7
 _FRESH_MOVER_POS_PCTL = 0.70
 _FRESH_MOVER_CHANGE_PCTL = 0.70
 
+# HOT-MOVER quality bar (the NEXR late-surge re-catch). A name is a "genuinely
+# explosive RIGHT NOW" hot mover only when it clears ALL THREE — RVOL, %-move, and
+# the profile's $-vol floor — so the guaranteed re-catch (and the sub-$1 exemption)
+# can NEVER admit penny junk. The RVOL/%-move bars are within-batch high-percentiles
+# (the batch decides what "explosive" means today) clamped UP to the documented config
+# floors; below this percentile the batch is too thin to compute a bar so the config
+# floor governs alone. Single documented base per dimension; everything else adaptive.
+_HOT_MOVER_RVOL_PCTL = 0.90
+_HOT_MOVER_CHANGE_PCTL = 0.90
+
+
+def _snapshot_today_shares(s: dict) -> float | None:
+    """TODAY's accumulated session share volume from a snapshot row — the numerator
+    of intraday RVOL. Mirrors the universe loop's tradability read: the day aggregate
+    (``day.v``) once RTH prints, else the minute bar's accumulated volume (``min.av``,
+    which counts extended-hours prints so premarket igniters aren't zero). Fail-open:
+    no usable volume ⇒ ``None`` (no fabricated RVOL)."""
+    day = s.get("day") or {}
+    mn = s.get("min") or {}
+    v = max(_f(day.get("v")) or 0.0, _f(mn.get("av")) or 0.0)
+    return v if v > 0 else None
+
+
+def _intraday_rvol(today_shares: float | None, adv_shares: float | None) -> float | None:
+    """Relative volume = today's accumulated shares ÷ the prior-day baseline (the
+    ADV proxy). ``None`` (fail-closed) when either side is missing/degenerate — a
+    missing baseline must NOT manufacture an explosive name for the hot-mover bar."""
+    if today_shares is None or adv_shares is None or adv_shares <= 0 or today_shares <= 0:
+        return None
+    return today_shares / adv_shares
+
+
+def _hot_mover_bars(
+    rvols: list[float | None],
+    chgs: list[float | None],
+    *,
+    rvol_floor: float,
+    change_floor: float,
+) -> tuple[float, float]:
+    """Adaptive (RVOL, %-move) bars for the hot-mover quality gate: MAX(documented
+    config floor, within-batch high-percentile). The percentile only LIFTS the floor
+    (so a hot batch raises the bar, a quiet/thin batch falls back to the floor); it can
+    never lower it below the documented reference. Needs ≥4 known values to trust a
+    percentile, else the floor governs alone. No magic numbers — both floors are config,
+    both percentiles are batch-relative."""
+    known_rvol = sorted(v for v in rvols if v is not None and v > 0)
+    known_chg = sorted(c for c in chgs if c is not None)
+    rvol_bar = rvol_floor
+    chg_bar = change_floor
+    if len(known_rvol) >= 4:
+        p = _percentile(known_rvol, _HOT_MOVER_RVOL_PCTL)
+        if p is not None:
+            rvol_bar = max(rvol_floor, p)
+    if len(known_chg) >= 4:
+        p = _percentile(known_chg, _HOT_MOVER_CHANGE_PCTL)
+        if p is not None:
+            chg_bar = max(change_floor, p)
+    return rvol_bar, chg_bar
+
 
 def _adv_ceiling_multipliers(
     advs: list[float | None],
@@ -360,8 +419,31 @@ def build_equity_universe(
             logger.debug("[universe] snapshot fetch failed", exc_info=True)
             return []
 
+    # HOT-MOVER RE-CATCH config (read ONCE, lazily, so tests/callers can flip the
+    # flag without a re-import — and so no later block re-imports `settings` under a
+    # local name that would shadow a module-level reference). OFF ⇒ the price_min
+    # filter and truncation below are byte-identical to the historical path.
+    try:
+        from ....config import settings as _settings
+    except Exception:
+        _settings = None  # type: ignore[assignment]
+    _recatch_on = bool(getattr(_settings, "chili_momentum_hot_mover_recatch_enabled", False)) if _settings else False
+    _subdollar_on = _recatch_on and bool(
+        getattr(_settings, "chili_momentum_hot_mover_subdollar_enabled", False)
+    )
+    try:
+        _rvol_floor = float(getattr(_settings, "chili_momentum_hot_mover_rvol_floor", 5.0)) if _settings else 5.0
+    except Exception:
+        _rvol_floor = 5.0
+    try:
+        _change_floor = float(getattr(_settings, "chili_momentum_hot_mover_change_floor", 20.0)) if _settings else 20.0
+    except Exception:
+        _change_floor = 20.0
+
     rows: list[tuple[str, float, float, float]] = []  # (ticker, rank_score, chg_pct, pos_in_range)
     advs: list[float | None] = []  # parallel ADV-shares proxy per row (prevDay.v); None = unknown
+    rvols: list[float | None] = []  # parallel intraday RVOL per row (today/prevDay shares); None = unknown
+    below_price_min: list[bool] = []  # parallel: True when the row is a sub-price_min exemption candidate
     for s in snapshot or []:
         try:
             if not isinstance(s, dict):
@@ -373,7 +455,13 @@ def build_equity_universe(
             price = _snapshot_price(s)
             if price is None:
                 continue
-            if profile.price_min is not None and price < profile.price_min:
+            # SUB-$1 EXEMPTION (deferred): when the sub-dollar exemption is on, a name
+            # priced UNDER price_min is NOT dropped here — it is carried as an exemption
+            # candidate and the price_min filter is re-applied AFTER the batch hot-mover
+            # bar is known, so ONLY an explosive sub-$1 runner (NEXR $0.95→$1.18) survives
+            # while ordinary penny tape is still dropped. OFF ⇒ the original early drop.
+            _under_min = profile.price_min is not None and price < profile.price_min
+            if _under_min and not _subdollar_on:
                 continue
             if profile.price_max is not None and price > profile.price_max:
                 continue
@@ -387,6 +475,8 @@ def build_equity_universe(
             # to arm in the very window Ross trades (#562's hour gate opened it).
             vol = max(_f(day.get("v")) or 0.0, _f(mn.get("av")) or 0.0)
             dollar_vol = price * vol
+            # The $-vol floor is NEVER relaxed — it is the tradability bar that keeps
+            # junk out of BOTH the normal pool and the hot-mover guarantee/exemption.
             if profile.min_dollar_volume is not None and dollar_vol < profile.min_dollar_volume:
                 continue
 
@@ -411,10 +501,36 @@ def build_equity_universe(
             # dead tape; this orders WHO makes the capped pool.
             pos = _pos_in_range(s, price)
             rank_score = pos * math.log1p(max(0.0, chg))
+            _adv = _snapshot_adv_shares(s)
             rows.append((ticker, rank_score, chg, pos))
-            advs.append(_snapshot_adv_shares(s))
+            advs.append(_adv)
+            rvols.append(_intraday_rvol(_snapshot_today_shares(s), _adv))
+            below_price_min.append(bool(_under_min))
         except Exception:
             continue
+
+    # SUB-$1 EXEMPTION enforcement (B): re-apply the price_min filter now that the
+    # batch is complete — drop every sub-price_min row EXCEPT the genuinely-explosive
+    # ones (cleared the hot-mover bar: RVOL AND %-move; the $-vol floor was already
+    # enforced in the loop). All parallel lists are filtered together to stay aligned.
+    if _subdollar_on and any(below_price_min):
+        _hot_rvol_bar, _hot_chg_bar = _hot_mover_bars(
+            rvols, [r[2] for r in rows], rvol_floor=_rvol_floor, change_floor=_change_floor
+        )
+        _keep_rows: list[tuple[str, float, float, float]] = []
+        _keep_advs: list[float | None] = []
+        _keep_rvols: list[float | None] = []
+        _keep_below: list[bool] = []
+        for r, a, rv, bm in zip(rows, advs, rvols, below_price_min):
+            if bm:
+                # explosive sub-$1 only: clear BOTH bars (fail-closed on missing RVOL)
+                if rv is None or rv < _hot_rvol_bar or r[2] < _hot_chg_bar:
+                    continue
+            _keep_rows.append(r)
+            _keep_advs.append(a)
+            _keep_rvols.append(rv)
+            _keep_below.append(bm)
+        rows, advs, rvols, below_price_min = _keep_rows, _keep_advs, _keep_rvols, _keep_below
 
     # ADV-CEILING soft re-rank (AS101): low AVERAGE-daily-volume is the causal
     # mechanism for the no-market-maker edge, so SOFT-discount high-ADV names in
@@ -431,6 +547,36 @@ def build_equity_universe(
             for (t, rs, chg, pos), w in zip(rows, _adv_w)
         ]
 
+    # HOT-MOVER GUARANTEE (A): identify the genuinely-explosive names RIGHT NOW —
+    # cleared the RVOL AND %-move bar AND (already) the $-vol floor — BEFORE the
+    # freshness×move sort/truncation, so a faded-then-resurging runner (low
+    # pos_in_range ⇒ low rank_score ⇒ would truncate out, e.g. NEXR +106%) is kept
+    # in the rescoring set. Computed pre-sort so the bar reads the full batch, then
+    # the guaranteed tickers are spliced AHEAD of the cap below. Bounded by ONE knob
+    # (recatch_slots). OFF ⇒ this set is empty and the path is byte-identical.
+    _guaranteed: list[str] = []
+    if _recatch_on and rows:
+        try:
+            _slots = int(getattr(_settings, "chili_momentum_hot_mover_recatch_slots", 15)) if _settings else 15
+        except Exception:
+            _slots = 15
+        _slots = max(1, _slots)
+        _rvol_bar, _chg_bar = _hot_mover_bars(
+            rvols, [r[2] for r in rows], rvol_floor=_rvol_floor, change_floor=_change_floor
+        )
+        # Hot set = rows clearing BOTH bars (fail-closed on missing RVOL so a name with
+        # no prior-day baseline can never be guaranteed). Rank the hot set by RVOL×move
+        # (the explosiveness signal, not freshness — freshness is exactly what a faded
+        # surger lacks) and take the top `_slots`. The $-vol floor was enforced in the
+        # loop, so no junk can enter here.
+        _hot: list[tuple[str, float]] = []
+        for (ticker, _rs, chg, _pos), rv in zip(rows, rvols):
+            if rv is None or rv < _rvol_bar or chg < _chg_bar:
+                continue
+            _hot.append((ticker, rv * math.log1p(max(0.0, chg))))
+        _hot.sort(key=lambda x: x[1], reverse=True)
+        _guaranteed = [t for t, _ in _hot[:_slots]]
+
     # Freshest, strongest-WORKING movers first (rank_score = freshness × move).
     # No fixed RVOL cut — the percentile ranking in score_universe (RVOL +
     # momentum + low-float) does the fine selection on the enriched survivors.
@@ -446,27 +592,43 @@ def build_equity_universe(
     # tests/callers can flip the flag without re-import. OFF ⇒ the historical
     # ``max_universe`` (top-50) break, byte-identical to current.
     try:
-        from ....config import settings as _settings
-
         _uncapped = bool(
             getattr(_settings, "chili_momentum_universe_uncapped_enabled", False)
-        )
+        ) if _settings else False
         _hard_ceiling = int(
             getattr(_settings, "chili_momentum_universe_hard_ceiling", 1500)
-        )
+        ) if _settings else 1500
     except Exception:
         _uncapped = False
         _hard_ceiling = 1500
     cap = max(1, _hard_ceiling) if _uncapped else max(1, int(profile.max_universe))
 
+    # HOT-MOVER GUARANTEE splice (A): emit the guaranteed hot movers FIRST (in their
+    # explosiveness order), then the normal freshness×move ranking fills the rest up
+    # to `cap`. A guaranteed name already in the top-`cap` is a no-op (the `seen` set
+    # de-dupes); a guaranteed name that ranked past `cap` is re-caught WITHOUT evicting
+    # the count cap's quality (the guarantee is bounded by recatch_slots). Whether the
+    # guaranteed slots count toward `cap` or extend it: they EXTEND it, so the normal
+    # top-`cap` pool is never starved by the re-catch — the guarantee is purely additive
+    # and bounded. OFF ⇒ `_guaranteed` is empty ⇒ byte-identical to the old loop.
     seen: set[str] = set()
     out: list[str] = []
+    for ticker in _guaranteed:
+        if ticker in seen:
+            continue
+        seen.add(ticker)
+        out.append(ticker)
+    # Additive: re-catch never DISPLACES the ranked pool. But never breach the
+    # DB-safety hard ceiling when uncapped (it bounds total row count) — clamp there.
+    _effective_cap = cap + len(out)
+    if _uncapped:
+        _effective_cap = min(_effective_cap, max(1, _hard_ceiling))
     for ticker, *_ in rows:
         if ticker in seen:
             continue
         seen.add(ticker)
         out.append(ticker)
-        if len(out) >= cap:
+        if len(out) >= _effective_cap:
             break
     return out
 

@@ -2486,6 +2486,59 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_IGNITION_MIN_PCT"),
         description="The single adaptive FLOOR knob for the WS ignition scorer: the minimum intraday move% (live price vs today's open / prev-close) for a tick to be treated as an ignition worth scoring into viability. A FLOOR / reference point, not a ceiling — the downstream Ross percentile re-rank does the real selection above it. Sized to drop dead tape while still catching the real igniters early.",
     )
+    # ── HOT-MOVER RE-CATCH + sub-$1 explosive exemption (the NEXR late-surge miss) ─
+    # ROOT CAUSE (verified live 2026-06-24): a name that FADED midday (low pos_in_range)
+    # then SURGED late ranks #51+ in build_equity_universe's freshness×move sort, is
+    # TRUNCATED out of the candidate pool (top-50 / hard-ceiling), stops getting a fresh
+    # viability row, goes stale in 10min, and is fresh-gated OUT of arming — even though
+    # it scored eligible (NEXR +106%, scored 0.580, NEVER armed; sub-$1 part of the day
+    # so price_min=1.0 also excluded it). The cure is to KEEP the genuinely-explosive
+    # name rescored (so freshness follows automatically), WITHOUT loosening the staleness
+    # gate and WITHOUT flooding the lane with penny junk.
+    # FIX (conservative, two additive guards, both flag-gated, OFF ⇒ byte-identical):
+    #  (A) GUARANTEE-INCLUDE the top hot movers (high RVOL AND big %-move AND ≥$-vol
+    #      floor) BEFORE the truncation cap, even if pos_in_range ranks them past the
+    #      cap — so a faded-then-resurging runner stays in the rescoring set. Bounded by
+    #      ONE knob (the guaranteed-slot count); the RVOL/$-vol/%-move quality bar is NOT
+    #      relaxed (no junk). The normal freshness×move ranking is unchanged — this only
+    #      ADDS the hot-mover guarantee on top.
+    #  (B) let an EXPLOSIVE sub-$1 name (same RVOL + %-move + $-vol bar) pass the
+    #      price_min floor (Ross trades sub-$1 runners; NEXR ran $0.95→$1.18). Guarded,
+    #      not a blanket floor removal — ONLY a name that clears the hot-mover bar is
+    #      exempted; ordinary sub-$1 penny tape is still dropped.
+    # Adaptive / no-magic: the RVOL + %-move bars are within-batch high-percentiles (the
+    # batch decides what "genuinely explosive" means today) clamped to documented floors;
+    # the $-vol floor reuses the profile's existing min_dollar_volume. No re-import
+    # shadowing (settings read once, lazily). See docs/DESIGN/MOMENTUM_LANE.md.
+    chili_momentum_hot_mover_recatch_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_MOVER_RECATCH_ENABLED"),
+        description="Guarantee-include the top genuinely-explosive hot movers (high RVOL AND big %-move AND ≥ the profile $-vol floor) in build_equity_universe BEFORE the top-N / hard-ceiling truncation, so a name that FADED midday then SURGED late (ranks #51+ on freshness×move, e.g. NEXR +106%) stays in the rescoring set and its viability stays fresh enough to arm. Bounded by chili_momentum_hot_mover_recatch_slots; the RVOL/$-vol/%-move quality bar is NOT relaxed (no penny-junk flood) and the normal ranking is unchanged (this only ADDS guaranteed slots on top). 0 = byte-identical to the freshness×move-ranked truncation.",
+    )
+    chili_momentum_hot_mover_recatch_slots: int = Field(
+        default=15,
+        ge=1,
+        le=100,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_MOVER_RECATCH_SLOTS"),
+        description="The ONE documented bound for the hot-mover re-catch: the max number of genuinely-explosive hot movers guaranteed into the universe ahead of the truncation cap (ranked by RVOL×move among the hot set). A small bound so a faded-then-resurging runner is re-caught without the guarantee itself becoming an unbounded second universe. Only consulted when chili_momentum_hot_mover_recatch_enabled is on.",
+    )
+    chili_momentum_hot_mover_rvol_floor: float = Field(
+        default=5.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_MOVER_RVOL_FLOOR"),
+        description="The single documented RVOL FLOOR (today share-volume ÷ prevDay share-volume) for the hot-mover quality bar — Ross's ≥5× relative-volume reference. A name must clear MAX(this floor, the batch RVOL high-percentile) AND the %-move bar AND the $-vol floor to qualify as a guaranteed hot mover or for the sub-$1 exemption. A FLOOR (the batch percentile can only lift it), so missing/degenerate prevDay volume never fabricates an explosive name (fail-closed: no usable RVOL ⇒ not a hot mover).",
+    )
+    chili_momentum_hot_mover_change_floor: float = Field(
+        default=20.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_MOVER_CHANGE_FLOOR"),
+        description="The single documented %-move FLOOR for the hot-mover quality bar — a 'genuinely explosive RIGHT NOW' threshold well above the universe's modest min_change_pct in-play floor. A name must clear MAX(this floor, the batch change high-percentile) (plus the RVOL + $-vol bars) to be guaranteed-included or sub-$1-exempted. A FLOOR; the within-batch percentile can only raise it so a quiet day can't flood the guarantee.",
+    )
+    chili_momentum_hot_mover_subdollar_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_MOVER_SUBDOLLAR_ENABLED"),
+        description="Sub-$1 exemption: let an EXPLOSIVE sub-$1 name (clears the SAME RVOL + %-move + $-vol hot-mover bar) pass the profile's price_min floor (Ross trades sub-$1 runners; NEXR ran $0.95→$1.18). Guarded, NOT a blanket floor removal — ordinary sub-$1 penny tape that fails the hot-mover bar is still dropped. Requires chili_momentum_hot_mover_recatch_enabled. 0 = the price_min floor is enforced for every name (byte-identical).",
+    )
     # ── Daily-chart context (the multi-timeframe layer Ross STARTS with) ─────────
     # Adds a 5th SELECTION pillar (daily_structure, 10% weight) from
     # daily_levels.compute_daily_context — break ABOVE a major daily level + room to

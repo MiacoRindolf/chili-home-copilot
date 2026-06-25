@@ -802,6 +802,14 @@ def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[Momentum
     freshness <= viability_max_age, so we filter to that here to never pick a
     candidate the arm would reject. Each symbol has many variants; we fetch a
     generous slice then dedupe to the best variant per distinct symbol.
+
+    The 600s freshness gate is DELIBERATELY NOT loosened (it is the staleness
+    protection that keeps the arm off dead/stale tape). The companion fix for the
+    NEXR late-surge miss is upstream in universe.build_equity_universe's hot-mover
+    re-catch (chili_momentum_hot_mover_recatch_enabled): keeping a faded-then-
+    resurging runner IN the rescored universe means its freshness_ts stays current,
+    so it passes THIS gate naturally — the cure is to keep it fresh, not to trust
+    stale rows here.
     """
     max_age = float(getattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0)
     cutoff = datetime.utcnow() - timedelta(seconds=max_age)
