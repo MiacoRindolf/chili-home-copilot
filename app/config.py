@@ -2341,6 +2341,30 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_ELIGIBLE_MAX_SPREAD_BPS"),
         description="The SINGLE documented live-eligibility spread ceiling (bps). A spread WIDER than this disqualifies a name from LIVE entry (truly toxic / broken-halted quote). At/below it the wide spread only DERATES the viability score — the explosive low-float movers the Ross lane targets (~40-90bps) stay live-eligible and are entered with marketable-limit/maker orders that cross the spread. 0 = no spread disqualification (rely on the liquidity floor). Replaces the old hard 12/25bps disqualify that silently blocked every squeeze (1,495 'Not live-eligible' entry blocks 2026-06-25).",
     )
+    # ADAPTIVE stale-quote (stale_bbo) window — scale the freshness ceiling to the NAME's own
+    # trade cadence instead of a fixed 15s clock (operator 2026-06-25 "gawin mong adaptive").
+    # max_age = clamp(cadence_mult * avg_inter-trade-interval, floor, ceiling). A name printing
+    # every ~20s is fresh at ~60s; a halted/quiet name (no recent ticks) stays at the floor and
+    # is correctly stale. ONE documented knob (cadence_mult) + safety bounds.
+    chili_momentum_quote_freshness_cadence_mult: float = Field(
+        default=3.0,
+        ge=1.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_QUOTE_FRESHNESS_CADENCE_MULT"),
+        description="K: the adaptive stale-quote window = K x the name's avg inter-trade interval (over the last 120s of iqfeed_trade_ticks), clamped to [floor, ceiling]. The one documented knob; higher = more tolerant of slow-but-live names.",
+    )
+    chili_momentum_quote_freshness_floor_seconds: float = Field(
+        default=15.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_QUOTE_FRESHNESS_FLOOR_SECONDS"),
+        description="Lower bound on the adaptive stale-quote window (never tighter than the venue base). Fast-printing + halted/quiet names land here.",
+    )
+    chili_momentum_quote_freshness_ceiling_seconds: float = Field(
+        default=120.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_QUOTE_FRESHNESS_CEILING_SECONDS"),
+        description="Upper bound on the adaptive stale-quote window — caps how old a quote can be and still count as fresh for a slow-trading name (safety vs trading on a truly stale price).",
+    )
     # BROKER-TRUTH RECONCILIATION (mig309) — TWO decoupled flags (write-then-verify-then-read):
     #
     #   chili_momentum_broker_truth_reconciliation_enabled — gates the WRITE pass

@@ -2299,16 +2299,61 @@ def _held_position_keeps_exit_on_boundary_fail(state: str, has_position: Any) ->
     return bool(has_position) and state in _HELD_LIVE_STATES
 
 
+def _adaptive_quote_max_age_seconds(db: Any, symbol: str, base_max_age: float) -> float:
+    """ADAPTIVE stale-quote window: scale the freshness ceiling to how fast THIS name
+    actually trades, so "stale" means old RELATIVE to its own cadence — not a fixed clock.
+    A name printing every ~20s is fresh at ~20-60s; a halted/quiet name (no recent ticks)
+    stays at the conservative base floor (correctly stale). One documented knob
+    (cadence_mult K) + safety bounds (floor = never tighter than the venue base; ceiling
+    caps it). Reads the live IQFeed trade cadence (iqfeed_trade_ticks).
+    (operator 2026-06-25: "gawin mong adaptive" — no fixed 15s magic clock.)"""
+    base = float(base_max_age or 0.0)
+    floor = max(base, float(getattr(settings, "chili_momentum_quote_freshness_floor_seconds", 15.0) or 15.0))
+    ceil = float(getattr(settings, "chili_momentum_quote_freshness_ceiling_seconds", 120.0) or 120.0)
+    k = float(getattr(settings, "chili_momentum_quote_freshness_cadence_mult", 3.0) or 3.0)
+    if ceil < floor:
+        ceil = floor
+    try:
+        from sqlalchemy import text as _text
+        window = 120.0
+        n = db.execute(
+            _text(
+                "SELECT count(*) FROM iqfeed_trade_ticks "
+                "WHERE symbol = :s AND observed_at > now() - make_interval(secs => :w)"
+            ),
+            {"s": symbol, "w": window},
+        ).scalar() or 0
+        if int(n) <= 0:
+            return floor  # not actively trading -> conservative (halted/quiet stays stale)
+        avg_interval = window / float(int(n))
+        return float(max(floor, min(ceil, k * avg_interval)))
+    except Exception:
+        return floor
+
+
 def _quote_quality_block(
-    tick: Any, freshness: Any, max_spread_bps: float | None = None
+    tick: Any, freshness: Any, max_spread_bps: float | None = None,
+    *, symbol: str | None = None, db: Any = None,
 ) -> dict[str, Any] | None:
     meta = getattr(tick, "freshness", None) or freshness
     if meta is not None and not is_fresh_enough(meta):
-        return {
-            "reason": "stale_bbo",
-            "age_seconds": round(float(meta.age_seconds()), 4),
-            "max_age_seconds": float(getattr(meta, "max_age_seconds", 0.0) or 0.0),
-        }
+        # The venue's FIXED base window flagged stale — re-check against the name's
+        # cadence-scaled window. PURELY ADDITIVE: only ever WIDENS (can un-block a
+        # slow-but-live name trading at its normal pace), never newly-blocks. A halted
+        # name (no recent ticks) keeps the conservative floor and stays stale.
+        _age = float(meta.age_seconds())
+        _max_age = float(getattr(meta, "max_age_seconds", 0.0) or 0.0)
+        if symbol and db is not None:
+            try:
+                _max_age = _adaptive_quote_max_age_seconds(db, str(symbol), _max_age)
+            except Exception:
+                pass
+        if _age > _max_age:
+            return {
+                "reason": "stale_bbo",
+                "age_seconds": round(_age, 4),
+                "max_age_seconds": round(_max_age, 2),
+            }
     try:
         mid = float(getattr(tick, "mid", 0.0) or 0.0)
         bid = float(getattr(tick, "bid", 0.0) or 0.0)
@@ -3074,7 +3119,9 @@ def tick_live_session(
         if _skip_spread_gate
         else _adaptive_max_spread
     )
-    quote_block = _quote_quality_block(tick, _fr, max_spread_bps=_entry_spread_ceiling)
+    quote_block = _quote_quality_block(
+        tick, _fr, max_spread_bps=_entry_spread_ceiling, symbol=sess.symbol, db=db
+    )
     # Halt tracking: a SUSTAINED stale-quote streak = suspected LULD halt; quotes
     # returning = resume (starts the entry whipsaw-cooldown). A wide-but-live quote
     # is NOT a halt signal — only staleness is.
