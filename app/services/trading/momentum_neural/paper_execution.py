@@ -1036,6 +1036,118 @@ def classify_stop_breach(
     return {"cls": "INCONCLUSIVE", "reason": "mixed", "signals": sig}
 
 
+def _classify_cadence(
+    *,
+    high_water_mark: float,
+    entry_price: float,
+    bid: float,
+    atr_pct: float,
+    elapsed_minutes: float | None,
+    peak_r_prior: float | None,
+    ema_5m_rising: bool | None,
+    rvol_accelerating: bool | None,
+    slow_atr_pct_threshold: float,
+    trigger_bar_minutes: float = 1.0,
+) -> dict[str, Any]:
+    """Classify the runner's CADENCE from signals already present at the green tick.
+
+    PURE (no I/O). Returns one of three classes — ``SLOW_CHOPPER`` (quiet stall:
+    only this class loosens the ladder), ``FAST`` (a live runner: NEVER loosened),
+    or ``UNCERTAIN`` (defaults to FAST/normal — no modulation). The conservative
+    TRIPLE-GATE for SLOW_CHOPPER (all three must hold): velocity LOW, trend NOT
+    rising, volume NOT accelerating. A rising 5m-EMA FORCES not-slow (structure
+    intact ⇒ it is still a runner). The [0.35, 0.65] velocity-uncertainty band
+    falls through to UNCERTAIN ⇒ FAST/normal so we never call a borderline name slow.
+
+    GUARD #1 (cold-start): returns UNCERTAIN — no modulation — when fewer than one
+    trigger-bar has elapsed OR ``peak_r_prior`` is unset/zero, because the velocity
+    score divides by a tiny ``elapsed_minutes`` early and a near-zero ``peak_r``
+    denominator would spuriously flip the class right after entry.
+
+    The returned ``velocity_score`` is the move-since-entry-per-minute as a fraction
+    of the entry-ATR-per-minute; ``< 0.35·... `` (below the slow threshold band) =
+    velocity-slow, ``> 0.65`` = velocity-fast, in-between = uncertain.
+    """
+    out: dict[str, Any] = {
+        "cls": "UNCERTAIN",
+        "reason": None,
+        "velocity_score": None,
+        "trend_rising": ema_5m_rising,
+        "volume_accelerating": rvol_accelerating,
+        "elapsed_minutes": elapsed_minutes,
+        "peak_r_prior": peak_r_prior,
+    }
+    # ---- GUARD #1: classifier cold-start (NO modulation until warm) ----
+    try:
+        bar_min = max(0.01, float(trigger_bar_minutes or 1.0))
+    except (TypeError, ValueError):
+        bar_min = 1.0
+    if (
+        elapsed_minutes is None
+        or not math.isfinite(float(elapsed_minutes))
+        or float(elapsed_minutes) < bar_min
+        or peak_r_prior is None
+        or not math.isfinite(float(peak_r_prior))
+        or float(peak_r_prior) <= 0.0
+    ):
+        out["reason"] = "cold_start"
+        return out
+
+    try:
+        hwm = float(high_water_mark)
+        entry = float(entry_price)
+        b = float(bid)
+        ap = float(atr_pct or 0.0)
+        elapsed = float(elapsed_minutes)
+        slow_thr = float(slow_atr_pct_threshold)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_inputs"
+        return out
+    if not (math.isfinite(hwm) and math.isfinite(entry) and math.isfinite(b)):
+        out["reason"] = "non_finite"
+        return out
+    if entry <= 0 or ap <= 0 or elapsed <= 0 or slow_thr <= 0:
+        out["reason"] = "degenerate"
+        return out
+
+    # ---- velocity_score: realized fractional move/min vs entry-ATR fractional/min ----
+    # numerator: |price excursion since entry| / entry, per minute held.
+    # denominator: entry ATR% per minute (the trade's OWN expected pace).
+    realized_move_frac_per_min = (abs(b - entry) / entry) / elapsed
+    atr_frac_per_min = ap / bar_min
+    if atr_frac_per_min <= 0:
+        out["reason"] = "degenerate"
+        return out
+    velocity_score = realized_move_frac_per_min / atr_frac_per_min
+    out["velocity_score"] = round(velocity_score, 4)
+
+    # velocity classes vs the slow threshold band; [0.35,0.65]·-relative = uncertain.
+    vel_slow = velocity_score < (slow_thr * 0.70)        # decisively below pace
+    vel_fast = velocity_score > (slow_thr * 1.30)        # decisively above pace
+    # trend: a RISING 5m-EMA means structure intact ⇒ NOT slow (force fast bias).
+    trend_not_rising = (ema_5m_rising is False)          # None ⇒ unknown ⇒ not "not-rising"
+    vol_not_accel = (rvol_accelerating is False)         # None ⇒ unknown ⇒ not "not-accel"
+
+    # ---- EMA-rising overrides everything ⇒ NOT slow ----
+    if ema_5m_rising is True:
+        out["cls"] = "FAST"
+        out["reason"] = "ema_rising"
+        return out
+    if vel_fast:
+        out["cls"] = "FAST"
+        out["reason"] = "velocity_fast"
+        return out
+    # ---- conservative TRIPLE-GATE for SLOW_CHOPPER ----
+    if vel_slow and trend_not_rising and vol_not_accel:
+        out["cls"] = "SLOW_CHOPPER"
+        out["reason"] = "slow_triple_gate"
+        return out
+    # everything else (incl. the [0.35,0.65] uncertainty band) defaults to UNCERTAIN.
+    out["cls"] = "UNCERTAIN"
+    out["reason"] = "mixed"
+    return out
+
+
 def sell_into_strength_ladder(
     *,
     high_water_mark: float,
@@ -1051,6 +1163,7 @@ def sell_into_strength_ladder(
     prior_partial_taken: bool = False,
     cooldown_active: bool = False,
     side_long: bool = True,
+    cadence_loosen: bool = False,
 ) -> dict[str, Any]:
     """Ross-style PROACTIVE sell-into-strength layer (v2) on top of the v1 exhaustion
     lock. v1 only DEFENDS (tightens the stop after exhaustion, then waits for the stop
@@ -1077,6 +1190,14 @@ def sell_into_strength_ladder(
     layer can only realize profit earlier and RAISE the stop; it never loosens/nulls any
     stop. ``fill_ratchet_floor`` is what the caller ratchets the remainder to ON fill.
 
+    CADENCE-AWARE (``cadence_loosen``): when the CALLER (who owns the kill-switch flag
+    + the cadence classifier) passes ``cadence_loosen=True`` for a SLOW_CHOPPER, the
+    DISTRIBUTION gate is relaxed so the small first increment fires EARLIER at the
+    stall (ofi softer toward ~1.33·T, micro 0.7×, dist_pctile up to 0.30) — bounded by
+    explicit clamp FLOORS (ofi never weaker than 1.0·T, dist_pctile never past 0.30).
+    The CONTINUATION VETO is NEVER loosened (its own pinned 2.0·T threshold). A FAST
+    runner is passed ``cadence_loosen=False`` ⇒ the gate is BYTE-IDENTICAL to today.
+
     ADAPTIVE, single base knob ``chili_momentum_exit_ladder_rung_bps``; everything else
     derives from the plan's ``rr``, the position's ``risk_dist`` (ATR), or percentiles.
     Pure (no I/O); fail-safe → HOLD. Emits the pure-hold counterfactual for the live A/B.
@@ -1097,6 +1218,7 @@ def sell_into_strength_ladder(
         "first_increment_frac": 0.0,
         "counterfactual_hold_stop": current_stop,
         "reason": None,
+        "cadence_loosened": bool(cadence_loosen),
     }
     if not side_long or ladder is None:
         out["reason"] = "not_long_or_no_ladder"
@@ -1161,8 +1283,30 @@ def sell_into_strength_ladder(
     arm_r = max(0.5, arm_frac * rr)
     harvest_gap_r = 0.5 * max(0.0, rr - arm_r)          # only harvest a genuine runner
     ofi_exit_thr = 2.0 * thr                            # exit conviction = 2× entry
+    # GUARD #4: the CONTINUATION VETO uses its OWN threshold pinned to the UNLOOSENED
+    # 2.0·T and is NEVER modulated — the sell-early firewall stays exactly as strict
+    # regardless of any cadence loosening below. (Decoupled from ofi_exit_thr so the
+    # loosening of the DISTRIBUTION ofi can never reach into the veto arithmetic.)
+    veto_ofi_thr = 2.0 * thr
     micro_roll_bps = max(3.0, 0.10 * risk_dist_bps)     # 10% of the trade's own 1R, ATR-derived
     dist_pctile_max = 0.25                              # bottom quartile of its own window
+
+    # ---- CADENCE-AWARE LOOSENING (SLOW_CHOPPER only; flag-gated by the caller) ----
+    # When the runner has gone quiet, fire the SMALL first increment EARLIER at the
+    # stall: relax the DISTRIBUTION gate (ofi 1.5× softer toward 1.5·T, micro 0.7×,
+    # dist_pctile up to 0.30). The CONTINUATION VETO (v1/v2/v3 below) is LEFT
+    # UNTOUCHED. GUARD #3 — EXPLICIT CLAMP FLOORS: even after the compound loosening,
+    # ofi_exit_thr is never weaker than 1.0·T and dist_pctile_max never exceeds 0.30,
+    # so the gate can degrade only to a documented, bounded floor — never collapse.
+    if cadence_loosen:
+        ofi_exit_thr = (ofi_exit_thr / 1.5)             # 2.0·T -> ~1.33·T (softer exit conviction)
+        micro_roll_bps = 0.7 * micro_roll_bps           # price needs to roll 0.7× as far
+        dist_pctile_max = min(0.30, dist_pctile_max + 0.05)
+        # GUARD #3: hard floors — clamp AFTER the compound, never past them.
+        ofi_exit_thr = max(ofi_exit_thr, 1.0 * thr)
+        dist_pctile_max = min(dist_pctile_max, 0.30)
+        micro_roll_bps = max(3.0, micro_roll_bps)       # keep the absolute micro floor
+
     stale_max_s = max(6.0, 2.0 * drain_s)
     spread_cap_bps = 3.0 * risk_dist_bps                # illiquid relative to the trade's risk unit
     refill_floor = 0.0
@@ -1213,8 +1357,10 @@ def sell_into_strength_ladder(
     d2 = o < -ofi_exit_thr                  # order flow decisively rolled over
     d3 = m < -micro_roll_bps                # price decisively settling toward the bid
     # ---- CONTINUATION VETO (any TRUE ⇒ HOLD; the sell-early firewall) ----
+    # GUARD #4: pinned to veto_ofi_thr (== UNLOOSENED 2.0·T), NOT ofi_exit_thr — the
+    # veto is byte-identical whether or not the distribution gate was loosened.
     v1 = refill is not None and refill > refill_floor   # buyers still stacking the bid
-    v2 = o > -ofi_exit_thr / 2.0                          # flow not decisively negative
+    v2 = o > -veto_ofi_thr / 2.0                          # flow not decisively negative
     v3 = m >= 0.0                                         # price still bid-favored
     if v1 or v2 or v3:
         out["vetoed_by"] = "bid_refill" if v1 else ("ofi_weak" if v2 else "micro_nonneg")

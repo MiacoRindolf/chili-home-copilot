@@ -3892,6 +3892,28 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_ADAPTIVE_EQUITY_ENABLED"),
         description="Run the adaptive exit (v1 exhaustion lock + v2 sell-into-strength) for EQUITY positions, not just crypto. Equity L2 from iqfeed. Default ON; the size-moving sell stays gated by exit_ladder_live. OFF = equity byte-identical (parity / rollback).",
     )
+    # ── Cadence-aware exit (v2 modulation) ───────────────────────────────────────
+    # Make the v2 sell-into-strength ladder CADENCE-AWARE: when the runner has gone
+    # quiet (a SLOW chopper — low velocity, 5m-EMA not rising, RVOL not accelerating)
+    # LOOSEN the distribution gate so the existing ladder banks the small first
+    # increment EARLIER at the stall, instead of waiting for the full distribution
+    # confluence that a dead chopper may never print. A FAST runner is NEVER touched
+    # (only SLOW choppers loosen; the [0.35,0.65] uncertainty band + the cold-start
+    # guard both default to FAST/normal). The continuation veto is NEVER loosened, the
+    # ratchet-only stop is preserved, and floors clamp the loosening. OFF ⇒ the ladder
+    # is byte-identical to its pre-cadence behaviour (parity kill-switch / rollback).
+    chili_momentum_cadence_aware_exit_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CADENCE_AWARE_EXIT_ENABLED"),
+        description="Master gate / kill-switch for the cadence-aware sell-into-strength modulation. ON = a SLOW_CHOPPER cadence class loosens the v2 ladder's distribution gate (fires earlier at the stall) while a FAST/UNCERTAIN class leaves the gate byte-identical to today. The continuation veto, the INVARIANT-A ratchet, and the single-chokepoint partial path are unchanged regardless. OFF = the ladder is byte-identical to its pre-cadence behaviour (no modulation ever), the only safe rollback.",
+    )
+    chili_momentum_cadence_atr_pct_slow_threshold: float = Field(
+        default=0.20,
+        ge=0.01,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CADENCE_ATR_PCT_SLOW_THRESHOLD"),
+        description="The ONE irreducible cadence knob: a runner is velocity-SLOW when its realized velocity (price move since entry per minute held, as a fraction of price) falls below this fraction of the trade's own entry ATR%/minute. Everything else in the cadence classifier (trend via 5m-EMA rising, RVOL acceleration, the [0.35,0.65] uncertainty band, the cold-start gate) derives from signals already present at the tick — no other magic numbers. Lower = harder to call SLOW (more runners stay FAST/normal).",
+    )
     # ── L2-aware anti-shake-out (LOSS side) ──────────────────────────────────
     # OPG-USD was shaken out at a dip VALLEY (trail_stop -41bps) then recovered +
     # re-armed 6 min later. The existing >=1s flicker guard catches a single bad

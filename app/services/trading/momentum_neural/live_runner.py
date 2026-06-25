@@ -57,6 +57,7 @@ from .risk_policy import (
     policy_int_cap,
 )
 from .paper_execution import (
+    _classify_cadence,
     cushion_adaptive_trail_stop,
     breakeven_stop_after_partial,
     class_aware_reward_risk,
@@ -5832,6 +5833,84 @@ def tick_live_session(
                     except Exception:
                         _cooldown = False
                     _ladder = read_ladder_distribution(sess.symbol, db=db)
+                    # ── CADENCE CLASS (drives the SLOW_CHOPPER loosening below) ──
+                    # Fully flag-gated + fail-open: any error / OFF flag ⇒ _cad_loosen
+                    # stays False ⇒ the ladder is BYTE-IDENTICAL to today. All inputs
+                    # are already present at this green tick (no new I/O for the class
+                    # itself; the 5m-EMA + RVOL are the cached values fetched above).
+                    _cad = None
+                    _cad_loosen = False
+                    if bool(getattr(settings, "chili_momentum_cadence_aware_exit_enabled", True)):
+                        try:
+                            # elapsed minutes since the fill (GUARD #1 cold-start input).
+                            _cad_elapsed_min = None
+                            _opened_raw = pos.get("opened_at_utc")
+                            if _opened_raw:
+                                try:
+                                    _opened_dt = datetime.fromisoformat(str(_opened_raw))
+                                    _now_dt = _utcnow()
+                                    if _opened_dt.tzinfo is None and _now_dt.tzinfo is not None:
+                                        _now_dt = _now_dt.replace(tzinfo=None)
+                                    _cad_elapsed_min = max(
+                                        0.0, (_now_dt - _opened_dt).total_seconds() / 60.0
+                                    )
+                                except (TypeError, ValueError):
+                                    _cad_elapsed_min = None
+                            # prior peak_r (GUARD #1 cold-start input): the trade's own
+                            # risk unit (same formula the stop uses), HWM excursion.
+                            _cad_peak_r = None
+                            try:
+                                _rd = avg * max(0.003, float(_atr_pct_trail or 0.0) * float(_sm or 0.0))
+                                if _rd > 0:
+                                    _cad_peak_r = max(0.0, (float(_hwm_trail) - float(avg)) / _rd)
+                            except (TypeError, ValueError, ZeroDivisionError):
+                                _cad_peak_r = None
+                            # 5m-EMA rising vs the PREVIOUS cached EMA sample (structure
+                            # anchor). None when we have no prior sample ⇒ unknown.
+                            _cad_ema_rising = None
+                            try:
+                                _ema_prev = _float_or_none(le.get("cadence_prev_ema5m"))
+                                if _ema5 is not None and _ema_prev is not None:
+                                    _cad_ema_rising = bool(float(_ema5) > float(_ema_prev))
+                                if _ema5 is not None:
+                                    le["cadence_prev_ema5m"] = float(_ema5)
+                            except (TypeError, ValueError):
+                                _cad_ema_rising = None
+                            # RVOL accelerating vs the previous cached sample. None when
+                            # no prior sample / thin tape ⇒ unknown.
+                            _cad_rvol_accel = None
+                            try:
+                                _rvol_now = _latest_rvol(db, sess.symbol)
+                                _rvol_prev = _float_or_none(le.get("cadence_prev_rvol"))
+                                if _rvol_now is not None and _rvol_prev is not None:
+                                    _cad_rvol_accel = bool(float(_rvol_now) > float(_rvol_prev))
+                                if _rvol_now is not None:
+                                    le["cadence_prev_rvol"] = float(_rvol_now)
+                            except (TypeError, ValueError):
+                                _cad_rvol_accel = None
+                            _cad = _classify_cadence(
+                                high_water_mark=_hwm_trail,
+                                entry_price=avg,
+                                bid=bid,
+                                atr_pct=_atr_pct_trail,
+                                elapsed_minutes=_cad_elapsed_min,
+                                peak_r_prior=_cad_peak_r,
+                                ema_5m_rising=_cad_ema_rising,
+                                rvol_accelerating=_cad_rvol_accel,
+                                slow_atr_pct_threshold=float(
+                                    getattr(settings, "chili_momentum_cadence_atr_pct_slow_threshold", 0.20) or 0.20
+                                ),
+                                trigger_bar_minutes=max(
+                                    0.01,
+                                    float(getattr(settings, "chili_momentum_micropull_bar_seconds", 15) or 15) / 60.0,
+                                ),
+                            )
+                            # ONLY a SLOW_CHOPPER loosens; FAST/UNCERTAIN never do.
+                            _cad_loosen = bool(_cad.get("cls") == "SLOW_CHOPPER")
+                            _commit_le(sess, le)
+                        except Exception:
+                            _cad = None
+                            _cad_loosen = False
                     _sis = sell_into_strength_ladder(
                         high_water_mark=_hwm_trail,
                         entry_price=avg,
@@ -5846,7 +5925,32 @@ def tick_live_session(
                         prior_partial_taken=bool(pos.get("partial_taken")),
                         cooldown_active=_cooldown,
                         side_long=True,
+                        cadence_loosen=_cad_loosen,
                     )
+                    # GUARD #2 — RE-ENTRY DAMPER under SLOW_CHOPPER: a name just called a
+                    # chopper must NOT be aggressively re-loaded (the 4.6%-spread scalp→
+                    # reenter bleed). Widen/lengthen the micro-pullback re-entry cooldown
+                    # for THIS session to ~3× the base bar frame from now. Monotonic: only
+                    # ever pushes the cooldown LATER, never earlier (never enables a
+                    # re-load that wasn't already allowed). No-op when not a chopper.
+                    if _cad_loosen:
+                        try:
+                            _damp_s = 3.0 * float(
+                                getattr(settings, "chili_momentum_micropullback_reentry_cooldown_seconds", 30.0) or 30.0
+                            )
+                            _damp_until = (_utcnow() + timedelta(seconds=_damp_s)).replace(tzinfo=None)
+                            _dmp_raw = le.get("micropullback_reentry_cooldown_until_utc")
+                            _dmp_cur = None
+                            if _dmp_raw:
+                                try:
+                                    _dmp_cur = datetime.fromisoformat(str(_dmp_raw))
+                                except (TypeError, ValueError):
+                                    _dmp_cur = None
+                            if _dmp_cur is None or _damp_until > _dmp_cur:
+                                le["micropullback_reentry_cooldown_until_utc"] = _damp_until.isoformat()
+                                _commit_le(sess, le)
+                        except Exception:
+                            pass
                     if _sis.get("armed"):
                         _emit(db, sess, "live_sell_into_strength", {
                             "state": _sis.get("state"),
@@ -5868,6 +5972,11 @@ def tick_live_session(
                             "live": bool(getattr(settings, "chili_momentum_exit_ladder_live", False)),
                             "bid": bid,
                             "high_water_mark": _hwm_trail,
+                            # cadence-aware A/B telemetry (observe-first)
+                            "cadence_cls": (_cad or {}).get("cls"),
+                            "cadence_reason": (_cad or {}).get("reason"),
+                            "cadence_velocity_score": (_cad or {}).get("velocity_score"),
+                            "cadence_loosened": bool(_sis.get("cadence_loosened")),
                         })
                     # Action A: ratchet-only stop (INVARIANT A; live-on, can only help).
                     _sis_stop = _float_or_none(_sis.get("new_stop_floor"))
