@@ -61,6 +61,7 @@ from .paper_execution import (
     breakeven_stop_after_partial,
     class_aware_reward_risk,
     effective_stop_atr_pct,
+    iceberg_seller_score,
     ofi_exhaustion_lock,
     pyramid_add_decision,
     pyramid_blend_on_fill,
@@ -5719,6 +5720,52 @@ def tick_live_session(
                             _lull = bool(_pyr_lull(sess.symbol))
                         except Exception:
                             _lull = False
+                        # ICEBERG / HIDDEN-SELLER probe (Ross SS101 #038) — EQUITY-ONLY,
+                        # ADD-PATH ONLY, fail-OPEN. Read the short-window top-of-book ASK
+                        # series (price+size) from iqfeed_depth_snapshots (same source +
+                        # window as the OFI/micro-price read) and score refill-vs-advance:
+                        # a refilling displayed ask => an absorbing seller => block the add.
+                        # None (flag off, crypto, or absent/stale L2) => the add is allowed.
+                        _iceberg_score = None
+                        _iceberg_thresh = None
+                        if _is_equity_pyr and bool(
+                            getattr(settings, "chili_momentum_iceberg_add_probe_enabled", True)
+                        ):
+                            try:
+                                from sqlalchemy import text as _ice_sql
+
+                                _ice_win = float(
+                                    getattr(settings, "chili_crypto_l2_ofi_window_s", 15.0) or 15.0
+                                )
+                                _ice_rows = db.execute(
+                                    _ice_sql(
+                                        "SELECT ask_top, ask_top_size "
+                                        "FROM iqfeed_depth_snapshots "
+                                        "WHERE symbol = :s AND observed_at > "
+                                        "(now() at time zone 'utc') - make_interval(secs => :w) "
+                                        "ORDER BY observed_at ASC"
+                                    ),
+                                    {"s": str(sess.symbol or "").strip().upper(), "w": _ice_win},
+                                ).fetchall()
+                                _ice_series = [
+                                    (float(r[0]), float(r[1]))
+                                    for r in _ice_rows
+                                    if r[0] is not None and r[1] is not None
+                                ]
+                                _iceberg_score = iceberg_seller_score(_ice_series)
+                                if _iceberg_score is not None:
+                                    _iceberg_thresh = float(
+                                        getattr(
+                                            settings,
+                                            "chili_momentum_iceberg_add_refill_ratio",
+                                            1.0,
+                                        )
+                                        or 1.0
+                                    )
+                            except Exception:
+                                # Fail-OPEN: any L2 read/parse error leaves the add unchanged.
+                                _iceberg_score = None
+                                _iceberg_thresh = None
                         # SHARED pure predicate (one source of truth w/ replay + tests).
                         _decn = pyramid_add_decision(
                             enabled=True,  # outer block already gated on the flag
@@ -5737,6 +5784,8 @@ def tick_live_session(
                             ofi_threshold=float(getattr(settings, "chili_momentum_ofi_threshold", 0.25) or 0.25),
                             min_cushion_r=float(getattr(settings, "chili_momentum_pyramid_min_cushion_r", 1.0) or 1.0),
                             midday_lull=_lull,
+                            iceberg_score=_iceberg_score,
+                            iceberg_threshold=_iceberg_thresh,
                         )
                         _R0 = _decn.get("R0")
                         if _decn.get("fire"):
@@ -5849,6 +5898,10 @@ def tick_live_session(
                                                 if _decn.get("cushion_r") is not None else None
                                             ),
                                             "ofi": (None if _pyr_ofi is None else float(_pyr_ofi)),
+                                            "iceberg_score": (
+                                                None if _iceberg_score is None
+                                                else round(float(_iceberg_score), 4)
+                                            ),
                                             "stop_at_submit": float(stop_px),
                                         })
                                     else:

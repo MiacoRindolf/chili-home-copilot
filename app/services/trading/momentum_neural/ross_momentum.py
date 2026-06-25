@@ -72,6 +72,27 @@ ROSS_PILLAR_WEIGHTS_DAILY_CONTEXT: dict[str, float] = {
     "daily_structure": 0.10,
 }
 
+# FLOAT-ROTATION sustainability pillar weight (opt-in via chili_momentum_float_rotation_tilt_enabled).
+# UNLIKE the variants above this is NOT a full replacement weight-set — it is a SINGLE pillar that the
+# pipeline folds onto WHATEVER weight-set is already active (composable). ``score_universe`` reads the
+# per-symbol ``float_rotation_pct`` raw sub-score (stamped by the bridge, exactly like
+# ``daily_structure_pct``) and renormalises over the present pillars, so adding this key never re-scales
+# the other pillars by hand. 0.10 = the same minority magnitude as the daily-structure pillar: it
+# RE-RANKS the pool toward names with fuel-remaining (cum-volume rotating the float), it can NEVER block
+# a fill or remove a name from the pool. Absent ``float_rotation_pct`` (crypto / thin data / flag OFF) ⇒
+# the pillar is simply not present in the blend ⇒ byte-identical ranking.
+ROSS_FLOAT_ROTATION_PILLAR_WEIGHT = 0.10
+
+# Ross SS101 sustainability threshold: a move whose CUMULATIVE session volume never clears ~1x its float
+# fades (insider/institutional supply overwhelms the bid), while a name rotating its float ~5x+ by EOD has
+# the demand to sustain. These are the ONE documented base each (a clear-floor and a saturation-reference),
+# not scattered magic: the within-batch PERCENTILE of ``projected_rotation_at_eod`` is what actually ranks
+# names, so these only shape the raw sub-score's curve (clip below 1x toward 0, saturate near 5x toward 1).
+# Equity-only — crypto "float" is market-cap and 24h volume semantics differ; the bridge applies it to
+# equities only. REFERENCE points (the percentile may discover a different live bar), never hard cutoffs.
+ROSS_FLOAT_ROTATION_CLEAR_FLOOR = 1.0
+ROSS_FLOAT_ROTATION_SATURATION = 5.0
+
 # ATTENTION-LEADERSHIP variant (opt-in via chili_momentum_attention_leadership_enabled):
 # the 2026-06-22 Ross study's TRUE winner/loser separator. Position (pos-in-range, VWAP
 # extension) does NOT separate — NXTS-winner and QXL-loser both break to new highs near
@@ -274,6 +295,13 @@ def score_universe(
     _ds_raw = {sym: _first_float(sig or {}, "daily_structure_pct") for sym, sig in signals.items()}
     ds_sorted = sorted(v for v in _ds_raw.values() if v is not None)
     _w_ds = float(w.get("daily_structure") or 0.0)
+    # Float-rotation sustainability pillar (composable, opt-in): the per-symbol raw
+    # ``float_rotation_pct`` sub-score (projected-rotation-at-EOD shaped by the SS101 clear/
+    # saturation references) stamped by the bridge. Graceful-degrade exactly like
+    # daily_structure — absent / zero-weight ⇒ not in the blend (byte-identical).
+    _fr_raw = {sym: _first_float(sig or {}, "float_rotation_pct") for sym, sig in signals.items()}
+    fr_sorted = sorted(v for v in _fr_raw.values() if v is not None)
+    _w_fr = float(w.get("float_rotation") or 0.0)
     # 6th/7th pillars (attention-leadership variant): the name's amplitude-leadership
     # share+rank of the live mover-field (the TRUE winner/loser separator) + its
     # dormant->explosive volume. Stamped cross-sectionally in _bridge_scanner_to_viability
@@ -297,6 +325,8 @@ def score_universe(
         att_pct = _percentile_rank(_att, att_sorted) if _att is not None else None
         _dorm = _dorm_raw.get(sym)
         dorm_pct = _percentile_rank(_dorm, dorm_sorted) if _dorm is not None else None
+        _fr = _fr_raw.get(sym)
+        fr_pct = _percentile_rank(_fr, fr_sorted) if _fr is not None else None
 
         present: list[tuple[float, float]] = []  # (percentile, weight)
         if rvol_pct is not None:
@@ -313,6 +343,8 @@ def score_universe(
             present.append((att_pct, _w_att))
         if dorm_pct is not None and _w_dorm > 0:
             present.append((dorm_pct, _w_dorm))
+        if fr_pct is not None and _w_fr > 0:
+            present.append((fr_pct, _w_fr))
 
         wsum = sum(wt for _, wt in present)
         score = (sum(pct * wt for pct, wt in present) / wsum) if wsum > 0 else 0.0
@@ -332,6 +364,7 @@ def score_universe(
                 "liquidity_neglog_size": liq,
                 "tradeable_liquidity_log_dvol": tliq,
                 "daily_structure": _ds if _w_ds > 0 else None,
+                "float_rotation_pct": _fr if _w_fr > 0 else None,
                 "pillars_present": [
                     name
                     for name, val in (
@@ -339,6 +372,7 @@ def score_universe(
                         ("liquidity", liq_pct),
                         ("tradeable_liquidity", tliq_pct if _w_tliq > 0 else None),
                         ("daily_structure", ds_pct if _w_ds > 0 else None),
+                        ("float_rotation", fr_pct if _w_fr > 0 else None),
                     )
                     if val is not None
                 ],
@@ -761,5 +795,108 @@ def curl_score(
             "last": round(last, 8),
             "trough_pos": round(t_pos, 4),
             "lookback": int(look),
+        },
+    )
+
+
+# ── Float-rotation sustainability (Ross SS101), as a pure SCORING signal ───────
+# Ross SS101: ``float_rotation = cumulative_session_volume / shares_float`` — how many
+# times the move has TURNED OVER the entire tradeable float so far today. A move whose
+# cumulative volume never clears ~1x its float fades: there simply is not enough DEMAND
+# to absorb the insider/institutional supply, so the spike round-trips. A move rotating
+# its float ~5x+ by the close has the demand to SUSTAIN. CHILI already ranks RVOL and
+# low-float INDEPENDENTLY but never divides volume BY float — this is that missing axis.
+#
+# ``projected_rotation_at_eod = current_rotation / session_fraction_elapsed`` linearly
+# extrapolates today's pace to the close (a name 2x-rotated 25% into the session projects
+# ~8x — plenty of fuel; a name 0.3x-rotated 80% in projects ~0.4x — a big float that
+# CANNOT rotate, the high-RVOL-but-stalling de-rate). The raw sub-score is shaped by the
+# SS101 clear-floor (below 1x projected ⇒ toward 0) and saturation (~5x ⇒ toward 1); the
+# bridge then percentile-ranks it WITHIN the batch (adaptive — the live bar floats).
+#
+# Pure / side-effect-free. Lookahead-free (cumulative volume is volume printed SO FAR;
+# the projection only extrapolates, it reads no future bar). Fail-OPEN to ``None`` on
+# thin / missing / pre-open data so the bridge simply omits the pillar (byte-identical) —
+# this can only RE-RANK toward sustainable fuel, it is NEVER a veto. Equity-only (the
+# caller applies it to equities; crypto "float" is market-cap and 24h semantics differ).
+
+
+@dataclass
+class FloatRotationSignal:
+    """Volume/float rotation sustainability read (Ross SS101). ``rotation_pct`` in
+    [0,1] is the raw sub-score the bridge stamps + percentile-ranks like the other
+    pillars; ``None`` (fail-open) ⇒ the pillar is omitted from the blend."""
+
+    rotation_pct: float | None          # [0,1] raw sub-score; None = omit the pillar
+    float_rotation: float | None        # cum_session_volume / shares_float (turns so far)
+    projected_rotation_at_eod: float | None  # current / session_fraction_elapsed
+    reason: str
+    debug: dict = field(default_factory=dict)
+
+
+def float_rotation_signal(
+    cumulative_session_volume: float | None,
+    shares_float: float | None,
+    session_fraction_elapsed: float | None,
+    *,
+    clear_floor: float = ROSS_FLOAT_ROTATION_CLEAR_FLOOR,
+    saturation: float = ROSS_FLOAT_ROTATION_SATURATION,
+) -> FloatRotationSignal:
+    """Compute Ross's float-rotation sustainability sub-score for one EQUITY name.
+
+    Args:
+      cumulative_session_volume — shares traded so far TODAY (the last session bar's
+        cumulative volume from the candle frame).
+      shares_float — the name's tradeable share float (the same value the low-float
+        ``liquidity`` pillar already reads).
+      session_fraction_elapsed — fraction of the regular session elapsed in (0,1]
+        (e.g. ``minutes_since_regular_open / 390``, clamped). Used ONLY to project the
+        current pace to EOD; clamped to a small floor so an early-session divide is sane.
+
+    Returns a ``FloatRotationSignal`` whose ``rotation_pct`` (the decision-affecting
+    output) shapes ``projected_rotation_at_eod`` against the SS101 clear-floor and
+    saturation references: below ``clear_floor`` projected rotation ⇒ toward 0 (the move
+    cannot clear its float — fades); ``saturation`` and above ⇒ 1.0 (ample fuel). Between,
+    a smooth ramp. Fail-OPEN to ``rotation_pct=None`` (omit the pillar) on any missing /
+    non-positive input — a name is NEVER de-ranked for absent float/volume data.
+    """
+    cv = _to_float(cumulative_session_volume)
+    fl = _to_float(shares_float)
+    if cv is None or fl is None or not (cv > 0) or not (fl > 0):
+        return FloatRotationSignal(None, None, None, "missing_or_nonpositive",
+                                   debug={"cum_vol": cv, "float": fl})
+    rotation = cv / fl
+    sf = _to_float(session_fraction_elapsed)
+    # Clamp the session fraction to a small positive floor so a just-after-open divide
+    # does not explode the projection; >1.0 (afterhours) clamps to 1.0 (no extrapolation).
+    if sf is None or sf <= 0:
+        # Pre-open / unknown clock — project at face value (no extrapolation), fail-open.
+        projected = rotation
+        sf_used = None
+    else:
+        sf_used = max(0.05, min(1.0, sf))
+        projected = rotation / sf_used
+    # Shape the projection into [0,1] against the SS101 references. A move PROJECTING to
+    # clear its float (>= clear_floor) ramps up; one stalling below it (big float that can't
+    # rotate) is pushed toward 0; saturation caps it. Smooth, monotone, no hard step.
+    span = max(1e-9, float(saturation) - float(clear_floor))
+    if projected <= float(clear_floor):
+        # below the clear-floor: scale 0 -> ~0.5 of the floor so a totally-stalled name (≈0
+        # rotation) reads ~0 and a name right AT the floor reads ~0.5 (neutral-leaning).
+        rot_pct = 0.5 * max(0.0, min(1.0, projected / float(clear_floor)))
+    else:
+        rot_pct = 0.5 + 0.5 * max(0.0, min(1.0, (projected - float(clear_floor)) / span))
+    rot_pct = max(0.0, min(1.0, rot_pct))
+    return FloatRotationSignal(
+        rotation_pct=round(rot_pct, 4),
+        float_rotation=round(rotation, 4),
+        projected_rotation_at_eod=round(projected, 4),
+        reason=("projects_to_clear" if projected >= float(clear_floor) else "stalling_rotation"),
+        debug={
+            "cum_vol": round(cv, 2),
+            "float": round(fl, 2),
+            "session_fraction": (round(sf_used, 4) if sf_used is not None else None),
+            "clear_floor": float(clear_floor),
+            "saturation": float(saturation),
         },
     )

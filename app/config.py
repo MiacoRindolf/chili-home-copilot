@@ -2200,6 +2200,46 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ADV_CEILING_ENABLED"),
         description="Prefer LOW average-daily-volume names (the no-market-maker edge) by penalizing names above an adaptive ADV ceiling.",
     )
+    chili_momentum_float_rotation_tilt_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLOAT_ROTATION_TILT_ENABLED"),
+        description="Volume/float rotation sustainability tilt (>=~5x EOD): reward names rotating their float multiple times as a fuel-remaining signal.",
+    )
+    chili_momentum_gap_geometry_tilt_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_GAP_GEOMETRY_TILT_ENABLED"),
+        description="Unfilled-gap to-the-penny trigger + clear-sky room: tilt entries where price triggers at the gap edge with open space overhead.",
+    )
+    chili_momentum_red_rejection_derate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RED_REJECTION_DERATE_ENABLED"),
+        description="De-rate a level with a daily history of red upper-wick rejections (repeated sellers defending the same price).",
+    )
+    chili_momentum_blue_sky_recent_ipo_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BLUE_SKY_RECENT_IPO_ENABLED"),
+        description="All-time-high breakout boost gated to recent-IPO names (<2yr history) where there is no overhead supply.",
+    )
+    chili_momentum_reverse_split_recency_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REVERSE_SPLIT_RECENCY_ENABLED"),
+        description="Recent (<~1mo) reverse split + real news = low-float-squeeze BOOST (un-penalize the reduced share count).",
+    )
+    chili_momentum_reverse_split_recency_days: int = Field(
+        default=30,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REVERSE_SPLIT_RECENCY_DAYS"),
+        description="The ONE documented base for the SS101 reverse-split squeeze: a reverse split must have executed within this many days (~Ross's '<1mo') to count as a FRESH low-float reset. Clamped 1..120.",
+    )
+    chili_momentum_private_placement_sign_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PRIVATE_PLACEMENT_SIGN_ENABLED"),
+        description="Private placement at/above market is bullish: split out of the weak-catalyst de-boost so above-market raises are not penalized.",
+    )
+    chili_momentum_iceberg_add_probe_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ICEBERG_ADD_PROBE_ENABLED"),
+        description="Per-add iceberg/hidden-seller probe: compare filled-through vs displayed ask to detect a hidden seller before each scale-in add.",
+    )
     chili_momentum_adv_ceiling_ref_shares: float = Field(
         default=10_000_000.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ADV_CEILING_REF_SHARES"),
@@ -4769,6 +4809,18 @@ class Settings(BaseSettings):
         ge=0.0,
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_OFI_THRESHOLD"),
+    )
+    # Iceberg / hidden-seller per-add probe (Ross SS101 #038, add-path only). The probe
+    # score is refill_size / (price_advance_bps + 1) over the short L2 window: HIGH means
+    # the displayed ask keeps REFILLING at the same price (absorbing seller) instead of
+    # lifting as price advances. The add is blocked when score >= this threshold. This is
+    # the ONE irreducible base; the score is otherwise self-normalizing (refill shares per
+    # bp of advance). Fail-OPEN on absent/stale L2; reversible via
+    # chili_momentum_iceberg_add_probe_enabled (flag) without redeploy.
+    chili_momentum_iceberg_add_refill_ratio: float = Field(
+        default=1.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ICEBERG_ADD_REFILL_RATIO"),
     )
     # trade_flow (executed-tape aggressor imbalance) CONFIRMATION premium: scales the OFI+micro tilt
     # magnitude by (1+gain) when the EXECUTED tape AGREES in direction (and clears the threshold).

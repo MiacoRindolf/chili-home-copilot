@@ -23,6 +23,13 @@ class ExecutionReadinessFeatures:
     slippage_estimate_bps: float | None = None
     fee_to_target_ratio: float | None = None
     product_tradable: bool | None = None
+    # Ross SS101 float-rotation sustainability (cumulative session volume / shares float):
+    # how many times the move has turned over the tradeable float so far today, and that
+    # pace projected to the close. A SELECTION/sustainability annotation (computed by
+    # ``ross_momentum.float_rotation_signal``), carried here for persistence + audit only —
+    # default None ⇒ omitted from ``to_public_dict`` ⇒ byte-identical when absent. Equity-only.
+    float_rotation: float | None = None
+    projected_rotation_at_eod: float | None = None
     meta: dict[str, Any] | None = None
 
     @classmethod
@@ -43,6 +50,8 @@ class ExecutionReadinessFeatures:
             slippage_estimate_bps=_f(meta.get("slippage_estimate_bps")),
             fee_to_target_ratio=_f(meta.get("fee_to_target_ratio")),
             product_tradable=pt,
+            float_rotation=_f(meta.get("float_rotation")),
+            projected_rotation_at_eod=_f(meta.get("projected_rotation_at_eod")),
             meta=dict(meta),
         )
 
@@ -69,6 +78,10 @@ class ExecutionReadinessFeatures:
             out["fee_to_target_ratio"] = self.fee_to_target_ratio
         if self.product_tradable is not None:
             out["product_tradable"] = self.product_tradable
+        if self.float_rotation is not None:
+            out["float_rotation"] = self.float_rotation
+        if self.projected_rotation_at_eod is not None:
+            out["projected_rotation_at_eod"] = self.projected_rotation_at_eod
         if self.meta:
             out["extra"] = dict(self.meta)
         return out

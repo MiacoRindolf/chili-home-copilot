@@ -13,6 +13,7 @@ when the data plan lacks Benzinga, so the lane degrades gracefully.
 from __future__ import annotations
 
 import logging
+import re
 
 from ....config import settings
 
@@ -133,6 +134,14 @@ def theme_catalyst_symbols() -> set[str]:
 # catalyst boost a trial / M&A / contract (STRONG) does. We only DE-BOOST the weak class
 # (to 0); strong/medium keep the existing tilt (minimal change, fail-open). Keyword list,
 # no magic constants.
+#
+# REVERSE-SPLIT and PRIVATE-PLACEMENT are kept in this list so the DEFAULT / flag-OFF /
+# context-absent path stays byte-identical (the conservative weak prior). Their SIGN is
+# refined ONLY in weak_catalyst_symbols(): a RECENT reverse split with fresh REAL news and a
+# low post-split float is a Ross SS101 low-float squeeze (REMOVED from the de-boost +
+# BOOSTED), and a private placement priced AT/ABOVE market is institutional confidence
+# (REMOVED from the de-boost). Both refinements fail-open back to weak when their data
+# (split date / PP price / float) is absent — see _REVERSE_SPLIT_KEYWORDS / _PP_KEYWORDS.
 _WEAK_CATALYST_KEYWORDS = (
     "offering", "registered direct", "at-the-market", "atm facility", "dilut",
     "reverse split", "reverse stock split", "going concern", "regain compliance",
@@ -140,6 +149,34 @@ _WEAK_CATALYST_KEYWORDS = (
     "default", "restatement", "securities fraud", "class action", "investigation",
     "subpoena", "private placement", "warrant exercise", "shelf registration",
 )
+
+# Reverse-split + private-placement headline markers — the SUBSET of the weak list whose SIGN
+# is corp-action / price dependent (refined in weak_catalyst_symbols, not the pure classifier).
+_REVERSE_SPLIT_KEYWORDS = ("reverse split", "reverse stock split")
+_PRIVATE_PLACEMENT_KEYWORDS = ("private placement",)
+
+# SS101 low-float-squeeze (Ross): the recency window a reverse split must fall inside to count
+# as a FRESH low-float reset (one documented base; the Polygon/SEC split feed carries the
+# execution date). 30 calendar days ≈ Ross's "<~1mo".
+REVERSE_SPLIT_RECENCY_DAYS = 30
+
+# A reverse split's post-split float only earns the squeeze re-rank when it sits in the LOW tail
+# of the day's equity-mover floats — an ADAPTIVE within-batch percentile, not a fixed share
+# count (Ross's 573k-float example is a FLOOR, not a magic ceiling). One documented base: the
+# percentile cut (lowest third) of the batch's known floats.
+REVERSE_SPLIT_LOW_FLOAT_PCTL = 0.34
+
+
+def _has_reverse_split_kw(title: str) -> bool:
+    """True when a headline is specifically a REVERSE-SPLIT corp action. Pure; fail-open False."""
+    t = str(title or "").lower()
+    return any(k in t for k in _REVERSE_SPLIT_KEYWORDS)
+
+
+def _has_private_placement_kw(title: str) -> bool:
+    """True when a headline is specifically a PRIVATE PLACEMENT. Pure; fail-open False."""
+    t = str(title or "").lower()
+    return any(k in t for k in _PRIVATE_PLACEMENT_KEYWORDS)
 
 
 def _is_weak_catalyst(title: str) -> bool:
@@ -149,21 +186,220 @@ def _is_weak_catalyst(title: str) -> bool:
     return any(k in t for k in _WEAK_CATALYST_KEYWORDS)
 
 
-def weak_catalyst_symbols() -> set[str]:
+def _reverse_split_recency_days() -> int:
+    """SS101 reverse-split recency window (days). One documented knob; default 30."""
+    try:
+        v = int(getattr(settings, "chili_momentum_reverse_split_recency_days", REVERSE_SPLIT_RECENCY_DAYS))
+    except (TypeError, ValueError):
+        return REVERSE_SPLIT_RECENCY_DAYS
+    return max(1, min(v, 120))
+
+
+def _low_float_threshold(floats: dict[str, float] | None) -> float | None:
+    """ADAPTIVE low-float cut: the REVERSE_SPLIT_LOW_FLOAT_PCTL percentile of the batch's known
+    floats (no magic share count). Returns None when fewer than 2 floats are known (can't rank
+    a batch of one -> fail-open, no squeeze re-rank). Pure."""
+    vals = sorted(float(v) for v in (floats or {}).values() if isinstance(v, (int, float)) and v > 0)
+    if len(vals) < 2:
+        return None
+    idx = max(0, min(len(vals) - 1, int(round(REVERSE_SPLIT_LOW_FLOAT_PCTL * (len(vals) - 1)))))
+    return vals[idx]
+
+
+def weak_catalyst_symbols(
+    *,
+    recent_split_symbols: set[str] | None = None,
+    floats: dict[str, float] | None = None,
+    strong_news_symbols: set[str] | None = None,
+    private_placement_at_or_above_market: set[str] | None = None,
+) -> set[str]:
     """Normalized tickers whose freshest fresh-news headline is a WEAK catalyst (the
     de-boost set). Uses the title-carrying news fetch; fail-open to empty (no de-boost)
-    when the news feed is unavailable, so a missing feed never strips the catalyst tilt."""
+    when the news feed is unavailable, so a missing feed never strips the catalyst tilt.
+
+    SIGN REFINEMENTS (additive — any kwarg absent / its flag OFF leaves the result
+    byte-identical to the bare keyword classification):
+
+      * RECENT REVERSE SPLIT (Ross SS101 low-float squeeze): a reverse-split headline whose
+        split executed within the recency window (``recent_split_symbols``) AND that carries
+        FRESH REAL news (``strong_news_symbols`` — a non-dilution catalyst) AND a LOW post-split
+        float (adaptive batch percentile of ``floats``) is a low-float SQUEEZE, not a fade —
+        it is REMOVED from the de-boost set (and surfaced separately for a BOOST via
+        ``recent_reverse_split_squeeze_symbols``). A BARE reverse split (no real news / not
+        recent / float unknown) stays weak. Gated by ``chili_momentum_reverse_split_recency_enabled``.
+
+      * PRIVATE PLACEMENT priced AT/ABOVE market (``private_placement_at_or_above_market``):
+        institutional confidence, not dilution — REMOVED from the de-boost. A below-market /
+        unknown-price PP stays weak (the dilutive fade). Gated by
+        ``chili_momentum_private_placement_sign_enabled``.
+    """
     try:
         from ...massive_client import get_recent_news_items
 
-        return {
-            _norm(tk)
-            for tk, title in get_recent_news_items(max_age_min=_news_catalyst_max_age_min())
-            if _is_weak_catalyst(title)
-        }
+        items = get_recent_news_items(max_age_min=_news_catalyst_max_age_min())
     except Exception:
         logger.debug("[catalyst] weak-catalyst grade fetch failed", exc_info=True)
         return set()
+
+    rs_flag = bool(getattr(settings, "chili_momentum_reverse_split_recency_enabled", True))
+    pp_flag = bool(getattr(settings, "chili_momentum_private_placement_sign_enabled", True))
+    recent_split_symbols = recent_split_symbols or set()
+    strong_news_symbols = strong_news_symbols or set()
+    pp_bullish = private_placement_at_or_above_market or set()
+    low_float_cut = _low_float_threshold(floats) if (rs_flag and floats) else None
+
+    out: set[str] = set()
+    for tk, title in items:
+        if not _is_weak_catalyst(title):
+            continue
+        sym = _norm(tk)
+        # (A) recent-reverse-split squeeze exception: only when ALL three confirmations hold,
+        # and only if this headline's weakness comes SOLELY from the reverse-split marker (a
+        # name that ALSO has a dilution/offering headline stays weak — dilution dominates).
+        if (
+            rs_flag
+            and _has_reverse_split_kw(title)
+            and not _other_weak_than(title, _REVERSE_SPLIT_KEYWORDS)
+            and sym in recent_split_symbols
+            and sym in strong_news_symbols
+            and low_float_cut is not None
+            and _float_at_or_below(sym, floats, low_float_cut)
+        ):
+            continue  # squeeze -> not weak (boost surfaced by recent_reverse_split_squeeze_symbols)
+        # (B) private-placement-at/above-market exception: only when the weakness is SOLELY the
+        # private-placement marker (a PP that is ALSO an at-the-market/dilution headline stays weak).
+        if (
+            pp_flag
+            and _has_private_placement_kw(title)
+            and not _other_weak_than(title, _PRIVATE_PLACEMENT_KEYWORDS)
+            and sym in pp_bullish
+        ):
+            continue  # at/above-market PP = institutional confidence -> not weak
+        out.add(sym)
+    return out
+
+
+def _other_weak_than(title: str, exempt: tuple[str, ...]) -> bool:
+    """True when a headline matches a weak keyword OTHER than the ``exempt`` markers — i.e. the
+    name is weak for an INDEPENDENT reason (dilution/compliance/legal) beyond the corp-action
+    being sign-refined, so the exemption must NOT apply (dilution dominates). Pure."""
+    t = str(title or "").lower()
+    return any(k in t for k in _WEAK_CATALYST_KEYWORDS if k not in exempt)
+
+
+def _float_at_or_below(sym: str, floats: dict[str, float] | None, cut: float) -> bool:
+    """True when ``sym`` has a known float at/below the adaptive cut. Unknown float -> False
+    (fail-open: an unknown float can't prove a LOW float, so no squeeze re-rank). Pure."""
+    if not floats:
+        return False
+    v = floats.get(sym) or floats.get(str(sym or "").upper())
+    try:
+        return v is not None and float(v) > 0 and float(v) <= float(cut)
+    except (TypeError, ValueError):
+        return False
+
+
+def recent_reverse_split_squeeze_symbols(
+    *,
+    recent_split_symbols: set[str] | None = None,
+    floats: dict[str, float] | None = None,
+    strong_news_symbols: set[str] | None = None,
+) -> set[str]:
+    """Normalized tickers that qualify as a Ross SS101 RECENT-REVERSE-SPLIT LOW-FLOAT SQUEEZE:
+    a reverse-split headline whose split is recent (``recent_split_symbols``), that ALSO carries
+    fresh REAL news (``strong_news_symbols``), with a LOW post-split float (adaptive batch
+    percentile of ``floats``). These earn a BOOST (folded into the STRONG-catalyst set by the
+    pipeline so the existing grade delta carries it — viability needs no change). Empty when the
+    flag is OFF or any input is absent (byte-identical). Fail-open."""
+    if not bool(getattr(settings, "chili_momentum_reverse_split_recency_enabled", True)):
+        return set()
+    recent_split_symbols = recent_split_symbols or set()
+    strong_news_symbols = strong_news_symbols or set()
+    low_float_cut = _low_float_threshold(floats) if floats else None
+    if not recent_split_symbols or not strong_news_symbols or low_float_cut is None:
+        return set()
+    try:
+        from ...massive_client import get_recent_news_items
+
+        items = get_recent_news_items(max_age_min=_news_catalyst_max_age_min())
+    except Exception:
+        logger.debug("[catalyst] reverse-split-squeeze fetch failed", exc_info=True)
+        return set()
+    out: set[str] = set()
+    for tk, title in items:
+        if not _has_reverse_split_kw(title):
+            continue
+        if _other_weak_than(title, _REVERSE_SPLIT_KEYWORDS):
+            continue  # also diluting/compliance/legal -> not a clean squeeze
+        sym = _norm(tk)
+        if (
+            sym in recent_split_symbols
+            and sym in strong_news_symbols
+            and _float_at_or_below(sym, floats, low_float_cut)
+        ):
+            out.add(sym)
+    return out
+
+
+# Private-placement SIGN (Ross): a PP priced AT/ABOVE the prevailing market is institutional
+# CONFIDENCE (smart money paying up — bullish), the opposite of a below-market raise that
+# dilutes and fades. The headline usually states the per-share price ("priced at $2.50 per
+# share"); we compare it to the live last price. The price-vs-market read is what flips the
+# sign — when EITHER the parsed PP price OR the live quote is absent, we FAIL OPEN to "still
+# weak" (the conservative dilution prior), so a missing price never falsely un-penalizes.
+_PP_PRICE_RE = re.compile(r"\$\s*([0-9]+(?:\.[0-9]+)?)\s*(?:per\s+share|/\s*share|a\s+share)")
+
+
+def _parse_pp_price(title: str) -> float | None:
+    """Per-share price stated in a private-placement headline ("$2.50 per share"), else None.
+    Pure; fail-open None."""
+    m = _PP_PRICE_RE.search(str(title or "").lower())
+    if not m:
+        return None
+    try:
+        v = float(m.group(1))
+        return v if v > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def private_placement_at_or_above_market_symbols(
+    *, last_prices: dict[str, float] | None = None
+) -> set[str]:
+    """Normalized tickers whose fresh PRIVATE-PLACEMENT headline is priced AT/ABOVE the live
+    market (institutional confidence — the bullish PP). ``last_prices`` = ``{ticker: last}``
+    (e.g. from get_quotes_batch's ``last_price``). A PP whose headline price is >= the live
+    last price is removed from the weak de-boost (via ``weak_catalyst_symbols``). Empty when
+    the flag is OFF or ``last_prices`` is absent (byte-identical). Fail-open: a PP with no
+    parsable price or no live quote is NOT included (stays weak — the dilution prior)."""
+    if not bool(getattr(settings, "chili_momentum_private_placement_sign_enabled", True)):
+        return set()
+    if not last_prices:
+        return set()
+    try:
+        from ...massive_client import get_recent_news_items
+
+        items = get_recent_news_items(max_age_min=_news_catalyst_max_age_min())
+    except Exception:
+        logger.debug("[catalyst] private-placement sign fetch failed", exc_info=True)
+        return set()
+    out: set[str] = set()
+    for tk, title in items:
+        if not _has_private_placement_kw(title):
+            continue
+        if _other_weak_than(title, _PRIVATE_PLACEMENT_KEYWORDS):
+            continue  # also an ATM/offering/dilution headline -> stays weak
+        pp_px = _parse_pp_price(title)
+        if pp_px is None:
+            continue  # no stated price -> can't prove at/above market -> stays weak
+        sym = _norm(tk)
+        mkt = last_prices.get(sym) or last_prices.get(str(tk or "").upper())
+        try:
+            if mkt is not None and float(mkt) > 0 and pp_px >= float(mkt):
+                out.add(sym)
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 # E2 catalyst GRADING (Ross course study, build_order #3, videos 06/36): Ross DISTRUSTS

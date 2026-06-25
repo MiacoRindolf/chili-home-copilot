@@ -402,6 +402,48 @@ def scale_out_quantity(
     return float(scale_qty), float(remainder), True
 
 
+def iceberg_seller_score(ask_series: list[tuple[float, float]] | None) -> float | None:
+    """Hidden-seller / iceberg detector for the per-add probe (pure, no I/O, unit-testable).
+
+    Ross SS101 #038: at a level, if the DISPLAYED ask DISAPPEARS when it is hit (the offer
+    lifts and price advances with no refill) there is NO hidden seller => OK to add. If the
+    displayed ask REFILLS / PERSISTS at the same price after being eaten, an iceberg /
+    absorbing seller is soaking the buying => STOP adding.
+
+    ``ask_series`` is the short-window top-of-book ASK time series as ``(ask_px, ask_size)``
+    tuples in ascending time (e.g. ``iqfeed_depth_snapshots`` best-ask price+size). Returns a
+    refill-vs-advance ratio in [0, +inf): HIGH => hidden supply replenishing the same offer
+    (iceberg); ~0 => the offer lifts cleanly as price advances (no hidden seller). Mirrors the
+    crypto ``fast_path._hidden_seller`` shape so equity + crypto share ONE definition.
+
+    Fail-OPEN: ``None``/<2 samples/unusable basis => ``None`` (the caller then ALLOWS the add —
+    never blocks on absent or stale L2). This NEVER touches the initial entry — add-path only.
+    """
+    if not ask_series or len(ask_series) < 2:
+        return None
+    refill = 0.0
+    price_adv_bps = 0.0
+    usable = 0
+    for prev, cur in zip(ask_series, ask_series[1:]):
+        try:
+            p_px, p_sz = float(prev[0]), float(prev[1])
+            c_px, c_sz = float(cur[0]), float(cur[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if not (p_px > 0 and c_px > 0):
+            continue
+        usable += 1
+        # Same touch, MORE size than before => the seller replenished the offer (absorption).
+        if c_px == p_px and c_sz > p_sz:
+            refill += c_sz - p_sz
+        # Touch lifted up => price advanced through the offer (the offer disappeared, no refill).
+        elif c_px > p_px:
+            price_adv_bps += (c_px - p_px) / p_px * 1e4
+    if usable < 1:
+        return None
+    return refill / (price_adv_bps + 1.0)
+
+
 def pyramid_add_decision(
     *,
     enabled: bool,
@@ -420,6 +462,8 @@ def pyramid_add_decision(
     ofi_threshold: float,
     min_cushion_r: float,
     midday_lull: bool,
+    iceberg_score: float | None = None,
+    iceberg_threshold: float | None = None,
 ) -> dict[str, Any]:
     """Pure gate for the risk-neutral confirmation-pyramid ADD (no I/O, unit-testable).
 
@@ -438,8 +482,13 @@ def pyramid_add_decision(
       * CONFIRMATION (all AND): new-HOD proxy (bid >= high_water_mark), OFI thrust
         (ofi >= ofi_threshold), and non-decreasing trail headroom (stop_px ratcheted up
         since the add was first considered, entry_stop_ref);
-      * NOT inside the equity midday lull (anti-Ross midday).
+      * NOT inside the equity midday lull (anti-Ross midday);
+      * NO hidden seller at the level (the iceberg probe): when ``iceberg_score`` and
+        ``iceberg_threshold`` are BOTH supplied, an iceberg_score >= threshold means the
+        displayed ask is REFILLING (absorbing seller) => STOP adding (Ross SS101 #038).
     Fail-CLOSED: a missing/zero R0, a None OFI, or any unusable basis => no fire.
+    Fail-OPEN (iceberg only): ``iceberg_score=None`` or ``iceberg_threshold=None`` (flag off
+    or absent/stale L2) => the probe is INERT and the add proceeds — byte-identical to before.
     docs/DESIGN/MOMENTUM_LANE.md"""
     out: dict[str, Any] = {"fire": False, "reason": "", "R0": None, "cushion_r": None, "cushion_usd": None}
     if not enabled:
@@ -487,6 +536,19 @@ def pyramid_add_decision(
         return out
     if midday_lull:
         out["reason"] = "midday_lull"
+        return out
+    # ICEBERG / HIDDEN-SELLER probe (Ross SS101 #038) — add-path ONLY, fail-OPEN.
+    # Both inputs present (flag on AND fresh L2) is the ONLY condition under which the
+    # probe can block; a refilling displayed ask (score >= threshold) means an absorbing
+    # seller is soaking the buying at the level => do not add into it. A None on either
+    # input (flag off, absent/stale L2) leaves the add UNCHANGED.
+    out["iceberg_score"] = iceberg_score
+    if (
+        iceberg_score is not None
+        and iceberg_threshold is not None
+        and float(iceberg_score) >= float(iceberg_threshold)
+    ):
+        out["reason"] = "iceberg_hidden_seller"
         return out
     out["fire"] = True
     out["reason"] = "confirmed"

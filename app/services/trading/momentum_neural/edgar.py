@@ -104,3 +104,34 @@ def dilution_risk_symbols(
         if is_d:
             out.add(tk)
     return out
+
+
+# Reverse-split corp action (Ross SS101 low-float squeeze): a RECENT reverse split collapses
+# the share count — when it lands with a fresh REAL catalyst and a low post-split float, the
+# name is squeeze fuel, NOT a fade. The execution date lives in the Polygon splits corp-action
+# feed (data.sec.gov has no clean split form). This thin wrapper keeps all corp-action lookups
+# in edgar.py; fail-open to an empty set so a missing splits feed never blocks the refinement.
+_REVERSE_SPLIT_MAX_AGE_DAYS = 30
+
+
+def recent_reverse_split_symbols(
+    tickers, *, max_age_days: int = _REVERSE_SPLIT_MAX_AGE_DAYS
+) -> set[str]:
+    """(Upper) tickers from ``tickers`` whose REVERSE split executed within ``max_age_days``
+    (Polygon ``/v3/reference/splits``, cached). Equity-only (crypto ``-USD`` skipped). Fail-open
+    to empty (no squeeze refinement) on any error or absent feed."""
+    want = {
+        str(t or "").upper().strip()
+        for t in (tickers or [])
+        if t and not str(t).upper().endswith("-USD")
+    }
+    if not want:
+        return set()
+    try:
+        from ...massive_client import get_recent_reverse_split_dates
+
+        recent = get_recent_reverse_split_dates(max_age_days=int(max_age_days)) or {}
+    except Exception:
+        logger.debug("[edgar] reverse-split corp-action fetch failed", exc_info=True)
+        return set()
+    return {tk for tk in recent if tk in want}
