@@ -268,24 +268,33 @@ def score_viability(
         )
 
     if spread_bps is not None:
+        # DERATE the score for wider spreads (tighter books rank higher) but do NOT
+        # disqualify the wide-spread EXPLOSIVE low-float movers the Ross lane EXISTS to
+        # trade — they run ~40-90bps and are entered with marketable-limit / maker orders
+        # that cross the spread; the liquidity floor + risk-first sizing already bound
+        # tradeability/cost. The old hard `live_eligible=False` at 12/25bps SILENTLY
+        # disqualified every squeeze (1,495 "Not live-eligible" entry blocks 2026-06-25 —
+        # ILLR 38-91bps, FCUV 70-87bps — the exact names the lane targets). Disqualify ONLY
+        # a TRULY toxic spread, via ONE documented ceiling (default 300bps = broken/halted
+        # quote), not "elevated".
         if spread_bps > 25:
             base -= 0.12
             warnings.append("Wide spread — edge vs fees doubtful")
-            live_eligible = False
         elif spread_bps > 12:
             base -= 0.05
             warnings.append("Elevated spread — caution for live scalps")
+        _max_spread_bps = float(getattr(settings, "chili_momentum_live_eligible_max_spread_bps", 0.0) or 0.0)
+        if _max_spread_bps > 0.0 and spread_bps > _max_spread_bps:
+            warnings.append(f"Spread {spread_bps:.0f}bps exceeds live ceiling {_max_spread_bps:.0f}bps — untradeable")
             live_eligible = False
 
     if slip_bps is not None and slip_bps > 15:
         base -= 0.06
-        warnings.append("High slippage estimate")
-        live_eligible = False
+        warnings.append("High slippage estimate")  # derate only — do NOT disqualify (handled by entry method + sizing)
 
     if fee_ratio is not None and fee_ratio > 0.35:
         base -= 0.1
-        warnings.append("Fee burden high vs target move")
-        live_eligible = False
+        warnings.append("Fee burden high vs target move")  # derate only — do NOT disqualify the lane's target movers
 
     if feats.product_tradable is False:
         live_eligible = False
