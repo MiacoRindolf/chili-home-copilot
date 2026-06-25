@@ -207,7 +207,17 @@ def refine_strategy_params(
     if not outcomes:
         return base, {"eligible": False, "reason": "no_outcomes"}
 
-    considered = [row for row in outcomes if row.return_bps is not None]
+    # Broker-truth label switch (mig309), mode-aware: paper rows keep their self-report,
+    # live rows route through the broker-truth accessor (flag-OFF byte-identical; flag-ON
+    # reconciled-live = broker-true, unreconciled-live EXCLUDED). The param refinement then
+    # tunes off trustworthy labels only.
+    from .outcome_reconcile import mode_aware_label_for_outcome
+
+    considered: list[tuple[Any, float]] = []  # (row, usable bps)
+    for row in outcomes:
+        rb, _pnl, usable = mode_aware_label_for_outcome(row)
+        if usable and rb is not None:
+            considered.append((row, float(rb)))
     if len(considered) < 4:
         return base, {"eligible": False, "reason": "insufficient_outcomes", "sample_size": len(considered)}
 
@@ -218,8 +228,7 @@ def refine_strategy_params(
     live_n = 0
     live_return_sum = 0.0
     live_loss_heavy = 0
-    for row in considered:
-        rb = float(row.return_bps or 0.0)
+    for row, rb in considered:
         return_sum += rb
         if rb > 0:
             wins += 1

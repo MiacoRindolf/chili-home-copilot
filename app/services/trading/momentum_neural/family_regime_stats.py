@@ -12,6 +12,14 @@ from ....models.trading import MomentumAutomationOutcome, MomentumStrategyVarian
 
 def aggregate_family_regime_performance(db: Session, *, days: int = 90) -> list[dict[str, Any]]:
     """Rollup (family, volatility_regime, session_label) → n, win_rate, mean_return_bps."""
+    # Broker-truth label switch (mig309). Flag-OFF: the accessor returns the legacy
+    # return_bps byte-for-byte (is_reconciled=True), so this rollup is identical to
+    # before. Flag-ON: reconciled-live rows contribute their broker-true return_bps and
+    # unreconciled rows (every never-reconciled row, incl. all paper) are EXCLUDED — the
+    # family×regime track record (and the arming prefilter it feeds) then judges only on
+    # broker-true outcomes. Mirrors the meta_label/risk_evaluator routing pattern.
+    from .outcome_reconcile import authoritative_label_for_outcome
+
     since = datetime.utcnow() - timedelta(days=max(1, min(int(days), 365)))
     rows = (
         db.query(MomentumAutomationOutcome, MomentumStrategyVariant)
@@ -22,6 +30,9 @@ def aggregate_family_regime_performance(db: Session, *, days: int = 90) -> list[
     )
     buckets: dict[tuple[str, str, str], list[float]] = {}
     for out, var in rows:
+        _pnl, rb, _win, is_rec = authoritative_label_for_outcome(out)
+        if not is_rec or rb is None:
+            continue
         entry = getattr(out, "entry_regime_snapshot_json", None)
         if not isinstance(entry, dict) or not entry:
             entry = out.regime_snapshot_json if isinstance(out.regime_snapshot_json, dict) else {}
@@ -30,7 +41,7 @@ def aggregate_family_regime_performance(db: Session, *, days: int = 90) -> list[
         sess_lbl = str(entry.get("session_label") or meta.get("session_label") or "unknown")
         fam = str(var.family or "unknown")
         key = (fam, vol, sess_lbl)
-        buckets.setdefault(key, []).append(float(out.return_bps or 0.0))
+        buckets.setdefault(key, []).append(float(rb))
 
     out_rows: list[dict[str, Any]] = []
     for (fam, vol, sess_lbl), vals in buckets.items():
