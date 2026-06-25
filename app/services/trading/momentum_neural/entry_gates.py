@@ -223,6 +223,9 @@ TICK_ARMED_WAIT_REASONS = (
     "waiting_for_reclaim_high",
     "waiting_for_dipbuy_break",
     "waiting_for_first_pullback_break",
+    # HVM101 (C): the VWAP-reclaim trigger emits this while price is still below VWAP
+    # but the K-below structure is in place — arm tick-speed dispatch on the reclaim.
+    "waiting_for_vwap_reclaim",
 )
 
 
@@ -1527,6 +1530,271 @@ def _today_session_frame(df):
     return df
 
 
+def _bottoming_tail(o: float, h: float, l: float, c: float, *, min_lower_wick_frac: float = 0.50) -> bool:
+    """Bottoming-tail / hammer: a long LOWER wick that dominates the bar's range — a
+    fast flush that got bought back up (the V-bounce signature). The mirror of
+    ``is_topping_tail``'s upper-wick read, reused as the per-bar flush-rejection shape.
+    Color-independent (a red bar that recovered most of its low still rejects). Range-
+    relative (no fixed cents); fail-safe False on a zero-range bar."""
+    rng, _body, _upper, lower = _ohlc_local(o, h, l, c)
+    if rng <= 0:
+        return False
+    return (lower / rng) >= float(min_lower_wick_frac)
+
+
+def _ohlc_local(o: float, h: float, l: float, c: float) -> tuple[float, float, float, float]:
+    """(range, body, upper_wick, lower_wick) for one bar — local mirror of candles._ohlc
+    (kept here so this module has no import cycle at function-def time)."""
+    rng = float(h) - float(l)
+    body = abs(float(c) - float(o))
+    upper = float(h) - max(float(o), float(c))
+    lower = min(float(o), float(c)) - float(l)
+    return rng, body, upper, lower
+
+
+def flush_dip_buy_confirmation(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str,
+    live_price: float | None = None,
+    symbol: str | None = None,
+    now: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """AS101 algo-flush V-bounce dip-buy (flag ``chili_momentum_flush_dip_buy_enabled``).
+
+    On an ALREADY-STRONG, FRONT-SIDE up name, a FAST down-spike (a bottoming-tail flush
+    bar on the fast interval) INTO VWAP / 20-MA support, followed by a CURL / RECLAIM back
+    up on GREEN tape, is Ross's algo-flush dip-buy: the flush is an algo/stop-run, not a
+    trend change, so the reclaim off support is a low-risk long with the dip low as the
+    structural stop.
+
+    Returns ``(ok, reason, debug)`` with ``debug`` carrying ``pullback_low`` (the dip low
+    = the structural stop) and ``pullback_high`` (the flush bar / curl high = the breakout
+    level) under the SAME keys the existing pullback-break trigger uses, so the downstream
+    sizing / stop / bailout machinery is reused unchanged.
+
+    GUARDS (each yardstick reused — no scattered magic; the flush depth is ATR-scaled):
+      1. FRONT-SIDE strong up name — price above the rising 9-EMA and above VWAP before
+         the flush (Ross only flush-buys what is already trending UP).
+      2. FAST flush — a bottoming-tail flush bar whose DOWN-spike is at least an ATR-scaled
+         depth (the "25-50c+" fast spike, expressed volatility-relatively, not fixed cents)
+         that dipped INTO VWAP / 20-MA support (touched/undercut it on the low).
+      3. CURL / RECLAIM — the CURRENT bar is a green bounce-curl candle reclaiming back
+         ABOVE the support (close back above VWAP) on returning tape.
+
+    ADDITIVE: flag OFF / thin (<10 bars) / degenerate / non-applicable -> ``(False, reason,
+    {...})`` with NO side effects; fail-OPEN to a benign decline on any error (never raises,
+    never blocks downstream). docs/DESIGN/MOMENTUM_LANE.md
+    """
+    try:
+        if not bool(getattr(settings, "chili_momentum_flush_dip_buy_enabled", True)):
+            return False, "flush_dip_disabled", {"entry_interval": entry_interval}
+        if df is None or getattr(df, "empty", True) or len(df) < 10:
+            return False, "flush_dip_insufficient_bars", {"entry_interval": entry_interval}
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        vol = df["Volume"].astype(float)
+        opn = df["Open"].astype(float) if "Open" in getattr(df, "columns", []) else None
+        n = len(df)
+        cur = n - 1
+        arrays = compute_all_from_df(df, needed={"ema_9", "vwap", "atr"})
+        ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
+        atr = arrays.get("atr") or []
+
+        # Instrument volatility (ATR/price) -> the flush DEPTH yardstick (the "25-50c+"
+        # fast spike expressed volatility-relatively). None on thin data -> a small floor.
+        atr_pct = None
+        try:
+            _a = float(atr[cur]) if cur < len(atr) and atr[cur] is not None else None
+            _p = float(close.iloc[cur])
+            if _a is not None and _p > 0:
+                atr_pct = _a / _p
+        except (TypeError, ValueError, IndexError):
+            atr_pct = None
+
+        debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "flush_dip"}
+
+        # The flush bar = the bar BEFORE the current (curl) bar; the current bar is the
+        # reclaim. Need both present.
+        flush_idx = cur - 1
+        if flush_idx < 1:
+            return False, "flush_dip_insufficient_bars", debug
+
+        # ── GUARD 1: FRONT-SIDE strong up name (rising 9-EMA, price above VWAP pre-flush) ──
+        e9_flush = ema9[flush_idx] if flush_idx < len(ema9) and ema9[flush_idx] is not None else None
+        e9_prev = ema9[flush_idx - 1] if (flush_idx - 1) < len(ema9) and ema9[flush_idx - 1] is not None else None
+        if e9_flush is None or e9_prev is None or float(e9_flush) < float(e9_prev):
+            return False, "flush_dip_not_front_side", debug  # 9-EMA not rising
+        vwap_flush = vwap[flush_idx] if flush_idx < len(vwap) and vwap[flush_idx] is not None else None
+        # Pre-flush strength: the bar BEFORE the flush closed above VWAP (was front-side).
+        pre = flush_idx - 1
+        if vwap_flush is not None and float(vwap_flush) > 0 and float(close.iloc[pre]) < float(vwap_flush):
+            return False, "flush_dip_below_vwap_pre", debug
+
+        # ── GUARD 2: FAST flush — bottoming-tail bar, ATR-scaled down-spike INTO support ──
+        f_o = float(opn.iloc[flush_idx]) if opn is not None else float(close.iloc[flush_idx - 1])
+        f_h, f_l, f_c = float(high.iloc[flush_idx]), float(low.iloc[flush_idx]), float(close.iloc[flush_idx])
+        if not _bottoming_tail(f_o, f_h, f_l, f_c):
+            return False, "flush_dip_no_bottoming_tail", debug
+        # Down-spike depth: from the pre-flush close down to the flush LOW, ATR-scaled
+        # (the "25-50c+" fast spike, volatility-relative). Floor so a calm name still needs
+        # a real flush. a==0 -> the floor alone (thin-data fail-open uses the floor).
+        a = float(atr_pct) if (atr_pct is not None and atr_pct > 0) else 0.0
+        ref = float(close.iloc[pre])
+        spike_pct = (ref - f_l) / ref if ref > 0 else 0.0
+        flush_floor = max(0.005, a * 0.5)  # >= 0.5 ATR or 0.5% — the documented base
+        if spike_pct < flush_floor:
+            return False, "flush_dip_too_shallow", debug
+        # INTO support: the flush low touched/undercut VWAP (or, if VWAP is warming up,
+        # the rising 9-EMA proxies the 20-MA support). Fail-open on missing support read.
+        support = None
+        if vwap_flush is not None and float(vwap_flush) > 0:
+            support = float(vwap_flush)
+        elif e9_flush is not None and float(e9_flush) > 0:
+            support = float(e9_flush)
+        if support is not None and f_l > support * (1.0 + max(0.0, a * 0.5)):
+            return False, "flush_dip_no_support_touch", debug  # never reached support
+
+        dip_low = f_l
+        if not (dip_low > 0):
+            return False, "flush_dip_bad_low", debug
+
+        # ── GUARD 3: CURL / RECLAIM — current bar green curl back ABOVE support ──────────
+        c_o = float(opn.iloc[cur]) if opn is not None else float(close.iloc[cur - 1])
+        c_h, c_l, c_c = float(high.iloc[cur]), float(low.iloc[cur]), float(close.iloc[cur])
+        from .candles import is_bounce_curl_candle
+
+        # Live tick (when present) is the reclaim price; else the curl bar close.
+        px = float(live_price) if (live_price is not None and float(live_price) > 0) else c_c
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        reclaimed = True
+        if vwap_cur is not None and float(vwap_cur) > 0:
+            reclaimed = px >= float(vwap_cur)
+        if not reclaimed:
+            return False, "flush_dip_not_reclaimed", debug
+        # The dip must HOLD on the curl bar (its low at/above the flush low minus noise).
+        if c_l < dip_low * (1.0 - max(0.0, a * 0.5)):
+            return False, "flush_dip_undercut", debug
+        # Per-bar conviction: a green bounce-curl candle (close in the upper part of range).
+        if not is_bounce_curl_candle(c_o, c_h, c_l, c_c):
+            return False, "flush_dip_weak_curl", debug
+
+        # Level = the curl bar's own high (the reclaim's break level); stop = the dip low.
+        level = max(c_h, f_h)
+        if not (0.0 < dip_low < level):
+            return False, "flush_dip_bad_level", debug
+        debug.update({
+            "pullback_high": float(level),
+            "pullback_low": float(dip_low),
+            "flush_spike_pct": round(spike_pct * 100.0, 2),
+            "flush_support": (round(support, 6) if support is not None else None),
+        })
+        return True, "flush_dip_buy", debug
+    except Exception:
+        return False, "flush_dip_error", {"entry_interval": entry_interval}
+
+
+def vwap_reclaim_confirmation(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str,
+    live_price: float | None = None,
+    symbol: str | None = None,
+    now: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """SCAL101 VWAP-reclaim entry (flag ``chili_momentum_vwap_reclaim_enabled``).
+
+    Price closed BELOW VWAP for at least ``K`` recent bars (the name lost VWAP), then the
+    CURRENT bar RECLAIMS back ABOVE VWAP on a VOLUME SPIKE — the SCAL101 long: the reclaim
+    of VWAP with conviction is the resumption signal, with the reclaim bar's LOW as the
+    structural stop (lose VWAP again and the reclaim failed).
+
+    Returns ``(ok, reason, debug)`` with ``debug`` carrying ``pullback_low`` (the reclaim
+    bar low = the structural stop) and ``pullback_high`` (the reclaim bar high = the
+    breakout level) under the SAME keys the existing pullback-break trigger uses, so the
+    downstream sizing / stop / bailout machinery is reused unchanged.
+
+    ADAPTIVE: ``K`` = ``chili_momentum_vwap_reclaim_min_below_bars`` (one documented base,
+    default 2); the volume-spike floor reuses the lane's own ``volume_spike_multiple``
+    yardstick via ``chili_momentum_vwap_reclaim_vol_mult`` (default 1.5). VWAP is the
+    rolling proxy already used across the lane (indicator_core.compute_vwap).
+
+    ADDITIVE: flag OFF / thin (<10 bars) / VWAP warming up / non-applicable -> ``(False,
+    reason, {...})`` with NO side effects; fail-OPEN to a benign decline on any error
+    (never raises, never blocks downstream). docs/DESIGN/MOMENTUM_LANE.md
+    """
+    try:
+        if not bool(getattr(settings, "chili_momentum_vwap_reclaim_enabled", True)):
+            return False, "vwap_reclaim_disabled", {"entry_interval": entry_interval}
+        if df is None or getattr(df, "empty", True) or len(df) < 10:
+            return False, "vwap_reclaim_insufficient_bars", {"entry_interval": entry_interval}
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        vol = df["Volume"].astype(float)
+        n = len(df)
+        cur = n - 1
+        arrays = compute_all_from_df(df, needed={"vwap", "volume_ratio"})
+        vwap = arrays.get("vwap") or []
+        vr = arrays.get("volume_ratio") or []
+
+        debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "vwap_reclaim"}
+
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        if vwap_cur is None or float(vwap_cur) <= 0:
+            return False, "vwap_reclaim_vwap_warmup", debug  # VWAP not ready -> fail-open
+
+        # ── K bars below VWAP, then the CURRENT bar reclaims above it ───────────────────
+        K = max(1, int(getattr(settings, "chili_momentum_vwap_reclaim_min_below_bars", 2) or 2))
+        # The CURRENT bar must reclaim: price (live tick when present, else close) >= VWAP
+        # AND the current close is back above VWAP (a real reclaim, not just a wick poke).
+        px = float(live_price) if (live_price is not None and float(live_price) > 0) else float(close.iloc[cur])
+        if px < float(vwap_cur) or float(close.iloc[cur]) < float(vwap_cur):
+            return False, "waiting_for_vwap_reclaim", debug
+        # The PRIOR K bars must each have CLOSED below their own VWAP (sustained loss of
+        # VWAP, not a one-bar dip). Fail-open if any of the K VWAP samples is warming up.
+        start = cur - K
+        if start < 0:
+            return False, "vwap_reclaim_insufficient_bars", debug
+        below_count = 0
+        for i in range(start, cur):
+            vi = vwap[i] if i < len(vwap) and vwap[i] is not None else None
+            if vi is None or float(vi) <= 0:
+                return False, "vwap_reclaim_vwap_warmup", debug
+            if float(close.iloc[i]) < float(vi):
+                below_count += 1
+        if below_count < K:
+            return False, "vwap_reclaim_not_below_enough", debug
+
+        # ── VOLUME SPIKE on the reclaim bar (conviction, not a drift back over VWAP) ─────
+        vol_mult = float(getattr(settings, "chili_momentum_vwap_reclaim_vol_mult", 1.5) or 1.5)
+        vol_ratio = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
+        if vol_ratio is None:
+            w = vol.tail(21)
+            avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
+            vol_ratio = (float(vol.iloc[-1]) / avg) if avg > 0 else 0.0
+        debug["vol_ratio"] = round(vol_ratio, 2)
+        if vol_ratio < vol_mult:
+            return False, "vwap_reclaim_low_volume", debug
+
+        # Level = the reclaim bar high (break level); stop = the reclaim bar low.
+        level = float(high.iloc[cur])
+        stop = float(low.iloc[cur])
+        if not (0.0 < stop < level):
+            return False, "vwap_reclaim_bad_level", debug
+        debug.update({
+            "pullback_high": float(level),
+            "pullback_low": float(stop),
+            "vwap": round(float(vwap_cur), 6),
+            "bars_below": below_count,
+        })
+        return True, "vwap_reclaim", debug
+    except Exception:
+        return False, "vwap_reclaim_error", {"entry_interval": entry_interval}
+
+
 def pullback_break_confirmation(
     df: pd.DataFrame,
     *,
@@ -1820,6 +2088,54 @@ def pullback_break_confirmation(
         avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
         vol_ratio = (float(vol.iloc[-1]) / avg) if avg > 0 else 0.0
     debug["vol_ratio"] = round(vol_ratio, 2)
+
+    # RED-VOLUME EXHAUSTION VETO (AS101/HVM101 "first sign of weakness"). A trigger bar
+    # that closes RED (close<open) WHILE printing the session's MAX volume AND a NEW
+    # session HIGH is a climactic high-volume-red exhaustion top — the breakout bar is
+    # the blow-off, not a continuation. Buying it is buying the top into distribution.
+    # VETO (protective; can never create a bad fill). Self-relative — the volume bar is
+    # judged against the session's OWN max (no fixed share count) and "new high" against
+    # the session's OWN prior high (no magic level). Skip on a TICK-break (the breaking
+    # bar is still FORMING — its close/volume are unknowable mid-bar, exactly as the
+    # conviction-candle gate skips it) and EXEMPT the deep-reclaim/dip-buy reversal path
+    # (that mode intentionally catches the turn off a dip and carries its own discipline).
+    # ADDITIVE: flag OFF / thin frame -> the block is skipped -> byte-identical. Fail-OPEN
+    # on any missing data or error (never block a valid break on a bug).
+    if (
+        not _tick_break
+        and debug.get("pattern") != "deep_reclaim"
+        and bool(getattr(settings, "chili_momentum_red_vol_exhaustion_veto_enabled", True))
+    ):
+        try:
+            _opn_v = opn.values if (opn is not None and hasattr(opn, "values")) else None
+            _vol_v = vol.values if hasattr(vol, "values") else None
+            _cl_v = close.values if hasattr(close, "values") else None
+            _hi_v = high.values if hasattr(high, "values") else None
+            if (
+                _opn_v is not None and _vol_v is not None and _cl_v is not None
+                and _hi_v is not None and cur < len(_opn_v) and cur < len(_vol_v)
+                and cur < len(_cl_v) and cur < len(_hi_v)
+            ):
+                _o, _c = float(_opn_v[cur]), float(_cl_v[cur])
+                _v, _h = float(_vol_v[cur]), float(_hi_v[cur])
+                # NaN-safe: any missing OHLCV on the trigger bar -> fail-open (no veto).
+                if _o == _o and _c == _c and _v == _v and _h == _h:
+                    _is_red = _c < _o
+                    _sess_max_vol = float(_vol_v[: cur + 1].max())
+                    _is_max_vol = _sess_max_vol > 0 and _v >= _sess_max_vol
+                    _prior_high = (
+                        float(_hi_v[:cur].max()) if cur >= 1 else 0.0
+                    )
+                    _is_new_high = _h > _prior_high
+                    if _is_red and _is_max_vol and _is_new_high:
+                        debug["red_vol_exhaustion"] = {
+                            "o": round(_o, 6), "c": round(_c, 6),
+                            "vol": _v, "sess_max_vol": _sess_max_vol,
+                            "high": round(_h, 6), "prior_high": round(_prior_high, 6),
+                        }
+                        return False, "red_vol_exhaustion_veto", debug
+        except (TypeError, ValueError, IndexError, AttributeError):
+            pass  # thin / malformed frame -> fail-open (never block on a bug)
 
     # E3: EXPLOSIVE-FLOOR HARD GATE (Ross gap #3, build_order #2). Selection ranks names
     # by within-batch PERCENTILE, so on a dull tape the best-of-a-dull-batch ranks #1 and

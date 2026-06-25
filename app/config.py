@@ -2190,6 +2190,96 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FILL_LOG_ENABLED"),
         description="Kill-switch: True => the momentum live lane records one momentum_fill_outcomes row per real broker fill leg (entry/exit/partial/scale-out). Default OFF (no writes, byte-identical). Write-only Stage-1.",
     )
+    chili_momentum_fake_catalyst_guard_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FAKE_CATALYST_GUARD_ENABLED"),
+        description="Down-weight unverified / hacked-PR / unsolicited-buyout headlines so fabricated catalysts don't drive selection or sizing.",
+    )
+    chili_momentum_adv_ceiling_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADV_CEILING_ENABLED"),
+        description="Prefer LOW average-daily-volume names (the no-market-maker edge) by penalizing names above an adaptive ADV ceiling.",
+    )
+    chili_momentum_adv_ceiling_ref_shares: float = Field(
+        default=10_000_000.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADV_CEILING_REF_SHARES"),
+        description="The ONE documented base for the ADV-ceiling soft re-rank: Ross's <10M-shares average-daily-volume reference FLOOR. The live ceiling is the MAX of this base and the batch ADV percentile (adaptive), so high-ADV names get a soft rank discount without a hard drop. Reversible via chili_momentum_adv_ceiling_enabled.",
+    )
+    chili_momentum_flush_dip_buy_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLUSH_DIP_BUY_ENABLED"),
+        description="Enable the algo-flush V-bounce dip-buy entry trigger (buy the reclaim after a fast flush).",
+    )
+    chili_momentum_red_vol_exhaustion_veto_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RED_VOL_EXHAUSTION_VETO_ENABLED"),
+        description="Veto a breakout bar that closes RED on max session volume (climactic exhaustion / failed break).",
+    )
+    chili_momentum_thick_tape_veto_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_THICK_TAPE_VETO_ENABLED"),
+        description="Veto/discount high-cumulative-volume-with-no-net-progress tape (distribution / churn into supply).",
+    )
+    chili_momentum_curl_detector_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CURL_DETECTOR_ENABLED"),
+        description="Rounding-bottom (curl) continuation selection signal — favor names curling back up off a base.",
+    )
+    chili_momentum_opening_bell_suppression_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OPENING_BELL_SUPPRESSION_ENABLED"),
+        description="Suppress FRESH triggers in the first ~2 min after the RTH open (avoid opening-auction whipsaw).",
+    )
+    chili_momentum_opening_bell_suppress_base_min: float = Field(
+        default=2.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OPENING_BELL_SUPPRESS_BASE_MIN"),
+        description="The ONE documented base for opening-bell suppression: minutes after the 09:30 ET open during which a FRESH equity trigger is held. Adaptively WIDENED (up to ~2x) by the opener's own day-range/ATR volatility. Reversible via chili_momentum_opening_bell_suppression_enabled.",
+    )
+    chili_momentum_bid_prop_min_samples: int = Field(
+        default=3,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BID_PROP_MIN_SAMPLES"),
+        description="Bid-prop confirmer: minimum L1 tape samples required to evaluate; below this the confirmer FAILS OPEN (never blocks a break on thin/absent tape). Reversible via chili_momentum_bid_prop_confirmer_enabled.",
+    )
+    chili_momentum_bid_prop_max_samples: int = Field(
+        default=8,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BID_PROP_MAX_SAMPLES"),
+        description="Bid-prop confirmer: number of most-recent L1 tape samples examined for the non-decreasing-bid / spread-at-or-below-median backing check.",
+    )
+    chili_momentum_nonmonotonic_volume_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NONMONOTONIC_VOLUME_ENABLED"),
+        description="Inverted-U volume preference — favor mid-range RVOL; treat too-high volume as choppy/exhausted, not better.",
+    )
+    chili_momentum_daily_trade_count_budget_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_TRADE_COUNT_BUDGET_ENABLED"),
+        description="Adaptive per-day A+ entry-count ceiling — cap the number of fresh entries per session (discipline / overtrading guard).",
+    )
+    chili_momentum_prior_day_pnl_damper_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PRIOR_DAY_PNL_DAMPER_ENABLED"),
+        description="Size-DOWN the session after an outlier prior-day PnL (revert toward baseline risk after a big win/loss).",
+    )
+    chili_momentum_vwap_reclaim_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VWAP_RECLAIM_ENABLED"),
+        description="Enable the sub-VWAP-then-reclaim entry trigger (buy the reclaim of VWAP after trading below it).",
+    )
+    chili_momentum_vwap_reclaim_min_below_bars: int = Field(
+        default=2,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VWAP_RECLAIM_MIN_BELOW_BARS"),
+        description="VWAP-reclaim trigger: minimum consecutive prior bars that must have closed BELOW VWAP before a current-bar reclaim counts (the SCAL101 K).",
+    )
+    chili_momentum_vwap_reclaim_vol_mult: float = Field(
+        default=1.5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VWAP_RECLAIM_VOL_MULT"),
+        description="VWAP-reclaim trigger: rel-volume floor on the reclaim bar (conviction, not a drift back over VWAP).",
+    )
+    chili_momentum_bid_prop_confirmer_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BID_PROP_CONFIRMER_ENABLED"),
+        description="Confirm a break only when the best-bid steps up / spread tightens (bid-propping microstructure confirmer).",
+    )
     # BROKER-TRUTH RECONCILIATION (mig309) — TWO decoupled flags (write-then-verify-then-read):
     #
     #   chili_momentum_broker_truth_reconciliation_enabled — gates the WRITE pass

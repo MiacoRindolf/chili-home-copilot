@@ -2008,6 +2008,129 @@ def _entry_interval_seconds() -> float:
     return float(_INTERVAL_SECONDS.get(iv, 300.0))
 
 
+def _opening_bell_suppresses_fresh_trigger(
+    symbol: str, le: dict, *, has_position: bool, now: datetime | None = None
+) -> tuple[bool, dict[str, Any]]:
+    """HVM101 edge (A) — opening-bell suppression of FRESH triggers.
+
+    The first ~N minutes after the 09:30 ET regular open is opening-auction whipsaw:
+    a fresh curl/dip/reversal that fires here is usually noise that reverses. SUPPRESS
+    a brand-new entry in that window — but NEVER a CONTINUATION of an already-armed
+    premarket runner (Ross's gap-and-go that armed/watched before the bell), and never
+    an already-held position's management.
+
+    Adaptive N: base ``chili_momentum_opening_bell_suppress_base_min`` (the ONE
+    documented base ~2 min), widened by the instrument's own opening volatility via a
+    day-range/ATR multiple when present in ``le`` — a calmer name clears fast, a wild
+    opener stays suppressed a touch longer. No scattered magic clocks.
+
+    EQUITY/RH ONLY (microstructure edge): crypto (``-USD``) and any
+    premarket/weekend/closed clock → ``minutes_since_regular_open`` is ``None`` → FAIL
+    OPEN (no suppression). Returns ``(suppress, debug)``; pure + side-effect-free.
+    """
+    debug: dict[str, Any] = {}
+    sym = str(symbol or "").upper()
+    if sym.endswith("-USD"):
+        return False, debug  # crypto: 24/7, no opening bell
+    if has_position:
+        return False, debug  # holding already — management, never a fresh trigger
+    try:
+        from .market_profile import minutes_since_regular_open
+
+        _mins = minutes_since_regular_open(sym, now=now)
+    except Exception:
+        _mins = None
+    if _mins is None or _mins < 0:
+        # crypto / weekend / closed / premarket → fail open (no suppression).
+        # A premarket-armed runner that is now continuing INTO the open reads as
+        # _mins>=0 here, but a fresh post-open arm is exactly what we suppress; the
+        # premarket CONTINUATION is preserved because the held-position / already-armed
+        # checks above short-circuit it, and a runner that armed premarket is in a
+        # held/candidate state, not a fresh WATCHING_LIVE score-trigger.
+        return False, debug
+    base_min = float(getattr(settings, "chili_momentum_opening_bell_suppress_base_min", 2.0) or 0.0)
+    if base_min <= 0:
+        return False, debug
+    # Adaptive widen: scale the base by the opener's realized volatility relative to a
+    # ~5% reference opening range (Ross small-cap). A 2x-vol opener earns up to ~2x the
+    # base window; clamped to [1.0, 2.0] so it can never run away.
+    vol_ref = None
+    for _k in ("entry_day_range_pct", "day_range_pct", "entry_stop_atr_pct", "regime_atr_pct"):
+        _v = le.get(_k) if isinstance(le, dict) else None
+        try:
+            if _v is not None and float(_v) > 0:
+                vol_ref = float(_v)
+                break
+        except (TypeError, ValueError):
+            continue
+    widen = 1.0
+    if vol_ref is not None:
+        widen = max(1.0, min(2.0, vol_ref / 0.05))
+    suppress_window = base_min * widen
+    debug = {
+        "mins_since_open": round(float(_mins), 2),
+        "base_min": round(base_min, 2),
+        "widen": round(widen, 2),
+        "suppress_window_min": round(suppress_window, 2),
+    }
+    return (0.0 <= _mins < suppress_window), debug
+
+
+def _bid_prop_confirms_break(
+    db, symbol: str, *, window_s: float, now: datetime | None = None
+) -> tuple[bool, dict[str, Any]]:
+    """HVM101 edge (B) — bid-prop / spread-tightening confirmer.
+
+    A genuine break is BACKED: the best-bid steps UP (or holds) tick-over-tick as buyers
+    lift, and the spread is at/below its own short trailing median (liquidity tightening
+    behind the move) — not a thin print spiking the ask into an air pocket. Confirm only
+    when BOTH hold over the last few L1 samples.
+
+    FAIL-OPEN by contract: thin/absent L1 tape (fewer than the min samples) → returns
+    ``(True, ...)`` so it NEVER blocks a break on missing data — it only ADDS a veto when
+    the tape positively shows a falling bid into a widening spread.
+
+    EQUITY/RH ONLY: callers gate to non ``-USD`` symbols (crypto L1 lives elsewhere).
+    Returns ``(confirmed, debug)``; pure read, never raises.
+    """
+    try:
+        from .nbbo_tape import recent_bid_spread_tape
+
+        _min_n = int(getattr(settings, "chili_momentum_bid_prop_min_samples", 3) or 3)
+        _max_rows = max(_min_n, int(getattr(settings, "chili_momentum_bid_prop_max_samples", 8) or 8))
+        tape = recent_bid_spread_tape(db, symbol, window_s=float(window_s), max_rows=_max_rows, now_utc=now)
+    except Exception:
+        return True, {"reason": "bid_prop_read_error_fail_open"}
+    if not tape or len(tape) < max(2, _min_n):
+        # Thin/absent L1 → fail open (do NOT block the break).
+        return True, {"reason": "bid_prop_thin_tape_fail_open", "samples": len(tape or [])}
+    bids = [b for b, _ in tape]
+    spreads = [s for _, s in tape]
+    # Non-decreasing best-bid with a tiny relative epsilon (0.05% of the latest bid) so
+    # micro-noise doesn't read as a falling bid; a real backing-away still fails.
+    last_bid = bids[-1]
+    eps = abs(last_bid) * 0.0005
+    bid_non_decreasing = all(bids[i] >= bids[i - 1] - eps for i in range(1, len(bids)))
+    # Spread at/below its own trailing median = liquidity tightening behind the move.
+    _srt = sorted(spreads)
+    _m = len(_srt)
+    median_spread = _srt[_m // 2] if _m % 2 else (_srt[_m // 2 - 1] + _srt[_m // 2]) / 2.0
+    spread_tight = spreads[-1] <= median_spread + 1e-9
+    confirmed = bool(bid_non_decreasing and spread_tight)
+    debug = {
+        "samples": len(tape),
+        "bid_first": round(bids[0], 6),
+        "bid_last": round(last_bid, 6),
+        "bid_non_decreasing": bid_non_decreasing,
+        "spread_last_bps": round(spreads[-1], 2),
+        "spread_median_bps": round(median_spread, 2),
+        "spread_tight": spread_tight,
+    }
+    if not confirmed:
+        debug["reason"] = "bid_prop_unconfirmed"
+    return confirmed, debug
+
+
 def _build_micro_bar_df(db, symbol: str, *, bar_seconds: int, lookback_minutes: float = 30.0):
     """15s MICRO-PULLBACK (2026-06-15, "1m too slow"): build an OHLC micro-bar df
     from the densified tick tape (``momentum_nbbo_spread_tape`` rows for ``symbol``
@@ -3209,6 +3332,46 @@ def tick_live_session(
                                     _df_trig, entry_interval=_iv_trig, live_price=_live_px,
                                     symbol=sess.symbol, db=db,
                                 )
+                            # HVM101 (C): two ADDITIVE entry triggers wired into the SAME
+                            # ladder (flag-gated INSIDE each detector). Each returns the
+                            # shared (ok, reason, debug) shape with pullback_low /
+                            # pullback_high under the IDENTICAL keys, so the structural
+                            # stop + breakout-or-bailout machinery below is reused
+                            # unchanged. Only run when nothing earlier fired (the pullback
+                            # break owns the tape first); each is a no-op + byte-identical
+                            # when its own kill-switch flag is OFF.
+                            if not _trigger_ok:
+                                try:
+                                    from .entry_gates import flush_dip_buy_confirmation
+
+                                    _fd_ok, _fd_reason, _fd_debug = flush_dip_buy_confirmation(
+                                        _df_trig, entry_interval=_iv_trig, live_price=_live_px,
+                                        symbol=sess.symbol,
+                                    )
+                                    if _fd_ok:
+                                        _trigger_ok, _trigger_reason, _pb_debug = _fd_ok, _fd_reason, _fd_debug
+                                except Exception:
+                                    pass
+                            if not _trigger_ok:
+                                try:
+                                    from .entry_gates import TICK_ARMED_WAIT_REASONS, vwap_reclaim_confirmation
+
+                                    _vr_ok, _vr_reason, _vr_debug = vwap_reclaim_confirmation(
+                                        _df_trig, entry_interval=_iv_trig, live_price=_live_px,
+                                        symbol=sess.symbol,
+                                    )
+                                    if _vr_ok:
+                                        _trigger_ok, _trigger_reason, _pb_debug = _vr_ok, _vr_reason, _vr_debug
+                                    elif (
+                                        _vr_reason in TICK_ARMED_WAIT_REASONS
+                                        and _trigger_reason not in TICK_ARMED_WAIT_REASONS
+                                    ):
+                                        # Surface the VWAP-reclaim WAIT so tick-speed dispatch
+                                        # re-evaluates the instant price reclaims VWAP (the
+                                        # pullback path produced only a terminal wait).
+                                        _trigger_reason, _pb_debug = _vr_reason, _vr_debug
+                                except Exception:
+                                    pass
                     except Exception:
                         _trigger_ok = False
                 if not _trigger_ok and _mode != "pullback_break":
@@ -3221,6 +3384,54 @@ def tick_live_session(
                         _trigger_ok, _trigger_reason = momentum_volume_confirmation(_df)
             except Exception:
                 _trigger_ok, _trigger_reason = False, "trigger_error_wait"
+        # HVM101 (A): OPENING-BELL SUPPRESSION — hold a FRESH equity trigger in the
+        # first ~N min after the 09:30 ET open (opening-auction whipsaw). Equity/RH
+        # ONLY; premarket continuation of an already-armed runner is preserved (the
+        # held-position short-circuit + the FSM: a premarket runner is in a held/
+        # candidate state, a fresh WATCHING_LIVE trigger is by definition fresh).
+        # Flag-off / crypto / outside-window ⇒ no-op, byte-identical.
+        if (
+            _trigger_ok
+            and bool(getattr(settings, "chili_momentum_opening_bell_suppression_enabled", True))
+        ):
+            try:
+                _ob_suppress, _ob_dbg = _opening_bell_suppresses_fresh_trigger(
+                    sess.symbol, le, has_position=isinstance(le.get("position"), dict),
+                )
+            except Exception:
+                _ob_suppress, _ob_dbg = False, {}
+            if _ob_suppress:
+                _trigger_ok = False
+                _prev_reason = _trigger_reason
+                _trigger_reason = "opening_bell_suppressed"
+                _emit(db, sess, "live_entry_opening_bell_suppressed", {
+                    "suppressed_trigger": _prev_reason, **_ob_dbg,
+                })
+        # HVM101 (B): BID-PROP / SPREAD-TIGHTENING CONFIRMER — confirm a fired break
+        # only when, over the last few L1 samples, the best-bid is non-decreasing AND
+        # the spread is at/below its short trailing median (genuine backing). Equity/RH
+        # ONLY (crypto L1 lives elsewhere). FAIL-OPEN on thin/absent L1 (never blocks).
+        # Flag-off ⇒ no-op, byte-identical.
+        if (
+            _trigger_ok
+            and not str(sess.symbol or "").upper().endswith("-USD")
+            and bool(getattr(settings, "chili_momentum_bid_prop_confirmer_enabled", True))
+        ):
+            try:
+                _bp_window = (
+                    float(getattr(settings, "chili_momentum_spread_stability_window_bars", 1.0) or 1.0)
+                    * _entry_interval_seconds()
+                )
+                _bp_ok, _bp_dbg = _bid_prop_confirms_break(db, sess.symbol, window_s=_bp_window)
+            except Exception:
+                _bp_ok, _bp_dbg = True, {"reason": "bid_prop_error_fail_open"}
+            if not _bp_ok:
+                _prev_reason = _trigger_reason
+                _trigger_ok = False
+                _trigger_reason = "bid_prop_unconfirmed_wait"
+                _emit(db, sess, "live_entry_bid_prop_unconfirmed", {
+                    "blocked_trigger": _prev_reason, **_bp_dbg,
+                })
         # E3: equities ENTER across the EXTENDED session (pre-market → after-hours,
         # per config) so the lane catches Ross's pre-market gap-and-go; crypto is 24/7.
         # Outside-RTH entries are flagged extended_hours at placement (below) so the
@@ -3255,6 +3466,10 @@ def tick_live_session(
                 "pullback_break_ok", "pullback_break_tick_ok", "halt_resume_dip_ok",
                 "deep_reclaim_ok", "deep_reclaim_tick_ok",
                 "deep_reclaim_dipbuy_ok", "deep_reclaim_dipbuy_tick_ok",
+                # HVM101 (C): the two new triggers carry pullback_low/high under the
+                # SAME keys, so they reuse the IDENTICAL structural-stop + breakout-or-
+                # bailout machinery.
+                "flush_dip_buy", "vwap_reclaim",
             ) and _pb_debug.get("pullback_low"):
                 le["structural_stop_price"] = float(_pb_debug["pullback_low"])
                 # #2 Breakout-or-bailout: stash the broken pullback HIGH (the breakout
@@ -4044,7 +4259,11 @@ def tick_live_session(
         # Streak-adaptive risk (Ross): the per-trade max loss scales with the
         # lane's recent live win rate — bigger on a hot hand, half-size when
         # cold or after 3 straight losses. Bounds [0.5, 1.5]; fail-neutral 1.0.
-        from .risk_policy import cushion_risk_multiplier, streak_risk_multiplier
+        from .risk_policy import (
+            cushion_risk_multiplier,
+            prior_day_pnl_damper_multiplier,
+            streak_risk_multiplier,
+        )
 
         # Segregate the streak dial by THIS lane (ef = normalized execution_family,
         # resolved above) so a crypto/paper-twin loss never de-risks the equity lane.
@@ -4059,6 +4278,14 @@ def tick_live_session(
             db, base_loss_usd=float(_base_max_loss)
         )
         le["cushion_risk"] = _cushion_meta
+        # PRIOR-DAY OUTLIER DAMPER (HVM101/SCAL101): after a statistically outlier prior
+        # session (big win OR big loss, |PnL|/equity z-scored over a trailing daily window)
+        # size DOWN the next session — an emotional/variance reset that reverts toward
+        # baseline risk. Only ever <=1.0 (fail-NEUTRAL 1.0 on thin/degenerate/flag-off =>
+        # byte-identical). Composes with the other size-down levers under the 3x clamp below.
+        _prior_day_mult, _prior_day_meta = prior_day_pnl_damper_multiplier(db, execution_family=ef)
+        if _prior_day_mult < 1.0:
+            le["prior_day_pnl_damper"] = _prior_day_meta
         # B2 ask-heavy book size-down (2026-06-12 entry study: imbalance5 <
         # -0.4 at the decision tick = 71% of chronic-late entries vs 29%,
         # Cliff's d -0.31). The L2 snapshot is already taken at candidate
@@ -4148,7 +4375,7 @@ def tick_live_session(
             except Exception:
                 _meta_mult = 1.0
         _eff_max_loss = min(
-            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult),
+            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE
@@ -4368,6 +4595,27 @@ def tick_live_session(
                 return {
                     "ok": True, "session_id": sess.id, "state": sess.state,
                     "skipped": "position_cap_at_fill", "pos_ct": _pos_ct, "cap": _cap,
+                }
+            # ADAPTIVE DAILY TRADE-COUNT BUDGET (SCAL101): cap the NUMBER of fresh entries
+            # per ET session — a discipline/overtrading guard distinct from the slot COUNT
+            # above. Ceiling floats with regime heat (today's banked cushion) + recent
+            # expectancy: tighten when the lane is cold, loosen when hot. _pos_ct (open +
+            # in-flight, already computed under this lock) is the live open-entry count so a
+            # fill-burst can't slip past the count. ADDITIVE/FAIL-OPEN: flag off / thin data
+            # => allowed (byte-identical). Evaluated INSIDE the advisory lock so the count is
+            # atomic with the position cap.
+            from .risk_policy import daily_trade_count_budget_decision
+
+            _tcb_ok, _tcb_meta = daily_trade_count_budget_decision(
+                db, execution_family=ef, open_entry_count=_pos_ct
+            )
+            if not _tcb_ok:
+                _emit(db, sess, "live_entry_blocked_daily_trade_count_budget", _tcb_meta)
+                _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                db.flush()
+                return {
+                    "ok": True, "session_id": sess.id, "state": sess.state,
+                    "skipped": "daily_trade_count_budget", "budget": _tcb_meta,
                 }
             if _is_crypto:
                 _cryp_ct = count_open_positions(

@@ -1057,7 +1057,23 @@ def _candidate_freshness(symbol: str):
         df = fetch_ohlcv_df(symbol, interval=interval, period="5d")
         if df is None or getattr(df, "empty", True):
             return None
-        return intraday_impulse_freshness(df, retracement_threshold=_freshness_retracement_threshold())
+        fr = intraday_impulse_freshness(df, retracement_threshold=_freshness_retracement_threshold())
+        # CURL (HVM101) selection tilt: stamp the rounding-bottom / cup-and-handle curl
+        # score onto the SAME freshness object (same already-fetched frame, no extra IO)
+        # so the watch-ranking can pre-arm a name that is CURLING back up off a base
+        # earlier — Ross's "The Curl" continuation. Flag-gated; pure + fail-open; it only
+        # ever ADDS preference (it is read by _freshness_rank as a small bonus, never a
+        # filter), so flag-off OR absent-shape is byte-identical to today.
+        try:
+            if bool(getattr(settings, "chili_momentum_curl_detector_enabled", True)) and fr is not None:
+                from .ross_momentum import curl_score as _curl_score_fn
+
+                _cs = _curl_score_fn(df)
+                if _cs is not None and isinstance(getattr(fr, "debug", None), dict):
+                    fr.debug["curl_score"] = float(getattr(_cs, "curl_score", 0.0) or 0.0)
+        except Exception:
+            pass
+        return fr
     except Exception:
         return None
 
@@ -1075,10 +1091,41 @@ def _known_fresh(fresh: Any) -> bool:
     return bool(getattr(fresh, "is_fresh", False)) if fresh is not None else False
 
 
+def _curl_rank_bonus(fresh: Any) -> float:
+    """Small additive watch-ranking bonus for a forming CURL (HVM101 rounding-bottom).
+    Reads the ``curl_score`` ``_candidate_freshness`` stamped on the freshness object (only
+    present when ``chili_momentum_curl_detector_enabled`` is on) and scales it by the lane's
+    one documented small-tilt base (``ROSS_QUALITY_VIABILITY_TILT``) so a clean curl is
+    watched a touch EARLIER without overpowering a genuinely fresh new-high. 0.0 (no effect)
+    when the flag is off, the shape is absent, or data is thin — so flag-off is byte-identical."""
+    if fresh is None:
+        return 0.0
+    dbg = getattr(fresh, "debug", None)
+    if not isinstance(dbg, dict):
+        return 0.0
+    try:
+        cs = float(dbg.get("curl_score") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if cs <= 0.0:
+        return 0.0
+    try:
+        from .ross_momentum import ROSS_QUALITY_VIABILITY_TILT as _tilt
+    except Exception:
+        _tilt = 0.20
+    return float(_tilt) * max(0.0, min(1.0, cs))
+
+
 def _freshness_rank(fresh: Any) -> float:
     """Ranking key: current price's position in the recent intraday range (higher =
-    closer to / above the recent high = fresher). Unknown ranks last among knowns."""
-    return float(getattr(fresh, "position_in_range", 0.0) or 0.0) if fresh is not None else 0.0
+    closer to / above the recent high = fresher), PLUS a small forming-curl bonus
+    (HVM101) so a name rounding back up off a base is pre-armed a touch earlier.
+    Unknown ranks last among knowns. The curl bonus is 0.0 unless the curl detector
+    flag is on AND a curl shape is present, so flag-off is byte-identical to before."""
+    if fresh is None:
+        return 0.0
+    base = float(getattr(fresh, "position_in_range", 0.0) or 0.0)
+    return base + _curl_rank_bonus(fresh)
 
 
 def _current_viability_scores(db: Session, symbols: set[str]) -> dict[str, float]:

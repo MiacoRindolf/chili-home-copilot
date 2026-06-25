@@ -179,6 +179,103 @@ def _premarket_change_pct(s: dict) -> float | None:
     return (price - base) / base * 100.0
 
 
+def _snapshot_adv_shares(s: dict) -> float | None:
+    """Average-daily-VOLUME proxy (in SHARES) from the snapshot — the causal
+    low-ADV "no-market-maker" edge (AS101): EXTREME relative volume only happens
+    when the name's baseline turnover is small enough that HFT market-makers are
+    absent. CHILI already floors TODAY's $-volume (tradability) but never looks at
+    the BASELINE average — a mega-cap printing +10% on huge ADV is a crowded,
+    market-made tape, not the retail edge.
+
+    The full-market snapshot carries no multi-day average, so the cleanest proxy
+    is ``prevDay.v`` (yesterday's session share volume — a stable, lookahead-free,
+    settled prior-day baseline; today's still-accumulating volume is NOT the
+    average and would be circular with the move). Fail-OPEN: no usable prevDay
+    volume ⇒ ``None`` ⇒ the name is NOT penalized (never block/demote on missing
+    data).
+    """
+    prev = s.get("prevDay") or {}
+    v = _f(prev.get("v"))
+    return v if (v is not None and v > 0) else None
+
+
+def _percentile(sorted_vals: list[float], q: float) -> float | None:
+    """Linear-interpolated ``q``-percentile (0..1) of an ASCENDING list. Returns
+    ``None`` on an empty list so callers can fail-open."""
+    n = len(sorted_vals)
+    if n == 0:
+        return None
+    if n == 1:
+        return sorted_vals[0]
+    pos = max(0.0, min(1.0, q)) * (n - 1)
+    lo = int(math.floor(pos))
+    hi = min(lo + 1, n - 1)
+    frac = pos - lo
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * frac
+
+
+def _adv_ceiling_multipliers(
+    advs: list[float | None],
+) -> list[float] | None:
+    """ADV-CEILING soft re-rank weights (AS101), one per row, in input order.
+
+    Returns ``None`` to signal "leave the rank untouched" (flag off / degenerate
+    data) — the caller then applies NO change, byte-identical to today. Otherwise
+    each weight is in ``(0, 1]``: ``1.0`` for names at/under the ceiling (the
+    low-ADV edge we WANT) and a smooth sub-1 discount that grows with how far a
+    name's ADV sits ABOVE the ceiling. It is a SOFT FLOOR-style discount, never a
+    hard drop — a high-ADV name can still make the pool if nothing better exists
+    (no lane starvation).
+
+    The ceiling is ADAPTIVE and basis-independent: ``max(documented Ross 10M-share
+    reference floor, batch ADV high-percentile)``. So in a normal small-cap batch
+    the Ross floor governs; in a batch that is ALL liquid (rare), the percentile
+    lifts the ceiling so the lane isn't starved by penalizing everyone. No
+    scattered magic numbers — the 10M base is the single documented config value
+    and everything else derives from the batch.
+    """
+    try:
+        from ....config import settings as _s
+
+        if not bool(getattr(_s, "chili_momentum_adv_ceiling_enabled", True)):
+            return None
+        ref_floor = float(getattr(_s, "chili_momentum_adv_ceiling_ref_shares", 10_000_000.0))
+    except Exception:
+        # Fail-open: any config error ⇒ no re-rank (byte-identical to today).
+        return None
+    if not (ref_floor > 0):
+        return None
+
+    known = sorted(v for v in advs if v is not None and v > 0)
+    if not known:
+        return None  # no ADV data anywhere ⇒ nothing to bias, leave untouched
+
+    # Adaptive ceiling: the documented Ross floor OR the batch's upper-mid ADV,
+    # whichever is HIGHER (don't penalize an entire already-liquid batch into
+    # starvation). The 75th percentile is a batch-relative reference, not a
+    # tuned cap — it only lifts the ceiling when the batch itself runs liquid.
+    pct = _percentile(known, 0.75) or ref_floor
+    ceiling = max(ref_floor, pct)
+    if not (ceiling > 0):
+        return None
+
+    weights: list[float] = []
+    for v in advs:
+        if v is None or v <= 0:
+            weights.append(1.0)  # fail-open: unknown ADV is never penalized
+            continue
+        if v <= ceiling:
+            weights.append(1.0)  # at/under the edge we want — full weight
+            continue
+        # SOFT discount that grows with the OVER-ceiling multiple. log keeps it
+        # gentle (a 2x-ADV name is nudged, a 50x mega-cap is heavily demoted) and
+        # bounded so the weight stays strictly positive — high-ADV names are
+        # down-ranked, never removed. excess in (0, inf) ⇒ weight in (0, 1).
+        over = v / ceiling
+        weights.append(1.0 / (1.0 + math.log(over)))
+    return weights
+
+
 def build_equity_universe(
     profile: UniverseProfile = EQUITY_ROSS_SMALLCAP,
     *,
@@ -216,6 +313,7 @@ def build_equity_universe(
             return []
 
     rows: list[tuple[str, float, float, float]] = []  # (ticker, rank_score, chg_pct, pos_in_range)
+    advs: list[float | None] = []  # parallel ADV-shares proxy per row (prevDay.v); None = unknown
     for s in snapshot or []:
         try:
             if not isinstance(s, dict):
@@ -266,8 +364,20 @@ def build_equity_universe(
             pos = _pos_in_range(s, price)
             rank_score = pos * math.log1p(max(0.0, chg))
             rows.append((ticker, rank_score, chg, pos))
+            advs.append(_snapshot_adv_shares(s))
         except Exception:
             continue
+
+    # ADV-CEILING soft re-rank (AS101): low AVERAGE-daily-volume is the causal
+    # mechanism for the no-market-maker edge, so SOFT-discount high-ADV names in
+    # the rank (never hard-drop — avoid lane starvation). Returns None when the
+    # kill-switch is off or ADV data is degenerate ⇒ rank untouched, byte-identical.
+    _adv_w = _adv_ceiling_multipliers(advs)
+    if _adv_w is not None and len(_adv_w) == len(rows):
+        rows = [
+            (t, rs * w, chg, pos)
+            for (t, rs, chg, pos), w in zip(rows, _adv_w)
+        ]
 
     # Freshest, strongest-WORKING movers first (rank_score = freshness × move).
     # No fixed RVOL cut — the percentile ranking in score_universe (RVOL +

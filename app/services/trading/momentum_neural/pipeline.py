@@ -910,6 +910,18 @@ def run_momentum_neural_tick(
     except Exception:
         pass
 
+    # FAKE-catalyst credibility set (Ross AS101/HVM101): UNVERIFIED / hacked-PR / unsolicited-
+    # buyout / rumor / pump headlines Ross DISTRUSTS (they round-trip fully). Same once-per-pass
+    # best-effort fetch; JSON-safe sorted list. Empty / absent feed / flag OFF -> no-op.
+    try:
+        from .catalyst import fake_catalyst_symbols
+
+        _fake = fake_catalyst_symbols()
+        if _fake:
+            meta["fake_catalyst_symbols"] = sorted(_fake)
+    except Exception:
+        pass
+
     ctx_meta = {
         k: meta[k]
         for k in (
@@ -929,6 +941,7 @@ def run_momentum_neural_tick(
             "catalyst_symbols",
             "weak_catalyst_symbols",
             "strong_catalyst_symbols",
+            "fake_catalyst_symbols",
             "sympathy_symbols",
             "top_market_gainers",
             "dilution_symbols",

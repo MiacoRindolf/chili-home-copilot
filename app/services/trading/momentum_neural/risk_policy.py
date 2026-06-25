@@ -541,6 +541,276 @@ def cushion_risk_multiplier(db, *, base_loss_usd: float) -> tuple[float, dict]:
         return 1.0, {"cushion_mult": 1.0, "reason": "error_fail_neutral"}
 
 
+def _et_day_bounds_utc(*, days_ago: int = 0) -> tuple[datetime, datetime]:
+    """[start_utc, end_utc) (naive UTC) for the US/Eastern calendar day ``days_ago`` back.
+
+    Mirrors ``governance.global_realized_pnl_today_et``'s ET-session windowing so the
+    daily-trade-count budget and the prior-day damper bucket trades on the SAME calendar
+    boundary the daily-loss cap uses (no off-by-one between the gate and the breaker)."""
+    from datetime import timedelta as _td
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    now_et = datetime.now(et)
+    start_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0) - _td(days=days_ago)
+    end_et = start_et + _td(days=1)
+    start_utc = start_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+    end_utc = end_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+    return start_utc, end_utc
+
+
+def _count_real_entries_today(db: Any, *, execution_family: str | None) -> int:
+    """REAL ENTERED live trades that terminated in today's ET session for THIS lane.
+
+    Read-only, indexed (execution_family, terminal_at). Uses ``is_real_entry_outcome`` so
+    the lane's heavy churn of never-entered cancel/no-fill rows (realized_pnl=0.0, NOT NULL)
+    is NOT counted as a 'trade' — the budget measures ENTRIES, not arms. Fail-open: any
+    error returns 0 (the gate then never blocks)."""
+    if db is None or not execution_family:
+        return 0
+    try:
+        from ....models.trading import MomentumAutomationOutcome
+        from .outcome_labels import is_real_entry_outcome
+
+        start_utc, end_utc = _et_day_bounds_utc(days_ago=0)
+        rows = (
+            db.query(MomentumAutomationOutcome.outcome_class)
+            .filter(
+                MomentumAutomationOutcome.execution_family == execution_family,
+                MomentumAutomationOutcome.mode == "live",
+                MomentumAutomationOutcome.terminal_at >= start_utc,
+                MomentumAutomationOutcome.terminal_at < end_utc,
+            )
+            .all()
+        )
+        return sum(1 for (oc,) in rows if is_real_entry_outcome(oc))
+    except Exception:
+        logger.debug("[momentum_neural] daily entry-count read failed", exc_info=True)
+        return 0
+
+
+def daily_trade_count_budget_decision(
+    db: Any,
+    *,
+    execution_family: str | None,
+    open_entry_count: int = 0,
+) -> tuple[bool, dict[str, Any]]:
+    """ADAPTIVE per-day entry-COUNT budget (SCAL101 '5 trades/day A+ cap', generalized).
+
+    Ross/Max use a fixed 5-trades-a-day rule as a DISCIPLINE FLOOR-reference (don't
+    over-trade a quiet tape into churn); we generalize it to a ceiling that FLOATS with
+    regime heat + the lane's recent realized expectancy, distinct from the slot/position
+    COUNT (that bounds simultaneous open risk; this bounds NEW entries across the session):
+
+      base       = chili_momentum_daily_trade_count_base (the ONE documented floor-ref, 5)
+      ceiling    = round(base * heat_mult * expectancy_mult), clamped to [base, base*ceil_x]
+      heat_mult  = clamp(1 + cushion/(2*base_loss), 1.0, ...)   # banked GREEN today => loosen
+      exp_mult   = clamp(0.5 + recent_win_rate, 0.5, 1.5)       # cold lane => tighten
+
+    TIGHTEN when expectancy degrades (a losing recent window halves toward 0.5 -> fewer
+    entries -> stop bleeding into a bad regime), LOOSEN when hot (banked cushion + a winning
+    window -> let the best regime run). DENY a NEW entry once today's REAL ENTERED count
+    (terminated today + currently-open/in-flight) reaches the ceiling.
+
+    Returns ``(allowed, meta)``. ADDITIVE / FAIL-OPEN: flag OFF, no db, no execution_family,
+    a degenerate base, or any error => ``(True, ...)`` so the caller is byte-identical to
+    today (the gate NEVER blocks on thin/bad data). Read-only; lookahead-free (only past
+    terminated trades + the live open count). [momentum_neural] SCAL101"""
+    if not bool(getattr(settings, "chili_momentum_daily_trade_count_budget_enabled", True)):
+        return True, {"reason": "disabled"}
+    try:
+        base = int(getattr(settings, "chili_momentum_daily_trade_count_base", 5) or 5)
+        if base <= 0:
+            return True, {"reason": "base_disabled"}
+        # Heat: today's banked realized cushion (units of the per-trade loss budget).
+        heat_mult = 1.0
+        cushion_u = 0.0
+        try:
+            from ..governance import global_realized_pnl_today_et
+
+            realized_today = float(global_realized_pnl_today_et(db).get("total_usd") or 0.0)
+            base_loss = equity_relative_loss_cap(
+                float(getattr(settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0) or 50.0),
+                execution_family,
+            )
+            if base_loss and base_loss > 0:
+                cushion_u = max(0.0, realized_today) / base_loss
+                # Each banked unit of risk loosens the day by 1/(2*base) of the ceiling —
+                # a 2x-base-loss cushion adds ~1 trade of headroom. Bounded by the clamp below.
+                heat_mult = 1.0 + cushion_u / (2.0 * base)
+        except Exception:
+            heat_mult = 1.0
+        # Expectancy: the lane's recent live win rate (same dial bounds as the streak risk).
+        exp_mult, win_rate, n_exp = 1.0, None, 0
+        try:
+            rr = _recent_realized_r(db, execution_family=execution_family, lookback=10)
+            n_exp = len(rr)
+            if n_exp >= 5:
+                win_rate = sum(1 for r in rr if r > 0) / n_exp
+                exp_mult = max(0.5, min(1.5, 0.5 + win_rate))
+        except Exception:
+            exp_mult = 1.0
+        ceil_x = float(getattr(settings, "chili_momentum_daily_trade_count_max_multiple", 2.0) or 2.0)
+        if not math.isfinite(ceil_x) or ceil_x < 1.0:
+            ceil_x = 1.0
+        raw_ceiling = base * heat_mult * exp_mult
+        ceiling = int(max(base, min(round(raw_ceiling), int(round(base * ceil_x)))))
+        entered = _count_real_entries_today(db, execution_family=execution_family)
+        try:
+            open_ct = max(0, int(open_entry_count))
+        except (TypeError, ValueError):
+            open_ct = 0
+        used = entered + open_ct
+        allowed = used < ceiling
+        meta = {
+            "allowed": allowed,
+            "ceiling": ceiling,
+            "base": base,
+            "entered_today": entered,
+            "open_inflight": open_ct,
+            "used": used,
+            "heat_mult": round(heat_mult, 3),
+            "cushion_units": round(cushion_u, 3),
+            "expectancy_mult": round(exp_mult, 3),
+            "win_rate": round(win_rate, 3) if win_rate is not None else None,
+            "n_expectancy": n_exp,
+        }
+        if not allowed:
+            meta["reason"] = "daily_trade_count_budget_reached"
+        return allowed, meta
+    except Exception:
+        return True, {"reason": "error_fail_open"}
+
+
+def _prior_session_pnl_over_equity(
+    db: Any, *, execution_family: str | None, lookback_days: int
+) -> tuple[float | None, list[float]]:
+    """(prior_session PnL/equity, trailing daily PnL/equity sample) for the lane.
+
+    Buckets terminated live outcomes by ET calendar day (skipping empty days), normalizes
+    each day's net realized PnL by the CURRENT equity basis (equity-relative — a fixed-$
+    outlier means nothing without the account size), and returns the MOST-RECENT PAST day's
+    normalized PnL plus the trailing sample (excluding today). Best-effort/read-only; thin
+    or failed => ``(None, [])`` so the damper is neutral."""
+    if db is None or not execution_family or lookback_days <= 0:
+        return None, []
+    try:
+        from ....models.trading import MomentumAutomationOutcome
+
+        # Window: from the start of `lookback_days` ago up to the start of TODAY (exclude
+        # today — the damper is a PRIOR-session reset, lookahead-free).
+        far_start, _ = _et_day_bounds_utc(days_ago=int(lookback_days))
+        today_start, _ = _et_day_bounds_utc(days_ago=0)
+        rows = (
+            db.query(
+                MomentumAutomationOutcome.terminal_at,
+                MomentumAutomationOutcome.realized_pnl_usd,
+            )
+            .filter(
+                MomentumAutomationOutcome.execution_family == execution_family,
+                MomentumAutomationOutcome.mode == "live",
+                MomentumAutomationOutcome.realized_pnl_usd.isnot(None),
+                MomentumAutomationOutcome.terminal_at >= far_start,
+                MomentumAutomationOutcome.terminal_at < today_start,
+            )
+            .all()
+        )
+    except Exception:
+        logger.debug("[momentum_neural] prior-day pnl read failed", exc_info=True)
+        return None, []
+    if not rows:
+        return None, []
+    eq = _account_equity_usd(execution_family, prefer_equity=True)
+    if not eq or eq <= 0:
+        return None, []
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    utc = ZoneInfo("UTC")
+    by_day: dict[Any, float] = {}
+    for ts, pnl in rows:
+        try:
+            if ts is None or pnl is None:
+                continue
+            d = ts.replace(tzinfo=utc).astimezone(et).date()
+            by_day[d] = by_day.get(d, 0.0) + float(pnl)
+        except Exception:
+            continue
+    if not by_day:
+        return None, []
+    days_sorted = sorted(by_day.keys())
+    sample = [by_day[d] / eq for d in days_sorted]
+    prior = by_day[days_sorted[-1]] / eq  # most-recent PAST session
+    return prior, sample
+
+
+def prior_day_pnl_damper_multiplier(
+    db: Any, *, execution_family: str | None
+) -> tuple[float, dict[str, Any]]:
+    """OUTLIER prior-session size DAMPER (HVM101 / SCAL101 emotional/variance reset).
+
+    After a statistically OUTLIER prior session — a BIG win OR a BIG loss (|PnL|/equity
+    z-scored over a trailing window of daily normalized PnL) — apply a size multiplier
+    < 1 for the next session: a tilt/variance reset (Ross + Mike's 'green on the day,
+    don't give it back' / 'don't revenge-trade a red day' discipline). Symmetric on the
+    sign — both a euphoric over-confidence day and a tilted blow-up day revert toward
+    baseline risk.
+
+      z = (prior_norm - mean) / stdev            # over the trailing daily sample
+      damper = clamp(1 - slope * (|z| - thresh), floor, 1.0)  when |z| >= thresh, else 1.0
+
+    Distinct from cushion_risk_multiplier (which reads TODAY's intraday banked cushion to
+    climb a ladder) — this reads the COMPLETED PRIOR session and only ever SIZES DOWN.
+    Composes multiplicatively with the other size-down levers (bounded by the runner's 3x
+    combined clamp). Equity-relative, adaptive: the threshold/slope/floor are the only fixed
+    knobs (all documented config defaults). ADDITIVE / FAIL-NEUTRAL: flag OFF, thin/degenerate
+    history, zero-variance, or any error => ``(1.0, ...)`` (never increases risk, never blocks).
+    Read-only; lookahead-free (prior days only). [momentum_neural] HVM101/SCAL101"""
+    if not bool(getattr(settings, "chili_momentum_prior_day_pnl_damper_enabled", True)):
+        return 1.0, {"reason": "disabled"}
+    try:
+        lookback_days = int(getattr(settings, "chili_momentum_prior_day_damper_lookback_days", 20) or 20)
+        z_thresh = float(getattr(settings, "chili_momentum_prior_day_damper_z_threshold", 1.5) or 1.5)
+        floor = float(getattr(settings, "chili_momentum_prior_day_damper_floor", 0.5) or 0.5)
+        slope = float(getattr(settings, "chili_momentum_prior_day_damper_slope", 0.25) or 0.25)
+        if not (0.0 < floor <= 1.0):
+            floor = 0.5
+        prior, sample = _prior_session_pnl_over_equity(
+            db, execution_family=execution_family, lookback_days=lookback_days
+        )
+        if prior is None or len(sample) < 5:
+            return 1.0, {"reason": "thin_history", "n": len(sample)}
+        mean = statistics.fmean(sample)
+        try:
+            stdev = statistics.pstdev(sample)
+        except statistics.StatisticsError:
+            stdev = 0.0
+        if not math.isfinite(stdev) or stdev <= 0:
+            return 1.0, {"reason": "zero_variance", "n": len(sample)}
+        z = (prior - mean) / stdev
+        meta = {
+            "prior_norm": round(prior, 6),
+            "mean": round(mean, 6),
+            "stdev": round(stdev, 6),
+            "z": round(z, 3),
+            "z_threshold": z_thresh,
+            "n": len(sample),
+        }
+        if abs(z) < z_thresh:
+            return 1.0, {**meta, "damper_mult": 1.0, "reason": "within_band", "outlier": False}
+        damper = max(floor, min(1.0, 1.0 - slope * (abs(z) - z_thresh)))
+        return damper, {
+            **meta,
+            "damper_mult": round(damper, 4),
+            "floor": floor,
+            "slope": slope,
+            "outlier": True,
+            "outlier_sign": "win" if prior > 0 else "loss",
+        }
+    except Exception:
+        return 1.0, {"damper_mult": 1.0, "reason": "error_fail_neutral"}
+
+
 def compute_risk_first_quantity(
     *,
     entry_price: float,

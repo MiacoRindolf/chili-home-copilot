@@ -601,3 +601,165 @@ def front_side_state(
         debug={"hod": round(hod, 6), "lod": round(lod, 6), "open": round(sess_open, 6),
                "last": round(last, 6), "rolled_over": bool(rolled_over)},
     )
+
+
+# ── The Curl (HVM101): rounding-bottom continuation, as a pure SCORING signal ──
+# Ross's "The Curl" (HVM101) = a rounding-bottom CONTINUATION off a gap-fade or a
+# mid-trend pop-fade: the name dips, the selling decelerates, a base rounds out, and
+# price reclaims successive micro-channels printing HIGHER LOWS — a cup-and-handle on
+# the intraday frame. It is the pre-break "forming" shape: catching it EARLY lets the
+# lane pre-arm a watcher before the textbook break fires (the entry gate still owns the
+# actual fill). This is a SELECTION TILT, never a veto.
+#
+# This is deliberately NOT the per-bar ``candles.is_bounce_curl_candle`` (a single green
+# re-load bar inside an already-confirmed pullback) nor the multi-bar
+# ``entry_gates.pullback_break_confirmation`` (a fired break). Those are entry triggers;
+# this reads the SESSION-FRAME rounding-bottom geometry and emits a continuous
+# ``curl_score`` in [0,1] for ranking — distinct axis, distinct consumer.
+#
+# Adaptive by construction (operator: "no magic numbers"):
+#   * The base is the recent LOW-anchored window; every threshold is a FRACTION of the
+#     name's own intraday range (rounding depth, reclaim, higher-low slope) — no fixed
+#     cents / fixed %. The one documented base is ``lookback`` (bars of session frame to
+#     consider), mirroring ``intraday_impulse_freshness``'s own knob.
+#   * Lookahead-free: reads completed bars only; the "reclaim" is measured up to the
+#     CURRENT close, never a future bar.
+# Fail-OPEN to a neutral 0.0 (no tilt) on thin/degenerate data — it can only ADD
+# preference for a forming curl, never block or penalise a name that lacks the shape.
+
+
+@dataclass
+class CurlScore:
+    """Rounding-bottom (cup-and-handle) continuation read of the session frame.
+
+    ``curl_score`` in [0,1]: 0 = no rounding base / making lower-lows (not a curl), 1 =
+    a clean deep round-bottom that has reclaimed its left rim on rising higher-lows. A
+    pure ranking signal — additive selection tilt only, never a gate."""
+
+    curl_score: float                  # [0,1] blended rounding-bottom-reclaim quality
+    is_curling: bool                   # convenience: curl_score above a neutral midpoint
+    base_depth: float | None           # how deep the bowl dipped, as a fraction of range
+    reclaim: float | None              # how far price has climbed back up the bowl [0,1]
+    higher_lows: float | None          # monotonic-rise quality of the post-trough lows [0,1]
+    trough_centered: float | None      # how centered the trough is (U vs late-V) [0,1]
+    reason: str
+    debug: dict = field(default_factory=dict)
+
+
+def curl_score(
+    df,
+    *,
+    lookback: int = 20,
+) -> CurlScore:
+    """Detect a forming rounding-bottom / cup-and-handle (Ross "The Curl", HVM101) on the
+    session frame and emit a continuous ``curl_score`` in [0,1] for selection ranking.
+
+    Geometry (all range-relative — no fixed magnitude):
+      * **base_depth** — the bowl actually DIPPED: ``(rim - trough) / range`` where ``rim``
+        is the higher of the pre-trough start and the most recent close. A flat shelf
+        (no dip to round off) scores ~0; a real fade-and-base scores high.
+      * **reclaim** — price has CLIMBED BACK UP out of the bowl toward the rim:
+        ``(last - trough) / (rim - trough)``. 0 = still at the bottom (no curl yet),
+        1 = fully reclaimed the rim (handle / breakout-pending). This is the "curling
+        back up" leg — the continuation tell.
+      * **higher_lows** — since the trough, the bar-lows are RISING (the staircase of
+        higher-lows reclaiming successive micro-channels). Measured as the fraction of
+        consecutive post-trough lows that step up, minus down-steps — a monotonic-rise
+        quality in [0,1].
+      * **trough_centered** — the low sits in the MIDDLE of the window (a U / rounded
+        base), not jammed at the right edge (a late V-dip that has not based yet).
+        ``1 - |2*trough_pos - 1|`` over the window position.
+
+    The score is the product-ish blend ``base_depth^? × reclaim`` gated by ``higher_lows``
+    and softened by ``trough_centered`` — a name must have BOTH dipped (something to round
+    off) AND begun reclaiming on higher-lows to read as a curl. A name making fresh lows
+    (reclaim≈0) or one that never dipped (base_depth≈0) scores ~0.
+
+    Lookahead-free: completed bars only, reclaim measured to the current close. Pure /
+    side-effect-free. Fail-OPEN to ``curl_score=0.0`` (neutral, no tilt) on thin or
+    degenerate data — this can only ADD ranking preference for a forming curl, never veto.
+    """
+    def _neutral(reason: str, **dbg) -> CurlScore:
+        return CurlScore(0.0, False, None, None, None, None, reason, debug=dbg)
+
+    if df is None or getattr(df, "empty", True):
+        return _neutral("insufficient_bars", bars=0)
+    closes = _df_col_floats(df, "Close")
+    lows = _df_col_floats(df, "Low")
+    highs = _df_col_floats(df, "High")
+    n = len(closes)
+    # Need enough bars to see a dip AND a round-back-up; mirror the freshness floor.
+    if n < 6 or len(lows) != n or len(highs) != n:
+        return _neutral("insufficient_bars", bars=n)
+    look = min(int(lookback), n)
+    if look < 6:
+        return _neutral("insufficient_bars", bars=n)
+    w_lows = lows[n - look:]
+    w_highs = highs[n - look:]
+    w_closes = closes[n - look:]
+    win_high = max(w_highs)
+    win_low = min(w_lows)
+    rng = win_high - win_low
+    last = w_closes[-1]
+    if not (rng > 0) or last <= 0:
+        return _neutral("no_range", win_high=win_high, win_low=win_low)
+
+    # Trough = the lowest LOW in the window (the bottom of the bowl).
+    t_idx = min(range(look), key=lambda i: w_lows[i])
+    trough = w_lows[t_idx]
+    # Rim = the higher of the window's opening close (left rim of the cup) and the
+    # current close (the right rim / handle we are reclaiming toward). Range-relative.
+    left_rim = w_closes[0]
+    rim = max(left_rim, last)
+    bowl = rim - trough
+    if not (bowl > 0):
+        return _neutral("no_bowl", trough=trough, rim=rim)
+
+    # base_depth: how much of the window range the bowl dipped (something to round off).
+    base_depth = max(0.0, min(1.0, bowl / rng))
+    # reclaim: how far price has curled back up out of the bowl toward the rim.
+    reclaim = max(0.0, min(1.0, (last - trough) / bowl))
+    # trough_centered: a U-base has its trough mid-window; a late V-dip jams it right.
+    t_pos = t_idx / (look - 1) if look > 1 else 0.5
+    trough_centered = max(0.0, 1.0 - abs(2.0 * t_pos - 1.0))
+
+    # higher_lows: the staircase of rising lows AFTER the trough (reclaiming micro-
+    # channels). Net up-steps over the post-trough leg, normalised to [0,1]. Too few
+    # post-trough bars -> graceful 0.5 (neutral, neither confirmed nor denied).
+    post = w_lows[t_idx:]
+    if len(post) >= 3:
+        ups = sum(1 for a, b in zip(post, post[1:]) if b > a)
+        downs = sum(1 for a, b in zip(post, post[1:]) if b < a)
+        steps = len(post) - 1
+        higher_lows = max(0.0, min(1.0, (ups - downs) / steps + 0.5)) if steps > 0 else 0.5
+    else:
+        higher_lows = 0.5
+
+    # Blend: must have DIPPED (base_depth) AND be RECLAIMING (reclaim); higher-lows and a
+    # centered U-base are confirmers that scale the read. Multiplicative so any missing
+    # leg collapses the score (a flat shelf, a fresh-low dump, or a one-bar V-spike all
+    # read low). Geometric-ish to keep it in [0,1] and reward simultaneous presence.
+    score = (
+        base_depth
+        * reclaim
+        * (0.5 + 0.5 * higher_lows)
+        * (0.5 + 0.5 * trough_centered)
+    )
+    score = max(0.0, min(1.0, score))
+    return CurlScore(
+        curl_score=round(score, 4),
+        is_curling=bool(score >= 0.5),
+        base_depth=round(base_depth, 4),
+        reclaim=round(reclaim, 4),
+        higher_lows=round(higher_lows, 4),
+        trough_centered=round(trough_centered, 4),
+        reason="curling" if score >= 0.5 else ("reclaiming" if reclaim >= 0.5 else "basing_or_falling"),
+        debug={
+            "trough": round(trough, 8),
+            "rim": round(rim, 8),
+            "left_rim": round(left_rim, 8),
+            "last": round(last, 8),
+            "trough_pos": round(t_pos, 4),
+            "lookback": int(look),
+        },
+    )

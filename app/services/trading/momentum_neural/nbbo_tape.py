@@ -284,6 +284,48 @@ def recent_spread_median_bps(
     return float(row[0]), int(row[1] or 0)
 
 
+def recent_bid_spread_tape(
+    db: Session, symbol: str, *, window_s: float, max_rows: int = 12,
+    now_utc: Optional[datetime] = None,
+) -> list[tuple[float, float]]:
+    """The last few ``(bid, spread_bps)`` samples (oldest→newest) over ``window_s``
+    seconds of L1 tape for ``symbol`` — the raw input to the bid-prop / spread-
+    tightening confirmer (HVM101 edge B). Bounded to ``max_rows`` most-recent rows.
+
+    Returns ``[]`` on no data / failure, so the caller fails OPEN (does not block a
+    break when the L1 tape is thin/absent). Pure read; never raises."""
+    sym = str(symbol or "").strip().upper()
+    if not sym or window_s <= 0:
+        return []
+    now_utc = now_utc or datetime.now(timezone.utc)
+    try:
+        n = max(2, min(int(max_rows), 100))
+        rows = db.execute(
+            text(
+                "SELECT bid, spread_bps FROM momentum_nbbo_spread_tape "
+                "WHERE symbol = :s AND bid > 0 AND spread_bps IS NOT NULL "
+                "AND observed_at >= :since "
+                "ORDER BY observed_at DESC LIMIT :n"
+            ),
+            {
+                "s": sym,
+                "since": now_utc.replace(tzinfo=None) - timedelta(seconds=float(window_s)),
+                "n": n,
+            },
+        ).fetchall()
+    except Exception as exc:
+        logger.debug("[nbbo_tape] bid-spread tape read failed: %s", exc)
+        return []
+    out: list[tuple[float, float]] = []
+    for r in rows:
+        b = _f(r[0])
+        s = _f(r[1])
+        if b is not None and s is not None and b > 0 and s >= 0:
+            out.append((b, s))
+    out.reverse()  # oldest → newest
+    return out
+
+
 def read_spread_profile(
     db: Session, symbol: str, *, day: Optional[str] = None,
 ) -> list[dict[str, Any]]:

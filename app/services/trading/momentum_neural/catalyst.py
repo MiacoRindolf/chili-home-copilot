@@ -210,11 +210,73 @@ def strong_catalyst_symbols() -> set[str]:
         return set()
 
 
+# FAKE-CATALYST credibility guard (Ross AS101/HVM101: he DISTRUSTS unverified / hacked-PR /
+# unsolicited-buyout / rumor headlines — they round-trip FULLY to the pre-move price with no
+# clean re-entry, so a fill on one is a likely fade-trap). This is a DIFFERENT angle from the
+# WEAK grade (dilution/compliance/legal, above) and the STRONG grade (real FDA/trial/M&A): a
+# fake catalyst can WEAR a strong costume ("rumor of buyout", "in talks to be acquired",
+# "confirms" a pump) — credibility, not catalyst TYPE. A flagged headline earns a SOFT
+# DOWN-WEIGHT (conservative, low over-veto — never a hard veto), and it DOMINATES the strong
+# boost (a rumored buyout is not a real M&A catalyst). Keyword list, no magic constants;
+# fail-open. Kill-switch: chili_momentum_fake_catalyst_guard_enabled (default ON).
+_FAKE_CATALYST_KEYWORDS = (
+    "rumor", "rumour", "rumored", "rumoured", "unconfirmed", "unverified",
+    "speculation", "speculated", "reportedly", "alleged", "allegedly",
+    "in talks", "in discussions", "exploring a sale", "considering a sale",
+    "unsolicited", "non-binding", "nonbinding", "preliminary proposal",
+    "expression of interest", "hacked", "hack", "compromised account",
+    "fake press release", "fabricated", "fraudulent press", "spoofed",
+    "pump and dump", "pump-and-dump", "stock promotion", "promoted stock",
+    "paid promotion", "newsletter touts", "social media buzz",
+)
+
+
+def _is_fake_catalyst(title: str) -> bool:
+    """True when a headline reads as an UNVERIFIED / hacked-PR / unsolicited-buyout / rumor /
+    pump-style catalyst (low credibility — Ross's full-round-trip fade-trap). Pure; fail-open
+    to False (an unreadable title is never down-weighted)."""
+    t = str(title or "").lower()
+    return any(k in t for k in _FAKE_CATALYST_KEYWORDS)
+
+
+def fake_catalyst_symbols() -> set[str]:
+    """Normalized tickers whose freshest fresh-news headline reads as a FAKE / low-credibility
+    catalyst (the credibility-de-weight set). Same title-carrying fetch as the weak/strong
+    grades; fail-open to empty (no de-weight) when the news feed is unavailable, so a missing
+    feed never strips credibility from real catalysts."""
+    try:
+        from ...massive_client import get_recent_news_items
+
+        return {
+            _norm(tk)
+            for tk, title in get_recent_news_items(max_age_min=_news_catalyst_max_age_min())
+            if _is_fake_catalyst(title)
+        }
+    except Exception:
+        logger.debug("[catalyst] fake-catalyst grade fetch failed", exc_info=True)
+        return set()
+
+
+def fake_catalyst_viability_delta(symbol: str, fake_symbols: set[str] | None) -> float:
+    """SOFT credibility DOWN-WEIGHT for a FAKE / unverified / hacked-PR / rumor / unsolicited-
+    buyout headline (Ross AS101/HVM101 distrust). Negative half-tilt — the same magnitude the
+    catalyst boost uses, so a fabricated catalyst's positive tilt is neutralized rather than the
+    name hard-vetoed (conservative, low over-veto; the lane keeps the name eligible, just
+    de-prioritized). Crypto (-USD) / absent set / flag OFF -> 0 (never penalizes, byte-identical
+    when the guard is disabled). Pure + fail-open."""
+    if not fake_symbols or "-USD" in str(symbol or "").upper():
+        return 0.0
+    if not bool(getattr(settings, "chili_momentum_fake_catalyst_guard_enabled", True)):
+        return 0.0
+    return -(_catalyst_tilt() * 0.5) if _norm(symbol) in fake_symbols else 0.0
+
+
 def catalyst_grade_selection_delta(
     symbol: str,
     *,
     weak_symbols: set[str] | None = None,
     strong_symbols: set[str] | None = None,
+    fake_symbols: set[str] | None = None,
 ) -> float:
     """E2 catalyst-GRADE viability delta for SELECTION (gap #12, build_order #3) — distinct
     from the regime-aware ``catalyst_viability_delta`` (which boosts ANY catalyst). Grades
@@ -227,6 +289,13 @@ def catalyst_grade_selection_delta(
         magnitude the news tilt uses; a confirming, not standalone, signal).
       * MEDIUM / no headline / crypto / absent feed -> 0 (neutral, no change).
 
+    FAKE-catalyst dominance (Ross AS101/HVM101): a STRONG-looking headline that is actually
+    UNVERIFIED / hacked-PR / unsolicited / rumor (e.g. "rumor of buyout") is in ``fake_symbols``
+    too — credibility BEATS catalyst type, so the strong boost is SUPPRESSED to 0 (the dedicated
+    ``fake_catalyst_viability_delta`` carries the soft negative). Weak still dominates fake (a
+    name that is both diluting and rumored is the stronger fade). ``fake_symbols`` defaults None,
+    so an absent set leaves this function byte-identical to its prior behavior.
+
     Pure + fail-open. The CALLER decides whether a negative delta also drops live
     eligibility (the hard gate) — this only returns the magnitude."""
     if "-USD" in str(symbol or "").upper():
@@ -234,6 +303,12 @@ def catalyst_grade_selection_delta(
     sym = _norm(symbol)
     if weak_symbols and sym in weak_symbols:
         return -_catalyst_tilt()
+    if fake_symbols and sym in fake_symbols:
+        # Credibility veto of the boost: a rumored / hacked / unsolicited "strong" catalyst
+        # earns NO boost (the soft penalty lives in fake_catalyst_viability_delta). Gated by
+        # the guard flag so flag-OFF restores the byte-identical strong-boost path.
+        if bool(getattr(settings, "chili_momentum_fake_catalyst_guard_enabled", True)):
+            return 0.0
     if strong_symbols and sym in strong_symbols:
         return _catalyst_tilt() * 0.5
     return 0.0
