@@ -1566,6 +1566,22 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     except Exception:
         pass
 
+    # AREA C — SAFE BOUNDED STALE-SESSION REAPER (2026-06-25). Runs INSIDE this
+    # auto-arm pass (NOT a parallel loop) right after the arm-pending TTL sweep:
+    # terminalize dead-but-lingering live_error / broker-flat live_bailout sessions so
+    # they stop pinning the busy-set + accumulating in the table. Broker-truth-gated +
+    # in-flight-order-gated + row-locked + fail-safe (any unknown read leaves the
+    # session alone). Kill-switch chili_momentum_stale_session_reaper_enabled.
+    try:
+        from .automation_query import reap_stale_live_sessions
+
+        _reaped = reap_stale_live_sessions(db, user_id=int(uid))
+        if _reaped.get("reaped"):
+            out["stale_sessions_reaped"] = _reaped.get("reaped")
+            logger.info("[auto_arm] stale-session reaper: %s", _reaped)
+    except Exception:
+        logger.debug("[auto_arm] stale-session reaper failed", exc_info=True)
+
     # Coinbase connect at PASS START (2026-06-12): the venue-readiness filter
     # at selection ran BEFORE the lazy _cb_connect() at the arm phase, so a
     # fresh scheduler process dropped every crypto candidate as
@@ -1920,15 +1936,64 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
                                 "[auto_arm] alpaca twin armed %s session=%s (paper endpoint)",
                                 chosen.symbol, _tb.get("session_id"),
                             )
+                        # AREA B (alpaca-twin leak): a blocked twin confirm strands the
+                        # begin-created twin session in live_arm_pending forever (it was
+                        # silently swallowed with no cancel + no log). The twin is a PAPER
+                        # session with NO broker order at the pre-entry arm stage, so the
+                        # cancel is a pure CHILI-state transition to LIVE_CANCELLED — and it
+                        # frees the slot the twin would otherwise pin. flag-OFF = legacy leak.
+                        elif bool(
+                            getattr(settings, "chili_momentum_cancel_on_confirm_block_enabled", True)
+                        ) and _tb.get("session_id"):
+                            from .automation_query import cancel_automation_session as _cancel_twin
+
+                            _cancel_twin(db, user_id=int(uid), session_id=_tb.get("session_id"))
+                            logger.info(
+                                "[auto_arm] alpaca twin confirm blocked %s session=%s err=%s — cancelled stranded arm",
+                                chosen.symbol, _tb.get("session_id"), _tc.get("error"),
+                            )
             except Exception:
                 logger.debug("[auto_arm] alpaca twin arm failed", exc_info=True)
         else:
             out["skipped"] = "confirm_blocked"
             out["confirm_error"] = confirm.get("error")
-            logger.info(
-                "[auto_arm] confirm_live_arm blocked %s: %s",
-                chosen.symbol, confirm.get("error"),
-            )
+            # AREA B — CANCEL-ON-CONFIRM-BLOCK (2026-06-25, the IQST sess-8804 leak).
+            # confirm_live_arm blocked AFTER begin_live_arm already created the session
+            # in live_arm_pending (a TOCTOU: the name flickered ineligible / risk-blocked /
+            # broker-not-ready / allocator-blocked between begin and confirm). The legacy
+            # path only logged "confirm_blocked" and moved on, STRANDING the begin-created
+            # session in live_arm_pending — pinning a concurrency slot until the TTL reaper
+            # (up to chili_momentum_auto_arm_max_watch_seconds later). RELEASE it now via
+            # cancel_automation_session: a pre-entry arm_pending session carries NO
+            # momentum_live_execution, so _oids is empty and the order-truth broker sweep is
+            # a pure no-op — the cancel is a pure CHILI-state transition to LIVE_CANCELLED
+            # (FOR UPDATE row-locked vs a concurrent runner tick; adopt-on-cancel is skipped
+            # because prev is not in LIVE_CANCELLABLE_STATES). flag-OFF = legacy leak.
+            if bool(
+                getattr(settings, "chili_momentum_cancel_on_confirm_block_enabled", True)
+            ) and begin.get("session_id"):
+                try:
+                    from .automation_query import cancel_automation_session
+
+                    _rel = cancel_automation_session(
+                        db, user_id=int(uid), session_id=begin.get("session_id")
+                    )
+                    out["confirm_block_released_session"] = begin.get("session_id")
+                    logger.info(
+                        "[auto_arm] confirm_live_arm blocked %s session=%s err=%s — cancelled stranded arm (%s)",
+                        chosen.symbol, begin.get("session_id"), confirm.get("error"),
+                        _rel.get("state") if _rel.get("ok") else _rel.get("error"),
+                    )
+                except Exception:
+                    logger.warning(
+                        "[auto_arm] confirm-block release failed %s session=%s",
+                        chosen.symbol, begin.get("session_id"), exc_info=True,
+                    )
+            else:
+                logger.info(
+                    "[auto_arm] confirm_live_arm blocked %s: %s",
+                    chosen.symbol, confirm.get("error"),
+                )
     if _armed_syms:
         out["armed_symbols"] = _armed_syms
         out.pop("skipped", None)

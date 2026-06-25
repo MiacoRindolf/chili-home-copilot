@@ -1132,10 +1132,45 @@ def _l2_entry_veto(
         return None  # any error -> fail-open (never block an entry on a bug)
 
 
+def is_explosive_mover(
+    atr_pct: float | None,
+    rvol: float | None,
+    settings: Any,
+) -> bool:
+    """Shared explosiveness predicate for the explosive-mover recalibration carve-outs
+    (bid-prop exempt, fast-bail lock-in, extension RVOL boost, flow-veto strong-leg
+    relaxation). A name is EXPLOSIVE when its intraday volatility OR its relative volume
+    is at/above the configured floor — the high-RVOL / extreme-ATR regime the Ross lane
+    explicitly targets (its bid steps down + spread widens + it dip-tests the broken
+    level mid-squeeze, which the conservative gates misread as failure).
+
+    GATED BY THE MASTER kill-switch: when ``chili_momentum_explosive_recalibration_enabled``
+    is OFF (default) this ALWAYS returns False, so every carve-out keyed on it is a no-op
+    and the lane is byte-identical. ADDITIVE / fail-closed: any error or both-None inputs
+    return False (no name is treated as explosive on a bug ⇒ the protective gate stays).
+    Pure; no I/O or mutation."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_explosive_recalibration_enabled", False)):
+            return False
+        a = None if atr_pct is None else float(atr_pct)
+        rv = None if rvol is None else float(rvol)
+        atr_floor = float(getattr(settings, "chili_momentum_explosive_atr_pct_floor", 0.045) or 0.0)
+        rvol_floor = float(getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 0.0)
+        if a is not None and atr_floor > 0.0 and a >= atr_floor:
+            return True
+        if rv is not None and rvol_floor > 0.0 and rv >= rvol_floor:
+            return True
+        return False
+    except Exception:
+        return False
+
+
 def _entry_flow_veto(
     ofi: float | None,
     trade_flow: float | None,
     settings: Any,
+    *,
+    explosive: bool = False,
 ) -> bool:
     """Entry-TIME flow veto (separate from selection): if the LIVE OFI AND the
     executed-tape trade_flow are BOTH sufficiently negative, the tape is actively
@@ -1169,6 +1204,25 @@ def _entry_flow_veto(
         tf_strong_thr = float(
             getattr(settings, "chili_momentum_entry_flow_veto_trade_flow_strong", -0.5)
         )
+        # EXPLOSIVE carve-out (GATE 4): on a high-RVOL / extreme-ATR low-float, a strong
+        # (but not maximum) negative tape is one or two aggressive sellers on a thin bar,
+        # not "sellers winning the breakout" — those names RUN on their own two-sided
+        # volatility. When the explosive flag is set (caller computed it via the master-
+        # gated is_explosive_mover), the STRONG-tape OR-leg threshold drops to the
+        # near-maximum-selling level, so the leg vetoes ONLY on extreme selling. The
+        # both-bearish AND-leg is UNCHANGED, so a mixed-flow break still vetoes (a falling
+        # tape under a deteriorating book is caught regardless of explosiveness). Master
+        # OFF ⇒ explosive is always False ⇒ byte-identical.
+        if explosive and bool(
+            getattr(settings, "chili_momentum_entry_flow_veto_explosive_exempt", False)
+        ):
+            tf_strong_thr = float(
+                getattr(
+                    settings,
+                    "chili_momentum_entry_flow_veto_trade_flow_strong_explosive",
+                    -0.85,
+                )
+            )
         # AND-leg: both the book (OFI) and the tape (trade_flow) lean net-selling.
         and_leg = (
             ofi is not None
@@ -1188,6 +1242,8 @@ def _entry_extension_veto(
     breakout_level: float | None,
     atr_pct: float | None,
     settings: Any,
+    *,
+    rvol: float | None = None,
 ) -> bool:
     """Entry-EXTENSION (chase) veto: defer the buy when the entry sits too far ABOVE
     the breakout level — i.e. we are buying NEAR a local top after the move already
@@ -1222,6 +1278,25 @@ def _entry_extension_veto(
         k = float(getattr(settings, "chili_momentum_entry_extension_atr_mult", 8.0))
         floor = float(getattr(settings, "chili_momentum_entry_extension_floor_pct", 0.08))
         cap = max(floor, k * max(0.0, a))
+        # EXPLOSIVE RVOL BOOST (GATE 3): a true outlier squeeze is high-RVOL DESPITE a
+        # thin regime-ATR (the discovery-phase setup the lane targets), so the clean
+        # ATR-derived cap under-leverages it. When the master + boost flags are ON and an
+        # RVOL reading is available, widen the cap proportionally to RVOL above the
+        # explosive floor, hard-capped at boost_max so a +33% blow-off chase still vetoes.
+        # ADDITIVE: master OFF / boost flag OFF / rvol None ⇒ no boost, byte-identical.
+        if (
+            rvol is not None
+            and bool(getattr(settings, "chili_momentum_explosive_recalibration_enabled", False))
+            and bool(getattr(settings, "chili_momentum_entry_extension_rvol_boost_enabled", False))
+        ):
+            try:
+                rvol_floor = float(getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 0.0)
+                boost_per = float(getattr(settings, "chili_momentum_entry_extension_rvol_boost_per", 0.05) or 0.0)
+                boost_max = float(getattr(settings, "chili_momentum_entry_extension_rvol_boost_max", 0.15) or 0.0)
+                _excess = max(0.0, float(rvol) - rvol_floor)
+                cap += min(boost_max, boost_per * _excess)
+            except (TypeError, ValueError):
+                pass
         return ep >= lvl * (1.0 + cap)
     except Exception:
         return False  # any error -> fail-open (never block an entry on a bug)
@@ -2351,6 +2426,7 @@ def breakout_failed_to_hold(
     held_seconds: float,
     window_seconds: float,
     buffer_pct: float = 0.001,
+    lock_in_seconds: float = 0.0,
 ) -> bool:
     """#2 Breakout-or-bailout (Ross flat-top rule: "if the stock cannot hold the
     breakout level after entry, exit IMMEDIATELY" rather than waiting for the
@@ -2361,17 +2437,31 @@ def breakout_failed_to_hold(
     wick buffer) — a failed breakout to be cut well inside the structural stop.
     Guarded so it never fights the normal stop: no level / outside the early window
     / non-positive inputs all return False. docs/DESIGN/MOMENTUM_LANE.md
+
+    LOCK-IN (GATE 2 of the explosive-mover recalibration): ``lock_in_seconds`` is a
+    floor BELOW which the fast-bail CANNOT fire — give the breakout time to stabilize
+    through a NORMAL retest before treating a momentary sub-level dip as a failed
+    breakout (a violent squeeze dips the bid below the level within a few seconds, then
+    resumes — FCUV +21% after a 4.5s bail). The structural stop / #769 max-loss circuit
+    still fire INSIDE the lock-in (they are evaluated separately, ahead of this gate), so
+    a genuinely collapsing position is NOT held hostage. ADDITIVE: ``lock_in_seconds``
+    defaults to 0.0 ⇒ byte-identical (the caller passes 0 when the master flag is OFF).
     """
     try:
         lvl = float(breakout_level) if breakout_level is not None else 0.0
         b = float(bid) if bid is not None else 0.0
         held = float(held_seconds)
         window = float(window_seconds)
+        lock_in = max(0.0, float(lock_in_seconds))
     except (TypeError, ValueError):
         return False
     if lvl <= 0.0 or b <= 0.0 or window <= 0.0:
         return False
     if held > window:
+        return False
+    if held < lock_in:
+        # Inside the stabilization lock-in — defer the fast-bail (structural stop +
+        # max-loss circuit still protect the position; they run before this gate).
         return False
     return b < lvl * (1.0 - max(0.0, float(buffer_pct)))
 

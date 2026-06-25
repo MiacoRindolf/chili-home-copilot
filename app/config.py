@@ -3887,6 +3887,95 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_BREAKOUT_BAILOUT_BUFFER_PCT"),
         description="Small wick buffer below the breakout level before fast-bailing (0.001 = 10 bps).",
     )
+    # ── EXPLOSIVE-MOVER RECALIBRATION (master) ─────────────────────────────────
+    # Ross small-caps step the bid DOWN / widen the spread mid-squeeze and dip-test
+    # the broken level within seconds — exactly when the breakout is WORKING, not
+    # failing. The conservative gates read that backwards and cut winners at b/e
+    # (FCUV +21% after a 4.5s fast-bail; ILLR/WEN +bid_prop blocks then ran). This
+    # MASTER kill-switch gates ONLY the explosive-aware carve-outs below; with it
+    # OFF (default) every sub-feature is a no-op and the lane is BYTE-IDENTICAL.
+    # The protections it relaxes (buy-into-selling veto, failed-breakout bail) STAY
+    # binding for genuinely failing / falling-momentum names — these only widen the
+    # thresholds for the high-RVOL / extreme-ATR regime the lane explicitly targets.
+    # Risk-first sizing + the #769 max-loss circuit + the cushion-funded pyramid are
+    # untouched (they bound the downside regardless).
+    chili_momentum_explosive_recalibration_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_RECALIBRATION_ENABLED"),
+        description="MASTER kill-switch for the explosive-mover recalibration (bid-prop exempt, fast-bail lock-in, extension/flow RVOL carve-outs, pyramid eligibility-flicker skip). OFF (default) => every carve-out is a no-op, lane byte-identical.",
+    )
+    chili_momentum_explosive_atr_pct_floor: float = Field(
+        default=0.045,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_ATR_PCT_FLOOR"),
+        description="ATR%% at/above which a name is treated as EXPLOSIVE for the recalibration carve-outs (top of the normal regime; regime_atr_pct basis). Sub-master flag gates whether it is read at all.",
+    )
+    chili_momentum_explosive_rvol_floor: float = Field(
+        default=3.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_RVOL_FLOOR"),
+        description="Relative-volume (vol_ratio) at/above which a name is treated as EXPLOSIVE for the recalibration carve-outs when an RVOL reading is available (OR-ed with the ATR floor).",
+    )
+    # GATE 1 — bid-prop confirmer explosive exemption.
+    chili_momentum_bid_prop_explosive_exempt: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BID_PROP_EXPLOSIVE_EXEMPT"),
+        description="When ON (and master ON), BYPASS the bid-prop deterioration confirmer for explosive names (ATR%% >= floor OR RVOL >= floor): a squeeze legitimately steps the bid down / widens the spread; the structural pullback-break trigger already read volume+structure. OFF => no-op.",
+    )
+    # GATE 2 — fast-bail lock-in window (give the breakout structural room).
+    chili_momentum_breakout_bailout_lock_in_seconds: float = Field(
+        default=0.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BREAKOUT_BAILOUT_LOCK_IN_SECONDS"),
+        description="Seconds after entry fill during which the fast-bail CANNOT fire (give the breakout time to stabilize through a normal retest). 0 (default) => no lock-in, byte-identical. Master flag must also be ON.",
+    )
+    chili_momentum_breakout_bailout_lock_in_explosive_seconds: float = Field(
+        default=0.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BREAKOUT_BAILOUT_LOCK_IN_EXPLOSIVE_SECONDS"),
+        description="Lock-in seconds for EXPLOSIVE names (ATR%% >= floor OR RVOL >= floor) — wider than the base lock-in (a violent squeeze dip-tests the level later). 0 (default) => falls back to the base lock-in. Master flag must also be ON.",
+    )
+    # GATE 3 — entry-extension RVOL boost (more chase room for a true squeeze).
+    chili_momentum_entry_extension_rvol_boost_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_EXTENSION_RVOL_BOOST_ENABLED"),
+        description="When ON (and master ON), BOOST the entry-extension cap for high-RVOL outlier squeezes by min(boost_max, boost_per * max(0, rvol - rvol_floor)). OFF => no boost, byte-identical extension veto.",
+    )
+    chili_momentum_entry_extension_rvol_boost_per: float = Field(
+        default=0.05,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_EXTENSION_RVOL_BOOST_PER"),
+        description="Extension-cap boost added per 1.0 of RVOL above the explosive RVOL floor (e.g. 0.05 => +5pp per extra 1x rvol).",
+    )
+    chili_momentum_entry_extension_rvol_boost_max: float = Field(
+        default=0.15,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_EXTENSION_RVOL_BOOST_MAX"),
+        description="Hard ceiling on the RVOL extension-cap boost (caps the chase room even on extreme RVOL so a +33%% blow-off chase still vetoes).",
+    )
+    # GATE 4 — entry flow-veto strong-leg relaxation for explosive names.
+    chili_momentum_entry_flow_veto_explosive_exempt: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FLOW_VETO_EXPLOSIVE_EXEMPT"),
+        description="When ON (and master ON), RAISE the strong-tape OR-leg threshold for explosive names (ATR%% >= floor OR RVOL >= floor) from trade_flow_strong to trade_flow_strong_explosive so a thin-tape one-seller dip does not veto — MAXIMUM selling (<= explosive thr) still vetoes, and the both-bearish AND-leg is unchanged. OFF => no-op.",
+    )
+    chili_momentum_entry_flow_veto_trade_flow_strong_explosive: float = Field(
+        default=-0.85,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FLOW_VETO_TRADE_FLOW_STRONG_EXPLOSIVE"),
+        description="Strong-tape OR-leg threshold for EXPLOSIVE names (only used when the flow-veto explosive exemption is ON): a thin-tape low-float vetoes only on near-maximum selling, not merely strong selling. The both-bearish AND-leg is unchanged so a mixed-flow break still vetoes.",
+    )
+    # GATE 5 (pyramid) — skip the neural-viability re-check on an ALREADY-HELD winner.
+    chili_momentum_pyramid_skip_viability_recheck: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PYRAMID_SKIP_VIABILITY_RECHECK"),
+        description="When ON (and master ON), an add to an ALREADY-HELD winner (STATE_LIVE_TRAILING) is NOT refused for an eligibility/freshness flicker (live_eligible / viability_freshness) — the entry already passed admission and the cushion gate + max-loss circuit still bound the add. Kill-switch / drawdown / daily-loss / position-cap blocks are NEVER skipped. OFF => legacy re-check, byte-identical.",
+    )
+    chili_momentum_pyramid_add_submit_retry_max: int = Field(
+        default=0,
+        ge=0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PYRAMID_ADD_SUBMIT_RETRY_MAX"),
+        description="Max times a transient pyramid add-order submit failure (broker isError) is re-attempted on a later tick before giving up. 0 (default) => no retry, byte-identical (a single failed submit emits pyramid_add_blocked as today). Master flag must also be ON.",
+    )
     chili_momentum_order_notional_guard_bps: float = Field(
         default=25.0,
         ge=0.0,
@@ -5016,6 +5105,69 @@ class Settings(BaseSettings):
     chili_momentum_auto_arm_equity_only: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_EQUITY_ONLY"),
+    )
+    # ── SESSION-HYGIENE / CRYPTO-SEGREGATION (2026-06-25) ──────────────────────
+    # All four default-ON; each flag-OFF restores byte-identical legacy behavior.
+    #
+    # (A) BROKER-ZERO CLOSE: when the exit broker-qty clamp SUCCESSFULLY reads the
+    # held quantity at 0 (broker_zero=True is set ONLY on a successful read in
+    # _submit_live_market_exit — never on None/exception), trust that confirmed-zero
+    # and reconcile the session to LIVE_EXITED WITHOUT a second independent broker
+    # read. The second read (_broker_position_confirms_zero) does not handle the
+    # robinhood_agentic_mcp family (returns False), so a broker-FLAT agentic bailout
+    # (FCUV sess 8791) looped live_bailout forever, pinning the slot. broker_zero is
+    # already a confirmed-zero from a successful read; re-confirming only ADDS a
+    # failure dependency. false = require the second read (legacy, byte-identical).
+    chili_momentum_broker_zero_trust_clamp_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BROKER_ZERO_TRUST_CLAMP_ENABLED"),
+        description="Trust a successful broker-qty-clamp zero (broker_zero=True) to reconcile to LIVE_EXITED without a second broker read. false = legacy double-read.",
+    )
+    # (B) CANCEL-ON-CONFIRM-BLOCK: when confirm_live_arm is BLOCKED after
+    # begin_live_arm already created the session in live_arm_pending (a TOCTOU:
+    # no_longer_eligible / risk_blocked / broker_not_ready / allocator_blocked), the
+    # begin-created session is stranded in live_arm_pending — pinning a concurrency
+    # slot (IQST sess 8804, 70+min). Release it via cancel_automation_session: a
+    # pre-entry arm_pending session has NO broker order (no momentum_live_execution),
+    # so the cancel is a pure CHILI-state transition to LIVE_CANCELLED. Covers BOTH
+    # the primary RH arm and the alpaca paper-twin. false = legacy leak (TTL-reaped).
+    chili_momentum_cancel_on_confirm_block_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CANCEL_ON_CONFIRM_BLOCK_ENABLED"),
+        description="Cancel the begin-created live_arm_pending session when confirm_live_arm is blocked. false = leave it for the TTL reaper (legacy).",
+    )
+    # (C) STALE-SESSION REAPER: a SAFE BOUNDED sweep (runs inside the existing
+    # auto-arm pass, NOT a parallel loop) that terminalizes dead-but-lingering
+    # sessions: (1) live_error past the TTL, (2) live_bailout past the TTL whose
+    # broker position is CONFIRMED 0. NEVER closes a session with a real broker
+    # position or in-flight order — every close requires a SUCCESSFUL broker-flat
+    # read (fail-safe: any unknown/failed read leaves the session ALONE). arm_pending
+    # is already handled by expire_stale_live_arm_sessions. false = no reaper (legacy).
+    chili_momentum_stale_session_reaper_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STALE_SESSION_REAPER_ENABLED"),
+        description="Bounded broker-truth-gated reaper for stale live_error / broker-flat live_bailout sessions. false = no reaper (legacy).",
+    )
+    # TTL (seconds) before a stale live_error / live_bailout session is eligible for
+    # the reaper. Adaptive floor on the max-watch setting (no new magic number) so a
+    # genuinely-active exit/error window is never reaped mid-flight. Default 2h.
+    chili_momentum_stale_session_reaper_ttl_seconds: float = Field(
+        default=7200.0,
+        ge=300.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STALE_SESSION_REAPER_TTL_SECONDS"),
+    )
+    # (D) CRYPTO VIABILITY GATE: when the lane is NOT trading crypto (crypto_only is
+    # False AND there is no positive crypto live-arm intent), STOP scoring "-USD"
+    # symbols into momentum_symbol_viability — they pollute the equity scoring pool
+    # while never being armable (the auto_arm candidate query already excludes them).
+    # Gate sits at the single persistence chokepoint (persist_neural_momentum_tick),
+    # downstream of all scoring, so equity scoring is byte-identical. false = score
+    # all symbols (legacy). When crypto IS re-enabled (crypto_only or crypto_live_arm),
+    # the gate self-disables and crypto scoring resumes untouched.
+    chili_momentum_crypto_viability_gate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CRYPTO_VIABILITY_GATE_ENABLED"),
+        description="Skip persisting -USD viability rows when crypto is not traded. false = persist all symbols (legacy).",
     )
     # Liquidity-bias selection (ON): among the price-band-passed Ross small-caps,
     # prefer high-dollar-volume (tighter-spread, FILLABLE) names so triggers convert

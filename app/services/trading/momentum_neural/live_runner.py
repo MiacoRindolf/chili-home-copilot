@@ -1085,7 +1085,27 @@ def _live_exit_submit_succeeded(
     # one-off spurious 0 can't close a real position, then reconcile to EXITED instead
     # of spinning. Family-agnostic (Robinhood + Coinbase); never fires on a None/failed
     # read (broker_zero is unset) so an API hiccup degrades to the safe retry path.
-    if result.get("broker_zero") is True and _broker_position_confirms_zero(sess):
+    # AREA A — BROKER-ZERO CLOSE (2026-06-25, the FCUV live_bailout loop). The
+    # broker-qty clamp sets broker_zero=True ONLY when a SUCCESSFUL broker read found
+    # the held qty <= 0 (None / a failed/exception fetch NEVER sets it — see
+    # _submit_live_market_exit @680-687). That successful read IS the confirmed-zero.
+    # The legacy second read (_broker_position_confirms_zero) does NOT handle the
+    # robinhood_agentic_mcp family (it returns False for it @933-950), so a
+    # broker-FLAT agentic bailout (FCUV sess 8791) re-confirmed False every tick,
+    # fell through to the generic failure path, and looped live_bailout FOREVER —
+    # pinning a concurrency slot on a position the broker already holds at 0.
+    # FIX (flag-gated, default-ON): trust broker_zero=True from the successful clamp
+    # read and reconcile to EXITED WITHOUT the second read. The second read only ADDS
+    # a failure dependency for a result we already confirmed. Fail-safe is preserved:
+    # broker_zero is unset on any None/failed/exception read, so an API hiccup still
+    # degrades to the safe retry path (never closes on uncertainty). flag-OFF =
+    # byte-identical legacy double-read.
+    _trust_clamp_zero = bool(
+        getattr(settings, "chili_momentum_broker_zero_trust_clamp_enabled", True)
+    )
+    if result.get("broker_zero") is True and (
+        _trust_clamp_zero or _broker_position_confirms_zero(sess)
+    ):
         le["position"] = None
         le["last_exit_reason"] = (reason or "exit") + "_broker_zero_reconcile"
         le.pop("pending_exit_reason", None)
@@ -1098,9 +1118,11 @@ def _live_exit_submit_succeeded(
             {
                 "reason": reason,
                 "error": result.get("error"),
+                "trusted_clamp_read": bool(_trust_clamp_zero),
                 "note": (
-                    "broker-qty clamp + confirming read both 0 — phantom position; "
-                    "reconciled to EXITED, not retrying (was spinning no_remaining_quantity)"
+                    "broker-qty clamp read 0 (successful read = confirmed flat) — "
+                    "phantom/already-exited position; reconciled to EXITED, not retrying "
+                    "(was spinning no_remaining_quantity / live_bailout)"
                 ),
             },
         )
@@ -1763,6 +1785,27 @@ def _only_transient_freshness_block(ev: dict[str, Any]) -> bool:
         return False
 
 
+def _only_held_eligibility_flicker_block(ev: dict[str, Any]) -> bool:
+    """True iff the boundary-risk evaluation failed EXCLUSIVELY on the neural-viability
+    eligibility / freshness checks (``live_eligible`` and/or ``viability_freshness``) —
+    a stale/flickering snapshot, NOT a hard risk block (kill-switch, drawdown, daily-loss,
+    position cap). Used by GATE 5: an add to an ALREADY-HELD winner inherits the entry's
+    admission, so this transient flicker must not refuse it. FAIL-SAFE: any unexpected
+    shape / no failing checks ⇒ False (keep the conservative refusal). Keys on the
+    structured ``checks`` ids, never free text, so it can never match a real risk block."""
+    try:
+        checks = ev.get("checks")
+        if not isinstance(checks, list) or not checks:
+            return False
+        failed = [c for c in checks if isinstance(c, dict) and not c.get("ok", True)]
+        if not failed:
+            return False
+        _allow = {"live_eligible", "viability_freshness"}
+        return all(str(c.get("id") or "") in _allow for c in failed)
+    except Exception:
+        return False
+
+
 def _round_base_size(qty: float, increment: Optional[float], min_sz: Optional[float]) -> float:
     if qty <= 0:
         return 0.0
@@ -2288,6 +2331,72 @@ def _breakout_bailout_window_seconds() -> float:
     except (TypeError, ValueError):
         bars = 2.0
     return max(0.0, bars) * _entry_interval_seconds()
+
+
+def _via_atr_pct(via: Any) -> float | None:
+    """Best-effort clean intraday-range ATR%% from a viability's regime snapshot (the
+    SAME basis the entry-extension veto uses). None on any error. Pure read."""
+    try:
+        rg = getattr(via, "regime_snapshot_json", None)
+        if not isinstance(rg, dict):
+            return None
+        ap = regime_atr_pct(rg)
+        return None if ap is None else float(ap)
+    except Exception:
+        return None
+
+
+def _session_is_explosive(via: Any, *, rvol: float | None = None) -> bool:
+    """MASTER-gated explosiveness read for the recalibration carve-outs (bid-prop
+    exempt, fast-bail lock-in). Uses the clean regime ATR%% (always present on a live
+    viability) OR an optional RVOL reading. Delegates the floors + the master gate to
+    entry_gates.is_explosive_mover (one source of truth). Fail-closed: any error /
+    master OFF ⇒ False (no name treated as explosive ⇒ the protective gate stays)."""
+    try:
+        from .entry_gates import is_explosive_mover
+
+        return bool(is_explosive_mover(_via_atr_pct(via), rvol, settings))
+    except Exception:
+        return False
+
+
+def _latest_rvol(db, symbol: str) -> float | None:
+    """Best-effort latest relative-volume (volume_ratio of the most recent bar) for the
+    explosive carve-outs. Reads the SESSION-scoped micro-bar df from the densified tape
+    (no network, same resampler the micro-pullback re-load uses) and computes
+    volume_ratio via the canonical indicator core. None on thin tape / any error (the
+    caller then treats the name as non-explosive on RVOL ⇒ fail-closed). Pure read."""
+    try:
+        from ..indicator_core import compute_all_from_df as _rv_compute
+
+        _df = _build_micro_bar_df(db, symbol, bar_seconds=15)
+        if _df is None or getattr(_df, "empty", True) or len(_df) < 10:
+            return None
+        arrays = _rv_compute(_df, needed={"volume_ratio"})
+        vr = arrays.get("volume_ratio") or []
+        if not len(vr):
+            return None
+        v = vr[-1]
+        return None if v is None else float(v)
+    except Exception:
+        return None
+
+
+def _breakout_bailout_lock_in_seconds(*, explosive: bool) -> float:
+    """Lock-in floor (seconds) for the fast-bail — BELOW which a momentary sub-level
+    dip is NOT treated as a failed breakout. Master-gated: returns 0.0 (byte-identical,
+    no lock-in) unless the explosive-recalibration master flag is ON. Explosive names
+    get the (wider) explosive lock-in when configured; otherwise the base lock-in."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_explosive_recalibration_enabled", False)):
+            return 0.0
+        base = max(0.0, float(getattr(settings, "chili_momentum_breakout_bailout_lock_in_seconds", 0.0) or 0.0))
+        if explosive:
+            expl = max(0.0, float(getattr(settings, "chili_momentum_breakout_bailout_lock_in_explosive_seconds", 0.0) or 0.0))
+            return max(base, expl)
+        return base
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _held_position_keeps_exit_on_boundary_fail(state: str, has_position: Any) -> bool:
@@ -3527,14 +3636,33 @@ def tick_live_session(
             and not str(sess.symbol or "").upper().endswith("-USD")
             and bool(getattr(settings, "chili_momentum_bid_prop_confirmer_enabled", True))
         ):
-            try:
-                _bp_window = (
-                    float(getattr(settings, "chili_momentum_spread_stability_window_bars", 1.0) or 1.0)
-                    * _entry_interval_seconds()
-                )
-                _bp_ok, _bp_dbg = _bid_prop_confirms_break(db, sess.symbol, window_s=_bp_window)
-            except Exception:
-                _bp_ok, _bp_dbg = True, {"reason": "bid_prop_error_fail_open"}
+            # GATE 1 (explosive-mover recalibration): BYPASS the bid-prop deterioration
+            # confirmer for explosive names. A high-RVOL / extreme-ATR squeeze routinely
+            # steps the bid DOWN and widens the spread mid-run (liquidity imbalance, NOT
+            # weakness) — that is exactly WHEN the break is working (ILLR/WEN/BB blocked,
+            # then ran). The structural pullback-break trigger already read volume +
+            # structure cleanly; the confirmer is a RECONFIRM layer, so it must not re-veto
+            # the whole pattern on the explosive names the lane targets. MASTER-gated +
+            # sub-flag: OFF ⇒ _session_is_explosive is False ⇒ confirmer runs as today.
+            _bp_explosive_exempt = (
+                bool(getattr(settings, "chili_momentum_bid_prop_explosive_exempt", False))
+                and _session_is_explosive(via)
+            )
+            if _bp_explosive_exempt:
+                _bp_ok, _bp_dbg = True, {"reason": "bid_prop_explosive_exempt"}
+                _emit(db, sess, "live_entry_bid_prop_explosive_exempt", {
+                    "atr_pct": _via_atr_pct(via),
+                    "atr_floor": float(getattr(settings, "chili_momentum_explosive_atr_pct_floor", 0.045)),
+                })
+            else:
+                try:
+                    _bp_window = (
+                        float(getattr(settings, "chili_momentum_spread_stability_window_bars", 1.0) or 1.0)
+                        * _entry_interval_seconds()
+                    )
+                    _bp_ok, _bp_dbg = _bid_prop_confirms_break(db, sess.symbol, window_s=_bp_window)
+                except Exception:
+                    _bp_ok, _bp_dbg = True, {"reason": "bid_prop_error_fail_open"}
             if not _bp_ok:
                 _prev_reason = _trigger_reason
                 _trigger_ok = False
@@ -4815,7 +4943,16 @@ def tick_live_session(
             _fv_tf = None if _fv_tf is None else float(_fv_tf)
         except Exception:
             _fv_ofi = _fv_tf = None
-        if _entry_flow_veto(_fv_ofi, _fv_tf, settings):
+        # GATE 4 (explosive-mover recalibration): on an explosive name the STRONG-tape
+        # OR-leg threshold is relaxed toward MAXIMUM selling (a thin-tape one-seller dip
+        # is not "sellers winning"). MASTER + sub-flag gated; the both-bearish AND-leg is
+        # UNCHANGED so a falling tape under a deteriorating book still vetoes. OFF / not
+        # explosive ⇒ _fv_explosive False ⇒ byte-identical veto.
+        _fv_explosive = (
+            bool(getattr(settings, "chili_momentum_entry_flow_veto_explosive_exempt", False))
+            and _session_is_explosive(via)
+        )
+        if _entry_flow_veto(_fv_ofi, _fv_tf, settings, explosive=_fv_explosive):
             _log.info(
                 "[momentum_neural] entry FLOW-VETO %s: OFI=%s trade_flow=%s — deferring buy into selling",
                 sess.symbol, _fv_ofi, _fv_tf,
@@ -4855,7 +4992,19 @@ def tick_live_session(
             _ev_entry = float(entry_limit_px) if entry_limit_px is not None else None
         except (TypeError, ValueError):
             _ev_lvl = _ev_atr = _ev_entry = None
-        if _entry_extension_veto(_ev_entry, _ev_lvl, _ev_atr, settings):
+        # GATE 3 (explosive-mover recalibration): a true outlier squeeze is high-RVOL
+        # despite a thin regime-ATR, so the clean-ATR extension cap under-leverages it.
+        # When the boost flag is ON, read the latest RVOL (cheap tape resample, no
+        # network) so the veto can widen the cap proportionally (hard-capped so a blow-off
+        # chase still vetoes). MASTER + sub-flag gated: OFF ⇒ rvol stays None ⇒ no boost,
+        # byte-identical.
+        _ev_rvol = None
+        if (
+            bool(getattr(settings, "chili_momentum_explosive_recalibration_enabled", False))
+            and bool(getattr(settings, "chili_momentum_entry_extension_rvol_boost_enabled", False))
+        ):
+            _ev_rvol = _latest_rvol(db, sess.symbol)
+        if _entry_extension_veto(_ev_entry, _ev_lvl, _ev_atr, settings, rvol=_ev_rvol):
             _ext_cap = max(
                 float(getattr(settings, "chili_momentum_entry_extension_floor_pct", 0.05)),
                 float(getattr(settings, "chili_momentum_entry_extension_atr_mult", 1.0)) * max(0.0, float(_ev_atr or 0.0)),
@@ -5129,6 +5278,14 @@ def tick_live_session(
         # stop/target: only with a recorded breakout level (pullback_break entry, not
         # the momentum_volume fallback), only while plainly ENTERED (scaling/trailing
         # are already past target/in profit), and only inside the time window.
+        # GATE 2 (explosive-mover recalibration): the fast-bail gets a LOCK-IN floor —
+        # below it a momentary sub-level dip is NOT treated as a failed breakout (give
+        # the breakout structural room for a normal retest; FCUV +21% after a 4.5s bail).
+        # The lock-in is master-gated (0 = byte-identical) and WIDER for explosive names.
+        # CRITICAL: the structural stop + the #769 max-loss circuit are evaluated ABOVE
+        # this block (and re-run every tick), so a genuinely collapsing position still
+        # exits inside the lock-in — only the level-retest fast-bail is deferred.
+        _bb_lock_in = _breakout_bailout_lock_in_seconds(explosive=_session_is_explosive(via))
         if (
             st == STATE_LIVE_ENTERED
             and bool(getattr(settings, "chili_momentum_breakout_bailout_enabled", True))
@@ -5138,6 +5295,7 @@ def tick_live_session(
                 held_seconds=held,
                 window_seconds=_breakout_bailout_window_seconds(),
                 buffer_pct=float(getattr(settings, "chili_momentum_breakout_bailout_buffer_pct", 0.001) or 0.0),
+                lock_in_seconds=_bb_lock_in,
             )
         ):
             le["last_bailout_trigger"] = "breakout_failed_to_hold"
@@ -5149,6 +5307,7 @@ def tick_live_session(
                 "bid": bid,
                 "held_seconds": held,
                 "window_seconds": _breakout_bailout_window_seconds(),
+                "lock_in_seconds": _bb_lock_in,
             })
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
@@ -5857,6 +6016,29 @@ def tick_live_session(
                             _adm_ok, _adm_ev = runner_boundary_risk_ok(
                                 db, sess, expected_move_bps=_expected_move_bps
                             )
+                            # GATE 5 (explosive-mover recalibration): the add is a BUY into
+                            # an ALREADY-HELD winner that PASSED admission at entry — a
+                            # neural-viability eligibility/freshness FLICKER (stale snapshot)
+                            # must not refuse it (3x live risk_admission_refused on held RUN).
+                            # Override ONLY when (a) master + sub-flag ON, (b) the position is
+                            # held in STATE_LIVE_TRAILING, and (c) the ONLY failing checks are
+                            # live_eligible / viability_freshness. Hard risk blocks (kill-switch,
+                            # drawdown, daily-loss, position cap) are NEVER overridden — they
+                            # fail other check ids, so _only_held_eligibility_flicker_block is
+                            # False and the add is still refused. The cushion gate + #769
+                            # max-loss circuit still bound the add. OFF ⇒ byte-identical.
+                            if (
+                                not _adm_ok
+                                and bool(getattr(settings, "chili_momentum_explosive_recalibration_enabled", False))
+                                and bool(getattr(settings, "chili_momentum_pyramid_skip_viability_recheck", False))
+                                and st == STATE_LIVE_TRAILING
+                                and _only_held_eligibility_flicker_block(_adm_ev)
+                            ):
+                                _emit(db, sess, "live_pyramid_add_eligibility_flicker_override", {
+                                    "severity": _adm_ev.get("severity"),
+                                    "errors": _adm_ev.get("errors"),
+                                })
+                                _adm_ok = True
                             if not _adm_ok:
                                 _emit(db, sess, "live_pyramid_add_blocked", {
                                     "reason": "risk_admission_refused",
@@ -5910,14 +6092,28 @@ def tick_live_session(
                                         "add_budget_usd": round(_add_budget, 2),
                                     })
                                 else:
-                                    # SUBMIT a marketable-limit BUY (mirror the entry
-                                    # submit). post_only only for crypto-maker — but this
-                                    # path is equity-only, so post_only is never set (RH
-                                    # adapter has no such kwarg). DAY tif like the entry.
+                                    # SUBMIT a marketable-limit BUY using the EXACT working
+                                    # entry order shape (the agentic-rail isError on the add
+                                    # path was the early shape bug — fixed for entries/exits,
+                                    # never back-ported here). post_only only for crypto-maker
+                                    # — this path is equity-only, so post_only is never set
+                                    # (RH adapter has no such kwarg). DAY tif ("gfd") like the
+                                    # entry; extended_hours from the SAME market_session_now
+                                    # read so the venue routes pre/after-hours adds. The
+                                    # client_order_id mirrors the ENTRY ref-id shape exactly
+                                    # (sha1-seeded, 120-char-bounded, per-attempt-unique) so the
+                                    # rail's "Reference ID must be unique" contract holds for a
+                                    # retried add too.
                                     _pyr_limit_str = _fmt_limit_price_buy(_pyr_guard_ask)
+                                    _pyr_place_n = int(le.get("pyramid_place_count", 0) or 0) + 1
+                                    le["pyramid_place_count"] = _pyr_place_n
+                                    _pyr_id_seed = (
+                                        f"{sess.id}|{sess.correlation_id or 'x'}|pyr|{_pyr_place_n}"
+                                    ).encode("utf-8")
+                                    _pyr_suffix = hashlib.sha1(_pyr_id_seed).hexdigest()[:10]
                                     _pyr_cid = (
-                                        f"chili_ml_pyr_{sess.id}_{uuid.uuid4().hex[:12]}"
-                                    )
+                                        f"chili_ml_pyr_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{_pyr_suffix}"
+                                    )[:120]
                                     try:
                                         from .market_profile import market_session_now as _pyr_sess_now
                                         _pyr_ext = _pyr_sess_now(sess.symbol) != "regular"
@@ -5943,6 +6139,7 @@ def tick_live_session(
                                         le["pyramid_confirm_ofi"] = (
                                             None if _pyr_ofi is None else float(_pyr_ofi)
                                         )
+                                        le.pop("pyramid_submit_retry_count", None)
                                         _commit_le(sess, le)
                                         _emit(db, sess, "live_pyramid_add_submitted", {
                                             "order_id": le["pyramid_order_id"],
@@ -5963,10 +6160,38 @@ def tick_live_session(
                                             "stop_at_submit": float(stop_px),
                                         })
                                     else:
-                                        _emit(db, sess, "live_pyramid_add_blocked", {
-                                            "reason": "submit_failed",
-                                            "error": _pyr_res.get("error"),
-                                        })
+                                        # BOUNDED RETRY (explosive-mover recalibration): a
+                                        # transient broker isError leaves NO order resting
+                                        # (the submit failed before acceptance), so re-attempt
+                                        # on a LATER tick (fresh per-attempt ref-id above) up to
+                                        # the configured max before giving up. No in-flight
+                                        # marker is set on failure, so the next tick re-evaluates
+                                        # the add cleanly. MASTER-gated + retry_max default 0 ⇒
+                                        # byte-identical (single block emit, as today).
+                                        _pyr_retry_max = (
+                                            int(getattr(settings, "chili_momentum_pyramid_add_submit_retry_max", 0) or 0)
+                                            if bool(getattr(settings, "chili_momentum_explosive_recalibration_enabled", False))
+                                            else 0
+                                        )
+                                        _pyr_retry_n = int(le.get("pyramid_submit_retry_count", 0) or 0)
+                                        if _pyr_retry_max > 0 and _pyr_retry_n < _pyr_retry_max:
+                                            le["pyramid_submit_retry_count"] = _pyr_retry_n + 1
+                                            _commit_le(sess, le)
+                                            _emit(db, sess, "live_pyramid_add_submit_retry", {
+                                                "error": _pyr_res.get("error"),
+                                                "retry_count": _pyr_retry_n + 1,
+                                                "retry_max": _pyr_retry_max,
+                                                "client_order_id": _pyr_cid,
+                                            })
+                                        else:
+                                            le.pop("pyramid_submit_retry_count", None)
+                                            _commit_le(sess, le)
+                                            _emit(db, sess, "live_pyramid_add_blocked", {
+                                                "reason": "submit_failed",
+                                                "error": _pyr_res.get("error"),
+                                                "retry_count": _pyr_retry_n,
+                                                "retry_max": _pyr_retry_max,
+                                            })
                 except Exception:
                     # Fail-safe: any pyramid error is swallowed so the exit path below
                     # ALWAYS runs. The add never blocks/delays/loosens an exit.

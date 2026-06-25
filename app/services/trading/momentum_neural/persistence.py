@@ -30,6 +30,36 @@ KEY_PAPER_EXEC = "momentum_paper_execution"
 KEY_LIVE_EXEC = "momentum_live_execution"
 
 
+def _crypto_viability_gate_active() -> bool:
+    """AREA D (2026-06-25): True when "-USD" symbols should NOT be persisted into
+    momentum_symbol_viability because crypto is not traded.
+
+    Crypto IS considered traded (gate OFF, scoring untouched) when EITHER:
+      * the lane is crypto-only (chili_momentum_auto_arm_crypto_only), or
+      * crypto live-arm is enabled (chili_momentum_crypto_live_arm_enabled).
+
+    Otherwise (the current equity-only / crypto-not-traded state) the gate is ON and
+    -USD rows are skipped at this single persistence chokepoint — downstream of all
+    scoring, so equity rows are byte-identical. Master kill-switch
+    chili_momentum_crypto_viability_gate_enabled=False disables the gate entirely
+    (legacy: persist all symbols). Fail-safe: any error -> gate OFF (persist all)."""
+    try:
+        from ....config import settings
+
+        if not bool(getattr(settings, "chili_momentum_crypto_viability_gate_enabled", True)):
+            return False
+        crypto_traded = bool(
+            getattr(settings, "chili_momentum_auto_arm_crypto_only", True)
+        ) or bool(getattr(settings, "chili_momentum_crypto_live_arm_enabled", False))
+        return not crypto_traded
+    except Exception:
+        return False
+
+
+def _is_usd_crypto_symbol(symbol: str | None) -> bool:
+    return "-USD" in str(symbol or "").upper()
+
+
 def _strategy_variant_key(family_id: str, version: int) -> tuple[str, str, int]:
     return (family_id, family_id, int(version))
 
@@ -471,9 +501,20 @@ def persist_neural_momentum_tick(
     exec_json = features.to_public_dict()
     now = datetime.utcnow()
     n = 0
+    skipped_crypto = 0
+    # AREA D — CRYPTO VIABILITY GATE: when crypto is not traded, skip persisting
+    # "-USD" symbol rows so they never pollute the equity scoring pool (the auto_arm
+    # candidate query already excludes them from arming; this stops them at the source
+    # so the viability table stays clean for the day crypto is re-enabled). Computed
+    # ONCE per tick (not per row). The "__aggregate__" row is NEVER crypto, so it is
+    # always persisted. flag-OFF / crypto-traded = scores all symbols (legacy).
+    _gate_crypto = _crypto_viability_gate_active()
     # Deterministic (symbol, variant_id) order — prevents the cross-tick deadlock
     # on the unique index (see _resolve_viability_upserts).
     for symbol, vid, row in _resolve_viability_upserts(db, row_dicts):
+        if _gate_crypto and _is_usd_crypto_symbol(symbol):
+            skipped_crypto += 1
+            continue
         explain: dict[str, Any] = {
             "rationale": row.get("rationale"),
             "warnings": row.get("warnings") or [],
@@ -522,6 +563,11 @@ def persist_neural_momentum_tick(
         )
         db.execute(stmt)
         n += 1
+    if skipped_crypto:
+        _log.debug(
+            "[momentum_neural] crypto viability gate skipped %s -USD rows (crypto not traded)",
+            skipped_crypto,
+        )
     return n
 
 
