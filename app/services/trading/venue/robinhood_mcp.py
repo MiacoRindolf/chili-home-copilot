@@ -954,7 +954,30 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
         if positions is None:
             return None
         try:
-            for pos in positions:
+            # UNWRAP the agentic positions payload. get_agentic_open_positions can return
+            # the RH-nested shape [{"positions": [{symbol..}, ...]}] (a single wrapper dict
+            # whose "positions" key holds the real rows) OR a flat list of position dicts.
+            # The wrapper has NO "symbol", so iterating it directly missed EVERY symbol and
+            # returned 0.0 for REAL holdings -> the exit clamp read broker_qty=0 -> blocked
+            # every sell (FCUV/WEN stuck + un-exitable 2026-06-25). Flatten BOTH shapes; and
+            # on an UNRECOGNIZED payload fail SAFE as UNKNOWN (None), never 0.0 — assuming
+            # flat from an unparsed payload is the exact failure that blocked exits.
+            rows: list = []
+            recognized = False
+            for item in positions:
+                if isinstance(item, dict) and isinstance(item.get("positions"), list):
+                    rows.extend(item["positions"])
+                    recognized = True
+                elif isinstance(item, dict) and _pick(item, ("symbol", "ticker", "instrument_symbol")):
+                    rows.append(item)
+                    recognized = True
+            if not recognized and positions:
+                logger.warning(
+                    "[rh_mcp_adapter] get_position_quantity(%s): unrecognized positions shape -> unknown (fail-safe)",
+                    want,
+                )
+                return None
+            for pos in rows:
                 if not isinstance(pos, dict):
                     continue
                 sym = str(_pick(pos, ("symbol", "ticker", "instrument_symbol")) or "").strip().upper()
@@ -962,7 +985,7 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
                     continue
                 qty = _sf(_pick(pos, ("quantity", "shares", "position", "size")))
                 return abs(qty) if qty is not None else 0.0
-            # Successful fetch, symbol absent from the agentic book -> confirmed flat.
+            # Recognized book, symbol genuinely absent -> confirmed flat.
             return 0.0
         except Exception as exc:  # noqa: BLE001 — fail SAFE
             logger.warning("[rh_mcp_adapter] get_position_quantity(%s) parse failed: %s", want, exc)
