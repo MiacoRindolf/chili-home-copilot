@@ -522,6 +522,9 @@ def mode_aware_label_for_outcome(
     """
     mode = (getattr(outcome, "mode", None) or "").lower()
     if mode != "live":
-        return outcome.return_bps, outcome.realized_pnl_usd, True
+        # getattr (not direct access) so a lightweight test/preview stand-in that sets
+        # only return_bps — as the legacy direct readers tolerated — does not AttributeError
+        # on realized_pnl_usd.
+        return getattr(outcome, "return_bps", None), getattr(outcome, "realized_pnl_usd", None), True
     pnl, rb, _win, is_rec = authoritative_label_for_outcome(outcome)
     return rb, pnl, bool(is_rec)

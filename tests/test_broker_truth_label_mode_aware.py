@@ -79,6 +79,16 @@ def test_mode_aware_flag_on_routes_live_keeps_paper():
     assert ocr.mode_aware_label_for_outcome(live_unrec) == (None, None, False)  # excluded
 
 
+def test_mode_aware_tolerates_partial_stand_in():
+    # The legacy direct readers (e.g. apply_outcome_feedback_to_viability) only touched
+    # return_bps, so callers feed lightweight stand-ins that set return_bps but NOT
+    # realized_pnl_usd. The mode-aware helper must not AttributeError on those.
+    import types
+
+    stand_in = types.SimpleNamespace(mode="paper", return_bps=1000.0)  # no realized_pnl_usd
+    assert ocr.mode_aware_label_for_outcome(stand_in) == (1000.0, None, True)
+
+
 # ── evolution._aggregate_rows ─────────────────────────────────────────────────
 def test_aggregate_rows_flag_off_byte_identical():
     rows = [
