@@ -155,6 +155,103 @@ ROSS_QUALITY_VIABILITY_TILT = 0.20
 ROSS_ELIGIBILITY_RVOL_FLOOR = 5.0
 ROSS_ELIGIBILITY_CHANGE_FLOOR_PCT = 10.0
 
+# ── 3-layer EXPLOSIVE scorer (flag chili_momentum_explosive_scoring_enabled) ──
+# The legacy blend (linear weighted-AVERAGE of percentiles) is fully COMPENSATORY and
+# its percentiles SATURATE: a 15,000x-RVOL / +400% recent-IPO rocket and a non-explosive
+# +10% mega-cap both map their explosive axes to ~1.0, then the mid pillars average the
+# rocket back toward the batch mean — so a deep-tape mega-cap (top tradeable_liquidity)
+# OUT-RANKS the rocket. The fix preserves the trusted backbone and adds three layers:
+#
+# LAYER 1 — a lexicographic EXPLOSIVENESS TIER from RAW batch-relative cuts (batch-MEDIAN
+#   multiples, adaptive — NOT magic numbers). Non-compensatory: a higher tier STRICTLY
+#   out-ranks a lower one no matter the continuous blend, so the explosive cohort fills the
+#   arming slots first (kills slot-starvation). Tier 1 reuses the existing Ross hard floors.
+# LAYER 2 — the continuous score = an EXPLOSIVE CORE (magnitude-preserving: log10-min-max
+#   on the RAW rvol/momentum signal so 15,000x stays separated from 6x; rvol^0.6 * mom^0.4
+#   PRODUCT is non-compensatory) x a BOUNDED quality modifier (0.5 + 0.5*quality) from the
+#   EXISTING secondary-pillar blend — secondary pillars can only modulate +/-50%, never
+#   average an explosive name down. SAME SHAPE as ``curl_score`` (base*reclaim*(0.5+0.5*x)).
+# LAYER 3 — tiebreak: (tier, score, RAW rvol) so the raw-magnitude tiebreak actually fires.
+#
+# The tier multiples are the ONE documented base each (batch-median multiples for the
+# extreme/strong tiers; the existing Ross floors for the eligibility tier); the core
+# exponents 0.6/0.4 encode Ross's RVOL-over-momentum priority. Batch-relative throughout.
+ROSS_EXPLOSIVE_TIER_EXTREME_MULT = 10.0   # tier 3: rvol AND change >= ~10x batch median
+ROSS_EXPLOSIVE_TIER_STRONG_MULT = 3.0     # tier 2: rvol AND change >= ~3x batch median
+ROSS_EXPLOSIVE_CORE_RVOL_EXP = 0.6        # explosive-core RVOL exponent (Ross #1 axis)
+ROSS_EXPLOSIVE_CORE_MOM_EXP = 0.4         # explosive-core momentum exponent ("already moving")
+
+
+def _median(sorted_vals: list[float]) -> float | None:
+    """Median of an already-sorted list (None if empty). Batch-adaptive reference."""
+    n = len(sorted_vals)
+    if n == 0:
+        return None
+    mid = n // 2
+    if n % 2:
+        return sorted_vals[mid]
+    return 0.5 * (sorted_vals[mid - 1] + sorted_vals[mid])
+
+
+def _log_min_max(value: float | None, sorted_vals: list[float]) -> float | None:
+    """log10-min-max normalisation of ``value`` within the batch, clamped [0,1].
+
+    Magnitude-PRESERVING (unlike a percentile rank): two top-of-batch values stay
+    separated on a log scale, so a 15,000x RVOL does NOT collapse onto a 6x. Operates
+    on the RAW signal. Non-positive values are shifted onto a positive floor relative to
+    the batch so a small/negative momentum reads near 0 rather than crashing the log.
+    Returns ``None`` when the value is absent (the caller degrades that name gracefully).
+    """
+    if value is None or not sorted_vals:
+        return None
+    lo = sorted_vals[0]
+    hi = sorted_vals[-1]
+    # Shift onto a strictly-positive domain (momentum can be <= 0). Anchor at the batch
+    # min so the smallest batch value maps to ~0 and ordering/spacing is preserved.
+    floor = 1.0  # additive offset keeps log well-defined and the min at 0
+    shift = (floor - lo) if lo < floor else 0.0
+    v = value + shift
+    lo_s = lo + shift
+    hi_s = hi + shift
+    if not (v > 0) or not (lo_s > 0) or not (hi_s > 0):
+        return 0.0
+    lg_lo = math.log10(lo_s)
+    lg_hi = math.log10(hi_s)
+    span = lg_hi - lg_lo
+    if span <= 0:
+        return 1.0  # degenerate batch (all equal) -> top of the (flat) range
+    norm = (math.log10(v) - lg_lo) / span
+    return max(0.0, min(1.0, norm))
+
+
+def _explosive_tier(
+    rvol: float | None,
+    mom: float | None,
+    rvol_median: float | None,
+    mom_median: float | None,
+    *,
+    rvol_floor: float = ROSS_ELIGIBILITY_RVOL_FLOOR,
+    change_floor_pct: float = ROSS_ELIGIBILITY_CHANGE_FLOOR_PCT,
+) -> int:
+    """Lexicographic explosiveness tier in {0,1,2,3} for one name (LAYER 1).
+
+    Batch-relative (median multiples) + the existing Ross hard floors. Fail-OPEN: a name
+    with absent rvol/momentum degrades to tier 0 (omitted from the explosive cohort), never
+    a crash and never a veto — selection re-rank only.
+    """
+    if rvol is None or mom is None:
+        return 0
+    rm = rvol_median if (rvol_median and rvol_median > 0) else None
+    mm = mom_median if (mom_median and mom_median > 0) else None
+    if rm is not None and mm is not None:
+        if rvol >= ROSS_EXPLOSIVE_TIER_EXTREME_MULT * rm and mom >= ROSS_EXPLOSIVE_TIER_EXTREME_MULT * mm:
+            return 3
+        if rvol >= ROSS_EXPLOSIVE_TIER_STRONG_MULT * rm and mom >= ROSS_EXPLOSIVE_TIER_STRONG_MULT * mm:
+            return 2
+    if rvol >= float(rvol_floor) and mom >= float(change_floor_pct):
+        return 1
+    return 0
+
 
 @dataclass
 class RossMomentumScore:
@@ -168,6 +265,7 @@ class RossMomentumScore:
     rank: int  # 1 = most explosive in this universe
     universe_size: int
     tradeable_liquidity_pct: float | None = None  # percentile of $-turnover (fillability); None unless the biased weights are used
+    tier: int = 0  # explosiveness tier (0..3); 0 unless the explosive scorer is active (LAYER 1)
     breakdown: dict = field(default_factory=dict)
 
     def in_top_fraction(self, frac: float) -> bool:
@@ -321,6 +419,7 @@ def score_universe(
     signals: dict[str, dict],
     *,
     weights: dict[str, float] | None = None,
+    explosive: bool | None = None,
 ) -> dict[str, RossMomentumScore]:
     """Rank a batch of instruments by Ross momentum quality, adaptively.
 
@@ -333,10 +432,25 @@ def score_universe(
     with Ross-priority weights, renormalised over whichever pillars are present
     (so a missing liquidity field degrades gracefully to rvol+momentum rather
     than zeroing the score).
+
+    ``explosive`` (flag ``chili_momentum_explosive_scoring_enabled``): when truthy,
+    the 3-layer EXPLOSIVE scorer replaces the score-compressing linear-percentile
+    blend — a lexicographic explosiveness TIER (outer sort key), a magnitude-
+    preserving log-min-max multiplicative CORE x bounded quality modifier, and a
+    raw-rvol tiebreak (see the module constants). ``None`` (the default) resolves the
+    live config flag; tests pass ``True``/``False`` explicitly. With the flag OFF the
+    output is BYTE-IDENTICAL to the legacy blend (the explosive path is fully gated).
     """
     if not signals:
         return {}
     w = dict(weights or ROSS_PILLAR_WEIGHTS)
+    if explosive is None:
+        # Resolve the live config flag lazily (keeps this module IO-free at import).
+        try:
+            from app.config import settings as _settings  # local import: no top-level dep
+            explosive = bool(getattr(_settings, "chili_momentum_explosive_scoring_enabled", True))
+        except Exception:
+            explosive = False  # fail-CLOSED to the legacy blend if config is unavailable
 
     pillars: dict[str, tuple[float | None, float | None, float | None, float | None]] = {
         sym: _extract_pillars(sig or {}) for sym, sig in signals.items()
@@ -378,6 +492,12 @@ def score_universe(
     dorm_sorted = sorted(v for v in _dorm_raw.values() if v is not None)
     _w_dorm = float(w.get("dormant") or 0.0)
 
+    # ── EXPLOSIVE scorer batch stats (LAYER 1 tier cuts + LAYER 2 magnitude norm) ──
+    # Only computed when the flag is on; batch-relative (median multiples + log-min-max),
+    # so there are no fixed magic cutoffs. Reuses the rvol/mom sorted lists above.
+    _rvol_median = _median(rvol_sorted) if explosive else None
+    _mom_median = _median(mom_sorted) if explosive else None
+
     out: dict[str, RossMomentumScore] = {}
     for sym, (rvol, mom, liq, tliq) in pillars.items():
         rvol_pct = _percentile_rank(rvol, rvol_sorted) if rvol is not None else None
@@ -418,6 +538,41 @@ def score_universe(
         wsum = sum(wt for _, wt in present)
         score = (sum(pct * wt for pct, wt in present) / wsum) if wsum > 0 else 0.0
 
+        # ── LAYER 1+2: explosive tier + magnitude-preserving core x bounded quality ──
+        _tier = 0
+        if explosive:
+            _tier = _explosive_tier(rvol, mom, _rvol_median, _mom_median)
+            # LAYER 2 — explosive CORE on the RAW signal (log-min-max, magnitude-preserving).
+            # rvol^0.6 * mom^0.4 PRODUCT (non-compensatory). Missing axis -> degrade to 0.0
+            # (fail-OPEN: a name with no rvol/mom is simply not explosive, never crashes).
+            rvol_norm = _log_min_max(rvol, rvol_sorted)
+            mom_norm = _log_min_max(mom, mom_sorted)
+            if rvol_norm is None or mom_norm is None:
+                core = 0.0
+            else:
+                core = (rvol_norm ** ROSS_EXPLOSIVE_CORE_RVOL_EXP) * (mom_norm ** ROSS_EXPLOSIVE_CORE_MOM_EXP)
+            # Bounded QUALITY modifier from the EXISTING SECONDARY-pillar blend (liquidity /
+            # tradeable_liquidity / daily_structure / float_rotation / squeeze_fuel — NOT the
+            # rvol/mom that drive the core). 0.5 + 0.5*quality clamps the modulation to +/-50%,
+            # so secondary pillars can NEVER average an explosive name down. Same shape as
+            # curl_score (base*reclaim*(0.5+0.5*confirmer)). Absent secondary pillars -> 0.5
+            # neutral quality -> modifier 0.75 (the name rides on its core, undamped).
+            _secondary: list[tuple[float, float]] = []
+            if liq_pct is not None:
+                _secondary.append((liq_pct, w.get("liquidity", 0.0)))
+            if tliq_pct is not None and _w_tliq > 0:
+                _secondary.append((tliq_pct, _w_tliq))
+            if ds_pct is not None and _w_ds > 0:
+                _secondary.append((ds_pct, _w_ds))
+            if fr_pct is not None and _w_fr > 0:
+                _secondary.append((fr_pct, _w_fr))
+            if sf_pct is not None and _w_sf > 0:
+                _secondary.append((sf_pct, _w_sf))
+            _sec_wsum = sum(wt for _, wt in _secondary)
+            quality_blend = (sum(p * wt for p, wt in _secondary) / _sec_wsum) if _sec_wsum > 0 else 0.5
+            quality_blend = max(0.0, min(1.0, quality_blend))
+            score = max(0.0, min(1.0, core * (0.5 + 0.5 * quality_blend)))
+
         out[sym] = RossMomentumScore(
             symbol=sym,
             score=round(score, 4),
@@ -425,6 +580,7 @@ def score_universe(
             momentum_pct=round(mom_pct, 4) if mom_pct is not None else 0.0,
             liquidity_pct=round(liq_pct, 4) if liq_pct is not None else None,
             tradeable_liquidity_pct=round(tliq_pct, 4) if tliq_pct is not None else None,
+            tier=int(_tier),
             rank=0,
             universe_size=len(signals),
             breakdown={
@@ -450,10 +606,25 @@ def score_universe(
             },
         )
 
-    # rank: highest blended score first; ties broken by rvol then momentum
-    ordered = sorted(
-        out.values(), key=lambda s: (s.score, s.rvol_pct, s.momentum_pct), reverse=True
-    )
+    if explosive:
+        # LAYER 1+3: lexicographic tier (non-compensatory) -> continuous score -> RAW rvol
+        # tiebreak (the raw-magnitude tiebreak the legacy key could never reach because score
+        # was always distinct first). A tier-3 name STRICTLY out-ranks every lower-tier name no
+        # matter the blend, so the explosive cohort fills the arming slots first.
+        ordered = sorted(
+            out.values(),
+            key=lambda s: (
+                s.tier,
+                s.score,
+                (s.breakdown.get("rvol") if s.breakdown.get("rvol") is not None else float("-inf")),
+            ),
+            reverse=True,
+        )
+    else:
+        # rank: highest blended score first; ties broken by rvol then momentum
+        ordered = sorted(
+            out.values(), key=lambda s: (s.score, s.rvol_pct, s.momentum_pct), reverse=True
+        )
     for i, s in enumerate(ordered, start=1):
         s.rank = i
     return out

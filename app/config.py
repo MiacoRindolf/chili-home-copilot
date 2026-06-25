@@ -2205,6 +2205,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FLOAT_ROTATION_TILT_ENABLED"),
         description="Volume/float rotation sustainability tilt (>=~5x EOD): reward names rotating their float multiple times as a fuel-remaining signal.",
     )
+    chili_momentum_explosive_scoring_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_SCORING_ENABLED"),
+        description="3-layer EXPLOSIVE scorer for score_universe (fixes the score-compression bug where a non-explosive mega-cap out-ranked a +400%/15,000x-RVOL rocket). Replaces the compensatory linear-percentile blend with: (1) a lexicographic explosiveness TIER (batch-median multiples — non-compensatory outer sort key), (2) a magnitude-preserving log-min-max multiplicative explosive CORE (rvol_norm^0.6 * mom_norm^0.4) x bounded quality modifier from the secondary pillars, (3) raw-rvol tiebreak. Batch-relative / no magic numbers; fail-OPEN (missing rvol/change degrades to tier 0, never crashes, never vetoes — selection re-rank only). Flag OFF ⇒ byte-identical to the legacy blend.",
+    )
     chili_momentum_squeeze_fuel_tilt_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_FUEL_TILT_ENABLED"),
