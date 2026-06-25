@@ -76,6 +76,16 @@ def _outcome_brief(r: MomentumAutomationOutcome) -> dict[str, Any]:
         "outcome_class": r.outcome_class,
         "realized_pnl_usd": r.realized_pnl_usd,
         "return_bps": r.return_bps,
+        # Broker-truth label (mig309) — surfaced ALONGSIDE the legacy self-report so the
+        # operator can inspect the lane-vs-broker divergence on the desk BEFORE flipping
+        # chili_momentum_broker_truth_label_enabled. This is a read-model: it must NOT
+        # route-through-and-drop unreconciled rows (that would HIDE the very divergence
+        # the audit exists to surface), so it reads the raw broker_* columns directly and
+        # is flag-INDEPENDENT. Legacy fields above are untouched.
+        "broker_recon_status": r.broker_recon_status,
+        "broker_realized_pnl_usd": r.broker_realized_pnl_usd,
+        "broker_return_bps": r.broker_return_bps,
+        "broker_divergence_usd": r.broker_divergence_usd,
         "hold_seconds": r.hold_seconds,
         "exit_reason": r.exit_reason,
         "evidence_weight": r.evidence_weight,
