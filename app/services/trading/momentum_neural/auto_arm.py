@@ -258,10 +258,14 @@ def _entry_reject_cooldown_active(sym_u: str, now: datetime) -> bool:
     return at is not None and (now - at).total_seconds() < cd_sec
 
 
-def _write_entry_reject_cooldown(sym_u: str, now: datetime | None = None) -> None:
+def _write_entry_reject_cooldown(sym_u: str, now: datetime | None = None, *, reason: str | None = None) -> None:
     """Record a broker ENTRY rejection for ``sym_u`` (UPPER) so auto-arm stops looping on
     a name the rail won't fill (leveraged-ETF suitability block, session-untradable).
-    Called best-effort from the live runner's entry-place failure path. Bounded prune."""
+    Called best-effort from the live runner's entry-place failure path. Bounded prune.
+
+    TIER-2 SELF-HEAL: if the rejection text says the name is "untradable for 24 hour
+    trading", also stamp the 24h-eligibility NEGATIVE cache so the proactive overnight gate
+    learns from the rejection (re-checked next day via the TTL)."""
     if not sym_u:
         return
     now = now or _utcnow()
@@ -270,6 +274,113 @@ def _write_entry_reject_cooldown(sym_u: str, now: datetime | None = None) -> Non
         _stale = now - timedelta(hours=2)
         for _k in [k for k, v in _ENTRY_REJECT_COOLDOWN.items() if v < _stale]:
             _ENTRY_REJECT_COOLDOWN.pop(_k, None)
+    try:
+        if reason and "untradable for 24 hour" in str(reason).lower():
+            _TRADABILITY_24H[sym_u] = (False, now)
+    except Exception:
+        pass
+
+
+# ── TIER-2: 24h-tradeability eligibility cache (proactive probe, no-spam) ──────────
+# dict[sym_upper -> (eligible: bool, checked_at)]. TTL = chili_momentum_tradability_cache_sec
+# (base 3600s — eligibility is an instrument property that changes slowly). Probed lazily:
+# only for overnight candidates that survive the cheaper gates, and only when is_overnight_now
+# (no wasted MCP calls during RTH). Mirrors _ENTRY_REJECT_COOLDOWN's bounded-prune pattern.
+_TRADABILITY_24H: dict[str, tuple[bool, datetime]] = {}
+
+
+def _tradability_cache_sec() -> float:
+    try:
+        return float(getattr(settings, "chili_momentum_tradability_cache_sec", 3600) or 3600)
+    except (TypeError, ValueError):
+        return 3600.0
+
+
+def _is_24h_eligible(symbol: str | None) -> bool:
+    """True iff ``symbol`` is a 24h-tradeable equity per the cached RH tradability probe.
+
+    Read-only against the cache (the PROBE that populates it runs in the overnight arm gate
+    so RTH callers never trigger an MCP call). FAIL-CLOSED: an unknown / stale / crypto /
+    empty symbol returns False — overnight is the higher-risk tier, so a name we cannot
+    POSITIVELY confirm is 24h-eligible is never armed overnight."""
+    sym = str(symbol or "").strip().upper()
+    if not sym or sym.endswith("-USD"):
+        return False
+    hit = _TRADABILITY_24H.get(sym)
+    if hit is None:
+        return False
+    eligible, checked_at = hit
+    if (_utcnow() - checked_at).total_seconds() > _tradability_cache_sec():
+        return False  # stale -> re-probe required (fail-closed until refreshed)
+    return bool(eligible)
+
+
+def _overnight_24h_liquid(symbol: str | None) -> bool:
+    """TIER-2 overnight 24h-LIQUID floor: the name's dollar-volume must clear
+    chili_momentum_overnight_min_dollar_volume (base max($5M, 2x the RTH $1M floor)) — a
+    thin overnight book is the gap risk, so only deep names arm overnight. Uses the same
+    snapshot_dollar_volumes source as the RTH liquidity re-rank. FAIL-CLOSED: no liquidity
+    datum -> not liquid (overnight is the higher-risk tier)."""
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return False
+    try:
+        floor = float(getattr(settings, "chili_momentum_overnight_min_dollar_volume", 5_000_000.0) or 5_000_000.0)
+    except (TypeError, ValueError):
+        floor = 5_000_000.0
+    if floor <= 0:
+        return True
+    try:
+        from .universe import snapshot_dollar_volumes
+
+        dvols = snapshot_dollar_volumes([sym])
+        dv = float(dvols.get(sym, 0.0) or 0.0)
+    except Exception:
+        return False
+    return dv >= floor
+
+
+def known_24h_eligible_symbols() -> set[str]:
+    """Symbols currently cached as POSITIVELY 24h-eligible (non-stale) — the overnight tape
+    whitelist source (nbbo_tape). Empty when nothing has been probed yet."""
+    now = _utcnow()
+    ttl = _tradability_cache_sec()
+    return {
+        s for s, (ok, at) in _TRADABILITY_24H.items()
+        if ok and (now - at).total_seconds() <= ttl
+    }
+
+
+def _probe_24h_eligibility(symbols: list[str]) -> None:
+    """Probe RH get_equity_tradability for the given equity symbols and refresh the cache.
+    Best-effort; only the agentic rail exposes the tool. Bounded prune."""
+    syms = [str(s or "").strip().upper() for s in symbols if str(s or "").strip() and not str(s).upper().endswith("-USD")]
+    # Skip names whose cache entry is still fresh — re-probe only the unknown/stale.
+    now = _utcnow()
+    ttl = _tradability_cache_sec()
+    syms = [s for s in syms if (s not in _TRADABILITY_24H) or (now - _TRADABILITY_24H[s][1]).total_seconds() > ttl]
+    if not syms:
+        return
+    try:
+        from ..venue.robinhood_mcp import RobinhoodAgenticMcpAdapter
+
+        adapter = RobinhoodAgenticMcpAdapter()
+        if not adapter.is_enabled():
+            return
+        result = adapter.get_equity_tradability(syms)
+    except Exception:
+        logger.debug("[auto_arm] 24h tradability probe failed", exc_info=True)
+        return
+    for s in syms:
+        info = result.get(s) if isinstance(result, dict) else None
+        # Absent from the probe response -> treat as NOT eligible (fail-closed) but cache it
+        # so we don't re-hammer the rate-limited tool every pass.
+        eligible = bool(info.get("overnight_eligible")) if isinstance(info, dict) else False
+        _TRADABILITY_24H[s] = (eligible, now)
+    if len(_TRADABILITY_24H) > 1000:
+        _stale = now - timedelta(seconds=ttl)
+        for _k in [k for k, v in _TRADABILITY_24H.items() if v[1] < _stale]:
+            _TRADABILITY_24H.pop(_k, None)
 
 
 def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: datetime) -> int:
@@ -1617,6 +1728,27 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     out["crypto_illiquid_skipped"] = 0
     out["reap_cooldown_skipped"] = 0
     out["entry_reject_cooldown_skipped"] = 0
+    # TIER-2 OVERNIGHT: resolve the clock + flags ONCE per pass. When overnight trading is
+    # active, proactively probe 24h-eligibility for the equity candidates (batched <=10) so
+    # ineligible names are SKIPPED at the gate below — never order-rejected (no spam).
+    _overnight_active = False
+    try:
+        from .market_profile import is_overnight_now as _is_overnight_now
+
+        _overnight_active = bool(
+            getattr(settings, "chili_momentum_overnight_trading_enabled", False)
+        ) and _is_overnight_now("EQUITY")
+    except Exception:
+        _overnight_active = False
+    if _overnight_active:
+        out["overnight_ineligible_skipped"] = 0
+        out["overnight_illiquid_skipped"] = 0
+        try:
+            _probe_24h_eligibility(
+                [c.symbol for c in candidates if not _is_coinbase_tradeable_symbol(c.symbol)]
+            )
+        except Exception:
+            logger.debug("[auto_arm] overnight 24h-eligibility probe failed", exc_info=True)
     eligible: list[MomentumSymbolViability] = []
     for c in candidates:
         out["checked"] += 1
@@ -1652,6 +1784,18 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             _liq_ok, _liq_detail, _liq_cap = crypto_liquidity_ok(c.symbol, c, adapter=None)
             if not _liq_ok:
                 out["crypto_illiquid_skipped"] = out.get("crypto_illiquid_skipped", 0) + 1
+                continue
+        # TIER-2 OVERNIGHT gate (equities only; runs BEFORE broker-ready + any order):
+        # an equity overnight must be 24h-ELIGIBLE (proactive RH tradability probe) AND
+        # 24h-LIQUID (a deeper dollar-volume floor than RTH). Ineligible/thin names are
+        # SKIPPED here — never armed, never order-rejected. is_overnight_now is the clock;
+        # _symbol_market_open already let the name through (is_tradeable_now overnight branch).
+        if _overnight_active and not _is_coinbase_tradeable_symbol(c.symbol):
+            if not _is_24h_eligible(c.symbol):
+                out["overnight_ineligible_skipped"] = out.get("overnight_ineligible_skipped", 0) + 1
+                continue
+            if not _overnight_24h_liquid(c.symbol):
+                out["overnight_illiquid_skipped"] = out.get("overnight_illiquid_skipped", 0) + 1
                 continue
         if not _venue_broker_ready_for(c.symbol, _broker_ready_cache):
             out["broker_not_ready_skipped"] += 1

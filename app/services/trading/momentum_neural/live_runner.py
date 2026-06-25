@@ -2690,6 +2690,50 @@ def _register_stale_quote_tick(db, sess, le: dict) -> None:
                 "avg_entry_price": pos.get("avg_entry_price"),
                 "stop_price": pos.get("stop_price"),
             })
+    # TIER-2 OVERNIGHT PRICE-BUS-DARK KILL: a position held OVERNIGHT into a stale book is
+    # the dangerous case — the software stop can only act on the NEXT fresh tick, so a dark
+    # bus means the held position is unprotected. When overnight trading is on AND a position
+    # is held overnight AND the quote has been stale beyond chili_momentum_overnight_max_stale_sec
+    # (0 => derive from the halt-stale threshold), emit a CRITICAL + set a flatten-intent flag
+    # the next-fresh-tick exit path honors; the runner already refuses to act on a stale book,
+    # so this never submits into the dark — it flattens on resume. New arming is gated off by
+    # is_overnight_now's safety-aware tradeability tier. Flag OFF / not overnight => no-op.
+    try:
+        if getattr(settings, "chili_momentum_overnight_trading_enabled", False):
+            from .market_profile import is_overnight_now as _is_overnight_now
+
+            pos = le.get("position")
+            if (
+                isinstance(pos, dict)
+                and float(pos.get("quantity") or 0) > 0
+                and _is_overnight_now(sess.symbol)
+            ):
+                _ovn_stale = float(getattr(settings, "chili_momentum_overnight_max_stale_sec", 0.0) or 0.0)
+                _ticks_thresh = _halt_stale_ticks_threshold()
+                # 0 => derive: the halt-stale tick threshold is the natural overnight bound.
+                _stale_streak = int(le.get("halt_stale_streak") or 0)
+                _trip = (
+                    _stale_streak >= _ticks_thresh
+                    if _ovn_stale <= 0
+                    else _stale_streak >= max(1, _ticks_thresh)
+                )
+                if _trip and not le.get("overnight_pricebus_dark_flagged"):
+                    le["overnight_pricebus_dark_flagged"] = True
+                    le["overnight_flatten_on_fresh"] = True
+                    _commit_le(sess, le)
+                    _log.critical(
+                        "[momentum_live] OVERNIGHT PRICE-BUS DARK symbol=%s session=%s qty=%s "
+                        "stale_streak=%s — no broker stop overnight; will flatten at the next "
+                        "fresh tick + arm nothing new. If the bus is reliably dark overnight, "
+                        "disable overnight trading.",
+                        sess.symbol, sess.id, pos.get("quantity"), _stale_streak,
+                    )
+                    _emit(db, sess, "overnight_pricebus_dark", {
+                        "quantity": pos.get("quantity"),
+                        "stale_streak": _stale_streak,
+                    })
+    except Exception:
+        pass
 
 
 def _entry_pricebook_snapshot(symbol: str) -> dict | None:
@@ -4509,6 +4553,37 @@ def tick_live_session(
         _base_max_loss = policy_float_cap(
             caps, "max_loss_per_trade_usd", settings.chili_momentum_risk_max_loss_per_trade_usd
         )
+        # TIER-2 OVERNIGHT max-loss cap: overnight has NO broker-side stop, so the per-trade
+        # loss is bounded by the SOFTWARE circuit (C1/C1b every tick) sized off a TIGHTER cap
+        # = max($50 irreducible base, 0.5% of overnight buying power) — equity-relative, not a
+        # magic $50. This LOWERS _base_max_loss overnight (never raises it). Flag OFF / not
+        # overnight => unchanged (byte-identical).
+        if (
+            getattr(settings, "chili_momentum_overnight_trading_enabled", False)
+            and not str(sess.symbol or "").upper().endswith("-USD")
+        ):
+            try:
+                from .market_profile import is_overnight_now as _is_overnight_now
+
+                if _is_overnight_now(sess.symbol):
+                    _ovn_floor = float(getattr(settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0) or 50.0)
+                    _ovn_irreducible = 50.0
+                    _ovn_pct = float(getattr(settings, "chili_momentum_overnight_max_loss_pct_bp", 0.5) or 0.0)
+                    _ovn_bp = None
+                    try:
+                        from .risk_policy import _account_equity_usd as _ovn_equity
+
+                        _ovn_bp = _ovn_equity(ef)
+                    except Exception:
+                        _ovn_bp = None
+                    _ovn_cap = _ovn_irreducible
+                    if _ovn_bp and _ovn_bp > 0 and _ovn_pct > 0:
+                        _ovn_cap = max(_ovn_irreducible, float(_ovn_bp) * _ovn_pct / 100.0)
+                    if _ovn_cap > 0 and _ovn_cap < float(_base_max_loss):
+                        le["overnight_max_loss"] = {"cap_usd": round(_ovn_cap, 2), "bp_usd": _ovn_bp}
+                        _base_max_loss = _ovn_cap
+            except Exception:
+                pass
         le["streak_risk"] = _streak_meta
         # Day-cushion ladder (Ross 06-11): start the day at half risk; earn the
         # right to full and then aggressive size from TODAY's banked P&L.
@@ -4559,6 +4634,26 @@ def tick_live_session(
             _emit(db, sess, "live_entry_wait_late_window", {"window": "late"})
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state, "skipped": "late_window"}
+        # TIER-2 OVERNIGHT size reduction: a multiplier (base 0.5) on the equity-relative
+        # notional overnight — smaller size is the REAL protection against a gap through the
+        # software stop (RH has no broker stop overnight). Equities only; composes with the
+        # other size-down levers under the 3x clamp. Flag OFF / not overnight => 1.0 (no-op).
+        _overnight_mult = 1.0
+        if (
+            getattr(settings, "chili_momentum_overnight_trading_enabled", False)
+            and not str(sess.symbol or "").upper().endswith("-USD")
+        ):
+            try:
+                from .market_profile import is_overnight_now as _is_overnight_now2
+
+                if _is_overnight_now2(sess.symbol):
+                    _overnight_mult = float(
+                        getattr(settings, "chili_momentum_overnight_size_fraction", 0.5) or 1.0
+                    )
+                    if _overnight_mult != 1.0:
+                        le["overnight_size_down"] = {"mult": _overnight_mult}
+            except Exception:
+                _overnight_mult = 1.0
         # L2.2 LIQUIDITY-SCALED RISK CAP (project_profitability_levers): the biggest losers
         # are wide-spread illiquid names sized too big (QXL −$229 @119bps; the −$697 low-float
         # gap-through tail). SHRINK the risk budget as the live spread eats the name's adaptive
@@ -4613,7 +4708,7 @@ def tick_live_session(
             except Exception:
                 _meta_mult = 1.0
         _eff_max_loss = min(
-            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult),
+            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE
@@ -4770,6 +4865,22 @@ def tick_live_session(
         except Exception:
             _entry_extended = False
         le["entry_session_extended"] = bool(_entry_extended)
+        # TIER-2 OVERNIGHT signal: when the master flag is ON and the clock is in the RH
+        # overnight band, mark the entry overnight so the RH adapter routes it to
+        # ``all_day_hours`` (the 24-hour market). The name reached here only via
+        # is_tradeable_now's overnight branch, which already required 24h-eligibility — so
+        # all_day_hours is sent ONLY for proven-eligible names (the 2026-06-23 regression
+        # guard). Flag OFF / not overnight => False => extended_hours routing (byte-identical).
+        _entry_overnight = False
+        try:
+            from .market_profile import is_overnight_now
+
+            _entry_overnight = bool(
+                getattr(settings, "chili_momentum_overnight_trading_enabled", False)
+            ) and is_overnight_now(sess.symbol)
+        except Exception:
+            _entry_overnight = False
+        le["entry_session_overnight"] = bool(_entry_overnight)
         _entry_kwargs = dict(
             product_id=product_id,
             side="buy",
@@ -4780,8 +4891,24 @@ def tick_live_session(
             # ORDER-TRUTH (2026-06-11): entry limits are DAY orders, never GTC —
             # a dead session's resting GTC buy (KMRK) filled hours later into a
             # -21.9% dump. Equity adapters map this to RH 'gfd'; crypto ignores.
+            # Overnight keeps 'gfd': RH day-orders in the 24h session expire at the
+            # 24h-session boundary (acceptable; a resting overnight GTC is the KMRK risk).
             time_in_force="gfd",
         )
+        # Pass the overnight signal ONLY for the agentic RH equity rail (the only adapter
+        # whose place_*_order accepts ``overnight`` -> all_day_hours). Crypto / robin_stocks /
+        # alpaca don't take the kwarg, so they are called exactly as before (no regress).
+        if _entry_overnight:
+            try:
+                from ..execution_family_registry import (
+                    EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
+                    normalize_execution_family,
+                )
+
+                if normalize_execution_family(sess.execution_family) == EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP:
+                    _entry_kwargs["overnight"] = True
+            except Exception:
+                pass
         # MAKER-ONLY (2026-06-13): post-only so a crossing price is rejected (no
         # taker) — the ack-timeout then cancels + re-watches. Pass post_only ONLY
         # for crypto+maker (coinbase_spot supports it); the RH equity adapter does
@@ -5071,7 +5198,11 @@ def tick_live_session(
             try:
                 from .auto_arm import _write_entry_reject_cooldown
 
-                _write_entry_reject_cooldown(str(sess.symbol or "").upper())
+                # Pass the broker's rejection text so the 24h-eligibility negative cache can
+                # self-heal on an "untradable for 24 hour trading" reject (TIER-2 backstop).
+                _write_entry_reject_cooldown(
+                    str(sess.symbol or "").upper(), reason=str(res.get("error") or "")
+                )
             except Exception:
                 pass
             _safe_transition(db, sess, STATE_LIVE_ERROR)

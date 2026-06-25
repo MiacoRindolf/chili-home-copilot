@@ -3537,6 +3537,77 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_RISK_MULTIPLE"),
         description="K — the circuit fires when unrealized loss <= -(K x structural_risk) and flattens at avg - K*stop_distance. ge=1.0 so the floor can never sit looser than the structural stop.",
     )
+    # ── FULL-CLOCK WINDOW (2026-06-25): two staged tiers ─────────────────────────
+    # TIER 1 — EARLY PREMARKET (low risk, DEFAULT-ON). Adaptive pre-entry-window unlock:
+    # the entry window opens at the FIRST-MOVER tape time once >=N spread-clean names move
+    # >=5% in a fresh M-min window, instead of waiting for the fixed premarket_start clock.
+    # Same extended session, same names, same size, same broker routing — only removes the
+    # selection lag (FCUV ignited 04:23 ET but CHILI watched it at 07:00). Companion sampler-
+    # pull guarantees the tape reaches the 04:00 exchange-open floor so it is warm to drive
+    # the unlock. Flag OFF = byte-identical (fixed premarket_start clock + lead-derived data open).
+    chili_momentum_early_premarket_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EARLY_PREMARKET_ENABLED"),
+        description="Tier 1: adaptive pre-premarket-start entry unlock (tape-derived first-mover time) + pull the NBBO sampler open to the 04:00 ET exchange-extended-open floor. Low-risk (same session/names/size/routing). false = fixed-clock premarket_start + lead-derived data open (byte-identical).",
+    )
+    chili_momentum_early_premarket_min_movers: int = Field(
+        default=3,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EARLY_PREMARKET_MIN_MOVERS"),
+        description="Distinct spread-clean tape movers (>= the 5% _MIN_ABS_CHANGE_PCT floor, freshness <30s) within the lookback window required to UNLOCK the early-premarket entry window. Mitigates a false unlock on stale/garbage tape.",
+    )
+    chili_momentum_early_premarket_window_min: int = Field(
+        default=5,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EARLY_PREMARKET_WINDOW_MIN"),
+        description="Lookback minutes for the early-premarket unlock test (move% reuses the existing 5% NBBO-tape floor; row freshness reuses 30s).",
+    )
+    # TIER 2 — OVERNIGHT / 24H (higher risk, GATED, operator flips after review). NOTE
+    # (conflict with the no-dark-flags norm): this is the ONE justified default-OFF flag —
+    # it changes broker routing (RH all_day_hours), carries irreducible overnight gap risk
+    # (no broker-side stop), and has no quant cohort yet. Operator flips after reviewing the
+    # overnight-safety design. Flag OFF = extended_hours routing only, no overnight (today).
+    chili_momentum_overnight_trading_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_TRADING_ENABLED"),
+        description="Tier 2 MASTER gate: allow overnight/24h arming+entry for 24h-ELIGIBLE, 24h-LIQUID names (RH all_day_hours routing). DEFAULT FALSE (higher risk: no broker stop overnight, thin books). false = no overnight, extended_hours routing only.",
+    )
+    chili_momentum_overnight_tape_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_TAPE_ENABLED"),
+        description="Tier 2: sample the NBBO tape overnight for the 24h-eligible whitelist only (bounds DB growth). DEFAULT FALSE. false = overnight arming falls back to the last extended-hours tape row + a live quote probe.",
+    )
+    chili_momentum_overnight_size_fraction: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_SIZE_FRACTION"),
+        description="Overnight risk-size multiplier on the equity-relative notional (composes with the other size-down levers under the 3x clamp). Adaptive, no fixed $. 1.0 = no reduction.",
+    )
+    chili_momentum_overnight_max_loss_pct_bp: float = Field(
+        default=0.5,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_MAX_LOSS_PCT_BP"),
+        description="Overnight per-trade max-loss cap basis = max($50 irreducible base, this % of overnight buying power) — equity-relative, feeds caps.max_loss_per_trade_usd overnight. 0 = use the irreducible $50 base only.",
+    )
+    chili_momentum_overnight_min_dollar_volume: float = Field(
+        default=5_000_000.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_MIN_DOLLAR_VOLUME"),
+        description="Overnight 24h-LIQUID floor (dollar-volume) = max($5M, 2x the RTH $1M floor). Thin overnight books are the gap risk, so only deep names arm overnight.",
+    )
+    chili_momentum_overnight_max_stale_sec: float = Field(
+        default=0.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_MAX_STALE_SEC"),
+        description="Price-bus-dark trigger (seconds): if a position is held overnight and the quote is stale longer than this, emit critical + attempt a flatten at the next fresh tick + arm nothing new. 0 = derive from the halt-stale threshold (chili_momentum_halt_stale_ticks x tick cadence).",
+    )
+    chili_momentum_tradability_cache_sec: int = Field(
+        default=3600,
+        ge=0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TRADABILITY_CACHE_SEC"),
+        description="TTL of the get_equity_tradability 24h-eligibility cache (eligibility is an instrument property that changes slowly — re-checked hourly + next day).",
+    )
     # MIDDAY-LULL ENTRY DE-WEIGHT (2026-06-17, project_profitability_levers): raise the
     # EFFECTIVE entry viability bar for NEW equity entries during the EXISTING schedule_window_now
     # "midday" window (10:30-14:30 ET) — live data: midday win-rate 1/17 = 6% vs morning 7/24 =
