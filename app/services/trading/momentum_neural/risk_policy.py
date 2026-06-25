@@ -225,7 +225,7 @@ def _stabilize_account_equity(ef: str, eq: float | None) -> float | None:
 
 def _account_equity_usd(
     execution_family: str | None = None, *, apply_margin_multiple: bool = True,
-    prefer_equity: bool = False,
+    prefer_equity: bool = False, prefer_cash_value: bool = False,
 ) -> float | None:
     """Best-effort account SIZING BASIS (USD) for equity-relative caps, PER VENUE.
 
@@ -241,7 +241,15 @@ def _account_equity_usd(
     (a ~$2k Coinbase buying power must not read as $3,989 = bp*2.0). So the SIZING
     default applies the margin multiple; the RISK cap passes apply_margin_multiple=False
     to get the unlevered buying power (RH ~$13.4k / CB ~$2.0k).
-    docs/DESIGN/MOMENTUM_LANE.md
+
+    prefer_cash_value (operator 2026-06-25) returns the account CASH VALUE / total
+    equity REGARDLESS of the buying-power flag — the basis the per-broker daily-loss cap
+    now uses (a 5% cap off the $13.6k agentic CASH value, not off margin-inflated BP).
+    For robinhood_agentic_mcp the cash value is the stable total account value
+    (_agentic_equity_cached); for robinhood_spot / coinbase it is pf["equity"]. Routes
+    through the last-good stabilizer so a flaky read cannot collapse the cap to ~$1
+    (the documented failure mode, lines 264-266). Implies prefer_equity semantics
+    (stabilized, never margin-inflated). docs/DESIGN/MOMENTUM_LANE.md
     """
     from ..execution_family_registry import (
         EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
@@ -250,7 +258,12 @@ def _account_equity_usd(
     )
 
     ef = normalize_execution_family(execution_family)
+    # prefer_cash_value forces the stabilized total-equity path (never BP, never margin)
+    # for the daily-loss RISK cap; it implies prefer_equity's last-good stabilization.
     use_bp = bool(getattr(settings, "chili_momentum_risk_size_use_buying_power", True))
+    if prefer_cash_value:
+        use_bp = False
+        prefer_equity = True
 
     # Agentic MCP rail: the isolated agentic account is a CASH account — its reported
     # buying_power IS the real, unleveraged spendable amount (no margin). Size against
