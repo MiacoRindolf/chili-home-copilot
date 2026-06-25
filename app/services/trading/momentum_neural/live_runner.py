@@ -4898,17 +4898,16 @@ def tick_live_session(
         # Pass the overnight signal ONLY for the agentic RH equity rail (the only adapter
         # whose place_*_order accepts ``overnight`` -> all_day_hours). Crypto / robin_stocks /
         # alpaca don't take the kwarg, so they are called exactly as before (no regress).
-        if _entry_overnight:
-            try:
-                from ..execution_family_registry import (
-                    EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
-                    normalize_execution_family,
-                )
-
-                if normalize_execution_family(sess.execution_family) == EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP:
-                    _entry_kwargs["overnight"] = True
-            except Exception:
-                pass
+        # normalize_execution_family + EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP are already
+        # imported at MODULE level (top of file). A LOCAL re-import here made the name
+        # function-local for the whole of tick_live_session and broke the earlier
+        # module-level use at ~3080 with UnboundLocalError. Use the module-level names.
+        if (
+            _entry_overnight
+            and normalize_execution_family(sess.execution_family)
+            == EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP
+        ):
+            _entry_kwargs["overnight"] = True
         # MAKER-ONLY (2026-06-13): post-only so a crossing price is rejected (no
         # taker) — the ack-timeout then cancels + re-watches. Pass post_only ONLY
         # for crypto+maker (coinbase_spot supports it); the RH equity adapter does
