@@ -662,10 +662,21 @@ def _submit_live_market_exit(
     try:
         _bq = adapter.get_position_quantity(product_id) if hasattr(adapter, "get_position_quantity") else None
         if _bq is None:
-            from ...broker_service import get_open_position_quantity as _rh_qty
+            _fam = normalize_execution_family(sess.execution_family)
+            if _fam == EXECUTION_FAMILY_ROBINHOOD_SPOT:
+                from ...broker_service import get_open_position_quantity as _rh_qty
 
-            if normalize_execution_family(sess.execution_family) == EXECUTION_FAMILY_ROBINHOOD_SPOT:
                 _bq = _rh_qty(sess.symbol)
+            elif _fam == EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP:
+                # Agentic fallback (mirror of the spot branch): if the adapter on this
+                # image lacks get_position_quantity, read the agentic book directly so
+                # the clamp still fires. Fail-safe: any error -> _bq stays None ->
+                # behavior unchanged. spot/crypto paths are untouched.
+                try:
+                    if hasattr(adapter, "get_position_quantity"):
+                        _bq = adapter.get_position_quantity(product_id)
+                except Exception:
+                    _bq = None
         if _bq is not None and float(_bq) >= 0 and float(_bq) < float(quantity) - 1e-9:
             _emit(db, sess, "live_exit_qty_clamped_to_broker", {
                 "requested": float(quantity), "broker_qty": float(_bq), "reason": reason,
