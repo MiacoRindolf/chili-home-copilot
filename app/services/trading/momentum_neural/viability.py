@@ -438,6 +438,29 @@ def score_viability(
     except (TypeError, ValueError, AttributeError):
         pass
 
+    # E7: THEME / SYMPATHY tilt (the 1000%-mover lever). Complements the SIC-sector
+    # sympathy above with a SHARED-CATALYST-KEYWORD axis: a name whose fresh headline
+    # shares a salient keyword with a hot LEADER (STI -> ASTC) gets a SMALL additive
+    # boost (it runs in sympathy). Soft, additive, never a penalty; equity-only; no-op
+    # when the set is absent / for crypto. Flag OFF -> the block is skipped -> the
+    # theme_sympathy_symbols key is never written either (pipeline) -> byte-identical.
+    try:
+        if bool(getattr(settings, "chili_momentum_theme_sympathy_enabled", True)):
+            _theme_symp = (
+                ctx.meta.get("theme_sympathy_symbols")
+                if isinstance(getattr(ctx, "meta", None), dict)
+                else None
+            )
+            if _theme_symp:
+                from .theme_detector import theme_sympathy_viability_delta
+
+                _ts_delta = theme_sympathy_viability_delta(symbol, set(_theme_symp))
+                if _ts_delta:
+                    base += _ts_delta
+                    warnings.append("Theme sympathy peer (shared-catalyst leader) — Ross-style")
+    except (TypeError, ValueError, AttributeError):
+        pass
+
     # Ross gap #6: market-wide leading-gainer boost — the day's top-N % gainers get the
     # eyes/hot-lists that make patterns resolve. Small additive tilt (orders WITHIN the
     # eligible set; #3 gates membership). Equity-only; no-op when the set is absent.

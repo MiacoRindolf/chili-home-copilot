@@ -805,6 +805,36 @@ def run_momentum_neural_tick(
         except Exception:
             pass
 
+        # E7: THEME / SYMPATHY detector (the 1000%-mover lever). Complements the SIC-sector
+        # sympathy above with a SHARED-CATALYST-KEYWORD axis: when a LEADER squeezes on a
+        # catalyst, OTHER names whose fresh headlines share the same keyword run too
+        # (STI -> ASTC; a "SpaceX synergies" headline lifting every space name). Cluster the
+        # batch's equity movers by a salient keyword shared across their fresh headlines; if
+        # the cluster has a genuine leader + >= min_cluster members, forward the non-leader
+        # peers so viability applies a small additive boost. Flag OFF / no fresh news / no
+        # cluster -> no key written -> byte-identical. Equity-only; fail-open. (theme_detector.py)
+        try:
+            if bool(getattr(settings, "chili_momentum_theme_sympathy_enabled", True)):
+                from ...massive_client import get_recent_news_items
+                from .ross_momentum import _extract_pillars as _ep_theme
+                from .theme_detector import theme_sympathy_symbols
+
+                _tmovers: dict[str, float] = {}
+                for s, sig in _ross_signals.items():
+                    su = str(s).upper()
+                    if su.endswith("-USD") or not isinstance(sig, dict):
+                        continue
+                    _, _mom_t, _, _ = _ep_theme(sig)
+                    if _mom_t is not None:
+                        _tmovers[su] = float(_mom_t)
+                if _tmovers:
+                    _news = get_recent_news_items()
+                    _tpeers = theme_sympathy_symbols(_tmovers, _news)
+                    if _tpeers:
+                        meta["theme_sympathy_symbols"] = sorted(_tpeers)
+        except Exception:
+            pass
+
         # Ross gap #16: dilution-risk penalty. A recent S-1/424B* (registration / offering)
         # filing means the low-float will ISSUE SHARES and fade despite good news (CTNT vs
         # SNTI). Flag the equity movers with a recent dilution filing (SEC EDGAR, free;
@@ -943,6 +973,7 @@ def run_momentum_neural_tick(
             "strong_catalyst_symbols",
             "fake_catalyst_symbols",
             "sympathy_symbols",
+            "theme_sympathy_symbols",
             "top_market_gainers",
             "dilution_symbols",
             "close_strength_priors",

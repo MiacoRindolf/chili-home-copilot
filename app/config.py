@@ -2494,6 +2494,39 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("CHILI_MOMENTUM_EVENT_THEME_KEYWORDS"),
     )
+    # E7: THEME / SYMPATHY detector (the 1000%-mover lever). When a LEADER squeezes on a
+    # catalyst, same-THEME names run too (STI->ASTC). Complements the SIC-sector sympathy
+    # tilt with a SHARED-CATALYST-KEYWORD axis: cluster the batch's movers by a salient
+    # keyword shared across their fresh headlines; if the cluster has a genuine leader
+    # (top gainer clears the floor) and >= min_cluster members, the NON-leader peers get
+    # a SMALL additive viability boost. Soft + additive (never a gate, never a penalty);
+    # equity-only; fail-open on thin news. KILL-SWITCH: False -> byte-identical.
+    # (theme_detector.py)
+    chili_momentum_theme_sympathy_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_THEME_SYMPATHY_ENABLED"),
+        description="E7: boost same-theme (shared-catalyst-keyword) sympathy peers of a hot leader. Soft additive tilt, equity-only, fail-open. KILL-SWITCH: False -> byte-identical.",
+    )
+    # E7 documented bases (override only to tune; defaults match theme_detector.py).
+    chili_momentum_theme_leader_floor_pct: float = Field(
+        default=15.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_THEME_LEADER_FLOOR_PCT"),
+        description="E7: the top mover in a keyword theme cluster must clear this %% to count as a genuine squeeze leader.",
+    )
+    chili_momentum_theme_min_cluster: int = Field(
+        default=2,
+        ge=2,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_THEME_MIN_CLUSTER"),
+        description="E7: minimum movers sharing a catalyst keyword (leader + peers) to count as a real theme.",
+    )
+    chili_momentum_theme_sympathy_boost: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=0.20,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_THEME_SYMPATHY_BOOST"),
+        description="E7: additive viability boost for a theme sympathy peer (small — a secondary corroborator).",
+    )
     # Ross "Running Up" feeder (the 2026-06-11 SKYQ gap): the viability batch ranks
     # DAY-change movers, so a name bursting NOW from a flat day never refreshes and
     # can never arm. The NBBO tape already samples Ross-universe names every minute —

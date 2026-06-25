@@ -2009,7 +2009,8 @@ def _entry_interval_seconds() -> float:
 
 
 def _opening_bell_suppresses_fresh_trigger(
-    symbol: str, le: dict, *, has_position: bool, now: datetime | None = None
+    symbol: str, le: dict, *, has_position: bool, now: datetime | None = None,
+    armed_at: datetime | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """HVM101 edge (A) — opening-bell suppression of FRESH triggers.
 
@@ -2018,6 +2019,16 @@ def _opening_bell_suppresses_fresh_trigger(
     a brand-new entry in that window — but NEVER a CONTINUATION of an already-armed
     premarket runner (Ross's gap-and-go that armed/watched before the bell), and never
     an already-held position's management.
+
+    CONTINUATION exemption (the fix): a name that was ARMED / watching BEFORE the
+    regular open is a premarket gap-and-go continuation, NOT a fresh open-auction
+    print — so it is EXEMPT even though it has not filled yet (``has_position`` is
+    False while WATCHING_LIVE). We key the continuation off the session's arm time
+    (``armed_at`` = ``sess.started_at``): if the session armed before ~the open, the
+    break we're confirming is a continuation of the premarket setup, not a freshly-
+    armed post-open trigger. ONLY a genuinely-fresh trigger — armed at/after the open
+    AND now inside the first ~N min — is suppressed. (Previously this keyed only off
+    FILLED/has_position, which wrongly suppressed un-filled premarket continuations.)
 
     Adaptive N: base ``chili_momentum_opening_bell_suppress_base_min`` (the ONE
     documented base ~2 min), widened by the instrument's own opening volatility via a
@@ -2043,11 +2054,28 @@ def _opening_bell_suppresses_fresh_trigger(
     if _mins is None or _mins < 0:
         # crypto / weekend / closed / premarket → fail open (no suppression).
         # A premarket-armed runner that is now continuing INTO the open reads as
-        # _mins>=0 here, but a fresh post-open arm is exactly what we suppress; the
-        # premarket CONTINUATION is preserved because the held-position / already-armed
-        # checks above short-circuit it, and a runner that armed premarket is in a
-        # held/candidate state, not a fresh WATCHING_LIVE score-trigger.
+        # _mins>=0 here; that CONTINUATION is preserved by the armed-before-open
+        # exemption below (we no longer rely on it being in a held/candidate state).
         return False, debug
+    # CONTINUATION: the session armed BEFORE the regular open (premarket gap-and-go).
+    # ``armed_at`` is the session's start time; reuse the SAME DST-correct open clock
+    # to ask "was this armed before the bell?" — if so, the break we're confirming is
+    # a continuation of the premarket setup, not a fresh open-auction print → EXEMPT.
+    # A tiny tolerance (a fraction of the base window) absorbs same-instant arm/score
+    # timing jitter at the open without exempting a clearly post-open fresh arm.
+    if armed_at is not None:
+        try:
+            from .market_profile import minutes_since_regular_open as _msro
+
+            _armed_mins = _msro(sym, now=armed_at)
+        except Exception:
+            _armed_mins = None
+        if _armed_mins is not None and _armed_mins < 0:
+            debug = {
+                "exempt": "premarket_armed_continuation",
+                "armed_mins_since_open": round(float(_armed_mins), 2),
+            }
+            return False, debug
     base_min = float(getattr(settings, "chili_momentum_opening_bell_suppress_base_min", 2.0) or 0.0)
     if base_min <= 0:
         return False, debug
@@ -2079,16 +2107,24 @@ def _opening_bell_suppresses_fresh_trigger(
 def _bid_prop_confirms_break(
     db, symbol: str, *, window_s: float, now: datetime | None = None
 ) -> tuple[bool, dict[str, Any]]:
-    """HVM101 edge (B) — bid-prop / spread-tightening confirmer.
+    """HVM101 edge (B) — bid-prop / book-deterioration confirmer.
 
-    A genuine break is BACKED: the best-bid steps UP (or holds) tick-over-tick as buyers
-    lift, and the spread is at/below its own short trailing median (liquidity tightening
-    behind the move) — not a thin print spiking the ask into an air pocket. Confirm only
-    when BOTH hold over the last few L1 samples.
+    A genuine break can momentarily widen the spread as the ask lifts into the next
+    level — that is NORMAL and must NOT be vetoed. We only veto when the book is
+    clearly DETERIORATING UNDER the move: the best-bid is net STEPPING DOWN across the
+    samples (buyers backing away, not merely one noisy tick) AND the spread has blown
+    out BEYOND its own short trailing median by a margin (an air pocket opening up),
+    not on a single normal widen. Both conditions must hold together to veto.
 
-    FAIL-OPEN by contract: thin/absent L1 tape (fewer than the min samples) → returns
-    ``(True, ...)`` so it NEVER blocks a break on missing data — it only ADDS a veto when
-    the tape positively shows a falling bid into a widening spread.
+    Adaptive margin: the ONE documented base ``chili_momentum_bid_prop_spread_blowout_mult``
+    (~1.5×) sets how far past the trailing median the LATEST spread must blow out before
+    it counts as deterioration — a name's own recent spread is the reference, no fixed
+    bps clock. Bid "stepping down" is measured net (last vs first) past a tiny relative
+    epsilon so micro-noise doesn't read as a falling bid.
+
+    FAIL-OPEN by contract: thin/absent/stale L1 tape (fewer than the min samples) →
+    returns ``(True, ...)`` so it NEVER blocks a break on missing data — it only ADDS a
+    veto when the tape POSITIVELY shows a falling bid into a blown-out spread.
 
     EQUITY/RH ONLY: callers gate to non ``-USD`` symbols (crypto L1 lives elsewhere).
     Returns ``(confirmed, debug)``; pure read, never raises.
@@ -2102,32 +2138,46 @@ def _bid_prop_confirms_break(
     except Exception:
         return True, {"reason": "bid_prop_read_error_fail_open"}
     if not tape or len(tape) < max(2, _min_n):
-        # Thin/absent L1 → fail open (do NOT block the break).
+        # Thin/absent/stale L1 → fail open (do NOT block the break).
         return True, {"reason": "bid_prop_thin_tape_fail_open", "samples": len(tape or [])}
     bids = [b for b, _ in tape]
     spreads = [s for _, s in tape]
-    # Non-decreasing best-bid with a tiny relative epsilon (0.05% of the latest bid) so
-    # micro-noise doesn't read as a falling bid; a real backing-away still fails.
     last_bid = bids[-1]
+    first_bid = bids[0]
+    # DETERIORATION half 1 — best-bid net stepping DOWN. Measured first→last past a tiny
+    # relative epsilon (0.05% of the latest bid) so a single noisy down-tick on an
+    # otherwise rising bid does NOT count; only a genuine backing-away (the bid is lower
+    # now than where the window started) reads as deterioration.
     eps = abs(last_bid) * 0.0005
-    bid_non_decreasing = all(bids[i] >= bids[i - 1] - eps for i in range(1, len(bids)))
-    # Spread at/below its own trailing median = liquidity tightening behind the move.
+    bid_stepping_down = last_bid < first_bid - eps
+    # DETERIORATION half 2 — spread BLOWN OUT beyond its own trailing median by a margin.
+    # The trailing median is the name's own recent spread; the latest spread must exceed
+    # it by ``blowout_mult`` to count as an air pocket (a single normal widen sits at
+    # ~1.0× and is tolerated).
     _srt = sorted(spreads)
     _m = len(_srt)
     median_spread = _srt[_m // 2] if _m % 2 else (_srt[_m // 2 - 1] + _srt[_m // 2]) / 2.0
-    spread_tight = spreads[-1] <= median_spread + 1e-9
-    confirmed = bool(bid_non_decreasing and spread_tight)
+    blowout_mult = float(getattr(settings, "chili_momentum_bid_prop_spread_blowout_mult", 1.5) or 1.5)
+    if blowout_mult < 1.0:
+        blowout_mult = 1.0
+    spread_blown_out = spreads[-1] > (median_spread * blowout_mult) + 1e-9
+    # VETO only when the book is CLEARLY deteriorating: bid backing away AND spread
+    # blowing out together. A normal breakout (rising/holding bid, momentary widen) does
+    # not satisfy both, so it is CONFIRMED (no veto).
+    deteriorating = bool(bid_stepping_down and spread_blown_out)
+    confirmed = not deteriorating
     debug = {
         "samples": len(tape),
-        "bid_first": round(bids[0], 6),
+        "bid_first": round(first_bid, 6),
         "bid_last": round(last_bid, 6),
-        "bid_non_decreasing": bid_non_decreasing,
+        "bid_stepping_down": bid_stepping_down,
         "spread_last_bps": round(spreads[-1], 2),
         "spread_median_bps": round(median_spread, 2),
-        "spread_tight": spread_tight,
+        "spread_blowout_mult": round(blowout_mult, 2),
+        "spread_blown_out": spread_blown_out,
     }
     if not confirmed:
-        debug["reason"] = "bid_prop_unconfirmed"
+        debug["reason"] = "bid_prop_book_deteriorating"
     return confirmed, debug
 
 
@@ -3397,6 +3447,7 @@ def tick_live_session(
             try:
                 _ob_suppress, _ob_dbg = _opening_bell_suppresses_fresh_trigger(
                     sess.symbol, le, has_position=isinstance(le.get("position"), dict),
+                    armed_at=getattr(sess, "started_at", None),
                 )
             except Exception:
                 _ob_suppress, _ob_dbg = False, {}

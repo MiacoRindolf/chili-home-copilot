@@ -47,6 +47,13 @@ _HIGH_RVOL_PCTL = 0.70
 _LOW_PROGRESS_PCTL = 0.30
 # SCAL101 roll-off engages only ABOVE this RVOL percentile (the extreme tail only).
 _EXTREME_RVOL_PCTL = 0.85
+# SCAL101 IGNITER EXEMPTION: a name that is BOTH in the extreme RVOL tail AND in the
+# upper tail of day-change is a genuine Ross igniter (the explosive name the lane
+# WANTS) — the inverted-U must never soften it. Above this day-change percentile the
+# exemption ramps in and fully cancels the roll-off at the very top. Adaptive bar =
+# within-batch percentile, not absolute. Fail-open: no change data ⇒ no exemption,
+# byte-identical to the prior roll-off.
+_IGNITER_CHANGE_PCTL = 0.70
 
 # Schema-tolerant field aliases (mirror ross_momentum._extract_pillars).
 _RVOL_KEYS = ("vol_ratio", "rvol", "volume_ratio")
@@ -179,6 +186,16 @@ def nonmonotonic_volume_rolloff(symbol: str, ross_signals: Any) -> float:
     too crowded" extreme without ever inverting the existing monotonic RVOL reward (the
     roll-off is capped well below the per-percentile slope of that reward, and the body
     of the distribution is untouched -> 0.0). Adaptive (batch percentile). Fail-open.
+
+    IGNITER EXEMPTION: an extreme-RVOL name that is ALSO in the upper tail of day-change
+    is a genuine Ross igniter (very high volume AND a large real move) — exactly the
+    explosive name the lane is built to catch. The inverted-U exists to soften the
+    "most obvious, mid-high-volume, ordinary" name; it must NEVER bite the explosive
+    tail. So the roll-off is faded out smoothly by how deep the name sits in the
+    day-change tail: at/above the top of the change distribution the roll-off is fully
+    cancelled (returns 0.0). Adaptive (within-batch change percentile). Fail-open: no
+    parseable change for this symbol or the batch ⇒ no exemption (prior roll-off
+    unchanged, byte-identical).
     """
     if not isinstance(ross_signals, dict) or not ross_signals:
         return 0.0
@@ -198,6 +215,22 @@ def nonmonotonic_volume_rolloff(symbol: str, ross_signals: Any) -> float:
         t = max(0.0, min(1.0, t))
         # Smooth (quadratic) ramp so the roll-off is gentle near the edge and only
         # bites at the very crowded top — a mild inverted-U right-side, not a cliff.
-        return -NONMONOTONIC_MAX_ROLLOFF * (t * t)
+        rolloff = -NONMONOTONIC_MAX_ROLLOFF * (t * t)
+
+        # IGNITER EXEMPTION (adaptive): fade the roll-off out by how far this name sits
+        # in the upper tail of day-change. keep_frac in [0,1] = 1.0 below the change
+        # tail (full prior roll-off), ramping to 0.0 at the very top of the change
+        # distribution (fully exempt — a real explosive igniter is never softened).
+        ach = _abs_change_of(ross_signals.get(symbol))
+        if ach is not None:
+            achs = sorted(
+                a for a in (_abs_change_of(s) for s in ross_signals.values()) if a is not None
+            )
+            ch_pct = _percentile_rank(ach, achs)
+            if ch_pct is not None and ch_pct > _IGNITER_CHANGE_PCTL:
+                exempt = (ch_pct - _IGNITER_CHANGE_PCTL) / max(1e-9, (1.0 - _IGNITER_CHANGE_PCTL))
+                keep_frac = 1.0 - max(0.0, min(1.0, exempt))
+                rolloff *= keep_frac
+        return rolloff
     except (TypeError, ValueError, AttributeError, ZeroDivisionError):
         return 0.0
