@@ -93,6 +93,31 @@ ROSS_FLOAT_ROTATION_PILLAR_WEIGHT = 0.10
 ROSS_FLOAT_ROTATION_CLEAR_FLOOR = 1.0
 ROSS_FLOAT_ROTATION_SATURATION = 5.0
 
+# SQUEEZE-FUEL sustainability pillar weight (opt-in via chili_momentum_squeeze_fuel_tilt_enabled).
+# Like ``float_rotation`` this is a SINGLE composable pillar the pipeline folds onto WHATEVER
+# weight-set is already active (``score_universe`` reads the per-symbol raw ``squeeze_fuel_pct``
+# sub-score, stamped by the bridge from Ortex, and renormalises over the present pillars). 0.10 =
+# the same minority magnitude as daily_structure / float_rotation: it RE-RANKS the pool toward
+# squeeze-prone names (heavily-shorted, hard-to-borrow float = trapped sellers covering INTO the
+# pop) and slightly DE-RATES free-share / easy-to-borrow names (shorts press the pop) — it can
+# NEVER block a fill or remove a name from the pool. Absent ``squeeze_fuel_pct`` (crypto / Ortex
+# absent / flag OFF / no data) ⇒ the pillar is simply not present in the blend ⇒ byte-identical.
+ROSS_SQUEEZE_FUEL_PILLAR_WEIGHT = 0.10
+
+# Squeeze-fuel reference points (Ross SS101 #2). These shape the RAW sub-score's curve only —
+# the within-batch PERCENTILE of ``squeeze_fuel_pct`` is what actually ranks names (adaptive,
+# the live bar floats), so these are documented REFERENCES, never hard cutoffs:
+#   * SI% of free float ~20%+ is a meaningfully-shorted name (the squeeze-prone tier); ~50%+ is
+#     extreme (saturates the SI leg).
+#   * CTB ~10% annual is "hard to borrow" (squeeze-prone); ~100%+ is extreme (saturates).
+#   * CTB at/below EASY_TO_BORROW (free shares) pulls the name BELOW the 0.5 neutral midpoint
+#     (the de-rate — shorts attack the pop with impunity).
+ROSS_SQUEEZE_SI_PROMINENT = 0.20      # 20% of free float = meaningfully shorted
+ROSS_SQUEEZE_SI_SATURATION = 0.50     # 50%+ = extreme (SI leg caps)
+ROSS_SQUEEZE_CTB_HARD = 10.0          # 10% annual borrow = hard-to-borrow
+ROSS_SQUEEZE_CTB_SATURATION = 100.0   # 100%+ = extreme (CTB leg caps)
+ROSS_SQUEEZE_CTB_EASY = 1.0           # at/below this annual % = essentially free shares (de-rate)
+
 # ATTENTION-LEADERSHIP variant (opt-in via chili_momentum_attention_leadership_enabled):
 # the 2026-06-22 Ross study's TRUE winner/loser separator. Position (pos-in-range, VWAP
 # extension) does NOT separate — NXTS-winner and QXL-loser both break to new highs near
@@ -237,6 +262,39 @@ def _extract_pillars(
     return rvol, momentum, liquidity, tradeable_liquidity
 
 
+# SSR (short-sale-restriction) trigger: SEC Rule 201 puts a name on SSR for the rest of the
+# session + the next when it trades down >= 10%% vs the PRIOR-DAY close. Under SSR shorts may
+# only sell on an UPTICK — they cannot hit the bid — so resting ASK-side stacking is NOT the
+# bearish "shorts pressing the offer" signal the L2 seller-veto reads it as. We compute this
+# FREE from price (no Ortex / borrow data needed). The 10%% is the SEC rule's own documented
+# threshold, not a tuned magic number. Equity-only (the caller applies it to equities).
+ROSS_SSR_TRIGGER_DOWN_PCT = 10.0
+
+
+def compute_is_ssr(
+    last_price: float | None,
+    prior_close: float | None,
+    *,
+    trigger_down_pct: float = ROSS_SSR_TRIGGER_DOWN_PCT,
+) -> bool:
+    """True when an EQUITY name is on short-sale restriction (SEC Rule 201): currently DOWN
+    by at least ``trigger_down_pct`` versus the PRIOR-DAY close. Free, price-only.
+
+    This is a CONSERVATIVE intraday proxy — Rule 201 latches for the rest of the day once the
+    10%% trip prints (and rolls to the next day), so a name that has recovered off the lows is
+    still on SSR; without an exchange SSR feed we can only AFFIRM SSR while price sits below the
+    trip level, which is exactly the window where the carve-out matters (shorts blocked from the
+    bid). Fails CLOSED to ``False`` (not-SSR ⇒ no carve-out ⇒ existing veto behaviour) on any
+    missing / non-positive input — the carve-out only ever RELAXES a veto, so a false-negative is
+    safe (status quo) while we never assert SSR on bad data."""
+    lp = _to_float(last_price)
+    pc = _to_float(prior_close)
+    if lp is None or pc is None or not (pc > 0) or not (lp > 0):
+        return False
+    down_pct = (pc - lp) / pc * 100.0
+    return down_pct >= float(trigger_down_pct)
+
+
 def below_explosive_floor(
     signal: dict,
     *,
@@ -302,6 +360,13 @@ def score_universe(
     _fr_raw = {sym: _first_float(sig or {}, "float_rotation_pct") for sym, sig in signals.items()}
     fr_sorted = sorted(v for v in _fr_raw.values() if v is not None)
     _w_fr = float(w.get("float_rotation") or 0.0)
+    # Squeeze-fuel pillar (composable, opt-in): the per-symbol raw ``squeeze_fuel_pct`` sub-score
+    # (short-interest %% + cost-to-borrow shaped to a [0,1] boost/de-rate) stamped by the bridge
+    # from Ortex. Graceful-degrade exactly like float_rotation — absent / zero-weight ⇒ not in
+    # the blend (byte-identical).
+    _sf_raw = {sym: _first_float(sig or {}, "squeeze_fuel_pct") for sym, sig in signals.items()}
+    sf_sorted = sorted(v for v in _sf_raw.values() if v is not None)
+    _w_sf = float(w.get("squeeze_fuel") or 0.0)
     # 6th/7th pillars (attention-leadership variant): the name's amplitude-leadership
     # share+rank of the live mover-field (the TRUE winner/loser separator) + its
     # dormant->explosive volume. Stamped cross-sectionally in _bridge_scanner_to_viability
@@ -327,6 +392,8 @@ def score_universe(
         dorm_pct = _percentile_rank(_dorm, dorm_sorted) if _dorm is not None else None
         _fr = _fr_raw.get(sym)
         fr_pct = _percentile_rank(_fr, fr_sorted) if _fr is not None else None
+        _sf = _sf_raw.get(sym)
+        sf_pct = _percentile_rank(_sf, sf_sorted) if _sf is not None else None
 
         present: list[tuple[float, float]] = []  # (percentile, weight)
         if rvol_pct is not None:
@@ -345,6 +412,8 @@ def score_universe(
             present.append((dorm_pct, _w_dorm))
         if fr_pct is not None and _w_fr > 0:
             present.append((fr_pct, _w_fr))
+        if sf_pct is not None and _w_sf > 0:
+            present.append((sf_pct, _w_sf))
 
         wsum = sum(wt for _, wt in present)
         score = (sum(pct * wt for pct, wt in present) / wsum) if wsum > 0 else 0.0
@@ -365,6 +434,7 @@ def score_universe(
                 "tradeable_liquidity_log_dvol": tliq,
                 "daily_structure": _ds if _w_ds > 0 else None,
                 "float_rotation_pct": _fr if _w_fr > 0 else None,
+                "squeeze_fuel_pct": _sf if _w_sf > 0 else None,
                 "pillars_present": [
                     name
                     for name, val in (
@@ -373,6 +443,7 @@ def score_universe(
                         ("tradeable_liquidity", tliq_pct if _w_tliq > 0 else None),
                         ("daily_structure", ds_pct if _w_ds > 0 else None),
                         ("float_rotation", fr_pct if _w_fr > 0 else None),
+                        ("squeeze_fuel", sf_pct if _w_sf > 0 else None),
                     )
                     if val is not None
                 ],
@@ -898,5 +969,111 @@ def float_rotation_signal(
             "session_fraction": (round(sf_used, 4) if sf_used is not None else None),
             "clear_floor": float(clear_floor),
             "saturation": float(saturation),
+        },
+    )
+
+
+# ── Squeeze-fuel sustainability (Ross SS101 #2), as a pure SCORING signal ──────
+# A heavily-shorted, hard/expensive-to-borrow float = trapped sellers who must cover INTO
+# the pop — the rocket fuel behind the 100-1000% low-float verticals. Free shares (very low
+# cost-to-borrow / easy-to-borrow) let shorts press the pop, so the same breakout fades.
+# This maps the two core Ortex signals (short-interest %% of free float + cost-to-borrow,
+# optionally utilization) into ONE raw [0,1] sub-score the bridge stamps as ``squeeze_fuel_pct``
+# and then percentile-ranks WITHIN the batch (adaptive — the live bar floats). Centered at the
+# 0.5 neutral midpoint: squeeze-prone names ramp ABOVE 0.5 (the boost); easy-to-borrow / free-
+# share names sit BELOW 0.5 (the de-rate). Fail-OPEN to ``None`` (omit the pillar) when neither
+# signal is present. Equity-only (crypto has no borrow data; the caller skips ``-USD``).
+
+
+@dataclass
+class SqueezeFuelSignal:
+    """Short-squeeze-fuel read (Ross SS101 #2). ``squeeze_pct`` in [0,1] is the raw
+    sub-score the bridge stamps + percentile-ranks like the other pillars; ``None``
+    (fail-open) ⇒ the pillar is omitted from the blend (byte-identical)."""
+
+    squeeze_pct: float | None            # [0,1] raw sub-score (>0.5 boost, <0.5 de-rate); None = omit
+    short_interest_pct: float | None     # SI as a fraction of free float (Ortex)
+    cost_to_borrow: float | None         # annual borrow cost %% (Ortex)
+    utilization: float | None            # short utilization %% if available, else None
+    is_easy_to_borrow: bool | None       # free shares ⇒ de-rate flag
+    reason: str
+    debug: dict = field(default_factory=dict)
+
+
+def squeeze_fuel_signal(
+    short_interest_pct: float | None,
+    cost_to_borrow: float | None,
+    *,
+    utilization: float | None = None,
+    is_easy_to_borrow: bool | None = None,
+    si_prominent: float = ROSS_SQUEEZE_SI_PROMINENT,
+    si_saturation: float = ROSS_SQUEEZE_SI_SATURATION,
+    ctb_hard: float = ROSS_SQUEEZE_CTB_HARD,
+    ctb_saturation: float = ROSS_SQUEEZE_CTB_SATURATION,
+) -> SqueezeFuelSignal:
+    """Compute Ross's squeeze-fuel sub-score for one EQUITY name from Ortex short mechanics.
+
+    The decision-affecting output ``squeeze_pct`` is centered at 0.5 (neutral). The SI%% leg
+    and the CTB leg each contribute a ramp ABOVE 0.5 when the name is squeeze-prone (heavily
+    shorted / hard-to-borrow), saturating at their reference points; utilization, when present,
+    is a soft confirmer on the same axis. A very-low-CTB / easy-to-borrow name is pulled BELOW
+    0.5 (the de-rate — free shares, shorts attack the pop). Fail-OPEN to ``squeeze_pct=None``
+    (omit the pillar) when BOTH SI%% and CTB are absent — a name is NEVER de-ranked for missing
+    borrow data, only re-ranked on data that AFFIRMATIVELY shows squeeze fuel (or its absence).
+    """
+    si = _to_float(short_interest_pct)
+    ctb = _to_float(cost_to_borrow)
+    util = _to_float(utilization)
+    if si is None and ctb is None:
+        return SqueezeFuelSignal(None, None, None, util, is_easy_to_borrow,
+                                 "missing_short_mechanics", debug={"si": si, "ctb": ctb})
+
+    # Each present leg ramps in [0,1]; we blend the present legs, then map to a [0,1] score
+    # centered at 0.5 (so the pillar is a symmetric boost/de-rate around neutral). SI%% and CTB
+    # carry the squeeze signal; utilization is a soft +confirmer. Easy-to-borrow forces a de-rate.
+    legs: list[tuple[float, float]] = []  # (leg_score_0to1, weight)
+    if si is not None:
+        # below `si_prominent` ⇒ ramps 0->~0.5; above ⇒ ramps ~0.5->1 saturating at si_saturation.
+        if si <= float(si_prominent):
+            si_leg = 0.5 * max(0.0, min(1.0, si / max(1e-9, float(si_prominent))))
+        else:
+            span = max(1e-9, float(si_saturation) - float(si_prominent))
+            si_leg = 0.5 + 0.5 * max(0.0, min(1.0, (si - float(si_prominent)) / span))
+        legs.append((max(0.0, min(1.0, si_leg)), 0.50))
+    if ctb is not None:
+        if ctb <= float(ctb_hard):
+            ctb_leg = 0.5 * max(0.0, min(1.0, ctb / max(1e-9, float(ctb_hard))))
+        else:
+            span = max(1e-9, float(ctb_saturation) - float(ctb_hard))
+            ctb_leg = 0.5 + 0.5 * max(0.0, min(1.0, (ctb - float(ctb_hard)) / span))
+        legs.append((max(0.0, min(1.0, ctb_leg)), 0.40))
+    if util is not None:
+        # utilization is a 0-100 %% (or already a fraction); normalise either way to [0,1].
+        util_frac = util / 100.0 if util > 1.0 else util
+        legs.append((max(0.0, min(1.0, util_frac)), 0.10))
+
+    wsum = sum(w for _, w in legs)
+    score = (sum(v * w for v, w in legs) / wsum) if wsum > 0 else 0.5
+
+    # Easy-to-borrow override (free shares): pull the score below the 0.5 neutral midpoint so
+    # the name is DE-RATED relative to the batch — shorts can press the pop with impunity.
+    eb = is_easy_to_borrow
+    if eb is None and ctb is not None:
+        eb = bool(ctb <= ROSS_SQUEEZE_CTB_EASY)
+    if eb:
+        score = min(score, 0.40)
+
+    score = max(0.0, min(1.0, score))
+    return SqueezeFuelSignal(
+        squeeze_pct=round(score, 4),
+        short_interest_pct=(round(si, 6) if si is not None else None),
+        cost_to_borrow=(round(ctb, 4) if ctb is not None else None),
+        utilization=(round(util, 4) if util is not None else None),
+        is_easy_to_borrow=eb,
+        reason=("easy_to_borrow_derate" if eb else
+                "squeeze_prone" if score >= 0.5 else "low_fuel"),
+        debug={
+            "si": si, "ctb": ctb, "utilization": util,
+            "si_prominent": float(si_prominent), "ctb_hard": float(ctb_hard),
         },
     )

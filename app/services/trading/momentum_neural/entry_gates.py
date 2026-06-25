@@ -571,7 +571,7 @@ def _dipbuy_signals_ok(
         # BEFORE the FIRE/ARM returns: a large resting ask wall the price can't lift, or
         # absorption/micro-price rollover despite buy-side OFI, makes this dip a
         # round-trip → PASS. FAIL-OPEN (helper returns None on disabled/null/stale L2).
-        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of)
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
         if _l2v is not None:
             _reason, _l2patch = _l2v
             return "PASS", None, None, {"dipbuy_declined": _reason, **_l2patch}
@@ -1018,10 +1018,37 @@ def _dipbuy_tick_thrust_ok(*, live_price: float, level: float, atr_pct: float | 
         return True
 
 
+def _resolve_is_ssr(symbol: str | None) -> bool:
+    """Best-effort, cached resolution of SEC Rule 201 short-sale-restriction for an EQUITY
+    name (currently DOWN >= ~10%% vs the prior-day close). Reuses the market-data quote
+    (last + previous_close — both cached in massive_client). Equity-only; fails CLOSED to
+    ``False`` (no carve-out ⇒ existing veto behaviour) on crypto / missing data / any error,
+    so it can only ever RELAX a veto, never tighten one."""
+    try:
+        s = (symbol or "").strip().upper()
+        if not s or s.endswith("-USD") or "-" in s or "/" in s:
+            return False
+        from ...massive_client import get_last_quote
+        from .ross_momentum import compute_is_ssr
+
+        q = get_last_quote(s)
+        if not isinstance(q, dict):
+            return False
+        last = q.get("last") or q.get("price") or q.get("close")
+        prior = q.get("previous_close") or q.get("prev_close")
+        return compute_is_ssr(last, prior)
+    except Exception:
+        return False
+
+
 def _l2_entry_veto(
-    symbol: str | None, *, db: Any = None, l2_as_of: Any = None,
+    symbol: str | None, *, db: Any = None, l2_as_of: Any = None, is_ssr: bool | None = False,
 ) -> tuple[str, dict[str, Any]] | None:
     """Gate 3 (dip-buy quality, flag-gated): L2 hidden-seller / big-seller veto.
+
+    ``is_ssr``: ``True``/``False`` = caller-supplied SSR state; ``None`` = AUTO-resolve it
+    here (best-effort, cached) — pass ``None`` from the live gates so the SSR carve-out is
+    actually wired. The default ``False`` keeps any positional/legacy caller byte-identical.
 
     Reuses the #699 OFI + #704 ladder readers (``read_ladder_distribution`` →
     OFI/micro-price/depth-imbalance) — NOT a new L2 stack. CLASS-AWARE through that
@@ -1049,16 +1076,28 @@ def _l2_entry_veto(
         if lr is None or int(getattr(lr, "n_snaps", 0) or 0) <= 0:
             return None  # empty / _NULL read -> fail-open
 
+        # AUTO-resolve SSR when the caller passed the None sentinel (the live gates do);
+        # explicit True/False is honoured as-is. Fails CLOSED to not-SSR (existing behaviour).
+        if is_ssr is None:
+            is_ssr = _resolve_is_ssr(symbol)
+
         # (a) BIG-SELLER wall: the newest book is ask-heavy relative to its own recent
         #     window — depth-imbalance percentile at/below the floor. Self-relative
         #     percentile (no absolute threshold a single spoof can trip). Fail-open
         #     when the percentile is unavailable (too few snaps to rank).
+        #     SSR CARVE-OUT (additive): under short-sale restriction shorts may only sell
+        #     on an UPTICK — they CANNOT hit the bid — so resting ASK-side stacking is NOT
+        #     the bearish "shorts pressing the offer" this leg reads it as (it is far more
+        #     likely passive/limit supply that a squeeze lifts). Suppress ONLY this ask-
+        #     stacking leg on SSR names; the hidden-seller / absorption leg (b) below still
+        #     runs (absorption at the BID is the relevant tell under SSR). is_ssr defaults
+        #     False ⇒ every existing caller is byte-identical.
         try:
             floor = float(getattr(settings, "chili_momentum_entry_l2_bigseller_pctile_floor", 0.15))
         except (TypeError, ValueError):
             floor = 0.15
         pct = getattr(lr, "depth_imbal_pctile", None)
-        if pct is not None:
+        if pct is not None and not is_ssr:
             try:
                 if float(pct) <= floor:
                     return "l2_big_seller", {
@@ -1489,7 +1528,7 @@ def first_pullback_break(
         # BEFORE the FIRE/ARM returns: an ask-wall the price can't lift, or absorption/
         # micro rollover despite buy-side OFI, makes this break a round-trip → PASS.
         # FAIL-OPEN (helper None on disabled/null/stale L2).
-        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of)
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
         if _l2v is not None:
             _reason, _l2patch = _l2v
             return "PASS", None, None, {"fp_declined": _reason, **_l2patch}

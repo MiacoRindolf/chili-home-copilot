@@ -2205,6 +2205,16 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FLOAT_ROTATION_TILT_ENABLED"),
         description="Volume/float rotation sustainability tilt (>=~5x EOD): reward names rotating their float multiple times as a fuel-remaining signal.",
     )
+    chili_momentum_squeeze_fuel_tilt_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_FUEL_TILT_ENABLED"),
+        description="SQUEEZE-FUEL selection tilt (Ross SS101 #2): SOFT within-batch BOOST for squeeze-prone names (high short-interest %% + high cost-to-borrow, via Ortex) and a small DE-RATE for very-low-CTB / easy-to-borrow names (free shares, shorts attack the pop). Ortex fetch gated to top-N explosive low-float candidates + cached 12h. Equity-only; flag-off OR Ortex absent/error ⇒ byte-identical.",
+    )
+    chili_momentum_squeeze_fuel_top_n: int = Field(
+        default=12, ge=0, le=60,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_FUEL_TOP_N"),
+        description="Credit-frugality gate: only the top-N explosive low-float candidates (by Ross score, after the explosive floor) get an Ortex short-mechanics fetch. Keeps the Trader plan (1,000 credits/mo, 1 req/s) within budget. 0 ⇒ no fetch.",
+    )
     chili_momentum_gap_geometry_tilt_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_GAP_GEOMETRY_TILT_ENABLED"),
@@ -5093,6 +5103,14 @@ class Settings(BaseSettings):
     )
     chili_alpaca_paper: bool = Field(
         default=True, validation_alias=AliasChoices("CHILI_ALPACA_PAPER"),
+    )
+    # Ortex short-mechanics API key (squeeze-fuel tilt). Trader plan: 1,000 credits/mo,
+    # 1 req/s, single-stock only — the fetch is gated to top-N explosive low-float
+    # candidates + cached 12h (see short_mechanics.py). Empty ⇒ no fetch ⇒ no tilt
+    # (fail-open / byte-identical). Use the literal "TEST" key for free random-data tests.
+    chili_ortex_api_key: str = Field(
+        default="", validation_alias=AliasChoices("CHILI_ORTEX_API_KEY"),
+        description="Ortex short-interest / cost-to-borrow API key for the squeeze-fuel selection tilt. Empty ⇒ no Ortex fetch ⇒ no tilt (fail-open).",
     )
     chili_alpaca_api_key: str = Field(
         default="", validation_alias=AliasChoices("CHILI_ALPACA_API_KEY"),

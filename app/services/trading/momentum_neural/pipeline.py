@@ -825,6 +825,70 @@ def run_momentum_neural_tick(
                         _weights["float_rotation"] = ROSS_FLOAT_ROTATION_PILLAR_WEIGHT
                 except Exception:
                     pass
+            # SQUEEZE-FUEL TILT (off => byte-identical): Ross SS101 #2 — a heavily-shorted,
+            # hard/expensive-to-borrow float = trapped sellers covering INTO the pop (the
+            # rocket fuel behind the 100-1000% low-float verticals); free shares / easy-to-
+            # borrow names get a small DE-RATE (shorts press the pop). CREDIT-FRUGAL: the
+            # Ortex fetch is gated to the TOP-N explosive low-float candidates that already
+            # pass the Ross screen (ranked by the CURRENT weight-set, NOT-below-floor), so the
+            # Trader plan (1,000 credits/mo, 1 req/s) lasts; each result is cached 12h. Stamp
+            # squeeze_fuel_pct onto those EQUITY signals + FOLD the squeeze_fuel pillar onto the
+            # ACTIVE weight-set (composable). RE-RANK only; never a veto. Equity-only (crypto has
+            # no borrow data). Flag default-ON ("no dark flags").
+            if bool(getattr(settings, "chili_momentum_squeeze_fuel_tilt_enabled", True)):
+                try:
+                    from .ross_momentum import (
+                        ROSS_SQUEEZE_FUEL_PILLAR_WEIGHT,
+                        below_explosive_floor as _sf_below_floor,
+                        score_universe as _sf_prelim_rank,
+                        squeeze_fuel_signal as _squeeze_fuel_signal,
+                    )
+                    from .short_mechanics import get_short_mechanics as _get_short_mech
+
+                    _top_n = int(getattr(settings, "chili_momentum_squeeze_fuel_top_n", 12) or 0)
+                    if _top_n > 0:
+                        # Preliminary rank with the CURRENT weights to pick the top-N explosive
+                        # low-float EQUITY candidates that ALSO clear the explosive floor — the
+                        # only names worth a credit. Crypto / below-floor names are excluded.
+                        _prelim = _sf_prelim_rank(_ross_signals, weights=_weights)
+                        _cands = [
+                            s for s in _ross_signals
+                            if isinstance(_ross_signals.get(s), dict)
+                            and not str(s).upper().endswith("-USD")
+                            and not _sf_below_floor(_ross_signals[s])
+                        ]
+                        _cands.sort(
+                            key=lambda s: (_prelim[s].score if s in _prelim else 0.0),
+                            reverse=True,
+                        )
+                        _n_sf = 0
+                        for _sym in _cands[:_top_n]:
+                            _sig = _ross_signals.get(_sym)
+                            if not isinstance(_sig, dict):
+                                continue
+                            try:
+                                _mech = _get_short_mech(_sym)
+                                if not _mech:
+                                    continue  # fail-open: no data => omit the pillar for this name
+                                _sf = _squeeze_fuel_signal(
+                                    _mech.get("short_interest_pct"),
+                                    _mech.get("cost_to_borrow"),
+                                    utilization=_mech.get("utilization"),
+                                    is_easy_to_borrow=_mech.get("is_easy_to_borrow"),
+                                )
+                                if _sf.squeeze_pct is not None:
+                                    _sig["squeeze_fuel_pct"] = _sf.squeeze_pct
+                                    _sig["short_interest_pct"] = _sf.short_interest_pct
+                                    _sig["cost_to_borrow"] = _sf.cost_to_borrow
+                                    _sig["is_easy_to_borrow"] = _sf.is_easy_to_borrow
+                                    _n_sf += 1
+                            except Exception:
+                                continue
+                        if _n_sf > 0:
+                            _weights = dict(_weights)
+                            _weights["squeeze_fuel"] = ROSS_SQUEEZE_FUEL_PILLAR_WEIGHT
+                except Exception:
+                    pass
             meta["ross_scores"] = {
                 s: rs.score
                 for s, rs in _ross_score_universe(_ross_signals, weights=_weights).items()
