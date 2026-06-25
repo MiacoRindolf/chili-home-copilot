@@ -1104,30 +1104,80 @@ def _live_exit_submit_succeeded(
     _trust_clamp_zero = bool(
         getattr(settings, "chili_momentum_broker_zero_trust_clamp_enabled", True)
     )
-    if result.get("broker_zero") is True and (
-        _trust_clamp_zero or _broker_position_confirms_zero(sess)
-    ):
-        le["position"] = None
-        le["last_exit_reason"] = (reason or "exit") + "_broker_zero_reconcile"
-        le.pop("pending_exit_reason", None)
-        le.pop("pending_exit_quantity", None)
-        le.pop("pending_exit_submitted_at_utc", None)
-        _commit_le(sess, le)
-        _safe_transition(db, sess, STATE_LIVE_EXITED)
-        _emit(
-            db, sess, "live_exit_reconciled_broker_zero",
-            {
-                "reason": reason,
-                "error": result.get("error"),
-                "trusted_clamp_read": bool(_trust_clamp_zero),
-                "note": (
-                    "broker-qty clamp read 0 (successful read = confirmed flat) — "
-                    "phantom/already-exited position; reconciled to EXITED, not retrying "
-                    "(was spinning no_remaining_quantity / live_bailout)"
-                ),
-            },
-        )
-        return True
+    # FIX B (2026-06-25, the FCUV live_bailout phantom): require N CONSECUTIVE
+    # successful broker_zero=True clamp reads before reconciling — a single spurious
+    # 0 must NEVER abandon a real position. broker_zero is set ONLY on a SUCCESSFUL
+    # clamp read (None/failed/exception never set it — _submit_live_market_exit
+    # @680-688), so any uncertainty already degrades to the safe retry path. Here we
+    # additionally count consecutive confirmations across exit pulses: a non-zero /
+    # absent broker_zero resets the streak (below), so only a STABLE confirmed-flat
+    # broker (FCUV: broker holds 0 every pulse) reaches N and closes the loop. This is
+    # what makes the bailout path satisfy the confirmed-flat reconcile (the agentic
+    # family fell through the legacy second read and looped live_bailout forever).
+    if result.get("broker_zero") is True:
+        _confirm_n = 1
+        try:
+            _confirm_n = max(1, int(getattr(settings, "chili_momentum_broker_zero_confirm_reads", 2) or 2))
+        except (TypeError, ValueError):
+            _confirm_n = 2
+        _streak = int(le.get("broker_zero_confirm_streak") or 0) + 1
+        le["broker_zero_confirm_streak"] = _streak
+        # The legacy single-read trust-clamp (flag default-ON) is preserved as the
+        # _confirm_n=1 case; the second independent read remains available for the
+        # flag-OFF (legacy double-read) path. Reconcile only once BOTH the consecutive-
+        # confirm count is met AND the trust/second-read condition holds.
+        _read_ok = _trust_clamp_zero or _broker_position_confirms_zero(sess)
+        if _streak < _confirm_n:
+            # Not yet confirmed flat enough times — stay in the exit/bailout state,
+            # arm a short retry, and re-confirm on the next pulse. NOT a failure: do
+            # not record last_exit_submit_failed (that is the spam FCUV produced).
+            le["exit_next_retry_at_utc"] = (
+                _utcnow() + timedelta(seconds=_exit_submit_backoff_seconds(int(le.get("exit_submit_attempts", 0) or 0)))
+            ).isoformat()
+            _commit_le(sess, le)
+            _emit(
+                db, sess, "live_exit_broker_zero_confirming",
+                {
+                    "reason": reason,
+                    "confirm_streak": _streak,
+                    "confirm_reads_required": _confirm_n,
+                    "note": "broker-qty clamp read 0 — confirming flat over N consecutive reads before reconcile",
+                },
+            )
+            return False
+        if _read_ok:
+            le["position"] = None
+            le["last_exit_reason"] = (reason or "exit") + "_broker_zero_reconcile"
+            le.pop("pending_exit_reason", None)
+            le.pop("pending_exit_quantity", None)
+            le.pop("pending_exit_submitted_at_utc", None)
+            le.pop("broker_zero_confirm_streak", None)
+            le["exit_submit_attempts"] = 0
+            le.pop("exit_next_retry_at_utc", None)
+            _commit_le(sess, le)
+            _safe_transition(db, sess, STATE_LIVE_EXITED)
+            _emit(
+                db, sess, "live_exit_reconciled_broker_zero",
+                {
+                    "reason": reason,
+                    "error": result.get("error"),
+                    "trusted_clamp_read": bool(_trust_clamp_zero),
+                    "confirm_streak": _streak,
+                    "confirm_reads_required": _confirm_n,
+                    "note": (
+                        "broker-qty clamp read 0 on N consecutive reads (successful read = "
+                        "confirmed flat) — phantom/already-exited position; reconciled to "
+                        "EXITED, not retrying (was spinning no_remaining_quantity / live_bailout)"
+                    ),
+                },
+            )
+            return True
+    else:
+        # Any read that is NOT a successful confirmed-zero (a real held qty, a failed
+        # fetch, or an absent broker_zero) breaks the confirmation chain — reset so a
+        # later spurious 0 cannot accumulate against stale prior confirmations.
+        if le.get("broker_zero_confirm_streak"):
+            le.pop("broker_zero_confirm_streak", None)
     failed = {
         "reason": reason,
         "result": {
@@ -2733,6 +2783,45 @@ def _register_stale_quote_tick(db, sess, le: dict) -> None:
                         "quantity": pos.get("quantity"),
                         "stale_streak": _stale_streak,
                     })
+                # FIX A part (2) — PROACTIVE FLATTEN AT FIRST STALE ONSET (2026-06-25).
+                # The on-fresh flatten (overnight_flatten_on_fresh, honored in
+                # _register_fresh_quote_tick) is NOT sufficient on its own: a FULLY DARK
+                # bus delivers NO fresh tick, so the position would ride the dark naked
+                # (no software stop fires — the loss circuit/stop are quote-dependent —
+                # and RH has no overnight stop order). CONSERVATIVE: at the FIRST onset of
+                # staleness (default onset_ticks=1 = this stale tick, while we still have
+                # the last good book) request a flatten through the operator-flatten
+                # chokepoint so an exit order is submitted/resting at the broker rather
+                # than leaving the position unprotected. The flatten still routes the
+                # normal exit/cancel path (cancel scale-out -> broker-qty clamp -> place ->
+                # confirm -> reconcile) — no oversell, no orphan. Kill-switch flag OFF =>
+                # this entire block is a no-op (legacy: overnight_flatten_on_fresh set but
+                # never read; the documented naked-overnight risk).
+                if (
+                    getattr(settings, "chili_momentum_overnight_dark_flatten_enabled", False)
+                    and not le.get("overnight_dark_flatten_requested")
+                    and not le.get("operator_flatten_requested_utc")
+                ):
+                    try:
+                        _onset = max(1, int(getattr(settings, "chili_momentum_overnight_dark_flatten_onset_ticks", 1) or 1))
+                    except (TypeError, ValueError):
+                        _onset = 1
+                    if _stale_streak >= _onset:
+                        le["overnight_dark_flatten_requested"] = _utcnow().isoformat()
+                        _commit_le(sess, le)
+                        _log.critical(
+                            "[momentum_live] OVERNIGHT DARK-FLATTEN (proactive) symbol=%s "
+                            "session=%s qty=%s stale_streak=%s onset_ticks=%s — flattening at the "
+                            "last good tick (dark bus delivers no fresh tick; naked overnight is "
+                            "not allowed). Routes the operator-flatten chokepoint.",
+                            sess.symbol, sess.id, pos.get("quantity"), _stale_streak, _onset,
+                        )
+                        _emit(db, sess, "overnight_dark_flatten_requested", {
+                            "quantity": pos.get("quantity"),
+                            "stale_streak": _stale_streak,
+                            "onset_ticks": _onset,
+                            "trigger": "proactive_first_onset",
+                        })
     except Exception:
         pass
 
@@ -2801,6 +2890,31 @@ def _register_fresh_quote_tick(db, sess, le: dict) -> None:
         # Persist the resume marker NOW — the halt_resume_dip trigger keys its
         # entry window off it, so it must survive a process restart mid-window
         # (other le mutations ride the next commit; this one is load-bearing).
+        _commit_le(sess, le)
+    # FIX A part (1) — HONOR overnight_flatten_on_fresh (2026-06-25). The dark-bus
+    # detector (_register_stale_quote_tick) SET this flag but it was NEVER READ. On
+    # the FIRST fresh tick after an overnight dark-bus, flatten the position through
+    # the operator-flatten chokepoint (the bus is back, so the exit can fill at the
+    # resume book) rather than re-arming the trade on a book that just went dark
+    # overnight. Belt to the proactive-onset suspenders: if the bus is only briefly
+    # dark and a fresh tick DOES arrive, this closes the still-held position; if the
+    # bus stays fully dark, the proactive onset flatten already requested the exit.
+    # Kill-switch flag OFF => the flag is cleared but no flatten is requested (legacy:
+    # set-but-never-read). Request via the same operator-flatten chokepoint marker.
+    if le.get("overnight_flatten_on_fresh"):
+        le.pop("overnight_flatten_on_fresh", None)
+        if (
+            getattr(settings, "chili_momentum_overnight_dark_flatten_enabled", False)
+            and isinstance(le.get("position"), dict)
+            and float((le.get("position") or {}).get("quantity") or 0) > 0
+            and not le.get("overnight_dark_flatten_requested")
+            and not le.get("operator_flatten_requested_utc")
+        ):
+            le["overnight_dark_flatten_requested"] = _utcnow().isoformat()
+            _emit(db, sess, "overnight_dark_flatten_requested", {
+                "quantity": (le.get("position") or {}).get("quantity"),
+                "trigger": "on_fresh_after_dark",
+            })
         _commit_le(sess, le)
 
 
@@ -3418,6 +3532,33 @@ def tick_live_session(
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state,
                 "operator_flatten": bool(_flatten_done)}
+
+    # ── OVERNIGHT DARK-BUS FLATTEN (2026-06-25, FIX A) ────────────────────
+    # _register_stale_quote_tick (proactive, first stale onset) and
+    # _register_fresh_quote_tick (honoring overnight_flatten_on_fresh) set
+    # overnight_dark_flatten_requested when an OVERNIGHT-held position faces a dark
+    # price-bus. Honor it HERE — quotes bound — through the SAME operator-flatten
+    # chokepoint (cancel scale-out -> broker-qty clamp -> place -> confirm ->
+    # reconcile), so there is no oversell and no orphan. This is what makes overnight
+    # SAFE: the position is never left to ride a dark bus naked (no broker stop
+    # overnight). Flag-gated at the SET sites, so flag OFF => this is unreachable
+    # (byte-identical legacy: flag set but never read). If the flatten cannot complete
+    # this pulse (e.g. still mid-dark), the request flag PERSISTS so it retries every
+    # pulse until the broker confirms flat (FIX B closes the loop on confirmed-zero).
+    if le.get("overnight_dark_flatten_requested") and sess.state in _HELD_LIVE_STATES:
+        _ovn_flat_done = _handle_kill_switch_mid_run(flatten_reason="overnight_pricebus_dark_flatten")
+        _emit(
+            db, sess,
+            "overnight_dark_flatten_executed" if _ovn_flat_done else "overnight_dark_flatten_pending",
+            {},
+        )
+        if _ovn_flat_done:
+            le.pop("overnight_dark_flatten_requested", None)
+            _commit_le(sess, le)
+            _safe_transition(db, sess, STATE_LIVE_EXITED)
+        db.flush()
+        return {"ok": True, "session_id": sess.id, "state": sess.state,
+                "overnight_dark_flatten": bool(_ovn_flat_done)}
 
     if _kill_switch_blocks_live() and sess.state in (
         STATE_LIVE_PENDING_ENTRY,

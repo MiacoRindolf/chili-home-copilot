@@ -3655,6 +3655,31 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_MAX_STALE_SEC"),
         description="Price-bus-dark trigger (seconds): if a position is held overnight and the quote is stale longer than this, emit critical + attempt a flatten at the next fresh tick + arm nothing new. 0 = derive from the halt-stale threshold (chili_momentum_halt_stale_ticks x tick cadence).",
     )
+    # OVERNIGHT DARK-BUS-SAFE FLATTEN (2026-06-25, FIX A — the GATE for overnight ON).
+    # Adversarial finding: overnight_flatten_on_fresh was SET on a dark overnight book
+    # but NEVER READ, and the per-trade loss circuit / stop fire ONLY on a fresh quote
+    # (halt_stale_streak==0). So a fully DARK overnight price-bus (no ticks) left an
+    # overnight position NAKED — no software stop fired and RH has no overnight stop;
+    # a gap-down on resume filled THROUGH any intended stop. This flag turns on the
+    # dark-bus-safe flatten: (1) honor overnight_flatten_on_fresh on the next fresh
+    # tick, AND (2) PROACTIVELY flatten at the FIRST onset of stale/dark on an
+    # overnight-held position (flatten at the last good tick while we still can — a
+    # dark bus delivers NO fresh tick, so on-fresh alone is insufficient). Both route
+    # through the existing operator-flatten chokepoint (cancel/clamp/place/confirm/
+    # reconcile) — no oversell, no orphan. CONSERVATIVE PRINCIPLE: an overnight
+    # position that cannot be protected by a working software-stop is FLATTENED, not
+    # held naked. DEFAULT FALSE = current behavior (flag set, never read; no flatten).
+    chili_momentum_overnight_dark_flatten_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_DARK_FLATTEN_ENABLED"),
+        description="FIX A: flatten an OVERNIGHT-held position on price-bus-dark — proactively at the FIRST stale onset (last good tick) AND on the next fresh tick (honor overnight_flatten_on_fresh) — via the operator-flatten chokepoint. The dark-bus-safe gate for enabling overnight trading. false = legacy (flag set, never read; naked overnight risk).",
+    )
+    chili_momentum_overnight_dark_flatten_onset_ticks: int = Field(
+        default=1,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_DARK_FLATTEN_ONSET_TICKS"),
+        description="FIX A proactive cutoff: stale-tick streak at which an overnight-held position is flattened at the last good tick (1 = first stale onset = most conservative; raise to tolerate brief overnight quote gaps before flattening).",
+    )
     chili_momentum_tradability_cache_sec: int = Field(
         default=3600,
         ge=0,
@@ -5317,6 +5342,24 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BROKER_ZERO_TRUST_CLAMP_ENABLED"),
         description="Trust a successful broker-qty-clamp zero (broker_zero=True) to reconcile to LIVE_EXITED without a second broker read. false = legacy double-read.",
+    )
+    # (A2) BROKER-ZERO CONFIRM-READS (2026-06-25, FIX B — the FCUV bailout phantom).
+    # FCUV sess 8791 sat in live_bailout emitting live_exit_submit_failed +
+    # live_exit_qty_clamped_to_broker(broker_qty=0) 98x in 20min and NEVER reconciled
+    # (the bailout exit loop did not satisfy the confirmed-flat reconcile because the
+    # robinhood_agentic_mcp family fell through the trust-clamp + the second-read
+    # _broker_position_confirms_zero returns False for it). HARD REQUIREMENT: the
+    # broker-zero reconcile must fire ONLY on a CONFIRMED-flat read — broker_zero=True
+    # seen on N CONSECUTIVE exit pulses, NOT a single spurious 0 — so a one-off API
+    # blip can never abandon a real position. The clamp read is per-pulse; this counts
+    # consecutive confirmations (le["broker_zero_confirm_streak"]) and only reconciles
+    # at N. 1 = single confirmed read (legacy trust-clamp behavior); 2 = belt-and-
+    # suspenders (default). The streak resets on any non-zero / failed / None read.
+    chili_momentum_broker_zero_confirm_reads: int = Field(
+        default=2,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BROKER_ZERO_CONFIRM_READS"),
+        description="FIX B: number of CONSECUTIVE successful broker_zero=True clamp reads required before the bailout/exit path reconciles to LIVE_EXITED (guards against a single spurious 0 abandoning a real position). 1 = single confirmed read; 2 = default belt-and-suspenders.",
     )
     # (B) CANCEL-ON-CONFIRM-BLOCK: when confirm_live_arm is BLOCKED after
     # begin_live_arm already created the session in live_arm_pending (a TOCTOU:
