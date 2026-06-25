@@ -205,6 +205,57 @@ def _max_watch_seconds() -> int:
     return max(60, int(getattr(settings, "chili_momentum_auto_arm_max_watch_seconds", 1800)))
 
 
+def _watch_extend_seconds() -> int:
+    """The EXTENDED watch window (>= base) earned by a progressing setup."""
+    return max(
+        _max_watch_seconds(),
+        int(getattr(settings, "chili_momentum_auto_arm_watch_extend_seconds", 600) or 600),
+    )
+
+
+def _watcher_is_building(le: dict, *, base_sec: int) -> bool:
+    """Conservative BUILDING classifier for the adaptive max-watch, off signals ALREADY
+    on the session's ``momentum_live_execution`` snapshot (no new data source):
+
+    - ``watch_break_level`` set  -> a reclaim/break is actually forming (tick-armed).
+    - ``last_mid`` within ``chili_momentum_adaptive_watch_proximity_pct`` of that level
+      -> price is WORKING TOWARD the trigger (about to fire) -> BUILDING -> earn the extend.
+    - far from the level / flat -> DEAD -> reap at the base window.
+
+    No watch_break_level => NOT building (reaps at base) — this matches the legacy binary
+    (only watch_break_level sessions ever earned the extend). CONSERVATIVE no-cut-short
+    guarantee: if the level is set but ``last_mid`` is missing/garbage, we CANNOT prove the
+    name is dead, so we KEEP it (treat as building). Only a level that is set AND a valid
+    last_mid that is provably FAR from it demotes a session to the base window."""
+    if not isinstance(le, dict):
+        return False
+    level = le.get("watch_break_level")
+    if not level:
+        return False  # no forming level -> base window (legacy behavior)
+    try:
+        lvl = float(level)
+    except (TypeError, ValueError):
+        return True  # unparseable level but it was SET -> keep the slot (conservative)
+    if lvl <= 0:
+        return True
+    mid = le.get("last_mid")
+    if mid is None:
+        return True  # level set, no price yet -> never cut a forming setup short
+    try:
+        m = float(mid)
+    except (TypeError, ValueError):
+        return True
+    if m <= 0:
+        return True
+    prox_pct = float(getattr(settings, "chili_momentum_adaptive_watch_proximity_pct", 1.5) or 0.0)
+    if prox_pct <= 0.0:
+        return True  # proximity disabled -> every level-armed watcher keeps the extend
+    # Distance from the break level as a percent of the level. A long below the level by
+    # more than prox_pct is not "about to fire"; within prox_pct (or already above) is.
+    dist_pct = abs(lvl - m) / lvl * 100.0
+    return dist_pct <= prox_pct
+
+
 # Per-symbol PRE-ENTRY REAP cooldown (in-process, scheduler-local). A name reaped
 # here just held the live slot for the full watch window without firing; cooling it
 # down briefly stops it from immediately re-arming and re-occupying the single slot,
@@ -213,10 +264,47 @@ def _max_watch_seconds() -> int:
 _REAP_COOLDOWN: dict[str, datetime] = {}
 
 
+# Per-symbol arm->reap OSCILLATION counter (in-process, scheduler-local). Parallel to
+# _REAP_COOLDOWN: counts how many times a name has looped arm->reap recently so the
+# adaptive cooldown can sit a SERIAL oscillator (RENDER 88x) out progressively longer
+# than a first-time reap. (sym_upper -> (count, last_reap_at)). Same bounded-prune +
+# TTL-decay shape as _REAP_COOLDOWN — a stale entry (no reap within the decay window)
+# is dropped so a name that stopped oscillating starts fresh.
+_REAP_OSCILLATION: dict[str, tuple[int, datetime]] = {}
+
+
+def _reap_cooldown_seconds(sym_u: str, now: datetime) -> float:
+    """The effective post-reap sit-out for ``sym_u`` (UPPER), in seconds.
+
+    Flag OFF (``chili_momentum_adaptive_reap_cooldown_enabled`` false) => the FIXED
+    ``chili_momentum_reap_cooldown_sec`` base, byte-identical to the legacy behavior.
+    Flag ON => base scaled by the per-symbol oscillation count:
+    ``base * (1 + osc_count * step)`` clamped to ``max_mult * base``. A first reap
+    (osc_count 0) is EXACTLY the base; a serial oscillator sits out longer. The
+    oscillation count is read from ``_REAP_OSCILLATION`` (stamped by _write_reap_cooldown).
+    Fail-open: any missing knob falls back to the fixed base (never longer on thin data)."""
+    base = float(getattr(settings, "chili_momentum_reap_cooldown_sec", 300.0) or 0.0)
+    if base <= 0:
+        return base
+    if not bool(getattr(settings, "chili_momentum_adaptive_reap_cooldown_enabled", True)):
+        return base
+    step = float(getattr(settings, "chili_momentum_adaptive_reap_cooldown_step", 1.0) or 0.0)
+    if step <= 0.0:
+        return base
+    entry = _REAP_OSCILLATION.get(sym_u)
+    osc = int(entry[0]) if entry else 0
+    if osc <= 0:
+        return base
+    max_mult = float(getattr(settings, "chili_momentum_adaptive_reap_cooldown_max_mult", 6.0) or 1.0)
+    mult = min(1.0 + osc * step, max(1.0, max_mult))
+    return base * mult
+
+
 def _reap_cooldown_active(sym_u: str, now: datetime) -> bool:
-    """True if ``sym_u`` (upper) was reaped pre-entry within
-    ``chili_momentum_reap_cooldown_sec``. 0 disables (instant kill-switch)."""
-    cd_sec = float(getattr(settings, "chili_momentum_reap_cooldown_sec", 300.0) or 0.0)
+    """True if ``sym_u`` (upper) was reaped pre-entry within its effective cooldown
+    (fixed ``chili_momentum_reap_cooldown_sec`` when the adaptive flag is OFF; the
+    oscillation-scaled window when ON). 0 base disables (instant kill-switch)."""
+    cd_sec = _reap_cooldown_seconds(sym_u, now)
     if cd_sec <= 0:
         return False
     at = _REAP_COOLDOWN.get(sym_u)
@@ -225,16 +313,41 @@ def _reap_cooldown_active(sym_u: str, now: datetime) -> bool:
 
 def _write_reap_cooldown(sym_u: str, now: datetime) -> None:
     """Record a pre-entry reap/displacement of ``sym_u`` (UPPER) so the name sits out
-    ``chili_momentum_reap_cooldown_sec`` before it can re-arm — the oscillation damper.
+    its effective reap cooldown before it can re-arm — the oscillation damper.
     CLASS-AGNOSTIC (2026-06-17): generalized off the old '-USD'-only gate so EQUITIES are
-    damped too (the rank-displacement motivating case, UTSI, is an equity). Bounded prune."""
+    damped too (the rank-displacement motivating case, UTSI, is an equity). Bounded prune.
+
+    ADAPTIVE (2026-06-25): also bumps the per-symbol _REAP_OSCILLATION counter so a serial
+    arm->reap oscillator earns a progressively longer cooldown (see _reap_cooldown_seconds).
+    The counter DECAYS: if the last reap was longer ago than the current effective cooldown,
+    the loop is considered broken and the count resets to 1 (a fresh first reap). Writing the
+    counter unconditionally keeps the flag-OFF cooldown byte-identical — the count is only
+    READ when the adaptive flag is on, so a populated counter never changes OFF behavior."""
     if not sym_u:
         return
+    # Bump the oscillation counter BEFORE stamping the reap time, decaying a stale loop.
+    _prev = _REAP_OSCILLATION.get(sym_u)
+    if _prev is not None:
+        _prev_count, _prev_at = _prev
+        # Decay window = the effective cooldown that WAS in force for the prior count
+        # (so a name that re-loops within its own sit-out keeps climbing; one that waited
+        # out the cooldown and only later re-armed/re-reaped starts the count over).
+        _decay_sec = _reap_cooldown_seconds(sym_u, now)
+        if _decay_sec > 0 and (now - _prev_at).total_seconds() <= _decay_sec:
+            _REAP_OSCILLATION[sym_u] = (int(_prev_count) + 1, now)
+        else:
+            _REAP_OSCILLATION[sym_u] = (1, now)
+    else:
+        _REAP_OSCILLATION[sym_u] = (1, now)
     _REAP_COOLDOWN[sym_u] = now
     if len(_REAP_COOLDOWN) > 500:
         _stale = now - timedelta(hours=1)
         for _k in [k for k, v in _REAP_COOLDOWN.items() if v < _stale]:
             _REAP_COOLDOWN.pop(_k, None)
+    if len(_REAP_OSCILLATION) > 500:
+        _stale_osc = now - timedelta(hours=1)
+        for _k in [k for k, v in _REAP_OSCILLATION.items() if v[1] < _stale_osc]:
+            _REAP_OSCILLATION.pop(_k, None)
 
 
 # Per-symbol ENTRY-REJECTED cooldown (in-process, scheduler-local). A name whose LIVE
@@ -388,13 +501,10 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
     freeing the concurrency slot for a fresher surging candidate — Ross moves on
     when a setup never triggers. Never touches a session that holds a position.
     """
-    cutoff = now - timedelta(seconds=_max_watch_seconds())
-    extend_cutoff = now - timedelta(
-        seconds=max(
-            _max_watch_seconds(),
-            int(getattr(settings, "chili_momentum_auto_arm_watch_extend_seconds", 600) or 600),
-        )
-    )
+    base_sec = _max_watch_seconds()
+    cutoff = now - timedelta(seconds=base_sec)
+    extend_cutoff = now - timedelta(seconds=_watch_extend_seconds())
+    adaptive_watch = bool(getattr(settings, "chili_momentum_adaptive_watch_enabled", True))
     try:
         q = db.query(TradingAutomationSession).filter(
             TradingAutomationSession.mode == "live",
@@ -416,15 +526,31 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
         # (watch_break_level set = a reclaim/break is actually forming) keeps
         # its slot to the extend cutoff; a watch that never produced a level
         # is dead weight at the base cutoff (triggers fire in ~29s median).
+        #
+        # ADAPTIVE (2026-06-25, kill-switch chili_momentum_adaptive_watch_enabled):
+        # flag OFF reproduces the legacy binary EXACTLY — watch_break_level set AND
+        # within the extend cutoff => keep. Flag ON refines "earned the extend" via
+        # _watcher_is_building: a tick-armed watcher whose last_mid is APPROACHING the
+        # break level keeps the slot to the extend cutoff (it is about to fire); one whose
+        # price is provably FAR from the level is DEAD and reaps at the base cutoff.
+        # CONSERVATIVE: missing/garbage signals => building => keep (never cut short).
         try:
             _snap = s.risk_snapshot_json or {}
             _le = _snap.get("momentum_live_execution") if isinstance(_snap, dict) else None
-            if (
-                isinstance(_le, dict)
-                and _le.get("watch_break_level")
-                and s.started_at >= extend_cutoff
-            ):
-                continue
+            if adaptive_watch:
+                if (
+                    isinstance(_le, dict)
+                    and _watcher_is_building(_le, base_sec=base_sec)
+                    and s.started_at >= extend_cutoff
+                ):
+                    continue
+            else:
+                if (
+                    isinstance(_le, dict)
+                    and _le.get("watch_break_level")
+                    and s.started_at >= extend_cutoff
+                ):
+                    continue
         except Exception:
             pass
         try:

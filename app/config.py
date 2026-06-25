@@ -4778,6 +4778,55 @@ class Settings(BaseSettings):
         ge=60,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_WATCH_EXTEND_SECONDS"),
     )
+    # ADAPTIVE MAX-WATCH (2026-06-25, operator "gawin mong adaptive — no magic wall clock"):
+    # the effective watch deadline adapts to whether the watcher is BUILDING a setup or
+    # DEAD, derived from signals ALREADY on the session snapshot (no new data source):
+    # a tick-armed session (watch_break_level set) whose last_mid is APPROACHING the break
+    # level (within proximity_pct, conservatively close) earns the EXTEND window (it is
+    # about to fire — keep the slot); a flat/oscillating watch with no level or price far
+    # from the level reaps at the BASE window (free the slot fast for a fresher mover).
+    # Refines the existing binary (watch_break_level + within extend_cutoff) with a
+    # proximity classifier. CONSERVATIVE: any missing signal -> treat as BUILDING (keep the
+    # slot — never cut a genuinely-building setup short). FLAG OFF => byte-identical to the
+    # current fixed base/extend binary. ONE documented base knob (proximity_pct) + the
+    # existing base/extend windows as the floor/ceiling clamp.
+    chili_momentum_adaptive_watch_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_WATCH_ENABLED"),
+        description="Kill-switch for the adaptive max-watch deadline. OFF => the exact current fixed base/extend binary (byte-identical). ON => a tick-armed watcher whose price is approaching its break level earns the extend window; one far from the level reaps at the base window.",
+    )
+    chili_momentum_adaptive_watch_proximity_pct: float = Field(
+        default=1.5,
+        ge=0.0,
+        le=50.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_WATCH_PROXIMITY_PCT"),
+        description="The ONE base knob: a tick-armed watcher counts as BUILDING (earns the extend window) when last_mid is within this percent of its watch_break_level. Wider => more watchers earn the extend (more conservative, keeps more slots). Tuned so a typical near-break name reproduces ~the current extend behavior.",
+    )
+    # ADAPTIVE REAP-COOLDOWN (2026-06-25): scale the post-reap sit-out by the per-symbol
+    # OSCILLATION COUNT (how many arm->reap loops the name has churned recently). A first
+    # reap = the short base; a serial oscillator (RENDER looped 88x) = a long cooldown,
+    # clamped. cooldown = base * (1 + osc_count * step), capped at max_mult * base. Reuses
+    # the in-process _REAP_COOLDOWN dict pattern (a parallel _REAP_OSCILLATION counter with
+    # the same bounded-prune + TTL decay). FLAG OFF => the exact fixed base (byte-identical).
+    chili_momentum_adaptive_reap_cooldown_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_REAP_COOLDOWN_ENABLED"),
+        description="Kill-switch for the oscillation-scaled reap cooldown. OFF => the fixed chili_momentum_reap_cooldown_sec for every reap (byte-identical). ON => a serial arm->reap oscillator sits out progressively longer (clamped).",
+    )
+    chili_momentum_adaptive_reap_cooldown_step: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_REAP_COOLDOWN_STEP"),
+        description="Per-oscillation multiplier increment: cooldown = base * (1 + osc_count * step). osc_count is the number of recent arm->reap loops for the symbol (0 on the first reap => exactly the base). Higher => serial oscillators are damped harder.",
+    )
+    chili_momentum_adaptive_reap_cooldown_max_mult: float = Field(
+        default=6.0,
+        ge=1.0,
+        le=50.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_REAP_COOLDOWN_MAX_MULT"),
+        description="Hard cap on the oscillation multiplier so a runaway loop can never freeze a name indefinitely: cooldown <= max_mult * base.",
+    )
     # Post-reap cooldown (seconds): after a name is reaped pre-entry (watched the
     # full window without firing), sit it out this long before it can re-arm, so
     # the same non-firing name (RENDER/WLD looped 88x/56x/24h) stops hogging the
