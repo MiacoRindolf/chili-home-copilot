@@ -720,6 +720,25 @@ def run_momentum_neural_tick(
                     from ..market_data import fetch_ohlcv_df as _fetch_daily
 
                     _lb = int(getattr(settings, "chili_momentum_daily_lookback_days", 20) or 20)
+                    # Three SOFT daily-structure tilts fold INTO daily_structure_pct (no
+                    # viability.py change). Each flag-off ⇒ that tilt is byte-identical.
+                    _gap_tilt = bool(getattr(settings, "chili_momentum_gap_geometry_tilt_enabled", True))
+                    _rej_derate = bool(getattr(settings, "chili_momentum_red_rejection_derate_enabled", True))
+                    _blue_ipo = bool(getattr(settings, "chili_momentum_blue_sky_recent_ipo_enabled", True))
+                    # blue-sky needs a long window to know the all-time-high + IPO recency;
+                    # fetch max history only when that tilt is on (else keep the 1y default).
+                    _period = "max" if _blue_ipo else "1y"
+                    # fresh-catalyst override set for (B): a name with FRESH news can blow
+                    # through a previously-defended level, so the red-rejection de-rate is
+                    # suppressed for it. Best-effort / cached; empty ⇒ no override (de-rate
+                    # applies). Only resolved when the de-rate tilt is actually on.
+                    _cat_set: set[str] = set()
+                    if _rej_derate:
+                        try:
+                            from .catalyst import all_catalyst_symbols as _all_cat
+                            _cat_set = {str(s).upper() for s in (_all_cat() or set())}
+                        except Exception:
+                            _cat_set = set()
                     _n_daily = 0
                     for _sym, _sig in _ross_signals.items():
                         if not isinstance(_sig, dict) or "-USD" in str(_sym):
@@ -731,8 +750,17 @@ def run_momentum_neural_tick(
                                 if _v is not None:
                                     _px = float(_v)
                                     break
-                            _ddf = _fetch_daily(_sym, interval="1d", period="1y")
-                            _dctx = compute_daily_context(_ddf, lookback=_lb, price=_px)
+                            # a fresh catalyst can override the red-rejection de-rate (a real
+                            # news squeeze blows through a previously-defended level).
+                            _fresh_cat = bool(_cat_set) and str(_sym).upper() in _cat_set
+                            _ddf = _fetch_daily(_sym, interval="1d", period=_period)
+                            _dctx = compute_daily_context(
+                                _ddf, lookback=_lb, price=_px,
+                                gap_geometry_tilt=_gap_tilt,
+                                red_rejection_derate=_rej_derate,
+                                blue_sky_recent_ipo=_blue_ipo,
+                                fresh_catalyst=_fresh_cat,
+                            )
                             if _dctx.daily_structure_pct is not None:
                                 _sig["daily_structure_pct"] = _dctx.daily_structure_pct
                                 _sig["daily_breaking_major"] = bool(_dctx.breaking_major_level)
@@ -741,6 +769,124 @@ def run_momentum_neural_tick(
                             continue
                     if _n_daily > 0:
                         _weights = ROSS_PILLAR_WEIGHTS_DAILY_CONTEXT
+                except Exception:
+                    pass
+            # FLOAT-ROTATION sustainability TILT (off => byte-identical): Ross SS101 —
+            # cumulative session volume / shares float = how many times today's move has
+            # turned over the tradeable float; the pace projected to EOD shapes a [0,1]
+            # sub-score (>=~5x = ample fuel to sustain; <1x = fades). Stamp
+            # float_rotation_pct onto each EQUITY signal and FOLD the float_rotation pillar
+            # onto the ACTIVE weight-set (composable — score_universe renormalises over the
+            # present pillars). Reuses the float_shares already enriched above + the
+            # cumulative session volume the signal already carries (no new fetch) + the
+            # session-fraction clock. RE-RANK only; never a veto. Equity-only (crypto float
+            # = market-cap / 24h semantics differ). Flag default-ON ("no dark flags").
+            if bool(getattr(settings, "chili_momentum_float_rotation_tilt_enabled", True)):
+                try:
+                    from .ross_momentum import (
+                        ROSS_FLOAT_ROTATION_PILLAR_WEIGHT,
+                        float_rotation_signal as _float_rotation_signal,
+                    )
+                    from .market_profile import minutes_since_regular_open as _mins_open
+
+                    _n_fr = 0
+                    for _sym, _sig in _ross_signals.items():
+                        if not isinstance(_sig, dict) or str(_sym).upper().endswith("-USD"):
+                            continue  # equities only
+                        try:
+                            _cum_vol = None
+                            for _vk in ("volume", "day_volume", "today_volume",
+                                        "cumulative_volume", "session_volume"):
+                                _vv = _sig.get(_vk)
+                                if _vv is not None:
+                                    try:
+                                        _cum_vol = float(_vv)
+                                        break
+                                    except (TypeError, ValueError):
+                                        continue
+                            _flt = _sig.get("float_shares")
+                            if _cum_vol is None or _flt is None:
+                                continue  # fail-open: omit the pillar for this name
+                            # session fraction: regular session is 390 min (09:30-16:00 ET).
+                            _mo = _mins_open(_sym)
+                            _sf = (max(0.0, float(_mo)) / 390.0) if _mo is not None else None
+                            _fr = _float_rotation_signal(_cum_vol, _flt, _sf)
+                            if _fr.rotation_pct is not None:
+                                _sig["float_rotation_pct"] = _fr.rotation_pct
+                                _sig["float_rotation"] = _fr.float_rotation
+                                _sig["projected_rotation_at_eod"] = _fr.projected_rotation_at_eod
+                                _n_fr += 1
+                        except Exception:
+                            continue
+                    if _n_fr > 0:
+                        # FOLD the pillar onto the active weight-set without replacing it
+                        # (score_universe self-renormalises over present pillars).
+                        _weights = dict(_weights)
+                        _weights["float_rotation"] = ROSS_FLOAT_ROTATION_PILLAR_WEIGHT
+                except Exception:
+                    pass
+            # SQUEEZE-FUEL TILT (off => byte-identical): Ross SS101 #2 — a heavily-shorted,
+            # hard/expensive-to-borrow float = trapped sellers covering INTO the pop (the
+            # rocket fuel behind the 100-1000% low-float verticals); free shares / easy-to-
+            # borrow names get a small DE-RATE (shorts press the pop). CREDIT-FRUGAL: the
+            # Ortex fetch is gated to the TOP-N explosive low-float candidates that already
+            # pass the Ross screen (ranked by the CURRENT weight-set, NOT-below-floor), so the
+            # Trader plan (1,000 credits/mo, 1 req/s) lasts; each result is cached 12h. Stamp
+            # squeeze_fuel_pct onto those EQUITY signals + FOLD the squeeze_fuel pillar onto the
+            # ACTIVE weight-set (composable). RE-RANK only; never a veto. Equity-only (crypto has
+            # no borrow data). Flag default-ON ("no dark flags").
+            if bool(getattr(settings, "chili_momentum_squeeze_fuel_tilt_enabled", True)):
+                try:
+                    from .ross_momentum import (
+                        ROSS_SQUEEZE_FUEL_PILLAR_WEIGHT,
+                        below_explosive_floor as _sf_below_floor,
+                        score_universe as _sf_prelim_rank,
+                        squeeze_fuel_signal as _squeeze_fuel_signal,
+                    )
+                    from .short_mechanics import get_short_mechanics as _get_short_mech
+
+                    _top_n = int(getattr(settings, "chili_momentum_squeeze_fuel_top_n", 12) or 0)
+                    if _top_n > 0:
+                        # Preliminary rank with the CURRENT weights to pick the top-N explosive
+                        # low-float EQUITY candidates that ALSO clear the explosive floor — the
+                        # only names worth a credit. Crypto / below-floor names are excluded.
+                        _prelim = _sf_prelim_rank(_ross_signals, weights=_weights)
+                        _cands = [
+                            s for s in _ross_signals
+                            if isinstance(_ross_signals.get(s), dict)
+                            and not str(s).upper().endswith("-USD")
+                            and not _sf_below_floor(_ross_signals[s])
+                        ]
+                        _cands.sort(
+                            key=lambda s: (_prelim[s].score if s in _prelim else 0.0),
+                            reverse=True,
+                        )
+                        _n_sf = 0
+                        for _sym in _cands[:_top_n]:
+                            _sig = _ross_signals.get(_sym)
+                            if not isinstance(_sig, dict):
+                                continue
+                            try:
+                                _mech = _get_short_mech(_sym)
+                                if not _mech:
+                                    continue  # fail-open: no data => omit the pillar for this name
+                                _sf = _squeeze_fuel_signal(
+                                    _mech.get("short_interest_pct"),
+                                    _mech.get("cost_to_borrow"),
+                                    utilization=_mech.get("utilization"),
+                                    is_easy_to_borrow=_mech.get("is_easy_to_borrow"),
+                                )
+                                if _sf.squeeze_pct is not None:
+                                    _sig["squeeze_fuel_pct"] = _sf.squeeze_pct
+                                    _sig["short_interest_pct"] = _sf.short_interest_pct
+                                    _sig["cost_to_borrow"] = _sf.cost_to_borrow
+                                    _sig["is_easy_to_borrow"] = _sf.is_easy_to_borrow
+                                    _n_sf += 1
+                            except Exception:
+                                continue
+                        if _n_sf > 0:
+                            _weights = dict(_weights)
+                            _weights["squeeze_fuel"] = ROSS_SQUEEZE_FUEL_PILLAR_WEIGHT
                 except Exception:
                     pass
             meta["ross_scores"] = {
@@ -802,6 +948,36 @@ def run_momentum_neural_tick(
             _peers = sympathy_peer_symbols(_movers, {su: get_ticker_sector(su) for su in _movers})
             if _peers:
                 meta["sympathy_symbols"] = sorted(_peers)
+        except Exception:
+            pass
+
+        # E7: THEME / SYMPATHY detector (the 1000%-mover lever). Complements the SIC-sector
+        # sympathy above with a SHARED-CATALYST-KEYWORD axis: when a LEADER squeezes on a
+        # catalyst, OTHER names whose fresh headlines share the same keyword run too
+        # (STI -> ASTC; a "SpaceX synergies" headline lifting every space name). Cluster the
+        # batch's equity movers by a salient keyword shared across their fresh headlines; if
+        # the cluster has a genuine leader + >= min_cluster members, forward the non-leader
+        # peers so viability applies a small additive boost. Flag OFF / no fresh news / no
+        # cluster -> no key written -> byte-identical. Equity-only; fail-open. (theme_detector.py)
+        try:
+            if bool(getattr(settings, "chili_momentum_theme_sympathy_enabled", True)):
+                from ...massive_client import get_recent_news_items
+                from .ross_momentum import _extract_pillars as _ep_theme
+                from .theme_detector import theme_sympathy_symbols
+
+                _tmovers: dict[str, float] = {}
+                for s, sig in _ross_signals.items():
+                    su = str(s).upper()
+                    if su.endswith("-USD") or not isinstance(sig, dict):
+                        continue
+                    _, _mom_t, _, _ = _ep_theme(sig)
+                    if _mom_t is not None:
+                        _tmovers[su] = float(_mom_t)
+                if _tmovers:
+                    _news = get_recent_news_items()
+                    _tpeers = theme_sympathy_symbols(_tmovers, _news)
+                    if _tpeers:
+                        meta["theme_sympathy_symbols"] = sorted(_tpeers)
         except Exception:
             pass
 
@@ -887,14 +1063,120 @@ def run_momentum_neural_tick(
     except Exception:
         pass
 
-    # Gap #12: WEAK-catalyst de-boost set (dilution/compliance/legal headlines Ross
-    # distrusts). Computed once per pass like catalyst_symbols; JSON-safe sorted list.
+    # E2: STRONG-catalyst boost set (FDA/trial/partnership/contract/M&A/beat headlines Ross
+    # FAVORS). Same once-per-pass best-effort fetch as the weak set; JSON-safe sorted list.
+    # Empty / absent feed -> no-op. docs/STRATEGY/CC_REPORTS/2026-06-24_ross-course-study.md
+    # (Computed BEFORE the weak set: the reverse-split-squeeze refinement below needs the
+    # strong set as the "fresh REAL news" confirmation.)
+    _strong: set[str] = set()
+    try:
+        from .catalyst import strong_catalyst_symbols
+
+        _strong = strong_catalyst_symbols()
+    except Exception:
+        _strong = set()
+
+    # SIGN-REFINEMENT context for the two catalyst sign-corrections (Ross SS101 reverse-split
+    # squeeze + private-placement-at/above-market). All equity-only, all best-effort + fail-open:
+    #   * recent reverse splits (Polygon corp-action feed, via edgar)  -> SS101 recency gate
+    #   * post-split float (Polygon share count, cached per process)    -> adaptive low-float cut
+    #   * live last prices (snapshot batch)                             -> PP price-vs-market sign
+    # When any feed is absent the refinement no-ops and the weak set stays the bare keyword
+    # classification (byte-identical). Bounded to the equity movers so the crypto-only lane
+    # does zero extra work. The whole block is best-effort; a miss never strips the weak set.
+    _eq_movers = [
+        str(s).upper()
+        for s, sig in (meta.get("ross_signals") or {}).items()
+        if isinstance(sig, dict) and not str(s).upper().endswith("-USD")
+    ]
+    _recent_splits: set[str] = set()
+    _floats: dict[str, float] = {}
+    _last_prices: dict[str, float] = {}
+    _pp_bullish: set[str] = set()
+    _rs_flag = bool(getattr(settings, "chili_momentum_reverse_split_recency_enabled", True))
+    _pp_flag = bool(getattr(settings, "chili_momentum_private_placement_sign_enabled", True))
+    if _eq_movers and _rs_flag:
+        try:
+            from .edgar import recent_reverse_split_symbols
+
+            _rs_days = int(getattr(settings, "chili_momentum_reverse_split_recency_days", 30))
+            _recent_splits = recent_reverse_split_symbols(_eq_movers, max_age_days=_rs_days)
+        except Exception:
+            _recent_splits = set()
+        try:
+            from ...massive_client import get_ticker_float
+
+            for _s in _recent_splits:  # float only for the few recent-split names (cheap, cached)
+                _fv = get_ticker_float(_s)
+                if _fv:
+                    _floats[_s] = float(_fv)
+        except Exception:
+            _floats = {}
+    if _eq_movers and _pp_flag:
+        try:
+            from ...massive_client import get_quotes_batch
+            from .catalyst import private_placement_at_or_above_market_symbols
+
+            _q = get_quotes_batch(_eq_movers) or {}
+            for _k, _v in _q.items():
+                try:
+                    _lp = (_v or {}).get("last_price")
+                    if _lp:
+                        _last_prices[str(_k).upper()] = float(_lp)
+                except (TypeError, ValueError):
+                    continue
+            _pp_bullish = private_placement_at_or_above_market_symbols(last_prices=_last_prices)
+        except Exception:
+            _pp_bullish = set()
+
+    # Gap #12: WEAK-catalyst de-boost set (dilution/compliance/legal headlines Ross distrusts),
+    # now SIGN-REFINED: a recent reverse split with fresh REAL news + low post-split float (SS101
+    # squeeze) and an at/above-market private placement are REMOVED from the de-boost. Any
+    # context absent / flag OFF -> bare keyword classification (byte-identical). JSON-safe list.
     try:
         from .catalyst import weak_catalyst_symbols
 
-        _weak = weak_catalyst_symbols()
+        _weak = weak_catalyst_symbols(
+            recent_split_symbols=_recent_splits or None,
+            floats=_floats or None,
+            strong_news_symbols=_strong or None,
+            private_placement_at_or_above_market=_pp_bullish or None,
+        )
         if _weak:
             meta["weak_catalyst_symbols"] = sorted(_weak)
+    except Exception:
+        pass
+
+    # SS101 low-float-squeeze BOOST: the recent-reverse-split names that EARNED the de-boost
+    # exemption are folded into the STRONG set so the EXISTING catalyst grade delta carries the
+    # boost (viability needs no change). Empty / flag OFF / context absent -> no addition
+    # (byte-identical). Equity-only; fail-open.
+    try:
+        if _rs_flag and _recent_splits and _strong:
+            from .catalyst import recent_reverse_split_squeeze_symbols
+
+            _squeeze = recent_reverse_split_squeeze_symbols(
+                recent_split_symbols=_recent_splits or None,
+                floats=_floats or None,
+                strong_news_symbols=_strong or None,
+            )
+            if _squeeze:
+                _strong = set(_strong) | _squeeze
+    except Exception:
+        pass
+
+    if _strong:
+        meta["strong_catalyst_symbols"] = sorted(_strong)
+
+    # FAKE-catalyst credibility set (Ross AS101/HVM101): UNVERIFIED / hacked-PR / unsolicited-
+    # buyout / rumor / pump headlines Ross DISTRUSTS (they round-trip fully). Same once-per-pass
+    # best-effort fetch; JSON-safe sorted list. Empty / absent feed / flag OFF -> no-op.
+    try:
+        from .catalyst import fake_catalyst_symbols
+
+        _fake = fake_catalyst_symbols()
+        if _fake:
+            meta["fake_catalyst_symbols"] = sorted(_fake)
     except Exception:
         pass
 
@@ -916,7 +1198,10 @@ def run_momentum_neural_tick(
             "ross_below_floor",
             "catalyst_symbols",
             "weak_catalyst_symbols",
+            "strong_catalyst_symbols",
+            "fake_catalyst_symbols",
             "sympathy_symbols",
+            "theme_sympathy_symbols",
             "top_market_gainers",
             "dilution_symbols",
             "close_strength_priors",

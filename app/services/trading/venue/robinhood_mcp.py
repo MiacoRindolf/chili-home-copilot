@@ -919,6 +919,55 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
             logger.warning("[rh_mcp_adapter] get_agentic_open_positions failed: %s", exc)
             return []
 
+    def get_position_quantity(self, product_id: str) -> Optional[float]:
+        """TOTAL shares the AGENTIC account holds for *product_id*, per RH truth.
+
+        This is the agentic twin of ``broker_service.get_open_position_quantity``
+        (used by ``robinhood_spot``) and shares its fail-safe contract so the exit
+        BROKER-QTY CLAMP in ``live_runner`` fires for the agentic family too:
+
+          * ``None``  = unknown (no account / API error / re-auth) — caller MUST
+            fail SAFE and never treat unknown as flat (the clamp leaves the
+            requested quantity unchanged).
+          * ``0.0``   = a SUCCESSFUL fetch confirming this symbol is absent from the
+            agentic book (confirmed flat → the clamp reconciles the session to
+            exited via ``broker_zero`` instead of stranding a phantom sell).
+          * ``> 0``   = the real held quantity; if it is LESS than the requested
+            exit quantity the clamp sells only what the broker holds, killing the
+            "Not enough shares to sell" → 8-retry → live_error → naked-long storm
+            (e.g. PLSM 2026-06-24 agentic sessions 8613/8616).
+
+        Reuses the proven ``get_agentic_open_positions()`` read + the same position
+        dict field keys as ``rh_agentic_orphan_sweep`` (symbol via
+        symbol/ticker/instrument_symbol, qty via quantity/shares/position/size).
+        One position read per exit attempt — exits are infrequent, so this does not
+        hammer the rate-limited agentic MCP.
+        """
+        want = _to_ticker(product_id)
+        if not want:
+            return None
+        try:
+            positions = self.get_agentic_open_positions()
+        except Exception as exc:  # noqa: BLE001 — fail SAFE: unknown, not flat
+            logger.warning("[rh_mcp_adapter] get_position_quantity(%s) read failed: %s", want, exc)
+            return None
+        if positions is None:
+            return None
+        try:
+            for pos in positions:
+                if not isinstance(pos, dict):
+                    continue
+                sym = str(_pick(pos, ("symbol", "ticker", "instrument_symbol")) or "").strip().upper()
+                if sym != want:
+                    continue
+                qty = _sf(_pick(pos, ("quantity", "shares", "position", "size")))
+                return abs(qty) if qty is not None else 0.0
+            # Successful fetch, symbol absent from the agentic book -> confirmed flat.
+            return 0.0
+        except Exception as exc:  # noqa: BLE001 — fail SAFE
+            logger.warning("[rh_mcp_adapter] get_position_quantity(%s) parse failed: %s", want, exc)
+            return None
+
     def get_agentic_open_orders(self, *, symbol: Optional[str] = None) -> list[dict]:
         """Raw open orders for the pinned agentic account, filtered to agent-placed.
 

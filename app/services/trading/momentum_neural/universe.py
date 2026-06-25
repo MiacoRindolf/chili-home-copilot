@@ -179,6 +179,151 @@ def _premarket_change_pct(s: dict) -> float | None:
     return (price - base) / base * 100.0
 
 
+def _snapshot_adv_shares(s: dict) -> float | None:
+    """Average-daily-VOLUME proxy (in SHARES) from the snapshot — the causal
+    low-ADV "no-market-maker" edge (AS101): EXTREME relative volume only happens
+    when the name's baseline turnover is small enough that HFT market-makers are
+    absent. CHILI already floors TODAY's $-volume (tradability) but never looks at
+    the BASELINE average — a mega-cap printing +10% on huge ADV is a crowded,
+    market-made tape, not the retail edge.
+
+    The full-market snapshot carries no multi-day average, so the cleanest proxy
+    is ``prevDay.v`` (yesterday's session share volume — a stable, lookahead-free,
+    settled prior-day baseline; today's still-accumulating volume is NOT the
+    average and would be circular with the move). Fail-OPEN: no usable prevDay
+    volume ⇒ ``None`` ⇒ the name is NOT penalized (never block/demote on missing
+    data).
+    """
+    prev = s.get("prevDay") or {}
+    v = _f(prev.get("v"))
+    return v if (v is not None and v > 0) else None
+
+
+def _percentile(sorted_vals: list[float], q: float) -> float | None:
+    """Linear-interpolated ``q``-percentile (0..1) of an ASCENDING list. Returns
+    ``None`` on an empty list so callers can fail-open."""
+    n = len(sorted_vals)
+    if n == 0:
+        return None
+    if n == 1:
+        return sorted_vals[0]
+    pos = max(0.0, min(1.0, q)) * (n - 1)
+    lo = int(math.floor(pos))
+    hi = min(lo + 1, n - 1)
+    frac = pos - lo
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * frac
+
+
+# ADV-ceiling discount FLOOR (AS101 latent-risk defuse): the soft discount must be a
+# TIE-BREAKER, not a re-orderer — clamp every weight at/above this floor so the penalty
+# can only nudge near-equal names, never demote a strong mover beneath a weaker one.
+# 0.7 == at most a -30% rank haircut. Single documented base; everything else adaptive.
+_ADV_WEIGHT_FLOOR = 0.7
+# A genuinely FRESH front-side mover (high position-in-day-range AND a large day-change
+# = a clean day-2 breakout still pinned near its high) is EXEMPT from the ADV penalty:
+# its liveness, not its baseline turnover, is what matters. Both gates are within-batch
+# adaptive percentiles. Fail-open: absent pos/chg ⇒ no exemption (prior weight stands).
+_FRESH_MOVER_POS_PCTL = 0.70
+_FRESH_MOVER_CHANGE_PCTL = 0.70
+
+
+def _adv_ceiling_multipliers(
+    advs: list[float | None],
+    *,
+    poss: list[float | None] | None = None,
+    chgs: list[float | None] | None = None,
+) -> list[float] | None:
+    """ADV-CEILING soft re-rank weights (AS101), one per row, in input order.
+
+    Returns ``None`` to signal "leave the rank untouched" (flag off / degenerate
+    data) — the caller then applies NO change, byte-identical to today. Otherwise
+    each weight is in ``[_ADV_WEIGHT_FLOOR, 1]``: ``1.0`` for names at/under the
+    ceiling (the low-ADV edge we WANT) and a smooth, FLOORED sub-1 discount that
+    grows with how far a name's ADV sits ABOVE the ceiling. It is a SOFT
+    TIE-BREAKER discount, never a hard drop and never a re-orderer — a high-ADV
+    name can still make the pool if nothing better exists (no lane starvation).
+
+    The ceiling is ADAPTIVE and basis-independent: ``max(documented Ross 10M-share
+    reference floor, batch ADV high-percentile)``. So in a normal small-cap batch
+    the Ross floor governs; in a batch that is ALL liquid (rare), the percentile
+    lifts the ceiling so the lane isn't starved by penalizing everyone. No
+    scattered magic numbers — the 10M base is the single documented config value
+    and everything else derives from the batch.
+
+    LATENT-RISK DEFUSE (two additive guards, both adaptive, both fail-open):
+      * FLOOR — every discount is clamped at ``_ADV_WEIGHT_FLOOR`` so the penalty
+        is bounded (≤ -30%); it can break a near-tie toward the lower-ADV edge but
+        can never re-order a clearly-stronger mover below a weaker one.
+      * FRESH-MOVER EXEMPT — when ``poss``/``chgs`` are supplied (parallel to
+        ``advs``), a name in BOTH the upper tail of position-in-day-range AND the
+        upper tail of day-change is a clean front-side day-2 breakout; its ADV
+        weight is reset to ``1.0`` (no penalty) because its liveness, not its
+        baseline turnover, governs. Absent that data the exemption is skipped
+        (prior floored weight stands — byte-identical to the no-arg call).
+    """
+    try:
+        from ....config import settings as _s
+
+        if not bool(getattr(_s, "chili_momentum_adv_ceiling_enabled", True)):
+            return None
+        ref_floor = float(getattr(_s, "chili_momentum_adv_ceiling_ref_shares", 10_000_000.0))
+    except Exception:
+        # Fail-open: any config error ⇒ no re-rank (byte-identical to today).
+        return None
+    if not (ref_floor > 0):
+        return None
+
+    known = sorted(v for v in advs if v is not None and v > 0)
+    if not known:
+        return None  # no ADV data anywhere ⇒ nothing to bias, leave untouched
+
+    # Adaptive ceiling: the documented Ross floor OR the batch's upper-mid ADV,
+    # whichever is HIGHER (don't penalize an entire already-liquid batch into
+    # starvation). The 75th percentile is a batch-relative reference, not a
+    # tuned cap — it only lifts the ceiling when the batch itself runs liquid.
+    pct = _percentile(known, 0.75) or ref_floor
+    ceiling = max(ref_floor, pct)
+    if not (ceiling > 0):
+        return None
+
+    # Adaptive fresh-mover bars (within-batch percentiles). Computed once; None when
+    # the dimension is absent/degenerate so the exemption simply doesn't engage.
+    pos_bar: float | None = None
+    chg_bar: float | None = None
+    if poss is not None and chgs is not None and len(poss) == len(advs) and len(chgs) == len(advs):
+        known_pos = sorted(p for p in poss if p is not None)
+        known_chg = sorted(c for c in chgs if c is not None)
+        if len(known_pos) >= 4:
+            pos_bar = _percentile(known_pos, _FRESH_MOVER_POS_PCTL)
+        if len(known_chg) >= 4:
+            chg_bar = _percentile(known_chg, _FRESH_MOVER_CHANGE_PCTL)
+
+    weights: list[float] = []
+    for i, v in enumerate(advs):
+        if v is None or v <= 0:
+            weights.append(1.0)  # fail-open: unknown ADV is never penalized
+            continue
+        if v <= ceiling:
+            weights.append(1.0)  # at/under the edge we want — full weight
+            continue
+        # SOFT discount that grows with the OVER-ceiling multiple. log keeps it
+        # gentle (a 2x-ADV name is nudged, a 50x mega-cap is heavily demoted) and
+        # the FLOOR bounds it so a strong mover is never re-ordered below a weaker
+        # one — the penalty is a tie-breaker, not a re-rank. excess in (0, inf).
+        over = v / ceiling
+        w = max(_ADV_WEIGHT_FLOOR, 1.0 / (1.0 + math.log(over)))
+
+        # FRESH-MOVER EXEMPTION: a clean front-side day-2 breakout (near its high
+        # of day AND a big move) is exempt — liveness governs, not baseline ADV.
+        if pos_bar is not None and chg_bar is not None:
+            p = poss[i] if poss is not None else None
+            c = chgs[i] if chgs is not None else None
+            if p is not None and c is not None and p >= pos_bar and c >= chg_bar:
+                w = 1.0
+        weights.append(w)
+    return weights
+
+
 def build_equity_universe(
     profile: UniverseProfile = EQUITY_ROSS_SMALLCAP,
     *,
@@ -216,6 +361,7 @@ def build_equity_universe(
             return []
 
     rows: list[tuple[str, float, float, float]] = []  # (ticker, rank_score, chg_pct, pos_in_range)
+    advs: list[float | None] = []  # parallel ADV-shares proxy per row (prevDay.v); None = unknown
     for s in snapshot or []:
         try:
             if not isinstance(s, dict):
@@ -266,8 +412,24 @@ def build_equity_universe(
             pos = _pos_in_range(s, price)
             rank_score = pos * math.log1p(max(0.0, chg))
             rows.append((ticker, rank_score, chg, pos))
+            advs.append(_snapshot_adv_shares(s))
         except Exception:
             continue
+
+    # ADV-CEILING soft re-rank (AS101): low AVERAGE-daily-volume is the causal
+    # mechanism for the no-market-maker edge, so SOFT-discount high-ADV names in
+    # the rank (never hard-drop — avoid lane starvation). Returns None when the
+    # kill-switch is off or ADV data is degenerate ⇒ rank untouched, byte-identical.
+    _adv_w = _adv_ceiling_multipliers(
+        advs,
+        poss=[r[3] for r in rows],  # pos_in_range, parallel to advs
+        chgs=[r[2] for r in rows],  # chg_pct, parallel to advs
+    )
+    if _adv_w is not None and len(_adv_w) == len(rows):
+        rows = [
+            (t, rs * w, chg, pos)
+            for (t, rs, chg, pos), w in zip(rows, _adv_w)
+        ]
 
     # Freshest, strongest-WORKING movers first (rank_score = freshness × move).
     # No fixed RVOL cut — the percentile ranking in score_universe (RVOL +

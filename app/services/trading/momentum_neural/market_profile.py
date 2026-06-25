@@ -198,6 +198,26 @@ def market_open_now(symbol: str | None, *, now: datetime | None = None) -> bool:
     return market_session_now(symbol, now=now) == "regular"
 
 
+def minutes_since_regular_open(symbol: str | None, *, now: datetime | None = None) -> float | None:
+    """Signed minutes since the 09:30 ET regular open for an EQUITY symbol on a
+    weekday, else ``None``. Negative before the open (premarket), positive after.
+
+    The opening-bell-suppression edge (HVM101) reads this so the "first ~N minutes
+    after the open" window is one DST-correct clock fact (reusing ``_REGULAR_OPEN_MIN``
+    + ``_NY_TZ``), never a scattered magic time. Crypto / weekend / non-equity →
+    ``None`` so the caller fails OPEN (no suppression)."""
+    if asset_class_for_symbol(symbol) == "crypto":
+        return None
+    ref = now or datetime.now(timezone.utc)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    local = ref.astimezone(_NY_TZ)
+    if local.weekday() >= 5:
+        return None
+    mod = local.hour * 60 + local.minute + local.second / 60.0
+    return float(mod - _REGULAR_OPEN_MIN)
+
+
 def is_tradeable_now(symbol: str | None, *, now: datetime | None = None) -> bool:
     """True whenever the symbol can be traded NOW — regular OR extended hours for
     equities (crypto always). This is the gate the auto-arm + live entry use so the

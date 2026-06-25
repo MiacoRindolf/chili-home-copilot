@@ -411,13 +411,23 @@ def load_training_rows(db, *, replay_path: str = "/app/data/_disc_dataset.json")
     try:
         from app.models.trading import MomentumAutomationOutcome as _MAO
 
+        # Broker-truth label switch (flag OFF => byte-identical legacy return_bps).
+        from .outcome_reconcile import authoritative_label_for_outcome
+
         eq = ["robinhood_spot", "alpaca_spot", "robinhood_agentic_mcp"]
         q = db.query(_MAO).filter(_MAO.execution_family.in_(eq), _MAO.return_bps.isnot(None))
         for o in q.limit(20000):
             ers = o.entry_regime_snapshot_json
             if isinstance(ers, dict) and isinstance(ers.get("features"), dict) and ers["features"]:
+                # Read the authoritative label. Flag-ON: reconciled rows use the
+                # broker-true return_bps; unreconciled rows return rb=None and are
+                # SKIPPED (never trained as a fabricated $0/loss). Flag-OFF: rb is
+                # the legacy o.return_bps unchanged.
+                _pnl, _rb, _win, _is_rec = authoritative_label_for_outcome(o)
+                if not _is_rec or _rb is None:
+                    continue
                 row = {
-                    "return_bps": float(o.return_bps), "features": ers["features"],
+                    "return_bps": float(_rb), "features": ers["features"],
                     "day": (str(o.terminal_at)[:10] if o.terminal_at else ""), "sym": o.symbol,
                 }
                 _emit = ers.get("meta_label_emit")

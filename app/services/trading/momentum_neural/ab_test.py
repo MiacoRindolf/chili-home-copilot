@@ -20,12 +20,20 @@ def compare_peer_variants(
     days: int = 30,
 ) -> dict[str, Any]:
     """Compare mean return_bps over recent terminal outcomes per variant (paper+live)."""
+    # Broker-truth label switch (mig309). Flag-OFF: the accessor returns the legacy
+    # return_bps (is_reconciled=True) so each slice is byte-identical to the prior
+    # column projection. Flag-ON: reconciled-live rows use the broker-true return_bps and
+    # unreconciled rows (incl. all paper) are dropped — the A/B winner is decided only on
+    # broker-true labels. Full ORM rows are loaded because the accessor reads the
+    # broker_* columns. Mirrors the meta_label/risk_evaluator routing pattern.
+    from .outcome_reconcile import authoritative_label_for_outcome
+
     since = datetime.utcnow() - timedelta(days=max(1, min(int(days), 365)))
     lim = max(int(min_sessions), 5)
 
     def _slice(vid: int) -> list[float]:
         rows = (
-            db.query(MomentumAutomationOutcome.return_bps)
+            db.query(MomentumAutomationOutcome)
             .filter(
                 MomentumAutomationOutcome.variant_id == int(vid),
                 MomentumAutomationOutcome.created_at >= since,
@@ -35,7 +43,13 @@ def compare_peer_variants(
             .limit(lim)
             .all()
         )
-        return [float(r[0]) for r in rows]
+        vals: list[float] = []
+        for o in rows:
+            _pnl, rb, _win, is_rec = authoritative_label_for_outcome(o)
+            if not is_rec or rb is None:
+                continue
+            vals.append(float(rb))
+        return vals
 
     a = _slice(variant_a_id)
     b = _slice(variant_b_id)

@@ -1749,6 +1749,45 @@ def get_ticker_float(ticker: str) -> float | None:
     return val
 
 
+def get_recent_reverse_split_dates(*, max_age_days: int = 30, limit: int = 1000) -> dict[str, str]:
+    """``{ticker: execution_date}`` for REVERSE stock splits executed within ``max_age_days``
+    (Polygon ``/v3/reference/splits``). A reverse split is ``split_to < split_from`` (e.g.
+    1-for-10 -> to=1, from=10); a forward split (2-for-1) is excluded. Ross's SS101 low-float
+    squeeze targets a RECENT reverse split (the share count just collapsed). Cached briefly;
+    fail-open to ``{}`` when the plan lacks the splits endpoint, so the corp-action refinement
+    stays a no-op rather than an error. docs/DESIGN/MOMENTUM_LANE.md"""
+    cache_key = f"massive:reverse_splits:{int(max_age_days)}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    from datetime import date, timedelta
+
+    cutoff = (date.today() - timedelta(days=max(1, int(max_age_days)))).isoformat()
+    url = f"{_base()}/v3/reference/splits"
+    data = _get(url, {
+        "execution_date.gte": cutoff,
+        "order": "desc", "sort": "execution_date", "limit": str(int(limit)),
+    })
+    out: dict[str, str] = {}
+    if data is _NOT_FOUND or not data:
+        _cache_set(cache_key, out)
+        return out
+    for row in (data.get("results") or []):
+        try:
+            tk = str(row.get("ticker") or "").upper().strip()
+            sto = float(row.get("split_to") or 0.0)
+            sfrom = float(row.get("split_from") or 0.0)
+            xdate = str(row.get("execution_date") or "")
+        except (TypeError, ValueError):
+            continue
+        if not tk or sto <= 0 or sfrom <= 0 or xdate < cutoff:
+            continue
+        if sto < sfrom and tk not in out:  # reverse split, keep the freshest (sort desc)
+            out[tk] = xdate
+    _cache_set(cache_key, out)
+    return out
+
+
 def get_theme_news_tickers(keywords: list[str], *, limit: int = 200, max_age_min: int = 240) -> list[str]:
     """Tickers whose FRESH headline matches the active EVENT THEME keywords.
 

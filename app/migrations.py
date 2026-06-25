@@ -20872,6 +20872,55 @@ def _migration_308_momentum_fill_outcomes(conn) -> None:
     )
 
 
+def _migration_309_momentum_broker_truth_label(conn) -> None:
+    """Broker-truth reconciliation: a SEPARATE authoritative label on
+    momentum_automation_outcomes (the legacy realized_pnl_usd/return_bps are
+    LEFT UNTOUCHED so lane-self-report-vs-broker-truth divergence stays
+    permanently auditable).
+
+    The reconcile pass (outcome_reconcile.py) matches a CLOSED momentum session
+    to its broker fills (ledger settled → ledger broker_confirmed → single
+    trading_trades row), computes the BROKER-true realized PnL AND a broker-true
+    return_bps (broker_pnl / broker-true entry notional — never the contaminated
+    session self-report notional), and stamps a status + divergence audit here.
+    NEVER fabricates: any session that cannot be matched with confidence lands a
+    non-`reconciled` status and is EXCLUDED from learning (the accessor returns
+    is_reconciled=False), never a $0 label.
+
+    All ADD COLUMN IF NOT EXISTS — additive + idempotent. No backfill here; the
+    reconcile pass writes these columns and is gated by
+    chili_momentum_broker_truth_reconciliation_enabled.
+    """
+    cols = (
+        # status: reconciled | fee_unconfirmed | unreconciled_no_fills |
+        #         unreconciled_pyramid_leg_gap | unreconciled_residual_open |
+        #         unreconciled_ambiguous_trade | unreconciled_no_match |
+        #         unreconciled_broker_unavailable | phantom_no_broker_match
+        "broker_recon_status VARCHAR(40)",
+        "broker_realized_pnl_usd DOUBLE PRECISION",
+        "broker_return_bps DOUBLE PRECISION",
+        "broker_notional_basis_usd DOUBLE PRECISION",
+        "broker_win BOOLEAN",
+        "broker_divergence_usd DOUBLE PRECISION",  # broker_realized - legacy realized (drift)
+        "broker_reconciled_at TIMESTAMP",          # naive UTC
+        "broker_recon_detail_json JSONB",          # source path, fees_status, leg sums, day-net cross-check
+    )
+    for coldef in cols:
+        conn.execute(text(
+            f"ALTER TABLE momentum_automation_outcomes ADD COLUMN IF NOT EXISTS {coldef}"
+        ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_mao_broker_recon_status "
+        "ON momentum_automation_outcomes (broker_recon_status)"
+    ))
+    conn.commit()
+    logger.info(
+        "[mig309] ensured momentum_automation_outcomes broker-truth label columns "
+        "(broker_recon_status + broker_realized_pnl_usd/return_bps + divergence audit) — "
+        "reconcile pass write-gated; learning read-gated; legacy fields untouched"
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -21250,6 +21299,8 @@ MIGRATIONS = [
      _migration_307_trading_tenbeat_candle_log),
     ("308_momentum_fill_outcomes",
      _migration_308_momentum_fill_outcomes),
+    ("309_momentum_broker_truth_label",
+     _migration_309_momentum_broker_truth_label),
 ]
 
 

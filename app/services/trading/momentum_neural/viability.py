@@ -49,11 +49,19 @@ def _symbol_family_memory_adjust(db: "Session", symbol: str, family_id: str) -> 
     """Boost/penalize from recent symbol × family outcomes (Phase 4b)."""
     from ....models.trading import MomentumAutomationOutcome, MomentumStrategyVariant
 
+    # Broker-truth label switch (mig309). Flag-OFF: the accessor returns the legacy
+    # return_bps (is_reconciled=True) so this viability nudge is byte-identical. Flag-ON:
+    # reconciled-live rows use the broker-true return_bps and unreconciled rows (incl. all
+    # paper) are EXCLUDED — the symbol×family memory boost/penalty then reflects only
+    # broker-true track record. Full ORM rows loaded so the accessor can read broker_*
+    # columns. Mirrors the meta_label/risk_evaluator routing pattern.
+    from .outcome_reconcile import authoritative_label_for_outcome
+
     sym = (symbol or "").strip().upper()
     if sym in ("", "__AGGREGATE__"):
         return 0.0
     rows = (
-        db.query(MomentumAutomationOutcome.return_bps)
+        db.query(MomentumAutomationOutcome)
         .join(MomentumStrategyVariant, MomentumStrategyVariant.id == MomentumAutomationOutcome.variant_id)
         .filter(
             MomentumAutomationOutcome.symbol == sym,
@@ -64,7 +72,12 @@ def _symbol_family_memory_adjust(db: "Session", symbol: str, family_id: str) -> 
         .limit(10)
         .all()
     )
-    vals = [float(r[0]) for r in rows if r[0] is not None]
+    vals: list[float] = []
+    for o in rows:
+        _pnl, rb, _win, is_rec = authoritative_label_for_outcome(o)
+        if not is_rec or rb is None:
+            continue
+        vals.append(float(rb))
     n = len(vals)
     if n < 3:
         return 0.0
@@ -362,6 +375,63 @@ def score_viability(
     except (TypeError, ValueError, AttributeError):
         pass
 
+    # E2: CATALYST GRADING + WEAK HARD GATE (Ross course study, build_order #3). The
+    # existing catalyst tilt above boosts ANY catalyst; this GRADES the type. A WEAK
+    # catalyst (dilution/compliance/legal — Ross's fade predictors) is SUPPRESSED: a
+    # negative tilt AND dropped from LIVE eligibility (the hard gate — a diluting low-float
+    # is not a live Ross long no matter how it ranks). A STRONG catalyst (FDA/trial/
+    # partnership/contract/M&A/beat) is BOOSTED. MEDIUM / crypto / absent feed -> 0 (no
+    # change). Flag OFF -> the whole block is skipped -> byte-identical (the weak set still
+    # feeds the soft catalyst_viability_delta de-boost above, unchanged).
+    # docs/STRATEGY/CC_REPORTS/2026-06-24_ross-course-study.md
+    try:
+        if bool(getattr(settings, "chili_momentum_catalyst_grade_gate_enabled", True)):
+            _meta2 = ctx.meta if isinstance(getattr(ctx, "meta", None), dict) else {}
+            _weak_g = _meta2.get("weak_catalyst_symbols")
+            _strong_g = _meta2.get("strong_catalyst_symbols")
+            _fake_g = _meta2.get("fake_catalyst_symbols")
+            if _weak_g or _strong_g or _fake_g:
+                from .catalyst import catalyst_grade_selection_delta
+
+                _grade_delta = catalyst_grade_selection_delta(
+                    symbol,
+                    weak_symbols=set(_weak_g) if _weak_g else None,
+                    strong_symbols=set(_strong_g) if _strong_g else None,
+                    fake_symbols=set(_fake_g) if _fake_g else None,
+                )
+                if _grade_delta < 0:
+                    base += _grade_delta
+                    live_eligible = False
+                    warnings.append(
+                        "Weak catalyst (dilution/compliance/legal) — not a live Ross setup"
+                    )
+                elif _grade_delta > 0:
+                    base += _grade_delta
+                    warnings.append("Strong catalyst (FDA/M&A/contract) — Ross-style")
+    except (TypeError, ValueError, AttributeError):
+        pass
+
+    # FAKE-CATALYST GUARD (Ross AS101/HVM101): a fresh headline that reads as UNVERIFIED /
+    # hacked-PR / unsolicited-buyout / rumor / pump earns a SOFT credibility DOWN-WEIGHT (not a
+    # hard veto — these names can still run, they just round-trip, so we de-prioritize rather
+    # than block; conservative, low over-veto). Negative half-tilt, the boost side's magnitude.
+    # Flag OFF / crypto / absent set -> 0 (byte-identical). Distinct from the WEAK/STRONG TYPE
+    # grade above (this is credibility, not type). docs/STRATEGY/CC_REPORTS/...
+    try:
+        _meta3 = ctx.meta if isinstance(getattr(ctx, "meta", None), dict) else {}
+        _fake_syms = _meta3.get("fake_catalyst_symbols")
+        if _fake_syms:
+            from .catalyst import fake_catalyst_viability_delta
+
+            _fake_delta = fake_catalyst_viability_delta(symbol, set(_fake_syms))
+            if _fake_delta:
+                base += _fake_delta
+                warnings.append(
+                    "Fake/unverified catalyst (rumor/hacked-PR/unsolicited) — Ross distrust"
+                )
+    except (TypeError, ValueError, AttributeError):
+        pass
+
     # Ross gap #4: sympathy/theme tilt — a SYMPATHY peer of a hot sector cluster (same SIC
     # sector as a strong leader) gets an additive boost (the "hot potato" sympathy run
     # Ross trades). Additive, never penalizes; no-op when the set is absent / for crypto.
@@ -378,6 +448,29 @@ def score_viability(
             if _symp_delta:
                 base += _symp_delta
                 warnings.append("Sector sympathy peer (Ross hot-potato) — Ross-style")
+    except (TypeError, ValueError, AttributeError):
+        pass
+
+    # E7: THEME / SYMPATHY tilt (the 1000%-mover lever). Complements the SIC-sector
+    # sympathy above with a SHARED-CATALYST-KEYWORD axis: a name whose fresh headline
+    # shares a salient keyword with a hot LEADER (STI -> ASTC) gets a SMALL additive
+    # boost (it runs in sympathy). Soft, additive, never a penalty; equity-only; no-op
+    # when the set is absent / for crypto. Flag OFF -> the block is skipped -> the
+    # theme_sympathy_symbols key is never written either (pipeline) -> byte-identical.
+    try:
+        if bool(getattr(settings, "chili_momentum_theme_sympathy_enabled", True)):
+            _theme_symp = (
+                ctx.meta.get("theme_sympathy_symbols")
+                if isinstance(getattr(ctx, "meta", None), dict)
+                else None
+            )
+            if _theme_symp:
+                from .theme_detector import theme_sympathy_viability_delta
+
+                _ts_delta = theme_sympathy_viability_delta(symbol, set(_theme_symp))
+                if _ts_delta:
+                    base += _ts_delta
+                    warnings.append("Theme sympathy peer (shared-catalyst leader) — Ross-style")
     except (TypeError, ValueError, AttributeError):
         pass
 
@@ -434,6 +527,61 @@ def score_viability(
                 base += _csp_delta
                 if _csp_delta > 0:
                     warnings.append("Strong prior-day close (continuation prior) — Ross-style")
+    except (TypeError, ValueError, AttributeError):
+        pass
+
+    # HVM101: thick-tape / distribution veto. A name printing HIGH relative volume with
+    # ~NO net price progress (low |change%| per unit RVOL) is churning into supply
+    # (distribution / rejection at a level), not a clean Ross break. Apply a SOFT,
+    # adaptive (batch-percentile) discount — never a hard cut, low over-veto. Reads the
+    # raw RVOL/change batch from feats.meta["ross_signals"] (carried through from_meta).
+    # EQUITY-ONLY (crypto 24h RVOL/change semantics differ); absent signal / thin batch /
+    # flag-off -> 0.0 -> BYTE-IDENTICAL. Kill-switch CHILI_MOMENTUM_THICK_TAPE_VETO_ENABLED.
+    try:
+        if (
+            bool(getattr(settings, "chili_momentum_thick_tape_veto_enabled", True))
+            and "-USD" not in str(symbol or "").upper()
+        ):
+            _rsig = (
+                feats.meta.get("ross_signals")
+                if isinstance(getattr(feats, "meta", None), dict)
+                else None
+            )
+            if _rsig:
+                from .distribution_filters import thick_tape_discount
+
+                _tt = thick_tape_discount(symbol, _rsig, atr_pct=getattr(ctx, "atr_pct", None))
+                if _tt < 0.0 and not _extreme_mover:
+                    base += _tt
+                    warnings.append("Thick tape — high volume, no net progress (distribution)")
+    except (TypeError, ValueError, AttributeError):
+        pass
+
+    # SCAL101: non-monotonic (inverted-U) volume preference. Viability rewards RVOL
+    # MONOTONICALLY (the Ross tilt above + microstructure boosts); the "most obvious"
+    # name has the highest volume, but EXTREME volume is choppy/late/crowded. Apply a
+    # mild PEAKED roll-off that bites ONLY the extreme upper RVOL tail (batch-percentile)
+    # and grows quadratically toward the very top — softening the over-rewarded outlier
+    # without ever inverting the existing signal (the body is untouched; the roll-off is
+    # capped well under the per-percentile reward slope). EQUITY-ONLY; absent / flag-off
+    # -> 0.0 -> BYTE-IDENTICAL. Kill-switch CHILI_MOMENTUM_NONMONOTONIC_VOLUME_ENABLED.
+    try:
+        if (
+            bool(getattr(settings, "chili_momentum_nonmonotonic_volume_enabled", True))
+            and "-USD" not in str(symbol or "").upper()
+        ):
+            _rsig2 = (
+                feats.meta.get("ross_signals")
+                if isinstance(getattr(feats, "meta", None), dict)
+                else None
+            )
+            if _rsig2:
+                from .distribution_filters import nonmonotonic_volume_rolloff
+
+                _nm = nonmonotonic_volume_rolloff(symbol, _rsig2)
+                if _nm < 0.0:
+                    base += _nm
+                    warnings.append("Extreme RVOL tail — choppy/crowded (inverted-U roll-off)")
     except (TypeError, ValueError, AttributeError):
         pass
 
