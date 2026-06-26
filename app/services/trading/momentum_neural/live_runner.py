@@ -3842,6 +3842,49 @@ def tick_live_session(
                                         # the instant the live ask trades through the base level
                                         # (the dip ladder produced only a terminal wait).
                                         _trigger_reason, _pb_debug = _hb_reason, _hb_dbg
+
+                                # BATCH C: ABCD (SS101 #013) + DOUBLE-BOTTOM breakout triggers.
+                                # Both need a swing-pivot scanner the lane lacked; built ATR-noise-
+                                # filtered so chop is not read as structure. Each is flag-gated INSIDE
+                                # the detector (OFF -> no-op, byte-identical) and returns the shared
+                                # (ok, reason, debug) with pullback_low/high under the IDENTICAL keys,
+                                # so the structural-stop + bailout machinery below is reused unchanged.
+                                # They join the breakout candidate set so the SAME setup-selector picks
+                                # the best R:R among dip-family + HOD/flat-top + ABCD/double-bottom.
+                                # Run AFTER the existing ladder (additive). docs/DESIGN/MOMENTUM_LANE.md
+                                try:
+                                    from .entry_gates import (
+                                        ross_abcd_confirmation,
+                                        ross_double_bottom_confirmation,
+                                    )
+
+                                    for _bc_fn in (
+                                        ross_abcd_confirmation,
+                                        ross_double_bottom_confirmation,
+                                    ):
+                                        try:
+                                            _bc_ok, _bc_reason, _bc_dbg = _bc_fn(
+                                                _df_trig, entry_interval=_iv_trig,
+                                                live_price=_live_px, symbol=sess.symbol, db=db,
+                                            )
+                                        except Exception:
+                                            _bc_ok, _bc_reason, _bc_dbg = False, "batch_c_error", {}
+                                        if _bc_ok:
+                                            _breakouts.append((_bc_ok, _bc_reason, _bc_dbg))
+                                        elif (
+                                            _bc_reason in TICK_ARMED_WAIT_REASONS
+                                            and isinstance(_bc_dbg, dict)
+                                            and _bc_dbg.get("pullback_high")
+                                            and not _trigger_ok
+                                            and _trigger_reason not in TICK_ARMED_WAIT_REASONS
+                                        ):
+                                            # Surface the ABCD/double-bottom WAIT so tick-speed
+                                            # dispatch fires the instant the ask trades through the
+                                            # B-high / neckline (the ladder gave only a terminal wait).
+                                            _trigger_reason, _pb_debug = _bc_reason, _bc_dbg
+                                except Exception:
+                                    pass
+
                                 if _breakouts:
                                     # SETUP-SELECTOR: choose the best R:R among the dip-family fire
                                     # (if any) and the breakout fire(s). Flag OFF -> the first fire
@@ -4041,6 +4084,11 @@ def tick_live_session(
                 # consolidation low / structural stop) + pullback_high (= the break level)
                 # under the SAME keys, so the structural-stop + bailout machinery is reused.
                 "hod_break", "hod_break_tick_ok", "flat_top_break", "flat_top_break_tick_ok",
+                # BATCH C: ABCD (SS101 #013) + double-bottom carry pullback_low (= the C-low /
+                # double-bottom low = structural stop) + pullback_high (= the B-high / neckline
+                # break level) under the SAME keys, so the same machinery is reused.
+                "abcd_break", "abcd_break_tick_ok",
+                "double_bottom_break", "double_bottom_break_tick_ok",
             ) and _pb_debug.get("pullback_low"):
                 le["structural_stop_price"] = float(_pb_debug["pullback_low"])
                 # #2 Breakout-or-bailout: stash the broken pullback HIGH (the breakout

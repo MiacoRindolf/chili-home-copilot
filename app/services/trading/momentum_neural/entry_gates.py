@@ -2207,6 +2207,445 @@ def wick_reclaim_confirmation(
         return False, "wick_reclaim_error", {"entry_interval": entry_interval}
 
 
+# ── BATCH C: swing-pivot scanner + ABCD + double-bottom (SS101 #013) ──────────────
+# The ABCD pattern (a dedicated Ross chapter) and the double-bottom both require a
+# SWING-HIGH/LOW (pivot) scanner the lane did not have. Lower hit-rate than the
+# breakout/pullback families (deferred in the audit) — built here to COMPLETE the
+# playbook, each independently kill-switched. The defense against reading CHOP as
+# structure is the ATR pivot filter (ignore a pivot whose vertical move off its
+# neighbors is smaller than a fraction of ATR) PLUS the per-pattern hold / no-new-low
+# conditions. docs/DESIGN/MOMENTUM_LANE.md
+#
+# ONE documented adaptive knob each: the pivot HALF-WINDOW (how many bars on each side
+# define a local extreme) and the ATR pivot-noise FRACTION (the minimum prominence a
+# pivot must clear, expressed in ATRs). Everything else is reused (ATR from
+# indicator_core, _collapse_cap, _bottoming_tail, the shared (ok,reason,debug) +
+# pullback_high/pullback_low keys, _l2_entry_veto, class_aware_reward_risk).
+
+
+def _swing_pivots(
+    high: Any,
+    low: Any,
+    *,
+    half_window: int,
+    atr_abs: float | None,
+    atr_noise_frac: float,
+) -> list[dict[str, Any]]:
+    """Pure swing-pivot scanner over the COMPLETED bars.
+
+    A bar ``i`` is a swing HIGH iff its high is the strict-or-equal local maximum over
+    ``[i-half_window, i+half_window]`` (a confirmed pivot needs ``half_window`` bars on
+    EACH side, so the last ``half_window`` bars can never be pivots — they are not yet
+    confirmed, exactly like the BOS swing-low confirmation already used in this module).
+    A swing LOW is the mirror. ATR-NOISE FILTER: a pivot is kept only when its PROMINENCE
+    — the vertical distance from the pivot to the higher of its two adjacent opposite
+    extremes within the window — is at least ``atr_noise_frac · atr_abs``; this is how
+    CHOP (tiny wiggles) is NOT mistaken for structure. When ``atr_abs`` is missing/<=0
+    the filter is skipped (fail-open: the window-extreme test alone still applies).
+
+    Returns the pivots in chronological order, each a dict
+    ``{"idx": int, "price": float, "kind": "H"|"L"}``. Pure; never raises (any error ->
+    empty list, so the caller's pattern simply does not fire)."""
+    out: list[dict[str, Any]] = []
+    try:
+        hi = high.values if hasattr(high, "values") else list(high)
+        lo = low.values if hasattr(low, "values") else list(low)
+        n = len(hi)
+        w = max(1, int(half_window))
+        if n < (2 * w + 1):
+            return out
+        a = float(atr_abs) if (atr_abs is not None and float(atr_abs) > 0) else 0.0
+        min_prom = a * max(0.0, float(atr_noise_frac))
+        for i in range(w, n - w):
+            try:
+                h_i = float(hi[i])
+                l_i = float(lo[i])
+            except (TypeError, ValueError):
+                continue
+            if h_i != h_i or l_i != l_i:  # NaN-safe
+                continue
+            lo_w = i - w
+            hi_w = i + w + 1
+            win_hi = [float(hi[j]) for j in range(lo_w, hi_w)]
+            win_lo = [float(lo[j]) for j in range(lo_w, hi_w)]
+            if any(x != x for x in win_hi) or any(x != x for x in win_lo):
+                continue
+            is_high = h_i >= max(win_hi)
+            is_low = l_i <= min(win_lo)
+            # A bar that is BOTH (a flat degenerate window) is ambiguous — skip it.
+            if is_high == is_low:
+                continue
+            if is_high:
+                # prominence = drop from this swing high to the LOWEST low in the window
+                # (the deepest trough flanking it). Below the ATR floor -> chop, drop it.
+                prom = h_i - min(win_lo)
+                if min_prom > 0.0 and prom < min_prom:
+                    continue
+                out.append({"idx": i, "price": h_i, "kind": "H"})
+            else:
+                prom = max(win_hi) - l_i
+                if min_prom > 0.0 and prom < min_prom:
+                    continue
+                out.append({"idx": i, "price": l_i, "kind": "L"})
+        # Collapse consecutive same-kind pivots to the more-extreme one so the sequence
+        # alternates H/L (a clean structural skeleton, not duplicate flat shelves).
+        cleaned: list[dict[str, Any]] = []
+        for p in out:
+            if cleaned and cleaned[-1]["kind"] == p["kind"]:
+                prev = cleaned[-1]
+                if (p["kind"] == "H" and p["price"] >= prev["price"]) or (
+                    p["kind"] == "L" and p["price"] <= prev["price"]
+                ):
+                    cleaned[-1] = p  # keep the more-extreme same-kind pivot
+                continue
+            cleaned.append(p)
+        return cleaned
+    except Exception:
+        return []
+
+
+def _batch_c_atr_pct(df: pd.DataFrame, close: pd.Series, cur: int) -> tuple[float | None, float | None]:
+    """``(atr_pct, atr_abs)`` at the current bar (the shared volatility yardstick the
+    Batch-C scanner + depth caps use). None on thin data / any error (fail-open)."""
+    try:
+        arrays = compute_all_from_df(df, needed={"atr"})
+        atr = arrays.get("atr") or []
+        _a = float(atr[cur]) if cur < len(atr) and atr[cur] is not None else None
+        _p = float(close.iloc[cur])
+        if _a is not None and _a == _a and _p > 0:
+            return (_a / _p), _a
+    except (TypeError, ValueError, IndexError, KeyError):
+        pass
+    return None, None
+
+
+def ross_abcd_confirmation(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str,
+    live_price: float | None = None,
+    symbol: str | None = None,
+    now: Any = None,
+    df_context: pd.DataFrame | None = None,
+    db: Any = None,
+    l2_as_of: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Ross ABCD entry (SS101 #013; flag ``chili_momentum_abcd_entry_enabled``).
+
+    From the ATR-filtered swing pivots, an ABCD long is::
+
+        A = an impulse-UP leg (a swing LOW -> a swing HIGH at/near the highs);
+        B = the pullback LOW after A (the first higher-low retrace off the A high);
+        C = a SECOND pullback LOW that HOLDS above the prior structure — it does NOT
+            break to a new low below the B/C support (a higher-low, the coil tightening);
+        D = price BREAKS above the B swing-HIGH (the high between B and C).
+
+    Fire on the D break (with a volume confirm). Entry = the B-high break level
+    (``pullback_high``); stop = the C-low structural low (``pullback_low``). The
+    downstream vol-floor layer widens the stop (INVARIANT A) — this gate does NOT
+    pre-floor it. The shared keys mean the runner's stop / sizing / bailout machinery is
+    reused unchanged (NO new sizing path).
+
+    MULTI-TIMEFRAME (optional, a CONFIDENCE BREADCRUMB only — never a hard gate): when a
+    higher-timeframe ``df_context`` frame is supplied, a 5-min ABCD aligned with the
+    1-min flag is surfaced in ``debug["abcd_mtf_aligned"]`` but is not required to fire.
+
+    NOISE DEFENSE: the ATR pivot filter (prominence >= a fraction of ATR) + the
+    no-new-low HOLD condition for C + a depth cap (``_collapse_cap``) on the B/C
+    retraces — a too-deep "C" is a breakdown, not a coil. ADDITIVE: flag OFF / thin
+    (<2·window+3 bars) / no clean ABCD -> ``(False, reason, {...})`` with NO side
+    effects; fail-OPEN to a benign decline on any error. docs/DESIGN/MOMENTUM_LANE.md"""
+    debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "abcd"}
+    try:
+        if not bool(getattr(settings, "chili_momentum_abcd_entry_enabled", True)):
+            return False, "abcd_disabled", debug
+        half_w = int(getattr(settings, "chili_momentum_swing_pivot_half_window", 2) or 2)
+        if df is None or getattr(df, "empty", True) or len(df) < (2 * half_w + 3):
+            return False, "abcd_insufficient_bars", debug
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        vol = df["Volume"].astype(float)
+        n = len(df)
+        cur = n - 1
+        atr_pct, atr_abs = _batch_c_atr_pct(df, close, cur)
+        noise_frac = float(getattr(settings, "chili_momentum_swing_pivot_atr_noise_frac", 0.5) or 0.0)
+        pivots = _swing_pivots(
+            high, low, half_window=half_w, atr_abs=atr_abs, atr_noise_frac=noise_frac,
+        )
+        debug["n_pivots"] = len(pivots)
+        # Need at least H(A) L(B) H(B->C) L(C) to describe an ABCD coil (the A-high is the
+        # readable start of the impulse; an origin low before it is not required as a pivot).
+        if len(pivots) < 4:
+            return False, "abcd_too_few_pivots", debug
+
+        # Walk from the most-recent pivots backward to find the freshest A-H, B-L, BC-H, C-L.
+        # The skeleton alternates H/L; we want the last three lows (origin/B/C) framing two
+        # highs (A and the B->C swing high). Identify the last LOW pivot = C, the high before
+        # it = the B->C swing high, the low before that = B, the high before that = A.
+        c_low = None
+        bc_high = None
+        b_low = None
+        a_high = None
+        # scan from the end for: L (C), then H (bc), then L (B), then H (A)
+        seq = pivots[:]  # chronological
+        # Find the last index that is a LOW (C).
+        ci = None
+        for k in range(len(seq) - 1, -1, -1):
+            if seq[k]["kind"] == "L":
+                ci = k
+                break
+        if ci is None or ci < 3:
+            return False, "abcd_no_c_low", debug
+        c_low = seq[ci]
+        bc_high = seq[ci - 1] if seq[ci - 1]["kind"] == "H" else None
+        b_low = seq[ci - 2] if seq[ci - 2]["kind"] == "L" else None
+        a_high = seq[ci - 3] if seq[ci - 3]["kind"] == "H" else None
+        if not (c_low and bc_high and b_low and a_high):
+            return False, "abcd_skeleton_incomplete", debug
+
+        a_h = float(a_high["price"])
+        b_l = float(b_low["price"])
+        bc_h = float(bc_high["price"])
+        c_l = float(c_low["price"])
+        # A is an impulse UP to the highs; B and C are HIGHER LOWS (the coil holds).
+        # C must NOT break below B (no new low) — the structural HOLD that distinguishes
+        # an ABCD coil from a breakdown.
+        if not (b_l > 0 and c_l > 0 and bc_h > a_h * (1.0 - 0.0)):
+            # bc_h should be a genuine swing high after B (continuation), at/above A's region
+            pass
+        if c_l < b_l:
+            debug.update({"b_low": round(b_l, 6), "c_low": round(c_l, 6)})
+            return False, "abcd_c_broke_b_low", debug  # C made a new low -> not a hold
+        # Depth guard: each retrace (A->B, BC->C) must be a PULLBACK, not a collapse.
+        cap = _collapse_cap(atr_pct)
+        ab_depth = (a_h - b_l) / a_h if a_h > 0 else 1.0
+        cd_depth = (bc_h - c_l) / bc_h if bc_h > 0 else 1.0
+        debug.update({
+            "a_high": round(a_h, 6), "b_low": round(b_l, 6),
+            "bc_high": round(bc_h, 6), "c_low": round(c_l, 6),
+            "ab_depth_pct": round(ab_depth * 100.0, 2),
+            "cd_depth_pct": round(cd_depth * 100.0, 2),
+            "abcd_collapse_cap_pct": round(cap * 100.0, 2),
+        })
+        if ab_depth > cap or cd_depth > cap:
+            return False, "abcd_retrace_too_deep", debug
+
+        # The break level = the B->C swing high (D = a break above it); stop = the C low.
+        level = bc_h
+        stop = c_l
+        if not (0.0 < stop < level):
+            return False, "abcd_bad_level", debug
+        debug["pullback_high"] = float(level)
+        debug["pullback_low"] = float(stop)
+
+        # MULTI-TIMEFRAME confidence breadcrumb (NOT a gate): a higher-TF ABCD coil aligned
+        # with this 1-min flag. Best-effort; any error simply omits the breadcrumb.
+        if df_context is not None and not getattr(df_context, "empty", True):
+            try:
+                _ch = df_context["High"].astype(float)
+                _cl = df_context["Low"].astype(float)
+                _cc = df_context["Close"].astype(float)
+                _cur2 = len(df_context) - 1
+                _ap2, _aa2 = _batch_c_atr_pct(df_context, _cc, _cur2)
+                _piv2 = _swing_pivots(
+                    _ch, _cl, half_window=half_w, atr_abs=_aa2, atr_noise_frac=noise_frac,
+                )
+                # aligned if the higher-TF skeleton also ends on a higher-low coil (L,H,L,...)
+                _aligned = (
+                    len(_piv2) >= 3 and _piv2[-1]["kind"] == "L"
+                    and _piv2[-3]["kind"] == "L"
+                    and float(_piv2[-1]["price"]) >= float(_piv2[-3]["price"])
+                )
+                debug["abcd_mtf_aligned"] = bool(_aligned)
+            except (TypeError, ValueError, KeyError, IndexError):
+                pass
+
+        # L2 hidden-seller / big-seller veto (reused; fail-open on disabled/null L2).
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
+        if _l2v is not None:
+            _reason, _l2patch = _l2v
+            debug.update(_l2patch)
+            return False, f"abcd_{_reason}", debug
+
+        # ── TRIGGER: D = the break above the B->C swing high ─────────────────────────────
+        cur_hi = float(high.iloc[cur])
+        # TICK-BREAK: the structure is valid on completed bars and the live tick is already
+        # trading through the level -> enter on that tick (mirrors the other Batch triggers;
+        # the caller's tick-break block applies the thrust buffer via the WAIT reason).
+        if (
+            live_price is not None and float(live_price) > 0
+            and float(live_price) > level
+        ):
+            debug["tick_break"] = True
+            debug["live_price"] = float(live_price)
+            return True, "abcd_break_tick_ok", debug
+        if cur_hi <= level:
+            return False, "waiting_for_break", debug  # tick-armable (pullback_high set)
+        # A completed bar broke D -> require a VOLUME spike on the break bar (real demand).
+        arrays_v = compute_all_from_df(df, needed={"volume_ratio"})
+        vr = arrays_v.get("volume_ratio") or []
+        vol_ratio = None
+        try:
+            vol_ratio = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
+        except (TypeError, ValueError):
+            vol_ratio = None
+        if vol_ratio is None:
+            w = vol.tail(21)
+            _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
+            vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
+        _vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
+        debug["vol_ratio"] = round(vol_ratio, 2)
+        if vol_ratio < _vol_mult:
+            return False, "abcd_low_volume", debug
+        return True, "abcd_break", debug
+    except Exception:
+        return False, "abcd_error", {"entry_interval": entry_interval}
+
+
+def ross_double_bottom_confirmation(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str,
+    live_price: float | None = None,
+    symbol: str | None = None,
+    now: Any = None,
+    db: Any = None,
+    l2_as_of: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Ross DOUBLE-BOTTOM entry (flag ``chili_momentum_double_bottom_entry_enabled``).
+
+    From the ATR-filtered swing pivots: TWO swing LOWS at ~the same support level (within
+    an ATR-derived band), the SECOND printing a bottoming tail / reversal and HOLDING,
+    then a BREAK above the intervening swing high. Entry = the intervening-high break
+    level (``pullback_high``); stop = below the double-bottom low (``pullback_low``).
+
+    NOISE DEFENSE: the ATR pivot filter (the two lows must be REAL pivots, not chop wiggles)
+    + the equal-lows band is ATR-derived (no fixed cents) + the second low must print a
+    bottoming tail (a flush that got bought) + HOLD (no new low below the first). The shared
+    (ok, reason, debug) + pullback_high/pullback_low keys reuse the runner's stop / sizing /
+    bailout machinery unchanged (NO new sizing path). The vol-floor layer widens the stop
+    downstream (INVARIANT A) — this gate does NOT pre-floor it.
+
+    ADDITIVE: flag OFF / thin / no double-bottom -> ``(False, reason, {...})`` with NO side
+    effects; fail-OPEN to a benign decline on any error. docs/DESIGN/MOMENTUM_LANE.md"""
+    debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "double_bottom"}
+    try:
+        if not bool(getattr(settings, "chili_momentum_double_bottom_entry_enabled", True)):
+            return False, "double_bottom_disabled", debug
+        half_w = int(getattr(settings, "chili_momentum_swing_pivot_half_window", 2) or 2)
+        if df is None or getattr(df, "empty", True) or len(df) < (2 * half_w + 3):
+            return False, "double_bottom_insufficient_bars", debug
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        vol = df["Volume"].astype(float)
+        opn = df["Open"].astype(float) if "Open" in getattr(df, "columns", []) else None
+        n = len(df)
+        cur = n - 1
+        atr_pct, atr_abs = _batch_c_atr_pct(df, close, cur)
+        noise_frac = float(getattr(settings, "chili_momentum_swing_pivot_atr_noise_frac", 0.5) or 0.0)
+        pivots = _swing_pivots(
+            high, low, half_window=half_w, atr_abs=atr_abs, atr_noise_frac=noise_frac,
+        )
+        debug["n_pivots"] = len(pivots)
+        lows = [p for p in pivots if p["kind"] == "L"]
+        if len(lows) < 2:
+            return False, "double_bottom_too_few_lows", debug
+
+        # The two most-recent swing lows + the swing HIGH that sits BETWEEN them.
+        low2 = lows[-1]   # the second (right) bottom
+        low1 = lows[-2]   # the first (left) bottom
+        i1, i2 = int(low1["idx"]), int(low2["idx"])
+        l1, l2 = float(low1["price"]), float(low2["price"])
+        mid_highs = [p for p in pivots if p["kind"] == "H" and i1 < int(p["idx"]) < i2]
+        if not mid_highs:
+            return False, "double_bottom_no_neckline", debug
+        neckline = max(float(p["price"]) for p in mid_highs)  # the intervening swing high
+
+        # EQUAL LOWS: the two bottoms within an ATR-derived band (no fixed cents). When ATR
+        # is unavailable, fall back to a small relative band so chop is still rejected.
+        band_mult = float(getattr(settings, "chili_momentum_double_bottom_band_atr_mult", 0.6) or 0.6)
+        ref = min(l1, l2)
+        if ref <= 0:
+            return False, "double_bottom_bad_low", debug
+        band = (band_mult * float(atr_abs)) if (atr_abs is not None and atr_abs > 0) else (0.01 * ref)
+        debug.update({
+            "low1": round(l1, 6), "low2": round(l2, 6),
+            "neckline": round(neckline, 6),
+            "equal_band": round(band, 6),
+        })
+        if abs(l1 - l2) > band:
+            return False, "double_bottom_lows_unequal", debug
+        # HOLD: the second low must NOT undercut the first (a clean double bottom, not a
+        # lower-low breakdown). A tiny tolerance = the noise band.
+        if l2 < l1 - band:
+            return False, "double_bottom_second_lower", debug
+
+        # SECOND-LOW REVERSAL: the bar AT (or adjacent to) the second pivot prints a
+        # bottoming tail (the flush that got bought back up — the V-bounce signature).
+        _bt_ok = False
+        try:
+            for j in (i2, i2 - 1, i2 + 1):
+                if not (0 <= j <= cur):
+                    continue
+                _o = float(opn.iloc[j]) if opn is not None else float(close.iloc[max(0, j - 1)])
+                _h, _l, _c = float(high.iloc[j]), float(low.iloc[j]), float(close.iloc[j])
+                if _bottoming_tail(_o, _h, _l, _c):
+                    _bt_ok = True
+                    break
+        except (TypeError, ValueError, IndexError):
+            _bt_ok = False
+        debug["second_low_bottoming_tail"] = _bt_ok
+        if not _bt_ok:
+            return False, "double_bottom_no_reversal_tail", debug
+
+        # The break level = the intervening neckline; stop = below the double-bottom low.
+        level = neckline
+        stop = min(l1, l2)
+        if not (0.0 < stop < level):
+            return False, "double_bottom_bad_level", debug
+        debug["pullback_high"] = float(level)
+        debug["pullback_low"] = float(stop)
+
+        # L2 hidden-seller / big-seller veto (reused; fail-open on disabled/null L2).
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
+        if _l2v is not None:
+            _reason, _l2patch = _l2v
+            debug.update(_l2patch)
+            return False, f"double_bottom_{_reason}", debug
+
+        # ── TRIGGER: the break above the intervening swing high (the neckline) ───────────
+        cur_hi = float(high.iloc[cur])
+        if (
+            live_price is not None and float(live_price) > 0
+            and float(live_price) > level
+        ):
+            debug["tick_break"] = True
+            debug["live_price"] = float(live_price)
+            return True, "double_bottom_break_tick_ok", debug
+        if cur_hi <= level:
+            return False, "waiting_for_break", debug  # tick-armable (pullback_high set)
+        arrays_v = compute_all_from_df(df, needed={"volume_ratio"})
+        vr = arrays_v.get("volume_ratio") or []
+        vol_ratio = None
+        try:
+            vol_ratio = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
+        except (TypeError, ValueError):
+            vol_ratio = None
+        if vol_ratio is None:
+            w = vol.tail(21)
+            _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
+            vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
+        _vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
+        debug["vol_ratio"] = round(vol_ratio, 2)
+        if vol_ratio < _vol_mult:
+            return False, "double_bottom_low_volume", debug
+        return True, "double_bottom_break", debug
+    except Exception:
+        return False, "double_bottom_error", {"entry_interval": entry_interval}
+
+
 def pullback_break_confirmation(
     df: pd.DataFrame,
     *,

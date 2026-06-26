@@ -3284,6 +3284,52 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_HOD_BASE_BARS"),
         description="Batch A: number of recent completed bars that must form the tight consolidation base just under the HOD before the break fires. ONE documented base-window knob.",
     )
+    # ── BATCH C: ABCD (SS101 #013) + double-bottom (swing-pivot scanner) ──────────────
+    # Lower hit-rate than the breakout/pullback families (the audit said defer) — built
+    # to COMPLETE the playbook, each independently kill-switched. The ATR pivot filter +
+    # the per-pattern hold/no-new-low conditions are how CHOP is NOT read as structure.
+    chili_momentum_abcd_entry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ABCD_ENTRY_ENABLED"),
+        description="Batch C: ABCD entry (SS101 #013) — from the ATR-filtered swing pivots, A = an impulse-up leg, B = the pullback low after A, C = a SECOND pullback low that HOLDS above the prior structure (no new low below B), then fire on D = the break above the B->C swing high with a volume confirm; entry = the B-high break level, stop = the C-low structural low (shared pullback_high/pullback_low keys). NOISE DEFENSE: the ATR pivot filter + the no-new-low hold + a _collapse_cap depth gate. KILL-SWITCH: False -> the trigger is never tried -> byte-identical.",
+    )
+    chili_momentum_double_bottom_entry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DOUBLE_BOTTOM_ENTRY_ENABLED"),
+        description="Batch C: double-bottom entry — two swing lows at ~the same support level (within an ATR-derived band), the second printing a bottoming-tail reversal and HOLDING (no new low below the first), then fire on the break above the intervening swing high; entry = the neckline break level, stop = below the double-bottom low (shared pullback_high/pullback_low keys). NOISE DEFENSE: the ATR pivot filter + the ATR-derived equal-lows band + the second-low bottoming tail. KILL-SWITCH: False -> the trigger is never tried -> byte-identical.",
+    )
+    # The ONE documented adaptive knob for the swing-pivot SCANNER WINDOW: a bar is a
+    # confirmed swing high/low when it is the local extreme over +/- this many neighbors
+    # (so the last `half_window` bars are not yet confirmable pivots). Shared by both
+    # Batch-C triggers. Bounded so a degenerate config can't read the whole frame.
+    chili_momentum_swing_pivot_half_window: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SWING_PIVOT_HALF_WINDOW"),
+        description="Batch C: swing-pivot scanner half-window — a bar is a confirmed swing high/low when it is the local extreme over +/- this many neighbor bars. The ONE documented pivot-window base knob (shared by ABCD + double-bottom).",
+    )
+    # The ONE documented adaptive knob for the ATR pivot-NOISE filter: a pivot is ignored
+    # unless its prominence (vertical move off its flanking opposite extreme within the
+    # window) is at least this fraction of ATR. THIS is the guard that stops chop being
+    # mistaken for structure — bigger = stricter (only larger swings count as pivots).
+    chili_momentum_swing_pivot_atr_noise_frac: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SWING_PIVOT_ATR_NOISE_FRAC"),
+        description="Batch C: swing-pivot ATR-noise filter — a pivot is ignored unless its prominence (vertical move off its flanking opposite extreme) is >= this fraction of ATR. THE chop-rejection knob (ATR-relative, no fixed cents); 0 disables the filter. Shared by ABCD + double-bottom.",
+    )
+    # The ONE documented adaptive knob for the double-bottom EQUAL-LOWS band: the two
+    # swing lows count as "the same support" when they are within this multiple x ATR of
+    # each other (ATR-derived, no fixed cents). Bigger = looser equal-lows tolerance.
+    chili_momentum_double_bottom_band_atr_mult: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DOUBLE_BOTTOM_BAND_ATR_MULT"),
+        description="Batch C: double-bottom equal-lows band — the two swing lows are 'at the same support' when within this multiple x ATR of each other (ATR-derived, no fixed cents). ONE documented band knob.",
+    )
     # E2 — CATALYST GRADING + WEAK HARD GATE. weak_catalyst_symbols() (dilution/compliance/
     # legal) existed only as a soft viability de-boost; it never gated the arm queue. Ross
     # DISTRUSTS weak catalysts (fade predictors) and favors STRONG (FDA/M&A/contract). When
