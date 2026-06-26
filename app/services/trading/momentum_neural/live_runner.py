@@ -107,6 +107,11 @@ from .entry_gates import (
     _l2_entry_confirm,
     breakout_failed_to_hold,
 )
+from .entry_gates import (
+    TAPE_HOLD_VALID_WAIT_REASONS,
+    tape_confirmed_hold_trigger,
+    tape_confirms_hold,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -4752,6 +4757,98 @@ def tick_live_session(
         elif _score_ok and not _mkt_open:
             _emit(db, sess, "live_entry_wait_market_closed", {"symbol": sess.symbol})
         elif _score_ok:
+            # ── FIX C: TAPE-CONFIRMED-HOLD EARLY ENTRY (additive earlier-fire) ──────────
+            # The break trigger above is WAITING (e.g. waiting_for_reclaim_high) because the
+            # current bar has not yet exceeded the pullback high — choppy explosive names
+            # rarely give that clean break inside the watch window (then get reaped). Ross
+            # enters EARLIER: he buys the pullback-HOLD bounce the moment the TAPE confirms
+            # buyers, before the confirmed break. Fire NOW iff ALL hold (else fall through to
+            # the existing break-wait, byte-identical):
+            #   (1) the trigger is waiting on a VALID PULLBACK family (a real pullback that
+            #       held the 9-EMA formed — TAPE_HOLD_VALID_WAIT_REASONS);
+            #   (2) the TAPE CONFIRMS a bounce — tape_confirms_hold is REQUIRED + FAIL-CLOSED
+            #       (signed_tape_accel>0 AND tick_rate>=floor; missing/thin/stale/crypto tape
+            #       ⇒ no fire, keep the break path);
+            #   (3) price is HOLDING/turning up off the 9-EMA band + a higher low vs the
+            #       pullback low (NOT broken down) — tape_confirmed_hold_trigger;
+            #   (4) NOT benched / NOT backside / NOT below VWAP (re-checked in the struct
+            #       trigger via _detect_back_side + front_side_state; the sticky bench already
+            #       forced _trigger_reason='backside_benched' above, which is NOT a valid wait
+            #       reason, so a benched name never reaches here);
+            #   (5) ALL existing entry vetoes + the quote gate still run — this only promotes
+            #       WATCHING -> LIVE_ENTRY_CANDIDATE, which routes through the SAME
+            #       LIVE_PENDING_ENTRY veto chain (_entry_flow_veto, _entry_extension_veto,
+            #       overhead/L2 vetoes, _l2_entry_confirm, position cap, _quote_quality_block).
+            # KILL-SWITCH chili_momentum_tape_hold_entry_enabled OFF ⇒ tape_confirms_hold
+            # returns (False, ...) before any I/O ⇒ this whole block is a no-op (break-only).
+            _tape_hold_fired = False
+            if (
+                bool(getattr(settings, "chili_momentum_tape_hold_entry_enabled", False))
+                and _trigger_reason in TAPE_HOLD_VALID_WAIT_REASONS
+                and isinstance(_pb_debug, dict)
+                and _pb_debug.get("pullback_low") is not None
+                and le.get("benched_backside_hod") is None
+            ):
+                try:
+                    _th_px = None
+                    try:
+                        if tick is not None:
+                            _th_px = float(tick.ask or tick.mid or 0) or None
+                    except Exception:
+                        _th_px = None
+                    # (2) REQUIRED tape confirm — fail-CLOSED.
+                    _tape_ok, _tape_dbg = tape_confirms_hold(sess.symbol, db=db, settings=settings)
+                    if _tape_ok:
+                        # (3)+(4) structural hold + not-backside on the SAME entry-interval df.
+                        _th_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+                        from ..market_data import fetch_ohlcv_df as _th_fetch
+
+                        _th_df = _th_fetch(sess.symbol, interval=_th_iv, period="5d")
+                        _th_struct_ok, _th_reason, _th_sdbg = tape_confirmed_hold_trigger(
+                            _th_df,
+                            pullback_high=_float_or_none(_pb_debug.get("pullback_high")),
+                            pullback_low=_float_or_none(_pb_debug.get("pullback_low")),
+                            live_price=_th_px,
+                            retracement_threshold=float(
+                                getattr(settings, "chili_momentum_pullback_retracement_threshold", 0.50) or 0.50
+                            ),
+                            entry_interval=_th_iv,
+                        )
+                        if _th_struct_ok:
+                            # Reuse the EXACT structural-stop + breakout-level stash the break
+                            # path uses (pullback_low = structural stop, pullback_high = the
+                            # breakout-or-bailout level), so sizing/placement/bailout are identical.
+                            le["structural_stop_price"] = float(_th_sdbg["pullback_low"])
+                            if _th_sdbg.get("pullback_high"):
+                                le["breakout_level_price"] = float(_th_sdbg["pullback_high"])
+                            else:
+                                le.pop("breakout_level_price", None)
+                            _l2 = _entry_pricebook_snapshot(sess.symbol)
+                            if _l2 is not None:
+                                le["entry_l2_snapshot"] = _l2
+                            else:
+                                le.pop("entry_l2_snapshot", None)
+                            le["entry_trigger_reason"] = "tape_confirmed_hold"
+                            le.pop("watch_break_level", None)
+                            _commit_le(sess, le)
+                            _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
+                            _emit(db, sess, "live_entry_tape_hold_fire", {
+                                "blocked_wait_reason": _trigger_reason,
+                                "viability_score": via.viability_score,
+                                "structural_stop": le.get("structural_stop_price"),
+                                "breakout_level": le.get("breakout_level_price"),
+                                **{k: _tape_dbg.get(k) for k in (
+                                    "signed_tape_accel", "tick_rate", "tick_rate_floor", "n_ticks")},
+                                **{k: _th_sdbg.get(k) for k in (
+                                    "ema9", "ema_wick", "cur_px", "above_vwap", "atr_pct")},
+                                "l2": _l2,
+                            })
+                            _tape_hold_fired = True
+                except Exception:
+                    _tape_hold_fired = False  # fail-safe: any error -> fall back to break-wait
+            if _tape_hold_fired:
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state}
             # Stash the level we're WAITING to break so the event loop can dispatch
             # a tick-speed re-evaluation the instant a live tick crosses it (the
             # tick-break path above then fires within seconds, like Ross).

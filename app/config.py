@@ -5656,6 +5656,30 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_MAX_SNAPSHOT_AGE_S"),
         description="L2 confirmer: staleness ceiling (seconds) on the newest L2 ladder snapshot; older ⇒ fail-open (confirm), never defer on a frozen feed. Only consulted when chili_momentum_l2_confirm_enabled is on.",
     )
+    # ── FIX C: TAPE-CONFIRMED-HOLD EARLY ENTRY ──────────────────────────────────────
+    # Graduate the L2 confirmer from a defer-gate to a TRIGGER. Armed pullback sessions wait
+    # for a price-BREAK (waiting_for_reclaim_high) that choppy explosive names never give
+    # inside the 300s watch window before they are reaped — so the lane sits FLAT through the
+    # move. Ross enters EARLIER: he buys the pullback-HOLD bounce the moment the TAPE confirms
+    # buyers, BEFORE the confirmed break. When ON, the live runner fires the marketable-LIMIT
+    # entry on a VALID, tape-confirmed, non-backside pullback HOLD (close holding the 9-EMA +
+    # a higher low vs the pullback low) WITHOUT requiring close > pullback_high. The tape
+    # confirm is REQUIRED + FAIL-CLOSED (no/thin/stale tape ⇒ no early fire, keep the break
+    # path); ALL existing entry vetoes + the quote gate still run (the early fire only promotes
+    # WATCHING -> LIVE_ENTRY_CANDIDATE, which routes through the full LIVE_PENDING_ENTRY veto
+    # chain), so it CANNOT fire on an extended/faded/rolled-over name. OFF (default) = the
+    # confirmer is never even probed in this path ⇒ byte-identical break-only behaviour.
+    chili_momentum_tape_hold_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TAPE_HOLD_ENTRY_ENABLED"),
+        description="FIX C: enter the pullback-HOLD bounce when the TAPE confirms buyers (signed_tape_accel>0 AND tick_rate>=self-relative floor) on a VALID, non-backside pullback that is holding the 9-EMA with a higher low — BEFORE the confirmed break (Ross enters earlier than the break). Tape-confirm is REQUIRED + fail-closed (no/thin/stale tape ⇒ no early fire, fall back to the existing break trigger). All existing entry vetoes + the quote gate still run downstream; does NOT touch evaluate_sticky_backside_bench. false (default) = byte-identical break-only.",
+    )
+    # ── FIX D: cache the Robinhood Agentic MCP adapter (perf bug-fix) ────────────────
+    chili_momentum_cache_rh_agentic_adapter: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CACHE_RH_AGENTIC_ADAPTER"),
+        description="FIX D: reuse a process-wide RobinhoodAgenticMcpAdapter singleton in auto_arm's 24h-tradability probe instead of constructing a fresh one per tick (which re-ran the 42-tool MCP discovery ~20/min and slowed the tick). Thread-safe + self-healing (rebuilt only when the cached instance reports unhealthy via is_enabled()). Same tradability probe — pure perf. false = legacy per-call construction (byte-identical).",
+    )
     # ── L2 microstructure (crypto full-book persistence + OFI/micro-price tilt) ──
     # Cadence to drain the warmed Coinbase WS full-book ring into fast_orderbook
     # (crypto only; persists L2 so the live OFI tilt is measurable). 5s start.

@@ -17,6 +17,7 @@ docs/STRATEGY (auto-arm-live); see [[project_momentum_lane]].
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -464,9 +465,67 @@ def known_24h_eligible_symbols() -> set[str]:
     }
 
 
+# ── FIX D: cached Robinhood Agentic MCP adapter (perf bug-fix) ──────────────────────
+# auto_arm called RobinhoodAgenticMcpAdapter() on EVERY _probe_24h_eligibility tick. A
+# fresh instance has _tool_names=None, so the first tool resolve triggers a full 42-tool
+# MCP tools/list discovery + INFO log line — ~20/min flood + a slow tick. The adapter is a
+# thin, reusable client wrapper (pinned account frozen at construction; token/account caches
+# live on it), so a single process-wide singleton makes the SAME tradability probe with the
+# tool catalog discovered once. Thread-safe (scheduler may tick concurrently) + self-healing:
+# the cached instance is reused only while it reports is_enabled() (auth-aware, fail-closed);
+# if it goes unhealthy (token expired / re-auth needed) it is rebuilt on the next call.
+_RH_AGENTIC_ADAPTER: Any = None
+_RH_AGENTIC_ADAPTER_LOCK = threading.Lock()
+
+
+def _rh_agentic_adapter_cached() -> Any:
+    """Return the process-wide RobinhoodAgenticMcpAdapter singleton, lazily building it
+    once and reusing it across ticks (preserving its discovered tool catalog). Rebuilds the
+    instance only if the cached one is missing or reports unhealthy via is_enabled().
+    Returns None when no enabled adapter can be obtained (caller skips the probe).
+
+    Behind ``chili_momentum_cache_rh_agentic_adapter`` (default ON): set it False to restore
+    the byte-identical per-call construction (the pure perf fix is otherwise transparent —
+    same tradability probe, just not re-constructing + re-discovering the adapter)."""
+    if not bool(getattr(settings, "chili_momentum_cache_rh_agentic_adapter", True)):
+        # kill-switch: legacy per-call construction (byte-identical behavior).
+        try:
+            from ..venue.robinhood_mcp import RobinhoodAgenticMcpAdapter
+
+            adapter = RobinhoodAgenticMcpAdapter()
+            return adapter if adapter.is_enabled() else None
+        except Exception:
+            logger.debug("[auto_arm] rh agentic adapter build failed (uncached)", exc_info=True)
+            return None
+    global _RH_AGENTIC_ADAPTER
+    with _RH_AGENTIC_ADAPTER_LOCK:
+        cached = _RH_AGENTIC_ADAPTER
+        if cached is not None:
+            try:
+                if cached.is_enabled():
+                    return cached
+            except Exception:
+                pass  # unhealthy probe -> rebuild below
+            _RH_AGENTIC_ADAPTER = None  # drop the unhealthy instance
+        try:
+            from ..venue.robinhood_mcp import RobinhoodAgenticMcpAdapter
+
+            adapter = RobinhoodAgenticMcpAdapter()
+            if not adapter.is_enabled():
+                return None
+            _RH_AGENTIC_ADAPTER = adapter
+            return adapter
+        except Exception:
+            logger.debug("[auto_arm] rh agentic adapter build failed", exc_info=True)
+            return None
+
+
 def _probe_24h_eligibility(symbols: list[str]) -> None:
     """Probe RH get_equity_tradability for the given equity symbols and refresh the cache.
-    Best-effort; only the agentic rail exposes the tool. Bounded prune."""
+    Best-effort; only the agentic rail exposes the tool. Bounded prune.
+
+    Uses the CACHED adapter singleton (FIX D) so the 42-tool MCP discovery happens once, not
+    per tick. Same tradability probe + same fail-closed semantics as before."""
     syms = [str(s or "").strip().upper() for s in symbols if str(s or "").strip() and not str(s).upper().endswith("-USD")]
     # Skip names whose cache entry is still fresh — re-probe only the unknown/stale.
     now = _utcnow()
@@ -475,10 +534,8 @@ def _probe_24h_eligibility(symbols: list[str]) -> None:
     if not syms:
         return
     try:
-        from ..venue.robinhood_mcp import RobinhoodAgenticMcpAdapter
-
-        adapter = RobinhoodAgenticMcpAdapter()
-        if not adapter.is_enabled():
+        adapter = _rh_agentic_adapter_cached()
+        if adapter is None:
             return
         result = adapter.get_equity_tradability(syms)
     except Exception:

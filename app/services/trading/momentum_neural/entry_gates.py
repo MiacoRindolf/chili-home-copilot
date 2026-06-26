@@ -2357,6 +2357,219 @@ def evaluate_sticky_backside_bench(
         return False, "bench_fail_open", None, debug
 
 
+# ── FIX C: TAPE-CONFIRMED-HOLD early entry (graduate the L2 confirmer to a TRIGGER) ──
+# Ross buys the pullback-HOLD bounce when the TAPE confirms buyers, BEFORE the confirmed
+# break (the choppy explosive names that never cleanly cross the pullback high inside the
+# watch window). This pair of helpers supplies the two NEW gates the early-fire path needs;
+# every existing veto + the quote gate still run downstream (the early-fire only promotes a
+# WATCHING session to LIVE_ENTRY_CANDIDATE, which routes through the full veto chain).
+
+# The arm-trigger families a tape-confirmed-hold early-fire is VALID on: a real pullback that
+# HELD the 9-EMA formed (these wait reasons are emitted ONLY after the pullback structure is
+# confirmed and the gate is waiting on the BREAK). A cold/blow-off/no-structure arm never sets
+# one of these, so a tape thrust alone can never manufacture an entry on a non-pullback name.
+TAPE_HOLD_VALID_WAIT_REASONS = (
+    "waiting_for_break",
+    "waiting_for_reclaim",
+    "waiting_for_reclaim_high",
+    "waiting_for_dipbuy_break",
+    "waiting_for_first_pullback_break",
+    "waiting_for_vwap_reclaim",
+)
+
+
+def tape_confirms_hold(
+    symbol: str | None, *, db: Any = None, settings: Any = settings, l2_as_of: Any = None
+) -> tuple[bool, dict[str, Any]]:
+    """STRICT, FAIL-CLOSED tape confirmer for the FIX C early entry (condition 2).
+
+    REQUIRES the executed tape to actively confirm a bounce: ``signed_tape_accel > 0``
+    (back-half aggressor-signed buy volume exceeds the front-half — buyers lifting the ask
+    THIS tick) AND ``tick_rate >= tick_rate_floor`` (recent activity at/above its self-
+    relative floor). This is the SAME tape primitive ``_l2_entry_confirm`` reads, but where
+    that DEFER-gate FAILS OPEN (missing/thin tape ⇒ confirm), this confirmer FAILS CLOSED:
+    any disabled flag / no symbol / no db / crypto / empty-or-thin tape / stale / error ⇒
+    returns ``(False, ...)``. So a missing tape NEVER produces an early fire — the caller
+    keeps waiting on the existing break trigger. Pure read (no writes).
+
+    KILL-SWITCH ``chili_momentum_tape_hold_entry_enabled`` OFF ⇒ ``(False, ...)`` before any
+    I/O, so the early-fire path is byte-identical (the caller never even probes)."""
+    dbg: dict[str, Any] = {"reason": "tape_hold_no_data"}
+    try:
+        if not bool(getattr(settings, "chili_momentum_tape_hold_entry_enabled", False)):
+            dbg["reason"] = "tape_hold_disabled"
+            return False, dbg
+        if db is None or not symbol:
+            return False, dbg  # fail-CLOSED on missing inputs
+        try:
+            w = float(getattr(settings, "chili_momentum_l2_confirm_window_s", 15.0) or 15.0)
+        except (TypeError, ValueError):
+            w = 15.0
+        tape = signed_tape_accel_features(symbol, db=db, window_s=w, as_of=l2_as_of)
+        if tape is None:
+            return False, dbg  # empty / thin / crypto / error -> fail-CLOSED (no early fire)
+        accel = float(tape.get("signed_tape_accel", 0.0))
+        tick_rate = float(tape.get("tick_rate", 0.0))
+        tick_rate_floor = float(tape.get("tick_rate_floor", 0.0))
+        dbg.update({
+            "signed_tape_accel": round(accel, 6),
+            "tick_rate": round(tick_rate, 4),
+            "tick_rate_floor": round(tick_rate_floor, 4),
+            "n_ticks": int(tape.get("n_ticks", 0)),
+        })
+        # REQUIRED: buyers actively lifting the ask this tick (accel>0) AND active (tick_rate
+        # at/above its own self-relative floor). Either leg failing ⇒ no early fire.
+        if accel > 0.0 and tick_rate >= tick_rate_floor:
+            dbg["reason"] = "tape_hold_confirmed"
+            return True, dbg
+        dbg["reason"] = "tape_hold_not_confirmed"
+        return False, dbg
+    except Exception:
+        dbg["reason"] = "tape_hold_error"
+        return False, dbg  # any error -> fail-CLOSED
+
+
+def tape_confirmed_hold_trigger(
+    df,
+    *,
+    pullback_high: float | None,
+    pullback_low: float | None,
+    live_price: float | None,
+    retracement_threshold: float = 0.50,
+    entry_interval: str = "5m",
+) -> tuple[bool, str, dict[str, Any]]:
+    """FIX C conditions (3) + (4) on the bar frame — the STRUCTURE side of the early fire.
+
+    Returns ``(ok, reason, debug)``; ``debug`` carries ``pullback_high`` / ``pullback_low``
+    under the SAME keys the break triggers use, so the caller reuses the IDENTICAL
+    structural-stop + breakout-or-bailout machinery. ``ok=True`` ONLY when:
+
+      (3) price is HOLDING / turning up off the 9-EMA — the current close is within the
+          vol-aware ``ema_wick`` band of the 9-EMA (``close >= ema9 * (1 - ema_wick)``) AND it
+          is a HIGHER LOW vs the pullback low (the dip held, did not break down). The live
+          tick (when above the bar close) is used as the current price so a fast turn is
+          seen sub-bar. It does NOT require ``close > pullback_high`` (that is the BREAK the
+          existing trigger waits for — the whole point of the earlier fire).
+      (4) NOT backside: ``_detect_back_side`` clears AND ``front_side_state`` reports not
+          ``is_backside`` (which already folds in BELOW-VWAP — Ross never buys below VWAP).
+
+    PROTECTIVE / FAIL-CLOSED: a thin / degenerate frame, a missing level, a price that has
+    broken the structure low, OR any error ⇒ ``ok=False`` (keep waiting on the break). It can
+    NEVER fire on an extended / faded / rolled-over name (the backside read blocks those, and
+    the downstream extension + overhead vetoes back it up). Pure; no I/O or mutation.
+    """
+    debug: dict[str, Any] = {"reason": "tape_hold_struct_wait"}
+    try:
+        if df is None or getattr(df, "empty", True) or len(df) < 10:
+            debug["reason"] = "insufficient_bars"
+            return False, "tape_hold_struct_wait", debug
+        pb_high = None if pullback_high is None else float(pullback_high)
+        pb_low = None if pullback_low is None else float(pullback_low)
+        if pb_low is None or not (pb_low > 0):
+            debug["reason"] = "no_structural_low"
+            return False, "tape_hold_struct_wait", debug
+
+        close = df["Close"].astype(float)
+        n = len(df)
+        cur = n - 1
+        arrays = compute_all_from_df(df, needed={"ema_9", "atr"})
+        ema9 = arrays.get("ema_9") or []
+        atr = arrays.get("atr") or []
+
+        # current price = the live tick when it is ABOVE the completed-bar close (a fast turn
+        # the bar has not closed yet), else the bar close. Never LOWERS the price (so a stale
+        # tick can only make the gate stricter, never manufacture a hold). Fail-closed if no
+        # usable price.
+        try:
+            cur_close = float(close.iloc[cur])
+        except (TypeError, ValueError, IndexError):
+            debug["reason"] = "no_close"
+            return False, "tape_hold_struct_wait", debug
+        cur_px = cur_close
+        if live_price is not None:
+            try:
+                lp = float(live_price)
+                if lp > 0:
+                    cur_px = max(cur_close, lp)
+            except (TypeError, ValueError):
+                pass
+        if cur_px <= 0:
+            debug["reason"] = "no_price"
+            return False, "tape_hold_struct_wait", debug
+
+        # vol-aware EMA-9 hold band (same yardstick the pullback gates use).
+        atr_pct = None
+        try:
+            _a = float(atr[cur]) if cur < len(atr) and atr[cur] is not None else None
+            if _a is not None and cur_close > 0:
+                atr_pct = _a / cur_close
+        except (TypeError, ValueError, IndexError):
+            atr_pct = None
+        _shallow, ema_wick, _retest = _vol_aware_pullback_tolerances(atr_pct, retracement_threshold)
+        debug.update({
+            "pullback_high": pb_high,
+            "pullback_low": pb_low,
+            "atr_pct": (round(atr_pct, 6) if atr_pct is not None else None),
+            "ema_wick": round(float(ema_wick), 6),
+            "cur_px": round(cur_px, 6),
+        })
+
+        # (3a) HIGHER LOW vs the pullback low — the dip held, never broke the structural low.
+        if cur_px <= pb_low:
+            debug["reason"] = "broke_structural_low"
+            return False, "tape_hold_struct_wait", debug
+
+        # (3b) HOLDING the 9-EMA band — current price at/above ema9*(1-ema_wick).
+        e9 = None
+        try:
+            e9 = float(ema9[cur]) if cur < len(ema9) and ema9[cur] is not None else None
+        except (TypeError, ValueError, IndexError):
+            e9 = None
+        if e9 is None or e9 <= 0:
+            debug["reason"] = "no_ema9"
+            return False, "tape_hold_struct_wait", debug  # fail-CLOSED: no EMA -> no early fire
+        debug["ema9"] = round(e9, 6)
+        if cur_px < e9 * (1.0 - float(ema_wick)):
+            debug["reason"] = "below_ema9_band"
+            return False, "tape_hold_struct_wait", debug
+
+        # (4) NOT BACKSIDE: _detect_back_side (1m EMA/MACD rollover) AND front_side_state
+        # (which already folds BELOW-VWAP into is_backside). Either reading backside ⇒ block.
+        try:
+            arrays2 = compute_all_from_df(df, needed={"ema_9", "ema_20", "macd", "macd_signal"})
+            _e9 = arrays2.get("ema_9") or []
+            _e20 = arrays2.get("ema_20") or []
+            _macd = arrays2.get("macd") or []
+            _msig = arrays2.get("macd_signal") or []
+            _bs, _bs_reason = _detect_back_side(_e9, _e20, _macd, _msig, cur)
+            if _bs:
+                debug["reason"] = "backside_detected"
+                debug["backside_reason"] = _bs_reason
+                return False, "tape_hold_backside", debug
+        except Exception:
+            # fail-CLOSED on the backside read for THIS new fire path: if we cannot prove
+            # the name is front-side, do NOT take the earlier-than-break entry.
+            debug["reason"] = "backside_read_error"
+            return False, "tape_hold_struct_wait", debug
+        try:
+            from .ross_momentum import front_side_state
+            _fs = front_side_state(_today_session_frame(df))
+            debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            debug["front_side_reason"] = getattr(_fs, "reason", None)
+            if getattr(_fs, "is_backside", False):
+                debug["reason"] = "front_side_backside"
+                return False, "tape_hold_backside", debug
+        except Exception:
+            debug["reason"] = "front_side_read_error"
+            return False, "tape_hold_struct_wait", debug
+
+        debug["reason"] = "tape_hold_ok"
+        return True, "tape_hold_ok", debug
+    except Exception:
+        debug["reason"] = "tape_hold_struct_error"
+        return False, "tape_hold_struct_wait", debug
+
+
 def _bottoming_tail(o: float, h: float, l: float, c: float, *, min_lower_wick_frac: float = 0.50) -> bool:
     """Bottoming-tail / hammer: a long LOWER wick that dominates the bar's range — a
     fast flush that got bought back up (the V-bounce signature). The mirror of
