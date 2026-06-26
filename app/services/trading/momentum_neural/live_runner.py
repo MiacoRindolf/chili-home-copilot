@@ -3776,6 +3776,67 @@ def tick_live_session(
                                         _trigger_reason, _pb_debug = _vr_reason, _vr_debug
                                 except Exception:
                                     pass
+                            # BATCH A: HOD-break + flat-top BREAKOUT triggers + setup-selector.
+                            # CHILI's ladder above is ALL dip/pullback/reclaim — a straight-up
+                            # HOD runner that never pulls back produces NO fills. These detect a
+                            # CONSOLIDATION BASE under the day high and fire the break to a new
+                            # HOD (anti-chase: a tested base, never a vertical blow-off — the
+                            # detector vetoes backside / rolled-over / over-extended). Each is
+                            # flag-gated INSIDE the detector (OFF -> no-op, byte-identical) and
+                            # returns the shared (ok, reason, debug) with pullback_low/high under
+                            # the IDENTICAL keys, so the structural-stop + bailout machinery below
+                            # is reused unchanged. SETUP-SELECTOR: when a dip-family trigger AND a
+                            # breakout BOTH fired this bar, pick the best reward:risk (not first-
+                            # clears-gates). docs/DESIGN/MOMENTUM_LANE.md
+                            try:
+                                from .entry_gates import (
+                                    TICK_ARMED_WAIT_REASONS,
+                                    hod_break_confirmation,
+                                    select_best_setup,
+                                )
+
+                                # The dip-family result so far (a FIRE is a candidate for the
+                                # selector; a WAIT is preserved as the fallback below).
+                                _dip_fire = (
+                                    (_trigger_ok, _trigger_reason, _pb_debug) if _trigger_ok else None
+                                )
+                                _breakouts: list = []
+                                for _ft in (False, True):  # HOD break, then flat-top
+                                    try:
+                                        _hb_ok, _hb_reason, _hb_dbg = hod_break_confirmation(
+                                            _df_trig, entry_interval=_iv_trig, flat_top=_ft,
+                                            live_price=_live_px, symbol=sess.symbol, db=db,
+                                        )
+                                    except Exception:
+                                        _hb_ok, _hb_reason, _hb_dbg = False, "hod_break_error", {}
+                                    if _hb_ok:
+                                        _breakouts.append((_hb_ok, _hb_reason, _hb_dbg))
+                                    elif (
+                                        _hb_reason in TICK_ARMED_WAIT_REASONS
+                                        and _hb_dbg.get("pullback_high")
+                                        and not _trigger_ok
+                                        and _trigger_reason not in TICK_ARMED_WAIT_REASONS
+                                    ):
+                                        # Surface the breakout WAIT so tick-speed dispatch fires
+                                        # the instant the live ask trades through the base level
+                                        # (the dip ladder produced only a terminal wait).
+                                        _trigger_reason, _pb_debug = _hb_reason, _hb_dbg
+                                if _breakouts:
+                                    # SETUP-SELECTOR: choose the best R:R among the dip-family fire
+                                    # (if any) and the breakout fire(s). Flag OFF -> the first fire
+                                    # wins (legacy ladder order) -> byte-identical.
+                                    if bool(getattr(settings, "chili_momentum_setup_selector_enabled", True)):
+                                        _cands = ([_dip_fire] if _dip_fire else []) + _breakouts
+                                        _sel_ok, _sel_reason, _sel_dbg = select_best_setup(
+                                            _cands, symbol=sess.symbol,
+                                            atr_pct=_pb_debug.get("atr_pct") if isinstance(_pb_debug, dict) else None,
+                                        )
+                                        _trigger_ok, _trigger_reason, _pb_debug = _sel_ok, _sel_reason, _sel_dbg
+                                    elif not _trigger_ok:
+                                        # selector OFF: take the first breakout only if no dip fire.
+                                        _trigger_ok, _trigger_reason, _pb_debug = _breakouts[0]
+                            except Exception:
+                                pass
                     except Exception:
                         _trigger_ok = False
                 if not _trigger_ok and _mode != "pullback_break":
@@ -3894,6 +3955,10 @@ def tick_live_session(
                 # SAME keys, so they reuse the IDENTICAL structural-stop + breakout-or-
                 # bailout machinery.
                 "flush_dip_buy", "vwap_reclaim",
+                # BATCH A: the HOD-break / flat-top breakouts carry pullback_low (= the
+                # consolidation low / structural stop) + pullback_high (= the break level)
+                # under the SAME keys, so the structural-stop + bailout machinery is reused.
+                "hod_break", "hod_break_tick_ok", "flat_top_break", "flat_top_break_tick_ok",
             ) and _pb_debug.get("pullback_low"):
                 le["structural_stop_price"] = float(_pb_debug["pullback_low"])
                 # #2 Breakout-or-bailout: stash the broken pullback HIGH (the breakout

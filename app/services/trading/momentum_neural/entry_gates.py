@@ -2524,6 +2524,372 @@ def hurst_proxy_from_closes(close: pd.Series) -> float:
     return max(0.35, min(0.65, h))
 
 
+def _hod_extension_ok(
+    *, level: float, ema9_cur: float | None, vwap_cur: float | None,
+    atr_pct: float | None, rvol: float | None,
+) -> tuple[bool, dict[str, Any]]:
+    """ANTI-CHASE extension guard for a HOD/flat-top BREAKOUT (the blow-off defense).
+
+    The break LEVEL (the base's resistance, which is the entry) must NOT sit excessively
+    extended above the 9-EMA / VWAP — an over-extended vertical IS a parabolic blow-off,
+    not a tested base break. Reuses ``_entry_extension_veto`` (the SAME adaptive ATR-scaled
+    cap + RVOL boost the chase veto uses, so there is ONE documented extension yardstick)
+    measured against BOTH the 9-EMA and the session VWAP: the entry is rejected when it is
+    extended past either. Returns ``(ok, debug)``; fail-OPEN (ok=True) on missing reads so
+    thin data never blocks. Pure."""
+    dbg: dict[str, Any] = {}
+    try:
+        for _name, _ref in (("ema9", ema9_cur), ("vwap", vwap_cur)):
+            if _ref is None or float(_ref) <= 0:
+                continue
+            # _entry_extension_veto returns True when level >= ref*(1+cap) — i.e. the
+            # entry is too far above the reference (a vertical extension = a blow-off).
+            if _entry_extension_veto(float(level), float(_ref), atr_pct, settings, rvol=rvol):
+                dbg["hod_extended_vs"] = _name
+                dbg["hod_ext_pct"] = round(float(level) / float(_ref) - 1.0, 4)
+                return False, dbg
+    except (TypeError, ValueError):
+        return True, dbg  # bad inputs -> fail-open (never block the break on a bug)
+    return True, dbg
+
+
+def hod_break_confirmation(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str,
+    flat_top: bool = False,
+    live_price: float | None = None,
+    symbol: str | None = None,
+    now: Any = None,
+    db: Any = None,
+    l2_as_of: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Ross HOD / NEW-HIGH BREAKOUT entry (Batch A) — the lane's FIRST breakout trigger.
+
+    Every other trigger needs a prior DIP (pullback / reclaim / flush). A straight-up
+    parabolic HOD runner that never pulls back to the 9-EMA produces NO fills (SHPH +86%,
+    armed 8x, 0 entries). Ross buys the HOD break verbatim (SS101 #011: "buying the high
+    of day... get in a couple cents underneath that level to anticipate the break").
+
+    Detects a CONSOLIDATION BASE holding a tight range just under the day high (a base/flag
+    right under the high, NOT a vertical spike), then FIRES on the break to a NEW HIGH with
+    (a) a volume spike on the break bar and (b) tick-thrust confirmation. Entry = the base
+    resistance (the break level, "a couple cents underneath"); stop = the consolidation low
+    (a tight, well-defined stop). The vol-floor layer widens the stop downstream
+    (INVARIANT A), so this gate does NOT pre-floor it.
+
+    ``flat_top=True`` parameterizes the SAME logic for a FLAT-TOP breakout: 2-3 taps
+    (topping tails) at a FLAT resistance, with whole/half-dollar round-number context.
+
+    Returns the shared ``(ok, reason, debug)`` 3-tuple with ``pullback_low`` (= the base
+    low / structural stop) and ``pullback_high`` (= the break level) under the SAME keys
+    the pullback-break trigger uses, so the downstream sizing / structural-stop /
+    breakout-or-bailout machinery is reused unchanged. ``reason`` is ``hod_break``
+    (or ``flat_top_break``) on a completed-bar break, the matching ``..._tick_ok`` is set
+    by the caller's tick path. WAIT reasons are tick-armable (``waiting_for_break``).
+
+    ANTI-CHASE (must not buy the top of a blow-off — verification will try to make it):
+      (a) ``front_side_state`` / ``_detect_back_side`` — never fire on a backside /
+          rolled-over top (an extended-AND-rolling blow-off);
+      (b) the EXTENSION guard (``_hod_extension_ok``) — the break level must not be
+          excessively extended above the 9-EMA / VWAP (a vertical = blow-off, skip);
+      (c) the CONSOLIDATION REQUIREMENT itself — a tested base (a tight range under the
+          high) must exist, so we buy a tested break, not a spike.
+
+    ADDITIVE: flag OFF / thin (<12 bars) / no base / not at the highs -> ``(False, reason,
+    {...})`` with NO side effects. Fail-OPEN to a benign decline on any error (never raises,
+    never blocks the rest of the ladder). docs/DESIGN/MOMENTUM_LANE.md"""
+    _flag = (
+        "chili_momentum_flat_top_entry_enabled" if flat_top
+        else "chili_momentum_hod_break_entry_enabled"
+    )
+    _reason_fire = "flat_top_break" if flat_top else "hod_break"
+    debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": _reason_fire}
+    try:
+        if not bool(getattr(settings, _flag, True)):
+            return False, f"{_reason_fire}_disabled", debug
+        if df is None or getattr(df, "empty", True) or len(df) < 12:
+            return False, f"{_reason_fire}_insufficient_bars", debug
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        vol = df["Volume"].astype(float)
+        opn = df["Open"].astype(float) if "Open" in getattr(df, "columns", []) else None
+        n = len(df)
+        cur = n - 1
+        arrays = compute_all_from_df(df, needed={"ema_9", "vwap", "volume_ratio", "atr"})
+        ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
+        vr = arrays.get("volume_ratio") or []
+        atr = arrays.get("atr") or []
+
+        # Instrument volatility (ATR/price) -> the ADAPTIVE base-tightness yardstick + the
+        # vol-aware tolerances. None on thin data -> a small floor (so the base check still
+        # has a yardstick); never magic cents.
+        atr_pct = None
+        try:
+            _a = float(atr[cur]) if cur < len(atr) and atr[cur] is not None else None
+            _p = float(close.iloc[cur])
+            if _a is not None and _p > 0:
+                atr_pct = _a / _p
+        except (TypeError, ValueError, IndexError):
+            atr_pct = None
+        a = float(atr_pct) if (atr_pct is not None and atr_pct > 0) else 0.0
+        eff_a = a if a > 0 else 0.01  # thin-data floor for the relative base width
+
+        # ── CONSOLIDATION BASE just under the HOD (anti-chase requirement (c)) ───────────
+        # The base = the last K COMPLETED bars (cur is the breaking bar). Its high is the
+        # resistance to break, its low the structural stop. The ATR-relative knob is the
+        # ONE documented base for both base-width and the under-HOD band.
+        base_bars = int(getattr(settings, "chili_momentum_hod_base_bars", 4) or 4)
+        base_atr_mult = float(getattr(settings, "chili_momentum_hod_base_atr_mult", 1.5) or 1.5)
+        base_start = max(0, cur - base_bars)
+        if base_start >= cur:
+            return False, f"{_reason_fire}_insufficient_bars", debug
+        base_hi = float(high.iloc[base_start:cur].max())
+        base_lo = float(low.iloc[base_start:cur].min())
+        if not (0.0 < base_lo < base_hi):
+            return False, f"{_reason_fire}_bad_base", debug
+
+        # The base must sit just UNDER the day high (a base AT the highs, not a mid-range
+        # pause): the session HOD on the COMPLETED bars is at/just-above the base high.
+        sess_hod = float(high.iloc[:cur].max())  # day high on completed bars
+        debug["base_high"] = round(base_hi, 6)
+        debug["base_low"] = round(base_lo, 6)
+        debug["sess_hod"] = round(sess_hod, 6)
+        # base must be within the under-HOD band (its high near the HOD) — else this is a
+        # mid-range consolidation, not the under-the-high coil Ross buys.
+        if sess_hod > 0 and (sess_hod - base_hi) / sess_hod > base_atr_mult * eff_a:
+            debug["hod_gap_pct"] = round((sess_hod - base_hi) / sess_hod, 4)
+            return False, f"{_reason_fire}_not_at_highs", debug
+
+        # TIGHT base (a flag, not a sloppy chop): the base range must be within the
+        # ATR-relative width. A base wider than this is chop -> not a tested break.
+        base_range_pct = (base_hi - base_lo) / base_hi if base_hi > 0 else 1.0
+        debug["base_range_pct"] = round(base_range_pct, 4)
+        if base_range_pct > base_atr_mult * eff_a:
+            return False, f"{_reason_fire}_base_too_wide", debug
+
+        # ── FLAT-TOP parameterization: 2-3 taps (topping tails) at a FLAT resistance ─────
+        # The flat-top variant additionally requires the base bars to TAP a flat level
+        # (highs clustered within a tight band of base_hi) with >=2 topping-tail rejections
+        # there — the textbook flat-top coil. Round-number context (whole/half dollar) is
+        # surfaced for the operator but is NOT a gate (a flat top is valid off any level).
+        if flat_top:
+            from .candles import is_topping_tail
+            from .daily_levels import _round_number_near
+
+            _tol = max(0.001, 0.5 * eff_a)  # flat-band tolerance (half the base ATR room)
+            taps = 0
+            _ov = opn.values if (opn is not None and hasattr(opn, "values")) else None
+            for i in range(base_start, cur):
+                _hi = float(high.iloc[i])
+                if _hi < base_hi * (1.0 - _tol):  # this bar's high isn't near the flat top
+                    continue
+                # a TAP = a high at the flat level; a topping tail there = a rejection tap.
+                _o = float(_ov[i]) if (_ov is not None and i < len(_ov)) else float(close.iloc[i])
+                _l, _c = float(low.iloc[i]), float(close.iloc[i])
+                if is_topping_tail(_o, _hi, _l, _c):
+                    taps += 1
+            debug["flat_top_taps"] = taps
+            if taps < 2:
+                return False, "flat_top_too_few_taps", debug
+            try:
+                _rn = _round_number_near(base_hi, eff_a)
+                if _rn is not None:
+                    debug["flat_top_round_level"] = round(float(_rn), 6)
+            except Exception:
+                pass
+
+        level = base_hi  # the break level = the base resistance ("a couple cents under")
+        stop = base_lo   # tight structural stop below the consolidation low
+
+        # ── ANTI-CHASE (a): backside / rolled-over top vetoes ───────────────────────────
+        # Never fire the break into a name that has already rolled over. _detect_back_side
+        # reads the 1m EMA/MACD rollover; front_side_state reads WHERE the name sits in its
+        # OWN session (below VWAP / faded / chasing an extended blow-off top). Both fail-OPEN.
+        _bs, _bs_reason = _detect_back_side(
+            ema9, (arrays.get("ema_20") or []),
+            (arrays.get("macd") or []), (arrays.get("macd_signal") or []),
+            cur, macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+        )
+        if _bs:
+            debug["back_side"] = _bs_reason
+            return False, f"{_reason_fire}_back_side", debug
+        try:
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            if getattr(_fs, "is_backside", False):
+                # LIVE-TICK NEW-HIGH carve-out for chasing_top ONLY (mirrors the pullback
+                # path): a live tick breaking to a fresh high IS front-side right now, so a
+                # stale completed-bar rolled-over read should not veto it. below_vwap /
+                # already_faded stay HARD vetoes.
+                _fsr = getattr(_fs, "reason", "backside")
+                _live_new_high = False
+                if _fsr == "chasing_top" and live_price is not None:
+                    try:
+                        _live_new_high = float(live_price) > float(sess_hod)
+                    except (TypeError, ValueError):
+                        _live_new_high = False
+                if not _live_new_high:
+                    debug["front_side_state"] = _fsr
+                    return False, f"{_reason_fire}_backside_lifecycle", debug
+        except (TypeError, ValueError, AttributeError, KeyError):
+            pass  # thin/degenerate frame -> fail-open (never block on a bug)
+
+        # ── ANTI-CHASE (b): EXTENSION guard — the break level must not be a vertical ────
+        ema9_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        _rvol = None
+        try:
+            _rvol = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
+        except (TypeError, ValueError):
+            _rvol = None
+        _ext_ok, _ext_dbg = _hod_extension_ok(
+            level=level, ema9_cur=ema9_cur, vwap_cur=vwap_cur, atr_pct=atr_pct, rvol=_rvol,
+        )
+        if not _ext_ok:
+            debug.update(_ext_dbg)
+            return False, f"{_reason_fire}_extended", debug
+
+        # ── L2 hidden-seller / big-seller veto (reused; fail-open on disabled/null L2) ──
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
+        if _l2v is not None:
+            _reason, _l2patch = _l2v
+            debug.update(_l2patch)
+            return False, f"{_reason_fire}_{_reason}", debug
+
+        debug["pullback_high"] = float(level)
+        debug["pullback_low"] = float(stop)
+
+        # ── TRIGGER: the break to a NEW HIGH above the base resistance ──────────────────
+        # The break LEVEL is the session HOD (the base sits at the highs, so clearing the
+        # base IS clearing the HOD) — fire on a new HIGH above BOTH the base resistance and
+        # the completed-bar HOD ("a couple cents underneath that level to anticipate it").
+        brk_level = max(level, sess_hod)
+        cur_hi = float(high.iloc[cur])
+
+        # TICK-BREAK (Ross-speed): the structure is valid on completed bars and the LIVE
+        # tick is already trading through the break level — enter on that tick, not a bar-
+        # close later. Require the ATR/floor THRUST buffer (the tightest level the lane
+        # arms must clear a real thrust, not a 1-tick poke) in EVERY session, plus the
+        # premarket false-pop guard. The break bar's volume is unknowable mid-bar, so the
+        # volume-spike leg is waived here (the shared caller's sustained-volume gate + the
+        # breakout-or-bailout fast exit are the compensating guards).
+        if (
+            live_price is not None and float(live_price) > 0
+            and float(live_price) > brk_level
+            and _premarket_tickbreak_confirmed(
+                live_price=float(live_price), level=float(brk_level),
+                atr_pct=atr_pct, symbol=symbol, now=now,
+            )
+            and _dipbuy_tick_thrust_ok(
+                live_price=float(live_price), level=float(brk_level), atr_pct=atr_pct,
+            )
+        ):
+            debug["pullback_high"] = float(brk_level)
+            debug["tick_break"] = True
+            debug["live_price"] = float(live_price)
+            return True, f"{_reason_fire}_tick_ok", debug
+
+        # not broken on a completed bar yet -> ARM a tick-watch at the level (surfaced by
+        # the caller as a TICK_ARMED_WAIT_REASON via the pullback_high).
+        if cur_hi <= brk_level:
+            debug["pullback_high"] = float(brk_level)
+            return False, "waiting_for_break", debug
+        # a completed bar broke to a NEW HIGH — require a VOLUME SPIKE on the break bar
+        # (real demand, the new-HOD + thrust core, mirroring the pyramid new-HOD predicate).
+        # The strong-close / candle-quality + sustained-volume confirmations are applied by
+        # the shared caller's confirmation stack.
+        vol_ratio = None
+        try:
+            vol_ratio = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
+        except (TypeError, ValueError):
+            vol_ratio = None
+        if vol_ratio is None:
+            w = vol.tail(21)
+            _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
+            vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
+        _vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
+        debug["vol_ratio"] = round(vol_ratio, 2)
+        if vol_ratio < _vol_mult:
+            return False, f"{_reason_fire}_low_volume", debug
+
+        debug["pullback_high"] = float(brk_level)
+        return True, _reason_fire, debug
+    except Exception:
+        return False, f"{_reason_fire}_error", {"entry_interval": entry_interval}
+
+
+def select_best_setup(
+    candidates: list[tuple[bool, str, dict[str, Any]]],
+    *,
+    symbol: str | None = None,
+    atr_pct: float | None = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Setup-selector (Batch A): given several trigger results that fired on the SAME bar
+    (each a shared ``(ok, reason, debug)`` with ``pullback_high`` = entry level +
+    ``pullback_low`` = structural stop), pick the FIRE with the best structural
+    reward:risk instead of first-clears-gates.
+
+    R:R is computed from the SAME ``stop_target_prices`` the live runner uses to place the
+    bracket, so the selection matches the actual order geometry (the entry = pullback_high,
+    the stop = pullback_low, the target = the class-aware R:R-anchored target → reward/risk
+    in price terms). Ties and any candidate missing a usable level fall back to the FIRST
+    fire (the legacy ladder order), so a degenerate input is byte-identical to no selector.
+
+    Returns the chosen ``(ok, reason, debug)`` (the debug carries a ``setup_rr`` +
+    ``setup_selected_from`` breadcrumb on a real choice). Pure; no I/O. Fail-OPEN to the
+    first fire on any error. docs/DESIGN/MOMENTUM_LANE.md"""
+    try:
+        fires = [c for c in candidates if c and c[0] and isinstance(c[2], dict)
+                 and c[2].get("pullback_high") and c[2].get("pullback_low")]
+        if not fires:
+            # no usable fire -> return the first truthy result (preserves legacy reason),
+            # else the first candidate unchanged.
+            for c in candidates:
+                if c and c[0]:
+                    return c
+            return candidates[0] if candidates else (False, "no_candidate", {})
+        if len(fires) == 1:
+            return fires[0]
+        from .paper_execution import class_aware_reward_risk, stop_target_prices
+
+        _ap = float(atr_pct) if (atr_pct is not None and atr_pct > 0) else 0.01
+        best = None
+        best_rr = -1.0
+        for ok_t, reason_t, dbg in fires:
+            try:
+                entry = float(dbg["pullback_high"])
+                stop = float(dbg["pullback_low"])
+                if not (0.0 < stop < entry):
+                    continue
+                _s, target = stop_target_prices(
+                    entry, atr_pct=_ap, side_long=True,
+                    reward_risk=class_aware_reward_risk(symbol),
+                )
+                risk = entry - stop
+                reward = float(target) - entry
+                rr = (reward / risk) if risk > 0 else -1.0
+            except (TypeError, ValueError, KeyError):
+                continue
+            if rr > best_rr:
+                best_rr, best = rr, (ok_t, reason_t, dbg)
+        if best is None:
+            return fires[0]
+        _ok, _reason, _dbg = best
+        _dbg = dict(_dbg)
+        _dbg["setup_rr"] = round(best_rr, 3)
+        _dbg["setup_selected_from"] = [c[1] for c in fires]
+        return _ok, _reason, _dbg
+    except Exception:
+        for c in candidates:
+            if c and c[0]:
+                return c
+        return candidates[0] if candidates else (False, "no_candidate", {})
+
+
 def momentum_pullback_trigger(
     df: pd.DataFrame, *, entry_interval: str, live_price: float | None = None,
     symbol: str | None = None, now: Any = None, db: Any = None, l2_as_of: Any = None,

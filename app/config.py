@@ -3189,6 +3189,52 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_FLOOR_CHANGE_PCT"),
         description="E3: absolute day-change %% floor (Ross's 'never buy what isn't already moving') an equity must clear at entry to be a live setup.",
     )
+    # ── BATCH A: HOD-break / flat-top BREAKOUT entry + setup-selector (Ross gap: CHILI
+    # has ZERO breakout entries — every trigger is pullback/dip/reclaim, so a straight-up
+    # PARABOLIC HOD runner that never pulls back to the 9-EMA produces NO fills (SHPH +86%
+    # armed 8x, 0 entries). Ross buys the HOD break verbatim, SS101 #011: "buying the high
+    # of day... get in a couple cents underneath that level to anticipate the break". These
+    # detect a CONSOLIDATION/BASE under the HOD (a flag right under the high, NOT a vertical
+    # spike) and fire on the break to a new high with volume + tick-thrust confirmation.
+    # ANTI-CHASE: the break fires ONLY off a tested base; a backside / rolled-over top
+    # (front_side_state / _detect_back_side) or an over-extended vertical (the existing
+    # extension veto) is skipped. KILL-SWITCH each: OFF -> dip-only behavior byte-identical.
+    chili_momentum_hod_break_entry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOD_BREAK_ENTRY_ENABLED"),
+        description="Batch A: HOD/new-high BREAKOUT entry — detect a consolidation BASE holding a tight range just under the day high, then FIRE on the break to a new HOD with a volume spike + tick-thrust confirmation; stop below the consolidation low. ANTI-CHASE: requires the base (a tested break, never a vertical blow-off), and is vetoed on a backside/rolled-over top or an over-extended (above-9-EMA/VWAP) extension. KILL-SWITCH: False -> the trigger is never tried -> byte-identical dip-only ladder.",
+    )
+    chili_momentum_flat_top_entry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLAT_TOP_ENTRY_ENABLED"),
+        description="Batch A: FLAT-TOP consolidation breakout — a parameterization of the HOD break requiring 2-3 taps (topping tails) at a FLAT resistance level, then FIRE on the break; stop = consolidation low; whole/half-dollar round-number context from the existing grid. Same anti-chase guards as the HOD break. KILL-SWITCH: False -> the flat-top variant is never tried -> byte-identical.",
+    )
+    chili_momentum_setup_selector_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SETUP_SELECTOR_ENABLED"),
+        description="Batch A: setup-selector — when >=2 triggers (a dip-family fire AND the new breakout fire) are eligible on the SAME bar, choose the one with the best structural reward:risk (via stop_target_prices) instead of first-clears-gates. KILL-SWITCH: False -> the first trigger that fires wins (the legacy ladder order) -> byte-identical.",
+    )
+    # The ONE documented adaptive knob for the consolidation BASE width: the base is "tight"
+    # when its high-to-low range is within this multiple x the instrument's ATR (a calm name
+    # keeps a tight base, a volatile small-cap is allowed a proportionally wider one). No
+    # fixed cents — derived from ATR. A base wider than this is a sloppy chop, not a flag.
+    chili_momentum_hod_base_atr_mult: float = Field(
+        default=1.5,
+        gt=0.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOD_BASE_ATR_MULT"),
+        description="Batch A: the consolidation BASE is 'tight enough' to be a flag (not chop) when its high-low range <= this x ATR (ATR-relative, no fixed cents). The base must also hold within this fraction of the day-high band. ONE documented base knob for the HOD/flat-top consolidation detection.",
+    )
+    # Number of recent completed bars that form the consolidation base under the HOD. The
+    # ONE documented base for the base-window length (a flag is a handful of bars, not a
+    # long grind). Bounded so a degenerate config can't read the whole frame as a base.
+    chili_momentum_hod_base_bars: int = Field(
+        default=4,
+        ge=2,
+        le=12,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOD_BASE_BARS"),
+        description="Batch A: number of recent completed bars that must form the tight consolidation base just under the HOD before the break fires. ONE documented base-window knob.",
+    )
     # E2 — CATALYST GRADING + WEAK HARD GATE. weak_catalyst_symbols() (dilution/compliance/
     # legal) existed only as a soft viability de-boost; it never gated the arm queue. Ross
     # DISTRUSTS weak catalysts (fade predictors) and favors STRONG (FDA/M&A/contract). When
