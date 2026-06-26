@@ -2246,6 +2246,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_BLUE_SKY_ENTRY_MIN_ROOM_ATR"),
         description="The ONE documented knob for the blue-sky entry: the nearest overhead-supply level must sit at least this many DAILY-ATR units above the break (clear-room floor) for the trigger to fire genuine clear sky. Adaptive (ATR-relative), not a fixed $.",
     )
+    chili_momentum_bull_flag_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BULL_FLAG_ENTRY_ENABLED"),
+        description="Ross BULL FLAG (SS101 #012) ALL-DAY entry: 1-3 green-candle impulse, then a 2-3 candle DEEPER pullback (50-70% retrace -- DEEPER than the shallow first_pullback cap, riding the 9-EMA band) that holds, then FIRE the first candle to break the prior pullback swing high. DISTINCT from first_pullback (shallow only) and deep_reclaim (morning-only). Reuses the anti-chase guards (explosive/first-pullback/backside/L2/overhead) + volume-profile (light-pull dry-up + high-vol-red distribution veto). Ship DARK (default FALSE -- NEW + never-run; operator ramps). OFF => no-op, byte-identical. docs/DESIGN/MOMENTUM_LANE.md",
+    )
     chili_momentum_overhead_veto_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_OVERHEAD_VETO_ENABLED"),
@@ -3346,10 +3351,61 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_RED_TO_GREEN_ENTRY_ENABLED"),
         description="Batch D: RED-TO-GREEN — a name trading RED (below the session OPEN level) that RECLAIMS the open with a bottoming-tail/reversal bar + volume; entry = the open-level reclaim, stop = the red (session) low. Reuses the bottoming-tail + dipbuy reversal machinery. KILL-SWITCH: False -> the trigger is never tried -> byte-identical.",
     )
+    chili_momentum_bottom_reversal_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BOTTOM_REVERSAL_ENTRY_ENABLED"),
+        description="SS101 #019 BOTTOM REVERSAL — a series of N consecutive RED candles on elevated volume, then the FIRST candle to CLOSE GREEN is the counter-trend confirmation; entry = the green-candle close (or the break above its high on live price), stop = the recent red-series low (the structural pivot). Optional doji/bottoming-tail at the low = exhaustion confirmer (recorded, never required). Reuses the backside + L2 anti-chase vetoes + the tick-break contract. DISTINCT from red_to_green (no session-open tie; enters on the green bar itself, not a reclaim), double-bottom (no two-low structure), first-pullback (counter-trend not continuation), deep-reclaim (no EMA req, all day). KILL-SWITCH: False (DEFAULT — new + never-run, ship dark) -> the trigger is never tried -> byte-identical.",
+    )
+    chili_momentum_bottom_reversal_min_red: int = Field(
+        default=2,
+        ge=2,
+        le=20,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BOTTOM_REVERSAL_MIN_RED"),
+        description="SS101 #019: minimum count of CONSECUTIVE RED candles immediately preceding the first green close before a bottom reversal can fire. ONE documented noise-defense base; Ross's floor is 2, 3-5 recommended for noise rejection.",
+    )
+    chili_momentum_bottom_reversal_volume_spike_multiple: float = Field(
+        default=1.5,
+        gt=0.0,
+        le=20.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BOTTOM_REVERSAL_VOLUME_SPIKE_MULTIPLE"),
+        description="SS101 #019: the green confirmation bar's RVOL (volume_ratio) must be at least this multiple for a real reclaim (not a dead-tape green dribble). ONE documented volume-confirm base; default 1.5x.",
+    )
     chili_momentum_micro_pullback_primary_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MICRO_PULLBACK_PRIMARY_ENABLED"),
         description="Batch D: MICRO-PULLBACK AS PRIMARY — fire the 1-candle shallow micro-pullback flag as an INITIAL entry (not just a post-fill re-load), GATED to HOT/explosive tape (the same _is_hot_tape RVOL/ATR floors as the wick-reclaim) so it does not over-fire on slow names. Reuses micro_pullback_reentry_detect's shelf/dip geometry; entry = the micro-break, stop = the micro-pullback low. KILL-SWITCH: False -> the trigger is never tried -> byte-identical.",
+    )
+    # ── SS101 #014: MOVING-AVERAGE / VWAP PULLBACK (cooler-market EMA-cascade dip-buy) ──
+    # NEW + never-run -> ship DARK (default False); the operator ramps it. The cooler-market
+    # grinder case the shallow first-pullback (too-shallow) and the morning-only deep-reclaim
+    # cannot address: a DEEPER all-day pull to the 9/20-EMA cascade that grinds sideways (no
+    # clean flag/ABCD), bought on the EMA reclaim. Adaptive ATR-relative geometry; one
+    # documented base per knob. docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_ma_vwap_pullback_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MA_VWAP_PULLBACK_ENABLED"),
+        description="SS101 #014: MOVING-AVERAGE / VWAP PULLBACK — after an impulse (3+ green candles) the name pulls back 2+ bars into a SIDEWAYS consolidation grinding along the moving averages (DEEPER than the shallow first-pullback allows; may touch the 9-EMA then the 20-EMA, possibly the VWAP), then FIRES on the reclaim of the 9-EMA (primary support) or, if the 9 broke, the 20-EMA (secondary); entry = the reclaimed EMA level, stop = the pullback RETRACEMENT LOW. The cooler-market grinder dip-buy that other gates fail to form (no clean flag/ABCD). Reuses the anti-chase machinery (extension guard, collapse cap, backside + L2 vetoes, overhead veto via select_best_setup). KILL-SWITCH (ship DARK): False -> the trigger is never tried -> byte-identical.",
+    )
+    chili_momentum_ma_vwap_impulse_bars: int = Field(
+        default=3,
+        ge=2,
+        le=10,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MA_VWAP_IMPULSE_BARS"),
+        description="SS101 #014: the ONE documented base for the INITIAL IMPULSE length — how many consecutive GREEN candles must precede the consolidation for the move to be a real leg up worth buying the dip of. Default 3 (Ross's '3+ green candles').",
+    )
+    chili_momentum_ma_vwap_consolidation_bars: int = Field(
+        default=2,
+        ge=2,
+        le=10,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MA_VWAP_CONSOLIDATION_BARS"),
+        description="SS101 #014: the ONE documented base for the PULLBACK/consolidation length — how many recent bars (up to the forming bar) must grind sideways near/below the moving averages before the reclaim. The pullback retracement low across these bars is the structural stop. Default 2 (Ross's '2+ bars').",
+    )
+    chili_momentum_ma_vwap_vol_mult: float = Field(
+        default=1.5,
+        gt=0.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MA_VWAP_VOL_MULT"),
+        description="SS101 #014: the ONE documented base for the ELEVATED-VOLUME floor on the EMA-reclaim bar (conviction of the bounce, not a drift back to the averages) as a multiple of the rolling average volume. Default 1.5x (shares the lane's vwap-reclaim vol-mult yardstick).",
     )
     # ── BATCH C: ABCD (SS101 #013) + double-bottom (swing-pivot scanner) ──────────────
     # Lower hit-rate than the breakout/pullback families (the audit said defer) — built
@@ -3364,6 +3420,16 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_DOUBLE_BOTTOM_ENTRY_ENABLED"),
         description="Batch C: double-bottom entry — two swing lows at ~the same support level (within an ATR-derived band), the second printing a bottoming-tail reversal and HOLDING (no new low below the first), then fire on the break above the intervening swing high; entry = the neckline break level, stop = below the double-bottom low (shared pullback_high/pullback_low keys). NOISE DEFENSE: the ATR pivot filter + the ATR-derived equal-lows band + the second-low bottoming tail. KILL-SWITCH: False -> the trigger is never tried -> byte-identical.",
+    )
+    chili_momentum_inverse_head_shoulders_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_INVERSE_HEAD_SHOULDERS_ENTRY_ENABLED"),
+        description="Batch C: inverse (inverted) head-and-shoulders entry (SS101 #017; Ross: 'I do trade the inverted head and shoulders'). From the ATR-filtered swing lows: left-shoulder low -> head (a LOWER low + recovery high) -> right-shoulder (a HIGHER-low HOLD above the head + high), neckline = the MINIMUM of the two shoulder highs. Fire on the break above the neckline with a volume confirm; entry = the neckline break level (pullback_high), stop = the HEAD low = the structural support of the pattern (pullback_low). NOISE DEFENSE: the ATR pivot filter + the head-below-both-shoulders ordering + the right-shoulder-above-head hold + a _collapse_cap depth gate on the shoulder retraces. DISTINCT from double-bottom (three pivots + shoulder-hold + neckline=min(shoulder-highs), not two equal lows). NEW + never-run: KILL-SWITCH default False -> the trigger is never tried -> byte-identical.",
+    )
+    chili_momentum_cup_and_handle_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CUP_AND_HANDLE_ENTRY_ENABLED"),
+        description="Batch C: cup-and-handle entry (SS101 #016; Ross: 'formed by a double top that then doesn't totally fail ... buy here for this breakout, using the low of the handle as support'). From the ATR-filtered swing highs: CUP = two swing HIGHS at ~the same level (within the double-bottom ATR band, applied to resistance) within ~15-20 bars (the double-top rim); HANDLE = a SHALLOW pullback (1-3 completed bars) after the second top, capped by the SAME vol-aware shallow tolerance first_pullback uses + the _collapse_cap, holding above the 9-EMA (vol-aware wick tolerance). Fire on the first NEW HIGH above the cup rim with a volume surge; entry = the cup-rim/double-top peak (pullback_high), stop = the HANDLE LOW (pullback_low — 'using the low of the handle as support'). DISTINCT from first_pullback (REQUIRES the double-top rim first, not any impulse), ABCD (2-tops+handle, not a 4-swing C-low-hold coil), double-bottom (two HIGHS at resistance, not two lows at support), deep_reclaim (ALL-DAY + shallow-only, not morning-only deeper), flat_top (rounded double-top + a SEPARATE handle phase, not one repeatedly-tested level). ANTI-CHASE: ATR pivot filter + equal-highs band + shallow handle cap + _collapse_cap + 9-EMA hold + L2 hidden-seller veto. NEW + never-run: KILL-SWITCH default False -> the trigger is never tried -> byte-identical.",
     )
     # The ONE documented adaptive knob for the swing-pivot SCANNER WINDOW: a bar is a
     # confirmed swing high/low when it is the local extreme over +/- this many neighbors
@@ -3396,6 +3462,26 @@ class Settings(BaseSettings):
         le=10.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_DOUBLE_BOTTOM_BAND_ATR_MULT"),
         description="Batch C: double-bottom equal-lows band — the two swing lows are 'at the same support' when within this multiple x ATR of each other (ATR-derived, no fixed cents). ONE documented band knob.",
+    )
+    # The ONE documented adaptive knob for the cup-and-handle CUP WIDTH: the two tops (the
+    # double-top rim) must be within this many bars of each other to read as a single cup
+    # (Ross's "~10-20 bar" double-top lookback). Bigger = a wider cup is allowed.
+    chili_momentum_cup_and_handle_lookback_bars: int = Field(
+        default=20,
+        ge=2,
+        le=120,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CUP_AND_HANDLE_LOOKBACK_BARS"),
+        description="Batch C: cup-and-handle cup-width ceiling — the two swing highs (the double-top rim) must be within this many bars of each other to read as one cup. ONE documented cup-width base knob.",
+    )
+    # The ONE documented knob for the cup-and-handle HANDLE LENGTH: the handle is the shallow
+    # pullback AFTER the second top — at most this many completed bars before the breaking bar
+    # (Ross's "1-3 bar" handle). Bigger = a longer handle is tolerated.
+    chili_momentum_cup_and_handle_max_handle_bars: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CUP_AND_HANDLE_MAX_HANDLE_BARS"),
+        description="Batch C: cup-and-handle handle length — the handle is at most this many completed bars (the shallow pullback after the second top, before the breaking bar). ONE documented handle-length base knob.",
     )
     # E2 — CATALYST GRADING + WEAK HARD GATE. weak_catalyst_symbols() (dilution/compliance/
     # legal) existed only as a soft viability de-boost; it never gated the arm queue. Ross

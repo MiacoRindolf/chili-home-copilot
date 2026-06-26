@@ -4204,6 +4204,8 @@ def tick_live_session(
                                 # Run AFTER the existing ladder (additive). docs/DESIGN/MOMENTUM_LANE.md
                                 try:
                                     from .entry_gates import (
+                                        cup_and_handle_confirmation,
+                                        inverse_head_shoulders_confirmation,
                                         ross_abcd_confirmation,
                                         ross_double_bottom_confirmation,
                                     )
@@ -4211,6 +4213,8 @@ def tick_live_session(
                                     for _bc_fn in (
                                         ross_abcd_confirmation,
                                         ross_double_bottom_confirmation,
+                                        inverse_head_shoulders_confirmation,
+                                        cup_and_handle_confirmation,
                                     ):
                                         try:
                                             _bc_ok, _bc_reason, _bc_dbg = _bc_fn(
@@ -4247,6 +4251,8 @@ def tick_live_session(
                                 # the live tick break is the only intrabar use). docs/DESIGN/MOMENTUM_LANE.md
                                 try:
                                     from .entry_gates import (
+                                        bottom_reversal_confirmation,
+                                        ma_vwap_pullback_confirmation,
                                         opening_range_breakout_confirmation,
                                         red_to_green_confirmation,
                                     )
@@ -4254,6 +4260,23 @@ def tick_live_session(
                                     for _bd_fn in (
                                         opening_range_breakout_confirmation,
                                         red_to_green_confirmation,
+                                        # SS101 #019 BOTTOM REVERSAL — N consecutive reds then
+                                        # the first green close (counter-trend bounce); shares the
+                                        # red_to_green signature + the shared (ok,reason,debug)+
+                                        # pullback_high/low contract so it joins the SAME candidate
+                                        # set the setup-selector arbitrates by R:R. Flag-gated
+                                        # INSIDE the detector (default OFF -> no-op, byte-identical).
+                                        bottom_reversal_confirmation,
+                                        # SS101 #014 MOVING-AVERAGE / VWAP PULLBACK — the
+                                        # cooler-market EMA-cascade dip-buy (DEEPER than the
+                                        # shallow first-pullback, ALL-DAY unlike the morning-
+                                        # only deep-reclaim, dips TO the 9/20-EMA not VWAP):
+                                        # fire on the EMA reclaim, stop = the pullback low.
+                                        # Shares the (ok,reason,debug)+pullback_high/low
+                                        # contract so it joins the SAME candidate set the
+                                        # setup-selector arbitrates by R:R. Flag-gated INSIDE
+                                        # the detector (default OFF -> no-op, byte-identical).
+                                        ma_vwap_pullback_confirmation,
                                     ):
                                         try:
                                             # now=None -> the live real clock (the runner
@@ -4279,6 +4302,41 @@ def tick_live_session(
                                             # dispatch fires the instant the ask trades through the
                                             # OR-high / open level (the ladder gave only a terminal wait).
                                             _trigger_reason, _pb_debug = _bd_reason, _bd_dbg
+                                except Exception:
+                                    pass
+
+                                # SS101 #012: BULL FLAG -- the DEEPER (50-70% retrace) 2-3
+                                # candle pullback that holds the 9-EMA, then breaks the prior
+                                # pullback swing high. DISTINCT from first_pullback (SHALLOW
+                                # only) and deep_reclaim (MORNING-only); ALL-DAY. A BREAKOUT-
+                                # family fire that joins the SAME candidate set so the setup-
+                                # selector picks the best R:R; flag-gated INSIDE the detector
+                                # (OFF -> no-op, byte-identical) and returns the shared (ok,
+                                # reason, debug) with pullback_low/high under the IDENTICAL
+                                # keys. Runs AFTER the existing ladder (additive). No lookahead
+                                # (swing high from completed bars; the live tick break is the
+                                # only intrabar use). docs/DESIGN/MOMENTUM_LANE.md
+                                try:
+                                    from .entry_gates import bull_flag_confirmation
+
+                                    _bf_ok, _bf_reason, _bf_dbg = bull_flag_confirmation(
+                                        _df_trig, entry_interval=_iv_trig,
+                                        live_price=_live_px, symbol=sess.symbol,
+                                        now=None, db=db,
+                                    )
+                                    if _bf_ok:
+                                        _breakouts.append((_bf_ok, _bf_reason, _bf_dbg))
+                                    elif (
+                                        _bf_reason in TICK_ARMED_WAIT_REASONS
+                                        and isinstance(_bf_dbg, dict)
+                                        and _bf_dbg.get("pullback_high")
+                                        and not _trigger_ok
+                                        and _trigger_reason not in TICK_ARMED_WAIT_REASONS
+                                    ):
+                                        # Surface the bull-flag WAIT so tick-speed dispatch
+                                        # fires the instant the ask trades through the swing
+                                        # high (the ladder gave only a terminal wait).
+                                        _trigger_reason, _pb_debug = _bf_reason, _bf_dbg
                                 except Exception:
                                     pass
 
