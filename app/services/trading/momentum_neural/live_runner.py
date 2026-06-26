@@ -4282,10 +4282,21 @@ def tick_live_session(
                                             # now=None -> the live real clock (the runner
                                             # is live-only; the session-window read uses the
                                             # DST-correct market-profile open helper).
+                                            # l2_as_of=None = the LIVE default (newest
+                                            # book snapshot; read_ladder_distribution emits
+                                            # the original SQL). Threaded EXPLICITLY so the
+                                            # _l2_entry_veto inside each Batch-D gate
+                                            # (red_to_green / ORB / bottom_reversal /
+                                            # ma_vwap_pullback) reads the live book like the
+                                            # other gates — the hidden-seller / big-seller
+                                            # veto fires for these too. PRESERVES fail-open:
+                                            # no L2 data ⇒ _NULL read ⇒ veto returns None ⇒
+                                            # unchanged. Byte-identical (the gate already
+                                            # defaults l2_as_of=None).
                                             _bd_ok, _bd_reason, _bd_dbg = _bd_fn(
                                                 _df_trig, entry_interval=_iv_trig,
                                                 live_price=_live_px, symbol=sess.symbol,
-                                                now=None, db=db,
+                                                now=None, db=db, l2_as_of=None,
                                             )
                                         except Exception:
                                             _bd_ok, _bd_reason, _bd_dbg = False, "batch_d_error", {}
@@ -4319,10 +4330,15 @@ def tick_live_session(
                                 try:
                                     from .entry_gates import bull_flag_confirmation
 
+                                    # l2_as_of=None = the LIVE default (newest book snapshot).
+                                    # Threaded EXPLICITLY so the _l2_entry_veto inside
+                                    # bull_flag_confirmation reads the live book like the other
+                                    # gates. PRESERVES fail-open (no L2 data ⇒ None ⇒ unchanged);
+                                    # byte-identical (the gate already defaults l2_as_of=None).
                                     _bf_ok, _bf_reason, _bf_dbg = bull_flag_confirmation(
                                         _df_trig, entry_interval=_iv_trig,
                                         live_price=_live_px, symbol=sess.symbol,
-                                        now=None, db=db,
+                                        now=None, db=db, l2_as_of=None,
                                     )
                                     if _bf_ok:
                                         _breakouts.append((_bf_ok, _bf_reason, _bf_dbg))
