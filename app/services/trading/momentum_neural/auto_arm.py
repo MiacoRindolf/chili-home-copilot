@@ -266,6 +266,136 @@ def _watcher_is_building(le: dict, *, base_sec: int) -> bool:
     return dist_pct <= prox_pct
 
 
+# ── EVENT / STRUCTURE-BASED ABANDONMENT ─────────────────────────────────────────────
+# Ross stays on a strong stock all day and works EACH pullback; he abandons when the name
+# FADES, not when a clock expires. The reaper's fixed base/extend clock dropped IVF (+66%,
+# 14 clean 2-red-pullback setups across the day) because CHILI armed it only EARLY and got
+# reaped before its setups developed. These helpers let the reaper KEEP a still-strong,
+# still-front-side pre-entry watcher past the clock — and REAP it the instant it cools/fades
+# (no slot leak), with a hard adaptive ceiling so a stuck watcher cannot watch forever.
+#
+# READ DISCIPLINE (orphan-safety + no serialization): conviction is read from a SINGLE bulk
+# viability query the reaper builds BEFORE its loop (passed in as ``conviction_idx``) — NO
+# per-session DB read inside the loop. Front-side is read from the session's OWN already-
+# loaded ``momentum_live_execution`` snapshot (zero new fetch). Both fail OPEN where required
+# so a missing signal never CUTS a keep candidate short — but a name with NO conviction
+# evidence falls through to the normal fixed-clock reap (the kept set is a strict opt-in).
+
+
+def _event_based_abandonment_enabled() -> bool:
+    """Kill-switch. OFF (default) => the reaper never calls the conviction/front-side check
+    and its loop is byte-identical to the fixed base/extend clock."""
+    return bool(getattr(settings, "chili_momentum_event_based_abandonment_enabled", False))
+
+
+def _event_based_max_extend_seconds() -> int:
+    """The HARD fallback ceiling (seconds) for a KEPT high-conviction watcher, derived
+    adaptively from the extend window by ONE documented multiple (no fixed second-count
+    clock). A watcher older than this reaps EVEN IF still high-conviction + front-side, so a
+    name that never triggers all day cannot squat a slot forever. Clamped >= the extend
+    window so the ceiling can never be tighter than the window a progressing setup already
+    earns (which would otherwise reap a building setup early)."""
+    try:
+        mult = float(getattr(settings, "chili_momentum_event_based_max_extend_mult", 3.0) or 3.0)
+    except (TypeError, ValueError):
+        mult = 3.0
+    if mult < 1.0:
+        mult = 1.0
+    return max(_watch_extend_seconds(), int(_watch_extend_seconds() * mult))
+
+
+def _session_still_high_conviction(row: Any) -> bool:
+    """True iff ``row`` (a MomentumSymbolViability for this watcher's symbol) still clears the
+    arm-queue's HIGH-CONVICTION bar — the IDENTICAL test ``_continuation_active_trigger`` uses:
+    ross_score >= chili_momentum_continuation_ross_floor, OR rvol >= the coiling-exempt extreme
+    floor (explosive_rvol_floor * coiling_exempt_rvol_mult, ~9x), OR daily_breaking_major.
+    Reads ONLY the row's OWN persisted scanner signal (no new fetch). ``row`` None / no
+    evidence => False (NOT high-conviction => falls through to the normal fixed-clock reap)."""
+    if row is None:
+        return False
+    _ross_score: float | None = None
+    try:
+        extra = (getattr(row, "execution_readiness_json", None) or {}).get("extra") or {}
+        _rs_map = extra.get("ross_scores") if isinstance(extra.get("ross_scores"), dict) else {}
+        _symu = str(getattr(row, "symbol", "") or "").upper()
+        if _symu in _rs_map:
+            _ross_score = float(_rs_map[_symu] or 0.0)
+    except (AttributeError, TypeError, ValueError):
+        _ross_score = None
+    _daily_breaking = False
+    _sig = _row_ross_signal(row)
+    if isinstance(_sig, dict):
+        _daily_breaking = bool(_sig.get("daily_breaking_major"))
+    _rvol_now = _row_rvol(row)
+    _ross_floor = float(getattr(settings, "chili_momentum_continuation_ross_floor", 0.7) or 0.7)
+    _rvol_floor = float(getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 3.0)
+    _coil_mult = float(getattr(settings, "chili_momentum_coiling_exempt_rvol_mult", 3.0) or 3.0)
+    _rvol_conviction_floor = _rvol_floor * _coil_mult
+    return bool(
+        (_ross_score is not None and _ross_score >= _ross_floor)
+        or (_rvol_now is not None and _rvol_now >= _rvol_conviction_floor)
+        or _daily_breaking
+    )
+
+
+def _session_still_front_side(le: Any) -> bool:
+    """True iff the watcher is still FRONT-SIDE per its OWN cached ``momentum_live_execution``
+    snapshot — i.e. NOT provably faded/backside. FAIL-OPEN: missing/garbage evidence => True
+    (assume front-side; never cut a keep candidate short on absent data, per the plan). Only
+    AFFIRMATIVE backside evidence demotes the watcher to reap:
+      (a) ``is_backside`` already cached True (from a prior entry-gate front_side_state run);
+      (b) ``retrace_from_hod`` cached and > the retrace veto (it has faded off the highs);
+      (c) ``last_mid`` and ``session_vwap`` both cached and last_mid below vwap (lost VWAP).
+    Reads ONLY the snapshot already loaded by the reap loop — no new fetch, no compute."""
+    if not isinstance(le, dict):
+        return True  # no snapshot -> cannot prove backside -> fail-open front-side
+    # (a) explicit cached backside flag (authoritative when present).
+    _ib = le.get("is_backside")
+    if isinstance(_ib, bool):
+        return not _ib
+    # (b) faded: retraced more than the veto of the day's up-move off the HOD.
+    _r = le.get("retrace_from_hod")
+    if _r is not None:
+        try:
+            _rf = float(_r)
+            _veto = float(getattr(settings, "chili_momentum_event_based_retrace_veto", 0.66) or 0.66)
+            if _veto > 0.0 and _rf > _veto:
+                return False  # faded -> backside -> reap
+        except (TypeError, ValueError):
+            pass  # unparseable -> ignore this axis (fail-open)
+    # (c) lost VWAP: last_mid affirmatively below the session VWAP.
+    _vwap = le.get("session_vwap")
+    _mid = le.get("last_mid")
+    if _vwap is not None and _mid is not None:
+        try:
+            _vf = float(_vwap)
+            _mf = float(_mid)
+            if _vf > 0.0 and _mf > 0.0 and _mf < _vf:
+                return False  # below VWAP -> backside -> reap
+        except (TypeError, ValueError):
+            pass  # unparseable -> ignore this axis (fail-open)
+    return True  # no affirmative backside evidence -> front-side (keep eligible)
+
+
+def _build_reap_conviction_index(db: Session) -> dict[str, Any]:
+    """Build the {UPPER symbol -> MomentumSymbolViability} index the reaper reads conviction
+    from, in a SINGLE bulk query BEFORE the reap loop (never a per-session read inside it).
+    Same fresh-eligible source the arm-queue ranks from (``_fresh_live_eligible_candidates``)
+    so a kept watcher is one the lane would STILL arm. Best variant per distinct symbol wins
+    (the list is already viability-score-desc, so first-seen is best). Fail-open to {} on any
+    error => no watcher is high-conviction => the reaper falls back to the fixed clock."""
+    try:
+        rows = _fresh_live_eligible_candidates(db, limit=_scan_limit())
+    except Exception:
+        return {}
+    idx: dict[str, Any] = {}
+    for r in rows:
+        su = str(getattr(r, "symbol", "") or "").upper()
+        if su and su not in idx:
+            idx[su] = r
+    return idx
+
+
 # Per-symbol PRE-ENTRY REAP cooldown (in-process, scheduler-local). A name reaped
 # here just held the live slot for the full watch window without firing; cooling it
 # down briefly stops it from immediately re-arming and re-occupying the single slot,
@@ -584,6 +714,18 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
             _focus_leader = str(_identify_session_leader(_board) or "").upper()
         except Exception:
             _focus_leader = ""
+    # EVENT/STRUCTURE-BASED ABANDONMENT (kill-switch chili_momentum_event_based_abandonment_
+    # enabled, default OFF => byte-identical fixed clock): build the conviction index ONCE,
+    # BEFORE the reap loop, in a SINGLE bulk query (never a per-session read in the loop — that
+    # would serialize the loop + risk the cancel-races-fill window). Flag OFF => the index is
+    # empty and the event keep-check below is skipped entirely (no extra query, no behavior
+    # change). The hard ceiling cutoff is also pre-computed once.
+    _event_based = _event_based_abandonment_enabled()
+    _conviction_idx: dict[str, Any] = {}
+    _event_ceiling_cutoff = None
+    if _event_based:
+        _conviction_idx = _build_reap_conviction_index(db)
+        _event_ceiling_cutoff = now - timedelta(seconds=_event_based_max_extend_seconds())
     try:
         q = db.query(TradingAutomationSession).filter(
             TradingAutomationSession.mode == "live",
@@ -638,6 +780,36 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
                     continue
         except Exception:
             pass
+        # EVENT/STRUCTURE-BASED KEEP (flag ON only — flag OFF skips this block entirely, so
+        # the decision above is byte-identical to the fixed clock). Ross stays on a strong
+        # stock all day: a watcher that is STILL HIGH-CONVICTION (same ross_score/rvol/
+        # daily_breaking source the arm-queue reads, via the pre-built bulk index — no loop
+        # DB read) AND STILL FRONT-SIDE (not faded/backside per its OWN cached snapshot,
+        # fail-open) keeps its slot past the clock so the lane is watching when its next
+        # pullback fires. It reaps the instant it cools/fades (no slot leak), and ALWAYS
+        # reaps past the hard ceiling (a truly-stuck watcher cannot watch forever).
+        if _event_based:
+            try:
+                _su = str(s.symbol or "").upper()
+                _past_ceiling = (
+                    _event_ceiling_cutoff is not None
+                    and s.started_at is not None
+                    and s.started_at < _event_ceiling_cutoff
+                )
+                if not _past_ceiling and _session_still_high_conviction(
+                    _conviction_idx.get(_su)
+                ) and _session_still_front_side(_le):
+                    logger.info(
+                        "[auto_arm] event-based KEEP pre-entry session=%s %s state=%s "
+                        "(still high-conviction + front-side; watching for its next setup, "
+                        "Ross stays on a strong stock) — slot held",
+                        s.id, s.symbol, s.state,
+                    )
+                    continue
+            except Exception:
+                # Fail-SAFE: any error in the keep evaluation falls through to the normal
+                # fixed-clock reap below (never a leak; never blocks the authoritative cancel).
+                logger.debug("[auto_arm] event-based keep eval failed session=%s", getattr(s, "id", None), exc_info=True)
         try:
             cancel_automation_session(db, user_id=int(user_id), session_id=int(s.id))
             reaped += 1

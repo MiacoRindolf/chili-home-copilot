@@ -5377,6 +5377,56 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_WATCH_PROXIMITY_PCT"),
         description="The ONE base knob: a tick-armed watcher counts as BUILDING (earns the extend window) when last_mid is within this percent of its watch_break_level. Wider => more watchers earn the extend (more conservative, keeps more slots). Tuned so a typical near-break name reproduces ~the current extend behavior.",
     )
+    # EVENT / STRUCTURE-BASED ABANDONMENT (2026-06-26, operator: "Ross stays on a strong
+    # stock all day — kill the fixed wall-clock"). ROOT (IVF +66%, 14 clean 2-red-pullback
+    # setups across the day; CHILI armed it only EARLY, got reaped at the base window, and
+    # never watched it during its 14 setups). The FIX: before reaping a stale pre-entry
+    # watcher, ask whether the NAME is still worth watching, not whether a clock expired:
+    #   * KEEP (do NOT reap) if it is STILL HIGH-CONVICTION (ross_score>=floor OR rvol>=the
+    #     coiling-exempt extreme floor OR daily_breaking_major — the SAME conviction the
+    #     arm-queue/continuation gate read) AND STILL FRONT-SIDE (not faded/backside/below
+    #     VWAP per the cached snapshot). Such a name is still setting up; keep its slot so the
+    #     lane is watching when its next pullback fires.
+    #   * REAP (exactly as today) the instant it FADES / goes backside / cools out of high
+    #     conviction — so a cooled name never leaks its slot.
+    # HARD FALLBACK CEILING: even a kept session reaps past an absolute max
+    # (chili_momentum_event_based_max_extend_seconds) so a truly-stuck watcher cannot watch
+    # forever. Conviction is read from a SINGLE bulk viability query built BEFORE the reap
+    # loop (no per-session fetch in the loop); front-side is read from the session's OWN
+    # cached snapshot (fail-open to front-side when absent — never veto a keep candidate
+    # short on missing data). FLAG OFF => the reap loop is byte-identical to the fixed
+    # base/extend clock (no conviction/front-side check runs at all).
+    chili_momentum_event_based_abandonment_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EVENT_BASED_ABANDONMENT_ENABLED"),
+        description="Kill-switch for event/structure-based abandonment of pre-entry watchers. OFF (default) => the exact current fixed base/extend reap clock (byte-identical). ON => a still-high-conviction, still-front-side mover keeps its watch slot past the clock (Ross stays on a strong stock all day) until it fades/cools or hits the hard ceiling; a faded/cooled name reaps exactly as today.",
+    )
+    # The hard fallback ceiling for a KEPT (high-conviction, front-side) watcher, derived
+    # ADAPTIVELY from the extend window (ONE documented multiple — no scattered magic clock):
+    # ceiling = chili_momentum_event_based_max_extend_mult * chili_momentum_auto_arm_watch_extend_seconds.
+    # A watcher that has watched longer than this absolute max reaps EVEN IF still high-
+    # conviction + front-side, so a name that never triggers all day cannot squat a slot
+    # forever. Default mult 3.0 over the 600s extend => 1800s (30min) ceiling; raise to let a
+    # strong leader ride longer, lower to recycle slots sooner.
+    chili_momentum_event_based_max_extend_mult: float = Field(
+        default=3.0,
+        ge=1.0,
+        le=24.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EVENT_BASED_MAX_EXTEND_MULT"),
+        description="Adaptive hard-ceiling multiple over the extend window: a kept high-conviction watcher reaps once it has watched longer than this * chili_momentum_auto_arm_watch_extend_seconds, even if still high-conviction + front-side. Caps a truly-stuck session. ONE documented knob (no fixed second-count); derived from the extend window so it scales with it.",
+    )
+    # Backside detection for the front-side keep gate: a kept watcher is demoted to REAP when
+    # the cached snapshot shows it has retraced MORE than this fraction of its day's up-move
+    # from the high-of-day (Ross's "it faded — move on"). Mirrors front_side_state's
+    # retrace_veto so the reaper's faded test matches the entry gate's. Only applied when the
+    # snapshot AFFIRMATIVELY carries the retrace/HOD evidence; absent => fail-open front-side.
+    chili_momentum_event_based_retrace_veto: float = Field(
+        default=0.66,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EVENT_BASED_RETRACE_VETO"),
+        description="Faded-backside threshold for the keep gate: a kept watcher reaps when its cached snapshot shows retrace_from_hod > this fraction of the day's up-move. Mirrors front_side_state.retrace_veto. Only applied when the snapshot carries the evidence (else fail-open front-side).",
+    )
     # ADAPTIVE REAP-COOLDOWN (2026-06-25): scale the post-reap sit-out by the per-symbol
     # OSCILLATION COUNT (how many arm->reap loops the name has churned recently). A first
     # reap = the short base; a serial oscillator (RENDER looped 88x) = a long cooldown,
