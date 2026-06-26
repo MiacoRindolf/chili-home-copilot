@@ -5571,6 +5571,58 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_EXTENSION_FLOOR_PCT"),
         description="Entry-extension veto: minimum allowed extension above the breakout level (fraction, e.g. 0.10 = 10%) regardless of ATR — a calm name still gets at least this room. Recalibrated 06-24 0.05->0.10: the high-ATR binding constraint that vetoes RUN(+19.9%)/PLSM(+33.8%) is K*0.12=0.12 (K=1.0, regime_atr clamp ceiling 0.12), governed by K NOT the floor, so raising the floor to 0.10 keeps RUN/PLSM vetoed across the full vol range while ALLOWING a calm +9.9% break-and-go (cap = max(0.10, 1.0*atr)). The cap is max(this, K*atr_pct).",
     )
+    # ── L2 ENTRY CONFIRMER (Phase 1, DEFER-only) ─────────────────────────────────
+    # docs/DESIGN/L2_PRIMARY_SIGNAL.md — graduate L2/T&S from veto→CONFIRMER. AFTER the
+    # chart trigger fires AND AFTER both existing vetoes (_l2_entry_veto + _entry_flow_veto)
+    # pass, require the TAPE to actively confirm thrust before the buy submits. TAPE-PRIMARY:
+    # confirm needs signed_tape_accel>0 (back-half aggressor-signed buy volume > front-half,
+    # same Lee-Ready as _aggressor_imbalance) AND tick_rate>=its self-relative floor; OFI
+    # (>=threshold OR micro_edge>0) + a RISING depth-imbalance percentile are SECONDARY
+    # agreement confirmers. CONSERVATIVE-ACTIVE: DEFER only on CLEAR no-confirmation
+    # (signed_tape_accel<=0 AND OFI<0); otherwise confirm. On defer → stay WATCHING_LIVE +
+    # re-enter next tick (MIRRORS the flow-veto defer; the adaptive watch/reap bounds the
+    # slot — no new hold) + emit live_l2_confirm_defer as the COUNTERFACTUAL. ENTRY-ONLY
+    # (never blocks an exit/stop/flatten — held states never call it). FAIL-OPEN: any helper
+    # None / n_snaps<3 / empty-tape / stale snapshot ⇒ CONFIRM (never defer on bad data).
+    # OFF (default) ⇒ return confirm BEFORE any I/O ⇒ byte-identical (will be ENABLED in env).
+    chili_momentum_l2_confirm_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_ENABLED"),
+        description="Phase-1 L2 entry CONFIRMER (DEFER-only): after the chart trigger + both existing vetoes pass, require the executed tape to confirm thrust (signed_tape_accel>0 AND tick_rate>=self-relative floor; OFI/micro + rising depth-pctile secondary) before submitting the buy. DEFER only on CLEAR no-tape (accel<=0 AND OFI<0); fail-open (confirm) on any missing/stale/thin data; entry-only (never blocks exits). false = return confirm before any I/O, byte-identical.",
+    )
+    # Self-relative tick-rate floor PERCENTILE within the symbol's own recent tape window:
+    # the back-half ticks/sec must sit at/above this percentile of the per-half tick rates
+    # for the tape to count as ACTIVELY accelerating (not a dead, thinning book). Adaptive /
+    # no magic absolute rate — it is a percentile of the name's OWN recent activity. 0.0
+    # (permissive) ⇒ any nonzero back-half rate clears the floor (the conservative-active
+    # start: tune UP only if the live counterfactual shows it catches losers). The ONE
+    # documented base knob; everything else is self-relative.
+    chili_momentum_l2_confirm_tick_rate_floor_pctile: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_TICK_RATE_FLOOR_PCTILE"),
+        description="L2 confirmer: self-relative tick-rate floor percentile within the symbol's own recent tape window (back-half ticks/sec must sit at/above this percentile of the per-half rates). Adaptive (no absolute magic rate). 0.0 = permissive (any nonzero back-half rate clears). Only consulted when chili_momentum_l2_confirm_enabled is on.",
+    )
+    # Recent tape window (seconds) the confirmer splits in half to compute signed_tape_accel
+    # + tick_rate. Defaults to the same 15s short-horizon window the OFI/flow readers use so
+    # the tape and book signals are time-aligned. Lookahead-free (trailing now()/as_of).
+    chili_momentum_l2_confirm_window_s: float = Field(
+        default=15.0,
+        gt=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_WINDOW_S"),
+        description="L2 confirmer: recent tape window (seconds), split in half for signed_tape_accel + tick_rate. Aligned to the OFI/flow short-horizon window. Only consulted when chili_momentum_l2_confirm_enabled is on.",
+    )
+    # Staleness ceiling (seconds): if the newest L2 ladder snapshot is older than this the
+    # book is treated as stale ⇒ FAIL-OPEN (confirm), never defer on a frozen feed. The
+    # equity depth bridge writes at ~2s cadence, so 10s tolerates a few missed pulses while
+    # still catching a dead feed.
+    chili_momentum_l2_confirm_max_snapshot_age_s: float = Field(
+        default=10.0,
+        gt=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_MAX_SNAPSHOT_AGE_S"),
+        description="L2 confirmer: staleness ceiling (seconds) on the newest L2 ladder snapshot; older ⇒ fail-open (confirm), never defer on a frozen feed. Only consulted when chili_momentum_l2_confirm_enabled is on.",
+    )
     # ── L2 microstructure (crypto full-book persistence + OFI/micro-price tilt) ──
     # Cadence to drain the warmed Coinbase WS full-book ring into fast_orderbook
     # (crypto only; persists L2 so the live OFI tilt is measurable). 5s start.

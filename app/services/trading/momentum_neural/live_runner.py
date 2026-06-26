@@ -95,7 +95,12 @@ from .live_fsm import (
 )
 from .session_lifecycle import is_operator_paused
 from .strategy_params import normalize_strategy_params
-from .entry_gates import _entry_extension_veto, _entry_flow_veto, breakout_failed_to_hold
+from .entry_gates import (
+    _entry_extension_veto,
+    _entry_flow_veto,
+    _l2_entry_confirm,
+    breakout_failed_to_hold,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -6018,6 +6023,37 @@ def tick_live_session(
             return {
                 "ok": True, "session_id": sess.id, "state": sess.state,
                 "skipped": "entry_extension_veto",
+            }
+        # ── L2 ENTRY CONFIRMER (Phase 1, DEFER-only) — docs/DESIGN/L2_PRIMARY_SIGNAL.md ──
+        # The LAST gate before submit, and it runs ONLY here (an ENTRY-only candidate that
+        # cleared the chart trigger + BOTH vetoes above): a veto ALWAYS wins, we never
+        # confirm into a vetoed book. TAPE-PRIMARY: require the executed tape to actively
+        # confirm thrust (signed_tape_accel>0 AND tick_rate>=self-relative floor; OFI/micro
+        # + rising depth-pctile secondary). CONSERVATIVE-ACTIVE: defer only on CLEAR no-tape
+        # (accel<=0 AND OFI<0). On defer → stay WATCHING_LIVE + re-enter next tick (the EXACT
+        # flow-veto/extension-veto defer pattern — the adaptive watch/reap bounds the slot, no
+        # new hold) + emit live_l2_confirm_defer as the COUNTERFACTUAL (the would-have-entered
+        # price). FAIL-OPEN: any None / thin / stale ⇒ confirm. KILL-SWITCH OFF ⇒ _l2_entry_confirm
+        # returns ("confirm", ...) BEFORE any I/O ⇒ byte-identical (no extra DB read). Held /
+        # position states never reach here, so a defer can NEVER block an exit/stop/flatten.
+        _l2c_decision, _l2c_dbg = _l2_entry_confirm(sess.symbol, db=db, le=le, settings=settings)
+        if _l2c_decision == "defer":
+            _log.info(
+                "[momentum_neural] entry L2-CONFIRM DEFER %s: accel=%s tick_rate=%s ofi=%s — re-watching for tape confirmation",
+                sess.symbol, _l2c_dbg.get("signed_tape_accel"),
+                _l2c_dbg.get("tick_rate"), _l2c_dbg.get("ofi"),
+            )
+            _emit(db, sess, "live_l2_confirm_defer", {
+                **_l2c_dbg,
+                "would_have_entered_price": (
+                    float(entry_limit_px) if entry_limit_px is not None else None
+                ),
+            })
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            db.flush()
+            return {
+                "ok": True, "session_id": sess.id, "state": sess.state,
+                "skipped": "l2_confirm_defer", "l2_confirm": _l2c_dbg,
             }
         res = adapter.place_limit_order_gtc(**_entry_kwargs)
         le["entry_submitted"] = True

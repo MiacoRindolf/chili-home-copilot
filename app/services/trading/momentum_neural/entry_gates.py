@@ -1135,6 +1135,308 @@ def _l2_entry_veto(
         return None  # any error -> fail-open (never block an entry on a bug)
 
 
+def _signed_tape_features(rows: Any, *, window_s: float) -> dict[str, Any] | None:
+    """PURE (no I/O): from oldest-first ``(price, size, bid, ask, ts_seconds)`` trade ticks
+    over a recent window, compute the TAPE-PRIMARY confirmer features. Lookahead-free —
+    the caller supplies only COMPLETED ticks up to ``now`` / ``as_of``; this just splits the
+    given window in half and measures the back-half against the front-half.
+
+    Returns ``None`` on empty / too-few-ticks (< 3) / zero total volume ⇒ the caller
+    FAILS OPEN (confirms). On enough ticks returns::
+
+        {
+          "signed_tape_accel": float,   # back_half_buy_vol − front_half_buy_vol (aggressor-
+                                        #   signed volume, SAME Lee-Ready quote/tick rule as
+                                        #   _aggressor_imbalance) — >0 ⇒ aggressive buying is
+                                        #   ACCELERATING into the entry
+          "tick_rate": float,           # back-half ticks / back-half seconds (recent activity)
+          "tick_rate_floor": float,     # self-relative floor: the ``floor_pctile`` percentile
+                                        #   of the per-half tick rates (adaptive, no magic rate)
+          "n_ticks": int,
+        }
+
+    Aggressor classification is identical to ``_aggressor_imbalance``: QUOTE RULE
+    (Lee-Ready) when bid/ask present, TICK RULE fallback (zero-tick carries the prior sign),
+    so ``signed_tape_accel`` is in the same signed-volume space as the live trade_flow.
+    """
+    if not rows:
+        return None
+    # Parse + aggressor-sign every tick in arrival order (prev_px / last_sign carry across
+    # the whole window so the tick-rule fallback is continuous, exactly like _aggressor_imbalance).
+    parsed: list[tuple[float, float, int]] = []  # (ts_seconds, signed_vol, abs_vol)
+    prev_px = None
+    last_sign = 0
+    t_min = None
+    t_max = None
+    for r in rows:
+        try:
+            px = float(r[0])
+            sz = float(r[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if px <= 0 or sz <= 0:
+            continue
+        try:
+            ts = float(r[4])
+        except (TypeError, ValueError, IndexError):
+            ts = None
+        bid = r[2] if len(r) > 2 else None
+        ask = r[3] if len(r) > 3 else None
+        sign = 0
+        if bid is not None and ask is not None:
+            try:
+                fb, fa = float(bid), float(ask)
+            except (TypeError, ValueError):
+                fb = fa = 0.0
+            if fa > fb > 0:
+                mid = (fa + fb) / 2.0
+                if px >= fa:
+                    sign = 1
+                elif px <= fb:
+                    sign = -1
+                elif px > mid:
+                    sign = 1
+                elif px < mid:
+                    sign = -1
+        if sign == 0:  # tick-rule fallback (zero-tick / first trade carries prior sign)
+            if prev_px is not None and px != prev_px:
+                sign = 1 if px > prev_px else -1
+            else:
+                sign = last_sign
+        prev_px = px
+        if sign != 0:
+            last_sign = sign
+        parsed.append((ts, sign * sz, sz))
+        if ts is not None:
+            t_min = ts if t_min is None else min(t_min, ts)
+            t_max = ts if t_max is None else max(t_max, ts)
+    n = len(parsed)
+    if n < 3:
+        return None
+    total_abs = sum(p[2] for p in parsed)
+    if total_abs <= 0:
+        return None
+    # Split the WINDOW (not the count) in half by timestamp midpoint so accel measures a
+    # true rate of change in time; fall back to an index split when timestamps are absent.
+    if t_min is not None and t_max is not None and t_max > t_min:
+        midpoint = (t_min + t_max) / 2.0
+        front = [p for p in parsed if p[0] is not None and p[0] < midpoint]
+        back = [p for p in parsed if p[0] is None or p[0] >= midpoint]
+        front_secs = max(1e-6, midpoint - t_min)
+        back_secs = max(1e-6, t_max - midpoint)
+    else:
+        half = n // 2
+        front = parsed[:half]
+        back = parsed[half:]
+        span = max(1e-6, float(window_s))
+        front_secs = back_secs = span / 2.0
+    # back-half buy_vol − front-half buy_vol (positive-signed aggressor volume only).
+    front_buy = sum(p[1] for p in front if p[1] > 0)
+    back_buy = sum(p[1] for p in back if p[1] > 0)
+    signed_tape_accel = back_buy - front_buy
+    tick_rate = len(back) / back_secs if back_secs > 0 else 0.0
+    # Self-relative floor: the per-half tick rates (front + back) form the symbol's OWN
+    # recent activity sample; the floor is the configured percentile of those rates.
+    half_rates = sorted(
+        [len(front) / front_secs if front_secs > 0 else 0.0,
+         len(back) / back_secs if back_secs > 0 else 0.0]
+    )
+    try:
+        fp = float(getattr(settings, "chili_momentum_l2_confirm_tick_rate_floor_pctile", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        fp = 0.0
+    fp = max(0.0, min(1.0, fp))
+    # percentile of the small per-half-rate sample (nearest-rank, lower bound)
+    idx = min(len(half_rates) - 1, int(fp * (len(half_rates) - 1)))
+    tick_rate_floor = half_rates[idx] if half_rates else 0.0
+    return {
+        "signed_tape_accel": float(signed_tape_accel),
+        "tick_rate": float(tick_rate),
+        "tick_rate_floor": float(tick_rate_floor),
+        "n_ticks": int(n),
+    }
+
+
+def signed_tape_accel_features(
+    symbol: str | None, *, db: Any = None, window_s: float | None = None, as_of: Any = None
+) -> dict[str, Any] | None:
+    """Live wrapper around :func:`_signed_tape_features`: pull the recent ``iqfeed_trade_ticks``
+    (equity tape; lookahead-free trailing ``now()`` / ``(as_of-w, as_of]``) and compute the
+    tape-primary confirmer features. Returns ``None`` (⇒ fail-open) on no symbol / no db /
+    crypto (no equity tick tape) / empty tape / any error. Crypto is intentionally skipped —
+    the equity tick-by-tick bridge is the genuinely additive tape (the design's Phase-1 scope);
+    crypto rides the existing OFI/flow path and fails open here."""
+    s = (symbol or "").strip().upper()
+    if not s or db is None or s.endswith("-USD"):
+        return None
+    try:
+        w = float(window_s) if window_s is not None else float(
+            getattr(settings, "chili_momentum_l2_confirm_window_s", 15.0) or 15.0
+        )
+    except (TypeError, ValueError):
+        w = 15.0
+    try:
+        from sqlalchemy import text as _sql
+
+        if as_of is None:
+            q = (
+                "SELECT price, size, bid, ask, "
+                "EXTRACT(EPOCH FROM observed_at) FROM iqfeed_trade_ticks "
+                "WHERE symbol = :s AND observed_at > "
+                "(now() at time zone 'utc') - make_interval(secs => :w) ORDER BY observed_at ASC"
+            )
+            p = {"s": s, "w": w}
+        else:
+            _ao = as_of.replace(tzinfo=None) if getattr(as_of, "tzinfo", None) is not None else as_of
+            q = (
+                "SELECT price, size, bid, ask, "
+                "EXTRACT(EPOCH FROM observed_at) FROM iqfeed_trade_ticks "
+                "WHERE symbol = :s AND observed_at > :as_of - make_interval(secs => :w) "
+                "AND observed_at <= :as_of ORDER BY observed_at ASC"
+            )
+            p = {"s": s, "w": w, "as_of": _ao}
+        rows = db.execute(_sql(q), p).fetchall()
+    except Exception:
+        return None
+    try:
+        return _signed_tape_features(rows, window_s=w)
+    except Exception:
+        return None
+
+
+def _l2_entry_confirm(
+    symbol: str | None,
+    *,
+    db: Any = None,
+    le: Any = None,
+    settings: Any = settings,
+    l2_as_of: Any = None,
+) -> tuple[str, dict[str, Any]]:
+    """Phase-1 L2 entry CONFIRMER (DEFER-only). Runs at the live entry seam AFTER the chart
+    trigger fires AND AFTER both existing vetoes (_l2_entry_veto + _entry_flow_veto) pass —
+    a veto ALWAYS wins, this never confirms into a vetoed book. Returns ``(decision, debug)``
+    with ``decision in {"confirm", "defer"}``.
+
+    TAPE-PRIMARY: a CONFIRM requires the executed tape to actively confirm thrust —
+    ``signed_tape_accel > 0`` (back-half aggressor-signed buy volume exceeds the front-half)
+    AND ``tick_rate >= tick_rate_floor`` (recent activity at/above its self-relative floor).
+    OFI (``>= threshold`` OR ``micro_edge > 0``) and a RISING depth-imbalance percentile are
+    SECONDARY agreement confirmers (logged + used to break the conservative-active tie).
+
+    CONSERVATIVE-ACTIVE start: DEFER only on CLEAR no-confirmation —
+    ``signed_tape_accel <= 0 AND OFI < 0`` (the tape is NOT accelerating into the buy AND the
+    book flow leans net-selling). Anything else ⇒ CONFIRM (we do not over-defer valid reclaims;
+    [[project_e1_backside_veto_shipped]] over-veto lesson). The tick-rate floor only GATES the
+    positive-confirm narrative; it never manufactures a defer on its own.
+
+    FAIL-OPEN (return ``confirm``, reason ``l2_confirm_no_data``): any helper None /
+    ``n_snaps < 3`` / empty tape / STALE book (``snapshot_age_s`` over the ceiling). Never
+    defers on missing / thin / stale data.
+
+    KILL-SWITCH: ``chili_momentum_l2_confirm_enabled`` False ⇒ return
+    ``("confirm", {"reason": "l2_confirm_disabled"})`` IMMEDIATELY, before ANY I/O ⇒
+    byte-identical. ENTRY-ONLY: the caller invokes this only on a not-yet-entered candidate;
+    held / position states never call it, so a defer can never block an exit. Pure read
+    (no writes); any error ⇒ confirm (fail-open)."""
+    dbg: dict[str, Any] = {"reason": ""}
+    try:
+        # KILL-SWITCH FIRST — before any I/O (byte-identical when OFF).
+        if not bool(getattr(settings, "chili_momentum_l2_confirm_enabled", False)):
+            dbg["reason"] = "l2_confirm_disabled"
+            return "confirm", dbg
+        if db is None or not symbol:
+            dbg["reason"] = "l2_confirm_no_data"
+            return "confirm", dbg
+
+        # ── TAPE (primary) ──
+        try:
+            w = float(getattr(settings, "chili_momentum_l2_confirm_window_s", 15.0) or 15.0)
+        except (TypeError, ValueError):
+            w = 15.0
+        tape = signed_tape_accel_features(symbol, db=db, window_s=w, as_of=l2_as_of)
+        if tape is None:
+            dbg["reason"] = "l2_confirm_no_data"  # empty/thin tape -> fail-open
+            return "confirm", dbg
+        accel = float(tape.get("signed_tape_accel", 0.0))
+        tick_rate = float(tape.get("tick_rate", 0.0))
+        tick_rate_floor = float(tape.get("tick_rate_floor", 0.0))
+        dbg.update({
+            "signed_tape_accel": round(accel, 6),
+            "tick_rate": round(tick_rate, 4),
+            "tick_rate_floor": round(tick_rate_floor, 4),
+            "n_ticks": int(tape.get("n_ticks", 0)),
+        })
+
+        # ── BOOK (secondary agreement): OFI / micro-price / depth-imbalance percentile ──
+        from .pipeline import read_ladder_distribution
+
+        lr = read_ladder_distribution(symbol, db=db, as_of=l2_as_of)
+        n_snaps = int(getattr(lr, "n_snaps", 0) or 0) if lr is not None else 0
+        if lr is None or n_snaps < 3:
+            dbg["reason"] = "l2_confirm_no_data"  # too-few snaps -> fail-open
+            return "confirm", dbg
+        # STALENESS: a frozen feed -> fail-open (never defer on stale data).
+        try:
+            max_age = float(getattr(settings, "chili_momentum_l2_confirm_max_snapshot_age_s", 10.0) or 10.0)
+        except (TypeError, ValueError):
+            max_age = 10.0
+        age = getattr(lr, "snapshot_age_s", None)
+        if age is not None and float(age) > max_age:
+            dbg["reason"] = "l2_confirm_no_data"
+            dbg["snapshot_age_s"] = round(float(age), 2)
+            return "confirm", dbg
+        ofi = getattr(lr, "ofi", None)
+        micro = getattr(lr, "micro_edge", None)
+        pctile = getattr(lr, "depth_imbal_pctile", None)
+        try:
+            ofi_thr = abs(float(getattr(settings, "chili_momentum_ofi_threshold", 0.25) or 0.25))
+        except (TypeError, ValueError):
+            ofi_thr = 0.25
+        ofi_f = None if ofi is None else float(ofi)
+        micro_f = None if micro is None else float(micro)
+        pctile_f = None if pctile is None else float(pctile)
+        dbg.update({
+            "ofi": None if ofi_f is None else round(ofi_f, 4),
+            "micro_edge": None if micro_f is None else round(micro_f, 2),
+            "depth_imbal_pctile": None if pctile_f is None else round(pctile_f, 3),
+            "ofi_threshold": round(ofi_thr, 4),
+        })
+
+        # Secondary agreement: book flow leans buy-side (OFI clears threshold OR micro>0)
+        # AND the depth-imbalance percentile is RISING (newest book at/above the median of
+        # its own recent window ⇒ accumulation, not distribution).
+        ofi_agrees = ofi_f is not None and (ofi_f >= ofi_thr or (micro_f is not None and micro_f > 0.0))
+        depth_rising = pctile_f is not None and pctile_f >= 0.5
+        dbg["ofi_agrees"] = bool(ofi_agrees)
+        dbg["depth_rising"] = bool(depth_rising)
+
+        # PRIMARY confirm: the tape is accelerating AND active.
+        tape_confirms = accel > 0.0 and tick_rate >= tick_rate_floor
+        # CLEAR no-confirmation: tape NOT accelerating AND book flow net-selling.
+        ofi_negative = ofi_f is not None and ofi_f < 0.0
+        clear_no_confirm = accel <= 0.0 and ofi_negative
+
+        if tape_confirms:
+            dbg["reason"] = "l2_confirm_tape_thrust"
+            return "confirm", dbg
+        if clear_no_confirm:
+            # conservative-active DEFER: only when the tape is dead/negative AND the book
+            # flow is net-selling. If any secondary confirmer disagrees with the bearish
+            # read (book buy-side or depth rising), give the benefit of the doubt + confirm.
+            if ofi_agrees or depth_rising:
+                dbg["reason"] = "l2_confirm_secondary_override"
+                return "confirm", dbg
+            dbg["reason"] = "l2_confirm_defer_no_tape"
+            return "defer", dbg
+        # mixed (e.g. flat tape but OFI not negative, or accel<=0 with neutral book):
+        # CONSERVATIVE-ACTIVE ⇒ confirm (do not over-defer).
+        dbg["reason"] = "l2_confirm_pass_mixed"
+        return "confirm", dbg
+    except Exception:
+        dbg["reason"] = "l2_confirm_no_data"  # any error -> fail-open
+        return "confirm", dbg
+
+
 def is_explosive_mover(
     atr_pct: float | None,
     rvol: float | None,
