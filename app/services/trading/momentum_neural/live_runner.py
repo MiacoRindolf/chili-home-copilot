@@ -4932,19 +4932,37 @@ def tick_live_session(
                             _daily_breaking = bool(_row_sig.get("daily_breaking_major"))
                     except (TypeError, ValueError, AttributeError):
                         _ross_score, _daily_breaking = None, False
-                    _rvol_now = _latest_rvol(db, sess.symbol)
-                    _ross_floor = float(
-                        getattr(settings, "chili_momentum_continuation_ross_floor", 0.7) or 0.7
+                    from .entry_gates import (
+                        compute_intraday_rvol_fallback,
+                        continuation_conviction_floors,
+                        continuation_high_conviction,
+                        momentum_continuation_trigger,
                     )
-                    # the coiling-exempt multiple: rvol_floor x coiling_exempt_rvol_mult (the
-                    # SAME extreme-RVOL yardstick the coiling-squeeze selection exemption uses).
-                    _rvol_floor = float(getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 3.0)
-                    _coil_mult = float(getattr(settings, "chili_momentum_coiling_exempt_rvol_mult", 3.0) or 3.0)
-                    _rvol_conviction_floor = _rvol_floor * _coil_mult
-                    _high_conviction = bool(
-                        (_ross_score is not None and _ross_score >= _ross_floor)
-                        or (_rvol_now is not None and _rvol_now >= _rvol_conviction_floor)
-                        or _daily_breaking
+                    from ..market_data import fetch_ohlcv_df as _mc_fetch
+
+                    _mc_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+                    _rvol_now = _latest_rvol(db, sess.symbol)
+                    # ROW-SIGNAL PRECEDENCE: only when this name carries NO usable conviction
+                    # signal (scanner-only: ross_score None, micro-bar RVOL None, not
+                    # daily_breaking) fill the EMPTY RVOL axis from the 5m/5d frame the struct
+                    # trigger fetches anyway — fetch it ONCE here and REUSE it downstream (zero
+                    # added fetch). Kill-switch OFF ⇒ helper returns None ⇒ byte-identical.
+                    _mc_df = None
+                    # KILL-SWITCH GATE: the empty-signal RVOL-fallback (and its OHLCV fetch)
+                    # only run when chili_momentum_conviction_rvol_fallback_enabled is ON.
+                    # Flag OFF ⇒ NO fetch is hoisted here and _rvol_now stays None for
+                    # scanner-only names ⇒ byte-identical to deployed 1e2eb09 (the baseline
+                    # short-circuits via high_conviction=False below and issues no fetch).
+                    if bool(getattr(settings, "chili_momentum_conviction_rvol_fallback_enabled", False)):
+                        if _rvol_now is None and _ross_score is None and not _daily_breaking:
+                            _mc_df = _mc_fetch(sess.symbol, interval=_mc_iv, period="5d")
+                            _rvol_now = compute_intraday_rvol_fallback(
+                                _mc_df, symbol=sess.symbol, settings_obj=settings
+                            )
+                    _ross_floor, _rvol_conviction_floor = continuation_conviction_floors(settings)
+                    # THE shared conviction test — IDENTICAL definition at arm-time + entry-time.
+                    _high_conviction = continuation_high_conviction(
+                        _ross_score, _rvol_now, _daily_breaking, settings
                     )
                     try:
                         logger.info(
@@ -4955,17 +4973,15 @@ def tick_live_session(
                     except Exception:
                         pass
                     if _high_conviction:
-                        from .entry_gates import momentum_continuation_trigger
-                        from ..market_data import fetch_ohlcv_df as _mc_fetch
-
-                        _mc_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
                         _mc_px = None
                         try:
                             if tick is not None:
                                 _mc_px = float(tick.ask or tick.mid or 0) or None
                         except Exception:
                             _mc_px = None
-                        _mc_df = _mc_fetch(sess.symbol, interval=_mc_iv, period="5d")
+                        # Reuse the frame already fetched for the fallback when present; else fetch.
+                        if _mc_df is None:
+                            _mc_df = _mc_fetch(sess.symbol, interval=_mc_iv, period="5d")
                         # (2) NEW HIGH + (4) not parabolic + (5) not backside (inside).
                         _mc_ok, _mc_reason, _mc_dbg = momentum_continuation_trigger(
                             _mc_df, live_price=_mc_px, entry_interval=_mc_iv,

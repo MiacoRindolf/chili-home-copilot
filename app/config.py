@@ -5752,6 +5752,16 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_CONTINUATION_ROSS_FLOOR"),
         description="FIX 1: the ross_score (Ross momentum quality, [0,1]) at/above which a name is high-conviction enough for the momentum-continuation new-high entry (one of three OR-ed conviction gates with the coiling-exempt RVOL multiple and daily_breaking_major). Only consulted when chili_momentum_momentum_continuation_entry_enabled is ON.",
     )
+    chili_momentum_conviction_rvol_fallback_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CONVICTION_RVOL_FALLBACK_ENABLED"),
+        description="FIX 1b: when a momentum-continuation candidate's OWN persisted scanner signal is EMPTY (no ross_score, no RVOL, not daily_breaking_major — a SCANNER-only name the ignition enricher never scored, e.g. PED +25% AT HOD with a true 13.72x intraday RVOL), COMPUTE intraday relative volume from the ALREADY-FETCHED 5m/5d OHLCV frame (today's cumulative session volume / the trailing average of prior complete sessions) and admit as high-conviction iff it is >= chili_momentum_explosive_rvol_floor x chili_momentum_coiling_exempt_rvol_mult (~9x). ZERO new fetch (reuses the frame the continuation trigger already holds). Shared helper => arm-time (auto_arm) and entry-time (live_runner) stay identical. FAIL-CLOSED: if RVOL cannot be computed reliably (no Volume column, < 2 sessions, NaN/zero average) the name stays low-conviction (never admit a genuinely low-RVOL name — this is the chase-safety). Row signal precedence is preserved: the fallback ONLY fills the empty case; ross_score>=floor and daily_breaking_major paths are unchanged. false (default) = byte-identical (empty-signal names remain low_conviction exactly as deployed 1e2eb09).",
+    )
+    chili_momentum_continuation_arm_skip_tape: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CONTINUATION_ARM_SKIP_TAPE"),
+        description="ARM-TIME TAPE GATE KILL-SWITCH: in auto_arm._continuation_active_trigger the continuation ARM places NO order — it only starts WATCHING, and arming is what subscribes the trade/depth bridges so tape (iqfeed_trade_ticks) THEN begins flowing for the symbol. A fresh scanner mover (e.g. PED RVOL 13.72x, +25% AT HOD) has ZERO tape before it is armed (tape_hold_no_data), so the unconditional arm-time tape_confirms_hold gate is UNSATISFIABLE → arm never fires → chicken-and-egg (the only thing that bootstraps tape is the arm). default False = tape REQUIRED at arm-time = byte-identical to deployed 1e2eb09. True = arm on conviction(+rvol-fallback) + STRUCTURE ONLY (momentum_continuation_trigger still enforces new-HOD + NOT-extended + NOT-backside) and SKIP the arm-time tape call; the strict tape gate STAYS at the live_runner ENTRY (which places the order) — by entry-time the now-watching symbol is subscribed and tape flows, so NO order is EVER placed without tape confirmation. Does NOT weaken structure/extension/backside/conviction; ONLY the arm-time tape call becomes optional.",
+    )
     # ── FIX 2: EMPTY-SIGNAL DE-RANK (push no-momentum-signal names below real movers) ──
     chili_momentum_no_signal_derank_enabled: bool = Field(
         default=False,
@@ -6077,6 +6087,46 @@ class Settings(BaseSettings):
     chili_momentum_exclude_leveraged_etfs: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXCLUDE_LEVERAGED_ETFS"),
+    )
+    # A-SETUP QUALITY FLOOR (2026-06-26): the 'puro talo' root — the lane had NO
+    # quality floor, so it armed/traded ANYTHING that fired a trigger -> B/C junk and
+    # small losses all day (9 round-trips, all ~-$65 losers). Live proof: AREC (float
+    # 107M, rvol 5.9, +12.9% — LARGE float, MODEST mover) armed+lost then re-armed;
+    # CODI (float=None, rvol 0, +0%) queued on a bare pullback shape. The real A-setups
+    # are LOW-FLOAT EXPLOSIVE names (UPC 648K/+227%, SDOT 744K/+84%, WSHP ~11M/+47%) —
+    # Ross trades those ONLY and sits out the junk. This is a LIVE-eligibility quality
+    # floor that can ONLY RESTRICT (set live_eligible False; never newly True). A name
+    # is LIVE-tradeable ONLY if ALL hold: (1) LOW FLOAT (float_shares <= the ceiling —
+    # THE primary discriminator: AREC 107M FAILS, UPC/SDOT/WSHP PASS), (2) real RVOL >=
+    # the explosive-rvol floor, (3) meaningful change >= the change floor, and (4)
+    # FLOAT-CONFIRMED: FAIL-CLOSED when float is missing/None/0 (CODI) — cannot confirm
+    # low-float => not an A-setup => reject (also cleanly rejects empty-signal scanner
+    # names). PAPER eligibility is UNCHANGED. Default-OFF -> byte-identical loose
+    # eligibility. Kill-switch CHILI_MOMENTUM_A_SETUP_QUALITY_FLOOR_ENABLED.
+    chili_momentum_a_setup_quality_floor_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_A_SETUP_QUALITY_FLOOR_ENABLED"),
+        description="LIVE-eligibility A-setup quality floor for the Ross momentum lane: a name is live-tradeable only if low-float (<= ceiling) AND real-RVOL AND meaningful-change AND float-confirmed (fail-closed on missing float). RESTRICT-only; paper unchanged. OFF = byte-identical.",
+    )
+    # ONE documented float ceiling (the primary A-setup discriminator). 20M rejects the
+    # AREC-class large floats (107M) while passing every real low-float squeeze the lane
+    # exists to trade (UPC 648K / SDOT 744K / WSHP ~11M). A FLOOR/reference, not magic:
+    # raise it via env if the universe shifts. The B-zone ceiling below is a stricter
+    # OPTIONAL second tier (names above the primary ceiling but below the B-zone are NOT
+    # admitted by this gate — it only restricts — they remain rejected; the B-zone is
+    # reserved for a future graded-quality consumer and is documented here as the one
+    # adaptive knob, not scattered).
+    chili_momentum_a_setup_quality_floor_float_ceiling_shares: float = Field(
+        default=20_000_000.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_A_SETUP_QUALITY_FLOOR_FLOAT_CEILING_SHARES"),
+        description="Max float_shares for an A-setup LIVE name (~20M): rejects AREC-class 107M, passes UPC/SDOT/WSHP. ONE documented ceiling.",
+    )
+    chili_momentum_a_setup_quality_floor_change_pct_min: float = Field(
+        default=10.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_A_SETUP_QUALITY_FLOOR_CHANGE_PCT_MIN"),
+        description="Min absolute day-change %% for an A-setup LIVE name; aligned with the Ross change floor (~10%%). CODI (0%%) rejected.",
     )
     # FIX B (2026-06-23): QUALITY SLOT-PRIORITY TIER in the arm queue. The
     # multiplicative ETF down-weight above leaks (a fresh-ross ETF at ×0.5 still

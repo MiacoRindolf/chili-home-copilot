@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -15,6 +16,8 @@ from .variants import MomentumStrategyFamily
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -319,6 +322,86 @@ def score_viability(
             live_eligible = False
             warnings.append("Below Ross explosiveness floor (RVOL/change) — not a live setup")
     except (TypeError, AttributeError):
+        pass
+
+    # A-SETUP QUALITY FLOOR (LIVE eligibility only; PAPER untouched). The 'puro talo'
+    # root: the lane had no quality floor, so it armed/traded ANYTHING that fired a
+    # trigger -> B/C junk + small losses (AREC: 107M float, rvol 5.9, +12.9% armed+lost;
+    # CODI: float=None/rvol 0/+0% queued on a bare pullback). Ross trades A-setups ONLY:
+    # LOW-FLOAT EXPLOSIVE names (UPC 648K/+227%, SDOT 744K/+84%, WSHP ~11M/+47%). This
+    # gate keeps a name LIVE-tradeable ONLY if ALL hold: (1) low float (<= ceiling — THE
+    # primary discriminator), (2) real RVOL >= the explosive-rvol floor, (3) meaningful
+    # change >= the change floor, (4) FLOAT-CONFIRMED (fail-CLOSED on missing/None/0 —
+    # cannot confirm low-float => reject; this also rejects empty-signal scanner names).
+    # RESTRICT-only: it can ONLY set live_eligible False, never newly True. Reads the
+    # SAME float/rvol/change the scorer uses (ross_momentum._extract_pillars over
+    # feats.meta["ross_signals"][symbol]). EQUITY-only (crypto 24h RVOL/change semantics
+    # differ). Default-OFF / absent signal -> byte-identical. Each rejection is logged
+    # with its reason so over-tightening is observable. Kill-switch
+    # CHILI_MOMENTUM_A_SETUP_QUALITY_FLOOR_ENABLED.
+    try:
+        if (
+            live_eligible
+            and bool(getattr(settings, "chili_momentum_a_setup_quality_floor_enabled", False))
+            and "-USD" not in str(symbol or "").upper()
+        ):
+            _rsig_a = (
+                feats.meta.get("ross_signals")
+                if isinstance(getattr(feats, "meta", None), dict)
+                else None
+            )
+            _sig_a = _rsig_a.get(symbol) if isinstance(_rsig_a, dict) else None
+            if isinstance(_sig_a, dict):
+                from .ross_momentum import _extract_pillars, _first_float
+
+                _rvol_a, _chg_a, _liq_a, _ = _extract_pillars(_sig_a)
+                _float_a = _first_float(_sig_a, "float_shares")
+                _ceil = float(
+                    getattr(
+                        settings,
+                        "chili_momentum_a_setup_quality_floor_float_ceiling_shares",
+                        20_000_000.0,
+                    )
+                    or 20_000_000.0
+                )
+                _rvol_min = float(
+                    getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 3.0
+                )
+                _chg_min = float(
+                    getattr(
+                        settings,
+                        "chili_momentum_a_setup_quality_floor_change_pct_min",
+                        10.0,
+                    )
+                    or 10.0
+                )
+                _reason: str | None = None
+                # (4) FLOAT-CONFIRMED — fail-CLOSED. Missing/None/0 float => cannot
+                # confirm low-float => not an A-setup (catches CODI + empty signals).
+                if _float_a is None or not (_float_a > 0):
+                    _reason = "no-float"
+                # (1) LOW FLOAT — the primary discriminator (AREC 107M fails).
+                elif _ceil > 0 and _float_a > _ceil:
+                    _reason = f"float {_float_a:,.0f} > ceiling {_ceil:,.0f}"
+                # (2) real RVOL.
+                elif _rvol_a is None or _rvol_a < _rvol_min:
+                    _reason = f"rvol {_rvol_a if _rvol_a is not None else 'none'} < {_rvol_min:g}"
+                # (3) meaningful change/move (absolute — magnitude is what matters).
+                elif _chg_a is None or abs(_chg_a) < _chg_min:
+                    _reason = f"change {_chg_a if _chg_a is not None else 'none'} < {_chg_min:g}%"
+                if _reason is not None:
+                    live_eligible = False
+                    warnings.append(f"Below A-setup quality floor ({_reason}) — not a live setup")
+                    logger.info(
+                        "[momentum_viability] A-setup quality floor REJECT live %s: %s "
+                        "(float=%s rvol=%s change=%s)",
+                        symbol,
+                        _reason,
+                        f"{_float_a:,.0f}" if _float_a is not None else None,
+                        _rvol_a,
+                        _chg_a,
+                    )
+    except (TypeError, ValueError, AttributeError):
         pass
 
     if db is not None:

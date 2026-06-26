@@ -1470,6 +1470,112 @@ def is_explosive_mover(
         return False
 
 
+def continuation_conviction_floors(settings_obj: Any = settings) -> tuple[float, float]:
+    """The TWO conviction floors the momentum-continuation gate uses, resolved from one
+    place so arm-time (auto_arm) and entry-time (live_runner) NEVER diverge:
+
+      * ross_floor   = ``chili_momentum_continuation_ross_floor``           (default 0.7)
+      * rvol_floor   = ``chili_momentum_explosive_rvol_floor`` x
+                       ``chili_momentum_coiling_exempt_rvol_mult``          (default 3.0*3.0 = ~9x)
+
+    Returns ``(ross_floor, rvol_conviction_floor)``. Pure; no I/O."""
+    _ross_floor = float(getattr(settings_obj, "chili_momentum_continuation_ross_floor", 0.7) or 0.7)
+    _rvol_floor = float(getattr(settings_obj, "chili_momentum_explosive_rvol_floor", 3.0) or 3.0)
+    _coil_mult = float(getattr(settings_obj, "chili_momentum_coiling_exempt_rvol_mult", 3.0) or 3.0)
+    return _ross_floor, _rvol_floor * _coil_mult
+
+
+def continuation_high_conviction(
+    ross_score: float | None,
+    rvol: float | None,
+    daily_breaking: bool,
+    settings_obj: Any = settings,
+) -> bool:
+    """THE shared high-conviction predicate for the momentum-continuation entry — the
+    chase-safety that only lets GENUINE high-conviction movers arm/enter. ONE definition,
+    consumed at BOTH the arm-time gate (auto_arm ``_continuation_active_trigger``) and the
+    entry-time gate (live_runner WATCHING tick) so the two can never silently diverge.
+
+    HIGH-CONVICTION when ANY of (OR-ed, exactly as deployed 1e2eb09):
+      * ross_score        >= chili_momentum_continuation_ross_floor                (~0.7)
+      * rvol              >= explosive_rvol_floor x coiling_exempt_rvol_mult        (~9x)
+      * daily_breaking_major
+
+    Callers source ``rvol`` their OWN way (row scanner signal first, then the intraday
+    fallback via ``compute_intraday_rvol_fallback``) and pass the resolved scalar in — the
+    TEST itself is shared. Pure; no I/O."""
+    try:
+        _ross_floor, _rvol_conviction_floor = continuation_conviction_floors(settings_obj)
+        return bool(
+            (ross_score is not None and ross_score >= _ross_floor)
+            or (rvol is not None and rvol >= _rvol_conviction_floor)
+            or daily_breaking
+        )
+    except Exception:
+        return False
+
+
+def compute_intraday_rvol_fallback(
+    df: Any,
+    *,
+    symbol: str | None = None,
+    settings_obj: Any = settings,
+) -> float | None:
+    """FALLBACK intraday relative volume from the ALREADY-FETCHED OHLCV frame (the 5m/5d
+    ``df_pb`` the continuation trigger has in hand) — ZERO new fetch. Fills the EMPTY
+    scanner-signal case ONLY: a name that arrived via the SCANNER (not the ignition
+    enricher) carries no ``ross_signals`` so its row RVOL is None, yet it can be a genuine
+    explosive runner (PED: +25%, AT HOD, true intraday RVOL 13.72x). The conviction gate
+    must not depend solely on that unreliable per-name enrichment.
+
+    Intraday RVOL = TODAY's (latest session's) cumulative volume / the trailing AVERAGE of
+    the prior complete sessions' cumulative volume, grouped by calendar date on the frame's
+    DatetimeIndex. This mirrors the leader-scorer's "today vs typical day" RVOL rather than
+    a single-bar ratio, so a straight-up runner that prints heavy volume all session reads
+    as high-RVOL even with no pullback bar.
+
+    KILL-SWITCH ``chili_momentum_conviction_rvol_fallback_enabled`` — OFF (default) returns
+    None IMMEDIATELY, so the conviction gate sees an empty-signal name exactly as deployed
+    1e2eb09 (low-conviction) ⇒ BYTE-IDENTICAL.
+
+    FAIL-CLOSED: returns None (⇒ the gate treats the name as non-explosive on RVOL, does
+    NOT admit it) on ANY of — flag off, no/empty frame, no Volume column, < 2 sessions of
+    data, a non-datetime index we cannot group by date, a non-positive / NaN trailing
+    average, or any exception. NEVER admits a genuinely low-RVOL name. Pure read."""
+    try:
+        if not bool(getattr(settings_obj, "chili_momentum_conviction_rvol_fallback_enabled", False)):
+            return None
+        if df is None or getattr(df, "empty", True):
+            return None
+        if "Volume" not in getattr(df, "columns", []):
+            return None
+        idx = df.index
+        if not isinstance(idx, pd.DatetimeIndex):
+            try:
+                idx = pd.DatetimeIndex(idx)
+            except Exception:
+                return None
+        vol = pd.to_numeric(df["Volume"], errors="coerce")
+        # Per-session cumulative volume = sum of the session's bars (group by calendar date).
+        by_day = vol.groupby(idx.normalize()).sum()
+        by_day = by_day[by_day.notna() & (by_day > 0.0)]
+        if len(by_day) < 2:
+            # Need at least one prior complete session to form a trailing average.
+            return None
+        by_day = by_day.sort_index()
+        today_vol = float(by_day.iloc[-1])
+        prior = by_day.iloc[:-1]
+        avg_prior = float(prior.mean())
+        if not math.isfinite(avg_prior) or avg_prior <= 0.0:
+            return None
+        rvol = today_vol / avg_prior
+        if not math.isfinite(rvol) or rvol <= 0.0:
+            return None
+        return float(rvol)
+    except Exception:
+        return None
+
+
 def _entry_flow_veto(
     ofi: float | None,
     trade_flow: float | None,

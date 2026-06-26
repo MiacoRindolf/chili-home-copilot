@@ -1853,7 +1853,12 @@ def _continuation_active_trigger(symbol: str, df_pb: Any, row: Any) -> tuple[boo
         if df_pb is None or getattr(df_pb, "empty", True):
             return False, "momentum_continuation_no_data"
 
-        from .entry_gates import momentum_continuation_trigger, tape_confirms_hold
+        from .entry_gates import (
+            compute_intraday_rvol_fallback,
+            continuation_high_conviction,
+            momentum_continuation_trigger,
+            tape_confirms_hold,
+        )
 
         # (1) HIGH-CONVICTION read from the candidate's OWN persisted scanner signal — the
         # SAME ross_score / RVOL / daily_breaking_major source the arm-queue ranker, the
@@ -1872,17 +1877,16 @@ def _continuation_active_trigger(symbol: str, df_pb: Any, row: Any) -> tuple[boo
         if isinstance(_sig, dict):
             _daily_breaking = bool(_sig.get("daily_breaking_major"))
         _rvol_now = _row_rvol(row)
-        _ross_floor = float(getattr(settings, "chili_momentum_continuation_ross_floor", 0.7) or 0.7)
-        # the coiling-exempt multiple: rvol_floor x coiling_exempt_rvol_mult (the SAME
-        # extreme-RVOL yardstick the coiling-squeeze selection exemption + the live runner's
-        # continuation gate use) — ~9x by default.
-        _rvol_floor = float(getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 3.0)
-        _coil_mult = float(getattr(settings, "chili_momentum_coiling_exempt_rvol_mult", 3.0) or 3.0)
-        _rvol_conviction_floor = _rvol_floor * _coil_mult
-        _high_conviction = bool(
-            (_ross_score is not None and _ross_score >= _ross_floor)
-            or (_rvol_now is not None and _rvol_now >= _rvol_conviction_floor)
-            or _daily_breaking
+        # ROW-SIGNAL PRECEDENCE: only when the row carries NO usable conviction signal
+        # (scanner-only name: ross_score None, RVOL None, not daily_breaking) do we fill the
+        # EMPTY RVOL axis from the ALREADY-FETCHED df_pb (intraday RVOL, zero new fetch). The
+        # ross_score / daily_breaking paths are UNCHANGED. Kill-switch OFF ⇒ fallback returns
+        # None ⇒ byte-identical. FAIL-CLOSED inside the helper. (PED: scanner-only, true 13.72x.)
+        if _rvol_now is None and _ross_score is None and not _daily_breaking:
+            _rvol_now = compute_intraday_rvol_fallback(df_pb, symbol=symbol, settings_obj=settings)
+        # THE shared conviction test — IDENTICAL definition at arm-time and entry-time.
+        _high_conviction = continuation_high_conviction(
+            _ross_score, _rvol_now, _daily_breaking, settings
         )
         if not _high_conviction:
             return False, "momentum_continuation_low_conviction"
@@ -1895,29 +1899,41 @@ def _continuation_active_trigger(symbol: str, df_pb: Any, row: Any) -> tuple[boo
         if not (_mc_ok and isinstance(_mc_dbg, dict) and _mc_dbg.get("pullback_low") is not None):
             return False, str(_mc_reason or "momentum_continuation_wait")
 
-        # (3) TAPE REQUIRED + FAIL-CLOSED — the identical tape gate the live entry carries.
-        # ``tape_confirms_hold`` fails CLOSED on a missing db, and the probe phase already
-        # released the pass's read transaction before this network-bound wave, so open a
-        # SHORT-LIVED read session JUST for the tape read and always close it (the #561
-        # short-lived-reader pattern — never hold a txn across the probe). A db/read error
-        # ⇒ tape unconfirmed ⇒ NO fire (fail-closed, exactly as required).
-        from ....db import SessionLocal
+        # (3) TAPE — at ARM-time this is OPTIONAL behind the kill-switch
+        # chili_momentum_continuation_arm_skip_tape (default False = tape REQUIRED =
+        # byte-identical to deployed 1e2eb09). The continuation ARM places NO order — it
+        # only starts WATCHING, and arming is what subscribes the trade/depth bridges so
+        # tape/L2 THEN begin flowing for the symbol. A not-yet-armed scanner mover has ZERO
+        # tape (tape_hold_no_data) → the unconditional arm-time tape gate is unsatisfiable
+        # (chicken-and-egg). When the flag is True we arm on conviction(+rvol-fallback) +
+        # structure ONLY (the momentum_continuation_trigger above already enforces new-HOD +
+        # NOT-extended + NOT-backside) and skip the tape call entirely. Chase-safety is
+        # PRESERVED at the live_runner ENTRY, which still REQUIRES tape (fail-closed) before
+        # ANY order — by entry-time the now-watching symbol is subscribed and tape flows.
+        if not bool(getattr(settings, "chili_momentum_continuation_arm_skip_tape", False)):
+            # TAPE REQUIRED + FAIL-CLOSED — the identical tape gate the live entry carries.
+            # ``tape_confirms_hold`` fails CLOSED on a missing db, and the probe phase already
+            # released the pass's read transaction before this network-bound wave, so open a
+            # SHORT-LIVED read session JUST for the tape read and always close it (the #561
+            # short-lived-reader pattern — never hold a txn across the probe). A db/read error
+            # ⇒ tape unconfirmed ⇒ NO fire (fail-closed, exactly as required).
+            from ....db import SessionLocal
 
-        _tape_ok = False
-        _tdb = None
-        try:
-            _tdb = SessionLocal()
-            _tape_ok, _ = tape_confirms_hold(symbol, db=_tdb, settings=settings)
-        except Exception:
             _tape_ok = False
-        finally:
-            if _tdb is not None:
-                try:
-                    _tdb.close()
-                except Exception:
-                    pass
-        if not _tape_ok:
-            return False, "momentum_continuation_tape_unconfirmed"
+            _tdb = None
+            try:
+                _tdb = SessionLocal()
+                _tape_ok, _ = tape_confirms_hold(symbol, db=_tdb, settings=settings)
+            except Exception:
+                _tape_ok = False
+            finally:
+                if _tdb is not None:
+                    try:
+                        _tdb.close()
+                    except Exception:
+                        pass
+            if not _tape_ok:
+                return False, "momentum_continuation_tape_unconfirmed"
         return True, "momentum_continuation"
     except Exception:
         return False, "momentum_continuation_error"
