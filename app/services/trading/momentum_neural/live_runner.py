@@ -3776,6 +3776,27 @@ def tick_live_session(
                                         _trigger_reason, _pb_debug = _vr_reason, _vr_debug
                                 except Exception:
                                     pass
+                            # BATCH B (FIX 2): HOT-TAPE WICK-RECLAIM — the extreme-volatility
+                            # variant of the VWAP-reclaim, GATED to hot/parabolic tape ONLY
+                            # (is_explosive_mover RVOL/ATR floors inside the detector; cold
+                            # tape -> never fires). Re-enter the retrace into a big upper-wick
+                            # rejection candle after a low-volume flush; stop below the wick
+                            # low. Returns the shared (ok, reason, debug) with pullback_low/
+                            # pullback_high under the IDENTICAL keys, so the structural-stop +
+                            # bailout machinery below is reused unchanged. No-op + byte-
+                            # identical when its kill-switch flag is OFF.
+                            if not _trigger_ok:
+                                try:
+                                    from .entry_gates import wick_reclaim_confirmation
+
+                                    _wr_ok, _wr_reason, _wr_debug = wick_reclaim_confirmation(
+                                        _df_trig, entry_interval=_iv_trig, live_price=_live_px,
+                                        symbol=sess.symbol,
+                                    )
+                                    if _wr_ok:
+                                        _trigger_ok, _trigger_reason, _pb_debug = _wr_ok, _wr_reason, _wr_debug
+                                except Exception:
+                                    pass
                             # BATCH A: HOD-break + flat-top BREAKOUT triggers + setup-selector.
                             # CHILI's ladder above is ALL dip/pullback/reclaim — a straight-up
                             # HOD runner that never pulls back produces NO fills. These detect a
@@ -3849,6 +3870,65 @@ def tick_live_session(
                         _trigger_ok, _trigger_reason = momentum_volume_confirmation(_df)
             except Exception:
                 _trigger_ok, _trigger_reason = False, "trigger_error_wait"
+        # BATCH B (FIX 1): STICKY BACK-SIDE BENCH. The per-tick front_side_state /
+        # _detect_back_side vetoes inside the trigger recompute backside EACH tick, so a
+        # name that rolled over midday gets RE-ARMED on the next MACD pivot — chasing a dead,
+        # rolled-over top. Ross BENCHES a name once it is on the back side for the rest of the
+        # move. Once a CONFIRMED session backside latches le["benched_backside_hod"], the name
+        # stays benched (and is NOT re-armed) until the MANDATORY UN-BENCH: a GENUINE NEW HIGH
+        # above the benched-at HOD clears the marker (a real new leg can still trade — never a
+        # permanent ban). Runs whenever the score qualifies (so the un-bench can clear even on
+        # a tick that produced no trigger); only VETOES when a trigger actually fired. Flag
+        # OFF -> the marker is never set/read -> byte-identical. Fail-OPEN (never benches on a
+        # bug). docs/STRATEGY/CC_REPORTS/2026-06-25_batch-b.md
+        if _score_ok and bool(
+            getattr(settings, "chili_momentum_sticky_backside_bench_enabled", True)
+        ):
+            try:
+                from .entry_gates import evaluate_sticky_backside_bench
+                from ..market_data import fetch_ohlcv_df
+
+                _bench_iv = str(
+                    getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m"
+                )
+                _bench_df = fetch_ohlcv_df(sess.symbol, interval=_bench_iv, period="5d")
+                _bench_px = None
+                try:
+                    if tick is not None:
+                        _bench_px = float(tick.ask or tick.mid or 0) or None
+                except Exception:
+                    _bench_px = None
+                _benched, _bench_reason, _bench_hod_out, _bench_dbg = evaluate_sticky_backside_bench(
+                    _bench_df,
+                    benched_at_hod=_float_or_none(le.get("benched_backside_hod")),
+                    live_price=_bench_px,
+                )
+                _prev_benched = le.get("benched_backside_hod") is not None
+                if _benched:
+                    le["benched_backside_hod"] = float(_bench_hod_out) if _bench_hod_out is not None else le.get("benched_backside_hod")
+                    if not _prev_benched:
+                        _emit(db, sess, "live_entry_backside_benched", {
+                            "reason": _bench_reason, "benched_at_hod": le.get("benched_backside_hod"),
+                            **_bench_dbg,
+                        })
+                    if _trigger_ok:
+                        # VETO the fired trigger — the name is benched on the back side.
+                        _prev_trigger = _trigger_reason
+                        _trigger_ok = False
+                        _trigger_reason = "backside_benched"
+                        _emit(db, sess, "live_entry_backside_bench_veto", {
+                            "blocked_trigger": _prev_trigger, "reason": _bench_reason,
+                            "benched_at_hod": le.get("benched_backside_hod"), **_bench_dbg,
+                        })
+                elif _prev_benched:
+                    # MANDATORY UN-BENCH: a genuine new high cleared the bench -> drop the
+                    # marker so the name can be armed/entered again on a fresh leg.
+                    le.pop("benched_backside_hod", None)
+                    _emit(db, sess, "live_entry_backside_unbenched", {
+                        "reason": _bench_reason, **_bench_dbg,
+                    })
+            except Exception:
+                pass  # fail-open: any error -> no bench change (never strand a name)
         # HVM101 (A): OPENING-BELL SUPPRESSION — hold a FRESH equity trigger in the
         # first ~N min after the 09:30 ET open (opening-auction whipsaw). Equity/RH
         # ONLY; premarket continuation of an already-armed runner is preserved (the
@@ -3953,8 +4033,10 @@ def tick_live_session(
                 "deep_reclaim_dipbuy_ok", "deep_reclaim_dipbuy_tick_ok",
                 # HVM101 (C): the two new triggers carry pullback_low/high under the
                 # SAME keys, so they reuse the IDENTICAL structural-stop + breakout-or-
-                # bailout machinery.
-                "flush_dip_buy", "vwap_reclaim",
+                # bailout machinery. BATCH B (FIX 2): the hot-tape wick-reclaim carries
+                # pullback_low (= the wick/flush low) + pullback_high (= the wick high)
+                # under the SAME keys, so it reuses the same machinery.
+                "flush_dip_buy", "vwap_reclaim", "wick_reclaim",
                 # BATCH A: the HOD-break / flat-top breakouts carry pullback_low (= the
                 # consolidation low / structural stop) + pullback_high (= the break level)
                 # under the SAME keys, so the structural-stop + bailout machinery is reused.

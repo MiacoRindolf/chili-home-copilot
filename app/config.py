@@ -2330,6 +2330,55 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_VWAP_RECLAIM_VOL_MULT"),
         description="VWAP-reclaim trigger: rel-volume floor on the reclaim bar (conviction, not a drift back over VWAP).",
     )
+    # ── BATCH B (FIX 1): STICKY BACK-SIDE BENCH (Ross front/back-side discipline). The
+    # per-tick front_side_state / _detect_back_side vetoes recompute backside EACH tick, so
+    # once a name rolls over midday CHILI re-arms it on every MACD pivot — chasing a dead,
+    # rolled-over top. Ross BENCHES the name for the rest of the move once it is on the back
+    # side. When ON, a CONFIRMED session backside (front_side_state.is_backside) latches a
+    # session-level bench marker so the name is NOT re-armed each tick. MANDATORY un-bench:
+    # a GENUINE NEW HIGH (live tick / completed-bar HOD above the benched-at HOD) clears the
+    # bench — a name that truly resumes a new leg CAN still trade (never a permanent ban).
+    # KILL-SWITCH: False -> the marker is never set/read -> byte-identical to today.
+    chili_momentum_sticky_backside_bench_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STICKY_BACKSIDE_BENCH_ENABLED"),
+        description="BATCH B FIX 1: once a name CONFIRMS the session back side, latch a session-level bench so it is NOT re-armed each tick (vs the per-tick recompute that chases a rolled-over top). MANDATORY fresh-HOD un-bench (a genuine new high clears the bench — never a permanent ban). KILL-SWITCH: False -> byte-identical.",
+    )
+    # ── BATCH B (FIX 2): HOT-TAPE WICK-RECLAIM entry (HVM101 #008, the extreme-volatility
+    # variant of VWAP-reclaim). In HOT/parabolic tape ONLY: a huge rejection candle (large
+    # upper wick, high range) -> immediate low-volume flush -> the next bar(s) retrace ~R of
+    # the wick on rate-of-change -> re-enter into the wick; stop below the wick low. INVALID
+    # on slow/cold recoveries (the hot-tape gate is MANDATORY: it reuses is_explosive_mover /
+    # the RVOL signals). Returns the shared (ok, reason, debug) with pullback_high/pullback_low
+    # so the runner stop/sizing machinery is reused (no new sizing path).
+    # KILL-SWITCH: False -> the trigger never fires -> byte-identical to today.
+    chili_momentum_wick_reclaim_entry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WICK_RECLAIM_ENTRY_ENABLED"),
+        description="BATCH B FIX 2: hot-tape-only wick-reclaim entry — re-enter the retrace into a big upper-wick rejection candle after a low-volume flush, on a strong, EXPLOSIVE (high RVOL/ATR) name only. Stop below the wick low; shared (ok, reason, debug). KILL-SWITCH: False -> byte-identical.",
+    )
+    # The ONE documented knob for the wick-reclaim wick-size floor: the rejection candle's
+    # UPPER wick must be at least this fraction of the bar RANGE to count as a big-wick
+    # rejection. Adaptive on TOP of this: the bar must also be an outsized-range bar relative
+    # to the name's own ATR%, so the absolute floor only guards the thin/degenerate case.
+    chili_momentum_wick_reclaim_min_wick_frac: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WICK_RECLAIM_MIN_WICK_FRAC"),
+        description="BATCH B FIX 2: minimum UPPER-wick fraction of the rejection bar's range for the wick-reclaim trigger (the one documented wick-size base; the bar must ALSO be outsized vs the name's own ATR%). Reversible via chili_momentum_wick_reclaim_entry_enabled.",
+    )
+    # The ONE documented knob for the retrace-into-the-wick depth: the reclaim must recover at
+    # least this fraction of the rejection wick (from the flush low back up toward the wick
+    # high). ~0.4 = the HVM101 ~40% retrace-on-rate-of-change. Adaptive: measured as a fraction
+    # of the wick itself (the name's own bar geometry), so it carries no fixed-price magnitude.
+    chili_momentum_wick_reclaim_min_retrace_frac: float = Field(
+        default=0.4,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WICK_RECLAIM_MIN_RETRACE_FRAC"),
+        description="BATCH B FIX 2: minimum fraction of the rejection wick the reclaim must recover (HVM101 ~40% retrace) for the wick-reclaim trigger to fire. Reversible via chili_momentum_wick_reclaim_entry_enabled.",
+    )
     chili_momentum_bid_prop_confirmer_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BID_PROP_CONFIRMER_ENABLED"),

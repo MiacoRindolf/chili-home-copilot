@@ -1644,6 +1644,96 @@ def _today_session_frame(df):
     return df
 
 
+def evaluate_sticky_backside_bench(
+    df,
+    *,
+    benched_at_hod: float | None,
+    live_price: float | None = None,
+) -> tuple[bool, str, float | None, dict[str, Any]]:
+    """STICKY BACK-SIDE BENCH (BATCH B FIX 1) — the SESSION-LEVEL latch the per-tick
+    front_side_state veto cannot give on its own.
+
+    The per-tick ``front_side_state`` / ``_detect_back_side`` vetoes recompute backside EACH
+    tick, so a name that rolled over midday gets RE-ARMED on the next MACD pivot — chasing a
+    dead, rolled-over top. Ross BENCHES a name once it is on the back side for the rest of the
+    move. This helper computes the latch decision from TODAY's session frame and the EXISTING
+    bench marker the caller persists in the session ledger.
+
+    Returns ``(benched, reason, benched_at_hod_out, debug)`` where:
+      * ``benched`` True  -> the name is on the back side AND has NOT made a genuine new high
+        -> the caller VETOES the entry this tick and keeps the bench latched.
+      * ``benched`` False -> NOT benched (front-side / unknown / thin data) OR a GENUINE NEW
+        HIGH cleared a prior bench (the MANDATORY un-bench) -> the caller may proceed.
+      * ``benched_at_hod_out`` -> the HOD to persist as the bench anchor (set when latching;
+        ``None`` when the bench is cleared by a new high so the marker is dropped).
+
+    MANDATORY UN-BENCH: a genuine NEW HIGH — the session HOD (or a live tick) ABOVE the HOD
+    at which the name was benched — clears the bench. A name that truly resumes a new leg can
+    still trade; the bench is NEVER a permanent ban. This mirrors ``front_side_state``'s own
+    "a fresh HOD is never chasing_top" rule, extended to a session-persistent latch.
+
+    Pure + side-effect-free (the caller owns the persisted marker). Fail-OPEN on any error /
+    thin data: returns ``benched=False`` so a bug can never bench (or strand) a name.
+    """
+    debug: dict[str, Any] = {}
+    try:
+        from .ross_momentum import front_side_state
+
+        _sess = _today_session_frame(df)
+        # the current session HOD, extended by the live tick when present (a live tick over
+        # the completed-bar HOD IS the new high the frame cannot see yet).
+        cur_hod = None
+        try:
+            cur_hod = float(_sess["High"].astype(float).max())
+        except (TypeError, ValueError, KeyError):
+            cur_hod = None
+        if live_price is not None:
+            try:
+                lp = float(live_price)
+                cur_hod = lp if cur_hod is None else max(cur_hod, lp)
+            except (TypeError, ValueError):
+                pass
+        debug["cur_hod"] = cur_hod
+
+        # ── MANDATORY UN-BENCH: a genuine NEW HIGH above the benched-at HOD clears it ───
+        if benched_at_hod is not None:
+            try:
+                if cur_hod is not None and float(cur_hod) > float(benched_at_hod):
+                    debug["unbenched_new_high"] = {
+                        "benched_at_hod": round(float(benched_at_hod), 6),
+                        "cur_hod": round(float(cur_hod), 6),
+                    }
+                    return False, "unbenched_fresh_hod", None, debug
+            except (TypeError, ValueError):
+                pass
+            # still benched (no new high) -> keep the latch, no need to re-confirm backside.
+            debug["still_benched"] = True
+            return True, "benched_backside_sticky", float(benched_at_hod), debug
+
+        # ── not yet benched: latch ONLY on a CONFIRMED session back side ────────────────
+        _fs = front_side_state(_sess)
+        if not getattr(_fs, "is_backside", False):
+            return False, "front_side", None, debug
+        _reason = getattr(_fs, "reason", "backside")
+        # chasing_top with a LIVE NEW HIGH is front-side RIGHT NOW (the completed-bar
+        # rolled-over read is stale) -> do NOT latch (mirrors the per-tick carve-out).
+        if _reason == "chasing_top" and live_price is not None and cur_hod is not None:
+            try:
+                _frame_hod = float(_sess["High"].astype(float).max())
+                if float(live_price) > _frame_hod:
+                    debug["live_new_high"] = _reason
+                    return False, "front_side_live_new_high", None, debug
+            except (TypeError, ValueError, KeyError):
+                pass
+        # CONFIRMED backside -> LATCH the bench at the current session HOD (the anchor the
+        # un-bench compares against). below_vwap / already_faded / a rolled-over chasing_top.
+        debug["latched"] = _reason
+        return True, f"benched_backside_{_reason}", cur_hod, debug
+    except (TypeError, ValueError, AttributeError, KeyError):
+        # thin / degenerate frame or any error -> fail-OPEN (never bench on a bug).
+        return False, "bench_fail_open", None, debug
+
+
 def _bottoming_tail(o: float, h: float, l: float, c: float, *, min_lower_wick_frac: float = 0.50) -> bool:
     """Bottoming-tail / hammer: a long LOWER wick that dominates the bar's range — a
     fast flush that got bought back up (the V-bounce signature). The mirror of
@@ -1907,6 +1997,214 @@ def vwap_reclaim_confirmation(
         return True, "vwap_reclaim", debug
     except Exception:
         return False, "vwap_reclaim_error", {"entry_interval": entry_interval}
+
+
+def _is_hot_tape(atr_pct: float | None, rvol: float | None) -> bool:
+    """Hot/parabolic-tape predicate for the wick-reclaim trigger (BATCH B FIX 2).
+
+    A name is HOT when its intraday volatility (ATR%) OR its relative volume is at/above
+    the lane's explosive floors — the SAME floors ``is_explosive_mover`` uses
+    (``chili_momentum_explosive_atr_pct_floor`` / ``chili_momentum_explosive_rvol_floor``),
+    so the hot-tape read shares one source of truth for "explosive". Unlike
+    ``is_explosive_mover`` this is NOT gated by the explosive-RECALIBRATION master switch —
+    the wick-reclaim has its OWN kill-switch (``chili_momentum_wick_reclaim_entry_enabled``)
+    and the hot-tape gate must hold regardless of whether the recalibration carve-outs are
+    on. Fail-CLOSED: both-None or any error -> False (the trigger then never fires -> the
+    cold-tape case is rejected, exactly as required). Pure; no I/O or mutation."""
+    try:
+        a = None if atr_pct is None else float(atr_pct)
+        rv = None if rvol is None else float(rvol)
+        atr_floor = float(getattr(settings, "chili_momentum_explosive_atr_pct_floor", 0.045) or 0.0)
+        rvol_floor = float(getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 0.0)
+        if a is not None and atr_floor > 0.0 and a >= atr_floor:
+            return True
+        if rv is not None and rvol_floor > 0.0 and rv >= rvol_floor:
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def wick_reclaim_confirmation(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str,
+    live_price: float | None = None,
+    symbol: str | None = None,
+    now: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """HOT-TAPE WICK-RECLAIM entry (HVM101 #008; flag ``chili_momentum_wick_reclaim_entry_enabled``).
+
+    The extreme-volatility variant of the VWAP-reclaim, GATED to HOT/parabolic tape ONLY.
+    The shape (Ross HVM101):
+
+      1. a HUGE REJECTION CANDLE — a recent bar with a large UPPER WICK (>= a documented
+         fraction of its range) on an OUTSIZED range (relative to the name's own ATR%): a
+         spike that got rejected hard;
+      2. an IMMEDIATE FLUSH on LOW (drying-up) volume — the bar(s) after the rejection trade
+         DOWN off the wick on RECEDING volume (a vacuum, not real distribution);
+      3. a RETRACE of ~``min_retrace_frac`` of the wick on rate-of-change — price re-enters
+         the wick from the flush low back UP toward the wick high — that re-entry IS the long.
+
+    Re-enter into the wick; the STOP is the wick LOW (the flush low) — lose it and the
+    reclaim failed. Returns ``(ok, reason, debug)`` with ``pullback_high`` (the wick high =
+    the breakout/continuation level) and ``pullback_low`` (the flush/wick low = the
+    structural stop) under the SAME keys the pullback-break trigger uses, so the downstream
+    sizing / stop / breakout-or-bailout machinery is reused unchanged (NO new sizing path).
+
+    MANDATORY HOT-TAPE GATE: ``_is_hot_tape`` (RVOL/ATR via the shared explosive floors). On
+    SLOW/COLD tape this returns ``(False, "wick_reclaim_cold_tape", ...)`` and NEVER fires —
+    so it can never fire on the slow recoveries / extended 5-min patterns it is invalid for.
+
+    ADAPTIVE knobs (one documented base each): ``chili_momentum_wick_reclaim_min_wick_frac``
+    (the upper-wick size floor) and ``chili_momentum_wick_reclaim_min_retrace_frac`` (the
+    retrace-into-the-wick depth). The outsized-range test is measured against the name's OWN
+    ATR% (no fixed-price magnitude).
+
+    ADDITIVE: flag OFF / thin (<10 bars) / cold tape / non-applicable -> ``(False, reason,
+    {...})`` with NO side effects; fail-OPEN to a benign decline on any error (never raises,
+    never blocks downstream). docs/DESIGN/MOMENTUM_LANE.md
+    """
+    try:
+        if not bool(getattr(settings, "chili_momentum_wick_reclaim_entry_enabled", True)):
+            return False, "wick_reclaim_disabled", {"entry_interval": entry_interval}
+        if df is None or getattr(df, "empty", True) or len(df) < 10:
+            return False, "wick_reclaim_insufficient_bars", {"entry_interval": entry_interval}
+        opn = df["Open"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        close = df["Close"].astype(float)
+        vol = df["Volume"].astype(float)
+        n = len(df)
+        cur = n - 1
+        arrays = compute_all_from_df(df, needed={"atr", "volume_ratio"})
+        atr = arrays.get("atr") or []
+        vr = arrays.get("volume_ratio") or []
+
+        debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "wick_reclaim"}
+
+        # ── MANDATORY HOT-TAPE GATE (the trigger is INVALID on slow/cold tape) ──────────
+        atr_pct = None
+        try:
+            _a = float(atr[cur]) if cur < len(atr) and atr[cur] is not None else None
+            _p = float(close.iloc[cur])
+            atr_pct = (_a / _p) if (_a is not None and _p > 0) else None
+        except (TypeError, ValueError, IndexError):
+            atr_pct = None
+        rvol = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
+        if not _is_hot_tape(atr_pct, rvol):
+            debug["atr_pct"] = atr_pct
+            debug["rvol"] = rvol
+            return False, "wick_reclaim_cold_tape", debug
+
+        # ── (1) the REJECTION CANDLE: a recent big-upper-wick / outsized-range bar ───────
+        # Scan a small recent window (the rejection should be CLOSE behind the current bar;
+        # reuse the VWAP-reclaim K so the look-back is one consistent lane yardstick). The
+        # rejection bar is the most recent bar whose upper wick dominates its range AND whose
+        # range is outsized vs the name's own ATR. Excludes the current (forming) bar.
+        min_wick_frac = float(
+            getattr(settings, "chili_momentum_wick_reclaim_min_wick_frac", 0.5) or 0.5
+        )
+        min_retrace_frac = float(
+            getattr(settings, "chili_momentum_wick_reclaim_min_retrace_frac", 0.4) or 0.4
+        )
+        # The rejection should be CLOSE behind the reclaim bar: the rejection bar itself plus
+        # the immediate (low-volume) flush bars between it and the reclaim. Reuse the
+        # VWAP-reclaim K as the flush-span base, +1 for the rejection bar — one consistent
+        # lane yardstick, no new magic. (K=2 -> rejection up to 3 bars behind the reclaim.)
+        K = max(1, int(getattr(settings, "chili_momentum_vwap_reclaim_min_below_bars", 2) or 2))
+        rej_scan = K + 1
+        # an outsized bar is one whose range exceeds the name's ATR (the ATR is itself the
+        # average true range — a "huge" rejection bar prints meaningfully above it). When ATR
+        # is unavailable, fall back to the bar's own range>0 (the wick-frac floor still gates).
+        _atr_abs = None
+        try:
+            _atr_abs = float(atr[cur]) if cur < len(atr) and atr[cur] is not None else None
+        except (TypeError, ValueError, IndexError):
+            _atr_abs = None
+        rej_idx = None
+        lo_scan = max(1, cur - rej_scan)  # the rejection + immediate flush bars behind cur
+        for i in range(cur - 1, lo_scan - 1, -1):
+            try:
+                o_i, h_i, l_i, c_i = (
+                    float(opn.iloc[i]), float(high.iloc[i]),
+                    float(low.iloc[i]), float(close.iloc[i]),
+                )
+            except (TypeError, ValueError, IndexError):
+                continue
+            rng_i, _body, upper_i, _lower = _ohlc_local(o_i, h_i, l_i, c_i)
+            if rng_i <= 0:
+                continue
+            big_wick = (upper_i / rng_i) >= min_wick_frac
+            outsized = (rng_i >= _atr_abs) if (_atr_abs is not None and _atr_abs > 0) else True
+            if big_wick and outsized:
+                rej_idx = i
+                break
+        if rej_idx is None:
+            return False, "wick_reclaim_no_rejection", debug
+
+        wick_high = float(high.iloc[rej_idx])
+
+        # ── (2) the FLUSH on RECEDING volume + (3) the RETRACE back into the wick ───────
+        # The flush low = the lowest low from the rejection bar through the current bar (the
+        # vacuum off the wick). The flush must be on DRYING volume: the post-rejection bars'
+        # rel-volume should recede vs the rejection bar (a low-volume vacuum, not real selling).
+        flush_low = float(low.iloc[rej_idx])
+        flush_recedes = True
+        try:
+            _rej_vr = float(vr[rej_idx]) if rej_idx < len(vr) and vr[rej_idx] is not None else None
+            _post_vrs = [
+                float(vr[j]) for j in range(rej_idx + 1, cur)
+                if j < len(vr) and vr[j] is not None
+            ]
+            for j in range(rej_idx + 1, cur + 1):
+                if j < len(low) and low.iloc[j] is not None:
+                    flush_low = min(flush_low, float(low.iloc[j]))
+            if _rej_vr is not None and _post_vrs:
+                # the flush bars (between rejection and the reclaim bar) must, on average,
+                # carry LESS rel-volume than the rejection bar (drying up / a vacuum).
+                flush_recedes = (sum(_post_vrs) / len(_post_vrs)) < _rej_vr
+        except (TypeError, ValueError, IndexError):
+            flush_recedes = True  # thin data -> fail-open on the volume-dry-up leg only
+        if not flush_recedes:
+            debug["flush_recedes"] = False
+            return False, "wick_reclaim_flush_not_dry", debug
+
+        wick_span = wick_high - flush_low
+        if not (wick_span > 0):
+            return False, "wick_reclaim_bad_wick", debug
+
+        # The RECLAIM: price (live tick when present, else the current close) re-enters the
+        # wick from the flush low by at least min_retrace_frac of the wick span (the HVM101
+        # ~40% retrace-on-rate-of-change). Re-enter INTO the wick — not a full break above it.
+        px = (
+            float(live_price)
+            if (live_price is not None and float(live_price) > 0)
+            else float(close.iloc[cur])
+        )
+        retrace_frac = (px - flush_low) / wick_span
+        debug["retrace_frac"] = round(retrace_frac, 4)
+        debug["atr_pct"] = atr_pct
+        debug["rvol"] = rvol
+        if retrace_frac < min_retrace_frac:
+            return False, "wick_reclaim_retrace_too_shallow", debug
+
+        # Level = the wick high (the breakout/continuation target the bailout machinery uses);
+        # stop = the flush/wick low. Reuse the IDENTICAL pullback_high/pullback_low keys.
+        level = wick_high
+        stop = flush_low
+        if not (0.0 < stop < level):
+            return False, "wick_reclaim_bad_level", debug
+        debug.update({
+            "pullback_high": float(level),
+            "pullback_low": float(stop),
+            "wick_high": round(wick_high, 6),
+            "flush_low": round(flush_low, 6),
+            "rejection_bar_offset": int(cur - rej_idx),
+        })
+        return True, "wick_reclaim", debug
+    except Exception:
+        return False, "wick_reclaim_error", {"entry_interval": entry_interval}
 
 
 def pullback_break_confirmation(
