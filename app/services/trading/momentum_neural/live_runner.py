@@ -4782,6 +4782,17 @@ def tick_live_session(
             # KILL-SWITCH chili_momentum_tape_hold_entry_enabled OFF ⇒ tape_confirms_hold
             # returns (False, ...) before any I/O ⇒ this whole block is a no-op (break-only).
             _tape_hold_fired = False
+            try:
+                logger.info(
+                    "[momentum_live] tape_hold_gate symbol=%s reason=%s flag=%s in_valid=%s pb_low=%s benched=%s",
+                    sess.symbol, _trigger_reason,
+                    bool(getattr(settings, "chili_momentum_tape_hold_entry_enabled", False)),
+                    _trigger_reason in TAPE_HOLD_VALID_WAIT_REASONS,
+                    (_pb_debug.get("pullback_low") if isinstance(_pb_debug, dict) else None),
+                    le.get("benched_backside_hod"),
+                )
+            except Exception:
+                pass
             if (
                 bool(getattr(settings, "chili_momentum_tape_hold_entry_enabled", False))
                 and _trigger_reason in TAPE_HOLD_VALID_WAIT_REASONS
@@ -4798,6 +4809,14 @@ def tick_live_session(
                         _th_px = None
                     # (2) REQUIRED tape confirm — fail-CLOSED.
                     _tape_ok, _tape_dbg = tape_confirms_hold(sess.symbol, db=db, settings=settings)
+                    try:
+                        logger.info(
+                            "[momentum_live] tape_hold_tape symbol=%s tape_ok=%s accel=%s rate=%s floor=%s n=%s reason=%s",
+                            sess.symbol, _tape_ok, _tape_dbg.get("signed_tape_accel"), _tape_dbg.get("tick_rate"),
+                            _tape_dbg.get("tick_rate_floor"), _tape_dbg.get("n_ticks"), _tape_dbg.get("reason"),
+                        )
+                    except Exception:
+                        pass
                     if _tape_ok:
                         # (3)+(4) structural hold + not-backside on the SAME entry-interval df.
                         _th_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
@@ -4814,6 +4833,13 @@ def tick_live_session(
                             ),
                             entry_interval=_th_iv,
                         )
+                        try:
+                            logger.info(
+                                "[momentum_live] tape_hold_struct symbol=%s struct_ok=%s reason=%s",
+                                sess.symbol, _th_struct_ok, _th_reason,
+                            )
+                        except Exception:
+                            pass
                         if _th_struct_ok:
                             # Reuse the EXACT structural-stop + breakout-level stash the break
                             # path uses (pullback_low = structural stop, pullback_high = the
