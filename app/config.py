@@ -2210,6 +2210,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_SCORING_ENABLED"),
         description="3-layer EXPLOSIVE scorer for score_universe (fixes the score-compression bug where a non-explosive mega-cap out-ranked a +400%/15,000x-RVOL rocket). Replaces the compensatory linear-percentile blend with: (1) a lexicographic explosiveness TIER (batch-median multiples — non-compensatory outer sort key), (2) a magnitude-preserving log-min-max multiplicative explosive CORE (rvol_norm^0.6 * mom_norm^0.4) x bounded quality modifier from the secondary pillars, (3) raw-rvol tiebreak. Batch-relative / no magic numbers; fail-OPEN (missing rvol/change degrades to tier 0, never crashes, never vetoes — selection re-rank only). Flag OFF ⇒ byte-identical to the legacy blend.",
     )
+    chili_momentum_ross_rvol_feed_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_RVOL_FEED_ENABLED"),
+        description="FIX A: un-zero the starved ws_ignition Ross scorer. (A1) the ignition feeder threads the REAL intraday RVOL it captured from the screen snapshot into ross_signals.vol_ratio, so an igniting mover reaches the explosive CORE with rvol present instead of None. (A2) when a name genuinely has no rvol, the explosive core degrades to a BOUNDED momentum-only score (capped below a confirmed rvol+mom mover) instead of 0.0 — so the viability tilt no longer penalises every explosive mover toward the floor. SELECTION-ONLY (never touches an entry decision). OFF => byte-identical (old rvol-None -> core 0.0 path).",
+    )
     chili_momentum_squeeze_fuel_tilt_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_FUEL_TILT_ENABLED"),
@@ -2439,6 +2444,34 @@ class Settings(BaseSettings):
         ge=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_QUOTE_FRESHNESS_CEILING_SECONDS"),
         description="Upper bound on the adaptive stale-quote window — caps how old a quote can be and still count as fresh for a slow-trading name (safety vs trading on a truly stale price).",
+    )
+    # FIX B1 — extended-hours-aware stale-quote window. Pre/post-market movers trade at a
+    # much slower cadence; the regular-hours ceiling perpetually flags them stale so the
+    # entry trigger never gets a turn (stale_bbo peaks 16:00-19:00 ET). When ON, EXTENDED
+    # HOURS raise the adaptive-window CEILING (the cadence-scaled window may now stretch
+    # further for a slow-but-LIVE name), while the conservative FLOOR for genuinely
+    # no-tick / halted names is unchanged. OFF => byte-identical (regular ceiling always).
+    chili_momentum_ext_hours_quote_age_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXT_HOURS_QUOTE_AGE_ENABLED"),
+        description="FIX B1: during pre/post-market, widen the adaptive stale-quote CEILING using the name's own inter-trade cadence so a slow-but-live extended-hours mover isn't perpetually flagged stale. Floor for halted/no-tick names is unchanged. OFF => byte-identical.",
+    )
+    chili_momentum_ext_hours_quote_ceiling_seconds: float = Field(
+        default=300.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXT_HOURS_QUOTE_CEILING_SECONDS"),
+        description="FIX B1: the adaptive stale-quote window CEILING used during extended hours (replaces the regular-hours ceiling only when ext-hours widening is enabled). Still a hard cap — a truly stale ext-hours quote past this is still stale.",
+    )
+    # FIX B2 — entry-quote secondary-source refetch. When the primary entry tick is STALE
+    # (not invalid), refetch the BBO ONCE from the documented market-data priority
+    # (Massive WS -> Polygon -> RH MCP get_equity_quotes) and re-run the SAME validation
+    # before emitting live_blocked_by_risk. Validation is NOT weakened: invalid_bbo
+    # (ask<bid, mid/bid/ask<=0) still hard-blocks; only the SOURCE of the quote changes.
+    # OFF => byte-identical (no refetch; the primary stale verdict stands).
+    chili_momentum_entry_quote_refetch_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_QUOTE_REFETCH_ENABLED"),
+        description="FIX B2: on a STALE (not invalid) entry tick, refetch the BBO once from the secondary market-data chain (Massive WS -> Polygon -> RH MCP) and re-run the same validation before blocking. invalid_bbo still hard-blocks. OFF => byte-identical.",
     )
     # BROKER-TRUTH RECONCILIATION (mig309) — TWO decoupled flags (write-then-verify-then-read):
     #

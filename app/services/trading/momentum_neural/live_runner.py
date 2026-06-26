@@ -37,7 +37,13 @@ from ..autopilot_scope import (
     check_autopilot_entry_gate,
 )
 from ..governance import is_kill_switch_active
-from ..venue.protocol import NormalizedOrder, NormalizedProduct, is_fresh_enough
+from ..venue.protocol import (
+    FreshnessMeta,
+    NormalizedOrder,
+    NormalizedProduct,
+    NormalizedTicker,
+    is_fresh_enough,
+)
 from .persistence import append_trading_automation_event
 from ..decision_ledger import (
     finalize_packet_after_simulated_exit,
@@ -2743,6 +2749,25 @@ def _adaptive_quote_max_age_seconds(db: Any, symbol: str, base_max_age: float) -
     floor = max(base, float(getattr(settings, "chili_momentum_quote_freshness_floor_seconds", 15.0) or 15.0))
     ceil = float(getattr(settings, "chili_momentum_quote_freshness_ceiling_seconds", 120.0) or 120.0)
     k = float(getattr(settings, "chili_momentum_quote_freshness_cadence_mult", 3.0) or 3.0)
+    # FIX B1 — extended-hours-aware CEILING. Pre/post-market names trade at a much slower
+    # cadence; the regular-hours ceiling perpetually caps the cadence-scaled window so a
+    # slow-but-LIVE ext-hours mover is flagged stale and the entry trigger never gets a turn
+    # (stale_bbo peaks 16:00-19:00 ET). Raise ONLY the ceiling during extended hours; the
+    # FLOOR (the conservative window for genuinely no-tick / halted names below) is untouched,
+    # and the cadence-scaling math is unchanged — a name with no recent ticks still returns
+    # the floor. OFF => byte-identical (regular ceiling always).
+    if bool(getattr(settings, "chili_momentum_ext_hours_quote_age_enabled", True)):
+        try:
+            from .market_profile import market_session_now
+
+            if market_session_now(symbol) in ("premarket", "afterhours"):
+                _ext_ceil = float(
+                    getattr(settings, "chili_momentum_ext_hours_quote_ceiling_seconds", 300.0) or 300.0
+                )
+                if _ext_ceil > ceil:
+                    ceil = _ext_ceil
+        except Exception:
+            pass
     if ceil < floor:
         ceil = floor
     try:
@@ -2763,11 +2788,84 @@ def _adaptive_quote_max_age_seconds(db: Any, symbol: str, base_max_age: float) -
         return floor
 
 
+def _refetch_bbo_secondary(symbol: str) -> tuple[Any, str] | None:
+    """FIX B2 — refetch a fresh BBO from the SECONDARY market-data chain (the documented
+    priority Massive WS -> Polygon -> Massive REST snapshot, which is the in-process
+    equivalent of the RH MCP ``get_equity_quotes`` equity leg) when the PRIMARY entry tick
+    is STALE. Returns ``(NormalizedTicker, source_label)`` or ``None`` if no source gives a
+    usable bid/ask. Each leg stamps a FRESH ``FreshnessMeta`` (the read just happened), so a
+    valid result is fresh by construction; the caller re-runs the SAME validation on it —
+    invalid books (ask<bid, non-positive) are still rejected. Cheap + fail-silent: any error
+    in a leg falls through to the next, and a total miss returns ``None`` (the stale verdict
+    stands)."""
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return None
+
+    def _mk(bid: float | None, ask: float | None, last: float | None, source: str):
+        try:
+            b = float(bid) if bid else None
+            a = float(ask) if ask else None
+        except (TypeError, ValueError):
+            b = a = None
+        if not (b and a and b > 0 and a > 0):
+            return None
+        mid = (b + a) / 2.0
+        spread_abs = a - b
+        spread_bps = (spread_abs / mid) * 10_000.0 if mid > 0 else None
+        return NormalizedTicker(
+            product_id=sym, bid=b, ask=a, mid=mid,
+            spread_abs=spread_abs, spread_bps=spread_bps,
+            last_price=(float(last) if last else None),
+            freshness=FreshnessMeta(retrieved_at_utc=datetime.now(timezone.utc)),
+            raw={"source": source},
+        ), source
+
+    # 1) Massive WebSocket (push-fresh NBBO when the feed is live in this process).
+    try:
+        from ...massive_client import get_ws_quote
+
+        ws_q = get_ws_quote(sym)
+        if ws_q is not None:
+            r = _mk(getattr(ws_q, "bid", None), getattr(ws_q, "ask", None),
+                    getattr(ws_q, "price", None), "massive_ws")
+            if r is not None:
+                return r
+    except Exception:
+        pass
+    # 2) Polygon snapshot (carries lastQuote bid/ask).
+    try:
+        from ... import polygon_client as _poly
+
+        pq = _poly.get_last_quote(sym) or {}
+        r = _mk(pq.get("bid"), pq.get("ask"), pq.get("last_price"), "polygon")
+        if r is not None:
+            return r
+    except Exception:
+        pass
+    # 3) Massive REST snapshot (the documented top-priority REST source; in-process stand-in
+    #    for the RH MCP equity-quote leg, which is not exposed as a synchronous fn here).
+    try:
+        from ...massive_client import get_last_quote as _massive_last_quote
+
+        mq = _massive_last_quote(sym) or {}
+        r = _mk(mq.get("bid"), mq.get("ask"), mq.get("last_price"), "massive_rest")
+        if r is not None:
+            return r
+    except Exception:
+        pass
+    return None
+
+
 def _quote_quality_block(
     tick: Any, freshness: Any, max_spread_bps: float | None = None,
     *, symbol: str | None = None, db: Any = None,
 ) -> dict[str, Any] | None:
     meta = getattr(tick, "freshness", None) or freshness
+    # FIX B2 telemetry: set when a secondary refetch replaced a stale primary tick; stamped
+    # into whichever verdict (block or pass) the re-validated quote produces. Always bound
+    # (no local-shadow UnboundLocalError class).
+    _refetched_meta: dict[str, Any] | None = None
     if meta is not None and not is_fresh_enough(meta):
         # The venue's FIXED base window flagged stale — re-check against the name's
         # cadence-scaled window. PURELY ADDITIVE: only ever WIDENS (can un-block a
@@ -2781,11 +2879,41 @@ def _quote_quality_block(
             except Exception:
                 pass
         if _age > _max_age:
-            return {
-                "reason": "stale_bbo",
-                "age_seconds": round(_age, 4),
-                "max_age_seconds": round(_max_age, 2),
-            }
+            # FIX B2 — the PRIMARY tick is genuinely stale. Before blocking, refetch the BBO
+            # ONCE from the secondary market-data chain (Massive WS -> Polygon -> Massive REST)
+            # and re-run the SAME validation on the fresh quote below. This ONLY changes WHICH
+            # quote we validate, never an entry condition; invalid books are still rejected.
+            # OFF => byte-identical (the original stale_bbo block stands).
+            _refetched_meta: dict[str, Any] | None = None
+            if (
+                symbol
+                and bool(getattr(settings, "chili_momentum_entry_quote_refetch_enabled", True))
+            ):
+                try:
+                    _rf = _refetch_bbo_secondary(str(symbol))
+                except Exception:
+                    _rf = None
+                if _rf is not None:
+                    _rf_tick, _rf_source = _rf
+                    _rf_meta = getattr(_rf_tick, "freshness", None)
+                    # The refetched quote must itself be fresh (it was just read, so it is) —
+                    # if for any reason it is NOT, fall through to the original stale block.
+                    if _rf_meta is None or is_fresh_enough(_rf_meta):
+                        _refetched_meta = {
+                            "refetch_source": _rf_source,
+                            "refetch_age_seconds": round(
+                                float(_rf_meta.age_seconds()) if _rf_meta is not None else 0.0, 4
+                            ),
+                            "primary_age_seconds": round(_age, 4),
+                            "primary_max_age_seconds": round(_max_age, 2),
+                        }
+                        tick = _rf_tick  # validate the FRESH quote from here down
+            if _refetched_meta is None:
+                return {
+                    "reason": "stale_bbo",
+                    "age_seconds": round(_age, 4),
+                    "max_age_seconds": round(_max_age, 2),
+                }
     try:
         mid = float(getattr(tick, "mid", 0.0) or 0.0)
         bid = float(getattr(tick, "bid", 0.0) or 0.0)
@@ -2793,7 +2921,11 @@ def _quote_quality_block(
     except (TypeError, ValueError):
         return {"reason": "invalid_bbo"}
     if mid <= 0 or bid <= 0 or ask <= 0 or ask < bid:
-        return {"reason": "invalid_bbo", "bid": bid, "ask": ask, "mid": mid}
+        _inv = {"reason": "invalid_bbo", "bid": bid, "ask": ask, "mid": mid}
+        if _refetched_meta:
+            _inv.update(_refetched_meta)
+            _inv["failed_check"] = "invalid_bbo"
+        return _inv
     try:
         spread_bps = float(getattr(tick, "spread_bps", None))
     except (TypeError, ValueError):
@@ -2814,7 +2946,7 @@ def _quote_quality_block(
     except (TypeError, ValueError):
         max_spread = 12.0
     if spread_bps > max_spread:
-        return {
+        _ws = {
             "reason": "wide_bbo_spread",
             "spread_bps": round(spread_bps, 4),
             "max_spread_bps": max_spread,
@@ -2822,6 +2954,25 @@ def _quote_quality_block(
             "ask": ask,
             "mid": mid,
         }
+        if _refetched_meta:
+            _ws.update(_refetched_meta)
+            _ws["failed_check"] = "wide_bbo_spread"
+        return _ws
+    # FIX B2: a secondary refetch RESCUED a stale primary tick (the fresh quote passed all
+    # validation). Surface a no-block telemetry marker so the entry caller records that the
+    # entry seam was unblocked by a refetch (A/B), then proceed exactly as a clean pass.
+    if _refetched_meta:
+        try:
+            _log.info(
+                "[momentum_live] entry_quote_refetch_rescue symbol=%s source=%s "
+                "primary_age=%.2fs refetch_age=%.2fs",
+                str(symbol),
+                _refetched_meta.get("refetch_source"),
+                float(_refetched_meta.get("primary_age_seconds") or 0.0),
+                float(_refetched_meta.get("refetch_age_seconds") or 0.0),
+            )
+        except Exception:
+            pass
     return None
 
 

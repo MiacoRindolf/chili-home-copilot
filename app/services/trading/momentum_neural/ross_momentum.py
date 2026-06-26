@@ -186,6 +186,16 @@ ROSS_EXPLOSIVE_TIER_EXTREME_MULT = 10.0   # tier 3: rvol AND change >= ~10x batc
 ROSS_EXPLOSIVE_TIER_STRONG_MULT = 3.0     # tier 2: rvol AND change >= ~3x batch median
 ROSS_EXPLOSIVE_CORE_RVOL_EXP = 0.6        # explosive-core RVOL exponent (Ross #1 axis)
 ROSS_EXPLOSIVE_CORE_MOM_EXP = 0.4         # explosive-core momentum exponent ("already moving")
+# FIX A2 — missing-RVOL fallback. When a name has NO rvol (e.g. a ws_ignition mover the
+# feed couldn't pair with a baseline) we no longer zero its core (which the viability tilt
+# then PENALISES toward the floor). Instead we score it on momentum ALONE — but BOUNDED:
+# the momentum-only core is the rvol-neutral assumption rvol_norm=NEUTRAL combined with the
+# real mom_norm, then CAPPED below 1.0. The cap is the load-bearing safety the review asked
+# for: a +400% vertical blow-off (mom_norm≈1.0) with no rvol confirmation can reach AT MOST
+# this ceiling, so it can NEVER out-rank a clean mover that has BOTH rvol and momentum
+# (whose confirmed core can reach 1.0). RVOL-confirmed explosiveness always wins.
+ROSS_EXPLOSIVE_MISSING_RVOL_NEUTRAL = 0.5   # rvol-neutral assumption for a name with no rvol
+ROSS_EXPLOSIVE_MISSING_RVOL_CORE_CEILING = 0.6  # hard cap on a momentum-only (no-rvol) core
 
 
 def _median(sorted_vals: list[float]) -> float | None:
@@ -450,13 +460,19 @@ def score_universe(
     if not signals:
         return {}
     w = dict(weights or ROSS_PILLAR_WEIGHTS)
+    # FIX A2 — missing-RVOL degrade flag (shares the ross_rvol_feed kill-switch: the whole
+    # "un-zero the starved ws_ignition scorer" feature is one switch). Default ON; when OFF
+    # the missing-rvol core stays 0.0 (byte-identical to the legacy explosive path).
+    _missing_rvol_degrade = True
     if explosive is None:
         # Resolve the live config flag lazily (keeps this module IO-free at import).
         try:
             from app.config import settings as _settings  # local import: no top-level dep
             explosive = bool(getattr(_settings, "chili_momentum_explosive_scoring_enabled", True))
+            _missing_rvol_degrade = bool(getattr(_settings, "chili_momentum_ross_rvol_feed_enabled", True))
         except Exception:
             explosive = False  # fail-CLOSED to the legacy blend if config is unavailable
+            _missing_rvol_degrade = False  # fail-CLOSED to the legacy core=0.0 when config absent
 
     pillars: dict[str, tuple[float | None, float | None, float | None, float | None]] = {
         sym: _extract_pillars(sig or {}) for sym, sig in signals.items()
@@ -553,10 +569,20 @@ def score_universe(
             # (fail-OPEN: a name with no rvol/mom is simply not explosive, never crashes).
             rvol_norm = _log_min_max(rvol, rvol_sorted)
             mom_norm = _log_min_max(mom, mom_sorted)
-            if rvol_norm is None or mom_norm is None:
-                core = 0.0
-            else:
+            if rvol_norm is not None and mom_norm is not None:
                 core = (rvol_norm ** ROSS_EXPLOSIVE_CORE_RVOL_EXP) * (mom_norm ** ROSS_EXPLOSIVE_CORE_MOM_EXP)
+            elif _missing_rvol_degrade and rvol_norm is None and mom_norm is not None:
+                # FIX A2 — name has momentum but NO rvol (a ws_ignition mover the feed couldn't
+                # pair with a baseline). Don't zero it (which the tilt would then penalise toward
+                # the floor). Score it on momentum with an rvol-NEUTRAL assumption, then CAP it so
+                # an unconfirmed vertical name can never out-rank a clean rvol+mom mover.
+                _neutral_core = (
+                    ROSS_EXPLOSIVE_MISSING_RVOL_NEUTRAL ** ROSS_EXPLOSIVE_CORE_RVOL_EXP
+                ) * (mom_norm ** ROSS_EXPLOSIVE_CORE_MOM_EXP)
+                core = min(ROSS_EXPLOSIVE_MISSING_RVOL_CORE_CEILING, _neutral_core)
+            else:
+                # No momentum either (or degrade disabled) -> not explosive. Legacy behaviour.
+                core = 0.0
             # Bounded QUALITY modifier from the EXISTING SECONDARY-pillar blend (liquidity /
             # tradeable_liquidity / daily_structure / float_rotation / squeeze_fuel — NOT the
             # rvol/mom that drive the core). 0.5 + 0.5*quality clamps the modulation to +/-50%,
