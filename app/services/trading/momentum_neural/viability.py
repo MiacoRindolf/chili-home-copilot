@@ -602,6 +602,17 @@ def score_viability(
         f"fee_to_target={fee_ratio} drift={drift} imb={imb} tape_z={tape_z}"
     )
 
+    try:
+        _le_final = bool(live_eligible and viability >= 0.42)
+        if (not _le_final) and viability >= 0.6:
+            import logging as _lg
+            _lg.getLogger("app.services.trading.momentum_neural.viability").info(
+                "[viability] INELIGIBLE %s viab=%.3f le_pre=%s vol=%s tradable=%s spread=%s session=%s warnings=%s",
+                symbol, viability, bool(live_eligible), ctx.vol_regime.value,
+                getattr(feats, "product_tradable", None), spread_bps, ctx.session_label, list(warnings),
+            )
+    except Exception:
+        pass
     return ViabilityResult(
         symbol=symbol,
         family_id=family.family_id,
