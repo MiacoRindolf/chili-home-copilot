@@ -160,6 +160,11 @@ ROSS_QUALITY_VIABILITY_TILT = 0.20
 # change semantics differ (24h) and get their own calibration if/when needed.
 ROSS_ELIGIBILITY_RVOL_FLOOR = 5.0
 ROSS_ELIGIBILITY_CHANGE_FLOOR_PCT = 10.0
+# COILING-SQUEEZE exemption: a name whose RVOL is >= this MULTIPLE of the rvol_floor
+# (default 3x5x = 15x) is EXTREME-volume on (typically) a low float = accumulation/coil
+# before the pop, and clears the change floor even at a still-modest %-change (the SDOT
+# case: 65x RVOL, 744K float, +4.4% — Ross trades it; the 10% change floor wrongly benched it).
+ROSS_COILING_EXEMPT_RVOL_MULT = 3.0
 
 # ── 3-layer EXPLOSIVE scorer (flag chili_momentum_explosive_scoring_enabled) ──
 # The legacy blend (linear weighted-AVERAGE of percentiles) is fully COMPENSATORY and
@@ -426,6 +431,21 @@ def below_explosive_floor(
     rvol, momentum, _liq, _tl = _extract_pillars(signal)
     if rvol is not None and float(rvol) < float(rvol_floor):
         return True
+    # COILING-SQUEEZE EXEMPTION (2026-06-26): EXTREME relative volume = accumulation/coiling
+    # BEFORE the pop, even while the %-change is still modest. SDOT (65x RVOL, 744K float,
+    # +4.4%) was wrongly benched by the 10% change floor though it is a textbook Ross squeeze
+    # he was actively trading. A name whose RVOL is EXTREME (>= mult x rvol_floor) clears the
+    # change floor. The rvol_floor itself STILL applies (genuine low-volume names rejected);
+    # this is SELECTION-only — the entry-side vetoes (backside / L2 hidden-seller / tape-confirm)
+    # still guard the actual entry against distribution. Kill-switch + adaptive mult.
+    try:
+        from app.config import settings as _cset
+        _coil_on = bool(getattr(_cset, "chili_momentum_coiling_squeeze_exempt_enabled", True))
+        _coil_mult = float(getattr(_cset, "chili_momentum_coiling_exempt_rvol_mult", ROSS_COILING_EXEMPT_RVOL_MULT) or ROSS_COILING_EXEMPT_RVOL_MULT)
+    except Exception:
+        _coil_on, _coil_mult = True, ROSS_COILING_EXEMPT_RVOL_MULT
+    if _coil_on and rvol is not None and float(rvol) >= _coil_mult * float(rvol_floor):
+        return False
     if momentum is not None and float(momentum) < float(change_floor_pct):
         return True
     return False

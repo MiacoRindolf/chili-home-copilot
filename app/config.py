@@ -4547,6 +4547,21 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_RVOL_FLOOR"),
         description="Relative-volume (vol_ratio) at/above which a name is treated as EXPLOSIVE for the recalibration carve-outs when an RVOL reading is available (OR-ed with the ATR floor).",
     )
+    # COILING-SQUEEZE exemption (2026-06-26): an EXTREME-RVOL name (>= mult x rvol_floor)
+    # clears the Ross CHANGE floor even at a modest %-change — accumulation/coil before the
+    # pop (SDOT: 65x RVOL, 744K float, +4.4%, wrongly benched by the 10% change floor though
+    # Ross was trading it). Selection-only; rvol_floor still applies; entry vetoes still guard.
+    chili_momentum_coiling_squeeze_exempt_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_COILING_SQUEEZE_EXEMPT_ENABLED"),
+        description="Allow an extreme-RVOL (coiling) name to clear the Ross change floor even at a modest %-change.",
+    )
+    chili_momentum_coiling_exempt_rvol_mult: float = Field(
+        default=3.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_COILING_EXEMPT_RVOL_MULT"),
+        description="RVOL multiple of the rvol_floor at/above which the coiling-squeeze change-floor exemption applies (default 3x5x = 15x).",
+    )
     # GATE 1 — bid-prop confirmer explosive exemption.
     chili_momentum_bid_prop_explosive_exempt: bool = Field(
         default=False,
