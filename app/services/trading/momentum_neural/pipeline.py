@@ -1006,6 +1006,66 @@ def run_momentum_neural_tick(
                             _weights["squeeze_fuel"] = ROSS_SQUEEZE_FUEL_PILLAR_WEIGHT
                 except Exception:
                     pass
+            # NEWS-CATALYST TILT (default OFF => byte-identical): the 🔥 pillar Ross weights
+            # heavily on his scanner — the 4th Ross pillar that was a STUB until now. Map each
+            # symbol's REAL Polygon/Benzinga catalyst GRADE (the strong/weak/fake/all sets the
+            # pipeline already computes from headlines — no new fetch) to a [0,1] news_catalyst_pct
+            # sub-score and FOLD the news_catalyst pillar onto the ACTIVE weight-set (composable —
+            # score_universe self-renormalises over present pillars). MEASURED: 0.10 weight keeps
+            # news a minority RE-RANK; float/RVOL/change stay primary. GRACEFUL: a name in NO
+            # catalyst set gets news_catalyst_pct=None ⇒ the pillar is omitted for it (NEUTRAL, no
+            # penalty, never rejected). Works for equities AND crypto (the catalyst sets are
+            # symbol-keyed). Flag DEFAULT-OFF (operator confirms feed amplitude first); OFF ⇒ the
+            # sub-score is never stamped and the pillar weight is never folded ⇒ byte-identical.
+            if bool(getattr(settings, "chili_momentum_news_catalyst_weight_enabled", False)):
+                try:
+                    from .ross_momentum import (
+                        ROSS_NEWS_CATALYST_PILLAR_WEIGHT,
+                        news_catalyst_signal as _news_catalyst_signal,
+                    )
+                    from .catalyst import (
+                        all_catalyst_symbols as _nc_all,
+                        strong_catalyst_symbols as _nc_strong,
+                        weak_catalyst_symbols as _nc_weak,
+                        fake_catalyst_symbols as _nc_fake,
+                    )
+
+                    # Cached, best-effort grade sets (each fails-open to empty).
+                    def _safe_set(fn) -> set[str]:
+                        try:
+                            return {str(s).upper() for s in (fn() or set())}
+                        except Exception:
+                            return set()
+
+                    _set_all = _safe_set(_nc_all)
+                    _set_strong = _safe_set(_nc_strong)
+                    _set_weak = _safe_set(_nc_weak)
+                    _set_fake = _safe_set(_nc_fake)
+                    # Only do per-symbol work if SOME news data exists this pass (else graceful no-op).
+                    if _set_all or _set_strong or _set_weak or _set_fake:
+                        _n_nc = 0
+                        for _sym, _sig in _ross_signals.items():
+                            if not isinstance(_sig, dict):
+                                continue
+                            try:
+                                _nc = _news_catalyst_signal(
+                                    _sym,
+                                    strong_catalyst_symbols=_set_strong,
+                                    weak_catalyst_symbols=_set_weak,
+                                    fake_catalyst_symbols=_set_fake,
+                                    all_catalyst_symbols=_set_all,
+                                )
+                                if _nc.news_pct is not None:
+                                    _sig["news_catalyst_pct"] = _nc.news_pct
+                                    _sig["news_catalyst_grade"] = _nc.grade
+                                    _n_nc += 1
+                            except Exception:
+                                continue
+                        if _n_nc > 0:
+                            _weights = dict(_weights)
+                            _weights["news_catalyst"] = ROSS_NEWS_CATALYST_PILLAR_WEIGHT
+                except Exception:
+                    pass
             meta["ross_scores"] = {
                 s: rs.score
                 for s, rs in _ross_score_universe(_ross_signals, weights=_weights).items()

@@ -99,6 +99,34 @@ ROSS_FLOAT_ROTATION_PILLAR_WEIGHT = 0.10
 ROSS_FLOAT_ROTATION_CLEAR_FLOOR = 1.0
 ROSS_FLOAT_ROTATION_SATURATION = 5.0
 
+# NEWS-CATALYST pillar weight (opt-in via chili_momentum_news_catalyst_weight_enabled, default OFF).
+# This is the FOURTH Ross pillar — the 🔥 on his scanner — that the scorer historically left a
+# STUB (never built; a name's news-ness never influenced its rank). Like float_rotation / squeeze_fuel
+# above it is a SINGLE composable pillar the pipeline folds onto WHATEVER weight-set is already active
+# (``score_universe`` reads the per-symbol raw ``news_catalyst_pct`` sub-score stamped by the bridge
+# from the REAL Polygon/Benzinga catalyst sets, and renormalises over the present pillars). 0.10 = the
+# same MEASURED minority magnitude as daily_structure / float_rotation / squeeze_fuel — it RE-RANKS the
+# pool toward STRONG-news A-setups (UPC/PED/IVF-class 🔥 movers) above no-news ones WITHIN the explosive
+# cohort, and slightly DE-RATES weak (dilution/compliance) / fake (unverified/hacked-PR) headlines. It
+# can NEVER let news dominate float/RVOL/change (the primary pillars keep ~80% of the blend) and can
+# NEVER block a fill or remove a name from the pool. GRACEFUL — a name with NO news data has
+# ``news_catalyst_pct = None`` ⇒ the pillar is simply not present in its blend ⇒ NEUTRAL (no penalty,
+# never rejected for lack of news). Absent set / flag OFF ⇒ the pillar is not in the blend ⇒
+# byte-identical ranking.
+ROSS_NEWS_CATALYST_PILLAR_WEIGHT = 0.10
+
+# News-catalyst grade reference sub-scores (centered on the 0.5 neutral midpoint, like squeeze_fuel).
+# STRONG (FDA/trial/partnership/contract/M&A/earnings-beat — the headlines Ross FAVORS) boosts ABOVE
+# neutral; WEAK (dilution/compliance/legal — Ross distrusts) de-rates BELOW; FAKE (unverified/hacked-PR/
+# rumor/pump — AS101/HVM101 round-trippers) de-rates HARDER. These shape the RAW sub-score only — the
+# within-batch PERCENTILE of ``news_catalyst_pct`` is what actually ranks names (adaptive), so they are
+# documented REFERENCES, never hard cutoffs. A name PRESENT in the broad catalyst set but in none of the
+# graded sets reads a mild positive (it has SOME fresh news, ungraded).
+ROSS_NEWS_GRADE_STRONG = 0.90    # strong, Ross-favored catalyst (the 🔥)
+ROSS_NEWS_GRADE_PRESENT = 0.60   # fresh news present but ungraded (mild positive)
+ROSS_NEWS_GRADE_WEAK = 0.30      # dilution/compliance/legal (de-rate)
+ROSS_NEWS_GRADE_FAKE = 0.15      # unverified/hacked-PR/rumor/pump (harder de-rate)
+
 # SQUEEZE-FUEL sustainability pillar weight (opt-in via chili_momentum_squeeze_fuel_tilt_enabled).
 # Like ``float_rotation`` this is a SINGLE composable pillar the pipeline folds onto WHATEVER
 # weight-set is already active (``score_universe`` reads the per-symbol raw ``squeeze_fuel_pct``
@@ -523,6 +551,13 @@ def score_universe(
     _sf_raw = {sym: _first_float(sig or {}, "squeeze_fuel_pct") for sym, sig in signals.items()}
     sf_sorted = sorted(v for v in _sf_raw.values() if v is not None)
     _w_sf = float(w.get("squeeze_fuel") or 0.0)
+    # News-catalyst pillar (composable, opt-in): the per-symbol raw ``news_catalyst_pct`` sub-score
+    # (catalyst grade -> [0,1] boost/de-rate) stamped by the bridge from the Polygon/Benzinga catalyst
+    # sets. Graceful-degrade exactly like squeeze_fuel — absent / zero-weight ⇒ not in the blend
+    # (byte-identical). A symbol with NO news data is NEUTRAL (the pillar is simply not present for it).
+    _nc_raw = {sym: _first_float(sig or {}, "news_catalyst_pct") for sym, sig in signals.items()}
+    nc_sorted = sorted(v for v in _nc_raw.values() if v is not None)
+    _w_nc = float(w.get("news_catalyst") or 0.0)
     # 6th/7th pillars (attention-leadership variant): the name's amplitude-leadership
     # share+rank of the live mover-field (the TRUE winner/loser separator) + its
     # dormant->explosive volume. Stamped cross-sectionally in _bridge_scanner_to_viability
@@ -556,6 +591,8 @@ def score_universe(
         fr_pct = _percentile_rank(_fr, fr_sorted) if _fr is not None else None
         _sf = _sf_raw.get(sym)
         sf_pct = _percentile_rank(_sf, sf_sorted) if _sf is not None else None
+        _nc = _nc_raw.get(sym)
+        nc_pct = _percentile_rank(_nc, nc_sorted) if _nc is not None else None
 
         present: list[tuple[float, float]] = []  # (percentile, weight)
         if rvol_pct is not None:
@@ -576,6 +613,8 @@ def score_universe(
             present.append((fr_pct, _w_fr))
         if sf_pct is not None and _w_sf > 0:
             present.append((sf_pct, _w_sf))
+        if nc_pct is not None and _w_nc > 0:
+            present.append((nc_pct, _w_nc))
 
         wsum = sum(wt for _, wt in present)
         score = (sum(pct * wt for pct, wt in present) / wsum) if wsum > 0 else 0.0
@@ -620,6 +659,8 @@ def score_universe(
                 _secondary.append((fr_pct, _w_fr))
             if sf_pct is not None and _w_sf > 0:
                 _secondary.append((sf_pct, _w_sf))
+            if nc_pct is not None and _w_nc > 0:
+                _secondary.append((nc_pct, _w_nc))
             _sec_wsum = sum(wt for _, wt in _secondary)
             quality_blend = (sum(p * wt for p, wt in _secondary) / _sec_wsum) if _sec_wsum > 0 else 0.5
             quality_blend = max(0.0, min(1.0, quality_blend))
@@ -643,6 +684,7 @@ def score_universe(
                 "daily_structure": _ds if _w_ds > 0 else None,
                 "float_rotation_pct": _fr if _w_fr > 0 else None,
                 "squeeze_fuel_pct": _sf if _w_sf > 0 else None,
+                "news_catalyst_pct": _nc if _w_nc > 0 else None,
                 "pillars_present": [
                     name
                     for name, val in (
@@ -652,6 +694,7 @@ def score_universe(
                         ("daily_structure", ds_pct if _w_ds > 0 else None),
                         ("float_rotation", fr_pct if _w_fr > 0 else None),
                         ("squeeze_fuel", sf_pct if _w_sf > 0 else None),
+                        ("news_catalyst", nc_pct if _w_nc > 0 else None),
                     )
                     if val is not None
                 ],
@@ -1387,3 +1430,56 @@ def squeeze_fuel_signal(
             "si_prominent": float(si_prominent), "ctb_hard": float(ctb_hard),
         },
     )
+
+
+@dataclass
+class NewsCatalystSignal:
+    """News-catalyst read (the 🔥 pillar). ``news_pct`` in [0,1] is the raw sub-score the bridge
+    stamps + percentile-ranks like the other pillars; ``None`` (graceful) ⇒ the pillar is omitted
+    from the blend for that name (NEUTRAL — no penalty, never rejected for lack of news)."""
+
+    news_pct: float | None   # [0,1] raw sub-score (>0.5 boost, <0.5 de-rate); None = omit (neutral)
+    grade: str               # strong | present | weak | fake | none
+    debug: dict = field(default_factory=dict)
+
+
+def news_catalyst_signal(
+    symbol: str,
+    *,
+    strong_catalyst_symbols: set[str] | None = None,
+    weak_catalyst_symbols: set[str] | None = None,
+    fake_catalyst_symbols: set[str] | None = None,
+    all_catalyst_symbols: set[str] | None = None,
+    grade_strong: float = ROSS_NEWS_GRADE_STRONG,
+    grade_present: float = ROSS_NEWS_GRADE_PRESENT,
+    grade_weak: float = ROSS_NEWS_GRADE_WEAK,
+    grade_fake: float = ROSS_NEWS_GRADE_FAKE,
+) -> NewsCatalystSignal:
+    """Map a symbol's REAL Polygon/Benzinga catalyst grade to the news pillar's [0,1] sub-score.
+
+    The grade comes from the catalyst symbol sets the pipeline already computes (no new fetch):
+      * in the STRONG set (FDA/trial/partnership/contract/M&A/earnings-beat — the 🔥)  -> boost
+      * in the broad catalyst set but ungraded (fresh news, type unknown)               -> mild +
+      * in the WEAK set (dilution/compliance/legal — Ross distrusts)                    -> de-rate
+      * in the FAKE set (unverified/hacked-PR/rumor/pump — round-trippers)              -> harder de-rate
+      * in NONE of the sets                                                             -> news_pct=None
+
+    Precedence FAKE > WEAK > STRONG > PRESENT: a name flagged unverified is de-rated even if a
+    keyword also matched a strong type (credibility dominates), and a known-weak headline de-rates
+    even alongside an ungraded-present hit. GRACEFUL: a name in no set returns ``news_pct=None`` so
+    the pillar is simply omitted from its blend (neutral — never penalised for the ABSENCE of news,
+    never rejected). Pure + side-effect-free (the caller supplies the cached sets)."""
+    sym = str(symbol).upper()
+    _strong = strong_catalyst_symbols or set()
+    _weak = weak_catalyst_symbols or set()
+    _fake = fake_catalyst_symbols or set()
+    _all = all_catalyst_symbols or set()
+    if sym in _fake:
+        return NewsCatalystSignal(round(float(grade_fake), 4), "fake", debug={"sym": sym})
+    if sym in _weak:
+        return NewsCatalystSignal(round(float(grade_weak), 4), "weak", debug={"sym": sym})
+    if sym in _strong:
+        return NewsCatalystSignal(round(float(grade_strong), 4), "strong", debug={"sym": sym})
+    if sym in _all:
+        return NewsCatalystSignal(round(float(grade_present), 4), "present", debug={"sym": sym})
+    return NewsCatalystSignal(None, "none", debug={"sym": sym})

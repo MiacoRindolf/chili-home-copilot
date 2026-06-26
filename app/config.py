@@ -2220,6 +2220,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_FUEL_TILT_ENABLED"),
         description="SQUEEZE-FUEL selection tilt (Ross SS101 #2): SOFT within-batch BOOST for squeeze-prone names (high short-interest %% + high cost-to-borrow, via Ortex) and a small DE-RATE for very-low-CTB / easy-to-borrow names (free shares, shorts attack the pop). Ortex fetch gated to top-N explosive low-float candidates + cached 12h. Equity-only; flag-off OR Ortex absent/error ⇒ byte-identical.",
     )
+    chili_momentum_news_catalyst_weight_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NEWS_CATALYST_WEIGHT_ENABLED"),
+        description="NEWS-CATALYST selection pillar (the 🔥 on Ross's scanner — the 4th Ross pillar that was a STUB). Maps each symbol's REAL Polygon/Benzinga catalyst GRADE (the strong/weak/fake/all sets the pipeline already computes from headlines — no new fetch) to a [0,1] news_catalyst_pct sub-score and FOLDS a MEASURED 0.10-weight pillar onto the active Ross weight-set (score_universe self-renormalises). Strong (FDA/trial/M&A/beat) BOOSTS; weak (dilution/compliance) and fake (unverified/hacked-PR) DE-RATE; news a minority RE-RANK only — float/RVOL/change stay primary. GRACEFUL: a name with NO news data is NEUTRAL (pillar omitted, never penalised or rejected for lack of news). Ships DEFAULT-OFF (operator confirms the catalyst feed's live amplitude before tilting). OFF ⇒ the sub-score is never stamped and the pillar is never folded ⇒ BYTE-IDENTICAL ranking.",
+    )
     chili_momentum_squeeze_fuel_top_n: int = Field(
         default=12, ge=0, le=60,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_FUEL_TOP_N"),
