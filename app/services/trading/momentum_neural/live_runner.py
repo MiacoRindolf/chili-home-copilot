@@ -3797,6 +3797,25 @@ def tick_live_session(
                                         _trigger_ok, _trigger_reason, _pb_debug = _wr_ok, _wr_reason, _wr_debug
                                 except Exception:
                                     pass
+                            # BATCH D: MICRO-PULLBACK AS PRIMARY — the 1-candle shallow flag as
+                            # an INITIAL entry (not just a post-fill re-load), GATED to HOT tape
+                            # (_is_hot_tape, like the wick-reclaim) so it does not over-fire on
+                            # slow names. A dip-family fire (runs only when nothing earlier fired);
+                            # returns the shared (ok, reason, debug) with pullback_low/high under
+                            # the IDENTICAL keys. No-op + byte-identical when its kill-switch is
+                            # OFF. docs/DESIGN/MOMENTUM_LANE.md
+                            if not _trigger_ok:
+                                try:
+                                    from .entry_gates import micro_pullback_primary_confirmation
+
+                                    _mp_ok, _mp_reason, _mp_debug = micro_pullback_primary_confirmation(
+                                        _df_trig, entry_interval=_iv_trig, live_price=_live_px,
+                                        symbol=sess.symbol, db=db,
+                                    )
+                                    if _mp_ok:
+                                        _trigger_ok, _trigger_reason, _pb_debug = _mp_ok, _mp_reason, _mp_debug
+                                except Exception:
+                                    pass
                             # BATCH A: HOD-break + flat-top BREAKOUT triggers + setup-selector.
                             # CHILI's ladder above is ALL dip/pullback/reclaim — a straight-up
                             # HOD runner that never pulls back produces NO fills. These detect a
@@ -3882,6 +3901,53 @@ def tick_live_session(
                                             # dispatch fires the instant the ask trades through the
                                             # B-high / neckline (the ladder gave only a terminal wait).
                                             _trigger_reason, _pb_debug = _bc_reason, _bc_dbg
+                                except Exception:
+                                    pass
+
+                                # BATCH D: OPENING-RANGE BREAKOUT (ORB) + RED-TO-GREEN. ORB =
+                                # break of the first-N-min opening range (session-time-windowed,
+                                # equity-RTH only). RED-TO-GREEN = a name below the session open
+                                # reclaiming it on a bottoming-tail reversal. Both BREAKOUT-family
+                                # fires that join the SAME candidate set so the setup-selector picks
+                                # the best R:R; both flag-gated INSIDE the detector (OFF -> no-op,
+                                # byte-identical) and return the shared (ok, reason, debug) with
+                                # pullback_low/high under the IDENTICAL keys. Run AFTER the existing
+                                # ladder (additive). No lookahead (ranges/levels from completed bars;
+                                # the live tick break is the only intrabar use). docs/DESIGN/MOMENTUM_LANE.md
+                                try:
+                                    from .entry_gates import (
+                                        opening_range_breakout_confirmation,
+                                        red_to_green_confirmation,
+                                    )
+
+                                    for _bd_fn in (
+                                        opening_range_breakout_confirmation,
+                                        red_to_green_confirmation,
+                                    ):
+                                        try:
+                                            # now=None -> the live real clock (the runner
+                                            # is live-only; the session-window read uses the
+                                            # DST-correct market-profile open helper).
+                                            _bd_ok, _bd_reason, _bd_dbg = _bd_fn(
+                                                _df_trig, entry_interval=_iv_trig,
+                                                live_price=_live_px, symbol=sess.symbol,
+                                                now=None, db=db,
+                                            )
+                                        except Exception:
+                                            _bd_ok, _bd_reason, _bd_dbg = False, "batch_d_error", {}
+                                        if _bd_ok:
+                                            _breakouts.append((_bd_ok, _bd_reason, _bd_dbg))
+                                        elif (
+                                            _bd_reason in TICK_ARMED_WAIT_REASONS
+                                            and isinstance(_bd_dbg, dict)
+                                            and _bd_dbg.get("pullback_high")
+                                            and not _trigger_ok
+                                            and _trigger_reason not in TICK_ARMED_WAIT_REASONS
+                                        ):
+                                            # Surface the ORB / red-to-green WAIT so tick-speed
+                                            # dispatch fires the instant the ask trades through the
+                                            # OR-high / open level (the ladder gave only a terminal wait).
+                                            _trigger_reason, _pb_debug = _bd_reason, _bd_dbg
                                 except Exception:
                                     pass
 

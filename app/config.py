@@ -3284,6 +3284,42 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_HOD_BASE_BARS"),
         description="Batch A: number of recent completed bars that must form the tight consolidation base just under the HOD before the break fires. ONE documented base-window knob.",
     )
+    # ── BATCH D: opening-range breakout (ORB) + red-to-green + micro-pullback-primary ──
+    # The remaining entry gaps from the Ross course audit. ORB = break of the first-N-min
+    # opening range (a session-time-windowed breakout). RED-TO-GREEN = a name trading below
+    # the session open that reclaims the open with a bottoming-tail reversal. MICRO-PRIMARY
+    # = the 1-candle shallow-flag micro-pullback as an INITIAL entry (not just a re-load),
+    # hot-tape-gated like the wick-reclaim so it cannot over-fire on slow names. Each is
+    # independently kill-switched; OFF -> the trigger is never tried -> byte-identical.
+    chili_momentum_orb_entry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ORB_ENTRY_ENABLED"),
+        description="Batch D: OPENING-RANGE BREAKOUT — define the opening range (high/low of the first N completed bars after the session open) and FIRE on a break above the OR-high with volume confirm; entry = OR-high break, stop = OR-low. Valid ONLY within the first ~30-60 min after the open (a session-time window). No lookahead (the OR is built from COMPLETED bars only; the live tick is the only intrabar use). KILL-SWITCH: False -> the trigger is never tried -> byte-identical.",
+    )
+    chili_momentum_orb_minutes: int = Field(
+        default=5,
+        ge=1,
+        le=60,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ORB_MINUTES"),
+        description="Batch D: the ONE documented knob for the opening-range LENGTH (minutes of completed bars after the session open whose high/low define the OR). The bar count is DERIVED from this and the entry bar interval (e.g. 5 min / 1m bars = 5 bars; 5 min / 15s bars = 20 bars). Default 5 (Ross's first-5-min OR).",
+    )
+    chili_momentum_orb_window_minutes: float = Field(
+        default=60.0,
+        gt=0.0,
+        le=180.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ORB_WINDOW_MINUTES"),
+        description="Batch D: the ORB is only valid within this many minutes AFTER the session open (past it the rest of the ladder owns the tape). ONE documented session-window knob; default 60 min.",
+    )
+    chili_momentum_red_to_green_entry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RED_TO_GREEN_ENTRY_ENABLED"),
+        description="Batch D: RED-TO-GREEN — a name trading RED (below the session OPEN level) that RECLAIMS the open with a bottoming-tail/reversal bar + volume; entry = the open-level reclaim, stop = the red (session) low. Reuses the bottoming-tail + dipbuy reversal machinery. KILL-SWITCH: False -> the trigger is never tried -> byte-identical.",
+    )
+    chili_momentum_micro_pullback_primary_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MICRO_PULLBACK_PRIMARY_ENABLED"),
+        description="Batch D: MICRO-PULLBACK AS PRIMARY — fire the 1-candle shallow micro-pullback flag as an INITIAL entry (not just a post-fill re-load), GATED to HOT/explosive tape (the same _is_hot_tape RVOL/ATR floors as the wick-reclaim) so it does not over-fire on slow names. Reuses micro_pullback_reentry_detect's shelf/dip geometry; entry = the micro-break, stop = the micro-pullback low. KILL-SWITCH: False -> the trigger is never tried -> byte-identical.",
+    )
     # ── BATCH C: ABCD (SS101 #013) + double-bottom (swing-pivot scanner) ──────────────
     # Lower hit-rate than the breakout/pullback families (the audit said defer) — built
     # to COMPLETE the playbook, each independently kill-switched. The ATR pivot filter +

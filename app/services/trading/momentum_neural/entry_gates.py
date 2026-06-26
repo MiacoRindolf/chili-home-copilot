@@ -3627,6 +3627,550 @@ def select_best_setup(
         return candidates[0] if candidates else (False, "no_candidate", {})
 
 
+# ── BATCH D: opening-range breakout + red-to-green + micro-pullback-primary ───────
+# The remaining entry gaps from the Ross course audit. ALL three return the shared
+# (ok, reason, debug) 3-tuple with ``pullback_high`` (= entry/break level) and
+# ``pullback_low`` (= structural stop) under the IDENTICAL keys the pullback-break
+# trigger uses, so the downstream sizing / structural-stop / breakout-or-bailout
+# machinery + the setup-selector are reused unchanged. Each is flag-gated INSIDE the
+# detector (OFF -> no-op, byte-identical) and runs AFTER the existing ladder.
+# docs/DESIGN/MOMENTUM_LANE.md
+
+
+def _orb_bar_count(entry_interval: str, orb_minutes: int) -> int:
+    """How many COMPLETED bars of ``entry_interval`` cover the opening-range MINUTES — the
+    ORB length DERIVED from the bar interval + the one documented ``orb_minutes`` knob (no
+    fixed bar count). ``"15s"`` -> 4 bars/min, ``"1m"/"5m"/"15m"`` -> the integer minutes.
+    Floors at 1 bar; fail-safe to ``orb_minutes`` bars (the 1m assumption) on a bad interval."""
+    try:
+        iv = str(entry_interval or "").strip().lower()
+        m = max(1, int(orb_minutes))
+        if iv.endswith("s"):
+            secs = int(iv[:-1] or 60)
+            if secs <= 0:
+                secs = 60
+            return max(1, int(round(m * 60.0 / secs)))
+        if iv.endswith("m"):
+            mins = int(iv[:-1] or 1)
+            if mins <= 0:
+                mins = 1
+            return max(1, int(round(m / mins)))
+        if iv.endswith("h"):
+            hrs = int(iv[:-1] or 1)
+            return max(1, int(round(m / (hrs * 60))))
+        return max(1, m)
+    except Exception:
+        return max(1, int(orb_minutes) if orb_minutes else 5)
+
+
+def opening_range_breakout_confirmation(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str,
+    live_price: float | None = None,
+    symbol: str | None = None,
+    now: Any = None,
+    db: Any = None,
+    l2_as_of: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Ross OPENING-RANGE BREAKOUT (Batch D; flag ``chili_momentum_orb_entry_enabled``).
+
+    Define the OPENING RANGE = the high/low of the first ``chili_momentum_orb_minutes``
+    (default 5) of COMPLETED bars after the session open, then FIRE on a break ABOVE the
+    OR-high with a volume spike. Entry = the OR-high break level ("a couple cents under" the
+    break, mirroring the HOD break); stop = the OR-low (the tight, well-defined opening-range
+    floor). Only valid within ``chili_momentum_orb_window_minutes`` (default 60) AFTER the
+    open — past it the rest of the ladder owns the tape.
+
+    NO LOOKAHEAD: the opening range is built from COMPLETED bars whose timestamps fall in the
+    first-N-minutes window (never the forming bar); the only intrabar use is the LIVE TICK
+    trading through the OR-high (Ross enters on the breaking tick, not a bar-close later) —
+    the SAME tick-break contract the HOD-break uses, gated by ``_premarket_tickbreak_confirmed``
+    + ``_dipbuy_tick_thrust_ok`` so a 1-tick poke can't fire it.
+
+    SESSION WINDOW: uses ``minutes_since_regular_open`` (the lane's DST-correct open clock).
+    Equity-only (it returns ``None`` for crypto/weekend -> ``(False, ...)`` no-op) — the
+    opening-range concept is an RTH-open edge, not a 24/7 crypto one.
+
+    ANTI-CHASE: reuses ``_detect_back_side`` / ``front_side_state`` (never break a rolled-over
+    top) and the volume-spike floor (a real break, not a drift). ADDITIVE: flag OFF / thin
+    (<3 bars) / outside the window / no OR -> ``(False, reason, {...})`` with NO side effects;
+    fail-OPEN to a benign decline on any error. docs/DESIGN/MOMENTUM_LANE.md"""
+    debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "orb"}
+    try:
+        if not bool(getattr(settings, "chili_momentum_orb_entry_enabled", True)):
+            return False, "orb_disabled", debug
+        if df is None or getattr(df, "empty", True) or len(df) < 3:
+            return False, "orb_insufficient_bars", debug
+
+        # ── SESSION WINDOW: only within the first ~N min after the RTH open ─────────────
+        # minutes_since_regular_open returns None for crypto / weekend / non-equity -> the
+        # ORB is an RTH-open edge, no-op elsewhere (fail-CLOSED on the window: the OR is
+        # undefined off the open).
+        from .market_profile import minutes_since_regular_open
+
+        mins_since_open = minutes_since_regular_open(symbol, now=now)
+        if mins_since_open is None:
+            return False, "orb_not_equity_session", debug
+        orb_minutes = int(getattr(settings, "chili_momentum_orb_minutes", 5) or 5)
+        window_minutes = float(getattr(settings, "chili_momentum_orb_window_minutes", 60.0) or 60.0)
+        debug["mins_since_open"] = round(float(mins_since_open), 1)
+        # The OR is only DEFINED once the opening-range minutes have fully elapsed (we need
+        # the completed first-N-min bars), and the breakout is only VALID inside the window.
+        if mins_since_open < float(orb_minutes):
+            return False, "orb_forming", debug   # opening range not complete yet
+        if mins_since_open > window_minutes:
+            return False, "orb_window_passed", debug
+
+        # ── OPENING RANGE from COMPLETED bars in the first-N-min window (no lookahead) ──
+        # Slice today's session frame, then take the bars whose ET timestamp falls within
+        # the first ``orb_minutes`` after 09:30 — these are the completed opening-range bars.
+        sess = _today_session_frame(df)
+        if sess is None or getattr(sess, "empty", True) or len(sess) < 2:
+            return False, "orb_no_session", debug
+        n = len(df)
+        cur = n - 1
+        opn = df["Open"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        close = df["Close"].astype(float)
+        vol = df["Volume"].astype(float)
+
+        # Prefer a timestamp-based OR (bars in [open, open+orb_minutes) on the ET clock);
+        # fall back to the first ``_orb_bar_count`` bars of the session frame when the index
+        # is non-datetime (e.g. replay synthetic frames). The forming (current) bar is
+        # EXCLUDED from the OR either way (completed bars only).
+        or_hi = or_lo = None
+        or_bars = 0
+        try:
+            sidx = sess.index
+            if isinstance(sidx, pd.DatetimeIndex) and sidx.tz is not None:
+                et = sidx.tz_convert("America/New_York")
+                day_open = et[-1].normalize() + pd.Timedelta(minutes=9 * 60 + 30)
+                or_end = day_open + pd.Timedelta(minutes=orb_minutes)
+                mask = (et >= day_open) & (et < or_end)
+                # never include the still-forming current bar in the OR
+                if cur < n and len(sess) == n:
+                    mask = mask & (et < et[-1]) if et[-1] >= or_end else mask
+                or_slice = sess[mask]
+                if or_slice is not None and not or_slice.empty:
+                    or_hi = float(or_slice["High"].astype(float).max())
+                    or_lo = float(or_slice["Low"].astype(float).min())
+                    or_bars = int(len(or_slice))
+        except Exception:
+            or_hi = or_lo = None
+        if or_hi is None or or_lo is None:
+            # non-datetime / sparse index -> first K COMPLETED bars of the session frame.
+            k = _orb_bar_count(entry_interval, orb_minutes)
+            try:
+                s_hi = sess["High"].astype(float)
+                s_lo = sess["Low"].astype(float)
+                end = min(len(sess) - 1, k)  # exclude the last (possibly forming) bar
+                if end < 1:
+                    return False, "orb_forming", debug
+                or_hi = float(s_hi.iloc[:end].max())
+                or_lo = float(s_lo.iloc[:end].min())
+                or_bars = int(end)
+            except (TypeError, ValueError, KeyError):
+                return False, "orb_no_range", debug
+        if or_bars < 1 or not (0.0 < or_lo < or_hi):
+            return False, "orb_no_range", debug
+        debug["or_high"] = round(or_hi, 6)
+        debug["or_low"] = round(or_lo, 6)
+        debug["or_bars"] = or_bars
+
+        # ── ATR% (the tick-thrust + anti-chase yardstick; ATR-relative, no fixed cents) ──
+        arrays = compute_all_from_df(df, needed={"ema_9", "ema_20", "macd", "macd_signal", "volume_ratio", "atr"})
+        ema9 = arrays.get("ema_9") or []
+        vr = arrays.get("volume_ratio") or []
+        atr = arrays.get("atr") or []
+        atr_pct = None
+        try:
+            _a = float(atr[cur]) if cur < len(atr) and atr[cur] is not None else None
+            _p = float(close.iloc[cur])
+            if _a is not None and _p > 0:
+                atr_pct = _a / _p
+        except (TypeError, ValueError, IndexError):
+            atr_pct = None
+        debug["atr_pct"] = round(atr_pct, 5) if atr_pct is not None else None
+
+        level = or_hi
+        stop = or_lo
+
+        # ── ANTI-CHASE: backside / rolled-over vetoes (reused, fail-OPEN) ───────────────
+        _bs, _bs_reason = _detect_back_side(
+            ema9, (arrays.get("ema_20") or []),
+            (arrays.get("macd") or []), (arrays.get("macd_signal") or []),
+            cur, macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+        )
+        if _bs:
+            debug["back_side"] = _bs_reason
+            return False, "orb_back_side", debug
+
+        # ── L2 hidden-seller veto (reused; fail-open on disabled/null L2) ───────────────
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
+        if _l2v is not None:
+            _reason, _l2patch = _l2v
+            debug.update(_l2patch)
+            return False, f"orb_{_reason}", debug
+
+        debug["pullback_high"] = float(level)
+        debug["pullback_low"] = float(stop)
+
+        # ── TICK-BREAK: the live ask already trading through the OR-high (Ross speed) ───
+        if (
+            live_price is not None and float(live_price) > 0
+            and float(live_price) > level
+            and _premarket_tickbreak_confirmed(
+                live_price=float(live_price), level=float(level),
+                atr_pct=atr_pct, symbol=symbol, now=now,
+            )
+            and _dipbuy_tick_thrust_ok(
+                live_price=float(live_price), level=float(level), atr_pct=atr_pct,
+            )
+        ):
+            debug["tick_break"] = True
+            debug["live_price"] = float(live_price)
+            return True, "orb_break_tick_ok", debug
+
+        # not broken on a completed bar -> ARM a tick-watch at the OR-high level.
+        cur_hi = float(high.iloc[cur])
+        if cur_hi <= level:
+            return False, "waiting_for_break", debug
+
+        # a completed bar broke above the OR-high -> require a VOLUME SPIKE (real demand).
+        vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
+        vol_ratio = None
+        try:
+            vol_ratio = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
+        except (TypeError, ValueError):
+            vol_ratio = None
+        if vol_ratio is None:
+            w = vol.tail(21)
+            _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
+            vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
+        debug["vol_ratio"] = round(vol_ratio, 2)
+        if vol_ratio < vol_mult:
+            return False, "orb_low_volume", debug
+        return True, "orb_break", debug
+    except Exception:
+        return False, "orb_error", {"entry_interval": entry_interval}
+
+
+def red_to_green_confirmation(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str,
+    live_price: float | None = None,
+    symbol: str | None = None,
+    now: Any = None,
+    db: Any = None,
+    l2_as_of: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Ross RED-TO-GREEN reclaim (Batch D; flag ``chili_momentum_red_to_green_entry_enabled``).
+
+    A name trading RED (below the session OPEN level) that RECLAIMS the open with a
+    bottoming-tail / reversal bar + volume is the textbook red-to-green long: the move back
+    through the open flips intraday sentiment green, and the session (red) low is the tight
+    structural stop. Entry = the OPEN-level reclaim ("a couple cents under" the open, mirroring
+    the breakout family); stop = the session low (the red low).
+
+    Reuses the bottoming-tail (``_bottoming_tail``) + the dipbuy reversal machinery (the
+    ``is_bounce_curl_candle`` per-bar conviction + the ``_dipbuy_tick_thrust_ok`` /
+    ``_premarket_tickbreak_confirmed`` tick-break contract).
+
+    OPEN LEVEL: the session open = the first COMPLETED bar's open on today's session frame
+    (the price the name opened at). NO LOOKAHEAD: the open + the red low are read from
+    COMPLETED bars; the only intrabar use is the live tick reclaiming the open level.
+
+    GUARDS: the name must currently BE red (price below the open before/at the reclaim — a
+    name already green has no red-to-green to make), the reversal bar must be a bottoming-tail
+    bounce-curl, and the reclaim needs a volume spike. ANTI-CHASE backside veto reused.
+    ADDITIVE: flag OFF / thin (<3 bars) / not red / no reversal -> ``(False, reason, {...})``
+    with NO side effects; fail-OPEN on any error. docs/DESIGN/MOMENTUM_LANE.md"""
+    debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "red_to_green"}
+    try:
+        if not bool(getattr(settings, "chili_momentum_red_to_green_entry_enabled", True)):
+            return False, "red_to_green_disabled", debug
+        if df is None or getattr(df, "empty", True) or len(df) < 3:
+            return False, "red_to_green_insufficient_bars", debug
+
+        sess = _today_session_frame(df)
+        if sess is None or getattr(sess, "empty", True) or len(sess) < 2:
+            return False, "red_to_green_no_session", debug
+
+        n = len(df)
+        cur = n - 1
+        opn = df["Open"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        close = df["Close"].astype(float)
+        vol = df["Volume"].astype(float)
+
+        # ── OPEN LEVEL = the session's FIRST completed bar open (price it opened at) ─────
+        try:
+            open_level = float(sess["Open"].astype(float).iloc[0])
+        except (TypeError, ValueError, KeyError, IndexError):
+            return False, "red_to_green_no_open", debug
+        if not (open_level > 0):
+            return False, "red_to_green_bad_open", debug
+        debug["open_level"] = round(open_level, 6)
+
+        # The session (red) LOW = the lowest low so far today = the structural stop. Built
+        # from COMPLETED bars (the forming bar's low can only be lower -> the stop only
+        # widens, never tightens below a completed structure).
+        try:
+            sess_low = float(sess["Low"].astype(float).min())
+        except (TypeError, ValueError, KeyError):
+            return False, "red_to_green_no_low", debug
+        if not (0.0 < sess_low < open_level):
+            return False, "red_to_green_not_red_structure", debug   # never traded red below the open
+        debug["session_low"] = round(sess_low, 6)
+
+        # ── The name must currently BE red: the PRIOR (completed) bar closed below the open
+        # (it has been trading red), so reclaiming the open NOW is the red->green flip. A
+        # name already green above the open has no red-to-green to make. ──────────────────
+        prev_close = float(close.iloc[cur - 1])
+        if prev_close >= open_level:
+            debug["prev_close"] = round(prev_close, 6)
+            return False, "red_to_green_already_green", debug
+
+        # ── ATR% yardstick (tick-thrust + thin-data floors) ────────────────────────────
+        arrays = compute_all_from_df(df, needed={"ema_9", "ema_20", "macd", "macd_signal", "volume_ratio", "atr"})
+        ema9 = arrays.get("ema_9") or []
+        vr = arrays.get("volume_ratio") or []
+        atr = arrays.get("atr") or []
+        atr_pct = None
+        try:
+            _a = float(atr[cur]) if cur < len(atr) and atr[cur] is not None else None
+            _p = float(close.iloc[cur])
+            if _a is not None and _p > 0:
+                atr_pct = _a / _p
+        except (TypeError, ValueError, IndexError):
+            atr_pct = None
+        debug["atr_pct"] = round(atr_pct, 5) if atr_pct is not None else None
+
+        # ── The REVERSAL bar: the current bar is a bottoming-tail bounce-curl (the V-flip).
+        c_o, c_h, c_l, c_c = (
+            float(opn.iloc[cur]), float(high.iloc[cur]),
+            float(low.iloc[cur]), float(close.iloc[cur]),
+        )
+        if not _bottoming_tail(c_o, c_h, c_l, c_c):
+            return False, "red_to_green_no_bottoming_tail", debug
+        from .candles import is_bounce_curl_candle
+
+        if not is_bounce_curl_candle(c_o, c_h, c_l, c_c):
+            return False, "red_to_green_weak_curl", debug
+
+        level = open_level   # the reclaim level = the session open
+        stop = sess_low      # the structural stop = the red (session) low
+
+        # ── ANTI-CHASE backside veto (reused, fail-OPEN) ───────────────────────────────
+        _bs, _bs_reason = _detect_back_side(
+            ema9, (arrays.get("ema_20") or []),
+            (arrays.get("macd") or []), (arrays.get("macd_signal") or []),
+            cur, macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+        )
+        if _bs:
+            debug["back_side"] = _bs_reason
+            return False, "red_to_green_back_side", debug
+
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
+        if _l2v is not None:
+            _reason, _l2patch = _l2v
+            debug.update(_l2patch)
+            return False, f"red_to_green_{_reason}", debug
+
+        debug["pullback_high"] = float(level)
+        debug["pullback_low"] = float(stop)
+
+        # ── TICK-BREAK: the live ask reclaiming the OPEN level (red->green flip tick) ───
+        if (
+            live_price is not None and float(live_price) > 0
+            and float(live_price) > level
+            and _premarket_tickbreak_confirmed(
+                live_price=float(live_price), level=float(level),
+                atr_pct=atr_pct, symbol=symbol, now=now,
+            )
+            and _dipbuy_tick_thrust_ok(
+                live_price=float(live_price), level=float(level), atr_pct=atr_pct,
+            )
+        ):
+            debug["tick_break"] = True
+            debug["live_price"] = float(live_price)
+            return True, "red_to_green_tick_ok", debug
+
+        # not reclaimed on a completed bar yet -> ARM a tick-watch at the open level.
+        cur_close = float(close.iloc[cur])
+        if cur_close <= level:
+            return False, "waiting_for_reclaim", debug
+
+        # a completed bar reclaimed the open -> require a VOLUME SPIKE (a real reclaim).
+        vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
+        vol_ratio = None
+        try:
+            vol_ratio = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
+        except (TypeError, ValueError):
+            vol_ratio = None
+        if vol_ratio is None:
+            w = vol.tail(21)
+            _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
+            vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
+        debug["vol_ratio"] = round(vol_ratio, 2)
+        if vol_ratio < vol_mult:
+            return False, "red_to_green_low_volume", debug
+        return True, "red_to_green", debug
+    except Exception:
+        return False, "red_to_green_error", {"entry_interval": entry_interval}
+
+
+def micro_pullback_primary_confirmation(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str,
+    live_price: float | None = None,
+    symbol: str | None = None,
+    now: Any = None,
+    db: Any = None,
+    l2_as_of: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """MICRO-PULLBACK AS PRIMARY (Batch D; flag ``chili_momentum_micro_pullback_primary_enabled``).
+
+    A thin wrapper that lets the 1-candle shallow micro-pullback flag fire as an INITIAL
+    entry (not just a post-fill re-load). It reuses ``micro_pullback_reentry_detect``'s shelf/
+    dip geometry on the SAME entry-interval frame the rest of the ladder uses, GATED to HOT/
+    explosive tape via ``_is_hot_tape`` (the SAME RVOL/ATR floors as the wick-reclaim) so it
+    cannot over-fire on slow names — the micro-pullback is a parabolic-runner re-load shape,
+    invalid on cold tape.
+
+    The SHELF (the ratcheting higher-low floor the re-load path persists in the session ledger)
+    is not available as a primary entry, so it is derived from the COMPLETED-bar structure:
+    the recent swing low (a confirmed structural floor) — the dip must hold ABOVE it, the same
+    higher-low contract. Entry = the micro-break (the bounce high = ``pullback_high``); stop =
+    the micro-pullback dip low (= ``pullback_low``).
+
+    NO LOOKAHEAD: the geometry is read from completed bars (the detector excludes a high that
+    is the last bar); the only intrabar use is the live tick breaking the bounce high (the
+    SAME tick-break contract the rest of the ladder uses).
+
+    ADDITIVE: flag OFF / cold tape / thin (<10 bars) / no micro-pullback -> ``(False, reason,
+    {...})`` with NO side effects; fail-OPEN on any error. docs/DESIGN/MOMENTUM_LANE.md"""
+    debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "micro_pullback_primary"}
+    try:
+        if not bool(getattr(settings, "chili_momentum_micro_pullback_primary_enabled", True)):
+            return False, "micro_primary_disabled", debug
+        if df is None or getattr(df, "empty", True) or len(df) < 10:
+            return False, "micro_primary_insufficient_bars", debug
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        n = len(df)
+        cur = n - 1
+
+        # ── MANDATORY HOT-TAPE GATE (the micro-pullback re-load is invalid on slow tape) ─
+        arrays = compute_all_from_df(df, needed={"ema_9", "ema_20", "macd", "macd_signal", "volume_ratio", "atr"})
+        ema9 = arrays.get("ema_9") or []
+        vr = arrays.get("volume_ratio") or []
+        atr = arrays.get("atr") or []
+        atr_pct = None
+        try:
+            _a = float(atr[cur]) if cur < len(atr) and atr[cur] is not None else None
+            _p = float(close.iloc[cur])
+            if _a is not None and _p > 0:
+                atr_pct = _a / _p
+        except (TypeError, ValueError, IndexError):
+            atr_pct = None
+        rvol = None
+        try:
+            rvol = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
+        except (TypeError, ValueError):
+            rvol = None
+        if not _is_hot_tape(atr_pct, rvol):
+            debug["atr_pct"] = atr_pct
+            debug["rvol"] = rvol
+            return False, "micro_primary_cold_tape", debug
+        debug["atr_pct"] = round(atr_pct, 5) if atr_pct is not None else None
+        debug["rvol"] = round(rvol, 2) if rvol is not None else None
+
+        # ── SHELF (the higher-low floor): the recent CONFIRMED swing low (a structural
+        # floor the dip must hold above). On a primary entry there is no persisted re-load
+        # shelf, so the completed-bar swing low is the conservative higher-low contract.
+        # Fall back to the recent-window min low when no confirmed swing exists yet.
+        shelf = _compute_confirmed_swing_low_last(df, lookback=5)
+        if shelf is None or shelf <= 0:
+            try:
+                shelf = float(df["Low"].astype(float).iloc[max(0, cur - 8):cur].min())
+            except (TypeError, ValueError, KeyError):
+                shelf = 0.0
+        debug["shelf"] = round(float(shelf), 6) if shelf else None
+
+        # ── REUSE the micro-pullback geometry detector (shelf/dip/curl) ────────────────
+        max_dip = float(
+            getattr(settings, "chili_momentum_micropullback_reentry_max_dip_pct", 0.04) or 0.04
+        )
+        _det = micro_pullback_reentry_detect(df, shelf=float(shelf), max_dip_pct=max_dip)
+        debug["detect_reason"] = _det.get("reason")
+        if not _det.get("fire"):
+            return False, f"micro_primary_{_det.get('reason') or 'no_fire'}", debug
+        from .candles import bounce_curl_from_df
+
+        if not bounce_curl_from_df(df):
+            return False, "micro_primary_weak_curl", debug
+
+        bounce_high = _det.get("bounce_high")
+        dip_low = _det.get("dip_low")
+        if bounce_high is None or dip_low is None:
+            return False, "micro_primary_no_levels", debug
+        level = float(bounce_high)   # the micro-break level
+        stop = float(dip_low)        # the micro-pullback low = structural stop
+        if not (0.0 < stop < level):
+            return False, "micro_primary_bad_level", debug
+
+        # ── ANTI-CHASE backside veto (reused, fail-OPEN) ───────────────────────────────
+        _bs, _bs_reason = _detect_back_side(
+            ema9, (arrays.get("ema_20") or []),
+            (arrays.get("macd") or []), (arrays.get("macd_signal") or []),
+            cur, macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+        )
+        if _bs:
+            debug["back_side"] = _bs_reason
+            return False, "micro_primary_back_side", debug
+
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
+        if _l2v is not None:
+            _reason, _l2patch = _l2v
+            debug.update(_l2patch)
+            return False, f"micro_primary_{_reason}", debug
+
+        debug["pullback_high"] = float(level)
+        debug["pullback_low"] = float(stop)
+        debug["bounce_high"] = round(level, 6)
+        debug["dip_low"] = round(stop, 6)
+
+        # ── TICK-BREAK: the live ask trading through the micro-break (bounce high) ──────
+        if (
+            live_price is not None and float(live_price) > 0
+            and float(live_price) > level
+            and _premarket_tickbreak_confirmed(
+                live_price=float(live_price), level=float(level),
+                atr_pct=atr_pct, symbol=symbol, now=now,
+            )
+            and _dipbuy_tick_thrust_ok(
+                live_price=float(live_price), level=float(level), atr_pct=atr_pct,
+            )
+        ):
+            debug["tick_break"] = True
+            debug["live_price"] = float(live_price)
+            return True, "micro_pullback_primary_tick_ok", debug
+
+        # not broken on a completed bar yet -> ARM a tick-watch at the micro-break level.
+        cur_hi = float(high.iloc[cur])
+        if cur_hi <= level:
+            return False, "waiting_for_break", debug
+        return True, "micro_pullback_primary", debug
+    except Exception:
+        return False, "micro_primary_error", {"entry_interval": entry_interval}
+
+
 def momentum_pullback_trigger(
     df: pd.DataFrame, *, entry_interval: str, live_price: float | None = None,
     symbol: str | None = None, now: Any = None, db: Any = None, l2_as_of: Any = None,
