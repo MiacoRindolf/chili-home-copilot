@@ -4684,6 +4684,13 @@ def tick_live_session(
             _mkt_open = bool(is_tradeable_now(sess.symbol))
         except Exception:
             _mkt_open = True
+        try:
+            logger.info(
+                "[momentum_live] entry_branch symbol=%s state=%s mkt_open=%s score_ok=%s trigger_ok=%s trigger_reason=%s",
+                sess.symbol, sess.state, _mkt_open, _score_ok, _trigger_ok, _trigger_reason,
+            )
+        except Exception:
+            pass
         # Halt-resume whipsaw guard: right after a suspected halt resumes, price
         # discovery is violent — sit out the cooldown (watching continues, structure
         # rebuilds with fresh bars), then enter on a clean post-resume setup.
