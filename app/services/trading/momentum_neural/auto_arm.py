@@ -51,6 +51,15 @@ _RANK_DISPLACE_REAPABLE_STATES = frozenset(
     {STATE_ARMED_PENDING_RUNNER, STATE_QUEUED_LIVE}
 )
 
+# Per-pass {UPPER symbol -> candidate row} map, REBUILT (reassigned to a fresh dict) at the
+# start of each probe wave so the budget-bounded ``_probe_candidate`` threads can resolve a
+# name's OWN persisted high-conviction scanner signal (ross_score / RVOL /
+# daily_breaking_major) for the momentum-continuation arm-time trigger WITHOUT changing the
+# probe's 1-arg (symbol) signature (keeps the concurrent submit + the test monkeypatches
+# byte-compatible). Reassigned-per-pass (never mutated in place) so an overlapping pass can
+# only ever read a complete snapshot; a missing key ⇒ None ⇒ pullback-only (byte-identical).
+_PASS_CANDIDATE_ROWS: dict[str, Any] = {}
+
 
 def _auto_arm_user_id() -> int | None:
     return getattr(settings, "chili_autotrader_user_id", None) or getattr(
@@ -1626,7 +1635,123 @@ def _symbol_free(db: Session, symbol: str, user_id: int | None) -> bool:
         return True
 
 
-def _entry_trigger_fires(symbol: str) -> tuple[bool, str]:
+def _row_rvol(row: Any) -> float | None:
+    """This candidate's relative volume from its OWN persisted scanner signal
+    (``execution_readiness_json.extra.ross_signals[sym]``) — the SAME source the leader
+    scorer + viability tilt read, zero new network. Tries the canonical rvol key aliases
+    (``vol_ratio`` / ``rvol`` / ``volume_ratio``, mirroring ross_momentum). None when
+    absent/unparseable -> the conviction gate treats the name as non-explosive on RVOL
+    (fail-closed on this axis; ross_score / daily_breaking can still qualify it)."""
+    sig = _row_ross_signal(row)
+    if not isinstance(sig, dict):
+        return None
+    for _k in ("vol_ratio", "rvol", "volume_ratio"):
+        v = sig.get(_k)
+        if v is None:
+            continue
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _continuation_active_trigger(symbol: str, df_pb: Any, row: Any) -> tuple[bool, str]:
+    """Arm-time MOMENTUM-CONTINUATION active-trigger check — the STRUCTURE side that lets a
+    high-conviction straight-up runner (which never forms the pullback base the pullback
+    probe requires) ARM. REUSES the live runner's exact gate stack so the arm decision and
+    the WATCHING-tick entry decision share one definition of a continuation fire:
+
+      (0) KILL-SWITCH ``chili_momentum_momentum_continuation_entry_enabled`` — OFF returns
+          ``(False, ...)`` BEFORE any compute, so flag-off auto-arm is byte-identical
+          (pullback-only). It also short-circuits via the trigger's own disabled guard.
+      (1) HIGH-CONVICTION ONLY — ross_score>=floor OR rvol>=(explosive_rvol_floor x
+          coiling_exempt_rvol_mult, i.e. ~9x) OR daily_breaking_major, read from the row's
+          OWN persisted scanner signal (same source as the live runner's continuation gate).
+      (2)+(4)+(5) NEW HIGH + NOT PARABOLIC + NOT backside/NOT below-VWAP — the EXISTING
+          ``momentum_continuation_trigger`` on the ALREADY-FETCHED ``df_pb`` (bar-only, no
+          live_price — the probe arms a WATCH; the live runner does the tick confirm).
+      (3) TAPE REQUIRED + FAIL-CLOSED — ``tape_confirms_hold`` (no/thin/stale/selling tape
+          ⇒ NO fire); the identical chase/distribution guard the live entry carries.
+
+    NEVER raises (any error ⇒ a benign decline). Reads only; no DB mutation, no new fetch."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_momentum_continuation_entry_enabled", False)):
+            return False, "momentum_continuation_disabled"
+        if df_pb is None or getattr(df_pb, "empty", True):
+            return False, "momentum_continuation_no_data"
+
+        from .entry_gates import momentum_continuation_trigger, tape_confirms_hold
+
+        # (1) HIGH-CONVICTION read from the candidate's OWN persisted scanner signal — the
+        # SAME ross_score / RVOL / daily_breaking_major source the arm-queue ranker, the
+        # viability tilt, and the live runner's continuation gate read. No new fetch.
+        _ross_score: float | None = None
+        _daily_breaking = False
+        try:
+            extra = (getattr(row, "execution_readiness_json", None) or {}).get("extra") or {}
+            _rs_map = extra.get("ross_scores") if isinstance(extra.get("ross_scores"), dict) else {}
+            _symu = str(getattr(row, "symbol", "") or "").upper()
+            if _symu in _rs_map:
+                _ross_score = float(_rs_map[_symu] or 0.0)
+        except (AttributeError, TypeError, ValueError):
+            _ross_score = None
+        _sig = _row_ross_signal(row)
+        if isinstance(_sig, dict):
+            _daily_breaking = bool(_sig.get("daily_breaking_major"))
+        _rvol_now = _row_rvol(row)
+        _ross_floor = float(getattr(settings, "chili_momentum_continuation_ross_floor", 0.7) or 0.7)
+        # the coiling-exempt multiple: rvol_floor x coiling_exempt_rvol_mult (the SAME
+        # extreme-RVOL yardstick the coiling-squeeze selection exemption + the live runner's
+        # continuation gate use) — ~9x by default.
+        _rvol_floor = float(getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 3.0)
+        _coil_mult = float(getattr(settings, "chili_momentum_coiling_exempt_rvol_mult", 3.0) or 3.0)
+        _rvol_conviction_floor = _rvol_floor * _coil_mult
+        _high_conviction = bool(
+            (_ross_score is not None and _ross_score >= _ross_floor)
+            or (_rvol_now is not None and _rvol_now >= _rvol_conviction_floor)
+            or _daily_breaking
+        )
+        if not _high_conviction:
+            return False, "momentum_continuation_low_conviction"
+
+        # (2)+(4)+(5) NEW HIGH + not parabolic + not backside — bar-only (no live_price).
+        _mc_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+        _mc_ok, _mc_reason, _mc_dbg = momentum_continuation_trigger(
+            df_pb, live_price=None, entry_interval=_mc_iv, symbol=symbol, db=None, l2_as_of=None
+        )
+        if not (_mc_ok and isinstance(_mc_dbg, dict) and _mc_dbg.get("pullback_low") is not None):
+            return False, str(_mc_reason or "momentum_continuation_wait")
+
+        # (3) TAPE REQUIRED + FAIL-CLOSED — the identical tape gate the live entry carries.
+        # ``tape_confirms_hold`` fails CLOSED on a missing db, and the probe phase already
+        # released the pass's read transaction before this network-bound wave, so open a
+        # SHORT-LIVED read session JUST for the tape read and always close it (the #561
+        # short-lived-reader pattern — never hold a txn across the probe). A db/read error
+        # ⇒ tape unconfirmed ⇒ NO fire (fail-closed, exactly as required).
+        from ....db import SessionLocal
+
+        _tape_ok = False
+        _tdb = None
+        try:
+            _tdb = SessionLocal()
+            _tape_ok, _ = tape_confirms_hold(symbol, db=_tdb, settings=settings)
+        except Exception:
+            _tape_ok = False
+        finally:
+            if _tdb is not None:
+                try:
+                    _tdb.close()
+                except Exception:
+                    pass
+        if not _tape_ok:
+            return False, "momentum_continuation_tape_unconfirmed"
+        return True, "momentum_continuation"
+    except Exception:
+        return False, "momentum_continuation_error"
+
+
+def _entry_trigger_fires(symbol: str, row: Any = None) -> tuple[bool, str]:
     """Replicate the live_runner WATCHING_LIVE hybrid trigger to find a name whose
     momentum is breaking NOW (pullback-break preferred, volume fallback).
 
@@ -1667,6 +1792,19 @@ def _entry_trigger_fires(symbol: str) -> tuple[bool, str]:
                     ok, reason, _ = pullback_break_confirmation(df_pb, entry_interval=interval)
                 if ok:
                     return True, reason
+                # MOMENTUM-CONTINUATION arm-time trigger (the STRUCTURE side). A
+                # high-conviction straight-up runner (SDOT +84%) never gives the pullback
+                # base, so the pullback probe returns False -> firing=None -> the name is
+                # NEVER armed -> the continuation entry wired into the WATCHING tick never
+                # evaluates it. So: when the pullback does NOT fire, ALSO consider the SAME
+                # EXISTING momentum_continuation_trigger (new-HOD + tape-REQUIRED-fail-closed
+                # + extension veto + not-backside) on the ALREADY-FETCHED df_pb for
+                # high-conviction names only — a fire here is a real ACTIVE TRIGGER and arms.
+                # Reuses the live runner's exact guards; flag OFF => byte-identical (the
+                # helper returns (False, ...) before any compute). docs/DESIGN/MOMENTUM_LANE.md
+                _cont_ok, _cont_reason = _continuation_active_trigger(symbol, df_pb, row)
+                if _cont_ok:
+                    return True, _cont_reason
                 if mode == "pullback_break":
                     return False, reason
         if mode != "pullback_break":
@@ -1734,8 +1872,22 @@ def _candidate_freshness(symbol: str):
 
 
 def _probe_candidate(symbol: str) -> tuple[bool, str, Any]:
-    """One network-bound pass per candidate: (trigger fires?, reason, freshness)."""
-    fires, reason = _entry_trigger_fires(symbol)
+    """One network-bound pass per candidate: (trigger fires?, reason, freshness).
+
+    Signature UNCHANGED (a bare symbol string) so the concurrent submit + the existing
+    test monkeypatches stay byte-compatible. The candidate ROW (carrying the name's OWN
+    persisted high-conviction scanner signal — ross_score / RVOL / daily_breaking_major)
+    is resolved from the per-pass ``_PASS_CANDIDATE_ROWS`` map the pass populated BEFORE
+    the probe wave, then handed to ``_entry_trigger_fires`` for the momentum-continuation
+    active-trigger branch. No new fetch (the row is already loaded). Row absent ⇒ None ⇒
+    the continuation branch is simply skipped (pullback-only)."""
+    row = _PASS_CANDIDATE_ROWS.get(str(symbol or "").upper())
+    try:
+        fires, reason = _entry_trigger_fires(symbol, row)
+    except TypeError:
+        # Back-compat with a 1-arg ``_entry_trigger_fires`` (e.g. a test monkeypatch that
+        # binds only the symbol) — the continuation branch simply doesn't run there.
+        fires, reason = _entry_trigger_fires(symbol)
     return fires, reason, _candidate_freshness(symbol)
 
 
@@ -2426,6 +2578,17 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     if eligible:
         import concurrent.futures
 
+        # Snapshot {UPPER symbol -> detached candidate row} for the probe threads so the
+        # momentum-continuation arm-time trigger can read each name's OWN persisted
+        # high-conviction signal without a new fetch. Reassign a FRESH dict (never mutate
+        # in place) so an overlapping pass only ever sees a complete map. The rows are
+        # already expunged but their loaded attrs (symbol / execution_readiness_json /
+        # viability_score) stay readable (the #561/#563 read-release pattern, same as the
+        # arm loop below). Module global so the 1-arg _probe_candidate signature is unchanged.
+        global _PASS_CANDIDATE_ROWS
+        _PASS_CANDIDATE_ROWS = {
+            str(getattr(c, "symbol", "") or "").upper(): c for c in eligible
+        }
         _workers = min(
             len(eligible),
             max(1, int(getattr(settings, "chili_momentum_auto_arm_trigger_workers", 8))),
