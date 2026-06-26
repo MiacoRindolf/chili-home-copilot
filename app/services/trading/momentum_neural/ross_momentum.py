@@ -630,6 +630,93 @@ def score_universe(
     return out
 
 
+# ── SYMBOL-OF-THE-DAY FOCUS (Batch F; flag chili_momentum_symbol_of_day_focus_enabled) ──
+# Ross trades the ONE best mover INTENSELY rather than spreading thin across the board —
+# the "stock of the day". The selection backbone (score_universe + the 3-layer explosive
+# scorer) already RANKS the batch; this layer names the single highest-CONVICTION explosive
+# leader so the arm queue can give it ONE guaranteed priority slot (never starved, never
+# displaced) while the REMAINING slots still fill by the normal rank (no over-concentration).
+#
+# The leader is defined by REUSING the explosive scorer — NO new magic:
+#   * it must CLEAR Ross's hard floors (``below_explosive_floor`` is False — i.e. it is a
+#     real live setup, not the loudest name in a dull batch), then
+#   * it is the maximum by the SAME lexicographic key the explosive ranker sorts on
+#     ``(tier, score, raw rvol*move)`` — i.e. ``rank == 1`` among floor-clearers — with the
+#     conviction tiebreak being the biggest %-move × RVOL (the "biggest explosion" the task
+#     asks for, computed from the raw pillars already on the score breakdown).
+# Pure: operates on the ``score_universe`` output + the raw signal dicts; no IO.
+
+# The ONE documented focus-tilt base. A leader that is already armed/watched earns a small
+# additive ranking bonus each refresh so a TRANSIENT intraday dip does not rotate it out of
+# the slot before its setup plays out (Ross stays ON his stock of the day). Same order of
+# magnitude as ``ROSS_QUALITY_VIABILITY_TILT`` (the lane's one small-tilt base) so it nudges
+# ordering without overpowering a genuinely fresher new leader. Composes with — never
+# overrides — the hard guards (the leader still passes every begin/confirm risk gate).
+ROSS_SYMBOL_OF_DAY_FOCUS_TILT = 0.20
+
+
+def _conviction(score: "RossMomentumScore", signal: dict | None) -> float:
+    """Biggest-explosion conviction = |%-move| × RVOL from the RAW pillars (the breakdown the
+    scorer already stamped, falling back to the signal dict). The leader tiebreak among
+    same-(tier,score) names — 'top explosive score / biggest %-move × RVOL', reusing the
+    scorer's own raw inputs (no new magic). 0.0 when either axis is absent."""
+    bd = getattr(score, "breakdown", None) or {}
+    rvol = bd.get("rvol")
+    mom = bd.get("momentum")
+    if (rvol is None or mom is None) and isinstance(signal, dict):
+        _r, _m, _l, _t = _extract_pillars(signal)
+        rvol = rvol if rvol is not None else _r
+        mom = mom if mom is not None else _m
+    rv = _to_float(rvol)
+    mv = _to_float(mom)
+    if rv is None or mv is None or rv <= 0:
+        return 0.0
+    return abs(mv) * rv
+
+
+def identify_leader(
+    scores: dict[str, "RossMomentumScore"],
+    signals: dict[str, dict] | None = None,
+    *,
+    rvol_floor: float = ROSS_ELIGIBILITY_RVOL_FLOOR,
+    change_floor_pct: float = ROSS_ELIGIBILITY_CHANGE_FLOOR_PCT,
+) -> str | None:
+    """The symbol-of-the-day = the single highest-conviction explosive LEADER in this batch.
+
+    ``scores``: a ``score_universe`` result. ``signals``: the same ``{symbol: result_dict}``
+    fed to ``score_universe`` (optional — used for the floor check + the conviction tiebreak;
+    when omitted the breakdown on each score is used). Returns the leader SYMBOL, or ``None``
+    when no name clears Ross's hard floors (a dull batch has no stock-of-the-day; the lane
+    simply ranks normally that refresh — never forces a weak leader).
+
+    Adaptive / no new magic: the leader is the max by the SAME lexicographic key the explosive
+    ranker sorts on — ``(tier, score, conviction)`` — restricted to names that AFFIRMATIVELY
+    clear the explosiveness floors (``below_explosive_floor`` is False). Equity floors are
+    crypto-tolerant (a crypto name without equity-shaped rvol/change fails the floor OPEN, so
+    it can still lead on tier+score). Pure + side-effect-free."""
+    if not scores:
+        return None
+    sig = signals or {}
+
+    def _clears_floor(sym: str) -> bool:
+        s = sig.get(sym)
+        if not isinstance(s, dict):
+            return True  # no raw signal to disprove explosiveness -> fail-OPEN (rank decides)
+        return not below_explosive_floor(s, rvol_floor=rvol_floor, change_floor_pct=change_floor_pct)
+
+    eligible = [sym for sym in scores if _clears_floor(sym)]
+    if not eligible:
+        return None
+    return max(
+        eligible,
+        key=lambda sym: (
+            int(getattr(scores[sym], "tier", 0) or 0),
+            float(getattr(scores[sym], "score", 0.0) or 0.0),
+            _conviction(scores[sym], sig.get(sym)),
+        ),
+    )
+
+
 # ── Selection→entry alignment: intraday-impulse freshness (M4 keystone) ───────
 # ``score_universe`` ranks the day's movers from 24h-CUMULATIVE pillars (RVOL /
 # gap / daily-change). But by the time the pullback-break entry gate evaluates a

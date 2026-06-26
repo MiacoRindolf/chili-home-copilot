@@ -5224,6 +5224,19 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RANK_DISPLACEMENT_ENABLED"),
     )
+    # SYMBOL-OF-THE-DAY FOCUS (Batch F): Ross trades the ONE best mover INTENSELY rather than
+    # spreading thin. ON identifies the highest-conviction explosive LEADER each refresh
+    # (reuses the 3-layer explosive scorer — ross_momentum.identify_leader: top (tier, score,
+    # %-move×RVOL) among names clearing the hard floors) and gives it ONE guaranteed priority
+    # slot: hoisted to first-in-arm-queue, never the rank-displacement victim, and granted the
+    # EXTENDED watch window so a transient dip does not rotate the stock of the day out. NOT an
+    # exclusive lock — the REMAINING slots still arm the #2/#3 movers by normal rank (no over-
+    # concentration). OFF => the batch ranking / displacement / reap are byte-identical to today.
+    # docs/DESIGN/MOMENTUM_LANE.md [[project_momentum_lane]] [[feedback_adaptive_no_magic]]
+    chili_momentum_symbol_of_day_focus_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SYMBOL_OF_DAY_FOCUS_ENABLED"),
+    )
     # The ONE adaptive base knob: minimum CURRENT-viability-score gap a newcomer must
     # STRICTLY exceed over the worst inert victim to displace it (hysteresis). Derived
     # as a score-gap margin within the live batch — not a fixed per-class number. Raise

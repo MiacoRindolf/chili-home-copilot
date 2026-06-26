@@ -505,6 +505,19 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
     cutoff = now - timedelta(seconds=base_sec)
     extend_cutoff = now - timedelta(seconds=_watch_extend_seconds())
     adaptive_watch = bool(getattr(settings, "chili_momentum_adaptive_watch_enabled", True))
+    # SYMBOL-OF-THE-DAY FOCUS TILT: the leader stays WATCHED through a transient intraday dip
+    # rather than rotating out at the base window (Ross stays ON his stock of the day). It
+    # earns the EXTENDED watch window even without a forming break level — but only to the
+    # extend cutoff (a hard upper bound, so a leader that truly dies still reaps). Computed
+    # once per pass from the fresh board; fail-open to no-focus. Flag-OFF => leader is empty
+    # => byte-identical reap behaviour.
+    _focus_leader = ""
+    if _symbol_of_day_focus_enabled():
+        try:
+            _board = _fresh_live_eligible_candidates(db, limit=_scan_limit())
+            _focus_leader = str(_identify_session_leader(_board) or "").upper()
+        except Exception:
+            _focus_leader = ""
     try:
         q = db.query(TradingAutomationSession).filter(
             TradingAutomationSession.mode == "live",
@@ -534,6 +547,12 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
         # break level keeps the slot to the extend cutoff (it is about to fire); one whose
         # price is provably FAR from the level is DEAD and reaps at the base cutoff.
         # CONSERVATIVE: missing/garbage signals => building => keep (never cut short).
+        # FOCUS TILT: the symbol-of-the-day leader keeps its slot to the EXTENDED cutoff even
+        # without a forming break level — so a transient dip never rotates the stock of the
+        # day out before its setup plays out. Bounded by extend_cutoff (still reaps a dead
+        # leader). Checked first so it composes with (does not bypass) the hard upper bound.
+        if _focus_leader and str(s.symbol or "").upper() == _focus_leader and s.started_at >= extend_cutoff:
+            continue
         try:
             _snap = s.risk_snapshot_json or {}
             _le = _snap.get("momentum_live_execution") if isinstance(_snap, dict) else None
@@ -794,6 +813,74 @@ def _dedupe_by_symbol(rows: list[Any], *, limit: int) -> list[Any]:
     return out
 
 
+def _symbol_of_day_focus_enabled() -> bool:
+    """SYMBOL-OF-THE-DAY FOCUS (Batch F): Ross trades the ONE best mover intensely. ON
+    gives the highest-conviction explosive LEADER a guaranteed top arm slot (never starved,
+    never the rank-displacement victim) + a small focus tilt to stay armed through a transient
+    dip. OFF => the batch ranking is byte-identical to today (no leader hoist, no veto, no tilt).
+    docs/DESIGN/MOMENTUM_LANE.md [[project_momentum_lane]] [[feedback_adaptive_no_magic]]"""
+    return bool(getattr(settings, "chili_momentum_symbol_of_day_focus_enabled", True))
+
+
+def _row_ross_signal(row: Any) -> dict | None:
+    """This row's own scanner result dict from the embedded batch ``ross_signals`` (keyed
+    by UPPER symbol). The scorer's raw-pillar source — zero new network call. None when
+    absent/unparseable (the leader scorer degrades that name gracefully)."""
+    try:
+        extra = (row.execution_readiness_json or {}).get("extra") or {}
+        sig = (extra.get("ross_signals") or {}).get(str(getattr(row, "symbol", "") or "").upper())
+        return sig if isinstance(sig, dict) else None
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _identify_session_leader(rows: list[Any]) -> str | None:
+    """The symbol-of-the-day among ``rows`` (UPPER), or None. REUSES the explosive scorer:
+    builds ``{symbol: scanner_result}`` from each row's embedded ross_signals, scores the
+    batch (3-layer explosive scorer, live flag), then ``ross_momentum.identify_leader`` picks
+    the single highest-conviction floor-clearing leader. Fail-OPEN (None) on thin data / error
+    — no leader this refresh just means the lane ranks normally (never forces a weak leader)."""
+    if not _symbol_of_day_focus_enabled() or not rows:
+        return None
+    try:
+        from .ross_momentum import identify_leader, score_universe
+
+        signals: dict[str, dict] = {}
+        for r in rows:
+            su = str(getattr(r, "symbol", "") or "").upper()
+            sig = _row_ross_signal(r)
+            if su and isinstance(sig, dict):
+                signals[su] = sig
+        if not signals:
+            return None
+        scores = score_universe(signals)
+        return identify_leader(scores, signals)
+    except Exception:
+        logger.debug("[auto_arm] symbol-of-day leader id failed (fail-open)", exc_info=True)
+        return None
+
+
+def _hoist_leader(rows: list[Any], leader: str | None) -> list[Any]:
+    """Move the leader's row to the FRONT of the (already rank-ordered) candidate list so it
+    is first-in-arm-queue — its ONE guaranteed priority slot. The REST keep their normal rank
+    (the single-focus is a PRIORITY, not an exclusive lock — the lane still arms the #2/#3
+    movers right behind the leader). Stable: only the leader moves; relative order of the rest
+    is preserved. No-op when there is no leader or it is already first (byte-identical)."""
+    if not leader or not rows:
+        return rows
+    lead_u = str(leader).upper()
+    idx = next((i for i, r in enumerate(rows) if str(getattr(r, "symbol", "") or "").upper() == lead_u), None)
+    if idx is None or idx == 0:
+        return rows
+    hoisted = [rows[idx]] + rows[:idx] + rows[idx + 1:]
+    logger.info(
+        "[auto_arm] symbol-of-day focus: leader %s hoisted to the priority arm slot "
+        "(was rank #%d); remaining slots still arm by normal rank",
+        rows[idx].symbol, idx + 1,
+    )
+    return hoisted
+
+
 def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[MomentumSymbolViability]:
     """Top live-eligible candidates (distinct symbols) fresh within the LIVE risk
     gate (600s).
@@ -903,6 +990,13 @@ def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[Momentum
             # attacking the crypto fill/exit toxicity). Equity rows in a mixed list
             # keep ross order (their re-rank is equity-only above).
             rows = _crypto_liquidity_rerank(rows)
+    # SYMBOL-OF-THE-DAY FOCUS (Batch F): give the highest-conviction explosive LEADER the
+    # priority arm slot (first in the queue) so it is never slot-starved — the rest keep
+    # their normal rank right behind it (no over-concentration). Flag-OFF => no-op (the
+    # ordering above is returned byte-identical). Run BEFORE dedupe so the leader survives
+    # the per-symbol dedupe at the front; the displacement victim-veto protects it too.
+    if _symbol_of_day_focus_enabled() and rows:
+        rows = _hoist_leader(rows, _identify_session_leader(rows))
     return _dedupe_by_symbol(rows, limit=int(limit))
 
 
@@ -1583,13 +1677,15 @@ def _guarded_reap_for_displacement(
 
 
 def _maybe_rank_displace(
-    db: Session, *, user_id: int | None, newcomer: MomentumSymbolViability, busy_symbols: set[str]
+    db: Session, *, user_id: int | None, newcomer: MomentumSymbolViability, busy_symbols: set[str],
+    protected_symbol: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """When arm slots are full, evict the worst-ranked INERT pre-entry watcher so a higher-
     ranked NEWCOMER can arm. Ranks victims by CURRENT viability score (same source as the
     newcomer). Guards: strict score margin, min-dwell (off updated_at), reap-cooldown,
-    per-symbol in-flight veto, and a row-locked guarded reap. PARITY: returns (False, ...)
-    without mutating any row when nothing qualifies."""
+    per-symbol in-flight veto, a row-locked guarded reap, and the symbol-of-the-day LEADER
+    veto (``protected_symbol`` is never the one evicted — its focus slot is guaranteed).
+    PARITY: returns (False, ...) without mutating any row when nothing qualifies."""
     margin_floor = float(getattr(settings, "chili_momentum_rank_displacement_margin", 0.02) or 0.0)
     min_dwell = float(getattr(settings, "chili_momentum_rank_displacement_min_dwell_sec", 45.0) or 0.0)
     now = _utcnow()
@@ -1615,10 +1711,13 @@ def _maybe_rank_displace(
 
     victims.sort(key=lambda v: (_vscore(v), v.updated_at or now))  # worst (lowest score) first
     inflight = _symbols_with_inflight_entry(db, user_id=user_id)
+    _protected = str(protected_symbol or "").upper()
     for v in victims:
         vsym = str(v.symbol or "").upper()
         if not vsym or vsym == nsym:
             continue
+        if _protected and vsym == _protected:
+            continue  # symbol-of-the-day leader veto: the focus slot is never evicted
         vscore = _vscore(v)
         if nscore - vscore < margin_floor:
             continue  # newcomer must STRICTLY beat by the margin (parity no-op otherwise)
@@ -1667,6 +1766,12 @@ def _try_displacement_for_full_slots(db: Session, *, uid: int | None, out: dict[
         busy = _symbols_with_active_live_session(db, user_id=uid)
     except Exception:
         return False
+    # SYMBOL-OF-THE-DAY FOCUS: the leader is the strongest non-busy NEWCOMER to claim a
+    # freed slot (its guaranteed priority), AND the one victim that is never evicted (below).
+    # _fresh_live_eligible_candidates already hoisted the leader to cands[0], so the normal
+    # "first non-busy eligible" walk picks it first when it is not yet armed. Flag-OFF =>
+    # leader is None => byte-identical to the prior behaviour.
+    _leader = _identify_session_leader(cands) if _symbol_of_day_focus_enabled() else None
     newcomer = None
     for c in cands:
         su = str(c.symbol or "").upper()
@@ -1684,7 +1789,9 @@ def _try_displacement_for_full_slots(db: Session, *, uid: int | None, out: dict[
         break
     if newcomer is None:
         return False
-    displaced, info = _maybe_rank_displace(db, user_id=uid, newcomer=newcomer, busy_symbols=busy)
+    displaced, info = _maybe_rank_displace(
+        db, user_id=uid, newcomer=newcomer, busy_symbols=busy, protected_symbol=_leader
+    )
     if displaced:
         out["displaced"] = info
         logger.warning(
