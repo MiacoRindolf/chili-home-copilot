@@ -2674,6 +2674,21 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_USE_REAL_FLOAT"),
         description="Feed the low-float pillar the REAL share count (Polygon reference share_class_shares_outstanding) instead of the market_cap $-proxy; names without it use a consistent market_cap/price share-count estimate (never mixes units). Kill-switch: 0 = the pillar keeps the market_cap proxy (selection byte-identical).",
     )
+    # FLOAT BACKFILL (anti-flicker; equities). Share FLOAT is STATIC (does not change
+    # intraday), so a known value is a CONSTANT — never stale dynamic data. The scanner
+    # bridge forwards a ROTATING subset of movers per cycle, so a symbol absent from THIS
+    # tick's ross_signals never gets float-enriched and its persisted
+    # execution_readiness_json.extra.ross_signals[sym].float_shares flickers to None — which
+    # the fail-closed A-setup quality floor wrongly rejects. When the current cycle can't
+    # resolve a real float, BACKFILL from the last-known value (prior persisted
+    # momentum_symbol_viability row for the symbol). Only FILLS a missing float — NEVER
+    # overwrites a fresh real float, NEVER fabricates for a never-seen symbol (stays None =>
+    # fail-closed reject = correct). 0 = byte-identical (no backfill).
+    chili_momentum_float_persistence_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLOAT_PERSISTENCE_ENABLED"),
+        description="Backfill a missing float_shares from the last-known persisted momentum_symbol_viability row (share float is STATIC, so a known value is a constant — anti-flicker for the fail-closed A-setup quality floor). Equities only; fills missing float only, never overwrites a fresh real float, never fabricates for a never-seen symbol. 0 = byte-identical (no backfill).",
+    )
     chili_momentum_daily_lookback_days: int = Field(
         default=20,
         ge=3,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Optional
@@ -599,6 +600,105 @@ def _ladder_equity(
     return LadderRead(imb_now, pctile, ofi, micro, bid_refill, ask_build, spread, age, len(series))
 
 
+# --- FLOAT BACKFILL (anti-flicker) ---------------------------------------------------
+# Share FLOAT is STATIC (does not change intraday), so a known value is a CONSTANT, not
+# stale dynamic data — caching/backfilling it is correct + safe. The scanner bridge
+# forwards a ROTATING subset of movers per cycle; a symbol absent from THIS tick's
+# ross_signals never gets float-enriched, so its persisted
+# execution_readiness_json.extra.ross_signals[sym].float_shares flickers to None and the
+# fail-closed A-setup quality floor wrongly rejects a genuine low-float A-setup. We
+# backfill the missing float from the last-known value: a bounded in-process cache first
+# (cheap, survives within the process), else the prior persisted viability row (durable,
+# survives restarts). Gated by chili_momentum_float_persistence_enabled (OFF => no calls
+# => byte-identical). Equities only; never overwrites a fresh real float; never fabricates
+# for a never-seen symbol (stays None => fail-closed reject = correct).
+_FLOAT_CACHE_MAX = 4096  # hard max size (bounded — no unbounded growth)
+_FLOAT_CACHE_TTL_S = 86400.0  # 24h TTL; float is static so a generous TTL is safe
+# symbol -> (float_shares, monotonic_expiry_ts)
+_FLOAT_LAST_KNOWN: dict[str, tuple[float, float]] = {}
+
+
+def _float_cache_get(symbol: str) -> float | None:
+    """Last-known float for symbol from the bounded in-process cache (None if absent/expired)."""
+    try:
+        entry = _FLOAT_LAST_KNOWN.get(symbol)
+        if entry is None:
+            return None
+        val, exp = entry
+        if time.monotonic() >= exp:
+            _FLOAT_LAST_KNOWN.pop(symbol, None)
+            return None
+        return val
+    except Exception:
+        return None
+
+
+def _float_cache_put(symbol: str, float_shares: float) -> None:
+    """Record a known float for symbol (bounded: evicts the oldest-expiring entry when full)."""
+    try:
+        if not float_shares or float_shares <= 0:
+            return
+        if (
+            symbol not in _FLOAT_LAST_KNOWN
+            and len(_FLOAT_LAST_KNOWN) >= _FLOAT_CACHE_MAX
+        ):
+            # evict the entry that expires soonest (approx-LRU; keeps the map bounded)
+            try:
+                oldest = min(_FLOAT_LAST_KNOWN.items(), key=lambda kv: kv[1][1])[0]
+                _FLOAT_LAST_KNOWN.pop(oldest, None)
+            except ValueError:
+                pass
+        _FLOAT_LAST_KNOWN[symbol] = (float(float_shares), time.monotonic() + _FLOAT_CACHE_TTL_S)
+    except Exception:
+        pass
+
+
+def _last_known_float_for_symbol(db: Session, symbol: str) -> float | None:
+    """Last-known float for symbol: bounded in-process cache first, else the prior persisted
+    momentum_symbol_viability row's execution_readiness_json.extra.ross_signals[symbol].float_shares.
+
+    Returns None when no prior value exists (never-seen symbol => stays None => fail-closed).
+    Read-only; best-effort (any error => None, fail-open to the market_cap/price estimate)."""
+    cached = _float_cache_get(symbol)
+    if cached is not None:
+        return cached
+    try:
+        from ....models.trading import MomentumSymbolViability
+
+        rows = (
+            db.query(MomentumSymbolViability.execution_readiness_json)
+            .filter(MomentumSymbolViability.symbol == symbol)
+            .order_by(MomentumSymbolViability.freshness_ts.desc())
+            .limit(4)
+            .all()
+        )
+        for (erj,) in rows:
+            if not isinstance(erj, dict):
+                continue
+            extra = erj.get("extra")
+            if not isinstance(extra, dict):
+                continue
+            rsig = extra.get("ross_signals")
+            if not isinstance(rsig, dict):
+                continue
+            sig = rsig.get(symbol)
+            if not isinstance(sig, dict):
+                continue
+            _f = sig.get("float_shares")
+            if _f is None:
+                continue
+            try:
+                fval = float(_f)
+            except (TypeError, ValueError):
+                continue
+            if fval > 0:
+                _float_cache_put(symbol, fval)  # warm the cache for cheap subsequent ticks
+                return fval
+    except Exception:
+        return None
+    return None
+
+
 def maybe_run_momentum_neural_tick(
     db: Session,
     ev: BrainActivationEvent,
@@ -691,6 +791,14 @@ def run_momentum_neural_tick(
                                     continue
                         return None
 
+                    # anti-flicker backfill: when this cycle can't resolve a real float for a
+                    # symbol (rotating-subset enrichment), fill from the last-known STATIC value
+                    # so float_shares never flickers to None for a name we've already resolved.
+                    # OFF => byte-identical (no cache writes, no last-known reads). FILLS missing
+                    # only; never overwrites a fresh real float; never fabricates a never-seen one.
+                    _float_backfill = bool(
+                        getattr(settings, "chili_momentum_float_persistence_enabled", False)
+                    )
                     for _sym, _sig in _ross_signals.items():
                         if not isinstance(_sig, dict) or "-USD" in str(_sym):
                             continue  # equities only
@@ -698,7 +806,16 @@ def run_momentum_neural_tick(
                             _f = get_ticker_float(_sym)
                             if _f and _f > 0:
                                 _sig["float_shares"] = float(_f)
+                                if _float_backfill:
+                                    _float_cache_put(_sym, float(_f))  # record the fresh real float
                                 continue
+                            # fresh real float unavailable this cycle: BACKFILL last-known (static)
+                            # before the market_cap/price estimate, so a known float never flickers.
+                            if _float_backfill:
+                                _lk = _last_known_float_for_symbol(db, _sym)
+                                if _lk and _lk > 0:
+                                    _sig["float_shares"] = float(_lk)
+                                    continue
                             _mc = _pick_num(_sig, ("market_cap", "marketcap"))
                             _px = _pick_num(_sig, ("price", "last", "close", "last_price"))
                             if _mc and _px and _px > 0:
