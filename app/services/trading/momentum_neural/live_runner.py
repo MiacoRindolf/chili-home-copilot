@@ -15,7 +15,7 @@ import json
 import logging
 import math
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 from sqlalchemy.orm import Session
@@ -68,6 +68,7 @@ from .paper_execution import (
     pyramid_blend_on_fill,
     regime_atr_pct,
     runner_trail_stop,
+    scale_grid_levels,
     scale_out_fraction,
     scale_out_quantity,
     stop_target_prices,
@@ -1618,6 +1619,144 @@ def _scale_out_to_runner(
     return pnl
 
 
+# ── BATCH E(1) — MULTI-LEVEL SCALE-OUT GRID ────────────────────────────────────
+# A LADDER over the SAME single scale-out chokepoint: sell successive tranche
+# fractions at successive R-multiple / round-number targets, trailing the runner
+# between rungs. The grid is computed ONCE (frozen on the position) the first time
+# the position is held with the flag on; thereafter each rung advances `target_price`
+# to the next level so the existing target-trigger re-fires. NO new decrement path —
+# every tranche routes through `_apply_confirmed_live_partial_exit` + clamps to the
+# remaining held qty; the cumulative fraction is < 1.0 so a runner always remains.
+# Flag OFF => the grid is empty => the lane takes the single scale-out then trails
+# (byte-identical). docs/DESIGN/MOMENTUM_LANE.md
+
+
+def _resolve_scale_grid(pos: dict[str, Any], symbol: str | None) -> list[list[float]]:
+    """Return the frozen ladder ``[[target_px, fraction], ...]`` for this position.
+
+    Computed ONCE off the FROZEN entry + the position's initial stop (the risk
+    anchor), then stored on ``pos['scale_grid']`` so a later breakeven-stop ratchet
+    cannot re-scale the rung prices. Empty list when the flag is off or the config is
+    degenerate (the caller then falls back to the single scale-out — byte-identical)."""
+    # Flag OFF => never touch the position dict (byte-identical persisted JSON).
+    if not bool(getattr(settings, "chili_momentum_scale_grid_enabled", False)):
+        return []
+    cached = pos.get("scale_grid")
+    if isinstance(cached, list):
+        return [list(x) for x in cached if isinstance(x, (list, tuple)) and len(x) == 2]
+    try:
+        entry = float(pos.get("avg_entry_price") or 0.0)
+        # The ladder is anchored on the ORIGINAL risk: prefer the frozen entry stop, not a
+        # later breakeven-ratcheted stop, so the R levels stay fixed across rungs.
+        stop = _float_or_none(pos.get("scale_grid_anchor_stop"))
+        if stop is None:
+            stop = _float_or_none(pos.get("stop_price"))
+    except (TypeError, ValueError):
+        entry, stop = 0.0, None
+    levels = scale_grid_levels(entry, float(stop) if stop is not None else 0.0, side_long=True, symbol=symbol)
+    pos["scale_grid"] = [[float(px), float(fr)] for px, fr in levels]
+    return [list(x) for x in pos["scale_grid"]]
+
+
+def _scale_grid_active(pos: dict[str, Any], symbol: str | None) -> bool:
+    """True iff a multi-level grid is in force AND has un-fired rungs remaining."""
+    grid = _resolve_scale_grid(pos, symbol)
+    if len(grid) < 2:  # 0/1 rung => no ladder; the single scale-out path handles it
+        return False
+    idx = int(pos.get("scale_grid_idx") or 0)
+    return idx < len(grid)
+
+
+def _scale_out_grid_step(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    le: dict[str, Any],
+    filled_quantity: float,
+    entry_price: float,
+    fill_price: float,
+    reason: str,
+) -> float:
+    """Bank ONE ladder tranche through the shared partial-exit chokepoint, then either
+    advance to the NEXT rung (keep the runner, re-target, return to TRAILING) or, on the
+    LAST rung, finish like the single scale-out (breakeven + trail the final runner).
+
+    Reuses ``_apply_confirmed_live_partial_exit`` for the bookkeeping/ledger (the SAME
+    single decrement path), so this never opens a second oversell surface. INVARIANT-A:
+    the stop only ratchets to breakeven (never loosened). The remainder is always > 0
+    because the cumulative grid fraction is < 1.0 (enforced in ``scale_grid_levels``)."""
+    pnl = _apply_confirmed_live_partial_exit(
+        db,
+        sess,
+        le=le,
+        filled_quantity=filled_quantity,
+        entry_price=entry_price,
+        fill_price=fill_price,
+        reason=reason,
+    )
+    le.pop("pending_exit_is_scale_out", None)
+    pos = le.get("position")
+    if not isinstance(pos, dict):
+        return pnl
+    grid = _resolve_scale_grid(pos, sess.symbol)
+    idx = int(pos.get("scale_grid_idx") or 0) + 1  # this rung just filled
+    pos["scale_grid_idx"] = idx
+    # Move the balance stop to breakeven on the FIRST rung (Ross "adjust to entry on the
+    # balance"); ratchet-only on later rungs (INVARIANT-A — never loosened).
+    old_stop = _float_or_none(pos.get("stop_price"))
+    be_stop = breakeven_stop_after_partial(
+        float(entry_price),
+        float(old_stop if old_stop is not None else entry_price),
+        side_long=True,
+    )
+    pos["stop_price"] = be_stop
+    pos["scaled_out_at_utc"] = _utcnow().isoformat()
+    more = idx < len(grid)
+    if more:
+        # Re-target the next rung so the existing target-trigger re-fires; KEEP partial_taken
+        # FALSE (more tranches remain) and hold the runner in TRAILING between rungs.
+        next_px = float(grid[idx][0])
+        pos["target_price"] = next_px
+        pos["partial_taken"] = False  # re-arm the scale-out trigger for the next rung
+        le["position"] = pos
+        _commit_le(sess, le)
+        _safe_transition(db, sess, STATE_LIVE_TRAILING)
+        _emit(
+            db,
+            sess,
+            "live_scale_grid_tranche",
+            {
+                "reason": reason,
+                "rung": idx,
+                "of_rungs": len(grid),
+                "tranche_qty": float(filled_quantity),
+                "runner_qty": _float_or_none(pos.get("quantity")),
+                "next_target": next_px,
+                "breakeven_stop": be_stop,
+                "tranche_pnl_usd": pnl,
+            },
+        )
+    else:
+        # Last rung filled: the remainder is the final RUNNER — trail it (single-scale finish).
+        le["position"] = pos
+        _commit_le(sess, le)
+        _safe_transition(db, sess, STATE_LIVE_TRAILING)
+        _emit(
+            db,
+            sess,
+            "live_scaled_out_to_runner",
+            {
+                "reason": reason,
+                "partial_qty": float(filled_quantity),
+                "runner_qty": _float_or_none(pos.get("quantity")),
+                "breakeven_stop": be_stop,
+                "partial_pnl_usd": pnl,
+                "scale_grid_final_rung": idx,
+            },
+        )
+    return pnl
+
+
 def _fmt_limit_price_sell(p: float) -> str:
     """Penny-FLOOR for sell limits >= $1 (never ask above the intended level)."""
     if p >= 1.0:
@@ -1645,15 +1784,31 @@ def _place_scale_out_limit(
         _eq_shares = not str(sess.symbol or "").upper().endswith("-USD")
         inc = prod.base_increment if prod else (1.0 if _eq_shares else None)
         mn = prod.base_min_size if prod else (1.0 if _eq_shares else None)
+        # E(1): when a multi-level grid is in force, rest the FIRST RUNG's fraction at the
+        # first rung's price (the reactive market path takes the later rungs). The grid
+        # anchor stop is frozen on the position at entry; build the ladder off it. Flag OFF
+        # / no ladder => the single scale_out_fraction at target_px (byte-identical).
+        _rest_frac = scale_out_fraction(symbol=sess.symbol)
+        _rest_px = float(target_px)
+        try:
+            _pos = le.get("position") if isinstance(le.get("position"), dict) else {}
+            _grid = _resolve_scale_grid(_pos, sess.symbol)
+            if len(_grid) >= 2:  # an actual ladder
+                _rest_frac = float(_grid[0][1])
+                _rest_px = float(_grid[0][0])
+        except Exception:
+            _rest_frac = scale_out_fraction(symbol=sess.symbol)
+            _rest_px = float(target_px)
         scale_qty, _runner_qty, can_split = scale_out_quantity(
             current_qty=float(filled),
             original_qty=float(filled),
-            fraction=scale_out_fraction(symbol=sess.symbol),
+            fraction=_rest_frac,
             base_increment=inc,
             base_min_size=mn,
         )
         if not can_split or scale_qty <= 0:
             return
+        target_px = _rest_px
         _ext = False
         try:
             from .market_profile import market_session_now
@@ -2043,6 +2198,78 @@ def _stop_vol_floor_mult() -> float:
     except (TypeError, ValueError):
         return 0.5
     return v if v >= 0 else 0.0
+
+
+def _parse_event_times_utc(raw: str | None) -> list[datetime]:
+    """Parse the comma-separated ISO-8601 UTC event-time list (E3). Pure; skips junk.
+    Accepts a trailing 'Z' (mapped to +00:00); naive datetimes are assumed UTC."""
+    out: list[datetime] = []
+    if not raw:
+        return out
+    for tok in str(raw).split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            t = datetime.fromisoformat(tok.replace("Z", "+00:00"))
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            out.append(t.astimezone(timezone.utc))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def hard_no_trade_regime(
+    execution_family: str | None = None,
+    *,
+    symbol: str | None = None,
+    now: datetime | None = None,
+) -> tuple[bool, str]:
+    """HARD no-NEW-ENTRY regime gate (Batch E(3), ENTRIES ONLY). Returns ``(blocked, reason)``.
+
+    Two hard windows, both gated by ``chili_momentum_hard_no_trade_regime_enabled``:
+      (a) EVENT STANDDOWN — within +/- ``chili_momentum_hard_no_trade_event_window_min`` of
+          any scheduled high-impact event (FOMC/CPI) in
+          ``chili_momentum_hard_no_trade_event_times_utc`` (a small documented list / calendar
+          hook). Market-wide (applies to crypto + equity).
+      (b) HARD MIDDAY — when ``chili_momentum_hard_no_trade_midday_enabled`` is on, the SAME
+          10:30-14:30 ET ``in_midday_lull`` band as the soft de-weight (equity-only).
+
+    CRITICAL: this gates only the ARMING / entry-eval path. It is NEVER consulted on an exit,
+    stop, trail, bailout, scale-out, or the overnight dark-flatten — managing/closing an OPEN
+    position is always allowed. OFF => ``(False, 'disabled')`` (byte-identical). Pure: reads
+    only settings + the shared clock; fail-open (any error => not blocked)."""
+    if not bool(getattr(settings, "chili_momentum_hard_no_trade_regime_enabled", False)):
+        return False, "disabled"
+    ref = now or datetime.now(timezone.utc)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    try:
+        win_min = float(getattr(settings, "chili_momentum_hard_no_trade_event_window_min", 30.0) or 0.0)
+    except (TypeError, ValueError):
+        win_min = 0.0
+    if win_min > 0:
+        for ev in _parse_event_times_utc(
+            getattr(settings, "chili_momentum_hard_no_trade_event_times_utc", "")
+        ):
+            if abs((ref - ev).total_seconds()) <= win_min * 60.0:
+                return True, f"event_standdown:{ev.isoformat()}"
+    if bool(getattr(settings, "chili_momentum_hard_no_trade_midday_enabled", False)):
+        try:
+            from .market_profile import in_midday_lull
+
+            # in_midday_lull is equity-only (crypto always False). The arm-gate caller
+            # passes the lane execution family, not a symbol — only the equity lane has a
+            # midday concept, so a None/equity family evaluates the clock; crypto is exempt.
+            _is_crypto = (
+                bool(symbol) and str(symbol).upper().endswith("-USD")
+            ) or str(execution_family or "") == "coinbase_spot"
+            if not _is_crypto and in_midday_lull(symbol, now=ref):
+                return True, "hard_midday_no_entry"
+        except Exception:
+            pass
+    return False, "ok"
 
 
 def _midday_viability_bump() -> float:
@@ -3634,6 +3861,20 @@ def tick_live_session(
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
     if st == STATE_WATCHING_LIVE:
+        # HARD NO-TRADE REGIME (Batch E(3), ENTRIES ONLY): around scheduled high-impact
+        # events (FOMC/CPI; +/- window) — and, optionally, hard midday — HOLD this watcher
+        # (no NEW entry) for the duration. WATCHING is a PRE-POSITION state: a held position
+        # lives in ENTERED/SCALING_OUT/TRAILING/BAILOUT (handled far below), so this gate
+        # physically cannot block/delay an exit, stop, trail, bailout, scale-out, or dark-
+        # flatten. OFF => no-op (byte-identical). Fail-open (helper returns not-blocked on error).
+        if bool(getattr(settings, "chili_momentum_hard_no_trade_regime_enabled", False)):
+            _ntr_blocked, _ntr_reason = hard_no_trade_regime(
+                sess.execution_family, symbol=sess.symbol
+            )
+            if _ntr_blocked:
+                _emit(db, sess, "live_entry_wait_no_trade_regime", {"reason": _ntr_reason})
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state, "skipped": _ntr_reason}
         # MIDDAY-LULL DE-WEIGHT (project_profitability_levers): during the 10:30-14:30 ET
         # midday chop (6% live win-rate vs 29% morning; Ross sits out midday) RAISE the
         # effective viability bar so only an exceptional mover arms. SOFT (additive bump,
@@ -5110,8 +5351,25 @@ def tick_live_session(
                                                    "conf": round(float(_mm_model.get("confidence") or 0.0), 4)}
             except Exception:
                 _meta_mult = 1.0
+        # WIN-CYCLE FATIGUE YELLOW down-size (Batch E(2), ENTRIES ONLY): once today's clean-win
+        # count (this execution family) reaches the YELLOW band, size DOWN the NEW entry's risk
+        # budget by the documented fraction (the RED band is a hard arm-gate halt, not a size of
+        # 0 — an OPEN position is never de-sized). Composes with the streak/cushion/liquidity
+        # levers under the same 3x clamp. This is the ENTRY-fill sizing path; it physically
+        # cannot reach an exit. OFF / green / fail-open => 1.0 (byte-identical). Replay applies
+        # the SAME multiplier from the SAME helper => parity. docs/DESIGN/MOMENTUM_LANE.md
+        _fatigue_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_win_cycle_fatigue_enabled", False)):
+            try:
+                from .auto_arm import win_cycle_yellow_size_multiplier
+
+                _fatigue_mult, _fatigue_meta = win_cycle_yellow_size_multiplier(db, execution_family=ef)
+                if _fatigue_mult < 1.0:
+                    le["win_cycle_fatigue"] = _fatigue_meta
+            except Exception:
+                _fatigue_mult = 1.0
         _eff_max_loss = min(
-            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult),
+            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult) * float(_fatigue_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE
@@ -5652,7 +5910,10 @@ def tick_live_session(
                 if is_scale_out:
                     # Deliberate first-target scale-out confirmed on a later tick:
                     # bank the partial, move the balance to breakeven, hold the runner.
-                    _scale_out_to_runner(
+                    # E(1): route through the grid step when a multi-level ladder is in
+                    # force (advances the rung); else the single scale-out (byte-identical).
+                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol) else _scale_out_to_runner
+                    _step(
                         db,
                         sess,
                         le=le,
@@ -5674,7 +5935,8 @@ def tick_live_session(
                     )
             elif poll.get("partial"):
                 if is_scale_out:
-                    _scale_out_to_runner(
+                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol) else _scale_out_to_runner
+                    _step(
                         db,
                         sess,
                         le=le,
@@ -7357,7 +7619,11 @@ def tick_live_session(
                 _commit_le(sess, le)
                 _new_qty = max(0.0, _sl_filled - _already)
                 if _new_qty > 0:
-                    _scale_out_to_runner(
+                    # E(1): a resting-limit fill advances the grid rung when a ladder is
+                    # in force (the reactive market path takes the later rungs); else it
+                    # finishes the single scale-out to the runner (byte-identical).
+                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol) else _scale_out_to_runner
+                    _step(
                         db, sess, le=le, filled_quantity=_new_qty,
                         entry_price=avg, fill_price=_px_f, reason="scale_out_limit",
                     )
@@ -7412,7 +7678,25 @@ def tick_live_session(
             inc = prod.base_increment if prod else (1.0 if _eq_shares else None)
             mn = prod.base_min_size if prod else (1.0 if _eq_shares else None)
             orig_qty = _float_or_none(pos.get("original_quantity")) or qty
-            frac = scale_out_fraction(symbol=sess.symbol)
+            # E(1) MULTI-LEVEL GRID: when active, this rung's fraction comes from the
+            # frozen ladder (NOT the single scale_out_fraction); on fill the grid step
+            # advances to the next rung instead of finishing. The grid is anchored on the
+            # ORIGINAL risk — freeze the entry stop the FIRST time we scale so a later
+            # breakeven ratchet can't re-scale the rung prices. Flag OFF => grid empty =>
+            # this whole branch is byte-identical (frac = scale_out_fraction, single scale).
+            _grid_active = False
+            try:
+                if pos.get("scale_grid_anchor_stop") is None and not pos.get("partial_taken"):
+                    pos["scale_grid_anchor_stop"] = float(pos.get("stop_price") or 0.0)
+                _grid_active = _scale_grid_active(pos, sess.symbol)
+            except Exception:
+                _grid_active = False
+            if _grid_active:
+                _grid = _resolve_scale_grid(pos, sess.symbol)
+                _gidx = int(pos.get("scale_grid_idx") or 0)
+                frac = float(_grid[_gidx][1]) if _gidx < len(_grid) else scale_out_fraction(symbol=sess.symbol)
+            else:
+                frac = scale_out_fraction(symbol=sess.symbol)
             scale_qty, runner_qty, can_split = scale_out_quantity(
                 current_qty=qty,
                 original_qty=orig_qty,
@@ -7454,7 +7738,9 @@ def tick_live_session(
             slip_live = float(le.get("entry_slip_bps_ref") or 6.0)
             if poll.get("filled"):
                 if scaling:
-                    _scale_out_to_runner(
+                    # E(1): a grid rung advances to the next target; the single scale
+                    # finishes to the runner. Both route through the SAME chokepoint.
+                    (_scale_out_grid_step if _grid_active else _scale_out_to_runner)(
                         db,
                         sess,
                         le=le,
@@ -7479,8 +7765,10 @@ def tick_live_session(
             if poll.get("partial"):
                 if scaling:
                     # Any portion of the scale order filling establishes the runner
-                    # + breakeven; never over-sell. Remaining intent is abandoned.
-                    _scale_out_to_runner(
+                    # + breakeven; never over-sell. Remaining intent is abandoned. A
+                    # partial grid-rung fill still advances the rung (the remaining
+                    # tranche intent is dropped — never re-sold).
+                    (_scale_out_grid_step if _grid_active else _scale_out_to_runner)(
                         db,
                         sess,
                         le=le,

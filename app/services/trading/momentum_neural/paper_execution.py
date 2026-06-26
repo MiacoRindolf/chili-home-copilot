@@ -402,6 +402,108 @@ def scale_out_quantity(
     return float(scale_qty), float(remainder), True
 
 
+def _parse_csv_floats(raw: str | None) -> list[float]:
+    """Parse a comma-separated float list (the scale-grid knobs). Pure; skips junk."""
+    out: list[float] = []
+    if not raw:
+        return out
+    for tok in str(raw).split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            v = float(tok)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(v):
+            out.append(v)
+    return out
+
+
+def scale_grid_enabled() -> bool:
+    return bool(getattr(settings, "chili_momentum_scale_grid_enabled", False))
+
+
+# The cumulative scale-out fraction must stay strictly below 1.0 so a RUNNER always
+# remains (the asymmetric Ross tail). One documented invariant constant.
+_GRID_MAX_CUMULATIVE = 0.9
+
+
+def scale_grid_levels(
+    entry: float,
+    stop: float,
+    *,
+    side_long: bool = True,
+    symbol: str | None = None,
+    rr_target: float | None = None,
+) -> list[tuple[float, float]]:
+    """Build the MULTI-LEVEL scale-out ladder: ``[(target_price, fraction), ...]``.
+
+    The LEVELS are R-multiples (reward = R x stop-distance) off the configured
+    ``chili_momentum_scale_grid_r_multiples``; where a round/half-dollar level above
+    entry sits BELOW the next R level, that tranche's target is pulled IN to the round
+    number (Ross sells into where sellers stack — reuses ``round_numbers_above`` so
+    there is ONE round-number grid). The FRACTIONS are the ONE documented base
+    (``chili_momentum_scale_grid_fractions``), each a fraction of the ORIGINAL position.
+
+    INVARIANTS (so the caller can never oversell or strand 0 shares):
+      * fractions are paired POSITIONALLY with R-multiples; extra of either is dropped;
+      * the cumulative fraction SUM is clamped to < 1.0 (``_GRID_MAX_CUMULATIVE``) so a
+        RUNNER always remains — the last tranche is trimmed if the configured sum would
+        reach/exceed 1.0;
+      * targets are strictly ascending and strictly above entry (a degenerate config
+        collapses to an empty ladder -> the caller falls back to the single scale-out).
+
+    Long-only (the lane is long-only); returns ``[]`` for shorts / bad inputs /
+    flag-off so the caller is byte-identical. Pure + side-effect-free for parity
+    testing. (docs/DESIGN/MOMENTUM_LANE.md)"""
+    if not side_long or not scale_grid_enabled():
+        return []
+    try:
+        e = float(entry)
+        s = float(stop)
+    except (TypeError, ValueError):
+        return []
+    risk = e - s
+    if not (math.isfinite(e) and math.isfinite(s)) or risk <= 0 or e <= 0:
+        return []
+    r_mults = _parse_csv_floats(getattr(settings, "chili_momentum_scale_grid_r_multiples", "1.0,2.0"))
+    fracs = _parse_csv_floats(getattr(settings, "chili_momentum_scale_grid_fractions", "0.5,0.25"))
+    # Pair positionally; drop any non-positive / non-finite leg.
+    pairs: list[tuple[float, float]] = []
+    for rm, fr in zip(r_mults, fracs):
+        if rm > 0 and fr > 0 and math.isfinite(rm) and math.isfinite(fr):
+            pairs.append((rm, fr))
+    if not pairs:
+        return []
+    rns = round_numbers_above(e)  # ascending psych levels above entry (Ross)
+    levels: list[tuple[float, float]] = []
+    cum = 0.0
+    prev_px = e
+    for rm, fr in pairs:
+        r_px = e + rm * risk
+        # Pull this tranche IN to a round number that sits at/above the prior level and
+        # at/below this R target (Ross sells into the level where sellers stack).
+        tgt = r_px
+        for rn in rns:
+            if rn > prev_px * (1.0 + 1e-9) and rn <= r_px * (1.0 + 1e-9):
+                tgt = rn  # nearest qualifying round number (ascending -> first wins is lowest)
+                break
+        if tgt <= prev_px * (1.0 + 1e-9):  # not strictly ascending -> skip this rung
+            continue
+        # Clamp the cumulative fraction so a runner always remains (< _GRID_MAX_CUMULATIVE).
+        room = _GRID_MAX_CUMULATIVE - cum
+        if room <= 1e-9:
+            break  # no fraction left without eating the runner
+        take = min(fr, room)
+        if take <= 1e-9:
+            continue
+        levels.append((float(tgt), float(take)))
+        cum += take
+        prev_px = tgt
+    return levels
+
+
 def iceberg_seller_score(ask_series: list[tuple[float, float]] | None) -> float | None:
     """Hidden-seller / iceberg detector for the per-add probe (pure, no I/O, unit-testable).
 

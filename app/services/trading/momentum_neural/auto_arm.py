@@ -1203,6 +1203,82 @@ def _symbol_loss_guards(db: Session) -> tuple[set[str], dict[str, datetime]]:
         return set(), {}
 
 
+def _win_cycle_clean_win_count(db: Session, *, execution_family: str | None = None) -> int:
+    """Count TODAY's CLEAN WINS (live, this execution family) for win-cycle fatigue (E2).
+
+    A clean win = a closed live momentum outcome with realized_pnl_usd > 0 in the current
+    UTC day. Mirrors ``_symbol_loss_guards``'s query shape (no new table, no new path).
+    Fail-open: any error returns 0 (fatigue never triggers on a query glitch — it can only
+    REDUCE/HALT new entries, so failing open just preserves current behavior). ENTRIES-ONLY:
+    the caller uses this for the YELLOW down-size + RED halt; it never touches an exit."""
+    try:
+        from ....models.trading import MomentumAutomationOutcome
+
+        day_start = _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        q = (
+            db.query(MomentumAutomationOutcome.id)
+            .filter(
+                MomentumAutomationOutcome.mode == "live",
+                MomentumAutomationOutcome.terminal_at >= day_start,
+                MomentumAutomationOutcome.realized_pnl_usd > 0,
+            )
+        )
+        if execution_family:
+            q = q.filter(MomentumAutomationOutcome.execution_family == str(execution_family))
+        return int(q.count())
+    except Exception:
+        logger.debug("[auto_arm] win-cycle win-count query failed (fail-open 0)", exc_info=True)
+        return 0
+
+
+def _win_cycle_fatigue_level(win_count: int) -> str:
+    """Map today's clean-win count to a fatigue band: 'green' | 'yellow' | 'red'.
+
+    Adaptive knobs: ``chili_momentum_win_cycle_yellow_wins`` (down-size threshold) and
+    ``chili_momentum_win_cycle_red_wins`` (hard-stop threshold; clamped >= yellow). OFF =>
+    always 'green' (no effect). ENTRIES-ONLY semantics live in the callers."""
+    if not bool(getattr(settings, "chili_momentum_win_cycle_fatigue_enabled", False)):
+        return "green"
+    try:
+        yellow = int(getattr(settings, "chili_momentum_win_cycle_yellow_wins", 4) or 4)
+        red = int(getattr(settings, "chili_momentum_win_cycle_red_wins", 7) or 7)
+    except (TypeError, ValueError):
+        return "green"
+    red = max(red, yellow)  # red threshold can never be below yellow
+    n = int(win_count or 0)
+    if n >= red:
+        return "red"
+    if n >= yellow:
+        return "yellow"
+    return "green"
+
+
+def win_cycle_yellow_size_multiplier(db: Session, *, execution_family: str | None = None) -> tuple[float, dict[str, Any]]:
+    """ENTRY-side size multiplier for win-cycle fatigue (E2) — read by the live runner at
+    entry-fill sizing. Returns ``(mult, meta)`` where mult is in (0, 1]:
+
+      * green  -> 1.0 (no effect)
+      * yellow -> ``chili_momentum_win_cycle_yellow_size_fraction`` (down-size; never zeroes)
+      * red    -> 1.0 here (the RED HALT is enforced as an arm-gate early-out, NOT a size of
+                  0 — an OPEN position never gets de-sized to nothing).
+
+    OFF / fail-open => (1.0, {}). This NEVER blocks or delays an exit; it only scales a NEW
+    entry's risk budget (composes with the streak/cushion/liquidity levers under the 3x clamp)."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_win_cycle_fatigue_enabled", False)):
+            return 1.0, {}
+        n = _win_cycle_clean_win_count(db, execution_family=execution_family)
+        level = _win_cycle_fatigue_level(n)
+        if level == "yellow":
+            frac = float(getattr(settings, "chili_momentum_win_cycle_yellow_size_fraction", 0.5) or 0.5)
+            if frac <= 0.0 or frac >= 1.0 or not (frac == frac):  # NaN guard
+                return 1.0, {}
+            return frac, {"level": "yellow", "wins": n, "mult": round(frac, 4)}
+        return 1.0, {"level": level, "wins": n}
+    except Exception:
+        return 1.0, {}
+
+
 def _symbol_free(db: Session, symbol: str, user_id: int | None) -> bool:
     """Per-symbol autopilot mutex vs AutoTrader v1 (fail open on helper error)."""
     try:
@@ -1800,6 +1876,45 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             out["daily_pnl_usd"] = _g2r.get("daily_pnl_usd")
             out["peak_pnl_usd"] = _g2r.get("peak_pnl_usd")
             return out
+    except Exception:
+        pass
+
+    # Guard 5c: WIN-CYCLE FATIGUE — RED hard-stop (Batch E(2), ENTRIES ONLY). Once today's
+    # CLEAN-WIN count (this execution family) reaches the RED threshold, STOP arming NEW
+    # entries for the session — lock in the green day instead of over-trading it back. This
+    # is the upside mirror of the profit-goal/giveback halts and uses the IDENTICAL early-out
+    # shape (skip the whole scan, report clearly). It NEVER touches an OPEN position: every
+    # exit/stop/trail/bailout/scale-out path runs in the live runner, which this guard does
+    # not gate. The YELLOW down-size is applied at entry-fill sizing in the live runner.
+    # OFF => 'green' => no-op (byte-identical). Fail-open. docs/DESIGN/MOMENTUM_LANE.md
+    try:
+        if bool(getattr(settings, "chili_momentum_win_cycle_fatigue_enabled", False)):
+            _wc_n = _win_cycle_clean_win_count(db, execution_family=_lane_execution_family())
+            if _win_cycle_fatigue_level(_wc_n) == "red":
+                out["skipped"] = "win_cycle_fatigue_red"
+                out["clean_wins_today"] = _wc_n
+                out["win_cycle_red_threshold"] = int(
+                    getattr(settings, "chili_momentum_win_cycle_red_wins", 7) or 7
+                )
+                return out
+    except Exception:
+        pass
+
+    # Guard 5d: HARD NO-TRADE REGIMES (Batch E(3), ENTRIES ONLY). A hard no-NEW-ENTRY
+    # standdown around scheduled high-impact events (FOMC/CPI; +/- a window) and an optional
+    # hard midday window. Same early-out shape as Guards 4/5; NEVER touches an OPEN position
+    # (exits/stops/trails/bailouts/scale-outs all run in the live runner, ungated by this).
+    # The clock/event helper lives in the live runner (one canonical definition the runner's
+    # own entry-eval also reads). OFF => never blocks (byte-identical). Fail-open.
+    try:
+        if bool(getattr(settings, "chili_momentum_hard_no_trade_regime_enabled", False)):
+            from .live_runner import hard_no_trade_regime
+
+            _blocked, _why = hard_no_trade_regime(_lane_execution_family())
+            if _blocked:
+                out["skipped"] = "hard_no_trade_regime"
+                out["no_trade_reason"] = _why
+                return out
     except Exception:
         pass
 

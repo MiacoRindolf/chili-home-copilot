@@ -3925,6 +3925,90 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_RUN_R_BREAKER_MIN_HISTORY"),
         description="Minimum closed-fill history before the breaker can trigger; below this it fails OPEN (bump 0).",
     )
+    # ── BATCH E ─ management/discipline gaps (each kill-switched; OFF = byte-identical) ──
+    #
+    # E(1) MULTI-LEVEL SCALE-OUT GRID. Extends the single first-scale into a LADDER: sell
+    # successive tranche fractions at successive R-multiple/round-number targets, trail the
+    # remainder above breakeven. Routes through the EXISTING single scale-out chokepoint
+    # (_apply_confirmed_live_partial_exit + the scale_limit_order_id interlock) — NO new
+    # decrement path; each tranche clamps to the remaining held qty (scale_out_quantity); the
+    # SUM of fractions is < 1.0 so a runner always remains. INVARIANT-A (ratchet stop) is
+    # preserved (breakeven move unchanged). OFF => the lane takes ONE scale-out then trails
+    # (today's behavior, byte-identical). docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_scale_grid_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SCALE_GRID_ENABLED"),
+        description="Kill-switch for the multi-level scale-out grid (E1). false = single first-scale then trail (byte-identical).",
+    )
+    chili_momentum_scale_grid_fractions: str = Field(
+        default="0.5,0.25",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SCALE_GRID_FRACTIONS"),
+        description="ONE documented base: comma-separated tranche fractions of the ORIGINAL position sold at successive ladder targets (1R, 2R, ...). The runner = 1 - sum; the SUM is clamped < 1.0 so a runner always remains (no oversell, never strand 0 shares). e.g. '0.5,0.25' -> half at 1R, quarter at 2R, quarter runs.",
+    )
+    chili_momentum_scale_grid_r_multiples: str = Field(
+        default="1.0,2.0",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SCALE_GRID_R_MULTIPLES"),
+        description="Comma-separated R-multiples for the ladder targets (reward = R x stop-distance). Paired positionally with the fractions; a round number above entry that sits below the next R level pulls that tranche IN (Ross sells into the level where sellers stack). Adaptive: levels are R-multiples / the existing round-number grid, no fixed $.",
+    )
+    # E(2) WIN-CYCLE FATIGUE (entries-only). Tracks today's CLEAN WINS (live, per execution
+    # family). After a YELLOW count of wins, NEW entries size DOWN by a fraction (mirrors the
+    # streak/cushion size-down multipliers — composes under the same 3x clamp); after a RED
+    # count, NEW entries are HALTED for the session (mirrors the profit-goal cap early-out).
+    # ENTRIES ONLY — never blocks/delays an exit, stop, trail, bailout, scale-out, or dark-
+    # flatten on an OPEN position. Adaptive: counts are derived from realized wins; the YELLOW
+    # down-size never zeroes (preserves the explosive tail). OFF => no count, no down-size,
+    # no halt (byte-identical). docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_win_cycle_fatigue_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WIN_CYCLE_FATIGUE_ENABLED"),
+        description="Kill-switch for win-cycle fatigue (E2, entries-only). false = no win count, no YELLOW down-size, no RED halt (byte-identical).",
+    )
+    chili_momentum_win_cycle_yellow_wins: int = Field(
+        default=4,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WIN_CYCLE_YELLOW_WINS"),
+        description="ONE documented knob: clean wins today (per family) at/above which NEW entries size DOWN (YELLOW). Below it, no effect.",
+    )
+    chili_momentum_win_cycle_red_wins: int = Field(
+        default=7,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WIN_CYCLE_RED_WINS"),
+        description="Clean wins today (per family) at/above which NEW entries HALT for the session (RED) — lock in the green day. Exits/management unaffected. >= yellow_wins (clamped up if misconfigured).",
+    )
+    chili_momentum_win_cycle_yellow_size_fraction: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WIN_CYCLE_YELLOW_SIZE_FRACTION"),
+        description="YELLOW down-size multiplier on the per-trade risk budget (composes with the streak/cushion/liquidity levers under the 3x clamp). Never zeroes (>0) so an exceptional setup still takes a (smaller) position.",
+    )
+    # E(3) HARD NO-TRADE REGIMES (entries-only). A hard no-NEW-ENTRY standdown window around
+    # scheduled high-impact events (FOMC/CPI), and an OPTIONAL hard midday no-entry window
+    # (default OFF — the existing SOFT midday de-weight stays in charge unless this hard flag
+    # is on). ENTRIES ONLY — never blocks/delays an exit, stop, trail, bailout, scale-out, or
+    # dark-flatten on an OPEN position. OFF => no hard standdown (byte-identical; the soft
+    # midday de-weight is untouched). docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_hard_no_trade_regime_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HARD_NO_TRADE_REGIME_ENABLED"),
+        description="Kill-switch for hard no-trade regimes (E3, entries-only). false = no event standdown, no hard midday window (byte-identical).",
+    )
+    chili_momentum_hard_no_trade_event_times_utc: str = Field(
+        default="",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HARD_NO_TRADE_EVENT_TIMES_UTC"),
+        description="Comma-separated ISO-8601 UTC datetimes of scheduled high-impact events (FOMC/CPI), e.g. '2026-06-18T18:00:00Z,2026-07-15T12:30:00Z'. A small documented list; a calendar hook can populate it. Empty = no event standdown.",
+    )
+    chili_momentum_hard_no_trade_event_window_min: float = Field(
+        default=30.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HARD_NO_TRADE_EVENT_WINDOW_MIN"),
+        description="ONE documented knob: minutes BEFORE and AFTER each scheduled event during which NEW entries are halted (+/- window). Exits/management unaffected.",
+    )
+    chili_momentum_hard_no_trade_midday_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HARD_NO_TRADE_MIDDAY_ENABLED"),
+        description="Optional HARD midday no-NEW-ENTRY window (reuses the SAME 10:30-14:30 ET in_midday_lull band as the soft de-weight). Default OFF: the soft de-weight stays in charge. Equity-only; exits/management unaffected.",
+    )
     # L2.2 LIQUIDITY-SCALED RISK CAP (project_profitability_levers): shrink per-trade RISK
     # as the live spread eats the name's adaptive tolerance — wide-spread/illiquid names
     # (the −$697 low-float tail; QXL −$229 @119bps) get SIZED DOWN, never rejected (cuts the
