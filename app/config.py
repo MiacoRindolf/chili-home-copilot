@@ -2642,6 +2642,16 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_LOOKBACK_DAYS"),
         description="The ONE base structural knob for the daily-context layer: the swing-high/low window + daily-ATR period (days). Everything else derives from the daily ATR (equity-relative).",
     )
+    # P1 SECOND-DAY / MULTI-DAY CONTINUATION CONTEXT (selection re-rank tilt; equities). Folds
+    # into the existing daily_structure sub-score (compute_daily_context, reusing the P0 daily
+    # df — no new fetch): BOOST a clean DAY-2 holding above the prior-day high/close, DERATE
+    # day-3+ (exhaustion). A re-rank tilt, never a hard gate (a day-1 news spike still scores
+    # HIGH — the CUPR guarantee). OFF => daily_structure_pct byte-identical (no boost/derate).
+    chili_momentum_second_day_context_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SECOND_DAY_CONTEXT_ENABLED"),
+        description="Kill-switch for the P1 second-day/multi-day continuation selection tilt (equities). false = no day-2 boost, no day-3+ derate; the run/level fields are still surfaced for audit but daily_structure_pct is byte-identical.",
+    )
     # ── Halt awareness (Ross low-floats halt constantly: LULD circuit breakers) ──
     # A trading HALT is observable as a SUSTAINED quote freeze: the stale_bbo gate
     # already blocks single stale ticks; this many CONSECUTIVE stale-quote ticks on
@@ -4002,6 +4012,55 @@ class Settings(BaseSettings):
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_WIN_CYCLE_YELLOW_SIZE_FRACTION"),
         description="YELLOW down-size multiplier on the per-trade risk budget (composes with the streak/cushion/liquidity levers under the 3x clamp). Never zeroes (>0) so an exceptional setup still takes a (smaller) position.",
+    )
+    # ── P2 PER-SYMBOL ATTEMPT FATIGUE (entries-only). A per-session per-symbol live entry-
+    # attempt counter: DERATE the borderline last allowed attempt (YELLOW down-size) then VETO
+    # the Nth+ attempt on the SAME ticker today (Ross: stop trading a symbol after ~N tries).
+    # ENTRIES ONLY — held positions NEVER consult it; every exit/stop/scale-out/bailout stays
+    # allowed (the veto is a pre-position arm-gate skip; the down-size is at entry-fill sizing).
+    # OFF => no count, no down-size, no veto (byte-identical). docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_per_symbol_fatigue_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PER_SYMBOL_FATIGUE_ENABLED"),
+        description="Kill-switch for per-symbol attempt fatigue (P2, entries-only). false = no per-symbol attempt count, no YELLOW down-size, no RED veto (byte-identical).",
+    )
+    chili_momentum_per_symbol_max_attempts: int = Field(
+        default=3,
+        ge=2,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PER_SYMBOL_MAX_ATTEMPTS"),
+        description="ONE documented knob (default 3 per Ross): live entry attempts on the SAME ticker today at/above which a NEW entry is VETOED (RED). The attempt just below it is a YELLOW down-size. Clamped >= 2 (one allowed attempt before a down-size + a veto).",
+    )
+    chili_momentum_per_symbol_yellow_size_fraction: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PER_SYMBOL_YELLOW_SIZE_FRACTION"),
+        description="YELLOW per-symbol down-size multiplier on the per-trade risk budget for the borderline last allowed attempt (composes with the streak/cushion/liquidity/win-cycle levers under the 3x clamp). Never zeroes (>0).",
+    )
+    # ── P3 HOT/COLD-TAPE SIZE SCALING (entries-only sizing). A bounded size multiplier composed
+    # MULTIPLICATIVELY with the streak/cushion/liquidity levers under the same 3x clamp: size UP
+    # on a hot/explosive tape, DOWN on a cold one. Scales the per-trade RISK BUDGET only — the
+    # liquidity cap + equity-relative notional ceiling stay HARD caps (qty is capped at
+    # max_notional downstream), so this can never push notional past any cap. The hot/cold read
+    # reuses the SAME explosive ATR/RVOL floors entry_gates._is_hot_tape uses (no new magic).
+    # OFF / fail-neutral => 1.0 (byte-identical). docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_hot_cold_size_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_COLD_SIZE_ENABLED"),
+        description="Kill-switch for hot/cold-tape size scaling (P3, entry sizing only). false = size multiplier is always 1.0 (byte-identical). Bounded [cold_floor, hot_ceil]; never exceeds the liquidity/equity caps.",
+    )
+    chili_momentum_hot_cold_cold_floor: float = Field(
+        default=0.6,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_COLD_COLD_FLOOR"),
+        description="One documented bound: the size multiplier on a COLD (non-explosive) tape — size DOWN to this fraction of the risk budget. In (0,1].",
+    )
+    chili_momentum_hot_cold_hot_ceil: float = Field(
+        default=1.5,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_COLD_HOT_CEIL"),
+        description="One documented bound: the size multiplier on a HOT (explosive) tape — size UP to this fraction of the risk budget. >= 1.0; kept well under the 3x combined clamp so the other levers retain room.",
     )
     # E(3) HARD NO-TRADE REGIMES (entries-only). A hard no-NEW-ENTRY standdown window around
     # scheduled high-impact events (FOMC/CPI), and an OPTIONAL hard midday no-entry window

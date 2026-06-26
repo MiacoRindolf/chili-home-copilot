@@ -64,6 +64,12 @@ ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED: dict[str, float] = {
 # pool toward clean daily breakouts, it can never block a fill (the entry gate is
 # untouched). A news-gap spike breaking a level scores HIGH (the CUPR guarantee), so it
 # is never demoted. Percentile-ranked like every other pillar (raw range normalised away).
+#
+# (P1) SECOND-DAY / MULTI-DAY CONTINUATION (chili_momentum_second_day_context_enabled) folds
+# INTO this same daily_structure sub-score (in daily_levels.compute_daily_context): a clean
+# DAY-2 holding above the prior-day high/close is BOOSTED and a day-3+ (exhaustion) is DERATED,
+# so it RE-RANKS via the existing daily_structure pillar — no new pillar weight, no new fetch
+# (it reuses the P0 DailyContext daily df). A re-rank tilt only; never blocks a fill.
 ROSS_PILLAR_WEIGHTS_DAILY_CONTEXT: dict[str, float] = {
     "rvol": 0.40,
     "momentum": 0.30,

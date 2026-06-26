@@ -1373,6 +1373,189 @@ def win_cycle_yellow_size_multiplier(db: Session, *, execution_family: str | Non
         return 1.0, {}
 
 
+# ── PER-SYMBOL ATTEMPT FATIGUE (P2; flag chili_momentum_per_symbol_fatigue_enabled) ──
+# Ross stops trading a symbol after N losing/failed attempts in a session — a name that has
+# already chopped you twice today is not the one to keep feeding. CHILI had only the account-
+# WIDE win-cycle fatigue (above); this adds a PER-SYMBOL entry-attempt counter that DERATES
+# (a documented size-down on the borderline 2nd attempt) then VETOES the 3rd+ live entry
+# attempt on the SAME ticker in the current session day. Reuses the win-cycle scaffolding
+# shape (a count query + a band map + a multiplier helper; same TradingAutomationSession
+# table the lane already writes, no new path).
+#
+# CRITICAL EXIT-ISOLATION INVARIANT (identical to win-cycle fatigue): this gates NEW ENTRIES
+# ONLY. It is consulted exclusively on the PRE-POSITION arming path (the auto-arm loop's
+# begin/confirm and the entry-fill size in the live runner). A HELD position NEVER consults
+# it — every exit / stop / trail / scale-out / bailout / flatten path runs in the live runner
+# and does not call these helpers, so a fatigued symbol can always be EXITED, only not
+# re-entered. The count is "attempts begun" (live sessions begun for the symbol today), so an
+# OPEN position's own session is already counted and cannot be re-blocked out of its exit.
+
+
+def _per_symbol_attempt_count(db: Session, symbol: str, *, execution_family: str | None = None) -> int:
+    """Count TODAY's LIVE ENTRY ATTEMPTS on ``symbol`` (this execution family) for per-symbol
+    fatigue (P2). An attempt = a live TradingAutomationSession begun for the symbol in the
+    current UTC day (the lane arms one live session per entry attempt). Mirrors the win-cycle
+    count's query shape (no new table/path). Fail-open: any error returns 0 (fatigue never
+    triggers on a query glitch — it can only REDUCE/VETO a NEW entry, never an exit)."""
+    try:
+        su = str(symbol or "").strip().upper()
+        if not su:
+            return 0
+        day_start = _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        q = (
+            db.query(TradingAutomationSession.id)
+            .filter(
+                TradingAutomationSession.mode == "live",
+                TradingAutomationSession.symbol == su,
+                TradingAutomationSession.started_at >= day_start,
+            )
+        )
+        if execution_family:
+            q = q.filter(TradingAutomationSession.execution_family == str(execution_family))
+        return int(q.count())
+    except Exception:
+        logger.debug("[auto_arm] per-symbol attempt-count query failed (fail-open 0)", exc_info=True)
+        return 0
+
+
+def _per_symbol_fatigue_level(attempt_count: int) -> str:
+    """Map the per-symbol attempt count to a fatigue band: 'green' | 'yellow' | 'red'.
+
+    ONE documented adaptive knob: ``chili_momentum_per_symbol_max_attempts`` (default 3 per
+    Ross — "stop trading a symbol after ~N attempts"). The VETO fires at/above that cap (RED);
+    the attempt just BELOW it (the borderline last allowed try) is a YELLOW down-size. OFF =>
+    always 'green' (byte-identical). ENTRIES-ONLY semantics live in the callers."""
+    if not bool(getattr(settings, "chili_momentum_per_symbol_fatigue_enabled", False)):
+        return "green"
+    try:
+        max_attempts = int(getattr(settings, "chili_momentum_per_symbol_max_attempts", 3) or 3)
+    except (TypeError, ValueError):
+        return "green"
+    max_attempts = max(2, max_attempts)  # need at least one allowed attempt before a down-size + a veto
+    n = int(attempt_count or 0)
+    if n >= max_attempts:
+        return "red"      # the 3rd+ attempt (count already at the cap) — VETO a new entry
+    if n >= max_attempts - 1:
+        return "yellow"   # the borderline last allowed attempt — size DOWN
+    return "green"
+
+
+def per_symbol_fatigue_blocks_entry(db: Session, symbol: str, *, execution_family: str | None = None) -> tuple[bool, dict[str, Any]]:
+    """ENTRIES-ONLY veto for per-symbol attempt fatigue (P2). Returns ``(blocked, meta)``.
+
+    ``blocked`` is True when ``symbol`` has already reached the per-symbol attempt cap TODAY
+    (RED) — the auto-arm loop SKIPS arming a new live session for it (a missed re-entry, never
+    a blocked exit: an OPEN position's session already exists and is managed by the live runner,
+    which does not consult this). OFF / fail-open => (False, {}) (byte-identical)."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_per_symbol_fatigue_enabled", False)):
+            return False, {}
+        n = _per_symbol_attempt_count(db, symbol, execution_family=execution_family)
+        level = _per_symbol_fatigue_level(n)
+        if level == "red":
+            return True, {
+                "symbol": str(symbol or "").strip().upper(),
+                "attempts_today": n,
+                "max_attempts": int(getattr(settings, "chili_momentum_per_symbol_max_attempts", 3) or 3),
+            }
+        return False, {"level": level, "attempts_today": n}
+    except Exception:
+        return False, {}
+
+
+def per_symbol_fatigue_size_multiplier(db: Session, symbol: str, *, execution_family: str | None = None) -> tuple[float, dict[str, Any]]:
+    """ENTRY-side size multiplier for per-symbol fatigue (P2) — read by the live runner at
+    entry-fill sizing. Returns ``(mult, meta)`` in (0, 1]:
+
+      * green  -> 1.0 (no effect)
+      * yellow -> ``chili_momentum_per_symbol_yellow_size_fraction`` (the borderline last
+                  allowed attempt is taken smaller; never zeroes)
+      * red    -> 1.0 here (the RED VETO is enforced as an arm-gate skip, NOT a size of 0 — an
+                  OPEN position is never de-sized to nothing).
+
+    OFF / fail-open => (1.0, {}). NEVER blocks or delays an exit; it only scales a NEW entry's
+    risk budget (composes with the streak/cushion/liquidity/win-cycle levers under the 3x clamp)."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_per_symbol_fatigue_enabled", False)):
+            return 1.0, {}
+        n = _per_symbol_attempt_count(db, symbol, execution_family=execution_family)
+        level = _per_symbol_fatigue_level(n)
+        if level == "yellow":
+            frac = float(getattr(settings, "chili_momentum_per_symbol_yellow_size_fraction", 0.5) or 0.5)
+            if frac <= 0.0 or frac >= 1.0 or not (frac == frac):  # NaN guard
+                return 1.0, {}
+            return frac, {"level": "yellow", "attempts_today": n, "mult": round(frac, 4)}
+        return 1.0, {"level": level, "attempts_today": n}
+    except Exception:
+        return 1.0, {}
+
+
+# ── HOT/COLD-TAPE SIZE SCALING (P3; flag chili_momentum_hot_cold_size_enabled) ──
+# The hot-tape regime already GATES some entries (entry_gates._is_hot_tape gates the wick-
+# reclaim / micro-primary triggers; catalyst.hot_tape_regime flips the catalyst tilt) but it
+# never scales SIZE. Ross sizes UP into a hot, explosive tape (more, faster setups that follow
+# through) and DOWN into a slow/cold one (chop). This returns a BOUNDED size multiplier the
+# live runner composes MULTIPLICATIVELY with the streak/cushion/liquidity levers under the same
+# 3x clamp; it scales the per-trade RISK BUDGET only and can NEVER push notional past the
+# liquidity / equity-relative ceilings (those stay hard caps; the qty is capped at max_notional
+# downstream). The hot/cold read reuses the SAME explosive ATR/RVOL floors as
+# entry_gates._is_hot_tape (one source of truth for "explosive tape") — no new magic thresholds.
+
+# The TWO documented bounds: the cold floor (size-DOWN on a non-explosive tape) and the hot
+# ceiling (size-UP on an explosive one). Symmetric-ish around 1.0; the hot ceiling is kept well
+# under the 3x combined clamp so the other levers still have room. Bounded => never runaway.
+ROSS_HOT_COLD_COLD_FLOOR = 0.6   # cold tape: size DOWN to 60% of the risk budget
+ROSS_HOT_COLD_HOT_CEIL = 1.5     # hot tape: size UP to 150% of the risk budget
+
+
+def hot_cold_tape_size_multiplier(
+    *,
+    atr_pct: float | None,
+    rvol: float | None,
+) -> tuple[float, dict[str, Any]]:
+    """P3 hot/cold-tape size multiplier in [cold_floor, hot_ceil]. ``(mult, meta)``.
+
+    HOT (size UP to ``chili_momentum_hot_cold_hot_ceil``) when the name's intraday volatility
+    (ATR%) OR relative volume is at/above the lane's explosive floors — the SAME floors
+    ``entry_gates._is_hot_tape`` / ``is_explosive_mover`` use, so "hot" has one definition.
+    COLD (size DOWN to ``chili_momentum_hot_cold_cold_floor``) when BOTH are AFFIRMATIVELY below
+    the floors (a measured non-explosive tape). NEUTRAL 1.0 when neither read is available
+    (fail-neutral — never size up or down on absent data). OFF / error => (1.0, {}) (byte-
+    identical). Pure (no IO / no mutation); the caller reads atr_pct / rvol from the live regime.
+
+    Bounded by construction (the two documented bounds), so it can never exceed the existing
+    caps — it only scales the RISK BUDGET, which the downstream notional ceiling still bounds."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_hot_cold_size_enabled", False)):
+            return 1.0, {}
+        cold_floor = float(getattr(settings, "chili_momentum_hot_cold_cold_floor", ROSS_HOT_COLD_COLD_FLOOR) or ROSS_HOT_COLD_COLD_FLOOR)
+        hot_ceil = float(getattr(settings, "chili_momentum_hot_cold_hot_ceil", ROSS_HOT_COLD_HOT_CEIL) or ROSS_HOT_COLD_HOT_CEIL)
+        # sane bounds: cold floor in (0,1], hot ceil in [1, +) — clamp a misconfig.
+        cold_floor = max(0.05, min(1.0, cold_floor))
+        hot_ceil = max(1.0, hot_ceil)
+        a = None if atr_pct is None else float(atr_pct)
+        rv = None if rvol is None else float(rvol)
+        if a is None and rv is None:
+            return 1.0, {}  # fail-neutral: no read => no scaling
+        atr_floor = float(getattr(settings, "chili_momentum_explosive_atr_pct_floor", 0.045) or 0.0)
+        rvol_floor = float(getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 0.0)
+        is_hot = (a is not None and atr_floor > 0.0 and a >= atr_floor) or (
+            rv is not None and rvol_floor > 0.0 and rv >= rvol_floor
+        )
+        if is_hot:
+            return hot_ceil, {"tape": "hot", "mult": round(hot_ceil, 4), "atr_pct": a, "rvol": rv}
+        # COLD only when the available reads AFFIRMATIVELY sit below the floors (not on a single
+        # missing axis). A present axis below its floor + the other absent still reads cold (the
+        # present evidence shows non-explosive); both present + below = clearly cold.
+        _below_atr = a is None or atr_floor <= 0.0 or a < atr_floor
+        _below_rvol = rv is None or rvol_floor <= 0.0 or rv < rvol_floor
+        if _below_atr and _below_rvol:
+            return cold_floor, {"tape": "cold", "mult": round(cold_floor, 4), "atr_pct": a, "rvol": rv}
+        return 1.0, {"tape": "neutral", "atr_pct": a, "rvol": rv}
+    except Exception:
+        return 1.0, {}
+
+
 def _symbol_free(db: Session, symbol: str, user_id: int | None) -> bool:
     """Per-symbol autopilot mutex vs AutoTrader v1 (fail open on helper error)."""
     try:
@@ -2356,6 +2539,28 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         out["execution_family"] = _exec_family
         out["viability_score"] = round(float(chosen.viability_score or 0.0), 4)
         out["trigger"] = chosen_reason
+
+        # P2 PER-SYMBOL ATTEMPT FATIGUE (ENTRIES ONLY): veto a NEW live entry attempt once this
+        # ticker has already reached the per-symbol attempt cap TODAY (Ross: stop trading a name
+        # after ~N attempts). This is a PRE-POSITION arm-gate SKIP — it never touches a HELD
+        # position (an OPEN session is owned by the live runner, which does not consult this), so
+        # every exit/stop/scale-out/bailout stays allowed. OFF / fail-open => no skip. The YELLOW
+        # down-size for the borderline last allowed attempt is applied at entry-fill sizing in the
+        # live runner (per_symbol_fatigue_size_multiplier). docs/DESIGN/MOMENTUM_LANE.md
+        try:
+            _psf_blocked, _psf_meta = per_symbol_fatigue_blocks_entry(
+                db, chosen.symbol, execution_family=_exec_family
+            )
+            if _psf_blocked:
+                out["skipped"] = "per_symbol_fatigue"
+                out["per_symbol_fatigue"] = _psf_meta
+                logger.info(
+                    "[auto_arm] per-symbol fatigue veto %s: %s attempts today (cap %s) — skip new entry",
+                    chosen.symbol, _psf_meta.get("attempts_today"), _psf_meta.get("max_attempts"),
+                )
+                continue
+        except Exception:
+            pass
 
         begin = begin_live_arm(
             db,

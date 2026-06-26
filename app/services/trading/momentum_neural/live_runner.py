@@ -5459,8 +5459,46 @@ def tick_live_session(
                     le["win_cycle_fatigue"] = _fatigue_meta
             except Exception:
                 _fatigue_mult = 1.0
+        # P2 PER-SYMBOL ATTEMPT FATIGUE — YELLOW down-size (ENTRIES ONLY): the borderline last
+        # allowed attempt on a ticker that has already chopped us today is taken SMALLER (the RED
+        # over-cap attempt is vetoed at the arm-gate, not de-sized to 0 — an OPEN position is
+        # never de-sized to nothing). This is the ENTRY-fill sizing path; it physically cannot
+        # reach an exit (held states never consult fatigue). Composes with the streak/cushion/
+        # liquidity/win-cycle levers under the same 3x clamp. OFF / green / fail-open => 1.0
+        # (byte-identical). Replay applies the SAME multiplier from the SAME helper => parity.
+        _sym_fatigue_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_per_symbol_fatigue_enabled", False)):
+            try:
+                from .auto_arm import per_symbol_fatigue_size_multiplier
+
+                _sym_fatigue_mult, _sym_fatigue_meta = per_symbol_fatigue_size_multiplier(
+                    db, sess.symbol, execution_family=ef
+                )
+                if _sym_fatigue_mult < 1.0:
+                    le["per_symbol_fatigue"] = _sym_fatigue_meta
+            except Exception:
+                _sym_fatigue_mult = 1.0
+        # P3 HOT/COLD-TAPE SIZE SCALING — a BOUNDED size multiplier: size UP on hot tape, DOWN on
+        # cold, composed MULTIPLICATIVELY with the other levers under the SAME 3x clamp. The
+        # liquidity cap (max_notional above) and the equity-relative notional ceiling remain HARD
+        # ceilings — this only scales the per-trade RISK BUDGET, and compute_risk_first_quantity
+        # below still caps qty at max_notional, so the mult can NEVER push notional past any cap.
+        # OFF / fail-neutral => 1.0 (byte-identical). docs/DESIGN/MOMENTUM_LANE.md
+        _hot_cold_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_hot_cold_size_enabled", False)):
+            try:
+                from .auto_arm import hot_cold_tape_size_multiplier
+
+                _hc_rvol = _latest_rvol(db, sess.symbol)
+                _hot_cold_mult, _hc_meta = hot_cold_tape_size_multiplier(
+                    atr_pct=regime_atr_pct(_regime), rvol=_hc_rvol,
+                )
+                if _hot_cold_mult != 1.0:
+                    le["hot_cold_size"] = _hc_meta
+            except Exception:
+                _hot_cold_mult = 1.0
         _eff_max_loss = min(
-            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult) * float(_fatigue_mult),
+            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult) * float(_fatigue_mult) * float(_sym_fatigue_mult) * float(_hot_cold_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE

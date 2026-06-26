@@ -36,6 +36,26 @@ _GAP_SIGNIF_MEDIAN_MULT = 2.0
 #     does NOT get the no-overhead-supply boost. ATH epsilon is ATR-relative (below).
 _RECENT_IPO_MAX_BARS = 504  # ~2 yr of trading days; the ONE documented IPO-recency base
 
+# (P1) SECOND-DAY / MULTI-DAY CONTINUATION (chili_momentum_second_day_context_enabled).
+# Ross trades the SECOND day of a multi-day runner aggressively (a clean day-2 holding
+# above the prior-day high / prior-day close with continuation structure is his bread-and-
+# butter) and DISTRUSTS day-3+ (exhaustion / blow-off risk). CHILI had zero multi-day
+# memory — each session was amnesiac. This counts the consecutive up/elevated daily bars
+# since the catalyst spike (``day_number_in_run``) and folds a bounded SELECTION tilt into
+# the daily-structure sub-score (BOOST a clean day-2, DERATE day-3+). It is a RE-RANK tilt,
+# never a hard gate (a news-gap day-1 spike still scores HIGH — the CUPR guarantee holds).
+#   * A daily bar counts toward the run when it is an UP day (close > prior close) OR
+#     "elevated" (close within ~one daily-ATR of the run's high — a tight consolidation
+#     after the spike still counts as holding the move, not breaking it). The run resets
+#     on a bar that closes BELOW the prior bar by more than one daily-ATR (the move broke).
+#   * The ONE documented base is the day-2 boost magnitude; the day-3+ derate is the same
+#     magnitude on the other side (symmetric), and the "elevated" tolerance is the daily-ATR
+#     (adaptive — no fixed %). The boost is gated on the name actually HOLDING above the
+#     prior-day high / prior-day close (continuation structure), so a day-2 that already
+#     rolled under yesterday's range gets no boost.
+_SECOND_DAY_TILT = 0.12          # ONE documented base: the day-2 continuation boost / day-3+ derate magnitude
+_SECOND_DAY_RUN_MAX_BARS = 6     # how far back to scan for the consecutive run (bounds the loop; adaptive cap)
+
 
 @dataclass(frozen=True)
 class DailyContext:
@@ -68,6 +88,10 @@ class DailyContext:
     is_blue_sky: bool | None = None                    # px within ε of the all-history max
     trading_history_days: int | None = None            # bars of available daily history
     is_recent_ipo: bool | None = None                  # short history => no trapped overhead supply
+    # (P1) SECOND-DAY / MULTI-DAY CONTINUATION (chili_momentum_second_day_context_enabled).
+    day_number_in_run: int | None = None               # consecutive up/elevated daily bars since the catalyst spike (1 = day-1 spike)
+    prior_day_close: float | None = None               # yesterday's daily close (the day-2 hold reference)
+    prior_week_high: float | None = None               # highest high over the trailing ~5 daily bars (the week's ceiling)
 
 
 _NULL = DailyContext(
@@ -257,6 +281,50 @@ def _blue_sky_recent_ipo(
     return bool(is_blue_sky), bool(is_recent_ipo)
 
 
+def _day_number_in_run(
+    close: Any,
+    *,
+    atr_last: float,
+    max_bars: int = _SECOND_DAY_RUN_MAX_BARS,
+) -> int | None:
+    """(P1) Count the consecutive up/elevated daily bars ending at the most recent bar — the
+    "day number" of a multi-day runner (1 = a fresh day-1 spike, 2 = day-2 continuation, …).
+
+    Walk BACKWARD from the last bar: the run continues through bar ``i`` as long as the move
+    has NOT yet stepped up out of its base BETWEEN ``i`` and ``i+1`` — i.e. the catalyst SPIKE
+    (the day the price gapped/ran > 1 daily-ATR ABOVE the prior close) is the FIRST bar of the
+    run, and the quiet pre-spike base is excluded. Stop the walk at the bar whose SUCCESSOR
+    jumped > 1 ATR above it (that successor is day-1 of the run). Also stop on a > 1-ATR DOWN
+    close (the move broke). So a fresh day-1 spike off a flat base reads run==1; each additional
+    holding/up day adds 1 (a steep multi-day runner that steps up > 1 ATR/day still counts each
+    leg because the step-UP only ENDS the walk at the base, it does not split the run). Bounded
+    to ``max_bars`` (a day-7+ runner is just "extended"). Returns ``None`` on thin / non-finite
+    data (fail-open ⇒ no tilt). Pure; never raises."""
+    try:
+        cv = [float(x) for x in close.values]
+    except Exception:
+        return None
+    n = len(cv)
+    if n < 2 or not (atr_last and math.isfinite(atr_last) and atr_last > 0):
+        return None
+    cap = max(1, int(max_bars))
+    run = 1  # the most recent bar always anchors the run
+    # step back: include bar i while the move did not start at i+1 (a > 1-ATR step UP from i to
+    # i+1 = the catalyst spike, so i is the pre-spike base) and i did not break > 1 ATR DOWN.
+    for i in range(n - 2, -1, -1):
+        if run >= cap:
+            break
+        c_cur, c_next = cv[i], cv[i + 1]
+        if not (math.isfinite(c_cur) and math.isfinite(c_next)):
+            break
+        if (c_next - c_cur) > atr_last:  # the move stepped up out of the base here — run starts at i+1
+            break
+        if (c_cur - c_next) > atr_last:  # a > 1-ATR down close — the run already broke before here
+            break
+        run += 1
+    return int(run)
+
+
 # ── ENTRY-PATH overhead-supply read (P0) ─────────────────────────────────────────
 # The SELECTION tilts above re-rank a name; these two pure helpers let the ENTRY gate
 # (entry_gates.py) read the SAME daily structure so a breakout TRIGGER is daily-aware:
@@ -334,6 +402,7 @@ def compute_daily_context(
     blue_sky_recent_ipo: bool = False,
     fresh_catalyst: bool = False,
     entry_context: bool = False,
+    second_day_context: bool | None = None,
 ) -> DailyContext:
     """Daily context from a daily OHLCV df (cols Open/High/Low/Close/Volume).
 
@@ -358,7 +427,21 @@ def compute_daily_context(
     gate can read overhead supply / clear-sky for ALL names. It NEVER alters ``ds`` (the
     selection sub-score): the boost/derate to ``ds`` stays gated on the tilt flags, so
     the SELECTION path (which never passes ``entry_context``) is byte-identical.
+
+    ``second_day_context`` (P1; flag ``chili_momentum_second_day_context_enabled``): when
+    True (``None`` ⇒ resolve the live config flag lazily so the existing caller auto-opts-
+    in without a signature change), compute ``day_number_in_run`` / ``prior_day_close`` /
+    ``prior_week_high`` and fold a bounded continuation tilt INTO ``ds``: BOOST a clean
+    DAY-2 (holding above prior_day_high / prior_day_close), DERATE day-3+ (exhaustion).
+    OFF (flag false) ⇒ the run/level fields are still surfaced for log/audit but ``ds`` is
+    left byte-identical (the boost/derate is gated on the flag). A re-rank tilt, never a gate.
     """
+    if second_day_context is None:
+        try:
+            from app.config import settings as _settings  # local import: no top-level dep
+            second_day_context = bool(getattr(_settings, "chili_momentum_second_day_context_enabled", False))
+        except Exception:
+            second_day_context = False
     n = max(2, int(lookback))
     try:
         if df is None or len(df) < n + 2:
@@ -511,6 +594,34 @@ def compute_daily_context(
             except Exception:
                 pass
 
+        # (P1) SECOND-DAY / MULTI-DAY CONTINUATION — count the consecutive up/elevated daily
+        # bars since the catalyst spike, surface prior_day_close + prior_week_high, and fold a
+        # bounded continuation tilt into ``ds``: BOOST a clean DAY-2 holding above the prior-day
+        # high / prior-day close (the textbook Ross continuation), DERATE day-3+ (exhaustion).
+        # The run/level fields are surfaced for log/audit regardless; the ds mutation is gated on
+        # the flag (OFF ⇒ byte-identical). A re-rank tilt, never a gate.
+        day_num = pday_close = pweek_high = None
+        try:
+            day_num = _day_number_in_run(close, atr_last=atr_last)
+            pday_close = float(close.iloc[-2])
+            # prior-week high = highest HIGH over the trailing ~5 daily bars EXCLUDING today.
+            _wk = high.iloc[-6:-1] if len(high) >= 6 else high.iloc[:-1]
+            if len(_wk) > 0:
+                pweek_high = float(_wk.max())
+            if second_day_context and day_num is not None:
+                if day_num == 2:
+                    # clean day-2 boost — gated on actually HOLDING the move (price at/above the
+                    # prior-day high OR the prior-day close = continuation structure, not a fade).
+                    _holding = (px >= pdh) or (pday_close is not None and px >= pday_close)
+                    if _holding:
+                        ds = max(0.0, min(1.0, ds + _SECOND_DAY_TILT))
+                elif day_num >= 3:
+                    # day-3+ derate (exhaustion); symmetric magnitude, multiplicative so it
+                    # never zeroes a still-breaking name (the CUPR floor holds).
+                    ds = max(0.0, min(1.0, ds * (1.0 - _SECOND_DAY_TILT)))
+        except Exception:
+            pass
+
         return DailyContext(
             prior_day_high=pdh, prior_day_low=pdl, swing_high_nd=sh, swing_low_nd=sl,
             daily_atr_pct=atr_pct, dist_to_resistance_atr=d_res, dist_to_support_atr=d_sup,
@@ -521,6 +632,7 @@ def compute_daily_context(
             room_to_gap_top_atr=room_to_gap_top, opens_into_gap=opens_into_gap,
             rejection_count=rej_count, rejection_recency_frac=rej_recency,
             is_blue_sky=is_blue, trading_history_days=trade_days, is_recent_ipo=is_ipo,
+            day_number_in_run=day_num, prior_day_close=pday_close, prior_week_high=pweek_high,
         )
     except Exception:
         return _NULL
