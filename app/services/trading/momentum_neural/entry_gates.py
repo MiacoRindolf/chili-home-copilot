@@ -3559,11 +3559,244 @@ def hod_break_confirmation(
         return False, f"{_reason_fire}_error", {"entry_interval": entry_interval}
 
 
+# ── P0: DAILY-CONTEXT-AWARE OVERHEAD VETO + BLUE-SKY ENTRY TRIGGER ────────────────
+# entry_gates consumed ZERO daily context, so EVERY breakout trigger fired BLIND to
+# overhead supply — it would buy a break into a wall of trapped longs $0.10 above just
+# as readily as a break into clear blue sky. These two functions plumb the DailyContext
+# (built/cached once per session by the live runner — NO new per-tick fetch) into the
+# entry path: a veto that rejects a break into a ceiling, and a dedicated trigger that
+# fires ONLY on a genuine clear-sky new-high break. Both kill-switch-gated: OFF ⇒ the
+# entry path is daily-blind = byte-identical to before. docs/DESIGN/MOMENTUM_LANE.md
+
+
+def _overhead_supply_veto(
+    daily_ctx: Any, *, entry: float | None,
+) -> tuple[str, dict[str, Any]] | None:
+    """P0 OVERHEAD-SUPPLY VETO for ANY breakout entry (flag
+    ``chili_momentum_overhead_veto_enabled``).
+
+    When trapped supply (a prior daily swing high / unfilled gap / red-rejection cluster
+    the price must fight THROUGH) sits within ``chili_momentum_overhead_veto_atr`` daily-
+    ATR units ABOVE the ``entry``, return ``("overhead_supply", patch)`` so the caller
+    rejects the break (do not buy straight into a ceiling). The threshold is ATR-derived
+    (adaptive, no magic $); a TRUE blue-sky / clear-room break (overhead distance beyond
+    the floor, or no overhead level at all) returns ``None`` (PASS) so the veto NEVER
+    over-blocks a clean breakout.
+
+    FAIL-OPEN to ``None`` on: flag off, no DailyContext, no usable ATR/entry, or any
+    error — the entry path is never blocked on missing daily data or a bug. Pure read."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_overhead_veto_enabled", False)):
+            return None
+        if daily_ctx is None or entry is None or not (float(entry) > 0):
+            return None
+        from .daily_levels import overhead_supply_atr
+
+        room = overhead_supply_atr(daily_ctx, entry=float(entry))
+        if room is None:                     # no overhead level found -> clear sky, PASS
+            return None
+        floor = float(getattr(settings, "chili_momentum_overhead_veto_atr", 0.5) or 0.5)
+        if float(room) < floor:
+            patch = {
+                "overhead_supply_atr": round(float(room), 3),
+                "overhead_veto_floor_atr": round(floor, 3),
+            }
+            # surface WHICH level is the nearest ceiling for the operator (best-effort).
+            try:
+                sh = getattr(daily_ctx, "swing_high_nd", None)
+                gb = getattr(daily_ctx, "nearest_unfilled_gap_bottom", None)
+                rej = getattr(daily_ctx, "rejection_count", None)
+                if sh is not None:
+                    patch["overhead_swing_high"] = round(float(sh), 4)
+                if gb is not None:
+                    patch["overhead_gap_bottom"] = round(float(gb), 4)
+                if rej:
+                    patch["overhead_rejection_count"] = int(rej)
+            except (TypeError, ValueError):
+                pass
+            return "overhead_supply", patch
+        return None
+    except Exception:
+        return None  # any error -> fail-open (never block an entry on a bug)
+
+
+def blue_sky_break_confirmation(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str,
+    daily_ctx: Any = None,
+    live_price: float | None = None,
+    symbol: str | None = None,
+    now: Any = None,
+    db: Any = None,
+    l2_as_of: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """P0 BLUE-SKY BREAKOUT entry (flag ``chili_momentum_blue_sky_entry_enabled``).
+
+    DISTINCT from ``hod_break_confirmation`` (which breaks the high of DAY): this fires
+    the break of a NEW MULTI-PERIOD / ALL-TIME high with NO overhead resistance — a true
+    clear-sky breakout (the cleanest there is: no trapped longs to sell into the move).
+    Requires (read from the session-cached ``DailyContext`` — NO new fetch):
+      * ``entry_is_clear_sky`` — px at/above a fresh multi-period/all-time high
+        (``is_blue_sky``) AND the nearest overhead-supply level (if any) at least
+        ``chili_momentum_blue_sky_entry_min_room_atr`` daily-ATR away (genuine clear sky,
+        NEVER a mid-range break with a ceiling above);
+    plus, on the intraday tape: a consolidation base just under the high (REUSING the
+    HOD-break base machinery), a break to a new high, and a volume confirm.
+
+    Returns the shared ``(ok, reason, debug)`` with ``pullback_high`` (= the break level)
+    and ``pullback_low`` (= the base low / structural stop) under the IDENTICAL keys, so
+    the downstream sizing / structural-stop / breakout-or-bailout machinery + the setup-
+    selector reuse it unchanged. ``reason`` is ``blue_sky_break`` on a completed-bar break
+    (``blue_sky_break_tick_ok`` on the live-tick break); WAIT reasons are tick-armable
+    (``waiting_for_break``).
+
+    ADDITIVE: flag OFF / no DailyContext / not clear sky / thin -> ``(False, reason,
+    {...})`` with NO side effects; fail-OPEN to a benign decline on any error (never
+    raises, never blocks the rest of the ladder). docs/DESIGN/MOMENTUM_LANE.md"""
+    debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "blue_sky_break"}
+    try:
+        if not bool(getattr(settings, "chili_momentum_blue_sky_entry_enabled", False)):
+            return False, "blue_sky_break_disabled", debug
+        if daily_ctx is None:
+            return False, "blue_sky_break_no_daily_ctx", debug
+        if df is None or getattr(df, "empty", True) or len(df) < 12:
+            return False, "blue_sky_break_insufficient_bars", debug
+
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        vol = df["Volume"].astype(float)
+        n = len(df)
+        cur = n - 1
+        arrays = compute_all_from_df(df, needed={"ema_9", "ema_20", "vwap", "volume_ratio", "atr", "macd", "macd_signal"})
+        ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
+        vr = arrays.get("volume_ratio") or []
+        atr = arrays.get("atr") or []
+
+        atr_pct = None
+        try:
+            _a = float(atr[cur]) if cur < len(atr) and atr[cur] is not None else None
+            _p = float(close.iloc[cur])
+            if _a is not None and _p > 0:
+                atr_pct = _a / _p
+        except (TypeError, ValueError, IndexError):
+            atr_pct = None
+        debug["atr_pct"] = round(atr_pct, 5) if atr_pct is not None else None
+        a = float(atr_pct) if (atr_pct is not None and atr_pct > 0) else 0.0
+        eff_a = a if a > 0 else 0.01
+
+        # ── CONSOLIDATION BASE just under the high (REUSE the HOD-break base read) ──────
+        base_bars = int(getattr(settings, "chili_momentum_hod_base_bars", 4) or 4)
+        base_atr_mult = float(getattr(settings, "chili_momentum_hod_base_atr_mult", 1.5) or 1.5)
+        base_start = max(0, cur - base_bars)
+        if base_start >= cur:
+            return False, "blue_sky_break_insufficient_bars", debug
+        base_hi = float(high.iloc[base_start:cur].max())
+        base_lo = float(low.iloc[base_start:cur].min())
+        if not (0.0 < base_lo < base_hi):
+            return False, "blue_sky_break_bad_base", debug
+        level = base_hi   # the break level = the base resistance ("a couple cents under")
+        stop = base_lo    # tight structural stop below the consolidation low
+        debug["base_high"] = round(base_hi, 6)
+        debug["base_low"] = round(base_lo, 6)
+
+        # tight base (a flag, not chop) — the same ATR-relative width guard as the HOD break.
+        base_range_pct = (base_hi - base_lo) / base_hi if base_hi > 0 else 1.0
+        debug["base_range_pct"] = round(base_range_pct, 4)
+        if base_range_pct > base_atr_mult * eff_a:
+            return False, "blue_sky_break_base_too_wide", debug
+
+        # ── CLEAR-SKY REQUIREMENT (the defining gate): the break level must be a genuine
+        # new multi-period/all-time high with clear room overhead — NEVER a mid-range
+        # break into a ceiling. Evaluated at the BREAK LEVEL (the price we'd enter at).
+        from .daily_levels import entry_is_clear_sky
+
+        min_room = float(getattr(settings, "chili_momentum_blue_sky_entry_min_room_atr", 1.5) or 1.5)
+        if not entry_is_clear_sky(daily_ctx, entry=float(level), min_room_atr=min_room):
+            debug["is_blue_sky"] = bool(getattr(daily_ctx, "is_blue_sky", False))
+            debug["min_room_atr"] = round(min_room, 3)
+            try:
+                from .daily_levels import overhead_supply_atr as _osa
+                _r = _osa(daily_ctx, entry=float(level))
+                if _r is not None:
+                    debug["overhead_supply_atr"] = round(float(_r), 3)
+            except Exception:
+                pass
+            return False, "blue_sky_break_not_clear_sky", debug
+        debug["is_blue_sky"] = True
+        debug["room_to_gap_top_atr"] = (
+            round(float(getattr(daily_ctx, "room_to_gap_top_atr", None) or 0.0), 3)
+            if getattr(daily_ctx, "room_to_gap_top_atr", None) is not None else None
+        )
+
+        # ── ANTI-CHASE: backside / rolled-over top veto (reused, fail-OPEN) ─────────────
+        _bs, _bs_reason = _detect_back_side(
+            ema9, (arrays.get("ema_20") or []),
+            (arrays.get("macd") or []), (arrays.get("macd_signal") or []),
+            cur, macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+        )
+        if _bs:
+            debug["back_side"] = _bs_reason
+            return False, "blue_sky_break_back_side", debug
+
+        # ── L2 hidden-seller veto (reused; fail-open on disabled/null L2) ───────────────
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
+        if _l2v is not None:
+            _reason, _l2patch = _l2v
+            debug.update(_l2patch)
+            return False, f"blue_sky_break_{_reason}", debug
+
+        debug["pullback_high"] = float(level)
+        debug["pullback_low"] = float(stop)
+
+        # ── TICK-BREAK: the live ask already trading through the break level (Ross speed) ──
+        if (
+            live_price is not None and float(live_price) > 0
+            and float(live_price) > level
+            and _premarket_tickbreak_confirmed(
+                live_price=float(live_price), level=float(level),
+                atr_pct=atr_pct, symbol=symbol, now=now,
+            )
+            and _dipbuy_tick_thrust_ok(
+                live_price=float(live_price), level=float(level), atr_pct=atr_pct,
+            )
+        ):
+            debug["tick_break"] = True
+            debug["live_price"] = float(live_price)
+            return True, "blue_sky_break_tick_ok", debug
+
+        # not broken on a completed bar yet -> ARM a tick-watch at the break level.
+        cur_hi = float(high.iloc[cur])
+        if cur_hi <= level:
+            return False, "waiting_for_break", debug
+
+        # a completed bar broke to a new high -> require a VOLUME SPIKE (real demand).
+        vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
+        vol_ratio = None
+        try:
+            vol_ratio = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
+        except (TypeError, ValueError):
+            vol_ratio = None
+        if vol_ratio is None:
+            w = vol.tail(21)
+            _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
+            vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
+        debug["vol_ratio"] = round(vol_ratio, 2)
+        if vol_ratio < vol_mult:
+            return False, "blue_sky_break_low_volume", debug
+        return True, "blue_sky_break", debug
+    except Exception:
+        return False, "blue_sky_break_error", {"entry_interval": entry_interval}
+
+
 def select_best_setup(
     candidates: list[tuple[bool, str, dict[str, Any]]],
     *,
     symbol: str | None = None,
     atr_pct: float | None = None,
+    daily_ctx: Any = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Setup-selector (Batch A): given several trigger results that fired on the SAME bar
     (each a shared ``(ok, reason, debug)`` with ``pullback_high`` = entry level +
@@ -3579,18 +3812,38 @@ def select_best_setup(
     Returns the chosen ``(ok, reason, debug)`` (the debug carries a ``setup_rr`` +
     ``setup_selected_from`` breadcrumb on a real choice). Pure; no I/O. Fail-OPEN to the
     first fire on any error. docs/DESIGN/MOMENTUM_LANE.md"""
+    def _veto_choice(choice: tuple[bool, str, dict[str, Any]]) -> tuple[bool, str, dict[str, Any]]:
+        """P0 OVERHEAD VETO at the single FIRE choke point: any chosen breakout entry that
+        would buy straight into trapped supply within the ATR-floor overhead is rejected
+        here, so it covers EVERY trigger that reaches the selector. Flag off / no
+        DailyContext / clear sky ⇒ the choice is returned unchanged (byte-identical)."""
+        try:
+            if not (choice and choice[0] and isinstance(choice[2], dict)):
+                return choice
+            _v = _overhead_supply_veto(daily_ctx, entry=choice[2].get("pullback_high"))
+            if _v is None:
+                return choice
+            _reason, _patch = _v
+            _d = dict(choice[2])
+            _d.update(_patch)
+            _d["overhead_vetoed_from"] = choice[1]
+            return False, f"overhead_veto_{_reason}", _d
+        except Exception:
+            return choice
+
     try:
         fires = [c for c in candidates if c and c[0] and isinstance(c[2], dict)
                  and c[2].get("pullback_high") and c[2].get("pullback_low")]
         if not fires:
             # no usable fire -> return the first truthy result (preserves legacy reason),
-            # else the first candidate unchanged.
+            # else the first candidate unchanged. (A truthy-but-levelless fire is not a
+            # breakout the veto can reason about -> returned unchanged.)
             for c in candidates:
                 if c and c[0]:
                     return c
             return candidates[0] if candidates else (False, "no_candidate", {})
         if len(fires) == 1:
-            return fires[0]
+            return _veto_choice(fires[0])
         from .paper_execution import class_aware_reward_risk, stop_target_prices
 
         _ap = float(atr_pct) if (atr_pct is not None and atr_pct > 0) else 0.01
@@ -3614,12 +3867,12 @@ def select_best_setup(
             if rr > best_rr:
                 best_rr, best = rr, (ok_t, reason_t, dbg)
         if best is None:
-            return fires[0]
+            return _veto_choice(fires[0])
         _ok, _reason, _dbg = best
         _dbg = dict(_dbg)
         _dbg["setup_rr"] = round(best_rr, 3)
         _dbg["setup_selected_from"] = [c[1] for c in fires]
-        return _ok, _reason, _dbg
+        return _veto_choice((_ok, _reason, _dbg))
     except Exception:
         for c in candidates:
             if c and c[0]:

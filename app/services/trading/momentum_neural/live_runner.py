@@ -108,6 +108,46 @@ def _utcnow() -> datetime:
     return datetime.utcnow()
 
 
+# ── P0: per-(symbol, day) DailyContext cache (NO new per-tick fetch) ──────────────
+# The blue-sky entry trigger + the overhead-supply veto need the daily-chart context
+# (overhead supply, clear-sky room, swing/gap/rejection levels). The DailyContext is a
+# frozen dataclass that must NOT be persisted into the JSON `le` snapshot, so it lives
+# in this in-process cache (hard max size + per-day key = its TTL — a new trading day
+# evicts the prior entry). The daily bars are fetched at most ONCE per symbol per day
+# across the whole process, never on the tick path. docs/DESIGN/MOMENTUM_LANE.md
+_DAILY_CTX_CACHE: dict[str, Any] = {}
+_DAILY_CTX_CACHE_MAX = 512
+
+
+def _daily_ctx_cached(symbol: str, *, price: float | None = None) -> Any:
+    """Return the cached DailyContext for ``symbol`` on the current UTC day, computing
+    (and caching) it from a single ``1d``/``max`` OHLCV fetch on the first call of the
+    day. Bounded (``_DAILY_CTX_CACHE_MAX``) with the day baked into the key so stale
+    entries fall out as the date rolls. Fail-OPEN to ``None`` on any error (the entry
+    path then degrades to daily-blind — never blocked). Equities only (the caller gates
+    out crypto)."""
+    try:
+        _day = _utcnow().strftime("%Y%m%d")
+        _key = f"{str(symbol).upper()}|{_day}"
+        if _key in _DAILY_CTX_CACHE:
+            return _DAILY_CTX_CACHE[_key]
+        from ..market_data import fetch_ohlcv_df as _dc_fetch
+        from .daily_levels import compute_daily_context as _dc_compute
+
+        _lb = int(getattr(settings, "chili_momentum_daily_lookback_days", 20) or 20)
+        _df = _dc_fetch(symbol, interval="1d", period="max")
+        _px = float(price) if (price is not None and price > 0) else None
+        _ctx = _dc_compute(_df, lookback=_lb, price=_px, entry_context=True)
+        # bound the cache: drop the oldest-day entries when it grows past the cap.
+        if len(_DAILY_CTX_CACHE) >= _DAILY_CTX_CACHE_MAX:
+            for _k in sorted(_DAILY_CTX_CACHE.keys())[: max(1, _DAILY_CTX_CACHE_MAX // 4)]:
+                _DAILY_CTX_CACHE.pop(_k, None)
+        _DAILY_CTX_CACHE[_key] = _ctx
+        return _ctx
+    except Exception:
+        return None
+
+
 # ── Bounded momentum exit-submit retries (2026-06-07 audit) ───────────────
 # A wedged exit (an unsellable-dust residual, a stale balance, a transient
 # broker error) used to re-submit the flatten order on EVERY pulse — session
@@ -4076,6 +4116,26 @@ def tick_live_session(
                                     select_best_setup,
                                 )
 
+                                # P0: DAILY CONTEXT INTO ENTRIES. Build the DailyContext ONCE
+                                # per (symbol, day) in an in-process TTL/size-bounded cache and
+                                # feed it to the blue-sky trigger + the overhead veto so the
+                                # entry path is no longer daily-blind to overhead supply. The
+                                # daily bars are fetched at most once/day/symbol across the whole
+                                # process — NO new per-tick network fetch (the DailyContext is a
+                                # frozen dataclass and is NOT persisted into the JSON `le`
+                                # snapshot — it lives in the module cache only). Equities only
+                                # (crypto has no daily-S&R regime here). Gated on the two P0
+                                # flags: BOTH off ⇒ no fetch, _daily_ctx stays None ⇒ the entry
+                                # path is byte-identical. docs/DESIGN/MOMENTUM_LANE.md
+                                _daily_ctx = None
+                                try:
+                                    _blue_on = bool(getattr(settings, "chili_momentum_blue_sky_entry_enabled", False))
+                                    _ovh_on = bool(getattr(settings, "chili_momentum_overhead_veto_enabled", False))
+                                    if (_blue_on or _ovh_on) and not str(sess.symbol).upper().endswith("-USD"):
+                                        _daily_ctx = _daily_ctx_cached(sess.symbol, price=_live_px)
+                                except Exception:
+                                    _daily_ctx = None
+
                                 # The dip-family result so far (a FIRE is a candidate for the
                                 # selector; a WAIT is preserved as the fallback below).
                                 _dip_fire = (
@@ -4102,6 +4162,36 @@ def tick_live_session(
                                         # the instant the live ask trades through the base level
                                         # (the dip ladder produced only a terminal wait).
                                         _trigger_reason, _pb_debug = _hb_reason, _hb_dbg
+
+                                # P0: BLUE-SKY BREAK — the dedicated NEW multi-period/all-time
+                                # high break with NO overhead resistance (clear sky), DISTINCT
+                                # from hod_break (high-of-DAY only). Reads the session-cached
+                                # DailyContext (NO new per-tick fetch); flag-gated INSIDE the
+                                # detector (OFF / no DailyContext -> no-op, byte-identical) and
+                                # returns the shared (ok, reason, debug) with pullback_low/high
+                                # under the IDENTICAL keys, joining the SAME candidate set so the
+                                # setup-selector picks the best R:R. docs/DESIGN/MOMENTUM_LANE.md
+                                try:
+                                    from .entry_gates import blue_sky_break_confirmation
+
+                                    _bsk_ok, _bsk_reason, _bsk_dbg = blue_sky_break_confirmation(
+                                        _df_trig, entry_interval=_iv_trig, daily_ctx=_daily_ctx,
+                                        live_price=_live_px, symbol=sess.symbol, db=db,
+                                    )
+                                    if _bsk_ok:
+                                        _breakouts.append((_bsk_ok, _bsk_reason, _bsk_dbg))
+                                    elif (
+                                        _bsk_reason in TICK_ARMED_WAIT_REASONS
+                                        and isinstance(_bsk_dbg, dict)
+                                        and _bsk_dbg.get("pullback_high")
+                                        and not _trigger_ok
+                                        and _trigger_reason not in TICK_ARMED_WAIT_REASONS
+                                    ):
+                                        # Surface the blue-sky WAIT so tick-speed dispatch fires
+                                        # the instant the ask trades through the new-high level.
+                                        _trigger_reason, _pb_debug = _bsk_reason, _bsk_dbg
+                                except Exception:
+                                    pass
 
                                 # BATCH C: ABCD (SS101 #013) + DOUBLE-BOTTOM breakout triggers.
                                 # Both need a swing-pivot scanner the lane lacked; built ATR-noise-
@@ -4201,6 +4291,7 @@ def tick_live_session(
                                         _sel_ok, _sel_reason, _sel_dbg = select_best_setup(
                                             _cands, symbol=sess.symbol,
                                             atr_pct=_pb_debug.get("atr_pct") if isinstance(_pb_debug, dict) else None,
+                                            daily_ctx=_daily_ctx,
                                         )
                                         _trigger_ok, _trigger_reason, _pb_debug = _sel_ok, _sel_reason, _sel_dbg
                                     elif not _trigger_ok:

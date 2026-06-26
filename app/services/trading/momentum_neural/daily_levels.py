@@ -237,9 +237,12 @@ def _blue_sky_recent_ipo(
     """(C) ``(is_blue_sky, is_recent_ipo)``.
 
     blue_sky = ``px`` within ~0.25 ATR of (or above) the max HIGH over ALL available
-    history (a true all-time-high break — no overhead supply at all). recent_ipo = the
-    available daily history is shorter than ``_RECENT_IPO_MAX_BARS`` (~2 trading yrs), a
-    proxy for a young listing with no trapped longs from a prior cycle. Fail-open to
+    history (a true all-time-high / multi-period-high break — no overhead supply at
+    all). This is computed for EVERY name (an ESTABLISHED name at a true 52wk / all-
+    time high with clear room is just as much a blue-sky break as a recent IPO — see
+    ``compute_daily_context``); recent_ipo is the SUB-CASE flag. recent_ipo = the
+    available daily history is shorter than ``_RECENT_IPO_MAX_BARS`` (~2 trading yrs),
+    a proxy for a young listing with no trapped longs from a prior cycle. Fail-open to
     (False, False) on thin data.
     """
     try:
@@ -254,6 +257,73 @@ def _blue_sky_recent_ipo(
     return bool(is_blue_sky), bool(is_recent_ipo)
 
 
+# ── ENTRY-PATH overhead-supply read (P0) ─────────────────────────────────────────
+# The SELECTION tilts above re-rank a name; these two pure helpers let the ENTRY gate
+# (entry_gates.py) read the SAME daily structure so a breakout TRIGGER is daily-aware:
+#   • overhead_supply_atr — how far (in daily-ATR units) the NEAREST trapped-supply
+#     level (prior swing high / unfilled-gap bottom / red-rejection cluster) sits ABOVE
+#     a candidate entry; a small distance = a ceiling the price must fight through.
+#   • entry_is_clear_sky — True only when there is NO overhead supply within the room
+#     floor (a genuine blue-sky / clear-room break, never a mid-range break with a wall
+#     just above). Both are ATR-relative (no fixed $), pure, and fail-OPEN.
+# These read fields the DailyContext already carries — NO new fetch, NO new state.
+def overhead_supply_atr(ctx: "DailyContext", *, entry: float) -> float | None:
+    """Daily-ATR distance from ``entry`` UP to the nearest overhead-supply level the
+    price must clear (min of: dist_to_resistance, the unfilled-gap bottom if it sits
+    above, the swing-high). ``None`` when no level / no ATR read (clear sky / fail-open).
+
+    The smaller this is, the closer a trapped-longs ceiling sits above the entry — the
+    overhead veto rejects/derates a breakout whose nearest ceiling is within a documented
+    ATR multiple. Pure; never raises (any error / missing input ⇒ None)."""
+    try:
+        if ctx is None or not (math.isfinite(entry) and entry > 0):
+            return None
+        atr_pct = ctx.daily_atr_pct
+        if not (atr_pct and atr_pct > 0 and math.isfinite(atr_pct)):
+            return None
+        dists: list[float] = []
+        # (a) the pre-computed nearest-resistance distance (prior-day high / swing / round#).
+        d_res = ctx.dist_to_resistance_atr
+        if d_res is not None and math.isfinite(d_res) and d_res < _CAP_ATR:
+            dists.append(float(d_res))
+        # (b) a swing high overhead (only when it is genuinely above the entry).
+        sh = ctx.swing_high_nd
+        if sh is not None and math.isfinite(sh) and sh > entry:
+            dists.append((sh - entry) / entry / atr_pct)
+        # (c) the nearest unfilled-gap BOTTOM overhead = the lower edge of a void the
+        #     price must trade up THROUGH (the void's far side is supply, not clear sky).
+        gb = ctx.nearest_unfilled_gap_bottom
+        if gb is not None and math.isfinite(gb) and gb > entry:
+            dists.append((gb - entry) / entry / atr_pct)
+        if not dists:
+            return None
+        return max(0.0, min(d for d in dists if math.isfinite(d)))
+    except Exception:
+        return None
+
+
+def entry_is_clear_sky(
+    ctx: "DailyContext", *, entry: float, min_room_atr: float
+) -> bool:
+    """True only when the break at ``entry`` has CLEAR SKY overhead — a true new multi-
+    period / all-time high (``is_blue_sky``) AND the nearest overhead-supply level (if
+    any) sits at least ``min_room_atr`` daily-ATR away (clear room above the trigger).
+
+    NEVER True on a mid-range break with a ceiling above (that is what the overhead veto
+    rejects). Pure; fail-CLOSED to False on missing data (a blue-sky entry must be a
+    POSITIVE, well-evidenced read — absence of data is not clear sky)."""
+    try:
+        if ctx is None or not bool(ctx.is_blue_sky):
+            return False
+        room = overhead_supply_atr(ctx, entry=entry)
+        # No overhead-supply level found AND we are at a fresh high ⇒ genuine clear sky.
+        if room is None:
+            return True
+        return float(room) >= float(min_room_atr)
+    except Exception:
+        return False
+
+
 def compute_daily_context(
     df: Any,
     *,
@@ -263,6 +333,7 @@ def compute_daily_context(
     red_rejection_derate: bool = False,
     blue_sky_recent_ipo: bool = False,
     fresh_catalyst: bool = False,
+    entry_context: bool = False,
 ) -> DailyContext:
     """Daily context from a daily OHLCV df (cols Open/High/Low/Close/Volume).
 
@@ -280,6 +351,13 @@ def compute_daily_context(
       (C) ``blue_sky_recent_ipo``  — BOOST an all-time-high break ONLY for recent IPOs
           (short history ⇒ no trapped overhead supply).
     All are bounded re-ranks of the [0,1] sub-score — never a veto, never block a fill.
+
+    ``entry_context`` (P0): when True, the structural READS (gap geometry, red-rejection
+    count, is_blue_sky/recent-IPO) are ALWAYS computed and surfaced on the returned
+    DailyContext — INDEPENDENT of the three selection-tilt flags above — so the ENTRY
+    gate can read overhead supply / clear-sky for ALL names. It NEVER alters ``ds`` (the
+    selection sub-score): the boost/derate to ``ds`` stays gated on the tilt flags, so
+    the SELECTION path (which never passes ``entry_context``) is byte-identical.
     """
     n = max(2, int(lookback))
     try:
@@ -373,7 +451,8 @@ def compute_daily_context(
 
         # (A) GAP/WINDOW GEOMETRY — a break that OPENS INTO an unfilled gap has clear sky
         # overhead (no resistance to chew through); UP-weight it + the room_to_gap_top.
-        if gap_geometry_tilt:
+        # entry_context (P0) computes the SAME reads for the entry gate but never mutates ds.
+        if gap_geometry_tilt or entry_context:
             try:
                 _open = df["Open"].astype(float) if "Open" in df.columns else None
                 g = detect_open_gaps(high, low, close, _open, px=px, atr_last=atr_last)
@@ -390,14 +469,16 @@ def compute_daily_context(
                     cls = 0.5 if is_window else 1.0   # windows are the weaker signal
                     # gate the boost on actually breaking up (don't reward a far-below name).
                     gap_boost = 0.10 * cls * room_norm * (1.0 if (opens_into_gap and brk > 0) else 0.5)
-                    ds = max(0.0, min(1.0, ds + gap_boost))
+                    if gap_geometry_tilt:  # SELECTION effect ONLY when the tilt flag is on
+                        ds = max(0.0, min(1.0, ds + gap_boost))
             except Exception:
                 pass
 
         # (B) RED-REJECTION HISTORY — repeated upper-wick red rejections at the nearest
         # resistance = sellers defending the price; soft DE-RATE (overridable by a strong
-        # fresh catalyst, which can flip a defended level into a squeeze).
-        if red_rejection_derate and not fresh_catalyst:
+        # fresh catalyst, which can flip a defended level into a squeeze). entry_context
+        # (P0) computes the count for the entry gate's overhead read but never mutates ds.
+        if red_rejection_derate or entry_context:
             try:
                 _lvl = min(above) if above else (sh if sh and sh >= px else None)
                 if _lvl is not None:
@@ -405,33 +486,27 @@ def compute_daily_context(
                     rej_count, rej_recency = _red_rejection_history(
                         high, low, _open, close, level=float(_lvl), atr_last=atr_last, lookback=n,
                     )
-                    if rej_count and rej_count > 0:
+                    # SELECTION de-rate ONLY when the tilt flag is on AND no fresh catalyst
+                    # overrides it (a real news squeeze blows through a defended level).
+                    if red_rejection_derate and not fresh_catalyst and rej_count and rej_count > 0:
                         # adaptive: scale by how many + how recent; cap so it never zeroes.
                         cnt_norm = min(1.0, rej_count / float(max(1, n // 4)))
                         derate = 0.15 * cnt_norm * max(0.25, rej_recency)
                         ds = max(0.0, min(1.0, ds * (1.0 - derate)))
             except Exception:
                 pass
-        elif red_rejection_derate and fresh_catalyst:
-            # still annotate for logging even when the catalyst overrides the de-rate.
-            try:
-                _lvl = min(above) if above else (sh if sh and sh >= px else None)
-                if _lvl is not None:
-                    _open = df["Open"].astype(float) if "Open" in df.columns else None
-                    rej_count, rej_recency = _red_rejection_history(
-                        high, low, _open, close, level=float(_lvl), atr_last=atr_last, lookback=n,
-                    )
-            except Exception:
-                pass
 
         # (C) BLUE-SKY / RECENT-IPO — an all-time-high break with NO trapped longs above
         # (recent IPO) is the cleanest breakout there is; BOOST it. Gated to recent IPOs:
         # an old name at ATH still has cycle-trapped supply nearby and gets no boost.
-        if blue_sky_recent_ipo:
+        # entry_context (P0): compute is_blue_sky for ALL names (an ESTABLISHED name at a
+        # true 52wk / all-time high with clear room is a blue-sky break too) but mutate ds
+        # only under the original recent-IPO-gated SELECTION boost (byte-identical there).
+        if blue_sky_recent_ipo or entry_context:
             try:
                 trade_days = int(len(high))
                 is_blue, is_ipo = _blue_sky_recent_ipo(high, px=px, atr_last=atr_last, n_bars=trade_days)
-                if is_blue and is_ipo and brk > 0:
+                if blue_sky_recent_ipo and is_blue and is_ipo and brk > 0:
                     ds = max(0.0, min(1.0, ds + 0.12))
             except Exception:
                 pass

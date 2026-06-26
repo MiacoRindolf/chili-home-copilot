@@ -2235,6 +2235,27 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_BLUE_SKY_RECENT_IPO_ENABLED"),
         description="All-time-high breakout boost gated to recent-IPO names (<2yr history) where there is no overhead supply.",
     )
+    # ── P0: blue-sky ENTRY trigger + overhead-supply veto (daily context INTO entries) ──
+    chili_momentum_blue_sky_entry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BLUE_SKY_ENTRY_ENABLED"),
+        description="P0 dedicated ENTRY trigger: fire the break of a NEW multi-period/all-time high with NO overhead resistance (clear sky >= the room-ATR floor) + volume confirm. OFF => the entry path stays daily-blind (byte-identical: no daily context is read, no trigger fires).",
+    )
+    chili_momentum_blue_sky_entry_min_room_atr: float = Field(
+        default=1.5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BLUE_SKY_ENTRY_MIN_ROOM_ATR"),
+        description="The ONE documented knob for the blue-sky entry: the nearest overhead-supply level must sit at least this many DAILY-ATR units above the break (clear-room floor) for the trigger to fire genuine clear sky. Adaptive (ATR-relative), not a fixed $.",
+    )
+    chili_momentum_overhead_veto_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERHEAD_VETO_ENABLED"),
+        description="P0 overhead-supply veto/derate: for ANY breakout entry, if trapped supply (prior swing high / unfilled gap / red-rejection cluster) sits within the veto-ATR floor overhead, VETO the entry (don't buy into a ceiling). OFF => breakout entries stay daily-blind = byte-identical.",
+    )
+    chili_momentum_overhead_veto_atr: float = Field(
+        default=0.5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERHEAD_VETO_ATR"),
+        description="The ONE documented knob for the overhead veto: a breakout whose nearest overhead-supply level sits within this many DAILY-ATR units is vetoed (a wall the price must fight through). Adaptive (ATR-relative). A true blue-sky/clear-room break (room beyond this) passes.",
+    )
     chili_momentum_reverse_split_recency_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_REVERSE_SPLIT_RECENCY_ENABLED"),
