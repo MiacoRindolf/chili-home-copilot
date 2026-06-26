@@ -350,6 +350,31 @@ def score_viability(
                 warnings.append(f"High Ross momentum quality ({_rqf:.2f})")
             elif _rqf <= 0.2:
                 warnings.append(f"Low Ross momentum quality ({_rqf:.2f}) — generic setup")
+        elif (
+            isinstance(_ross_scores, dict)
+            and _ross_scores
+            and bool(getattr(settings, "chili_momentum_no_signal_derank_enabled", False))
+        ):
+            # FIX 2 — EMPTY-SIGNAL DE-RANK. 40/50 live-eligible names carry EMPTY ross_signals
+            # (GALT/PYXS/ANGI — no momentum/velocity data) yet sit eligible at base ~0.6 via the
+            # fail-OPEN absent-signal no-op above; GALT was ENTERED over the real movers. When the
+            # batch DID score SOME names (_ross_scores non-empty) but THIS symbol has NO ross_score
+            # (a real-momentum signal was absent for it), DE-RANK it so ANY scored real mover
+            # (base + tilt ~0.7+) outranks it for the slots. DE-RANK, not hard-exclude: the name
+            # stays eligible and trades if nothing better is up. ONE documented adaptive setting —
+            # the penalty is sized as a fraction of the SAME ROSS_QUALITY_VIABILITY_TILT magnitude
+            # so it scales with the tilt and is not a scattered magic number; the default pushes an
+            # empty-signal name clearly below a scored mover. A scored real mover (symbol IN
+            # _ross_scores) takes the IF branch above and is NEVER touched by this penalty. OFF
+            # (default) / no scored names ⇒ this branch is skipped ⇒ byte-identical.
+            from .ross_momentum import ROSS_QUALITY_VIABILITY_TILT
+
+            _derank_frac = float(
+                getattr(settings, "chili_momentum_no_signal_derank_fraction", 1.0) or 1.0
+            )
+            _penalty = ROSS_QUALITY_VIABILITY_TILT * 0.5 * max(0.0, _derank_frac)
+            base -= _penalty
+            warnings.append("No Ross momentum signal — de-ranked below scored movers")
     except (TypeError, ValueError, AttributeError):
         pass
 

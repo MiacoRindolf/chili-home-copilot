@@ -5689,6 +5689,31 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_TAPE_HOLD_ENTRY_ENABLED"),
         description="FIX C: enter the pullback-HOLD bounce when the TAPE confirms buyers (signed_tape_accel>0 AND tick_rate>=self-relative floor) on a VALID, non-backside pullback that is holding the 9-EMA with a higher low — BEFORE the confirmed break (Ross enters earlier than the break). Tape-confirm is REQUIRED + fail-closed (no/thin/stale tape ⇒ no early fire, fall back to the existing break trigger). All existing entry vetoes + the quote gate still run downstream; does NOT touch evaluate_sticky_backside_bench. false (default) = byte-identical break-only.",
     )
+    # ── FIX 1: MOMENTUM-CONTINUATION ENTRY (catch the straight-up runners) ───────────
+    chili_momentum_momentum_continuation_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MOMENTUM_CONTINUATION_ENTRY_ENABLED"),
+        description="FIX 1: enter the continuation (a fresh NEW HIGH, NO prior pullback/base required) on a HIGH-CONVICTION mover that trends STRAIGHT UP and so never triggers the pullback/base entries (WSHP +47% 40x RVOL, SDOT +25% 132x RVOL — caught + watched but reaped at 300s, never entered). Fires ONLY when ALL hold: (1) high-conviction (ross_score >= chili_momentum_continuation_ross_floor OR RVOL >= explosive_rvol_floor x coiling_exempt_rvol_mult OR daily_breaking_major); (2) momentum_continuation_trigger new-high break; (3) tape_confirms_hold REQUIRED + fail-closed (no/thin/stale/selling/crypto tape ⇒ no fire); (4) NOT parabolic (_hod_extension_ok / _entry_extension_veto vs 9-EMA AND VWAP); (5) NOT backside / NOT below-VWAP (_detect_back_side + front_side_state) + a structural stop + ALL downstream LIVE_PENDING_ENTRY vetoes. Skipped for benched names. false (default) = byte-identical (the trigger returns disabled before any compute).",
+    )
+    chili_momentum_continuation_ross_floor: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CONTINUATION_ROSS_FLOOR"),
+        description="FIX 1: the ross_score (Ross momentum quality, [0,1]) at/above which a name is high-conviction enough for the momentum-continuation new-high entry (one of three OR-ed conviction gates with the coiling-exempt RVOL multiple and daily_breaking_major). Only consulted when chili_momentum_momentum_continuation_entry_enabled is ON.",
+    )
+    # ── FIX 2: EMPTY-SIGNAL DE-RANK (push no-momentum-signal names below real movers) ──
+    chili_momentum_no_signal_derank_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NO_SIGNAL_DERANK_ENABLED"),
+        description="FIX 2: when the batch scored SOME names but THIS symbol has NO ross_score (empty/missing momentum signal — GALT/PYXS/ANGI sit eligible at base ~0.6 via fail-open and GALT was ENTERED over the real movers), apply a viability DE-RANK penalty so any scored real mover (base + tilt ~0.7+) outranks it for the slots. DE-RANK, not hard-exclude (it still trades if nothing better is up). A scored real mover (symbol IN ross_scores) is NEVER touched. false (default) = byte-identical.",
+    )
+    chili_momentum_no_signal_derank_fraction: float = Field(
+        default=1.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NO_SIGNAL_DERANK_FRACTION"),
+        description="FIX 2: the de-rank penalty is ROSS_QUALITY_VIABILITY_TILT x 0.5 x this fraction (the SAME tilt magnitude the scored names use — adaptive, not a scattered magic number; default 1.0 -> a 0.10 viability penalty that pushes an empty-signal name clearly below a scored mover). Only consulted when chili_momentum_no_signal_derank_enabled is ON.",
+    )
     # ── FIX D: cache the Robinhood Agentic MCP adapter (perf bug-fix) ────────────────
     chili_momentum_cache_rh_agentic_adapter: bool = Field(
         default=True,

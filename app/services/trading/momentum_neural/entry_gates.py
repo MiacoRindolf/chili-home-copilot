@@ -2570,6 +2570,211 @@ def tape_confirmed_hold_trigger(
         return False, "tape_hold_struct_wait", debug
 
 
+def momentum_continuation_trigger(
+    df,
+    *,
+    live_price: float | None,
+    entry_interval: str = "5m",
+    swing_lookback: int = 6,
+    symbol: str | None = None,
+    db: Any = None,
+    l2_as_of: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """FIX 1 — MOMENTUM-CONTINUATION new-high trigger (the STRUCTURE side).
+
+    The strongest movers (WSHP +47% 40x RVOL, SDOT +25% 132x RVOL) trend STRAIGHT UP and
+    never give the pullback / consolidation base every OTHER trigger requires, so they are
+    caught + watched but never enter, then reaped at 300s while the lane trades weaker
+    pullback names. Ross BUYS the continuation: a fresh new high on a front-side name that
+    is NOT parabolic. This is the structural new-high check that does NOT require a prior
+    pullback (unlike pullback_break) and does NOT require a tested consolidation base
+    (unlike ``hod_break_confirmation`` — the straight-up runner has no base).
+
+    Returns the shared ``(ok, reason, debug)`` 3-tuple. ``debug`` carries ``pullback_low``
+    (= the recent swing low / structural stop) and ``pullback_high`` (= the broken recent
+    high / breakout-or-bailout level) under the SAME keys the break triggers use, so the
+    downstream sizing / structural-stop / breakout-or-bailout machinery is reused unchanged.
+    ``reason`` is ``momentum_continuation`` on a completed-bar new high, ``momentum_continuation_tick``
+    on a live-tick break (caller's tick path); the WAIT reason is the tick-armable
+    ``waiting_for_break`` (so tick-speed dispatch fires the instant the ask trades through).
+
+    CONDITION (2) NEW HIGH: ``cur_px`` makes a fresh high above the recent completed-bar high
+    (the prior ``swing_lookback`` bars, EXCLUDING the current bar) — a genuine continuation
+    break, NOT a stale level. The live tick (when above the bar close) is the current price
+    so a fast break is seen sub-bar; it NEVER lowers the price (a stale tick only makes the
+    gate stricter).
+
+    CONDITION (4) NOT PARABOLIC — the #1 chase guard: ``_hod_extension_ok`` (the SAME adaptive
+    ATR-scaled ``_entry_extension_veto`` cap measured vs BOTH the 9-EMA and session VWAP)
+    rejects a break level sitting excessively extended above the 9-EMA / VWAP (a vertical
+    blow-off, not a continuation). The downstream LIVE_PENDING_ENTRY ``_entry_extension_veto``
+    re-checks this on the real entry price — this is the EARLY block.
+
+    CONDITION (5) NOT BACKSIDE / NOT BELOW-VWAP: ``_detect_back_side`` (1m EMA/MACD rollover)
+    AND ``front_side_state`` (which folds in BELOW-VWAP / faded / chasing-a-rolled-over-top).
+    A live-tick NEW HIGH carve-out applies ONLY to ``chasing_top`` (a fresh tick to a new
+    high IS front-side right now — mirrors ``hod_break_confirmation``); ``below_vwap`` /
+    ``already_faded`` stay HARD vetoes. The L2 hidden-seller / big-seller veto
+    (``_l2_entry_veto``) also gates it (fail-open on disabled / null L2).
+
+    PROTECTIVE / FAIL-CLOSED: thin (<12 bars) / degenerate / no swing structure / a price that
+    is NOT above the recent high / backside / extended ⇒ ``ok=False`` (keep waiting). Flag
+    ``chili_momentum_momentum_continuation_entry_enabled`` OFF ⇒ ``(False, ..._disabled, {})``
+    before any compute, so the entry path is byte-identical. NEVER raises (any error ⇒ a
+    benign decline). docs/DESIGN/MOMENTUM_LANE.md"""
+    debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "momentum_continuation"}
+    try:
+        if not bool(getattr(settings, "chili_momentum_momentum_continuation_entry_enabled", False)):
+            return False, "momentum_continuation_disabled", debug
+        if df is None or getattr(df, "empty", True) or len(df) < 12:
+            return False, "momentum_continuation_insufficient_bars", debug
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        n = len(df)
+        cur = n - 1
+        arrays = compute_all_from_df(df, needed={"ema_9", "ema_20", "macd", "macd_signal", "vwap", "atr"})
+        ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
+        atr = arrays.get("atr") or []
+
+        # current price = the live tick when ABOVE the completed-bar close (a fast break the
+        # bar has not closed yet), else the bar close. Never LOWERS the price (a stale tick can
+        # only make the gate stricter, never manufacture a break). Fail-closed if no price.
+        try:
+            cur_close = float(close.iloc[cur])
+        except (TypeError, ValueError, IndexError):
+            return False, "momentum_continuation_no_close", debug
+        cur_px = cur_close
+        if live_price is not None:
+            try:
+                lp = float(live_price)
+                if lp > 0:
+                    cur_px = max(cur_close, lp)
+            except (TypeError, ValueError):
+                pass
+        if cur_px <= 0:
+            return False, "momentum_continuation_no_price", debug
+
+        # ── (2) NEW HIGH: a fresh high above the recent COMPLETED-bar high ───────────────
+        # The recent high = the max high over the prior ``swing_lookback`` COMPLETED bars
+        # (cur excluded — that is the breaking bar). The structural stop = the recent swing
+        # LOW over the SAME window (a defined, tested low; the vol-floor layer widens it
+        # downstream — INVARIANT A — so we do NOT pre-floor it here).
+        K = max(2, int(swing_lookback))
+        w_start = max(0, cur - K)
+        if w_start >= cur:
+            return False, "momentum_continuation_insufficient_bars", debug
+        recent_high = float(high.iloc[w_start:cur].max())
+        recent_low = float(low.iloc[w_start:cur].min())
+        if not (0.0 < recent_low < recent_high):
+            return False, "momentum_continuation_bad_structure", debug
+        debug["recent_high"] = round(recent_high, 6)
+        debug["recent_low"] = round(recent_low, 6)
+        level = recent_high     # the break level (breakout-or-bailout level)
+        stop = recent_low       # the structural stop
+
+        # instrument ATR% — the adaptive yardstick for the extension guard.
+        atr_pct = None
+        try:
+            _a = float(atr[cur]) if cur < len(atr) and atr[cur] is not None else None
+            if _a is not None and cur_close > 0:
+                atr_pct = _a / cur_close
+        except (TypeError, ValueError, IndexError):
+            atr_pct = None
+
+        # ── (5) NOT BACKSIDE: _detect_back_side (1m EMA/MACD rollover) — fail-OPEN ───────
+        _bs, _bs_reason = _detect_back_side(
+            ema9, (arrays.get("ema_20") or []),
+            (arrays.get("macd") or []), (arrays.get("macd_signal") or []),
+            cur, macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+        )
+        if _bs:
+            debug["back_side"] = _bs_reason
+            return False, "momentum_continuation_back_side", debug
+        # front_side_state folds in BELOW-VWAP / faded / chasing-a-rolled-over-top. A live-
+        # tick NEW HIGH carve-out applies ONLY to chasing_top (a fresh tick to a new high IS
+        # front-side now — mirrors hod_break_confirmation); below_vwap / already_faded stay
+        # HARD vetoes (Ross never buys below VWAP).
+        try:
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            if getattr(_fs, "is_backside", False):
+                _fsr = getattr(_fs, "reason", "backside")
+                _sess_hod = float(high.iloc[:cur].max()) if cur > 0 else recent_high
+                _live_new_high = False
+                if _fsr == "chasing_top" and live_price is not None:
+                    try:
+                        _live_new_high = float(live_price) > float(_sess_hod)
+                    except (TypeError, ValueError):
+                        _live_new_high = False
+                if not _live_new_high:
+                    debug["front_side_state"] = _fsr
+                    return False, "momentum_continuation_backside_lifecycle", debug
+        except (TypeError, ValueError, AttributeError, KeyError):
+            # thin/degenerate frame -> fail-CLOSED for THIS new high-conviction fire path:
+            # if we cannot prove the name is front-side, do NOT take the continuation entry.
+            debug["reason"] = "front_side_read_error"
+            return False, "momentum_continuation_backside_lifecycle", debug
+
+        # ── (4) NOT PARABOLIC — the #1 chase guard (extension vs 9-EMA AND VWAP) ─────────
+        ema9_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        _ext_ok, _ext_dbg = _hod_extension_ok(
+            level=level, ema9_cur=ema9_cur, vwap_cur=vwap_cur, atr_pct=atr_pct, rvol=None,
+        )
+        if not _ext_ok:
+            debug.update(_ext_dbg)
+            return False, "momentum_continuation_extended", debug
+
+        # ── L2 hidden-seller / big-seller veto (reused; fail-open on disabled/null L2) ──
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
+        if _l2v is not None:
+            _reason, _l2patch = _l2v
+            debug.update(_l2patch)
+            return False, f"momentum_continuation_{_reason}", debug
+
+        debug["pullback_high"] = float(level)
+        debug["pullback_low"] = float(stop)
+        debug["atr_pct"] = (round(atr_pct, 6) if atr_pct is not None else None)
+
+        # ── TRIGGER: the break to a fresh NEW HIGH above the recent high ────────────────
+        # TICK-BREAK (Ross-speed): the structure is valid on completed bars and the LIVE tick
+        # is already trading through the recent high — enter on that tick, not a bar-close
+        # later. Require the ATR/floor THRUST buffer (a real thrust, not a 1-tick poke) and
+        # the premarket false-pop guard, mirroring hod_break_confirmation's tick path.
+        if (
+            live_price is not None and float(live_price) > 0
+            and float(live_price) > level
+            and _premarket_tickbreak_confirmed(
+                live_price=float(live_price), level=float(level),
+                atr_pct=atr_pct, symbol=symbol, now=None,
+            )
+            and _dipbuy_tick_thrust_ok(
+                live_price=float(live_price), level=float(level), atr_pct=atr_pct,
+            )
+        ):
+            debug["tick_break"] = True
+            debug["live_price"] = float(live_price)
+            return True, "momentum_continuation_tick", debug
+
+        # not broken on a completed bar yet -> ARM a tick-watch at the level (surfaced by the
+        # caller as a TICK_ARMED_WAIT_REASON via the pullback_high).
+        cur_hi = float(high.iloc[cur])
+        if cur_hi <= level:
+            return False, "waiting_for_break", debug
+        # a completed bar broke to a NEW HIGH (cur_px above the recent high) — fire. The
+        # strong-close / candle-quality + sustained-volume confirmations are applied by the
+        # shared caller's confirmation stack; the breakout-or-bailout fast exit compensates.
+        if cur_px <= level:
+            return False, "waiting_for_break", debug
+        return True, "momentum_continuation", debug
+    except Exception:
+        return False, "momentum_continuation_error", {"entry_interval": entry_interval}
+
+
 def _bottoming_tail(o: float, h: float, l: float, c: float, *, min_lower_wick_frac: float = 0.50) -> bool:
     """Bottoming-tail / hammer: a long LOWER wick that dominates the bar's range — a
     fast flush that got bought back up (the V-bounce signature). The mirror of

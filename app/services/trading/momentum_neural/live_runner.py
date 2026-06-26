@@ -4882,6 +4882,161 @@ def tick_live_session(
             if _tape_hold_fired:
                 db.flush()
                 return {"ok": True, "session_id": sess.id, "state": sess.state}
+            # ── FIX 1: MOMENTUM-CONTINUATION ENTRY (additive new-high fire) ─────────────
+            # The break trigger above is WAITING because every existing trigger needs a
+            # PULLBACK / consolidation BASE — and the STRONGEST movers (WSHP +47% 40x RVOL
+            # viab 0.759 breaking_major, SDOT +25% 132x RVOL viab 0.768) trend STRAIGHT UP
+            # with no pullback, so they are caught + watched but NEVER enter, then reaped at
+            # 300s while the lane trades weaker pullback names. Ross BUYS the continuation:
+            # a fresh new high on a HIGH-CONVICTION, front-side, NOT-parabolic name with the
+            # TAPE confirming buyers. Fire NOW iff ALL FIVE hold (else fall through to the
+            # break-wait, byte-identical):
+            #   (1) HIGH-CONVICTION ONLY — ross_score >= floor OR RVOL >= the coiling-exempt
+            #       multiple OR daily_breaking_major (never a low-conviction/random name);
+            #   (2) NEW HIGH / HOD break — momentum_continuation_trigger (a fresh high above
+            #       the recent high, NO prior pullback / base required);
+            #   (3) TAPE CONFIRMS — REQUIRED + FAIL-CLOSED (tape_confirms_hold: signed_tape_
+            #       accel>0 AND tick_rate>=floor; no/thin/stale/selling/crypto tape ⇒ no fire);
+            #   (4) NOT PARABOLIC — the #1 chase guard (_hod_extension_ok / _entry_extension_
+            #       veto vs 9-EMA AND VWAP, inside the trigger; re-checked downstream);
+            #   (5) NOT backside / NOT below-VWAP (_detect_back_side + front_side_state inside
+            #       the trigger; the sticky bench already forced 'backside_benched' above, and
+            #       a benched name is gated below); + the structural stop + ALL downstream
+            #       LIVE_PENDING_ENTRY vetoes (_entry_flow_veto, _entry_extension_veto, L2 /
+            #       overhead, _l2_entry_confirm, position cap, _quote_quality_block) still run.
+            # KILL-SWITCH chili_momentum_momentum_continuation_entry_enabled OFF ⇒ the trigger
+            # returns (False, ..._disabled) before any compute ⇒ this whole block is a no-op
+            # (byte-identical). Runs only when the break path did NOT already fire (this is the
+            # elif _score_ok: WAIT branch) and the name is NOT benched.
+            _continuation_fired = False
+            if (
+                bool(getattr(settings, "chili_momentum_momentum_continuation_entry_enabled", False))
+                and le.get("benched_backside_hod") is None
+            ):
+                try:
+                    # (1) HIGH-CONVICTION read — ross_score / RVOL / daily_breaking_major from
+                    # the session's own persisted scanner row (execution_readiness_json.extra),
+                    # the SAME source the arm-queue ranker + viability tilt read. No new fetch.
+                    _ross_score = None
+                    _daily_breaking = False
+                    try:
+                        _ex = via.execution_readiness_json if isinstance(via.execution_readiness_json, dict) else {}
+                        _extra = (_ex.get("extra") or {}) if isinstance(_ex, dict) else {}
+                        _symu = str(sess.symbol or "").upper()
+                        _rs_map = _extra.get("ross_scores") if isinstance(_extra.get("ross_scores"), dict) else {}
+                        if _symu in _rs_map:
+                            _ross_score = float(_rs_map[_symu] or 0.0)
+                        _sig_map = _extra.get("ross_signals") if isinstance(_extra.get("ross_signals"), dict) else {}
+                        _row_sig = _sig_map.get(_symu) if isinstance(_sig_map, dict) else None
+                        if isinstance(_row_sig, dict):
+                            _daily_breaking = bool(_row_sig.get("daily_breaking_major"))
+                    except (TypeError, ValueError, AttributeError):
+                        _ross_score, _daily_breaking = None, False
+                    _rvol_now = _latest_rvol(db, sess.symbol)
+                    _ross_floor = float(
+                        getattr(settings, "chili_momentum_continuation_ross_floor", 0.7) or 0.7
+                    )
+                    # the coiling-exempt multiple: rvol_floor x coiling_exempt_rvol_mult (the
+                    # SAME extreme-RVOL yardstick the coiling-squeeze selection exemption uses).
+                    _rvol_floor = float(getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 3.0)
+                    _coil_mult = float(getattr(settings, "chili_momentum_coiling_exempt_rvol_mult", 3.0) or 3.0)
+                    _rvol_conviction_floor = _rvol_floor * _coil_mult
+                    _high_conviction = bool(
+                        (_ross_score is not None and _ross_score >= _ross_floor)
+                        or (_rvol_now is not None and _rvol_now >= _rvol_conviction_floor)
+                        or _daily_breaking
+                    )
+                    try:
+                        logger.info(
+                            "[momentum_live] continuation_gate symbol=%s high_conv=%s ross=%s ross_floor=%s rvol=%s rvol_floor=%s breaking=%s",
+                            sess.symbol, _high_conviction, _ross_score, _ross_floor,
+                            _rvol_now, _rvol_conviction_floor, _daily_breaking,
+                        )
+                    except Exception:
+                        pass
+                    if _high_conviction:
+                        from .entry_gates import momentum_continuation_trigger
+                        from ..market_data import fetch_ohlcv_df as _mc_fetch
+
+                        _mc_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+                        _mc_px = None
+                        try:
+                            if tick is not None:
+                                _mc_px = float(tick.ask or tick.mid or 0) or None
+                        except Exception:
+                            _mc_px = None
+                        _mc_df = _mc_fetch(sess.symbol, interval=_mc_iv, period="5d")
+                        # (2) NEW HIGH + (4) not parabolic + (5) not backside (inside).
+                        _mc_ok, _mc_reason, _mc_dbg = momentum_continuation_trigger(
+                            _mc_df, live_price=_mc_px, entry_interval=_mc_iv,
+                            symbol=sess.symbol, db=db, l2_as_of=None,
+                        )
+                        try:
+                            logger.info(
+                                "[momentum_live] continuation_struct symbol=%s mc_ok=%s reason=%s pb_low=%s pb_high=%s",
+                                sess.symbol, _mc_ok, _mc_reason,
+                                (_mc_dbg.get("pullback_low") if isinstance(_mc_dbg, dict) else None),
+                                (_mc_dbg.get("pullback_high") if isinstance(_mc_dbg, dict) else None),
+                            )
+                        except Exception:
+                            pass
+                        if _mc_ok and isinstance(_mc_dbg, dict) and _mc_dbg.get("pullback_low") is not None:
+                            # (3) REQUIRED tape confirm — fail-CLOSED (no/thin/stale/selling
+                            # tape ⇒ NO continuation fire; the distribution / dead-cat guard).
+                            _mc_tape_ok, _mc_tape_dbg = tape_confirms_hold(
+                                sess.symbol, db=db, settings=settings
+                            )
+                            try:
+                                logger.info(
+                                    "[momentum_live] continuation_tape symbol=%s tape_ok=%s accel=%s rate=%s floor=%s n=%s reason=%s",
+                                    sess.symbol, _mc_tape_ok,
+                                    _mc_tape_dbg.get("signed_tape_accel"), _mc_tape_dbg.get("tick_rate"),
+                                    _mc_tape_dbg.get("tick_rate_floor"), _mc_tape_dbg.get("n_ticks"),
+                                    _mc_tape_dbg.get("reason"),
+                                )
+                            except Exception:
+                                pass
+                            if _mc_tape_ok:
+                                # Reuse the EXACT structural-stop + breakout-level stash the
+                                # break path uses (pullback_low = structural stop, pullback_high
+                                # = the breakout-or-bailout level), so sizing/placement/bailout
+                                # are identical, then route through the SAME LIVE_ENTRY_CANDIDATE
+                                # -> LIVE_PENDING_ENTRY veto chain.
+                                le["structural_stop_price"] = float(_mc_dbg["pullback_low"])
+                                if _mc_dbg.get("pullback_high"):
+                                    le["breakout_level_price"] = float(_mc_dbg["pullback_high"])
+                                else:
+                                    le.pop("breakout_level_price", None)
+                                _l2 = _entry_pricebook_snapshot(sess.symbol)
+                                if _l2 is not None:
+                                    le["entry_l2_snapshot"] = _l2
+                                else:
+                                    le.pop("entry_l2_snapshot", None)
+                                le["entry_trigger_reason"] = "momentum_continuation"
+                                le.pop("watch_break_level", None)
+                                _commit_le(sess, le)
+                                _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
+                                _emit(db, sess, "live_entry_momentum_continuation_fire", {
+                                    "blocked_wait_reason": _trigger_reason,
+                                    "continuation_reason": _mc_reason,
+                                    "viability_score": via.viability_score,
+                                    "ross_score": _ross_score,
+                                    "rvol": _rvol_now,
+                                    "daily_breaking_major": _daily_breaking,
+                                    "structural_stop": le.get("structural_stop_price"),
+                                    "breakout_level": le.get("breakout_level_price"),
+                                    **{k: _mc_tape_dbg.get(k) for k in (
+                                        "signed_tape_accel", "tick_rate", "tick_rate_floor", "n_ticks")},
+                                    **{k: _mc_dbg.get(k) for k in (
+                                        "recent_high", "recent_low", "above_vwap", "atr_pct")},
+                                    "l2": _l2,
+                                })
+                                _continuation_fired = True
+                except Exception:
+                    _continuation_fired = False  # fail-safe: any error -> fall back to break-wait
+            if _continuation_fired:
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state}
             # Stash the level we're WAITING to break so the event loop can dispatch
             # a tick-speed re-evaluation the instant a live tick crosses it (the
             # tick-break path above then fires within seconds, like Ross).
