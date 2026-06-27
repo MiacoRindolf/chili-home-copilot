@@ -4353,6 +4353,715 @@ def absorption_snap_entry(
         return False, "absorption_snap_error", {"entry_interval": entry_interval}
 
 
+# ── LOCATE #2/#4/#5/#6: four NEW scalp/dip entry triggers ─────────────────────────
+# Each is flag-gated INSIDE the detector (default OFF -> returns disabled BEFORE any
+# compute = byte-identical), carries the SAME chase-guards as wedge/absorption (tape
+# REQUIRED+fail-closed via tape_confirms_hold as the LAST gate, _hod_extension_ok
+# (NOT parabolic) + _detect_back_side + front_side_state (NOT backside / NOT below-VWAP),
+# _l2_entry_veto) and returns the shared (ok, reason, debug) 3-tuple with pullback_low /
+# pullback_high under the IDENTICAL keys so the runner's structural-stop + sizing +
+# breakout-or-bailout machinery + the setup-selector are reused unchanged. No lookahead
+# (levels from completed bars; the live tick break is the only intrabar use). Fail-OPEN
+# to a benign decline on any error. docs/DESIGN/MOMENTUM_LANE.md
+
+
+def _dip_velocity_size_mult(
+    *, dip_roc_per_bar: float | None, atr_pct: float | None, settings_obj: Any = settings,
+) -> float:
+    """LOCATE #3 DIP-VELOCITY CONVICTION multiplier. A steeper/faster dip (a more violent
+    algo-stop-run) snaps back harder, so scale entry SIZE by the dip's ROC (per-bar % drop)
+    measured RELATIVE to the instrument's own ATR%. Returns a multiplier in
+    ``[1.0, 1+max_boost]`` (NEVER < 1.0, so it can only ADD conviction within the existing
+    3x clamp + max_notional caps, never reduce size below the base / increase risk past the
+    caps). Pure; fail-OPEN to ``1.0`` (no boost) on flag-off / missing data / any error."""
+    try:
+        if not bool(getattr(settings_obj, "chili_momentum_dip_velocity_conviction_enabled", False)):
+            return 1.0
+        if dip_roc_per_bar is None:
+            return 1.0
+        roc = abs(float(dip_roc_per_bar))
+        a = float(atr_pct) if (atr_pct is not None and atr_pct > 0) else 0.01
+        # The ROC is "steep" when the per-bar drop exceeds ~1 ATR%; interpolate the boost
+        # from 0 (at 1x ATR%) to max_boost (at 3x ATR%+). Below 1x ATR% = noise -> no boost.
+        floor = a
+        ceil = 3.0 * a
+        if roc <= floor or ceil <= floor:
+            return 1.0
+        frac = min(1.0, (roc - floor) / (ceil - floor))
+        max_boost = float(getattr(settings_obj, "chili_momentum_dip_velocity_conviction_max_boost", 0.25) or 0.0)
+        max_boost = max(0.0, min(0.5, max_boost))
+        return 1.0 + frac * max_boost
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def ask_thins_dip_entry(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str,
+    live_price: float | None = None,
+    symbol: str | None = None,
+    now: Any = None,
+    db: Any = None,
+    l2_as_of: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """LOCATE #2: ASK-THINS-TO-ZERO DIP-BOTTOM long (flag
+    ``chili_momentum_ask_thins_dip_entry_enabled``).
+
+    A real dip (an ATR-scaled retrace that holds a structural higher-low) where the resting
+    ASK supply has been EXHAUSTED — the offer collapsed across the L2 window
+    (``read_ladder_distribution.ask_build <= -min_depletion_frac``) WITH buy-side OFI — then
+    price ticks back up off the dip low. The thinning offer means the sellers are gone, so
+    the bounce has room. Entry = the bounce/recent high (``pullback_high``); STOP = the dip
+    low (``pullback_low``).
+
+    CHASE-GUARDS (each reused; no weakened veto): TAPE REQUIRED+FAIL-CLOSED
+    (``tape_confirms_hold``), NOT PARABOLIC (``_hod_extension_ok`` vs 9-EMA AND VWAP), NOT
+    BACKSIDE / NOT BELOW-VWAP (``_detect_back_side`` + ``front_side_state``), L2 hidden/
+    big-seller veto (``_l2_entry_veto``). ADDITIVE: flag OFF / thin / no depletion / no dip
+    ⇒ ``(False, reason, {...})`` with NO side effects; fail-OPEN on any error."""
+    debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "ask_thins_dip"}
+    try:
+        if not bool(getattr(settings, "chili_momentum_ask_thins_dip_entry_enabled", False)):
+            return False, "ask_thins_disabled", debug
+        if df is None or getattr(df, "empty", True) or len(df) < 12:
+            return False, "ask_thins_insufficient_bars", debug
+        if db is None or not symbol:
+            return False, "ask_thins_no_l2", debug
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        n = len(df)
+        cur = n - 1
+        arrays = compute_all_from_df(df, needed={"ema_9", "ema_20", "macd", "macd_signal", "vwap", "atr"})
+        ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
+        atr_pct, _atr_abs = _batch_c_atr_pct(df, close, cur)
+
+        # current price (live tick when above the bar close; never lowers the price).
+        try:
+            cur_close = float(close.iloc[cur])
+        except (TypeError, ValueError, IndexError):
+            return False, "ask_thins_no_close", debug
+        cur_px = cur_close
+        if live_price is not None:
+            try:
+                lp = float(live_price)
+                if lp > 0:
+                    cur_px = max(cur_close, lp)
+            except (TypeError, ValueError):
+                pass
+
+        # ── STRUCTURE: a real dip off a recent reference high holding a higher-low ───────
+        K = max(3, int(getattr(settings, "chili_momentum_swing_pivot_half_window", 2) or 2) * 2)
+        w_start = max(0, cur - K)
+        if w_start >= cur:
+            return False, "ask_thins_insufficient_bars", debug
+        ref_high = float(high.iloc[w_start:cur].max())
+        dip_low = float(low.iloc[w_start:cur + 1].min())
+        if not (0.0 < dip_low < ref_high):
+            return False, "ask_thins_bad_structure", debug
+        dip_depth = (ref_high - dip_low) / ref_high if ref_high > 0 else 0.0
+        a = float(atr_pct) if (atr_pct is not None and atr_pct > 0) else 0.0
+        noise_floor = max(0.003, 0.5 * (a or 0.01))
+        deep_cap = _collapse_cap(atr_pct)
+        if dip_depth < noise_floor:
+            return False, "ask_thins_too_shallow", debug
+        if dip_depth > deep_cap:
+            return False, "ask_thins_too_deep", debug
+        # the CURRENT bar must hold the dip (a higher-low; no fresh new low while thinning).
+        if float(low.iloc[cur]) < dip_low * (1.0 - 1e-9):
+            return False, "ask_thins_broke_low", debug
+        # the break/bounce LEVEL = the recent reference high; STOP = the dip low.
+        level = ref_high
+        stop = dip_low
+        debug["dip_low"] = round(stop, 6)
+        debug["dip_depth_pct"] = round(dip_depth * 100.0, 2)
+        # dip ROC (per-bar % drop into the low) — the conviction yardstick (#3 reads this).
+        try:
+            _lo_pos = int(low.iloc[w_start:cur + 1].astype(float).values.argmin()) + w_start
+            _ref_pos = int(high.iloc[w_start:cur].astype(float).values.argmax()) + w_start
+            _bars = max(1, _lo_pos - _ref_pos)
+            debug["dip_roc_per_bar"] = round(dip_depth / _bars, 6)
+        except (TypeError, ValueError):
+            debug["dip_roc_per_bar"] = None
+
+        # ── (1)+(2) L2 ASK DEPLETION: the offer collapsed across the window + buy-side OFI ─
+        from .pipeline import read_ladder_distribution
+
+        lr = read_ladder_distribution(symbol, db=db, as_of=l2_as_of)
+        if lr is None or int(getattr(lr, "n_snaps", 0) or 0) <= 0:
+            return False, "ask_thins_no_l2", debug
+        ask_build = getattr(lr, "ask_build", None)
+        ofi = getattr(lr, "ofi", None)
+        if ask_build is None:
+            return False, "ask_thins_no_ask_build", debug
+        try:
+            min_dep = abs(float(getattr(settings, "chili_momentum_ask_thins_min_depletion_frac", 0.25) or 0.25))
+            if float(ask_build) > -min_dep:
+                return False, "ask_thins_ask_not_depleted", debug
+        except (TypeError, ValueError):
+            return False, "ask_thins_no_ask_build", debug
+        # buy-side OFI confirms demand is pressing the (now-thin) offer. Fail-CLOSED on miss.
+        try:
+            ofi_thr = abs(float(getattr(settings, "chili_momentum_ofi_threshold", 0.25) or 0.25))
+        except (TypeError, ValueError):
+            ofi_thr = 0.25
+        if ofi is None:
+            return False, "ask_thins_no_ofi", debug
+        try:
+            if float(ofi) < ofi_thr:
+                return False, "ask_thins_weak_ofi", debug
+        except (TypeError, ValueError):
+            return False, "ask_thins_no_ofi", debug
+        debug["ask_build"] = round(float(ask_build), 4)
+        debug["ofi"] = round(float(ofi), 4)
+
+        # ── NOT BACKSIDE ────────────────────────────────────────────────────────────────
+        _bs, _bs_reason = _detect_back_side(
+            ema9, (arrays.get("ema_20") or []),
+            (arrays.get("macd") or []), (arrays.get("macd_signal") or []),
+            cur, macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+        )
+        if _bs:
+            debug["back_side"] = _bs_reason
+            return False, "ask_thins_back_side", debug
+        try:
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            if getattr(_fs, "is_backside", False):
+                debug["front_side_state"] = getattr(_fs, "reason", "backside")
+                return False, "ask_thins_backside_lifecycle", debug
+        except (TypeError, ValueError, AttributeError, KeyError):
+            debug["reason"] = "front_side_read_error"
+            return False, "ask_thins_backside_lifecycle", debug
+
+        # ── NOT PARABOLIC ──────────────────────────────────────────────────────────────
+        ema9_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        _ext_ok, _ext_dbg = _hod_extension_ok(
+            level=level, ema9_cur=ema9_cur, vwap_cur=vwap_cur, atr_pct=atr_pct, rvol=None,
+        )
+        if not _ext_ok:
+            debug.update(_ext_dbg)
+            return False, "ask_thins_extended", debug
+
+        # ── L2 hidden-seller / big-seller veto (reused; fail-open on disabled/null L2) ──
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
+        if _l2v is not None:
+            _reason, _l2patch = _l2v
+            debug.update(_l2patch)
+            return False, f"ask_thins_{_reason}", debug
+
+        debug["pullback_high"] = float(level)
+        debug["pullback_low"] = float(stop)
+        debug["atr_pct"] = (round(atr_pct, 6) if atr_pct is not None else None)
+
+        # ── BREAK: price ticks back up off the dip toward the level ─────────────────────
+        cur_hi = float(high.iloc[cur])
+        _broke = (cur_px > level) or (cur_hi > level)
+        if not _broke:
+            return False, "waiting_for_break", debug  # tick-armable (pullback_high set)
+
+        # ── TAPE REQUIRED + FAIL-CLOSED (the LAST gate; no fire without buyers on tape) ──
+        _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+        debug["tape_reason"] = _tape_dbg.get("reason")
+        if not _tape_ok:
+            return False, "ask_thins_tape_unconfirmed", debug
+        if live_price is not None and float(live_price) > 0 and float(live_price) > level:
+            debug["tick_break"] = True
+            debug["live_price"] = float(live_price)
+            return True, "ask_thins_dip_tick", debug
+        return True, "ask_thins_dip", debug
+    except Exception:
+        return False, "ask_thins_error", {"entry_interval": entry_interval}
+
+
+def sub_vwap_trap_entry(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str,
+    live_price: float | None = None,
+    symbol: str | None = None,
+    now: Any = None,
+    db: Any = None,
+    l2_as_of: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """LOCATE #4: SUB-VWAP TRAP / short-cover long (flag
+    ``chili_momentum_sub_vwap_trap_entry_enabled``).
+
+    A SHARP breakdown BELOW VWAP that FAILS to follow through (a bottoming-tail flush bar
+    that undercut VWAP and got bought, no fresh new low for the trap bar) then the CURRENT
+    bar RECLAIMS back above VWAP = a bear-trap / short-cover squeeze long. DISTINCT from
+    ``vwap_reclaim_confirmation`` (which requires ``K`` sustained closes below VWAP): the
+    trap is the violent stop-run undercut-and-reclaim, not a slow loss of VWAP. Entry = the
+    reclaim bar high (``pullback_high``); STOP = the trap low (``pullback_low``).
+
+    CHASE-GUARDS reused (no weakened veto): TAPE REQUIRED+FAIL-CLOSED, NOT PARABOLIC
+    (``_hod_extension_ok``), NOT BACKSIDE / NOT BELOW-VWAP (``_detect_back_side`` +
+    ``front_side_state`` — the reclaim must put price back ABOVE VWAP so front_side_state
+    is satisfied), L2 veto. ADDITIVE: flag OFF / thin / no trap ⇒ ``(False, reason, {...})``
+    with NO side effects; fail-OPEN on any error."""
+    debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "sub_vwap_trap"}
+    try:
+        if not bool(getattr(settings, "chili_momentum_sub_vwap_trap_entry_enabled", False)):
+            return False, "sub_vwap_trap_disabled", debug
+        if df is None or getattr(df, "empty", True) or len(df) < 10:
+            return False, "sub_vwap_trap_insufficient_bars", debug
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        opn = df["Open"].astype(float) if "Open" in getattr(df, "columns", []) else None
+        n = len(df)
+        cur = n - 1
+        arrays = compute_all_from_df(df, needed={"ema_9", "ema_20", "macd", "macd_signal", "vwap", "atr"})
+        ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
+        atr_pct, _atr_abs = _batch_c_atr_pct(df, close, cur)
+
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        if vwap_cur is None or float(vwap_cur) <= 0:
+            return False, "sub_vwap_trap_vwap_warmup", debug
+
+        # The TRAP bar = the bar before the current (reclaim) bar. It must have UNDERCUT VWAP
+        # on its low (the stop-run) and printed a bottoming tail (got bought), not closed down
+        # in a trend. The current bar reclaims back above VWAP.
+        trap_idx = cur - 1
+        if trap_idx < 1:
+            return False, "sub_vwap_trap_insufficient_bars", debug
+        vwap_trap = vwap[trap_idx] if trap_idx < len(vwap) and vwap[trap_idx] is not None else None
+        if vwap_trap is None or float(vwap_trap) <= 0:
+            return False, "sub_vwap_trap_vwap_warmup", debug
+        t_o = float(opn.iloc[trap_idx]) if opn is not None else float(close.iloc[trap_idx - 1])
+        t_h, t_l, t_c = float(high.iloc[trap_idx]), float(low.iloc[trap_idx]), float(close.iloc[trap_idx])
+        # UNDERCUT: the trap low pierced below VWAP (the breakdown that traps shorts).
+        if t_l >= float(vwap_trap):
+            return False, "sub_vwap_trap_no_undercut", debug
+        # BOTTOMING TAIL: the flush got bought (close in the upper part of the bar range).
+        if not _bottoming_tail(t_o, t_h, t_l, t_c):
+            return False, "sub_vwap_trap_no_bottoming_tail", debug
+        trap_low = t_l
+        if not (trap_low > 0):
+            return False, "sub_vwap_trap_bad_low", debug
+
+        # CURRENT bar RECLAIMS above VWAP (price + close back above) AND holds the trap low.
+        px = float(live_price) if (live_price is not None and float(live_price) > 0) else float(close.iloc[cur])
+        if px < float(vwap_cur) or float(close.iloc[cur]) < float(vwap_cur):
+            return False, "waiting_for_vwap_reclaim", debug  # tick-armable on the reclaim
+        if float(low.iloc[cur]) < trap_low * (1.0 - 1e-9):
+            return False, "sub_vwap_trap_undercut_again", debug
+        from .candles import is_strong_bull_break_candle
+
+        c_o = float(opn.iloc[cur]) if opn is not None else float(close.iloc[cur - 1])
+        c_h, c_l, c_c = float(high.iloc[cur]), float(low.iloc[cur]), float(close.iloc[cur])
+        if not is_strong_bull_break_candle(
+            c_o, c_h, c_l, c_c,
+            min_close_pos=float(getattr(settings, "chili_momentum_entry_break_candle_min_close_pos", 0.50) or 0.50),
+        ):
+            return False, "sub_vwap_trap_weak_reclaim", debug
+
+        level = float(high.iloc[cur])   # the reclaim bar high (break level)
+        stop = trap_low                 # the trap low (structural stop)
+        if not (0.0 < stop < level):
+            return False, "sub_vwap_trap_bad_level", debug
+
+        # ── NOT BACKSIDE / NOT BELOW-VWAP ───────────────────────────────────────────────
+        _bs, _bs_reason = _detect_back_side(
+            ema9, (arrays.get("ema_20") or []),
+            (arrays.get("macd") or []), (arrays.get("macd_signal") or []),
+            cur, macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+        )
+        if _bs:
+            debug["back_side"] = _bs_reason
+            return False, "sub_vwap_trap_back_side", debug
+        try:
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            if getattr(_fs, "is_backside", False):
+                debug["front_side_state"] = getattr(_fs, "reason", "backside")
+                return False, "sub_vwap_trap_backside_lifecycle", debug
+        except (TypeError, ValueError, AttributeError, KeyError):
+            debug["reason"] = "front_side_read_error"
+            return False, "sub_vwap_trap_backside_lifecycle", debug
+
+        # ── NOT PARABOLIC ──────────────────────────────────────────────────────────────
+        ema9_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+        _ext_ok, _ext_dbg = _hod_extension_ok(
+            level=level, ema9_cur=ema9_cur, vwap_cur=float(vwap_cur), atr_pct=atr_pct, rvol=None,
+        )
+        if not _ext_ok:
+            debug.update(_ext_dbg)
+            return False, "sub_vwap_trap_extended", debug
+
+        # ── L2 hidden-seller / big-seller veto (reused; fail-open on disabled/null L2) ──
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
+        if _l2v is not None:
+            _reason, _l2patch = _l2v
+            debug.update(_l2patch)
+            return False, f"sub_vwap_trap_{_reason}", debug
+
+        # dip ROC for the conviction modifier (#3): the undercut depth per bar.
+        try:
+            _roc = (float(vwap_trap) - trap_low) / float(vwap_trap) if float(vwap_trap) > 0 else None
+            debug["dip_roc_per_bar"] = round(_roc, 6) if _roc is not None else None
+        except (TypeError, ValueError):
+            debug["dip_roc_per_bar"] = None
+        debug.update({
+            "pullback_high": float(level),
+            "pullback_low": float(stop),
+            "vwap": round(float(vwap_cur), 6),
+            "atr_pct": (round(atr_pct, 6) if atr_pct is not None else None),
+        })
+
+        # ── TAPE REQUIRED + FAIL-CLOSED (the LAST gate) ─────────────────────────────────
+        _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+        debug["tape_reason"] = _tape_dbg.get("reason")
+        if not _tape_ok:
+            return False, "sub_vwap_trap_tape_unconfirmed", debug
+        if live_price is not None and float(live_price) > 0 and float(live_price) > level:
+            debug["tick_break"] = True
+            debug["live_price"] = float(live_price)
+            return True, "sub_vwap_trap_tick", debug
+        return True, "sub_vwap_trap", debug
+    except Exception:
+        return False, "sub_vwap_trap_error", {"entry_interval": entry_interval}
+
+
+def pulling_away_roc_entry(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str,
+    live_price: float | None = None,
+    symbol: str | None = None,
+    now: Any = None,
+    db: Any = None,
+    l2_as_of: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """LOCATE #5: PULLING-AWAY ROC-inflection break (flag
+    ``chili_momentum_pulling_away_roc_entry_enabled``).
+
+    Price tapped a multi-tap RESISTANCE band (>= ``min_taps`` swing-high taps within an
+    ATR-derived band = a tested ceiling, not a first touch) then PULLS AWAY: the current-bar
+    rate-of-change ACCELERATES above its recent baseline by an ATR-scaled margin (a ROC
+    inflection — the break is finally going, vs the dead taps before it). Entry = the
+    resistance/break level (``pullback_high``); STOP = the last swing low under the base
+    (``pullback_low``).
+
+    CHASE-GUARDS reused (no weakened veto): TAPE REQUIRED+FAIL-CLOSED, NOT PARABOLIC
+    (``_hod_extension_ok``), NOT BACKSIDE / NOT BELOW-VWAP, L2 veto. ADDITIVE: flag OFF /
+    thin / too-few-taps / no ROC inflection ⇒ ``(False, reason, {...})``; fail-OPEN on error."""
+    debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "pulling_away_roc"}
+    try:
+        if not bool(getattr(settings, "chili_momentum_pulling_away_roc_entry_enabled", False)):
+            return False, "pulling_away_disabled", debug
+        half_w = int(getattr(settings, "chili_momentum_swing_pivot_half_window", 2) or 2)
+        if df is None or getattr(df, "empty", True) or len(df) < (2 * half_w + 6):
+            return False, "pulling_away_insufficient_bars", debug
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        n = len(df)
+        cur = n - 1
+        arrays = compute_all_from_df(df, needed={"ema_9", "ema_20", "macd", "macd_signal", "vwap", "atr"})
+        ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
+        atr_pct, atr_abs = _batch_c_atr_pct(df, close, cur)
+        noise_frac = float(getattr(settings, "chili_momentum_swing_pivot_atr_noise_frac", 0.5) or 0.0)
+        pivots = _swing_pivots(
+            high, low, half_window=half_w, atr_abs=atr_abs, atr_noise_frac=noise_frac,
+        )
+        highs = [p for p in pivots if p["kind"] == "H"]
+        lows = [p for p in pivots if p["kind"] == "L"]
+        min_taps = max(2, int(getattr(settings, "chili_momentum_pulling_away_min_taps", 2) or 2))
+        if len(highs) < min_taps:
+            return False, "pulling_away_too_few_taps", debug
+
+        # The resistance BAND = the taps clustered near the highest recent swing high within an
+        # ATR-derived band. Count taps in the band; require >= min_taps (a tested ceiling).
+        top = max(float(p["price"]) for p in highs)
+        band = (0.6 * float(atr_abs)) if (atr_abs is not None and atr_abs > 0) else (0.01 * top)
+        taps = [p for p in highs if abs(float(p["price"]) - top) <= band]
+        debug["n_taps"] = len(taps)
+        if len(taps) < min_taps:
+            return False, "pulling_away_too_few_band_taps", debug
+        level = top
+        # STOP = the most-recent swing low UNDER the base (back into the consolidation).
+        if not lows:
+            return False, "pulling_away_no_stop", debug
+        stop = float(lows[-1]["price"])
+        if not (0.0 < stop < level):
+            return False, "pulling_away_bad_level", debug
+
+        # ── ROC INFLECTION: the current-bar ROC accelerates above its recent baseline ────
+        # ROC per bar = fractional close change; baseline = the mean |ROC| over the prior
+        # window. A genuine pull-away spikes the current ROC well above that flat baseline.
+        roc_lb = 5
+        if cur - roc_lb - 1 < 0:
+            return False, "pulling_away_insufficient_bars", debug
+        cur_roc = (float(close.iloc[cur]) - float(close.iloc[cur - 1])) / float(close.iloc[cur - 1]) if float(close.iloc[cur - 1]) > 0 else 0.0
+        base_rocs = []
+        for i in range(cur - roc_lb, cur):
+            p0 = float(close.iloc[i - 1])
+            if p0 > 0:
+                base_rocs.append(abs((float(close.iloc[i]) - p0) / p0))
+        base_roc = (sum(base_rocs) / len(base_rocs)) if base_rocs else 0.0
+        a = float(atr_pct) if (atr_pct is not None and atr_pct > 0) else 0.01
+        # the inflection margin = max(baseline + ~0.5 ATR%, a small abs floor) — adaptive.
+        infl_margin = max(base_roc + 0.5 * a, 0.003)
+        debug["cur_roc"] = round(cur_roc, 5)
+        debug["base_roc"] = round(base_roc, 5)
+        debug["infl_margin"] = round(infl_margin, 5)
+        if cur_roc < infl_margin:
+            return False, "pulling_away_no_roc_inflection", debug
+
+        # ── NOT BACKSIDE ────────────────────────────────────────────────────────────────
+        _bs, _bs_reason = _detect_back_side(
+            ema9, (arrays.get("ema_20") or []),
+            (arrays.get("macd") or []), (arrays.get("macd_signal") or []),
+            cur, macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+        )
+        if _bs:
+            debug["back_side"] = _bs_reason
+            return False, "pulling_away_back_side", debug
+        try:
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            if getattr(_fs, "is_backside", False):
+                debug["front_side_state"] = getattr(_fs, "reason", "backside")
+                return False, "pulling_away_backside_lifecycle", debug
+        except (TypeError, ValueError, AttributeError, KeyError):
+            debug["reason"] = "front_side_read_error"
+            return False, "pulling_away_backside_lifecycle", debug
+
+        # ── NOT PARABOLIC ──────────────────────────────────────────────────────────────
+        ema9_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        _ext_ok, _ext_dbg = _hod_extension_ok(
+            level=level, ema9_cur=ema9_cur, vwap_cur=vwap_cur, atr_pct=atr_pct, rvol=None,
+        )
+        if not _ext_ok:
+            debug.update(_ext_dbg)
+            return False, "pulling_away_extended", debug
+
+        # ── L2 hidden-seller / big-seller veto (reused; fail-open on disabled/null L2) ──
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
+        if _l2v is not None:
+            _reason, _l2patch = _l2v
+            debug.update(_l2patch)
+            return False, f"pulling_away_{_reason}", debug
+
+        debug["pullback_high"] = float(level)
+        debug["pullback_low"] = float(stop)
+        debug["atr_pct"] = (round(atr_pct, 6) if atr_pct is not None else None)
+
+        # current price (live tick when above the bar close; never lowers).
+        try:
+            cur_close = float(close.iloc[cur])
+        except (TypeError, ValueError, IndexError):
+            return False, "pulling_away_no_close", debug
+        cur_px = cur_close
+        if live_price is not None:
+            try:
+                lp = float(live_price)
+                if lp > 0:
+                    cur_px = max(cur_close, lp)
+            except (TypeError, ValueError):
+                pass
+        cur_hi = float(high.iloc[cur])
+        _broke = (cur_px > level) or (cur_hi > level)
+        if not _broke:
+            return False, "waiting_for_break", debug  # tick-armable (pullback_high set)
+
+        # ── TAPE REQUIRED + FAIL-CLOSED (the LAST gate) ─────────────────────────────────
+        _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+        debug["tape_reason"] = _tape_dbg.get("reason")
+        if not _tape_ok:
+            return False, "pulling_away_tape_unconfirmed", debug
+        if live_price is not None and float(live_price) > 0 and float(live_price) > level:
+            debug["tick_break"] = True
+            debug["live_price"] = float(live_price)
+            return True, "pulling_away_roc_tick", debug
+        return True, "pulling_away_roc", debug
+    except Exception:
+        return False, "pulling_away_error", {"entry_interval": entry_interval}
+
+
+def premarket_pivot_macd_entry(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str,
+    live_price: float | None = None,
+    symbol: str | None = None,
+    now: Any = None,
+    db: Any = None,
+    l2_as_of: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """LOCATE #6: PREMARKET PIVOT + MACD re-cross gap-and-go (flag
+    ``chili_momentum_premarket_pivot_macd_entry_enabled``).
+
+    A premarket break: price breaks the premarket PIVOT (the recent premarket swing high)
+    WITH a fresh MACD re-cross (the MACD line crosses back ABOVE its signal within the
+    lookback — momentum re-igniting) AND a COLD-MARKET avoid (skip when RVOL is below the
+    cold floor — a cold premarket with no interest fakes out). Entry = the pivot level
+    (``pullback_high``); STOP = the premarket pivot low (``pullback_low``). EQUITY-ONLY
+    (crypto is 24/7, no premarket).
+
+    CHASE-GUARDS reused (no weakened veto): TAPE REQUIRED+FAIL-CLOSED, NOT PARABOLIC
+    (``_hod_extension_ok``), NOT BACKSIDE / NOT BELOW-VWAP, L2 veto. ADDITIVE: flag OFF /
+    crypto / thin / cold / no MACD re-cross ⇒ ``(False, reason, {...})``; fail-OPEN on error."""
+    debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "premarket_pivot_macd"}
+    try:
+        if not bool(getattr(settings, "chili_momentum_premarket_pivot_macd_entry_enabled", False)):
+            return False, "premarket_pivot_disabled", debug
+        # EQUITY-ONLY: crypto is 24/7 and has no premarket pivot concept.
+        if bool(symbol) and str(symbol).upper().endswith("-USD"):
+            return False, "premarket_pivot_crypto_exempt", debug
+        half_w = int(getattr(settings, "chili_momentum_swing_pivot_half_window", 2) or 2)
+        if df is None or getattr(df, "empty", True) or len(df) < (2 * half_w + 6):
+            return False, "premarket_pivot_insufficient_bars", debug
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        n = len(df)
+        cur = n - 1
+        arrays = compute_all_from_df(df, needed={"ema_9", "ema_20", "macd", "macd_signal", "vwap", "atr", "volume_ratio"})
+        ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
+        macd = arrays.get("macd") or []
+        macd_sig = arrays.get("macd_signal") or []
+        vr = arrays.get("volume_ratio") or []
+        atr_pct, atr_abs = _batch_c_atr_pct(df, close, cur)
+
+        # COLD-MARKET avoid: a real gap-and-go has volume; skip a cold premarket fake-out.
+        rvol = None
+        try:
+            rvol = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
+        except (TypeError, ValueError):
+            rvol = None
+        cold_floor = float(getattr(settings, "chili_momentum_premarket_pivot_cold_rvol_floor", 1.5) or 0.0)
+        debug["rvol"] = round(rvol, 2) if rvol is not None else None
+        if cold_floor > 0.0 and (rvol is None or rvol < cold_floor):
+            return False, "premarket_pivot_cold_market", debug
+
+        # The premarket PIVOT = the most-recent swing high (the level that, broken, signals the
+        # gap-and-go); STOP = the most-recent swing low under it.
+        noise_frac = float(getattr(settings, "chili_momentum_swing_pivot_atr_noise_frac", 0.5) or 0.0)
+        pivots = _swing_pivots(
+            high, low, half_window=half_w, atr_abs=atr_abs, atr_noise_frac=noise_frac,
+        )
+        highs = [p for p in pivots if p["kind"] == "H"]
+        lows = [p for p in pivots if p["kind"] == "L"]
+        if not highs or not lows:
+            return False, "premarket_pivot_no_pivot", debug
+        level = float(highs[-1]["price"])
+        stop = float(lows[-1]["price"])
+        if not (0.0 < stop < level):
+            return False, "premarket_pivot_bad_level", debug
+
+        # ── MACD RE-CROSS: the line crossed back ABOVE signal within the lookback AND is
+        # STILL above now (a fresh bullish re-cross, not a stale one). ─────────────────
+        _lb = int(_BACKSIDE_MACD_CROSS_LOOKBACK)
+        _recrossed = False
+        try:
+            m_cur = macd[cur] if cur < len(macd) else None
+            s_cur = macd_sig[cur] if cur < len(macd_sig) else None
+            if m_cur is not None and s_cur is not None and float(m_cur) > float(s_cur):
+                lo_i = max(1, cur - _lb + 1)
+                for i in range(lo_i, cur + 1):
+                    mp = macd[i - 1] if 0 <= i - 1 < len(macd) else None
+                    sp = macd_sig[i - 1] if 0 <= i - 1 < len(macd_sig) else None
+                    mi = macd[i] if 0 <= i < len(macd) else None
+                    si = macd_sig[i] if 0 <= i < len(macd_sig) else None
+                    if mp is None or sp is None or mi is None or si is None:
+                        continue
+                    if float(mp) <= float(sp) and float(mi) > float(si):
+                        _recrossed = True
+                        break
+        except (TypeError, ValueError, IndexError):
+            _recrossed = False
+        if not _recrossed:
+            return False, "premarket_pivot_no_macd_recross", debug
+        debug["macd_recross"] = True
+
+        # ── NOT BACKSIDE ────────────────────────────────────────────────────────────────
+        _bs, _bs_reason = _detect_back_side(
+            ema9, (arrays.get("ema_20") or []),
+            macd, macd_sig, cur, macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+        )
+        if _bs:
+            debug["back_side"] = _bs_reason
+            return False, "premarket_pivot_back_side", debug
+        try:
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            if getattr(_fs, "is_backside", False):
+                debug["front_side_state"] = getattr(_fs, "reason", "backside")
+                return False, "premarket_pivot_backside_lifecycle", debug
+        except (TypeError, ValueError, AttributeError, KeyError):
+            debug["reason"] = "front_side_read_error"
+            return False, "premarket_pivot_backside_lifecycle", debug
+
+        # ── NOT PARABOLIC ──────────────────────────────────────────────────────────────
+        ema9_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        _ext_ok, _ext_dbg = _hod_extension_ok(
+            level=level, ema9_cur=ema9_cur, vwap_cur=vwap_cur, atr_pct=atr_pct, rvol=rvol,
+        )
+        if not _ext_ok:
+            debug.update(_ext_dbg)
+            return False, "premarket_pivot_extended", debug
+
+        # ── L2 hidden-seller / big-seller veto (reused; fail-open on disabled/null L2) ──
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
+        if _l2v is not None:
+            _reason, _l2patch = _l2v
+            debug.update(_l2patch)
+            return False, f"premarket_pivot_{_reason}", debug
+
+        debug["pullback_high"] = float(level)
+        debug["pullback_low"] = float(stop)
+        debug["atr_pct"] = (round(atr_pct, 6) if atr_pct is not None else None)
+
+        # current price (live tick when above the bar close; never lowers).
+        try:
+            cur_close = float(close.iloc[cur])
+        except (TypeError, ValueError, IndexError):
+            return False, "premarket_pivot_no_close", debug
+        cur_px = cur_close
+        if live_price is not None:
+            try:
+                lp = float(live_price)
+                if lp > 0:
+                    cur_px = max(cur_close, lp)
+            except (TypeError, ValueError):
+                pass
+        cur_hi = float(high.iloc[cur])
+        _broke = (cur_px > level) or (cur_hi > level)
+        if not _broke:
+            return False, "waiting_for_break", debug  # tick-armable (pullback_high set)
+
+        # ── TAPE REQUIRED + FAIL-CLOSED (the LAST gate) ─────────────────────────────────
+        _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+        debug["tape_reason"] = _tape_dbg.get("reason")
+        if not _tape_ok:
+            return False, "premarket_pivot_tape_unconfirmed", debug
+        if live_price is not None and float(live_price) > 0 and float(live_price) > level:
+            debug["tick_break"] = True
+            debug["live_price"] = float(live_price)
+            return True, "premarket_pivot_macd_tick", debug
+        return True, "premarket_pivot_macd", debug
+    except Exception:
+        return False, "premarket_pivot_error", {"entry_interval": entry_interval}
+
+
 def ross_double_bottom_confirmation(
     df: pd.DataFrame,
     *,
@@ -6084,6 +6793,27 @@ def select_best_setup(
             return _veto_choice(fires[0])
         from .paper_execution import class_aware_reward_risk, stop_target_prices
 
+        # LOCATE #8 SECOND-LEG PREFERENCE: prefer a later, BASED leg over a 1st extended leg.
+        # A based second-leg candidate (a breakout whose tested base/support sits ABOVE the
+        # candidate set's lowest structural low by an ATR-scaled margin — i.e. it consolidated
+        # higher, a second leg) gets a small R:R TILT in the arbitration. It is a PREFERENCE
+        # among already-passing fires — it never admits a NEW entry and never loosens a guard.
+        # OFF / single fire ⇒ no tilt (byte-identical). Bounded so it can't dominate a far
+        # worse R:R. docs/DESIGN/MOMENTUM_LANE.md
+        _2leg_on = bool(getattr(settings, "chili_momentum_second_leg_preference_enabled", False))
+        _2leg_tilt = 0.0
+        _set_low = None
+        if _2leg_on and len(fires) > 1:
+            try:
+                _lows = [float(d["pullback_low"]) for _, _, d in fires
+                         if isinstance(d, dict) and d.get("pullback_low") and float(d["pullback_low"]) > 0]
+                _set_low = min(_lows) if _lows else None
+                _2leg_tilt = max(0.0, min(1.0, float(
+                    getattr(settings, "chili_momentum_second_leg_rr_tilt", 0.15) or 0.0
+                )))
+            except (TypeError, ValueError):
+                _set_low, _2leg_tilt = None, 0.0
+
         _ap = float(atr_pct) if (atr_pct is not None and atr_pct > 0) else 0.01
         best = None
         best_rr = -1.0
@@ -6100,10 +6830,19 @@ def select_best_setup(
                 risk = entry - stop
                 reward = float(target) - entry
                 rr = (reward / risk) if risk > 0 else -1.0
+                # #8: a based second leg (this fire's structural base sits an ATR-scaled
+                # margin ABOVE the candidate set's lowest base) earns the bounded R:R tilt.
+                _eff_rr = rr
+                if _2leg_tilt > 0.0 and _set_low is not None and rr > 0:
+                    _margin = _ap * float(entry)  # ~1 ATR in price terms
+                    if _margin > 0 and (stop - _set_low) >= _margin:
+                        _eff_rr = rr * (1.0 + _2leg_tilt)
+                        if isinstance(dbg, dict):
+                            dbg["second_leg_based"] = True
             except (TypeError, ValueError, KeyError):
                 continue
-            if rr > best_rr:
-                best_rr, best = rr, (ok_t, reason_t, dbg)
+            if _eff_rr > best_rr:
+                best_rr, best = _eff_rr, (ok_t, reason_t, dbg)
         if best is None:
             return _veto_choice(fires[0])
         _ok, _reason, _dbg = best

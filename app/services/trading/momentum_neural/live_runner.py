@@ -2842,6 +2842,51 @@ def instant_bid_below_fill_cut(
     return b < threshold
 
 
+def instant_bid_above_fill_confirm_failed(
+    *,
+    entry_price: float,
+    bid: float,
+    high_water_mark: float | None,
+    held_seconds: float,
+    window_seconds: float,
+    margin_bps: float,
+) -> bool:
+    """LOCATE #7 — the POSITIVE MIRROR of ``instant_bid_below_fill_cut``. In the first
+    ``window_seconds`` after the fill the live BID should hold AT/ABOVE the fill (within
+    ``margin_bps`` noise) as positive confirmation. Returns ``True`` (confirmation FAILED ⇒
+    feed the existing bail) ONLY when, AT THE END of the window (``held_seconds`` near the
+    window edge), the bid is NOT at/above the fill AND the position never made a confirming
+    high (the high-water mark never cleared the fill+margin). A position that DID print a
+    confirming high is IMMUNE (the entry confirmed). This NEVER adds a new exit reason — the
+    caller routes it into the SAME instant-bid-below / no-confirmation bailout it already
+    gates. Pure / fail-CLOSED (any bad input ⇒ False ⇒ no cut)."""
+    try:
+        e = float(entry_price)
+        b = float(bid)
+        held = float(held_seconds)
+        win = float(window_seconds)
+        mbps = max(0.0, float(margin_bps))
+    except (TypeError, ValueError):
+        return False
+    if not (math.isfinite(e) and math.isfinite(b)) or e <= 0 or b <= 0:
+        return False
+    # Only evaluate at the END of the confirmation window (give the bid the full window to
+    # confirm); before that, never cut. After the window, the structural stop owns it.
+    if win <= 0 or held < win or held > win * 2.0:
+        return False
+    confirm_floor = e * (1.0 - mbps / 10_000.0)
+    # If the position EVER made a confirming high (hwm cleared the fill+margin), it confirmed.
+    try:
+        if high_water_mark is not None and math.isfinite(float(high_water_mark)):
+            if float(high_water_mark) >= e * (1.0 + mbps / 10_000.0):
+                return False
+    except (TypeError, ValueError):
+        pass
+    # No confirming high AND the bid is below the fill (minus noise) at the window edge ⇒
+    # the entry never confirmed → feed the bail.
+    return b < confirm_floor
+
+
 def _regime_holdtime_band_mult(*, explosive: bool) -> float:
     """GAP3 (regime-conditioned hold-time, Warrior re-audit 2026-06-26): the give-back
     band multiplier for the runner cushion-trail, conditioned on the ENTRY regime via the
@@ -4772,6 +4817,56 @@ def tick_live_session(
                                 except Exception:
                                     pass
 
+                                # LOCATE #2/#4/#5/#6: four NEW scalp/dip triggers. Each carries
+                                # the SAME chase-guards (tape REQUIRED+fail-closed via
+                                # tape_confirms_hold INSIDE the detector, _hod_extension_ok +
+                                # _detect_back_side + front_side_state + _l2_entry_veto) and
+                                # returns the shared (ok, reason, debug) with pullback_low/high
+                                # under the IDENTICAL keys, so the structural-stop + bailout
+                                # machinery below + the setup-selector are reused unchanged.
+                                # ask_thins/sub_vwap_trap are DIP-family (join the dip-fire slot
+                                # when no breakout wins); pulling_away/premarket_pivot are
+                                # BREAKOUT-family. Each flag-gated INSIDE the detector (default
+                                # OFF -> disabled before any compute, byte-identical). l2_as_of=
+                                # None = the LIVE default. docs/DESIGN/MOMENTUM_LANE.md
+                                try:
+                                    from .entry_gates import (
+                                        ask_thins_dip_entry,
+                                        premarket_pivot_macd_entry,
+                                        pulling_away_roc_entry,
+                                        sub_vwap_trap_entry,
+                                    )
+
+                                    for _sd_fn in (
+                                        ask_thins_dip_entry,
+                                        sub_vwap_trap_entry,
+                                        pulling_away_roc_entry,
+                                        premarket_pivot_macd_entry,
+                                    ):
+                                        try:
+                                            _sd_ok, _sd_reason, _sd_dbg = _sd_fn(
+                                                _df_trig, entry_interval=_iv_trig,
+                                                live_price=_live_px, symbol=sess.symbol,
+                                                now=None, db=db, l2_as_of=None,
+                                            )
+                                        except Exception:
+                                            _sd_ok, _sd_reason, _sd_dbg = False, "scalp_dip_error", {}
+                                        if _sd_ok:
+                                            _breakouts.append((_sd_ok, _sd_reason, _sd_dbg))
+                                        elif (
+                                            _sd_reason in TICK_ARMED_WAIT_REASONS
+                                            and isinstance(_sd_dbg, dict)
+                                            and _sd_dbg.get("pullback_high")
+                                            and not _trigger_ok
+                                            and _trigger_reason not in TICK_ARMED_WAIT_REASONS
+                                        ):
+                                            # Surface the WAIT so tick-speed dispatch fires the
+                                            # instant the ask trades through the level (the ladder
+                                            # gave only a terminal wait).
+                                            _trigger_reason, _pb_debug = _sd_reason, _sd_dbg
+                                except Exception:
+                                    pass
+
                                 if _breakouts:
                                     # SETUP-SELECTOR: choose the best R:R among the dip-family fire
                                     # (if any) and the breakout fire(s). Flag OFF -> the first fire
@@ -4945,6 +5040,66 @@ def tick_live_session(
                 _emit(db, sess, "live_entry_opening_bell_suppressed", {
                     "suppressed_trigger": _prev_reason, **_ob_dbg,
                 })
+        # LOCATE #9 8AM BURST GUARD: a narrow time-windowed DISTRUST of the top-of-hour
+        # burst candle (esp. 08:00 ET) — within the guard window of a top-of-hour boundary,
+        # DEFER a fresh entry trigger (mirror of the opening-bell suppression). Equity/RH
+        # ONLY; the burst candle is order-imbalance noise, not a tradeable break. RISK-
+        # REDUCING ONLY: it can only DEFER a fresh fire (never enables/loosens). Flag OFF /
+        # crypto / outside-window ⇒ no-op, byte-identical.
+        if (
+            _trigger_ok
+            and not str(sess.symbol or "").upper().endswith("-USD")
+            and bool(getattr(settings, "chili_momentum_order_burst_candle_guard_enabled", False))
+        ):
+            try:
+                from zoneinfo import ZoneInfo as _ZIb
+
+                _now_et_b = datetime.now(_ZIb("America/New_York"))
+                _win_min = float(getattr(settings, "chili_momentum_order_burst_guard_window_minutes", 3.0) or 0.0)
+                # minutes since the most-recent top-of-hour boundary (0..59).
+                _mins_into_hour = _now_et_b.minute + _now_et_b.second / 60.0
+                _burst = _win_min > 0.0 and _mins_into_hour < _win_min
+            except Exception:
+                _burst, _now_et_b = False, None
+            if _burst:
+                _trigger_ok = False
+                _prev_reason = _trigger_reason
+                _trigger_reason = "order_burst_candle_deferred"
+                _emit(db, sess, "live_entry_order_burst_deferred", {
+                    "deferred_trigger": _prev_reason,
+                    "hour_et": (_now_et_b.hour if _now_et_b is not None else None),
+                    "minute_et": (_now_et_b.minute if _now_et_b is not None else None),
+                    "window_minutes": float(getattr(settings, "chili_momentum_order_burst_guard_window_minutes", 3.0) or 0.0),
+                })
+        # LOCATE #10 RED-CANDLE ENTRY BLOCK: do NOT fire a fresh entry while the CURRENT
+        # entry-interval bar is RED (close < open) — Ross never buys into a red candle.
+        # DEFER (stay WATCHING) when the latest completed bar on the entry frame is red.
+        # RISK-REDUCING ONLY: it can only DEFER a fresh fire (never enables/loosens). Flag
+        # OFF / no data ⇒ no-op (fail-OPEN — a missing frame never manufactures a defer),
+        # byte-identical.
+        if (
+            _trigger_ok
+            and bool(getattr(settings, "chili_momentum_red_candle_entry_block_enabled", False))
+        ):
+            try:
+                from ..market_data import fetch_ohlcv_df as _rc_fetch
+
+                _rc_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+                _rc_df = _rc_fetch(sess.symbol, interval=_rc_iv, period="5d")
+                _is_red = False
+                if _rc_df is not None and not getattr(_rc_df, "empty", True) and len(_rc_df) >= 1:
+                    _rc_c = float(_rc_df["Close"].astype(float).iloc[-1])
+                    _rc_o = float(_rc_df["Open"].astype(float).iloc[-1])
+                    _is_red = _rc_c < _rc_o
+            except Exception:
+                _is_red = False  # fail-OPEN: a missing/degenerate frame never defers
+            if _is_red:
+                _trigger_ok = False
+                _prev_reason = _trigger_reason
+                _trigger_reason = "red_candle_entry_blocked"
+                _emit(db, sess, "live_entry_red_candle_blocked", {
+                    "blocked_trigger": _prev_reason,
+                })
         # HVM101 (B): BID-PROP / SPREAD-TIGHTENING CONFIRMER — confirm a fired break
         # only when, over the last few L1 samples, the best-bid is non-decreasing AND
         # the spread is at/below its short trailing median (genuine backing). Equity/RH
@@ -5045,6 +5200,14 @@ def tick_live_session(
                 # break level) under the SAME keys, so the same machinery is reused.
                 "abcd_break", "abcd_break_tick_ok",
                 "double_bottom_break", "double_bottom_break_tick_ok",
+                # LOCATE #2/#4/#5/#6: the four new scalp/dip triggers carry pullback_low
+                # (= the dip/trap/base structural stop) + pullback_high (= the break level)
+                # under the SAME keys, so the structural-stop + breakout-or-bailout machinery
+                # is reused unchanged.
+                "ask_thins_dip", "ask_thins_dip_tick",
+                "sub_vwap_trap", "sub_vwap_trap_tick",
+                "pulling_away_roc", "pulling_away_roc_tick",
+                "premarket_pivot_macd", "premarket_pivot_macd_tick",
             ) and _pb_debug.get("pullback_low"):
                 le["structural_stop_price"] = float(_pb_debug["pullback_low"])
                 # #2 Breakout-or-bailout: stash the broken pullback HIGH (the breakout
@@ -5058,6 +5221,41 @@ def tick_live_session(
             else:
                 le.pop("structural_stop_price", None)
                 le.pop("breakout_level_price", None)
+            # LOCATE #3 DIP-VELOCITY CONVICTION: scale entry SIZE by the dip ROC for a
+            # dip-family fire (steeper flush snaps back harder). The multiplier is in
+            # [1.0, 1+max_boost] (NEVER < 1.0) and composes multiplicatively under the SAME
+            # 3x clamp + max_notional ceiling as every other size lever, so it can never
+            # increase per-trade RISK past the caps. Stash it (mirroring halt_entry_size_
+            # mult); cleared on a non-dip fire so it cannot leak. Flag OFF / non-dip / no ROC
+            # ⇒ mult 1.0 / key absent ⇒ byte-identical. docs/DESIGN/MOMENTUM_LANE.md
+            le.pop("dip_velocity_size_mult", None)
+            if _trigger_reason in (
+                "flush_dip_buy", "vwap_reclaim", "wick_reclaim",
+                "ask_thins_dip", "ask_thins_dip_tick",
+                "sub_vwap_trap", "sub_vwap_trap_tick",
+            ):
+                try:
+                    from .entry_gates import _dip_velocity_size_mult
+
+                    _dv_mult = _dip_velocity_size_mult(
+                        dip_roc_per_bar=(
+                            _float_or_none(_pb_debug.get("dip_roc_per_bar"))
+                            if isinstance(_pb_debug, dict) else None
+                        ),
+                        atr_pct=(
+                            _float_or_none(_pb_debug.get("atr_pct"))
+                            if isinstance(_pb_debug, dict) else None
+                        ),
+                    )
+                    if _dv_mult is not None and abs(float(_dv_mult) - 1.0) > 1e-9 and float(_dv_mult) > 1.0:
+                        le["dip_velocity_size_mult"] = float(_dv_mult)
+                        _emit(db, sess, "live_entry_dip_velocity_conviction", {
+                            "trigger": _trigger_reason,
+                            "dip_roc_per_bar": (_pb_debug.get("dip_roc_per_bar") if isinstance(_pb_debug, dict) else None),
+                            "size_mult": round(float(_dv_mult), 4),
+                        })
+                except Exception:
+                    le.pop("dip_velocity_size_mult", None)
             # L2 depth snapshot AT THE DECISION MOMENT (Robinhood pricebook =
             # Nasdaq TotalView, the same book Legend's bid/ask windows show).
             # One GET per entry decision — NOT a stream (streaming an unofficial
@@ -6389,8 +6587,20 @@ def tick_live_session(
                 _halt_size_mult = float(_hsm)
         except Exception:
             _halt_size_mult = 1.0
+        # LOCATE #3 DIP-VELOCITY CONVICTION lever: a steeper dip-family flush carries a
+        # bounded (>=1.0) size boost (_dip_velocity_size_mult, set upstream). It composes
+        # multiplicatively under the SAME 3x clamp + hard max_notional ceiling, so it can
+        # NEVER push notional past any ceiling. Default (non-dip / flag OFF ⇒ key absent) =>
+        # 1.0 (byte-identical).
+        _dip_velocity_mult = 1.0
+        try:
+            _dvm = _float_or_none(le.get("dip_velocity_size_mult"))
+            if _dvm is not None and _dvm > 0:
+                _dip_velocity_mult = float(_dvm)
+        except Exception:
+            _dip_velocity_mult = 1.0
         _eff_max_loss = min(
-            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult) * float(_fatigue_mult) * float(_sym_fatigue_mult) * float(_hot_cold_mult) * float(_time_fatigue_mult) * float(_halt_size_mult),
+            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult) * float(_fatigue_mult) * float(_sym_fatigue_mult) * float(_hot_cold_mult) * float(_time_fatigue_mult) * float(_halt_size_mult) * float(_dip_velocity_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE
@@ -7293,6 +7503,82 @@ def tick_live_session(
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
+        # LOCATE #7 — INSTANT BID-ABOVE-FILL CONFIRM (positive mirror of the below-fill
+        # cut). At the END of the confirm window, if the bid never held at/above the fill
+        # AND the position never printed a confirming high, the entry did NOT confirm —
+        # FEED the SAME bailout machinery (no new exit reason; the same protective cut).
+        # ENTERED-only, fresh-quote gated. Reuses the instant-bid margin/window knobs.
+        # Flag OFF (default) ⇒ no-op ⇒ byte-identical. PROTECTIVE: it can only cut a
+        # non-confirming entry sooner; never widens a stop.
+        if (
+            st == STATE_LIVE_ENTERED
+            and bool(getattr(settings, "chili_momentum_instant_bid_above_fill_confirm_enabled", False))
+            and bid is not None
+            and math.isfinite(float(bid))
+            and float(bid) > 0
+            and int(le.get("halt_stale_streak") or 0) == 0
+            and not le.get("suspected_halt_since_utc")
+            and instant_bid_above_fill_confirm_failed(
+                entry_price=avg,
+                bid=float(bid),
+                high_water_mark=_float_or_none(pos.get("high_water_mark")),
+                held_seconds=held,
+                window_seconds=float(getattr(settings, "chili_momentum_instant_bid_confirm_window_seconds", 6.0) or 0.0),
+                margin_bps=float(getattr(settings, "chili_momentum_instant_bid_cut_margin_bps", 25.0) or 0.0),
+            )
+        ):
+            le["last_bailout_trigger"] = "instant_bid_above_fill_unconfirmed"
+            _commit_le(sess, le)
+            _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+            _emit(db, sess, "live_bailout", {
+                "reason": "instant_bid_above_fill_unconfirmed",
+                "entry_price": avg,
+                "bid": bid,
+                "high_water_mark": _float_or_none(pos.get("high_water_mark")),
+                "held_seconds": held,
+                "window_seconds": float(getattr(settings, "chili_momentum_instant_bid_confirm_window_seconds", 6.0) or 0.0),
+            })
+            db.flush()
+            return {"ok": True, "session_id": sess.id, "state": sess.state}
+
+        # LOCATE #1 — SUB-5MIN SCALP BAILOUT (scalp-family fast time-stop). Reads the SAME
+        # deployed cadence classifier result the runner trail persists (le["cadence_cls"],
+        # written every held tick with its FULL ema/rvol signals — ONE source of truth, no
+        # duplicate classifier): only a SLOW_CHOPPER (a scalp that is NOT extending; a FAST
+        # runner is NEVER time-stopped) that is held >= the scalp max-hold AND is NOT green
+        # (bid <= entry) is time-stopped via the SAME bailout machinery. ENTERED-only (a
+        # scaled/trailing position is already past its first target = in profit, never a
+        # stalled scalp), fresh-quote gated. Flag OFF (default) ⇒ no-op ⇒ byte-identical.
+        # PROTECTIVE: it can only exit a stalled scalp sooner; it never widens a stop or
+        # admits risk. (The classifier is conservative: it falls to UNCERTAIN — no time-stop
+        # — unless velocity is decisively slow AND the trail's trend/vol read agrees.)
+        if (
+            st == STATE_LIVE_ENTERED
+            and bool(getattr(settings, "chili_momentum_sub5min_scalp_bailout_enabled", False))
+            and bid is not None
+            and math.isfinite(float(bid))
+            and float(bid) > 0
+            and int(le.get("halt_stale_streak") or 0) == 0
+            and not le.get("suspected_halt_since_utc")
+            and float(bid) <= float(avg)  # NOT green — a green scalp rides the trail, not a time-stop
+            and str(le.get("cadence_cls") or "") == "SLOW_CHOPPER"
+        ):
+            _scalp_max_min = float(getattr(settings, "chili_momentum_sub5min_scalp_bailout_minutes", 5.0) or 0.0)
+            if _scalp_max_min > 0.0 and held >= _scalp_max_min * 60.0:
+                le["last_bailout_trigger"] = "sub5min_scalp_timestop"
+                _commit_le(sess, le)
+                _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                _emit(db, sess, "live_bailout", {
+                    "reason": "sub5min_scalp_bailout",
+                    "entry_price": avg,
+                    "bid": bid,
+                    "held_seconds": held,
+                    "scalp_max_minutes": _scalp_max_min,
+                    "cadence_cls": le.get("cadence_cls"),
+                })
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state}
+
         # GAP1 — BAIL ON ABSENCE-OF-STRENGTH (affirmative breakout-or-bailout, Warrior
         # re-audit 2026-06-26). Within [min_hold, window] seconds of the fill, if the
         # breakout showed NO confirming strength — no new high above the confirm buffer
@@ -7815,6 +8101,14 @@ def tick_live_session(
                             )
                             # ONLY a SLOW_CHOPPER loosens; FAST/UNCERTAIN never do.
                             _cad_loosen = bool(_cad.get("cls") == "SLOW_CHOPPER")
+                            # LOCATE #1: persist the deployed classification (with its FULL
+                            # ema/rvol signals) so the scalp time-stop in the exit handler
+                            # reads the SAME classifier result — no duplicate classifier, one
+                            # source of truth. Written every held tick; read next tick.
+                            try:
+                                le["cadence_cls"] = _cad.get("cls")
+                            except Exception:
+                                pass
                             _commit_le(sess, le)
                         except Exception:
                             _cad = None

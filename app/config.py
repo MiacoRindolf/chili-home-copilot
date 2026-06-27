@@ -5998,6 +5998,112 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ABSORPTION_SNAP_ENTRY_ENABLED"),
         description="GAP 3: an L2/tape LONG trigger — a large resting SELLER on the ask being ABSORBED (eaten, the ask-wall refilled repeatedly but price HOLDS just under it on buy-side OFI) then the SNAP when the wall CLEARS (price ticks through the absorption level on accelerating buy flow). Reuses read_ladder_distribution (OFI / micro_edge / ask_build) + the bar structure; stop = back below the absorption level. Carries the SAME chase-guards (tape REQUIRED via the live_runner tape_confirms_hold call, _hod_extension_ok + _detect_back_side + front_side_state + the downstream vetoes), joins the SAME setup-selector candidate set. false (default) = returns disabled before any compute = byte-identical.",
     )
+    # ── LOCATE 10 scalp/dip triggers + modifiers (each default OFF = byte-identical) ──
+    # All ten are wired into the EXISTING entry ladder / veto chain. New ENTRY triggers
+    # (2,4,5,6) carry the SAME chase-guards as wedge/absorption (tape REQUIRED+fail-closed
+    # via tape_confirms_hold, _hod_extension_ok, _detect_back_side + front_side_state,
+    # _l2_entry_veto) and join the SAME setup-selector candidate set + the downstream
+    # LIVE_PENDING_ENTRY vetoes. The modifiers/guards (1,3,7,8,9,10) only REFINE/REDUCE.
+    chili_momentum_sub5min_scalp_bailout_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SUB5MIN_SCALP_BAILOUT_ENABLED"),
+        description="LOCATE #1 SUB-5MIN SCALP BAILOUT: a scalp-family fast time-stop. When the deployed cadence classifier (_classify_cadence) reports a SLOW_CHOPPER (a scalp that is NOT extending) AND the position has been held >= chili_momentum_sub5min_scalp_bailout_minutes AND is NOT green (bid <= entry), bail via the EXISTING bailout machinery (distinct from the runner trail; a runner — FAST / rising-EMA — is NEVER time-stopped). PROTECTIVE-ONLY: it can only EXIT a stalled scalp sooner; it never widens a stop or admits a worse entry. false (default) = the time-stop is never evaluated = byte-identical.",
+    )
+    chili_momentum_sub5min_scalp_bailout_minutes: float = Field(
+        default=5.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SUB5MIN_SCALP_BAILOUT_MINUTES"),
+        description="LOCATE #1: the scalp max-hold in MINUTES — a SLOW_CHOPPER not green by this age is time-stopped. One documented base (the irreducible scalp clock). Only consulted when chili_momentum_sub5min_scalp_bailout_enabled is ON.",
+    )
+    chili_momentum_ask_thins_dip_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ASK_THINS_DIP_ENTRY_ENABLED"),
+        description="LOCATE #2 ASK-THINS-TO-ZERO DIP: an L2 ask-DEPLETION dip-bottom long. After a real dip (an ATR-scaled retrace that holds a structural higher-low), the resting ASK supply has been EXHAUSTED — read_ladder_distribution.ask_build <= -chili_momentum_ask_thins_min_depletion_frac (Σask5 collapsed across the window) WITH buy-side OFI (>= chili_momentum_ofi_threshold) — then price ticks back up off the dip low. Entry = the bounce/recent high (pullback_high); stop = the dip low (pullback_low). Carries ALL chase-guards (tape REQUIRED+fail-closed via tape_confirms_hold, _hod_extension_ok, _detect_back_side + front_side_state, _l2_entry_veto), joins the setup-selector set + LIVE_PENDING_ENTRY vetoes. false (default) = returns disabled before any compute = byte-identical.",
+    )
+    chili_momentum_ask_thins_min_depletion_frac: float = Field(
+        default=0.25,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ASK_THINS_MIN_DEPLETION_FRAC"),
+        description="LOCATE #2: the minimum ASK depletion (a fraction in [0,1]) the offer must lose across the L2 window to read as 'sellers exhausted' — fire only when ask_build <= -this (e.g. 0.25 = Σask5 shrank >= 25%). One documented base. Only consulted when chili_momentum_ask_thins_dip_entry_enabled is ON.",
+    )
+    chili_momentum_dip_velocity_conviction_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_VELOCITY_CONVICTION_ENABLED"),
+        description="LOCATE #3 DIP-VELOCITY CONVICTION: a CONVICTION modifier on a dip-family fire (flush_dip / ask-thins / vwap_reclaim / wick_reclaim) — scale entry SIZE by the dip ROC (a STEEPER, faster flush = a more violent algo-stop-run that snaps back harder, per Ross's flush read). The size multiplier is in [1.0, 1+chili_momentum_dip_velocity_conviction_max_boost], computed from the dip's measured ROC (steepness) above an ATR-noise floor; it NEVER shrinks size below 1.0 and is bounded by the same 3x clamp + max_notional the other size levers obey, so it can never increase per-trade RISK beyond the existing caps. ADDITIVE: OFF / non-dip / no ROC ⇒ mult 1.0 = byte-identical.",
+    )
+    chili_momentum_dip_velocity_conviction_max_boost: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=0.5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_VELOCITY_CONVICTION_MAX_BOOST"),
+        description="LOCATE #3: the maximum fractional size BOOST for the steepest qualifying dip (0.25 = up to +25% size on the fastest flush). The multiplier interpolates 1.0..1+this by the dip ROC over an ATR-noise floor; clamped here so it can never run away. Only consulted when chili_momentum_dip_velocity_conviction_enabled is ON.",
+    )
+    chili_momentum_sub_vwap_trap_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SUB_VWAP_TRAP_ENTRY_ENABLED"),
+        description="LOCATE #4 SUB-VWAP TRAP: a breakdown BELOW VWAP that FAILS to follow through (no new low for K bars, a bottoming-tail flush that got bought) then RECLAIMS back above VWAP = a bear-trap / short-cover long. DISTINCT from vwap_reclaim (which needs K closes below): the trap is a SHARP undercut-and-reclaim (the stop-run below VWAP), not a sustained loss. Entry = the reclaim bar high (pullback_high); stop = the trap low (pullback_low). Carries ALL chase-guards (tape REQUIRED+fail-closed, _hod_extension_ok, _detect_back_side + front_side_state, _l2_entry_veto) + the LIVE_PENDING_ENTRY vetoes. false (default) = returns disabled before any compute = byte-identical.",
+    )
+    chili_momentum_pulling_away_roc_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLING_AWAY_ROC_ENTRY_ENABLED"),
+        description="LOCATE #5 PULLING-AWAY ROC: a ROC-INFLECTION breakout — price tapped a multi-tap resistance >= chili_momentum_pulling_away_min_taps times (a tested ceiling) then PULLS AWAY on a ROC spike (the current-bar rate-of-change accelerates above its recent baseline by an ATR-scaled margin = the break is finally going). Entry = the resistance/break level (pullback_high); stop = the last swing low under the base (pullback_low). Carries ALL chase-guards (tape REQUIRED+fail-closed, _hod_extension_ok, _detect_back_side + front_side_state, _l2_entry_veto) + the setup-selector + LIVE_PENDING_ENTRY vetoes. false (default) = returns disabled before any compute = byte-identical.",
+    )
+    chili_momentum_pulling_away_min_taps: int = Field(
+        default=2,
+        ge=2,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLING_AWAY_MIN_TAPS"),
+        description="LOCATE #5: the minimum number of swing-high TAPS at the resistance band (ATR-derived) required before a pulling-away ROC break is a tested break, not a first touch. Only consulted when chili_momentum_pulling_away_roc_entry_enabled is ON.",
+    )
+    chili_momentum_premarket_pivot_macd_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_PIVOT_MACD_ENTRY_ENABLED"),
+        description="LOCATE #6 PREMARKET PIVOT + MACD: a premarket gap-and-go pivot break — price breaks a premarket pivot (the premarket swing high) WITH a fresh MACD re-cross (line crosses back ABOVE signal within the lookback) AND a COLD-MARKET avoid (skip when RVOL is below the cold floor = no premarket interest). Entry = the pivot level (pullback_high); stop = the premarket pivot low (pullback_low). Carries ALL chase-guards (tape REQUIRED+fail-closed, _hod_extension_ok, _detect_back_side + front_side_state, _l2_entry_veto) + the setup-selector + LIVE_PENDING_ENTRY vetoes. EQUITY-ONLY (crypto is 24/7, no premarket). false (default) = returns disabled before any compute = byte-identical.",
+    )
+    chili_momentum_premarket_pivot_cold_rvol_floor: float = Field(
+        default=1.5,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_PIVOT_COLD_RVOL_FLOOR"),
+        description="LOCATE #6: the COLD-MARKET avoid floor — skip the premarket-pivot trigger when the current relative-volume is below this (a cold premarket with no interest is a fake-out). Only consulted when chili_momentum_premarket_pivot_macd_entry_enabled is ON.",
+    )
+    chili_momentum_instant_bid_above_fill_confirm_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_INSTANT_BID_ABOVE_FILL_CONFIRM_ENABLED"),
+        description="LOCATE #7 INSTANT BID-ABOVE-FILL CONFIRM: the positive MIRROR of instant_bid_below_fill_cut. In the first chili_momentum_instant_bid_confirm_window_seconds after the fill, the live BID must hold AT/ABOVE the fill (within margin noise); if instead it has NOT held above the fill by the end of that window (the entry showed no immediate positive confirmation), FEED the existing instant_bid_below_fill / no-confirmation bail path (it does NOT add a new exit — it only flips on the SAME bailout the operator already gates). PROTECTIVE-ONLY: it can only cut a non-confirming entry sooner; never widens a stop. false (default) = no-op = byte-identical.",
+    )
+    chili_momentum_instant_bid_confirm_window_seconds: float = Field(
+        default=6.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_INSTANT_BID_CONFIRM_WINDOW_SECONDS"),
+        description="LOCATE #7: the post-fill window (seconds) in which the bid must confirm at/above the fill. Only consulted when chili_momentum_instant_bid_above_fill_confirm_enabled is ON.",
+    )
+    chili_momentum_second_leg_preference_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SECOND_LEG_PREFERENCE_ENABLED"),
+        description="LOCATE #8 SECOND-LEG PREFERENCE: a SELECTION/conviction tilt in the setup-selector — prefer a later, BASED leg (a breakout whose base sits ABOVE a prior consolidation+support, i.e. the second leg of a two-leg move) over a 1st-leg break that is already extended off the open. When two breakout candidates fire, the one with a confirmed prior base/support between legs gets an R:R tilt of +chili_momentum_second_leg_rr_tilt. It is a PREFERENCE among already-passing fires — it never admits a NEW entry and never loosens a guard. ADDITIVE: OFF / single candidate ⇒ no tilt = byte-identical.",
+    )
+    chili_momentum_second_leg_rr_tilt: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SECOND_LEG_RR_TILT"),
+        description="LOCATE #8: the fractional R:R tilt added to a based second-leg candidate when arbitrating the setup-selector (0.15 = +15% effective R:R weight). A preference only — bounded so it cannot dominate a vastly-worse R:R. Only consulted when chili_momentum_second_leg_preference_enabled is ON.",
+    )
+    chili_momentum_order_burst_candle_guard_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ORDER_BURST_CANDLE_GUARD_ENABLED"),
+        description="LOCATE #9 8AM BURST GUARD: a narrow time-windowed DISTRUST of the top-of-hour burst candle (esp. 08:00 ET) — within chili_momentum_order_burst_guard_window_minutes of a top-of-hour boundary, DEFER a fresh entry trigger (stay WATCHING, re-enter after the window) because the burst candle is order-imbalance noise, not a tradeable break. EQUITY-ONLY; mirrors the opening-bell suppression. RISK-REDUCING ONLY: it can only DEFER a fresh fire (never enables/loosens). false (default) = no-op = byte-identical.",
+    )
+    chili_momentum_order_burst_guard_window_minutes: float = Field(
+        default=3.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ORDER_BURST_GUARD_WINDOW_MINUTES"),
+        description="LOCATE #9: the minutes after a top-of-hour boundary (esp. 08:00 ET) during which a fresh burst-candle trigger is deferred. Only consulted when chili_momentum_order_burst_candle_guard_enabled is ON.",
+    )
+    chili_momentum_red_candle_entry_block_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RED_CANDLE_ENTRY_BLOCK_ENABLED"),
+        description="LOCATE #10 RED-CANDLE ENTRY BLOCK: do NOT fire a fresh entry while the CURRENT 1m (entry-interval) bar is RED (close < open) — Ross never buys into a red candle; wait for the green confirmation. DEFER (stay WATCHING) when the latest bar on the entry frame is red. RISK-REDUCING ONLY: it can only DEFER a fresh fire (never enables/loosens). false (default) = no-op = byte-identical.",
+    )
     chili_momentum_dip_buy_rth_only_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_BUY_RTH_ONLY_ENABLED"),
