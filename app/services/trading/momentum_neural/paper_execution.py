@@ -1168,6 +1168,386 @@ def ofi_exhaustion_lock(
     return out
 
 
+# ── Measured-move scale target + double-top exhaustion (winner-management) ─────
+# Ross "measured move": the FIRST leg up off the base breakout has a height; the
+# move often extends a SECOND leg of about the SAME height. We measure the name's
+# OWN initial impulse (impulse_leg_high − impulse_leg_entry, both frozen at the
+# first-target scale-out) and project it ABOVE the impulse high to a measured-move
+# target. At that target we SCALE OUT a fraction (the existing partial machinery)
+# and ratchet the runner stop up — a PARTIAL, never a full cut. A strong runner
+# that blows through keeps running on the cushion/chandelier trail (this helper
+# only ever fires ONCE, sells a fraction, and tightens — it cannot flatten).
+#
+# Double-top exhaustion: price prints the impulse high, pulls back, then RETESTS
+# the high and FAILS (a lower-high inside an ATR-relative band, optionally on weak
+# flow). That is distribution at the level ⇒ tighten the stop (and optionally arm
+# a partial). A CLEAN HIGHER-HIGH (price takes out the impulse high) is NOT a
+# double-top ⇒ no exhaustion exit (the winner is left to run).
+#
+# ADAPTIVE, no flat-% magic: the target is the name's own leg height (not a fixed
+# %); the double-top band is ATR-relative. ONE documented base each — the
+# scale-out fraction and the double-top retest ATR-mult. Everything else is
+# derived (the impulse height, the ATR risk unit frozen at entry). RATCHET-ONLY:
+# every stop this module returns is max(current_stop, breakeven_floor, candidate).
+# Flag OFF (default) ⇒ every helper is a pass-through no-op (byte-identical).
+
+
+def measured_move_exit_enabled() -> bool:
+    """Kill-switch for the measured-move scale target + double-top exhaustion.
+
+    Default OFF ⇒ both helpers return their inert pass-through (no scale, no
+    tighten) so the runner trails EXACTLY as before (byte-identical)."""
+    return bool(getattr(settings, "chili_momentum_measured_move_exit_enabled", False))
+
+
+def _measured_move_scale_fraction(default: float = 0.33) -> float:
+    """Fraction of the ORIGINAL position sold into the measured-move target.
+
+    ONE documented base (``chili_momentum_measured_move_exit_scale_fraction``).
+    This is a SCALE-OUT (sell a slice into strength), distinct from the heavier
+    first-target de-risk; bounded to the open interval so it can never sell 0%
+    (no-op) or 100% (no runner)."""
+    try:
+        v = float(getattr(settings, "chili_momentum_measured_move_exit_scale_fraction", default))
+    except (TypeError, ValueError):
+        v = default
+    if not math.isfinite(v):
+        v = default
+    return max(0.05, min(0.95, v))
+
+
+def _double_top_atr_mult(default: float = 0.75) -> float:
+    """ATR-relative retest tolerance for the double-top band.
+
+    ONE documented base (``chili_momentum_measured_move_exit_double_top_atr_mult``).
+    The retest "near the high" band is this multiple of the position's own ATR
+    risk unit — adaptive to the name's volatility, NOT a fixed %. Bounded so a
+    misconfig can never make the band absurdly wide or zero."""
+    try:
+        v = float(getattr(settings, "chili_momentum_measured_move_exit_double_top_atr_mult", default))
+    except (TypeError, ValueError):
+        v = default
+    if not math.isfinite(v):
+        v = default
+    return max(0.1, min(2.0, v))
+
+
+def measured_move_target(
+    *,
+    entry_price: float,
+    impulse_leg_high: float,
+    side_long: bool = True,
+) -> float | None:
+    """Project the name's OWN first-leg height above the impulse high.
+
+    leg_height = impulse_leg_high − entry (the base-breakout first leg up). The
+    measured-move target = impulse_leg_high + leg_height (a second equal leg). No
+    flat % — the projection is the name's own measured impulse. Returns None for a
+    degenerate (non-positive) leg, a short, or any bad input (the caller no-ops).
+    Pure for parity testing. docs/DESIGN/MOMENTUM_LANE.md"""
+    if not side_long:
+        return None
+    try:
+        e = float(entry_price)
+        h = float(impulse_leg_high)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(e) and math.isfinite(h)) or e <= 0 or h <= 0:
+        return None
+    leg = h - e
+    if leg <= 0:
+        return None
+    return h + leg
+
+
+def measured_move_scale_exit_decision(
+    *,
+    flag_on: bool,
+    current_qty: float,
+    original_qty: float,
+    entry_price: float,
+    impulse_leg_high: float,
+    bid: float,
+    atr_pct: float,
+    stop_atr_mult: float,
+    current_stop: float,
+    breakeven_floor: float,
+    already_fired: bool = False,
+    symbol: str | None = None,
+    base_increment: float | None = None,
+    base_min_size: float | None = None,
+    side_long: bool = True,
+) -> dict[str, Any]:
+    """Decide the measured-move PARTIAL scale-out + runner-stop ratchet (pure).
+
+    Returns ``{"fire": bool, "reason": str, "target_price": float|None,
+    "scale_qty": float, "remainder_qty": float, "scale_fraction": float,
+    "new_stop_floor": float, "leg_height": float|None}``.
+
+    Fires ONCE (``already_fired`` gates re-fire) when the bid reaches the
+    measured-move target (impulse high + leg height). On fire it sizes a
+    ``_measured_move_scale_fraction`` slice of the ORIGINAL position via the shared
+    ``scale_out_quantity`` splitter (so it never oversells or strands dust) and
+    ratchets the RUNNER stop up to AT LEAST breakeven (the partial de-risked the
+    rest). The remainder keeps running on the existing cushion/chandelier trail —
+    this is a PARTIAL, never a full exit.
+
+    WINNER-SAFE: a runner that has already blown PAST the target still only ever
+    scales a FRACTION here; the remainder is untouched and trails on. RATCHET-ONLY:
+    ``new_stop_floor = max(current_stop, breakeven_floor, breakeven_candidate)`` —
+    never below the input stop. Flag OFF / short / no-op ⇒ ``fire=False`` and
+    ``new_stop_floor == current_stop`` (byte-identical). Pure for parity testing.
+    docs/DESIGN/MOMENTUM_LANE.md"""
+    out: dict[str, Any] = {
+        "fire": False,
+        "reason": "flag_off" if not flag_on else "wait",
+        "target_price": None,
+        "scale_qty": 0.0,
+        "remainder_qty": max(0.0, float(current_qty or 0.0)),
+        "scale_fraction": 0.0,
+        "new_stop_floor": current_stop,
+        "leg_height": None,
+    }
+    if not flag_on or not side_long:
+        return out
+    if already_fired:
+        out["reason"] = "already_fired"
+        return out
+    try:
+        e = float(entry_price)
+        h = float(impulse_leg_high)
+        b = float(bid)
+        cs = float(current_stop)
+        be = float(breakeven_floor)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_basis"
+        return out
+    if not (math.isfinite(e) and math.isfinite(h) and math.isfinite(b) and math.isfinite(cs)):
+        out["reason"] = "bad_basis"
+        return out
+    tgt = measured_move_target(entry_price=e, impulse_leg_high=h, side_long=True)
+    if tgt is None:
+        out["reason"] = "no_leg"
+        return out
+    out["target_price"] = float(tgt)
+    out["leg_height"] = float(h - e)
+    # Ratchet candidate is ALWAYS at least breakeven; the partial de-risks the rest.
+    be_candidate = max(e, be)  # breakeven of the runner, derived (no new magic)
+    floors = [c for c in (cs, be, be_candidate) if math.isfinite(c)]
+    ratchet_floor = max(floors) if floors else cs
+    if b < tgt * (1.0 - 1e-9):  # target not yet reached
+        out["reason"] = "target_not_reached"
+        return out
+    # Target reached — split a fraction of the ORIGINAL via the shared splitter.
+    frac = _measured_move_scale_fraction()
+    if symbol is not None:
+        # crypto can take a heavier slice via the existing class knob; never below base
+        try:
+            ov = getattr(settings, "chili_momentum_crypto_scale_out_fraction", None)
+            if _is_crypto_symbol(symbol) and ov is not None:
+                ovf = float(ov)
+                if math.isfinite(ovf) and 0.0 < ovf < 1.0:
+                    frac = max(frac, min(0.95, ovf))
+        except (TypeError, ValueError):
+            pass
+    out["scale_fraction"] = float(frac)
+    scale_qty, remainder, can_split = scale_out_quantity(
+        current_qty=current_qty,
+        original_qty=original_qty,
+        fraction=frac,
+        base_increment=base_increment,
+        base_min_size=base_min_size,
+    )
+    if not can_split:
+        # Cannot split cleanly (dust) — do NOT flatten a runner here; the existing
+        # target/trail machinery owns the flat case. We still ratchet the stop up.
+        out["reason"] = "target_reached_no_split"
+        out["new_stop_floor"] = ratchet_floor
+        return out
+    out["fire"] = True
+    out["reason"] = "measured_move_target"
+    out["scale_qty"] = float(scale_qty)
+    out["remainder_qty"] = float(remainder)
+    out["new_stop_floor"] = ratchet_floor
+    return out
+
+
+def double_top_exhaustion_check(
+    *,
+    flag_on: bool,
+    impulse_leg_high: float,
+    current_high: float,
+    bid: float,
+    entry_price: float,
+    atr_pct: float,
+    stop_atr_mult: float,
+    ofi: float | None = None,
+    micro_edge: float | None = None,
+    side_long: bool = True,
+) -> dict[str, Any]:
+    """Detect a DOUBLE-TOP weak retest of the impulse high (pure, fail-safe).
+
+    The impulse high prints, price pulls back, then RETESTS the high. Returns
+    ``{"exhausted": bool, "weak_retest": bool, "clean_higher_high": bool,
+    "reason": str, "retest_gap_atr": float|None, "flow_weak": bool}``.
+
+    A DOUBLE-TOP (exhaustion) requires ALL:
+      * the retest peak (``current_high``) is a LOWER high — strictly below the
+        impulse high, AND
+      * it is NEAR the high — within an ATR-relative band (``_double_top_atr_mult``
+        × the position's own ATR risk unit) of the impulse high (a genuine retest,
+        not a shallow bounce that never approached the prior peak), AND
+      * the live bid has rolled back DOWN off that retest peak (rejected, not still
+        pressing) — ``bid < current_high`` within the band.
+
+    A CLEAN HIGHER-HIGH (``current_high`` ≥ impulse high) is NOT a double-top ⇒
+    ``exhausted=False, clean_higher_high=True`` (the winner is left to run).
+
+    Flow is an OPTIONAL corroborant: when OFI/micro are supplied and BOTH are weak
+    (ofi ≤ 0 and micro < 0) the retest is flagged ``flow_weak=True`` (the caller can
+    arm a partial vs a plain tighten). Absent/None flow ⇒ the structural lower-high
+    retest alone marks exhaustion (fail-OPEN on flow, never required).
+
+    Pure; fail-safe (bad/NaN inputs ⇒ ``exhausted=False``). Flag OFF ⇒ inert. This
+    NEVER returns a stop — the caller derives the tighten via
+    ``double_top_tighten_decision`` (ratchet-only). docs/DESIGN/MOMENTUM_LANE.md"""
+    out: dict[str, Any] = {
+        "exhausted": False,
+        "weak_retest": False,
+        "clean_higher_high": False,
+        "reason": "flag_off" if not flag_on else "wait",
+        "retest_gap_atr": None,
+        "flow_weak": False,
+    }
+    if not flag_on or not side_long:
+        return out
+    try:
+        h = float(impulse_leg_high)
+        rh = float(current_high)
+        b = float(bid)
+        e = float(entry_price)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_basis"
+        return out
+    if not (math.isfinite(h) and math.isfinite(rh) and math.isfinite(b) and math.isfinite(e)):
+        out["reason"] = "bad_basis"
+        return out
+    if h <= 0 or e <= 0:
+        out["reason"] = "bad_basis"
+        return out
+    # Clean higher-high — NOT a double top; leave the winner running.
+    if rh >= h * (1.0 - 1e-9):
+        out["clean_higher_high"] = True
+        out["reason"] = "clean_higher_high"
+        return out
+    # ATR-relative band: the retest must come NEAR the prior high (a real retest).
+    risk_dist = e * max(0.003, float(atr_pct or 0.0) * float(stop_atr_mult or 0.0))
+    band = _double_top_atr_mult() * risk_dist if (math.isfinite(risk_dist) and risk_dist > 0) else None
+    gap = h - rh  # how far the lower-high fell short of the impulse high
+    out["retest_gap_atr"] = round(gap / risk_dist, 4) if (risk_dist and risk_dist > 0) else None
+    if band is None or gap > band:
+        out["reason"] = "retest_too_shallow"  # never approached the prior high
+        return out
+    # The retest must be REJECTED — the live bid has rolled back below the retest peak.
+    if b >= rh * (1.0 - 1e-9):
+        out["reason"] = "still_pressing"  # price still at/above the retest peak
+        return out
+    # Structural double-top confirmed (lower-high near the prior high, rejected).
+    out["weak_retest"] = True
+    out["exhausted"] = True
+    out["reason"] = "double_top_weak_retest"
+    # Optional flow corroborant: BOTH OFI and micro weak ⇒ strong distribution.
+    try:
+        o = float(ofi) if ofi is not None and math.isfinite(float(ofi)) else None
+    except (TypeError, ValueError):
+        o = None
+    try:
+        m = float(micro_edge) if micro_edge is not None and math.isfinite(float(micro_edge)) else None
+    except (TypeError, ValueError):
+        m = None
+    out["flow_weak"] = bool(o is not None and o <= 0.0 and m is not None and m < 0.0)
+    return out
+
+
+def double_top_tighten_decision(
+    *,
+    flag_on: bool,
+    impulse_leg_high: float,
+    current_high: float,
+    bid: float,
+    entry_price: float,
+    atr_pct: float,
+    stop_atr_mult: float,
+    current_stop: float,
+    breakeven_floor: float,
+    ofi: float | None = None,
+    micro_edge: float | None = None,
+    side_long: bool = True,
+) -> dict[str, Any]:
+    """Map a double-top exhaustion into a RATCHET-ONLY stop tighten (+ partial arm).
+
+    Returns ``{"tighten": bool, "partial_arm": bool, "new_stop_floor": float,
+    "reason": str, "exhausted": bool, "flow_weak": bool}``.
+
+    On a confirmed double-top weak retest (``double_top_exhaustion_check``) the
+    candidate stop is tightened toward the rejected retest peak — but only the SAME
+    ATR distance the trail already uses, and ALWAYS floored at breakeven so the
+    runner is de-risked, never loosened. When the retest is also flow-weak (OFI ≤ 0
+    AND micro < 0) ``partial_arm=True`` so the caller can sell a fraction instead of
+    only tightening. A clean higher-high ⇒ ``tighten=False`` and
+    ``new_stop_floor == current_stop`` (winner runs).
+
+    RATCHET-ONLY (never loosens): ``new_stop_floor = max(current_stop,
+    breakeven_floor, candidate)``. Flag OFF / no exhaustion ⇒ pass-through. Pure for
+    parity testing. docs/DESIGN/MOMENTUM_LANE.md"""
+    out: dict[str, Any] = {
+        "tighten": False,
+        "partial_arm": False,
+        "new_stop_floor": current_stop,
+        "reason": "flag_off" if not flag_on else "wait",
+        "exhausted": False,
+        "flow_weak": False,
+    }
+    if not flag_on or not side_long:
+        return out
+    chk = double_top_exhaustion_check(
+        flag_on=flag_on,
+        impulse_leg_high=impulse_leg_high,
+        current_high=current_high,
+        bid=bid,
+        entry_price=entry_price,
+        atr_pct=atr_pct,
+        stop_atr_mult=stop_atr_mult,
+        ofi=ofi,
+        micro_edge=micro_edge,
+        side_long=True,
+    )
+    out["reason"] = chk["reason"]
+    out["exhausted"] = bool(chk["exhausted"])
+    out["flow_weak"] = bool(chk["flow_weak"])
+    try:
+        cs = float(current_stop)
+        be = float(breakeven_floor)
+        e = float(entry_price)
+        rh = float(current_high)
+    except (TypeError, ValueError):
+        return out
+    if not chk["exhausted"]:
+        # No double-top (incl. a clean higher-high) ⇒ no tighten (winner runs).
+        return out
+    # Tighten the stop to the SAME ATR distance below the rejected retest peak the
+    # trail already uses (no new magic) — but never below breakeven (the runner is
+    # de-risked). Ratchet-only via the max() floor.
+    risk_dist = e * max(0.003, float(atr_pct or 0.0) * float(stop_atr_mult or 0.0))
+    candidate = rh - risk_dist if (math.isfinite(risk_dist) and risk_dist > 0) else cs
+    floors = [c for c in (cs, be, e, candidate) if math.isfinite(c)]
+    new_floor = max(floors) if floors else cs
+    out["new_stop_floor"] = new_floor
+    out["tighten"] = new_floor > cs + 1e-12
+    out["partial_arm"] = bool(chk["flow_weak"])
+    return out
+
+
 def classify_stop_breach(
     *,
     ladder: Any,

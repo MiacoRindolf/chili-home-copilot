@@ -4433,6 +4433,37 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_SCALE_GRID_R_MULTIPLES"),
         description="Comma-separated R-multiples for the ladder targets (reward = R x stop-distance). Paired positionally with the fractions; a round number above entry that sits below the next R level pulls that tranche IN (Ross sells into the level where sellers stack). Adaptive: levels are R-multiples / the existing round-number grid, no fixed $.",
     )
+    # ── MEASURED-MOVE SCALE TARGET + DOUBLE-TOP EXHAUSTION (winner-management).
+    # WINNER-SAFE / RATCHET-ONLY. (1) Measure the name's OWN first impulse leg
+    # (impulse_leg_high − entry, frozen at first-target scale-out) and project it
+    # ABOVE the impulse high to a measured-move target; at the target SCALE OUT a
+    # fraction (reuse the partial machinery) + ratchet the runner stop up — a
+    # PARTIAL, never a full cut (a strong runner that blows through keeps running on
+    # the cushion/chandelier trail). (2) Double-top: a lower-high RETEST of the
+    # impulse high inside an ATR-relative band that's REJECTED ⇒ tighten the stop /
+    # arm a partial; a clean higher-high ⇒ no exhaustion exit. Adaptive (name's own
+    # leg height + ATR-relative band); ONE documented base each (the scale-out
+    # fraction + the double-top retest ATR-mult). OFF (default) ⇒ both helpers are
+    # inert pass-throughs and the runner trails EXACTLY as before (byte-identical).
+    # docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_measured_move_exit_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MEASURED_MOVE_EXIT_ENABLED"),
+        description="Kill-switch for the measured-move scale target + double-top exhaustion tighten (winner-management). false = inert no-op; the runner trails byte-identical.",
+    )
+    chili_momentum_measured_move_exit_scale_fraction: float = Field(
+        default=0.33,
+        gt=0.0,
+        lt=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MEASURED_MOVE_EXIT_SCALE_FRACTION"),
+        description="ONE documented base: fraction of the ORIGINAL position SCALED OUT into the measured-move target (the second equal leg). A partial — the remainder runs on the trail. Bounded (0,1) so it can never sell 0% (no-op) or 100% (no runner).",
+    )
+    chili_momentum_measured_move_exit_double_top_atr_mult: float = Field(
+        default=0.75,
+        gt=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MEASURED_MOVE_EXIT_DOUBLE_TOP_ATR_MULT"),
+        description="ONE documented base: the double-top retest tolerance as a multiple of the position's OWN ATR risk unit (adaptive, not a fixed %). A lower-high retest within this ATR-relative band of the impulse high (and rejected) = double-top exhaustion.",
+    )
     # E(2) WIN-CYCLE FATIGUE (entries-only). Tracks today's CLEAN WINS (live, per execution
     # family). After a YELLOW count of wins, NEW entries size DOWN by a fraction (mirrors the
     # streak/cushion size-down multipliers — composes under the same 3x clamp); after a RED

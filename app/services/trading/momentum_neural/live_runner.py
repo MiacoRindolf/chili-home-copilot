@@ -67,8 +67,11 @@ from .paper_execution import (
     cushion_adaptive_trail_stop,
     breakeven_stop_after_partial,
     class_aware_reward_risk,
+    double_top_tighten_decision,
     effective_stop_atr_pct,
     iceberg_seller_score,
+    measured_move_exit_enabled,
+    measured_move_scale_exit_decision,
     ofi_exhaustion_lock,
     pyramid_add_decision,
     pyramid_blend_on_fill,
@@ -1663,6 +1666,18 @@ def _scale_out_to_runner(
         pos["stop_price"] = be_stop
         pos["scaled_out_at_utc"] = _utcnow().isoformat()
         pos["scale_out_fraction"] = scale_out_fraction(symbol=sess.symbol)
+        # Measured-move winner-management (flag-gated, default OFF): FREEZE the
+        # name's first impulse leg at the first-target scale-out — the breakout high
+        # so far (HWM) is the impulse high, entry the leg base. The runner-loop trail
+        # later projects this name's OWN leg height to a measured-move target (scale
+        # a fraction) and watches for a double-top retest. Frozen here ONCE; both are
+        # inert no-ops when the flag is off (byte-identical). docs/DESIGN/MOMENTUM_LANE.md
+        try:
+            _imp_high = _float_or_none(pos.get("high_water_mark")) or _float_or_none(entry_price)
+            pos["impulse_leg_high"] = _imp_high
+            pos["impulse_leg_entry"] = _float_or_none(entry_price)
+        except Exception:
+            pass
         le["position"] = pos
         _commit_le(sess, le)
         _safe_transition(db, sess, STATE_LIVE_TRAILING)
@@ -8047,6 +8062,106 @@ def tick_live_session(
                     "high_water_mark": _hwm_trail,
                     "partial_taken": bool(pos.get("partial_taken")),
                 })
+
+            # MEASURED-MOVE SCALE TARGET + DOUBLE-TOP EXHAUSTION (winner-management,
+            # flag-gated, default OFF ⇒ this whole block is inert and the runner
+            # trails byte-identical). Runs on the held RUNNER (partial_taken True) AFTER
+            # the cushion ratchet, using the impulse leg frozen at the first-target
+            # scale-out. WINNER-SAFE: both helpers are RATCHET-ONLY over the live stop
+            # (Action A here) — they tighten the runner, never cut it. The measured-move
+            # PARTIAL + the double-top partial arm route through the SAME audited
+            # SCALING_OUT path (Action B, gated on its own one-tick marker, default OFF
+            # / observe-first like the OFI lock partial) so a fraction is scaled and the
+            # remainder keeps running. docs/DESIGN/MOMENTUM_LANE.md
+            if measured_move_exit_enabled() and bool(pos.get("partial_taken")):
+                try:
+                    _imp_high = _float_or_none(pos.get("impulse_leg_high"))
+                    _imp_entry = _float_or_none(pos.get("impulse_leg_entry")) or avg
+                    if _imp_high is not None and _imp_high > 0:
+                        _eq_shares = not str(sess.symbol or "").upper().endswith("-USD")
+                        _mm_inc = prod.base_increment if prod else (1.0 if _eq_shares else None)
+                        _mm_min = prod.base_min_size if prod else (1.0 if _eq_shares else None)
+                        _mm = measured_move_scale_exit_decision(
+                            flag_on=True,
+                            current_qty=_float_or_none(pos.get("quantity")) or 0.0,
+                            original_qty=_q0,
+                            entry_price=_imp_entry,
+                            impulse_leg_high=_imp_high,
+                            bid=bid,
+                            atr_pct=_atr_pct_trail,
+                            stop_atr_mult=_sm,
+                            current_stop=stop_px,
+                            breakeven_floor=_be_floor,
+                            already_fired=bool(pos.get("measured_move_taken")),
+                            symbol=sess.symbol,
+                            base_increment=_mm_inc,
+                            base_min_size=_mm_min,
+                            side_long=True,
+                        )
+                        # Double-top exhaustion off the SAME impulse high (flow optional).
+                        _mm_ofi = None
+                        _mm_micro = None
+                        try:
+                            from .pipeline import _live_ofi_microprice as _mm_flow
+
+                            _mm_ofi, _mm_micro = _mm_flow(sess.symbol, db=db)
+                        except Exception:
+                            _mm_ofi, _mm_micro = None, None
+                        _dt = double_top_tighten_decision(
+                            flag_on=True,
+                            impulse_leg_high=_imp_high,
+                            current_high=_hwm_trail,
+                            bid=bid,
+                            entry_price=_imp_entry,
+                            atr_pct=_atr_pct_trail,
+                            stop_atr_mult=_sm,
+                            current_stop=stop_px,
+                            breakeven_floor=_be_floor,
+                            ofi=_mm_ofi,
+                            micro_edge=_mm_micro,
+                            side_long=True,
+                        )
+                        # Action A — RATCHET-ONLY stop write (winner-safe core). The
+                        # measured-move ratchet (to breakeven on the runner) and the
+                        # double-top tighten both only ever RAISE the stop; the > stop_px
+                        # guard is belt-and-suspenders.
+                        _mm_floor = _float_or_none(_mm.get("new_stop_floor"))
+                        _dt_floor = _float_or_none(_dt.get("new_stop_floor"))
+                        _cand = max(
+                            [v for v in (_mm_floor, _dt_floor) if v is not None] or [stop_px]
+                        )
+                        if _cand > stop_px:
+                            pos["stop_price"] = _cand
+                            stop_px = _cand
+                            le["position"] = pos
+                            _commit_le(sess, le)
+                        if _mm.get("fire") or _dt.get("tighten") or _dt.get("exhausted"):
+                            _emit(db, sess, "live_measured_move_exit", {
+                                "mm_fire": bool(_mm.get("fire")),
+                                "mm_reason": _mm.get("reason"),
+                                "mm_target": _mm.get("target_price"),
+                                "mm_leg_height": _mm.get("leg_height"),
+                                "mm_scale_qty": _mm.get("scale_qty"),
+                                "mm_scale_fraction": _mm.get("scale_fraction"),
+                                "dt_exhausted": bool(_dt.get("exhausted")),
+                                "dt_tighten": bool(_dt.get("tighten")),
+                                "dt_flow_weak": bool(_dt.get("flow_weak")),
+                                "dt_reason": _dt.get("reason"),
+                                "new_stop": _cand,
+                                "bid": bid,
+                                "impulse_leg_high": _imp_high,
+                                "high_water_mark": _hwm_trail,
+                            })
+                        # Action B — arm the measured-move / double-top PARTIAL (one-tick
+                        # marker; observe-first, default OFF). It routes through the SAME
+                        # audited SCALING_OUT path; a fraction is scaled and the runner
+                        # keeps running (never a full cut). Promote after the A/B proves out.
+                        if bool(getattr(settings, "chili_momentum_exit_ofi_lock_partial_enabled", False)):
+                            if _mm.get("fire") or _dt.get("partial_arm"):
+                                le["measured_move_partial_armed"] = True
+                                _commit_le(sess, le)
+                except Exception:
+                    pass
 
             # Adaptive order-flow EXHAUSTION LOCK (crypto runner). Runs AFTER the
             # cushion ratchet so `current_band_bps` is the band's REALIZED output
