@@ -2205,6 +2205,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FLOAT_ROTATION_TILT_ENABLED"),
         description="Volume/float rotation sustainability tilt (>=~5x EOD): reward names rotating their float multiple times as a fuel-remaining signal.",
     )
+    chili_momentum_adaptive_pullback_depth_ceiling_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_PULLBACK_DEPTH_CEILING_ENABLED"),
+        description="Adaptive Ross retrace ceiling on the bull-flag IMPULSE-relative axis. OFF (default) ⇒ byte-identical to the current vol-aware flag ceiling. ON ⇒ CALM-only tightening toward Ross's ~50%-of-prior-candle (calm atr_pct≈0.01 ⇒ ceiling≈0.515, tighter than the current 0.70) while WIDENING with the name's own ATR% so EXPLOSIVE/volatile names keep the deeper tolerance (atr_pct≈0.05 ⇒ ≈0.575; hard-capped 0.75). Reuses the single documented base (_VOL_SHALLOW_BASE/_VOL_SHALLOW_ATR_MULT) — no fixed per-name magic. THE TRAP: tightening WITHOUT adaptation cuts explosive-name entries (the documented 0-fills regression — explosive names normally pull deeper), so this is calm-ONLY + ATR%-widening.",
+    )
     # ── Ross re-audit SELECTION tilts (each kill-switched DEFAULT-OFF = byte-identical) ──
     # Four MEASURED selection-side tilts from the 2026-06-26 Warrior-courses re-audit. Each is a
     # minority RE-RANK that NEVER dominates the explosive RVOL/change/float core and can NEVER

@@ -240,6 +240,33 @@ def _collapse_cap(atr_pct: float | None) -> float:
     return min(0.25, max(0.06, 6.0 * (atr_pct or 0.01)))
 
 
+def _adaptive_pullback_depth_ceiling(atr_pct: float | None, enabled: bool) -> float:
+    """Adaptive Ross retrace ceiling on the IMPULSE-relative axis (not the absolute
+    depth axis owned by ``_collapse_cap``). When ``enabled`` is False (default), returns
+    ``0.0`` -> callers fall through to their existing ceiling, BYTE-IDENTICAL behaviour.
+
+    THE TRAP (docs/STRATEGY: documented 0-fills/fewer-fills regression): tightening the
+    pullback-depth ceiling toward Ross's ~50%-of-prior-candle WITHOUT adapting cuts the
+    EXPLOSIVE low-float names whose normal pull is deeper (INHD-like). So the tightening
+    is CALM-ONLY: the ~0.50 base is the FLOOR of the ceiling for a calm name (ATR% ~ 0),
+    and it WIDENS with the instrument's OWN ATR% so a volatile name keeps the current
+    (deeper) tolerance.
+
+    Reuses the ONE documented base (``_VOL_SHALLOW_BASE``/``_VOL_SHALLOW_ATR_MULT``,
+    line ~192) -- same formula as ``_vol_aware_pullback_tolerances`` shallow return -- so
+    there is a single yardstick to tune. Hard-capped at ``_VOL_SHALLOW_CEIL`` (0.75);
+    never exceeds it. No fixed per-name magic.
+
+    Worked points (matches LOCATE): calm ``atr_pct=0.01`` -> ~0.515 (tighter than the
+    current 0.70 ceiling -> a calm name's deeper-than-~50% pull is now REJECTED);
+    explosive ``atr_pct=0.05`` -> ~0.575 (the same deep pull on a volatile name PASSES);
+    ``atr_pct=0.50`` -> 0.75 hard cap (never beyond)."""
+    if not enabled:
+        return 0.0
+    a = float(atr_pct) if (atr_pct is not None and atr_pct > 0) else 0.0
+    return min(_VOL_SHALLOW_CEIL, _VOL_SHALLOW_BASE + a * _VOL_SHALLOW_ATR_MULT)
+
+
 def _is_first_pullback(
     lo: Any, ema9: list, anchor: int, peak_idx: int, ema_wick: float
 ) -> bool:
@@ -2686,12 +2713,22 @@ def bull_flag_confirmation(
         retrace = (win_high - pb_low) / impulse_range
         depth = (win_high - pb_low) / win_high if win_high > 0 else 1.0
         flag_ceil = min(_BULL_FLAG_RETRACE_CEIL + a * _BULL_FLAG_RETRACE_CEIL_ATR_MULT, 0.90)
+        # Adaptive Ross retrace ceiling (default OFF -> 0.0 -> no-op, byte-identical).
+        # When enabled it TIGHTENS the retrace axis toward Ross's ~50% for CALM names
+        # while widening for volatile names (so explosive deeper pulls still pass). Only
+        # tightens (min with flag_ceil); never relaxes the existing ceiling.
+        adaptive_ceiling = _adaptive_pullback_depth_ceiling(
+            atr_pct, settings.chili_momentum_adaptive_pullback_depth_ceiling_enabled
+        )
+        eff_ceil = min(flag_ceil, adaptive_ceiling) if adaptive_ceiling > 0 else flag_ceil
         debug["bull_flag_retrace"] = round(retrace, 3)
         debug["bull_flag_floor"] = round(eff_shallow, 3)
-        debug["bull_flag_ceil"] = round(flag_ceil, 3)
+        debug["bull_flag_ceil"] = round(eff_ceil, 3)
+        if adaptive_ceiling > 0:
+            debug["bull_flag_adaptive_ceil"] = round(adaptive_ceiling, 3)
         if retrace <= eff_shallow:
             return False, "bull_flag_too_shallow_is_first_pullback", debug
-        if retrace > flag_ceil or depth > _collapse_cap(atr_pct):
+        if retrace > eff_ceil or depth > _collapse_cap(atr_pct):
             return False, "bull_flag_too_deep", debug
 
         # -- GUARD 5: held the 9-EMA band through the pullback (vol-aware wick tolerance).
