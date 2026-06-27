@@ -5908,6 +5908,36 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_MOVE_EXHAUSTION_REGRESS_FRAC"),
         description="Viability-regressed threshold for the exhaustion veto: the conviction has regressed when the current ross_score has fallen by at least this fraction below its recent in-process session peak. Adaptive (fraction of the name's own peak). 0 disables this axis.",
     )
+    # ── NO-A-SETUP SESSION SIT-CASH GATE (NEW-INITIATION ONLY) ─────────────────────────
+    # A CONSERVATIVE, margin-gated session-level veto: SUPPRESS a fresh entry initiation only
+    # when the day's BEST available setup quality (top ross_score among the fresh live-eligible
+    # board) is CLEARLY below an A+ bar (by a documented margin) AND the regime is poor (cold
+    # tape-breadth AND no fresh news catalyst on any candidate). Ross sits in cash when nothing
+    # A+ is up — but a genuine A+ (explosive top ross_score + catalyst) MUST still initiate, and
+    # a BORDERLINE-good setup still trades (the margin prevents over-restriction). NEW-INITIATION
+    # ONLY: this gate is evaluated ONCE per auto-arm pass, BEFORE the candidate scan/arm loop —
+    # it NEVER blocks, delays, or downsizes any EXIT / stop / trail / scale-out / flatten / open-
+    # position management (those run exclusively in the live runner, which does not consult this
+    # gate). FLAG OFF (default) => the gate never runs and run_auto_arm_pass is BYTE-IDENTICAL
+    # (no new query, no new logic). docs/DESIGN/MOMENTUM_LANE.md [[feedback_adaptive_no_magic]]
+    chili_momentum_no_asetup_sit_cash_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NO_ASETUP_SIT_CASH_ENABLED"),
+        description="Kill-switch for the no-A-setup session sit-cash gate (NEW INITIATION ONLY). OFF (default) => the gate never runs => run_auto_arm_pass is byte-identical. ON => suppress a FRESH arm only when the board's best ross_score is CLEARLY below an adaptive A+ bar (by a margin) AND the regime is poor (cold tape AND no fresh catalyst). A genuine A+ (top ross_score + catalyst) still initiates; a borderline-good setup still trades; it NEVER blocks or downsizes an exit/position-management action.",
+    )
+    # The ONE documented margin knob for the sit-cash gate's adaptive A+ bar. The A+ bar is
+    # max(A-setup conviction floor, median_ross - margin_multiple * std_dev_ross) over the fresh
+    # board's ross_score distribution — so the bar adapts to the tape (a hot board raises it, a
+    # cold board lowers it toward the conviction floor) with NO fixed numeric cutoff. A LARGER
+    # margin lowers the bar (more permissive — suppress only when the best is far below median);
+    # a SMALLER margin raises it (stricter). Default 1.0 (one std-dev below median).
+    chili_momentum_no_asetup_sit_cash_margin_multiple: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NO_ASETUP_SIT_CASH_MARGIN_MULTIPLE"),
+        description="The ONE documented margin for the sit-cash gate's adaptive A+ bar: bar = max(A-setup conviction floor, median_ross - this * std_dev_ross). Larger => more permissive (lower bar); smaller => stricter. Adaptive to the board's ross_score distribution (no fixed cutoff).",
+    )
     # ADAPTIVE REAP-COOLDOWN (2026-06-25): scale the post-reap sit-out by the per-symbol
     # OSCILLATION COUNT (how many arm->reap loops the name has churned recently). A first
     # reap = the short base; a serial oscillator (RENDER looped 88x) = a long cooldown,

@@ -642,6 +642,245 @@ def _build_reap_conviction_index(db: Session) -> dict[str, Any]:
     return idx
 
 
+# ── NO-A-SETUP SESSION SIT-CASH GATE (NEW-INITIATION ONLY) ──────────────────────────────
+# A CONSERVATIVE, margin-gated SESSION veto: SUPPRESS a fresh entry initiation only when the
+# day's BEST available setup quality (top ross_score among the fresh live-eligible board) is
+# CLEARLY below an A+ bar (by ONE documented margin) AND the regime is poor (cold tape-breadth
+# AND no fresh news catalyst on any candidate). Ross sits flat when nothing A+ is up — but a
+# genuine A+ (explosive top ross_score + catalyst) MUST still initiate, and a borderline-good
+# setup (best at/above the bar) still trades (the margin prevents over-restriction).
+#
+# NEW-INITIATION ONLY — THE ISOLATION INVARIANT: this gate is evaluated ONCE per auto-arm pass,
+# in run_auto_arm_pass, BEFORE the candidate scan/arm loop. It can ONLY ever set
+# out["skipped"]="no_asetup_sit_cash" and return early (i.e. NOT arm a NEW session). It NEVER
+# blocks, delays, or downsizes an EXIT / stop-loss / trail / scale-out / flatten / bailout or
+# any management of an OPEN position — every one of those runs EXCLUSIVELY in the live runner,
+# which does not consult this gate. An open position's session is already armed; this gate only
+# decides whether a NEW fresh session arms.
+#
+# ADAPTIVE + AGREEMENT-GATED (the danger is OVER-restriction, never under): the A+ bar is
+# derived from the ross_score DISTRIBUTION (median - margin*std), floored at the existing
+# A-setup conviction floor — no fixed magic. Regime poorness requires BOTH axes to agree
+# (cold tape AND no catalyst); every axis FAILS OPEN (a missing datum can only PERMIT the arm,
+# never suppress it).
+
+
+def _no_asetup_sit_cash_enabled() -> bool:
+    """Kill-switch. OFF (default) => the sit-cash gate never runs and run_auto_arm_pass is
+    byte-identical (no new query, no new logic, no suppression)."""
+    return bool(getattr(settings, "chili_momentum_no_asetup_sit_cash_enabled", False))
+
+
+def _asetup_margin_multiple() -> float:
+    """The ONE documented margin for the adaptive A+ bar (std-devs below the median). Larger
+    => more permissive (lower bar); smaller => stricter. Fail-safe to 1.0 on a bad value."""
+    try:
+        m = float(getattr(settings, "chili_momentum_no_asetup_sit_cash_margin_multiple", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+    return m if m >= 0.0 else 1.0
+
+
+def _board_ross_scores(candidates: list[Any]) -> list[float]:
+    """The fresh board's ross_score distribution sample: each candidate's OWN persisted
+    ross_score (``execution_readiness_json.extra.ross_scores[SYM]``), the SAME source the
+    arm-queue ranker / continuation gate / keep helper read. Missing/unparseable scores are
+    dropped (never coerced to 0.0, which would drag the median down artificially). Empty list
+    when nothing is readable (the gate then fails open — cannot prove a sub-A+ board)."""
+    out: list[float] = []
+    for c in candidates or []:
+        rs = _row_ross_score(c)
+        if rs is not None:
+            try:
+                out.append(float(rs))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def _asetup_quality_floor(scores: list[float]) -> float:
+    """The ADAPTIVE A+ bar from the board's ross_score distribution + ONE documented margin:
+
+        bar = max(A-setup conviction floor, median - margin_multiple * std_dev)
+
+    The floor is ``chili_momentum_continuation_ross_floor`` (the existing A-setup conviction
+    floor the continuation gate / keep helper already use) so the bar can NEVER drop below
+    what the lane already calls "high conviction". The distribution term lets the bar ADAPT to
+    the tape (a hot board with a high median raises the bar; a cold thin board lowers it toward
+    the floor). No fixed numeric cutoff. Empty/degenerate distribution => the conviction floor
+    (the safe, byte-identical-to-existing-floor default)."""
+    convict_floor = float(getattr(settings, "chili_momentum_continuation_ross_floor", 0.7) or 0.7)
+    if not scores:
+        return convict_floor
+    n = len(scores)
+    srt = sorted(scores)
+    # median (distribution center).
+    if n % 2:
+        median = srt[n // 2]
+    else:
+        median = (srt[n // 2 - 1] + srt[n // 2]) / 2.0
+    # population std-dev (spread). n==1 => 0 spread => bar collapses to max(floor, median).
+    mean = sum(scores) / n
+    var = sum((x - mean) ** 2 for x in scores) / n
+    std = var ** 0.5
+    adaptive = median - _asetup_margin_multiple() * std
+    return max(convict_floor, adaptive)
+
+
+def _best_setup_quality_below_floor(
+    candidates: list[Any], floor: float
+) -> tuple[bool, dict[str, Any]]:
+    """True iff the board's TOP ross_score is CLEARLY below the A+ ``floor`` (i.e. NO candidate
+    clears the bar). Returns ``(below, debug)``. FAIL-OPEN: an empty/unreadable board returns
+    ``(False, ...)`` — we cannot prove the best is sub-A+, so we never suppress on absent data."""
+    scores = _board_ross_scores(candidates)
+    if not scores:
+        return False, {"best_ross": None, "floor": round(float(floor), 4), "reason": "no_scores"}
+    best = max(scores)
+    below = best < float(floor)
+    return below, {
+        "best_ross": round(float(best), 4),
+        "floor": round(float(floor), 4),
+        "n_scored": len(scores),
+        "below": bool(below),
+    }
+
+
+def _tape_cold_breadth(candidates: list[Any]) -> bool:
+    """True iff the board's EQUITY tape-breadth is affirmatively COLD — i.e. NOT a single
+    readable equity candidate has provably-HOT tape (every one we can read is cold per the
+    entry gate's ``signed_tape_accel<=0 OR tick_rate<floor`` definition, reused via
+    ``_tape_cold``). FAIL-OPEN (False = NOT cold): if ANY equity reads hot, OR the board is
+    all-crypto / unreadable (no equity tape to judge), the breadth is treated HOT so the gate
+    can never suppress on absent tape. Reads only equity names (crypto has no equity tick
+    tape; ``_tape_cold`` already returns not-cold for ``-USD``). Cheap-bounded: probes at most
+    a handful of TOP names (the board is already ross-ranked, so the leaders are first)."""
+    eq = [
+        c for c in (candidates or [])
+        if not str(getattr(c, "symbol", "") or "").upper().endswith("-USD")
+    ]
+    if not eq:
+        return False  # all-crypto / empty equity board -> no equity tape to judge -> fail-open
+    try:
+        probe_n = int(getattr(settings, "chili_momentum_no_asetup_tape_probe_n", 5) or 5)
+    except (TypeError, ValueError):
+        probe_n = 5
+    probe_n = max(1, probe_n)
+    probed = 0
+    saw_one = False
+    for c in eq[:probe_n]:
+        sym = str(getattr(c, "symbol", "") or "")
+        try:
+            cold = _tape_cold(sym)
+        except Exception:
+            continue  # unreadable name -> skip (fail-open on this name)
+        probed += 1
+        saw_one = True
+        if not cold:
+            return False  # at least one leader has hot tape -> breadth is HOT (fail-open)
+    if not saw_one or probed == 0:
+        return False  # nothing readable -> cannot prove cold breadth -> fail-open (not cold)
+    return True  # every readable leader's tape is affirmatively cold -> cold breadth
+
+
+def _has_fresh_catalyst_on_board(candidates: list[Any]) -> bool:
+    """True iff ANY board candidate carries a FRESH news catalyst, read from each candidate's
+    OWN embedded ``ross_signals`` (the persisted scanner result — zero new fetch). Recognizes
+    the boolean/explicit ``news_catalyst`` flag AND the pipeline's catalyst sub-score fields
+    (``news_catalyst_pct`` > 0 / a non-empty ``news_catalyst_grade``) so a board the catalyst
+    pillar already graded counts. FAIL-OPEN: if NO candidate carries ANY catalyst field at all
+    (the data is simply absent), returns True — missing catalyst data is NOT 'poor regime' per
+    the design, so absent catalyst data can never contribute to a suppression."""
+    saw_any_field = False
+    for c in candidates or []:
+        sig = _row_ross_signal(c)
+        if not isinstance(sig, dict):
+            continue
+        present = False
+        # explicit boolean / truthy flag.
+        if "news_catalyst" in sig:
+            saw_any_field = True
+            present = True
+            if bool(sig.get("news_catalyst")):
+                return True
+        # pipeline catalyst sub-score (a graded headline).
+        if "news_catalyst_pct" in sig:
+            saw_any_field = True
+            present = True
+            try:
+                if float(sig.get("news_catalyst_pct") or 0.0) > 0.0:
+                    return True
+            except (TypeError, ValueError):
+                pass
+        grade = sig.get("news_catalyst_grade")
+        if grade is not None:
+            saw_any_field = True
+            present = True
+            if str(grade).strip():
+                return True
+        # generic catalyst flag some scanners stamp.
+        if "has_catalyst" in sig:
+            saw_any_field = True
+            present = True
+            if bool(sig.get("has_catalyst")):
+                return True
+        _ = present
+    # No candidate carried ANY catalyst field => the data is absent (not a proven 'no catalyst')
+    # => FAIL-OPEN as 'has catalyst' so absent data never makes the regime poor.
+    return not saw_any_field
+
+
+def _regime_is_poor(tape_cold: bool, has_catalyst: bool) -> bool:
+    """THE regime agreement rule (conservative, single definition): the regime is POOR only
+    when BOTH axes say so — the tape-breadth is affirmatively COLD **AND** there is NO fresh
+    catalyst anywhere on the board. A hot tape OR any fresh catalyst => the regime is NOT poor
+    (the gate does not suppress). Both axes fail open independently upstream, so a missing datum
+    on either axis can only PERMIT the arm."""
+    return bool(tape_cold and not has_catalyst)
+
+
+def _should_sit_cash_no_asetup(
+    db: Session, candidates: list[Any]
+) -> tuple[bool, dict[str, Any]]:
+    """THE GATE (NEW-INITIATION ONLY): coordinate the three checks and return
+    ``(suppress, debug)``. SUPPRESS a fresh arm iff:
+
+        best ross_score CLEARLY below the adaptive A+ bar   (sub-A+ board)
+        AND regime is poor                                  (cold tape AND no catalyst)
+
+    A genuine A+ (top ross_score >= bar) NEVER suppresses (local A+ beats the regime veto). A
+    poor regime with a borderline-good best (>= bar) NEVER suppresses (the margin protects it).
+    NEVER raises — any error returns ``(False, ...)`` so the gate can only ever VETO on POSITIVE
+    multi-axis agreement, never on its own failure (it can never block a fresh arm spuriously,
+    and structurally CANNOT touch an exit: it is only ever called pre-arm). ``db`` is accepted
+    for signature symmetry with the other guards / future tape reads; the current axes read the
+    already-loaded candidate rows (no per-candidate DB loop)."""
+    try:
+        scores = _board_ross_scores(candidates)
+        floor = _asetup_quality_floor(scores)
+        below, q_dbg = _best_setup_quality_below_floor(candidates, floor)
+        if not below:
+            # best is at/above the A+ bar -> a genuine/borderline A+ is present -> ARM.
+            return False, {"suppress": False, "reason": "asetup_present", **q_dbg}
+        tape_cold = _tape_cold_breadth(candidates)
+        has_catalyst = _has_fresh_catalyst_on_board(candidates)
+        poor = _regime_is_poor(tape_cold, has_catalyst)
+        suppress = bool(below and poor)
+        dbg = {
+            "suppress": suppress,
+            "best_below_floor": bool(below),
+            "tape_cold": bool(tape_cold),
+            "has_catalyst": bool(has_catalyst),
+            "regime_poor": bool(poor),
+            "margin_multiple": _asetup_margin_multiple(),
+            **q_dbg,
+        }
+        return suppress, dbg
+    except Exception:
+        logger.debug("[auto_arm] no-asetup sit-cash gate errored (fail-open)", exc_info=True)
+        return False, {"suppress": False, "reason": "gate_error"}
+
+
 # Per-symbol PRE-ENTRY REAP cooldown (in-process, scheduler-local). A name reaped
 # here just held the live slot for the full watch window without firing; cooling it
 # down briefly stops it from immediately re-arming and re-occupying the single slot,
@@ -2926,6 +3165,36 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     if not candidates:
         out["skipped"] = "no_fresh_live_eligible"
         return out
+
+    # Guard 6: NO-A-SETUP SESSION SIT-CASH (NEW INITIATION ONLY, kill-switch
+    # chili_momentum_no_asetup_sit_cash_enabled, default OFF => byte-identical: the gate is
+    # NOT called, no new query, no new logic). Evaluated ONCE per pass on the already-fetched
+    # board, BEFORE the candidate scan/arm loop. SUPPRESS a FRESH arm only when the board's
+    # best ross_score is CLEARLY below the adaptive A+ bar (sub-A+ board) AND the regime is poor
+    # (cold tape-breadth AND no fresh catalyst). A genuine A+ (top ross_score >= bar) still
+    # initiates; a borderline-good best (>= bar) still trades (the margin prevents over-
+    # restriction). ISOLATION INVARIANT: this can ONLY skip a NEW arm — it NEVER blocks, delays,
+    # or downsizes an EXIT / stop / trail / scale-out / flatten / open-position management (all of
+    # which run exclusively in the live runner, ungated by this). Conservative + agreement-gated
+    # + fail-open on every axis. docs/DESIGN/MOMENTUM_LANE.md [[feedback_adaptive_no_magic]]
+    if _no_asetup_sit_cash_enabled():
+        try:
+            _sit, _sit_dbg = _should_sit_cash_no_asetup(db, candidates)
+            if _sit:
+                out["skipped"] = "no_asetup_sit_cash"
+                out["sit_cash"] = _sit_dbg
+                logger.info(
+                    "[auto_arm] no-A-setup sit-cash: suppressing NEW initiation — best_ross=%s "
+                    "below A+ bar=%s AND poor regime (tape_cold=%s, has_catalyst=%s). Exits/"
+                    "position-management are UNAFFECTED.",
+                    _sit_dbg.get("best_ross"),
+                    _sit_dbg.get("floor"),
+                    _sit_dbg.get("tape_cold"),
+                    _sit_dbg.get("has_catalyst"),
+                )
+                return out
+        except Exception:
+            logger.debug("[auto_arm] no-asetup sit-cash guard failed (fail-open)", exc_info=True)
 
     # Cheap pre-filter (no network): venue, market hours, per-symbol mutex,
     # and self-collision (a symbol we already hold an active live session for).
