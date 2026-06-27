@@ -377,6 +377,252 @@ def _session_still_front_side(le: Any) -> bool:
     return True  # no affirmative backside evidence -> front-side (keep eligible)
 
 
+# ── PRE-ARM MOVE-EXHAUSTION ABANDON (orthogonal to the reaper above) ────────────────
+# A RISK-REDUCING pre-arm VETO: a fresh trigger fired, but if the move is GENUINELY
+# EXHAUSTED — faded off its HOD AND (the tape has gone cold OR its viability/conviction
+# has regressed off its recent peak) — REFUSE to arm a new watcher (sit flat on a done
+# move) instead of chasing the last leg into a fade.
+#
+# ORTHOGONALITY (do NOT confuse with the event-based reaper above): that reaper KEEPS a
+# still-strong WATCHING watcher past its clock and reaps a faded one. THIS gate is ENTRY-
+# time only — it gates whether a NEW arm happens at all. A faded prior bar does NOT mean a
+# fresh mover is exhausted, so this gate reads CURRENT structure (front_side_state on the
+# already-fetched arm frame), CURRENT tape (the same signed_tape_accel the entry uses), and
+# the per-symbol viability PEAK — it never reuses the reaper's keep-by-conviction path.
+#
+# CONSERVATIVE + AGREEMENT-GATED (the danger is over-restriction, NOT under-): abandon ONLY
+# when FADED-FROM-HOD **AND** (COLD-TAPE **OR** VIABILITY-REGRESSED). A still-front-side
+# strong mover (near HOD, hot/None tape, viability at/near peak) NEVER trips it — every axis
+# fails OPEN (a missing signal can only PERMIT the arm, never block it). One documented base
+# per axis; all adaptive (name-relative ratios), no scattered magic.
+#
+# CHEAP: front-side reads the OHLCV frame the arm probe ALREADY fetched; tape reuses the
+# entry gate's signed_tape_accel (the arm watches => the symbol is subscribed); viability
+# reads the per-pass row's OWN persisted ross_score + an in-process per-symbol peak.
+
+
+# Per-symbol in-process VIABILITY PEAK (scheduler-local). Tracks the best ross_score seen
+# for a symbol within the recent session so the exhaustion gate can tell a name that has
+# REGRESSED off its peak from one that is still at/near it. Same bounded-prune + TTL-decay
+# shape as _REAP_COOLDOWN (sym_upper -> (peak_ross, last_seen_at)). A stale entry (not seen
+# within the decay window) is dropped so a fresh resurgence rebuilds its own peak. Written
+# unconditionally each pass (flag-independent), but only READ when the exhaustion flag is on,
+# so a populated peak NEVER changes flag-OFF behavior (byte-identical).
+_VIABILITY_PEAK: dict[str, tuple[float, datetime]] = {}
+
+
+def _move_exhaustion_abandon_enabled() -> bool:
+    """Kill-switch. OFF (default) => the exhaustion gate never runs and ``_entry_trigger_fires``
+    returns its normal (fires, reason) unchanged => arm-time is byte-identical."""
+    return bool(getattr(settings, "chili_momentum_move_exhaustion_abandon_enabled", False))
+
+
+def _move_exhaustion_peak_ttl_seconds() -> float:
+    """TTL/decay window for the in-process viability-peak tracker. Reuses the live risk
+    freshness window (``chili_momentum_risk_viability_max_age_seconds``, 600s) so the peak
+    decays on the SAME staleness boundary the arm queue already trusts — one documented
+    base, no new clock. A peak not refreshed within this window is dropped (a resurging name
+    rebuilds its peak from its fresh score)."""
+    try:
+        return float(getattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0)
+    except (TypeError, ValueError):
+        return 600.0
+
+
+def _row_ross_score(row: Any) -> float | None:
+    """This candidate's own ross_score from its persisted scanner batch
+    (``execution_readiness_json.extra.ross_scores[SYM]``) — the SAME source the arm-queue
+    ranker, the continuation gate, and the keep helper read. None when absent/unparseable
+    (the viability-regressed axis then fails OPEN: cannot prove regression => permits the arm)."""
+    try:
+        extra = (getattr(row, "execution_readiness_json", None) or {}).get("extra") or {}
+        rs_map = extra.get("ross_scores") if isinstance(extra.get("ross_scores"), dict) else {}
+        symu = str(getattr(row, "symbol", "") or "").upper()
+        if symu in rs_map:
+            return float(rs_map[symu] or 0.0)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return None
+
+
+def _update_viability_peak(sym_u: str, ross_score: float | None, now: datetime) -> None:
+    """Record/raise the per-symbol session viability PEAK from the current ross_score.
+    Decays a stale entry (older than the TTL) back to a fresh peak so a name that fell out
+    and resurged rebuilds its own peak. Written unconditionally (flag-independent); the peak
+    is only READ by the exhaustion gate when its flag is on, so this never alters flag-OFF
+    behavior. Bounded prune (same shape as _REAP_COOLDOWN)."""
+    if not sym_u or ross_score is None:
+        return
+    try:
+        rs = float(ross_score)
+    except (TypeError, ValueError):
+        return
+    ttl = _move_exhaustion_peak_ttl_seconds()
+    prev = _VIABILITY_PEAK.get(sym_u)
+    if prev is not None:
+        prev_peak, prev_at = prev
+        if ttl > 0 and (now - prev_at).total_seconds() <= ttl:
+            # within the session window -> keep the running MAX, refresh the timestamp.
+            _VIABILITY_PEAK[sym_u] = (max(float(prev_peak), rs), now)
+        else:
+            _VIABILITY_PEAK[sym_u] = (rs, now)  # stale -> rebuild from the fresh score
+    else:
+        _VIABILITY_PEAK[sym_u] = (rs, now)
+    if len(_VIABILITY_PEAK) > 500:
+        stale = now - timedelta(hours=1)
+        for k in [k for k, v in _VIABILITY_PEAK.items() if v[1] < stale]:
+            _VIABILITY_PEAK.pop(k, None)
+
+
+def _viability_regressed(sym_u: str, ross_now: float | None, now: datetime) -> bool:
+    """True iff the name's CURRENT ross_score has regressed meaningfully off its recent
+    in-process PEAK: ``ross_now <= peak * (1 - regress_frac)``. FAIL-OPEN (False) on any
+    missing datum — no current score, no tracked peak, a stale/zero peak, or the axis
+    disabled (regress_frac <= 0) — so absent conviction history can never block an arm.
+    Adaptive: the drop is measured as a FRACTION of the name's OWN peak (no fixed score)."""
+    try:
+        frac = float(getattr(settings, "chili_momentum_move_exhaustion_regress_frac", 0.20) or 0.0)
+    except (TypeError, ValueError):
+        frac = 0.0
+    if frac <= 0.0 or ross_now is None:
+        return False
+    entry = _VIABILITY_PEAK.get(sym_u)
+    if entry is None:
+        return False
+    peak, at = entry
+    ttl = _move_exhaustion_peak_ttl_seconds()
+    if ttl > 0 and (now - at).total_seconds() > ttl:
+        return False  # stale peak -> cannot prove regression (fail-open)
+    try:
+        peak_f = float(peak)
+        now_f = float(ross_now)
+    except (TypeError, ValueError):
+        return False
+    if peak_f <= 0.0:
+        return False
+    return now_f <= peak_f * (1.0 - frac)
+
+
+def _faded_from_hod(fss: Any) -> bool:
+    """True iff the move has FADED off its HOD per the arm-frame's ``front_side_state``:
+    ``retrace_from_hod`` exceeds ``chili_momentum_move_exhaustion_retrace_floor`` (the SAME
+    name-relative ratio the reaper uses). FAIL-OPEN (False) on a missing retrace datum — a
+    fresh thrust at/near a new high has retrace ~0 and is NEVER faded. Adaptive (ratio)."""
+    if fss is None:
+        return False
+    r = getattr(fss, "retrace_from_hod", None)
+    if r is None:
+        return False
+    try:
+        rf = float(r)
+        floor = float(getattr(settings, "chili_momentum_move_exhaustion_retrace_floor", 0.66) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if floor <= 0.0:
+        return False
+    return rf > floor
+
+
+def _tape_cold(symbol: str) -> bool:
+    """True iff the executed tape has gone COLD for ``symbol`` — using the IDENTICAL
+    signed-tape definition the entry gate (``_l2_entry_confirm`` / ``tape_confirms_hold``)
+    uses: ``signed_tape_accel <= 0`` (not accelerating into the buy) OR ``tick_rate`` below
+    its self-relative floor (activity collapsed). FAIL-OPEN (False = NOT cold) on no symbol /
+    crypto (no equity tick tape) / empty/thin tape / any error — a name we cannot prove cold
+    is treated HOT, so missing tape never blocks an arm. Reuses the entry's window/floor (one
+    definition of hot/cold tape). Opens a SHORT-LIVED read session (#561 pattern) and always
+    closes it (never holds a txn across the probe)."""
+    s = str(symbol or "").strip().upper()
+    if not s or s.endswith("-USD"):
+        return False
+    try:
+        from .entry_gates import signed_tape_accel_features
+        from ....db import SessionLocal
+    except Exception:
+        return False
+    tdb = None
+    try:
+        tdb = SessionLocal()
+        tape = signed_tape_accel_features(s, db=tdb)
+    except Exception:
+        return False
+    finally:
+        if tdb is not None:
+            try:
+                tdb.close()
+            except Exception:
+                pass
+    if not isinstance(tape, dict):
+        return False  # no/thin tape -> fail-open (not cold)
+    try:
+        accel = float(tape.get("signed_tape_accel", 0.0) or 0.0)
+        rate = float(tape.get("tick_rate", 0.0) or 0.0)
+        floor = float(tape.get("tick_rate_floor", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return (accel <= 0.0) or (floor > 0.0 and rate < floor)
+
+
+def _exhaustion_abandon_eligible(faded: bool, tape_cold: bool, regressed: bool) -> bool:
+    """THE agreement rule (conservative, single definition): ABANDON only when the move has
+    FADED-FROM-HOD **AND** at least one corroborating exhaustion signal agrees — the tape has
+    gone COLD **OR** viability has REGRESSED. A lone faded flag (tape still hot, viability at
+    peak) is a single flicker => NOT enough agreement => the arm proceeds. A near-HOD strong
+    mover is never faded => never abandoned."""
+    return bool(faded and (tape_cold or regressed))
+
+
+def _move_is_exhausted(symbol: str, df: Any, row: Any) -> tuple[bool, dict[str, Any]]:
+    """Pure-ish arm-time exhaustion read for ``symbol`` on the ALREADY-fetched arm frame
+    ``df`` and the per-pass ``row`` (its persisted ross_score). Returns ``(abandon, debug)``.
+
+    Reads the three CHEAP agreeing axes — faded-from-HOD (front_side_state on ``df``),
+    cold-tape (signed_tape_accel), viability-regressed (current ross_score vs in-process
+    peak) — and applies the agreement rule. NEVER raises (any error => (False, ...) =>
+    the arm proceeds: the gate can only ever VETO on POSITIVE multi-signal agreement, never
+    on its own failure). Also refreshes the per-symbol viability peak from the current score."""
+    dbg: dict[str, Any] = {}
+    try:
+        sym_u = str(symbol or "").upper()
+        now = _utcnow()
+        ross_now = _row_ross_score(row)
+        # Refresh the peak FIRST so the running max includes this pass's score, THEN test
+        # regression against it (a name still printing its peak is never regressed).
+        _update_viability_peak(sym_u, ross_now, now)
+
+        fss = None
+        try:
+            from .ross_momentum import front_side_state
+
+            retrace_floor = float(
+                getattr(settings, "chili_momentum_move_exhaustion_retrace_floor", 0.66) or 0.66
+            )
+            fss = front_side_state(df, retrace_veto=retrace_floor)
+        except Exception:
+            fss = None
+
+        faded = _faded_from_hod(fss)
+        # Short-circuit: faded is REQUIRED for abandonment, so only probe the (DB-bound) tape
+        # and the regression axis when the cheap structure read already shows a fade. A fresh
+        # near-HOD mover skips the tape read entirely (cheap + can never be abandoned).
+        tape_cold = _tape_cold(symbol) if faded else False
+        regressed = _viability_regressed(sym_u, ross_now, now) if faded else False
+        abandon = _exhaustion_abandon_eligible(faded, tape_cold, regressed)
+        dbg = {
+            "faded_from_hod": bool(faded),
+            "tape_cold": bool(tape_cold),
+            "viability_regressed": bool(regressed),
+            "retrace_from_hod": (
+                getattr(fss, "retrace_from_hod", None) if fss is not None else None
+            ),
+            "ross_now": ross_now,
+            "abandon": bool(abandon),
+        }
+        return abandon, dbg
+    except Exception:
+        return False, {"abandon": False, "reason": "exhaustion_error"}
+
+
 def _build_reap_conviction_index(db: Session) -> dict[str, Any]:
     """Build the {UPPER symbol -> MomentumSymbolViability} index the reaper reads conviction
     from, in a SINGLE bulk query BEFORE the reap loop (never a per-session read inside it).
@@ -1979,6 +2225,16 @@ def _entry_trigger_fires(symbol: str, row: Any = None) -> tuple[bool, str]:
                     # Legacy probe: raw library defaults (require_retest=False).
                     ok, reason, _ = pullback_break_confirmation(df_pb, entry_interval=interval)
                 if ok:
+                    # MOVE-EXHAUSTION ABANDON (pre-arm VETO, flag-gated default OFF): a trigger
+                    # fired, but if the move is GENUINELY exhausted (faded-from-HOD AND
+                    # (cold-tape OR viability-regressed)) REFUSE the arm and sit flat on a done
+                    # move. Flag OFF => never runs => byte-identical. Reuses the ALREADY-fetched
+                    # df_pb (no new fetch); a strong front-side mover (near HOD / hot / at-peak)
+                    # is never abandoned. docs/DESIGN/MOMENTUM_LANE.md
+                    if _move_exhaustion_abandon_enabled():
+                        _ex_abandon, _ = _move_is_exhausted(symbol, df_pb, row)
+                        if _ex_abandon:
+                            return False, "exhaustion_abandoned"
                     return True, reason
                 # MOMENTUM-CONTINUATION arm-time trigger (the STRUCTURE side). A
                 # high-conviction straight-up runner (SDOT +84%) never gives the pullback
@@ -1992,6 +2248,13 @@ def _entry_trigger_fires(symbol: str, row: Any = None) -> tuple[bool, str]:
                 # helper returns (False, ...) before any compute). docs/DESIGN/MOMENTUM_LANE.md
                 _cont_ok, _cont_reason = _continuation_active_trigger(symbol, df_pb, row)
                 if _cont_ok:
+                    # Same pre-arm exhaustion veto on the continuation (straight-up runner)
+                    # branch — a runner that has topped and faded off its HOD with cold tape /
+                    # regressed viability is a done move; sit flat. Flag OFF => byte-identical.
+                    if _move_exhaustion_abandon_enabled():
+                        _ex_abandon, _ = _move_is_exhausted(symbol, df_pb, row)
+                        if _ex_abandon:
+                            return False, "exhaustion_abandoned"
                     return True, _cont_reason
                 if mode == "pullback_break":
                     return False, reason

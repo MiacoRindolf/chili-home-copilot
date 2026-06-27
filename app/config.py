@@ -5735,6 +5735,44 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_EVENT_BASED_RETRACE_VETO"),
         description="Faded-backside threshold for the keep gate: a kept watcher reaps when its cached snapshot shows retrace_from_hod > this fraction of the day's up-move. Mirrors front_side_state.retrace_veto. Only applied when the snapshot carries the evidence (else fail-open front-side).",
     )
+    # ── MOVE-EXHAUSTION ABANDON (pre-arm VETO; ORTHOGONAL to the reaper above) ─────────
+    # A RISK-REDUCING pre-arm veto: when a fresh entry trigger fires but the move is
+    # GENUINELY EXHAUSTED by MULTIPLE AGREEING signals, REFUSE to arm a new watcher (sit
+    # flat on a done move) rather than chase the last leg. AGREEMENT RULE (conservative,
+    # never over-restrictive): abandon ONLY when FADED-FROM-HOD **AND** (COLD-TAPE **OR**
+    # VIABILITY-REGRESSED). A still-front-side strong mover (near HOD, hot tape, viability
+    # high) NEVER trips this — it still arms. This gates NEW arming only; it does NOT touch
+    # the event-based reaper (which KEEPS strong watchers) — the two are orthogonal.
+    # FLAG OFF (default) => the exhaustion check never runs => arm-time is BYTE-IDENTICAL.
+    chili_momentum_move_exhaustion_abandon_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MOVE_EXHAUSTION_ABANDON_ENABLED"),
+        description="Kill-switch for the pre-arm move-exhaustion abandon veto. OFF (default) => no exhaustion check runs => arm-time is byte-identical. ON => after a trigger fires, REFUSE the arm only when the move is exhausted by AGREEING signals: faded-from-HOD AND (cold-tape OR viability-regressed). A still-front-side strong mover (near HOD, hot tape, viability high) still arms.",
+    )
+    # FADED-FROM-HOD threshold for the exhaustion veto. Reuses front_side_state's own
+    # retrace_from_hod (fraction of the day's up-move retraced off the HOD) — ADAPTIVE by
+    # construction (name-relative ratio, no fixed %). Defaults to the SAME base as the
+    # event-based reaper's retrace_veto so the lane has ONE documented "it has faded"
+    # boundary. A move that has retraced MORE than this fraction off its HOD is "faded".
+    chili_momentum_move_exhaustion_retrace_floor: float = Field(
+        default=0.66,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MOVE_EXHAUSTION_RETRACE_FLOOR"),
+        description="Faded-from-HOD threshold for the exhaustion veto: the move is 'faded' when front_side_state.retrace_from_hod exceeds this fraction of the day's up-move. Adaptive (name-relative ratio). Defaults to the same base as chili_momentum_event_based_retrace_veto so there is one documented 'faded' boundary.",
+    )
+    # VIABILITY-REGRESSED threshold for the exhaustion veto: the move's conviction has
+    # regressed when its CURRENT best signal (ross_score, normalized) has dropped by at
+    # least this FRACTION below its recent session PEAK (tracked in-process per symbol). A
+    # name still at/near its peak is NOT regressed. Adaptive: measured as a fraction of the
+    # name's OWN peak (no fixed score magnitude). 0 disables the viability-regressed axis.
+    chili_momentum_move_exhaustion_regress_frac: float = Field(
+        default=0.20,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MOVE_EXHAUSTION_REGRESS_FRAC"),
+        description="Viability-regressed threshold for the exhaustion veto: the conviction has regressed when the current ross_score has fallen by at least this fraction below its recent in-process session peak. Adaptive (fraction of the name's own peak). 0 disables this axis.",
+    )
     # ADAPTIVE REAP-COOLDOWN (2026-06-25): scale the post-reap sit-out by the per-symbol
     # OSCILLATION COUNT (how many arm->reap loops the name has churned recently). A first
     # reap = the short base; a serial oscillator (RENDER looped 88x) = a long cooldown,
