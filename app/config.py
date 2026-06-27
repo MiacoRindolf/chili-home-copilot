@@ -2598,6 +2598,30 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_WICK_RECLAIM_MIN_RETRACE_FRAC"),
         description="BATCH B FIX 2: minimum fraction of the rejection wick the reclaim must recover (HVM101 ~40% retrace) for the wick-reclaim trigger to fire. Reversible via chili_momentum_wick_reclaim_entry_enabled.",
     )
+    # ── slow-recovery bar-count gate (HVM101 #008) ──────────────────────────────────
+    # Ross: a wick rejection must RECOVER within 1-3 bars; the 4th bar only counts when
+    # the tape is "really showing a lot of price action" (a high-rate-of-change, drying-up
+    # flush); 5-6+ bars = a slow trickle = "more times than not invalid" = it CONFIRMS the
+    # rejection, not a reclaim. wick_reclaim_confirmation already COMPUTES the bar offset
+    # (cur - rej_idx) but never gated on it, so a slow trickle wrongly fired. This gate
+    # REJECTS that invalid slow-recovery case only — a pure quality filter, never loosens
+    # an existing wick-reclaim guard. KILL-SWITCH default OFF => byte-identical.
+    chili_momentum_wick_reclaim_slow_recovery_gate_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WICK_RECLAIM_SLOW_RECOVERY_GATE_ENABLED"),
+        description="HVM101 #008: reject wick-reclaim recoveries that took too many bars (a slow trickle = invalid). Quality filter (REJECTS only, never loosens a guard). KILL-SWITCH: False -> byte-identical.",
+    )
+    # The ONE documented bar-count base for the slow-recovery gate. Ross accepts 1-3 bars
+    # outright; the 4th bar only on strong price-action (the flush-receding / drying-up
+    # proof already computed in the trigger). 5-6+ bars are rejected. 4 mirrors the
+    # VWAP-reclaim K+1 look-back yardstick (one consistent lane window, no new magic).
+    chili_momentum_wick_reclaim_max_recovery_bars: int = Field(
+        default=4,
+        ge=1,
+        le=12,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WICK_RECLAIM_MAX_RECOVERY_BARS"),
+        description="HVM101 #008: max bars the wick-reclaim recovery may take (the one documented base; 1-3 fire, the 4th bar fires only on strong drying-up price-action, 5-6+ are rejected). Gated by chili_momentum_wick_reclaim_slow_recovery_gate_enabled.",
+    )
     chili_momentum_bid_prop_confirmer_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BID_PROP_CONFIRMER_ENABLED"),

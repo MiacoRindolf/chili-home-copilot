@@ -3792,6 +3792,37 @@ def wick_reclaim_confirmation(
                 flush_recedes = (sum(_post_vrs) / len(_post_vrs)) < _rej_vr
         except (TypeError, ValueError, IndexError):
             flush_recedes = True  # thin data -> fail-open on the volume-dry-up leg only
+
+        # ── SLOW-RECOVERY BAR-COUNT GATE (HVM101 #008; quality filter, REJECTS only) ────
+        # Ross: a wick rejection must RECOVER within 1-3 bars; the 4th bar only counts when
+        # the tape is "really showing a lot of price action" (here: a high-rate-of-change,
+        # drying-up flush == flush_recedes True); 5-6+ bars = a slow trickle = invalid =
+        # confirms the rejection, NOT a reclaim. The rejection-bar OFFSET is already
+        # computed (cur - rej_idx) and was only logged before — this gates on it. ADAPTIVE
+        # RELAXATION: bars <= (max-1) fire; the boundary bar (== max) fires ONLY on the
+        # strong-action proof (flush_recedes); > max is rejected outright. Flag OFF ->
+        # skipped entirely (byte-identical). It can only REJECT a slow trickle; it never
+        # loosens the existing wick-reclaim guards (which still run below).
+        if bool(
+            getattr(settings, "chili_momentum_wick_reclaim_slow_recovery_gate_enabled", False)
+        ):
+            max_recovery_bars = max(
+                1,
+                int(getattr(settings, "chili_momentum_wick_reclaim_max_recovery_bars", 4) or 4),
+            )
+            recovery_bars = int(cur - rej_idx)
+            # the boundary (Nth) bar needs the strong price-action proof; bars beyond it are
+            # rejected unconditionally (no relaxation can save a 5-6+ bar slow trickle).
+            strong_action = bool(flush_recedes)
+            too_slow = (recovery_bars > max_recovery_bars) or (
+                recovery_bars == max_recovery_bars and not strong_action
+            )
+            if too_slow:
+                debug["rejection_bar_offset"] = recovery_bars
+                debug["max_recovery_bars"] = max_recovery_bars
+                debug["strong_action"] = strong_action
+                return False, "wick_reclaim_slow_recovery", debug
+
         if not flush_recedes:
             debug["flush_recedes"] = False
             return False, "wick_reclaim_flush_not_dry", debug
