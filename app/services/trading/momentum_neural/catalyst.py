@@ -24,9 +24,13 @@ logger = logging.getLogger(__name__)
 _NY_TZ = ZoneInfo("America/New_York")
 
 # ONE documented knob: the premarket PR-cadence windows (top/bottom of the hour) Ross
-# watches for press releases. Comma-separated HH:MM-HH:MM ranges in ET. Default = the
-# 7:00/7:30/8:00/8:30 drops. Used by ``pr_cadence_active`` (cadence tilt, default OFF).
-PR_CADENCE_HOURS_DEFAULT = "7:00-7:30,8:00-8:30"
+# watches for press releases. Comma-separated HH:MM-HH:MM ranges in ET. Default now
+# covers the TOP + BOTTOM of EVERY hour across the full premarket (4:00-9:30 ET) — each
+# window spans the :00 top-of-hour drop through the :35-:45 bottom-of-hour drop (GAP 0
+# re-audit: the old 7:00-7:30,8:00-8:30 default under-filled the clock). Kept identical to
+# the config Field default so the in-code fallback matches settings. Used by
+# ``pr_cadence_active`` (cadence tilt, default OFF).
+PR_CADENCE_HOURS_DEFAULT = "4:00-4:45,5:00-5:45,6:00-6:45,7:00-7:50,8:00-8:50,9:25-9:35"
 # Premarket window bound (minutes-of-day ET). A PR-cadence lean-in is premarket-only —
 # the regular-session open (09:30 ET) ends the premarket PR-drop regime. Fixed exchange
 # fact, named once here (not a tunable knob).

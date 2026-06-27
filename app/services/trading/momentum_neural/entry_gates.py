@@ -486,6 +486,51 @@ def add_into_halt_ok(
         return False, "add_into_halt_error", dbg  # any error -> fail-CLOSED
 
 
+def halt_chain_risk_gate(
+    *,
+    consecutive_halt_up_count: int | None,
+    settings_obj: Any = settings,
+) -> tuple[bool, float, str, dict[str, Any]]:
+    """GAP 1 (Warrior re-audit): the HALT-CHAIN risk predicate for a halt-resume-dip long.
+
+    A name that keeps halting UP again and again is climbing the LULD ladder — each
+    successive limit-up halt-resume long is later / more extended / sharper to unwind.
+    Given the PER-SYMBOL consecutive halt-UP count, returns ``(block, size_mult, reason,
+    debug)``:
+
+      * ``block=True``  — at/above ``chili_momentum_halt_chain_block_count`` ⇒ BLOCK the
+        halt-resume long entirely (turn a would-fire into a no-fire).
+      * ``block=False`` + ``size_mult<1.0`` — below the block but on a chain (count>=2):
+        DE-WEIGHT linearly toward the block so the size shrinks as the chain extends.
+      * ``block=False`` + ``size_mult=1.0`` — count 0/1 (no chain) ⇒ no change.
+
+    RISK-REDUCING ONLY: it can only ever BLOCK or SHRINK; ``size_mult`` is always in
+    ``[lo, 1.0]`` and never exceeds 1.0. Pure; never raises. Default OFF
+    (``chili_momentum_halt_chain_risk_gate_enabled``) ⇒ ``(False, 1.0, "disabled", {})``
+    before any compute = byte-identical."""
+    dbg: dict[str, Any] = {}
+    try:
+        if not bool(getattr(settings_obj, "chili_momentum_halt_chain_risk_gate_enabled", False)):
+            return False, 1.0, "halt_chain_gate_disabled", dbg
+        cnt = int(consecutive_halt_up_count or 0)
+        block_at = int(getattr(settings_obj, "chili_momentum_halt_chain_block_count", 3) or 3)
+        block_at = max(2, block_at)
+        dbg.update({"consecutive_halt_up": cnt, "block_count": block_at})
+        if cnt >= block_at:
+            return True, 1.0, "halt_chain_blocked", dbg
+        # De-weight linearly from the 2nd halt up toward the block: at count==1 (the
+        # first halt up) full size; at count==block_at-1 the most-shrunk pre-block size.
+        if cnt >= 2 and block_at > 2:
+            # fraction of the way from the 1st halt-up (full) to the block (most shrunk).
+            frac = (cnt - 1) / (block_at - 1)
+            mult = max(0.5, 1.0 - 0.5 * frac)  # floor at 0.5x; never below
+            dbg["size_mult"] = round(mult, 4)
+            return False, mult, "halt_chain_deweighted", dbg
+        return False, 1.0, "halt_chain_ok", dbg
+    except Exception:
+        return False, 1.0, "halt_chain_error", dbg  # fail-open: never blocks on a bug
+
+
 def _dipbuy_signals_ok(
     high: pd.Series, low: pd.Series, close: pd.Series, vol: pd.Series, vwap: list,
     *, peak_idx: int, dip_idx: int, dip_low: float, run_high: float, depth: float,
@@ -7175,6 +7220,7 @@ def halt_resume_dip_trigger(
     entry_interval: str = "1m",
     halt_resumed_at_utc: Any,
     now: Any = None,
+    halt_level: float | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Ross's halt-resume DIP BUY (2026-06-10 DSY +$20k leg: "it drops and on the
     resumption I bought the dip").
@@ -7202,6 +7248,15 @@ def halt_resume_dip_trigger(
     post-resume reference high = breakout-or-bailout level) under the SAME keys as
     the pullback-break trigger, so sizing, stop placement, and the fast-bailout
     machinery are reused unchanged in live, paper, and replay.
+
+    ``halt_level`` (GAP 2 / GAP 3, Warrior re-audit): the price at the moment the name
+    HALTED (captured by the live runner at halt detection). Default ``None`` keeps the
+    behaviour byte-identical. When supplied AND the relevant flag is ON, the resumption
+    open (first post-resume bar open) is compared to ``halt_level``: a WEAK resume
+    (opens below) is a FALSE halt → no-fire (``chili_momentum_false_halt_avoid_enabled``);
+    a directional read (``chili_momentum_halt_resumption_direction_enabled``) annotates
+    ``debug['resumption_size_mult']`` for the runner to scale entry size by. The modifier
+    NEVER enables an entry or loosens a gate — risk-reducing / conviction only.
     """
     debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "halt_resume_dip"}
     if df is None or getattr(df, "empty", True) or len(df) < 3:
@@ -7233,6 +7288,61 @@ def halt_resume_dip_trigger(
     debug["bars_post_resume"] = int(len(post))
     if len(post) < 3:
         return False, "resume_dip_forming", debug
+
+    # GAP 2 + GAP 3 (Warrior re-audit) — HALT-RESUMPTION PRICE-DIRECTION.
+    # The deployed trigger reads ONLY post-resume bars and never the halt_level (the
+    # price at the moment the name halted). When the caller passes halt_level AND the
+    # relevant flag is ON, compare the resumption open (the OPEN of the first post-resume
+    # bar) vs halt_level:
+    #   • GAP 3 FALSE-HALT (chili_momentum_false_halt_avoid_enabled): a limit-UP halt
+    #     that resumes WEAK — resumption_open BELOW halt_level — is a FALSE halt (the
+    #     limit-up move did not hold through the auction). AVOID: return a no-fire. This
+    #     runs BEFORE all the dip/reclaim structure checks, so a weak resume never even
+    #     reaches the fire path. Pure risk-reduction (only ever adds a no-fire).
+    #   • GAP 2 CONVICTION (chili_momentum_halt_resumption_direction_enabled): annotate
+    #     debug with resumption_direction ('higher'/'lower'/'flat') + a bounded
+    #     resumption_size_mult the live runner applies to entry size (HIGHER ⇒ small
+    #     boost, LOWER ⇒ penalty). It is ONLY a size annotation — it never enables an
+    #     entry on its own and never loosens a gate.
+    # Both flags default OFF and halt_level defaults None ⇒ this whole block is skipped
+    # ⇒ byte-identical. Fail-OPEN on any error (no annotation, no veto).
+    _hr_dir_on = bool(getattr(settings, "chili_momentum_halt_resumption_direction_enabled", False))
+    _hr_false_on = bool(getattr(settings, "chili_momentum_false_halt_avoid_enabled", False))
+    try:
+        _hl = float(halt_level) if (halt_level is not None and (_hr_dir_on or _hr_false_on)) else None
+        if _hl is not None and _hl > 0:
+            _resume_open = float(post["Open"].astype(float).iloc[0])
+            debug["halt_level"] = round(_hl, 6)
+            debug["resumption_open"] = round(_resume_open, 6)
+            _resume_dir = (
+                "higher" if _resume_open > _hl * (1.0 + 1e-9)
+                else "lower" if _resume_open < _hl * (1.0 - 1e-9)
+                else "flat"
+            )
+            # GAP 3 — FALSE-HALT REVERSAL avoid (limit-UP halt resuming below the halt
+            # price = the up-move failed to hold). Only ever turns a would-fire into a
+            # no-fire; never enables.
+            if _hr_false_on and _resume_dir == "lower":
+                debug["resumption_direction"] = _resume_dir
+                debug["false_halt"] = True
+                return False, "resume_dip_false_halt_resume_weak", debug
+            # GAP 2 — conviction-size modifier annotation (does NOT gate; applied to size
+            # by the live runner only).
+            if _hr_dir_on:
+                try:
+                    _frac = float(getattr(settings, "chili_momentum_halt_resumption_boost_frac", 0.15) or 0.15)
+                except (TypeError, ValueError):
+                    _frac = 0.15
+                _frac = max(0.0, min(_frac, 0.5))
+                _mult = (
+                    1.0 + _frac if _resume_dir == "higher"
+                    else 1.0 - _frac if _resume_dir == "lower"
+                    else 1.0
+                )
+                debug["resumption_direction"] = _resume_dir
+                debug["resumption_size_mult"] = round(_mult, 4)
+    except Exception:
+        pass
 
     high = post["High"].astype(float)
     low = post["Low"].astype(float)

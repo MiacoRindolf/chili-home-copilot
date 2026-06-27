@@ -3278,13 +3278,39 @@ def _halt_resume_cooldown_seconds() -> float:
         return 120.0
 
 
-def _register_stale_quote_tick(db, sess, le: dict) -> None:
+def _register_stale_quote_tick(db, sess, le: dict, tick: Any = None) -> None:
     """Count a consecutive stale-quote tick; at the threshold mark a suspected halt
-    (and alert loudly if a real position is held into it)."""
+    (and alert loudly if a real position is held into it).
+
+    GAP 2/3 (Warrior re-audit): when ``tick`` is supplied AND either the resumption-
+    direction or false-halt flag is ON, also capture ``halt_level`` (the LAST GOOD price
+    at the moment the halt is detected) so the resume-direction read can compare the
+    resumption open against it. The capture is the only behaviour change and is fully
+    flag-gated (both flags OFF ⇒ no halt_level is written ⇒ byte-identical)."""
     streak = int(le.get("halt_stale_streak") or 0) + 1
     le["halt_stale_streak"] = streak
     if streak == _halt_stale_ticks_threshold() and not le.get("suspected_halt_since_utc"):
         le["suspected_halt_since_utc"] = _utcnow().isoformat()
+        # GAP 2/3 — capture the halt_level (last good price) once, at halt onset. Only
+        # when a resume-direction / false-halt flag is ON and a tick is available; the
+        # bid is the last good top-of-book before the book went dark (mid as fallback).
+        try:
+            if (
+                tick is not None
+                and (
+                    bool(getattr(settings, "chili_momentum_halt_resumption_direction_enabled", False))
+                    or bool(getattr(settings, "chili_momentum_false_halt_avoid_enabled", False))
+                )
+            ):
+                _hl = None
+                try:
+                    _hl = float(getattr(tick, "bid", None) or getattr(tick, "mid", None) or 0) or None
+                except (TypeError, ValueError):
+                    _hl = None
+                if _hl is not None and _hl > 0:
+                    le["halt_level"] = _hl
+        except Exception:
+            pass
         _emit(db, sess, "suspected_halt_detected", {"stale_tick_streak": streak})
         pos = le.get("position")
         if isinstance(pos, dict) and float(pos.get("quantity") or 0) > 0:
@@ -3434,15 +3460,48 @@ def _entry_pricebook_snapshot(symbol: str) -> dict | None:
         return None
 
 
-def _register_fresh_quote_tick(db, sess, le: dict) -> None:
+def _register_fresh_quote_tick(db, sess, le: dict, tick: Any = None) -> None:
     """Quote is live again: clear the streak; if a suspected halt was in force, mark
-    the RESUME (starts the entry cooldown) so the lane does not buy the whipsaw."""
+    the RESUME (starts the entry cooldown) so the lane does not buy the whipsaw.
+
+    GAP 1 (Warrior re-audit): when the halt-chain risk gate is ON, on each resume of a
+    suspected halt update a PER-SYMBOL consecutive halt-UP counter (le['halt_chain_up_
+    count']): increment when the name resumes UP (resumption price at/above the captured
+    halt_level — a limit-up halt in a chain) and RESET to 0 when it resumes DOWN/flat (a
+    halt-down or fade ends the up-chain). The counter is consumed by halt_chain_risk_gate
+    at entry to block/de-weight an over-extended halt-chain long. Flag OFF ⇒ the counter
+    is never touched ⇒ byte-identical."""
     le["halt_stale_streak"] = 0
     if le.get("suspected_halt_since_utc"):
+        # GAP 1 — update the consecutive halt-UP chain counter (flag-gated). Read the
+        # captured halt_level (GAP 2/3 capture) and the resumption price; up ⇒ +1, else
+        # reset. Fail-open: any miss leaves the counter unchanged (never blocks on a bug).
+        try:
+            if bool(getattr(settings, "chili_momentum_halt_chain_risk_gate_enabled", False)):
+                _hl = _float_or_none(le.get("halt_level"))
+                _resume_px = None
+                if tick is not None:
+                    try:
+                        _resume_px = float(getattr(tick, "bid", None) or getattr(tick, "mid", None) or 0) or None
+                    except (TypeError, ValueError):
+                        _resume_px = None
+                _prev = int(le.get("halt_chain_up_count") or 0)
+                if _hl is not None and _resume_px is not None and _hl > 0:
+                    if _resume_px >= _hl * (1.0 - 1e-9):
+                        le["halt_chain_up_count"] = _prev + 1
+                    else:
+                        le["halt_chain_up_count"] = 0  # resumed down/fade ends the up-chain
+                else:
+                    # No directional read available ⇒ count it as a halt-up (conservative:
+                    # an unclassified halt still extends the chain → tighter, not looser).
+                    le["halt_chain_up_count"] = _prev + 1
+        except Exception:
+            pass
         le.pop("suspected_halt_since_utc", None)
         le["halt_resumed_at_utc"] = _utcnow().isoformat()
         _emit(db, sess, "halt_resumed", {
             "entry_cooldown_seconds": _halt_resume_cooldown_seconds(),
+            "halt_chain_up_count": le.get("halt_chain_up_count"),
         })
         # Persist the resume marker NOW — the halt_resume_dip trigger keys its
         # entry window off it, so it must survive a process restart mid-window
@@ -3951,9 +4010,9 @@ def tick_live_session(
     # returning = resume (starts the entry whipsaw-cooldown). A wide-but-live quote
     # is NOT a halt signal — only staleness is.
     if quote_block is not None and quote_block.get("reason") == "stale_bbo":
-        _register_stale_quote_tick(db, sess, le)
+        _register_stale_quote_tick(db, sess, le, tick)
     else:
-        _register_fresh_quote_tick(db, sess, le)
+        _register_fresh_quote_tick(db, sess, le, tick)
     # SPREAD STABILITY (2026-06-11 INDP): the instantaneous BBO passed the gate
     # for ONE tick inside a flickering, hostile spread regime — we submitted,
     # the spread blew out a second later, and the eventual fill bought a dying
@@ -4268,9 +4327,14 @@ def tick_live_session(
                                 try:
                                     from .entry_gates import halt_resume_dip_trigger
 
+                                    # GAP 2/3 (Warrior re-audit): pass the captured
+                                    # halt_level so the trigger can read the resumption
+                                    # DIRECTION (false-halt avoid / conviction modifier).
+                                    # None when neither flag captured one ⇒ byte-identical.
                                     _trigger_ok, _trigger_reason, _pb_debug = halt_resume_dip_trigger(
                                         _df_pb, entry_interval=_interval,
                                         halt_resumed_at_utc=_resumed_at,
+                                        halt_level=_float_or_none(le.get("halt_level")),
                                     )
                                 except Exception:
                                     _trigger_ok = False
@@ -4796,6 +4860,67 @@ def tick_live_session(
                     })
             except Exception:
                 pass  # fail-open: any error -> no bench change (never strand a name)
+        # GAP 1 + GAP 2 (Warrior re-audit) — HALT-CHAIN RISK GATE + RESUMPTION SIZE
+        # MODIFIER, applied ONLY to a halt-resume-dip entry that fired (it shares ALL the
+        # existing chase-guards — the bench veto above, the bid-prop confirmer + opening-
+        # bell below still run, and the tape-REQUIRED / extension / structural-stop gates
+        # downstream are untouched). GAP 1: when the per-symbol consecutive halt-UP count
+        # reaches the block threshold, VETO the long (over-extended halt chain); below it,
+        # de-weight. GAP 2: fold the resumption_size_mult (from the trigger debug) into the
+        # same halt size lever. The combined multiplier is stashed in le["halt_entry_size_
+        # mult"] for the sizing path; a clear when not a halt-resume entry keeps it from
+        # leaking. RISK-REDUCING + conviction only — it can BLOCK or shrink (and a bounded
+        # GAP-2 boost capped by the 3x clamp + max_notional). Both flags OFF ⇒ gate returns
+        # disabled + no mult is read ⇒ byte-identical.
+        if _trigger_ok and _trigger_reason == "halt_resume_dip_ok":
+            try:
+                from .entry_gates import halt_chain_risk_gate
+
+                _hc_block, _hc_mult, _hc_reason, _hc_dbg = halt_chain_risk_gate(
+                    consecutive_halt_up_count=int(le.get("halt_chain_up_count") or 0),
+                )
+                if _hc_block:
+                    _prev_trigger = _trigger_reason
+                    _trigger_ok = False
+                    _trigger_reason = "halt_chain_blocked"
+                    le.pop("halt_entry_size_mult", None)
+                    _emit(db, sess, "live_entry_halt_chain_blocked", {
+                        "blocked_trigger": _prev_trigger, "reason": _hc_reason, **_hc_dbg,
+                    })
+                else:
+                    # Compose the GAP-1 chain de-weight with the GAP-2 resumption-direction
+                    # modifier (annotated by the trigger in _pb_debug). Both default 1.0.
+                    _gap2_mult = 1.0
+                    try:
+                        if isinstance(_pb_debug, dict):
+                            _gm = _float_or_none(_pb_debug.get("resumption_size_mult"))
+                            if _gm is not None and _gm > 0:
+                                _gap2_mult = float(_gm)
+                    except Exception:
+                        _gap2_mult = 1.0
+                    _combined = float(_hc_mult) * float(_gap2_mult)
+                    if abs(_combined - 1.0) > 1e-9:
+                        le["halt_entry_size_mult"] = _combined
+                        _emit(db, sess, "live_entry_halt_size_modifier", {
+                            "halt_chain_mult": round(float(_hc_mult), 4),
+                            "resumption_mult": round(float(_gap2_mult), 4),
+                            "combined_mult": round(_combined, 4),
+                            "halt_chain_reason": _hc_reason,
+                            "resumption_direction": (
+                                _pb_debug.get("resumption_direction")
+                                if isinstance(_pb_debug, dict) else None
+                            ),
+                            **_hc_dbg,
+                        })
+                    else:
+                        le.pop("halt_entry_size_mult", None)
+            except Exception:
+                # fail-open: any error -> no block, no size change (never strand a name).
+                le.pop("halt_entry_size_mult", None)
+        elif not (_trigger_ok and _trigger_reason == "halt_resume_dip_ok"):
+            # Not a halt-resume entry this tick: clear any stale halt size lever so it can
+            # never leak into a non-halt entry's sizing.
+            le.pop("halt_entry_size_mult", None)
         # HVM101 (A): OPENING-BELL SUPPRESSION — hold a FRESH equity trigger in the
         # first ~N min after the 09:30 ET open (opening-auction whipsaw). Equity/RH
         # ONLY; premarket continuation of an already-armed runner is preserved (the
@@ -6249,8 +6374,23 @@ def tick_live_session(
                     le["time_fatigue_derate"] = _time_fatigue_meta
             except Exception:
                 _time_fatigue_mult = 1.0
+        # GAP 1 + GAP 2 (Warrior re-audit) HALT-RESUME SIZE LEVER: a halt-resume-dip
+        # entry carries an optional size multiplier set upstream (le["halt_entry_size_
+        # mult"]): GAP 1 de-weights an extending halt-CHAIN long (<1.0), GAP 2 boosts a
+        # bullish gap-up resumption / penalises a lower resumption. It composes
+        # multiplicatively under the SAME 3x clamp + hard max_notional ceiling as every
+        # other lever (compute_risk_first_quantity still caps qty at max_notional, so a
+        # GAP-2 boost can NEVER push notional past any ceiling). Default (no halt-resume
+        # entry / both flags OFF ⇒ key absent) => 1.0 (byte-identical).
+        _halt_size_mult = 1.0
+        try:
+            _hsm = _float_or_none(le.get("halt_entry_size_mult"))
+            if _hsm is not None and _hsm > 0:
+                _halt_size_mult = float(_hsm)
+        except Exception:
+            _halt_size_mult = 1.0
         _eff_max_loss = min(
-            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult) * float(_fatigue_mult) * float(_sym_fatigue_mult) * float(_hot_cold_mult) * float(_time_fatigue_mult),
+            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult) * float(_fatigue_mult) * float(_sym_fatigue_mult) * float(_hot_cold_mult) * float(_time_fatigue_mult) * float(_halt_size_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE

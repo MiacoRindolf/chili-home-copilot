@@ -2241,9 +2241,9 @@ class Settings(BaseSettings):
         description="Ross PR-clock cadence: PRs drop on the top/bottom of the hour premarket (7:00/7:30/8:00/8:30 ET). When ON, a CATALYST name (present in the news set) gets a small additional selection LEAN-IN during a PR window — but ONLY in premarket hours, ET. Outside the windows the name is NEUTRAL (no boost). Requires the news-catalyst pillar to be stamping; a pure time-of-day gate on top of it. OFF ⇒ no cadence boost ⇒ byte-identical.",
     )
     chili_momentum_news_pr_cadence_hours: str = Field(
-        default="7:00-7:30,8:00-8:30",
+        default="4:00-4:45,5:00-5:45,6:00-6:45,7:00-7:50,8:00-8:50,9:25-9:35",
         validation_alias=AliasChoices("CHILI_MOMENTUM_NEWS_PR_CADENCE_HOURS"),
-        description="The ONE documented knob for the PR-cadence windows: comma-separated HH:MM-HH:MM ranges in ET (premarket) during which catalyst names get the cadence lean-in. Default = the top/bottom-of-hour PR drops Ross watches (7:00-7:30, 8:00-8:30).",
+        description="The ONE documented knob for the PR-cadence windows: comma-separated HH:MM-HH:MM ranges in ET (premarket) during which catalyst names get the cadence lean-in. Default now covers the TOP + BOTTOM of EVERY hour Ross watches across the full premarket (4:00-9:30 ET) — each window spans the :00 top-of-hour drop through the :35-:45 bottom-of-hour drop, plus a 9:25-9:35 pre-open window. (GAP 0 re-audit: the old 7:00-7:30,8:00-8:30 default under-filled the PR clock.) Parser (_parse_cadence_windows) handles arbitrary windows fail-safe.",
     )
     chili_momentum_price_sweetspot_tilt_enabled: bool = Field(
         default=False,
@@ -2790,6 +2790,57 @@ class Settings(BaseSettings):
     chili_momentum_halt_resume_dip_window_seconds: float = Field(
         default=600.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_RESUME_DIP_WINDOW_SECONDS"),
+    )
+    # GAP 1 (Warrior re-audit) — HALT-CHAIN RISK GATE. A name that keeps halting UP
+    # again and again (a "halt chain") is climbing the LULD ladder — each successive
+    # limit-up halt-resume long is statistically later/riskier (the move is more
+    # extended, the unwind is sharper). When ON, the lane tracks a PER-SYMBOL
+    # consecutive halt-UP count (reset on a new session/day or on a halt-down resume)
+    # and, once the count reaches chili_momentum_halt_chain_block_count, BLOCKS the
+    # halt-resume-dip long entirely (and de-weights size as it climbs toward the block).
+    # RISK-REDUCING ONLY: it can turn a would-fire into a no-fire / smaller, never the
+    # reverse; it NEVER touches exits or any other gate. Default OFF ⇒ the counter is
+    # never read ⇒ byte-identical. docs/STRATEGY/CC_REPORTS/2026-06-26_warrior-courses-reaudit.md
+    chili_momentum_halt_chain_risk_gate_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_CHAIN_RISK_GATE_ENABLED"),
+        description="GAP 1: when ON, track a PER-SYMBOL consecutive halt-UP count; once it reaches chili_momentum_halt_chain_block_count, BLOCK the halt-resume-dip long (and size down as it climbs). Risk-reducing only (block/de-weight); never loosens any gate or touches exits. OFF ⇒ byte-identical.",
+    )
+    chili_momentum_halt_chain_block_count: int = Field(
+        default=3,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_CHAIN_BLOCK_COUNT"),
+        description="GAP 1: the consecutive halt-UP count at/above which the halt-resume-dip long is BLOCKED (Ross watches ~3 halts up before the move is too extended to chase the resumption). Below it the entry is de-weighted toward the block. Only consulted when chili_momentum_halt_chain_risk_gate_enabled is ON.",
+    )
+    # GAP 2 (Warrior re-audit) — HALT-RESUMPTION PRICE-DIRECTION conviction. When a
+    # name halts, capture the halt_level (the price at the moment the halt was detected).
+    # On resume, compare the resumption open vs that halt_level: opens HIGHER (gap-up
+    # resume) = bullish conviction → a small size BOOST on the halt-resume-dip long;
+    # opens LOWER = caution → a size PENALTY. The deployed halt_resume_dip_trigger reads
+    # ONLY post-resume bars and never the halt_level — this wires the halt_level + the
+    # resumption-direction read as a CONVICTION MODIFIER (annotation in the debug dict;
+    # live applies it to entry size). Default OFF ⇒ no halt_level is read / no modifier
+    # is emitted ⇒ byte-identical.
+    chili_momentum_halt_resumption_direction_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_RESUMPTION_DIRECTION_ENABLED"),
+        description="GAP 2: capture halt_level (price at the halt) and compare resumption_open vs it. Resumes HIGHER = bullish (small size boost); resumes LOWER = caution (size penalty). Conviction modifier on the halt-resume-dip long only; never loosens a gate. OFF ⇒ byte-identical.",
+    )
+    chili_momentum_halt_resumption_boost_frac: float = Field(
+        default=0.15,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_RESUMPTION_BOOST_FRAC"),
+        description="GAP 2: the fractional size adjustment magnitude for the resumption-direction conviction modifier (e.g. 0.15 ⇒ +15% on a bullish gap-up resume, −15% on a caution lower resume). Equity-relative multiplier on the existing structural size, not a fixed $; bounded [0,0.5]. Only consulted when chili_momentum_halt_resumption_direction_enabled is ON.",
+    )
+    # GAP 3 (Warrior re-audit) — FALSE-HALT RESUMPTION REVERSAL avoid. A limit-UP halt
+    # that resumes WEAK — the first post-resume bar OPENS BELOW the halt_level (the price
+    # it halted at) — is a FALSE halt: the limit-up move did not hold through the auction
+    # and the resumption is a fade, not a continuation. When ON, the halt-resume-dip long
+    # is AVOIDED in that case (shares the halt_level + resumption read with GAP 2). Pure
+    # risk-reduction: it can only ADD a no-fire reason; it never enables an entry. Default
+    # OFF ⇒ the resumption_open-vs-halt_level check is never made ⇒ byte-identical.
+    chili_momentum_false_halt_avoid_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FALSE_HALT_AVOID_ENABLED"),
+        description="GAP 3: a limit-UP halt that resumes WEAK (first post-resume bar opens below halt_level) = a FALSE halt → AVOID the halt-resume-dip long. Shares halt_level + resumption read with GAP 2. Risk-reducing only (adds a no-fire); never enables an entry. OFF ⇒ byte-identical.",
     )
     # HOT-tape regime floor: this many simultaneous LULD-scale movers (>=30% day
     # move among the bridge's scanned candidates) flips the catalyst tilt to the
