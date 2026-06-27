@@ -120,3 +120,22 @@ Kill-switch `chili_momentum_cup_and_handle_entry_enabled` default OFF ⇒ the fu
    suggests the call-site bench is doing most of the work; the new in-trigger guards are the
    belt to its suspenders. Worth confirming over the Monday soak whether cup adds net edge at
    all once properly guarded, or whether it should stay ON only as a completeness item.
+
+## Addendum — lineage race (needs coordination)
+
+While this was in flight the parallel session COMMITTED the EXITS cluster onto the etfrank
+branch (`chili/momentum-defensive-veto-bundle`): **b349aed → e26ecdf** (GAP1 bail-on-no-
+confirmation, GAP2 instant bid-below-fill cut, GAP3 regime-conditioned hold-time), and an
+image `chili-app:main-clean-e26ecdf` was built. Two divergent lineages now exist off b349aed:
+
+- `10c7018` = b349aed **+ cup hardening** (THIS PR; currently LIVE on the scheduler).
+- `e26ecdf` = b349aed **+ EXITS cluster** (no cup hardening).
+
+**Risk:** the cup flag is ON in the sched env, so deploying plain `e26ecdf` would REGRESS the
+cup chase-guards and re-expose the unsafe cup Monday premarket. I did NOT unilaterally bundle
+the EXITS work into my deploy (another session's code; not mine to verify/ship).
+
+**Recommendation:** converge on a single `b349aed + cup + EXITS` image. The merge is trivially
+clean (disjoint files: cup = `entry_gates.py` only; EXITS = `live_runner.py` /
+`paper_execution.py` / `config.py`). On go-ahead I can `git merge e26ecdf` into this branch,
+build the combined image, and deploy it. No live-trading urgency (equity closed until Monday).
