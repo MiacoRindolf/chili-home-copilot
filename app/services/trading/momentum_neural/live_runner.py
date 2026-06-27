@@ -6694,8 +6694,25 @@ def tick_live_session(
                     le["catalyst_conviction_size"] = _cc_meta
             except Exception:
                 _catalyst_conviction_mult = 1.0
+        # PRIME-WINDOW SIZE LEVER (time-of-day schedule, default OFF ⇒ 1.0 byte-identical): a
+        # BOUNDED-UPWARD (>=1.0, <= prime_window_size_mult_max) multiplier when ET is inside the
+        # documented prime window (default 04:00-10:30 ET, the premarket+open drive band). It
+        # composes multiplicatively into the SAME min(..., base*3.0) clamp + the hard max_notional
+        # ceiling below, so a prime-window boost can NEVER push notional past base*3.0 and is NEVER
+        # a veto (floor 1.0 = never a shrink). Flag OFF / outside window / any error ⇒ 1.0. The
+        # FADE-DRIVEN late-day cutoff (the suppression half) lives in auto_arm (PRE-arm), not here.
+        _prime_window_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_timeofday_schedule_enabled", False)):
+            try:
+                from .auto_arm import prime_window_size_multiplier
+
+                _prime_window_mult, _pw_meta = prime_window_size_multiplier()
+                if _prime_window_mult > 1.0:
+                    le["prime_window_size"] = _pw_meta
+            except Exception:
+                _prime_window_mult = 1.0
         _eff_max_loss = min(
-            float(_base_max_loss) * float(_streak_mult) * float(_graduation_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult) * float(_fatigue_mult) * float(_sym_fatigue_mult) * float(_hot_cold_mult) * float(_time_fatigue_mult) * float(_halt_size_mult) * float(_dip_velocity_mult) * float(_catalyst_conviction_mult),
+            float(_base_max_loss) * float(_streak_mult) * float(_graduation_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult) * float(_fatigue_mult) * float(_sym_fatigue_mult) * float(_hot_cold_mult) * float(_time_fatigue_mult) * float(_halt_size_mult) * float(_dip_velocity_mult) * float(_catalyst_conviction_mult) * float(_prime_window_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # ADAPTIVE SPREAD-COST VETO/DERATE (2026-06-27, DEFAULT OFF ⇒ byte-identical):

@@ -881,6 +881,164 @@ def _should_sit_cash_no_asetup(
         return False, {"suppress": False, "reason": "gate_error"}
 
 
+# ── TIME-OF-DAY SCHEDULE: PRIME-WINDOW SIZE LEVER + FADE-DRIVEN LATE-DAY CUTOFF ──────────
+# Two NEW-INITIATION-ONLY behaviors, both kill-switched OFF by default (byte-identical):
+#
+#   (1) PRIME-WINDOW SIZE LEVER — a BOUNDED-UPWARD (>=1.0, <= max) per-trade size multiplier
+#       during the documented prime window (default 04:00-10:30 ET = the premarket+open drive,
+#       the SAME band as schedule_window_now's "hot"). It is computed here and threaded into
+#       the live_runner _eff_max_loss PRODUCT, where it composes under the SAME min(..., base*3.0)
+#       clamp + hard notional ceiling that green_day/catalyst/cushion feed — so a prime-window
+#       boost can NEVER push notional past base*3.0 and is NEVER a veto (floor 1.0 = no shrink).
+#
+#   (2) FADE-DRIVEN LATE-DAY NEW-ENTRY CUTOFF — suppress a FRESH arm only when the day's
+#       momentum/breadth has FADED, REUSING the EXACT regime signal the no-asetup-sit-cash gate
+#       uses (_tape_cold_breadth AND not _has_fresh_catalyst_on_board => _regime_is_poor). The
+#       documented fallback clock (default 14:30 ET) is a CEILING, not the primary driver: the
+#       fade must be present AND the clock at/past the fallback to suppress, so a strong-momentum
+#       (non-faded) afternoon STILL trades. With fade DISABLED the cutoff is clock-only.
+#
+# ISOLATION INVARIANT: evaluated ONCE per auto-arm pass, BEFORE the arm loop (alongside the
+# sit-cash gate). It can ONLY set out["skipped"]="momentum_timeofday_schedule" + return early
+# (NOT arm a NEW session). It NEVER blocks/delays/downsizes an EXIT / stop / trail / scale-out /
+# flatten / open-position management — those run EXCLUSIVELY in the live runner, which never
+# consults this gate. Every axis fails open (a missing datum can only PERMIT the arm + leave the
+# size lever at 1.0). One documented base per knob; no scattered magic.
+
+
+def _timeofday_schedule_enabled() -> bool:
+    """Kill-switch. OFF (default) => the time-of-day gate never runs, the prime-window size
+    lever stays 1.0, and run_auto_arm_pass is byte-identical (no new query, no suppression)."""
+    return bool(getattr(settings, "chili_momentum_timeofday_schedule_enabled", False))
+
+
+def _et_minutes_now(now: datetime | None = None) -> tuple[int, bool]:
+    """Current ET minutes-of-day + a weekday flag, via the shared market-profile clock (DST
+    correct). ``now`` is treated as UTC if naive (matching _utcnow / market_session_now). Returns
+    ``(minutes_of_day, is_weekday)``. Any clock error => (-1, False) => fail-open (no suppression,
+    treated as outside the prime window)."""
+    try:
+        from datetime import timezone as _tz
+
+        from .market_profile import _NY_TZ
+
+        ref = now or _utcnow()
+        if ref.tzinfo is None:
+            ref = ref.replace(tzinfo=_tz.utc)
+        local = ref.astimezone(_NY_TZ)
+        return local.hour * 60 + local.minute, local.weekday() < 5
+    except Exception:
+        return -1, False
+
+
+def _timeofday_bounds() -> tuple[int, int, int]:
+    """Resolve the THREE documented clock bases (prime start, prime end, fallback clock) to
+    ET minutes-of-day via market_profile._parse_hhmm (the SAME parser the premarket/afterhours
+    bounds use). Malformed strings fail-safe to the documented defaults (04:00 / 10:30 / 14:30)."""
+    try:
+        from .market_profile import _parse_hhmm
+
+        start = _parse_hhmm(
+            getattr(settings, "chili_momentum_timeofday_prime_window_start_et", None), 4 * 60
+        )
+        end = _parse_hhmm(
+            getattr(settings, "chili_momentum_timeofday_prime_window_end_et", None), 10 * 60 + 30
+        )
+        fallback = _parse_hhmm(
+            getattr(settings, "chili_momentum_timeofday_fallback_clock_et", None), 14 * 60 + 30
+        )
+        return start, end, fallback
+    except Exception:
+        return 4 * 60, 10 * 60 + 30, 14 * 60 + 30
+
+
+def _prime_window_size_mult_max() -> float:
+    """The ONE bound on the prime-window size lever. Clamped to >= 1.0 (the lever is NEVER a
+    shrink). Fail-safe to 1.5 on a bad value."""
+    try:
+        m = float(getattr(settings, "chili_momentum_timeofday_prime_window_size_mult_max", 1.5))
+    except (TypeError, ValueError):
+        return 1.5
+    return m if m >= 1.0 else 1.0
+
+
+def prime_window_size_multiplier(now: datetime | None = None) -> tuple[float, dict[str, Any]]:
+    """The PRIME-WINDOW size lever (NEW-INITIATION sizing only): a BOUNDED-UPWARD multiplier
+    (>= 1.0, <= prime_window_size_mult_max) when ET is inside the documented prime window
+    [start, end), else exactly 1.0. NEVER < 1.0 (never a shrink), NEVER a veto. The runner
+    composes this into its _eff_max_loss PRODUCT under the SAME min(..., base*3.0) clamp + hard
+    notional ceiling, so it can never escape 3x. Flag OFF / weekend / outside window / any error
+    => (1.0, ...) (byte-identical). One documented base per bound; no scattered magic."""
+    if not _timeofday_schedule_enabled():
+        return 1.0, {"reason": "disabled", "prime_mult": 1.0}
+    try:
+        mod, is_weekday = _et_minutes_now(now)
+        if mod < 0 or not is_weekday:
+            return 1.0, {"reason": "outside_window", "prime_mult": 1.0, "et_min": mod}
+        start, end, _fallback = _timeofday_bounds()
+        if start <= mod < end:
+            mult = _prime_window_size_mult_max()
+            return max(1.0, mult), {
+                "prime_mult": round(max(1.0, mult), 4),
+                "et_min": mod,
+                "window": [start, end],
+                "in_prime": True,
+            }
+        return 1.0, {"reason": "outside_window", "prime_mult": 1.0, "et_min": mod,
+                     "window": [start, end]}
+    except Exception:
+        return 1.0, {"reason": "error_fail_neutral", "prime_mult": 1.0}
+
+
+def _should_suppress_late_day(
+    candidates: list[Any], *, now: datetime | None = None
+) -> tuple[bool, dict[str, Any]]:
+    """THE FADE-DRIVEN LATE-DAY CUTOFF (NEW-INITIATION ONLY): suppress a FRESH arm iff ET is
+    at/past the documented fallback clock AND the day's regime has FADED. ``(suppress, debug)``.
+
+    The cutoff is FADE-DRIVEN — it REUSES the SAME regime signal the no-asetup-sit-cash gate
+    uses (``_regime_is_poor(_tape_cold_breadth(board), _has_fresh_catalyst_on_board(board))``):
+    the board's equity tape-breadth is affirmatively COLD AND there is NO fresh catalyst. The
+    fallback clock is only a CEILING — a strong-momentum (non-faded) afternoon STILL trades past
+    it. If fade-check is DISABLED (``chili_momentum_timeofday_fade_enabled`` false), the cutoff
+    is clock-only (past the fallback => suppress). Every axis fails OPEN (a missing datum only
+    PERMITS the arm). NEVER raises — any error returns ``(False, ...)`` so the gate can only
+    suppress on POSITIVE agreement, never on its own failure. NEW-INITIATION ONLY (the live
+    runner's exits never call this)."""
+    try:
+        mod, is_weekday = _et_minutes_now(now)
+        if mod < 0 or not is_weekday:
+            return False, {"suppress": False, "reason": "outside_clock", "et_min": mod}
+        _start, _end, fallback = _timeofday_bounds()
+        past_fallback = mod >= fallback
+        if not past_fallback:
+            # Before the fallback ceiling — the late-day cutoff never suppresses (prime/midday
+            # initiation is governed by the other gates, not this one).
+            return False, {"suppress": False, "reason": "before_fallback_clock",
+                           "et_min": mod, "fallback": fallback}
+        fade_enabled = bool(getattr(settings, "chili_momentum_timeofday_fade_enabled", True))
+        if not fade_enabled:
+            # Clock-only cutoff: past the documented fallback => suppress a NEW entry.
+            return True, {"suppress": True, "reason": "past_fallback_clock_only",
+                          "et_min": mod, "fallback": fallback}
+        # FADE-DRIVEN: reuse the no-asetup-sit-cash regime signal verbatim (one definition).
+        tape_cold = _tape_cold_breadth(candidates)
+        has_catalyst = _has_fresh_catalyst_on_board(candidates)
+        faded = _regime_is_poor(tape_cold, has_catalyst)
+        return bool(faded), {
+            "suppress": bool(faded),
+            "reason": "fade_driven" if faded else "afternoon_still_strong",
+            "et_min": mod,
+            "fallback": fallback,
+            "tape_cold": bool(tape_cold),
+            "has_catalyst": bool(has_catalyst),
+            "regime_faded": bool(faded),
+        }
+    except Exception:
+        logger.debug("[auto_arm] time-of-day late-day cutoff errored (fail-open)", exc_info=True)
+        return False, {"suppress": False, "reason": "gate_error"}
+
+
 # Per-symbol PRE-ENTRY REAP cooldown (in-process, scheduler-local). A name reaped
 # here just held the live slot for the full watch window without firing; cooling it
 # down briefly stops it from immediately re-arming and re-occupying the single slot,
@@ -3195,6 +3353,38 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
                 return out
         except Exception:
             logger.debug("[auto_arm] no-asetup sit-cash guard failed (fail-open)", exc_info=True)
+
+    # Guard 7: TIME-OF-DAY FADE-DRIVEN LATE-DAY NEW-ENTRY CUTOFF (NEW INITIATION ONLY, kill-
+    # switch chili_momentum_timeofday_schedule_enabled, default OFF => byte-identical: the gate is
+    # NOT called, no new query, no suppression). Evaluated ONCE per pass on the already-fetched
+    # board, BEFORE the candidate scan/arm loop. SUPPRESS a FRESH arm only when ET is at/past the
+    # documented fallback clock (default 14:30 ET, a CEILING not the primary driver) AND the day's
+    # momentum/breadth has FADED — REUSING the SAME regime signal (_tape_cold_breadth AND no fresh
+    # catalyst => _regime_is_poor) the sit-cash gate above uses. A strong-momentum (non-faded)
+    # afternoon STILL initiates. The PRIME-WINDOW SIZE LEVER (the upward half of this feature) is
+    # applied separately in live_runner's _eff_max_loss product, NOT here. ISOLATION INVARIANT:
+    # this can ONLY skip a NEW arm — it NEVER blocks/delays/downsizes an EXIT / stop / trail /
+    # scale-out / flatten / open-position management (all of which run exclusively in the live
+    # runner, ungated). Fail-open on every axis. docs/DESIGN/MOMENTUM_LANE.md
+    if _timeofday_schedule_enabled():
+        try:
+            _tod, _tod_dbg = _should_suppress_late_day(candidates)
+            if _tod:
+                out["skipped"] = "momentum_timeofday_schedule"
+                out["timeofday_schedule"] = _tod_dbg
+                logger.info(
+                    "[auto_arm] time-of-day cutoff: suppressing NEW initiation — past fallback "
+                    "clock (et_min=%s, fallback=%s) AND day faded (reason=%s, tape_cold=%s, "
+                    "has_catalyst=%s). Exits/position-management are UNAFFECTED.",
+                    _tod_dbg.get("et_min"),
+                    _tod_dbg.get("fallback"),
+                    _tod_dbg.get("reason"),
+                    _tod_dbg.get("tape_cold"),
+                    _tod_dbg.get("has_catalyst"),
+                )
+                return out
+        except Exception:
+            logger.debug("[auto_arm] time-of-day cutoff guard failed (fail-open)", exc_info=True)
 
     # Cheap pre-filter (no network): venue, market hours, per-symbol mutex,
     # and self-collision (a symbol we already hold an active live session for).

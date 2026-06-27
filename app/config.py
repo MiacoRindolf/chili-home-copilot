@@ -5943,6 +5943,58 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_NO_ASETUP_SIT_CASH_MARGIN_MULTIPLE"),
         description="The ONE documented margin for the sit-cash gate's adaptive A+ bar: bar = max(A-setup conviction floor, median_ross - this * std_dev_ross). Larger => more permissive (lower bar); smaller => stricter. Adaptive to the board's ross_score distribution (no fixed cutoff).",
     )
+    # ── TIME-OF-DAY SCHEDULE (prime-window size lever + fade-driven late-day cutoff) ────────
+    # NEW-INITIATION ONLY. Kill-switch; OFF (default) => byte-identical (the gate never runs,
+    # no prime-window mult, no late-day suppression). ON => (1) a BOUNDED-UPWARD size multiplier
+    # (>=1.0, <= prime_window_size_mult_max) during the documented prime window that composes
+    # into the SAME live_runner _eff_max_loss product under the 3x clamp (so it can NEVER push
+    # notional past base*3.0 and is NEVER a veto); (2) a FADE-DRIVEN late-day NEW-ENTRY cutoff —
+    # suppress a fresh arm only when the day's momentum/breadth has FADED (reusing the SAME
+    # tape-cold-breadth + catalyst regime signal the no-asetup-sit-cash gate uses), with the
+    # fallback clock as a documented hard-ceiling (a strong-momentum afternoon still trades).
+    # It NEVER blocks/delays/downsizes an EXIT or open-position management (live runner owns
+    # those, ungated). docs/DESIGN/MOMENTUM_LANE.md [[feedback_adaptive_no_magic]]
+    chili_momentum_timeofday_schedule_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TIMEOFDAY_SCHEDULE_ENABLED"),
+        description="Kill-switch for the time-of-day schedule (prime-window size lever + fade-driven late-day NEW-entry cutoff), NEW-INITIATION ONLY. OFF (default) => byte-identical (no prime-window mult, no late-day suppression). ON => bounded-upward size boost in the prime window (composes under the 3x ceiling, never a veto) + suppress a fresh arm when day momentum/breadth has FADED past the fallback clock. NEVER touches an exit/open-position management.",
+    )
+    # Prime window bounds (ONE base each). Default 04:00-10:30 ET = the documented premarket+open
+    # drive band (mirrors schedule_window_now's "hot" window — ONE canonical window, no new magic
+    # bound). Parsed via market_profile._parse_hhmm; malformed => the documented fallback minutes.
+    chili_momentum_timeofday_prime_window_start_et: str = Field(
+        default="04:00",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TIMEOFDAY_PRIME_WINDOW_START_ET"),
+        description="Prime-window OPEN, 'HH:MM' ET (default 04:00 = premarket drive start). Inside [start,end) the bounded-upward size lever applies. Documented base; parsed via _parse_hhmm.",
+    )
+    chili_momentum_timeofday_prime_window_end_et: str = Field(
+        default="10:30",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TIMEOFDAY_PRIME_WINDOW_END_ET"),
+        description="Prime-window CLOSE, 'HH:MM' ET (default 10:30 = end of the open drive). Documented base; parsed via _parse_hhmm.",
+    )
+    # The ONE bound on the prime-window size lever. Clamped to [1.0, this]; the lever is NEVER
+    # < 1.0 (never a shrink) and NEVER a veto. It composes into the runner's _eff_max_loss product
+    # under the SAME min(..., base*3.0) clamp + hard notional ceiling, so it can never escape 3x.
+    chili_momentum_timeofday_prime_window_size_mult_max: float = Field(
+        default=1.5,
+        ge=1.0,
+        le=3.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TIMEOFDAY_PRIME_WINDOW_SIZE_MULT_MAX"),
+        description="Max bounded-upward size multiplier for the prime window (default 1.5x). Clamped [1.0, this]; never < 1.0, never a veto. Composes under the live_runner 3x combined-multiplier ceiling, so it can NEVER push notional past base*3.0.",
+    )
+    # The DOCUMENTED FALLBACK CLOCK (a ceiling, NOT the primary driver). The cutoff is FADE-DRIVEN
+    # (momentum/breadth faded per the regime signal); this clock only gates WHEN that fade is
+    # allowed to suppress a fresh entry. A strong-momentum afternoon (no fade) still trades past it.
+    chili_momentum_timeofday_fallback_clock_et: str = Field(
+        default="14:30",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TIMEOFDAY_FALLBACK_CLOCK_ET"),
+        description="Documented hard-ceiling fallback clock, 'HH:MM' ET (default 14:30 = end of midday lull). NOT the primary driver: a NEW entry is suppressed only when the day momentum/breadth has FADED *and* the clock is at/past this. A strong-momentum (non-faded) afternoon still initiates. Parsed via _parse_hhmm.",
+    )
+    chili_momentum_timeofday_fade_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TIMEOFDAY_FADE_ENABLED"),
+        description="When ON (default), the late-day cutoff is FADE-DRIVEN: past the fallback clock, suppress a NEW entry only if the day momentum/breadth has FADED (cold tape-breadth AND no fresh catalyst, reusing the no-asetup-sit-cash regime signal). When OFF, the cutoff is clock-only (past the fallback clock => suppress). Either way it NEVER touches an exit.",
+    )
     # ADAPTIVE REAP-COOLDOWN (2026-06-25): scale the post-reap sit-out by the per-symbol
     # OSCILLATION COUNT (how many arm->reap loops the name has churned recently). A first
     # reap = the short base; a serial oscillator (RENDER looped 88x) = a long cooldown,
