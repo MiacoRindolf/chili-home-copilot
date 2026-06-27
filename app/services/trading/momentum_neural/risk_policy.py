@@ -927,6 +927,7 @@ def consecutive_green_days(
         return 0, {**meta, "reason": "no_input"}
     try:
         from ....models.trading import MomentumAutomationOutcome
+        from .outcome_labels import is_real_entry_outcome
 
         far_start, _ = _et_day_bounds_utc(days_ago=int(lookback_days))
         today_start, _ = _et_day_bounds_utc(days_ago=0)
@@ -934,6 +935,7 @@ def consecutive_green_days(
             db.query(
                 MomentumAutomationOutcome.terminal_at,
                 MomentumAutomationOutcome.realized_pnl_usd,
+                MomentumAutomationOutcome.outcome_class,
             )
             .filter(
                 MomentumAutomationOutcome.execution_family == execution_family,
@@ -954,9 +956,15 @@ def consecutive_green_days(
     et = ZoneInfo("America/New_York")
     utc = ZoneInfo("UTC")
     by_day: dict[Any, float] = {}
-    for ts, pnl in rows:
+    for ts, pnl, oc in rows:
         try:
-            if ts is None or pnl is None:
+            # Only REAL entered trades carry strategy P&L. A never-entered row
+            # (cancelled_pre_entry / no_fill / risk_block) carries realized_pnl_usd=0.0
+            # (NOT NULL — slips past the not-null filter); a day of ONLY such rows would
+            # sum to 0.0 and spuriously BREAK the streak (0.0 is not > 0.0) even though no
+            # real trade happened. Mirror _count_real_entries_today: exclude them so the
+            # daily green/red verdict is the REAL realized-PnL sum. [momentum_neural]
+            if ts is None or pnl is None or not is_real_entry_outcome(oc):
                 continue
             d = ts.replace(tzinfo=utc).astimezone(et).date()
             by_day[d] = by_day.get(d, 0.0) + float(pnl)
