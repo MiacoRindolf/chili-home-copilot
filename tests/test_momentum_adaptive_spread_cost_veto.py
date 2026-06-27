@@ -492,3 +492,433 @@ def test_real_db_thin_history_fails_open(db: Session) -> None:
     )
     assert allow is True
     assert meta.get("name_dist") == "insufficient_history"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ── HARDENING: APPENDED ADVERSARIAL BRANCH/BOUNDARY/EDGE COVERAGE ────────────
+# Each test below targets a specific UNTESTED conditional branch, boundary value
+# (exactly-at / eps-below / eps-above a threshold), edge input, or failure mode in
+# spread_cost_veto.py and asserts the SPECIFIC reason/value so it FAILS if that
+# branch regresses. Defaults from app/config.py: max_frac=0.25, reclaim=0.35,
+# anomaly_mult=2.0, extreme_mult=1.5, floor=0.5, engage_frac=0.5, lookback=20.0.
+# ════════════════════════════════════════════════════════════════════════════
+
+from app.services.trading.momentum_neural.spread_cost_veto import (  # noqa: E402
+    _f,
+    _is_reclaim_family,
+)
+
+
+# ── H1. _f() coercion helper: None / NaN / inf / non-numeric / valid ─────────
+def test_f_helper_rejects_nan_inf_none_and_garbage() -> None:
+    assert _f(None) is None
+    assert _f(float("nan")) is None
+    assert _f(float("inf")) is None
+    assert _f(float("-inf")) is None
+    assert _f("not-a-number") is None
+    assert _f([1, 2]) is None          # TypeError path
+    # valid coercions (incl. numeric strings + ints) survive
+    assert _f("3.5") == 3.5
+    assert _f(7) == 7.0
+    assert _f(0) == 0.0                 # 0 is a VALID float (not None) -> caller gates >0
+    assert _f(-4.2) == -4.2             # negatives pass _f; the caller gates sign
+
+
+# ── H2. name_spread_percentiles: pure guards that don't touch the DB ─────────
+def test_percentiles_empty_symbol_returns_none_without_db_call() -> None:
+    # raise_exc=True would blow up IF the DB were touched; empty symbol must short-circuit.
+    db = _FakeDB(None, raise_exc=True)
+    assert name_spread_percentiles(db, "", lookback_days=20.0) is None
+    assert name_spread_percentiles(db, "   ", lookback_days=20.0) is None
+    assert name_spread_percentiles(db, None, lookback_days=20.0) is None  # type: ignore[arg-type]
+
+
+def test_percentiles_nonpositive_lookback_returns_none_without_db_call() -> None:
+    db = _FakeDB(None, raise_exc=True)  # must NOT be reached
+    assert name_spread_percentiles(db, "X", lookback_days=0.0) is None
+    assert name_spread_percentiles(db, "X", lookback_days=-5.0) is None
+
+
+def test_percentiles_db_exception_returns_none() -> None:
+    db = _FakeDB(None, raise_exc=True)
+    assert name_spread_percentiles(db, "BOOM", lookback_days=20.0) is None
+
+
+def test_percentiles_null_row_and_null_first_col_return_none() -> None:
+    assert name_spread_percentiles(_FakeDB(None), "X", lookback_days=20.0) is None
+    # row present but p50 (col 0) is NULL -> None
+    assert name_spread_percentiles(
+        _FakeDB((None, 1.0, 2.0, 99)), "X", lookback_days=20.0) is None
+
+
+def test_percentiles_min_samples_boundary() -> None:
+    # exactly at the floor passes; one below returns None.
+    assert name_spread_percentiles(
+        _FakeDB((100.0, 120.0, 140.0, 8)), "X", lookback_days=20.0, min_samples=8) is not None
+    assert name_spread_percentiles(
+        _FakeDB((100.0, 120.0, 140.0, 7)), "X", lookback_days=20.0, min_samples=8) is None
+
+
+def test_percentiles_nonpositive_p50_returns_none() -> None:
+    # p50<=0 is treated as an unusable distribution -> None (caller fails open).
+    assert name_spread_percentiles(
+        _FakeDB((0.0, 10.0, 20.0, 50)), "X", lookback_days=20.0) is None
+    assert name_spread_percentiles(
+        _FakeDB((-3.0, 10.0, 20.0, 50)), "X", lookback_days=20.0) is None
+
+
+def test_percentiles_p75_p90_fallback_when_nonpositive() -> None:
+    # p75<=0 -> falls back to p50 ; p90<=0 -> falls back to (p75 or p50).
+    out = name_spread_percentiles(
+        _FakeDB((100.0, 0.0, -1.0, 50)), "X", lookback_days=20.0)
+    assert out is not None
+    assert out["p50"] == 100.0
+    assert out["p75"] == 100.0   # 0.0 -> fell back to p50
+    assert out["p90"] == 100.0   # -1.0 -> fell back to (p75->p50)
+    assert out["n"] == 50.0
+
+
+def test_percentiles_p75_none_p90_present_uses_p50_then_p75chain() -> None:
+    # p75 is None -> p50 ; p90 valid stays p90.
+    out = name_spread_percentiles(
+        _FakeDB((100.0, None, 300.0, 50)), "X", lookback_days=20.0)
+    assert out is not None
+    assert out["p75"] == 100.0
+    assert out["p90"] == 300.0
+
+
+def test_percentiles_symbol_normalized_uppercase_and_stripped() -> None:
+    # The query binds the normalized symbol; we assert via a capturing fake.
+    captured: dict = {}
+
+    class _CapDB:
+        def execute(self, _stmt, params):
+            captured.update(params)
+            return _FakePercentileResult((100.0, 120.0, 140.0, 50))
+
+    out = name_spread_percentiles(_CapDB(), "  pavs  ", lookback_days=20.0)
+    assert out is not None
+    assert captured["s"] == "PAVS"
+
+
+def test_percentiles_now_utc_param_controls_since_window() -> None:
+    # The 'since' bind = now_utc - lookback_days; assert it honours the injected clock.
+    captured: dict = {}
+
+    class _CapDB:
+        def execute(self, _stmt, params):
+            captured.update(params)
+            return _FakePercentileResult((100.0, 120.0, 140.0, 50))
+
+    fixed = datetime(2026, 6, 27, 12, 0, 0, tzinfo=timezone.utc)
+    name_spread_percentiles(_CapDB(), "X", lookback_days=10.0, now_utc=fixed)
+    since = captured["since"]
+    # naive (tz stripped) and exactly 10 days before the fixed clock
+    assert since.tzinfo is None
+    assert since == datetime(2026, 6, 17, 12, 0, 0)
+
+
+# ── H3. _is_reclaim_family: non-string / each substring / fail-closed ────────
+def test_is_reclaim_family_non_string_inputs_fail_closed() -> None:
+    for bad in (123, 4.5, [], {}, object()):
+        assert _is_reclaim_family(bad) is False
+
+
+def test_is_reclaim_family_every_substring_token_matches() -> None:
+    # one positive sample per documented substring token
+    for tok in ("xreclaimx", "predip", "preflush", "curlback", "rebounce", "sub_vwap_trap"):
+        assert _is_reclaim_family(tok) is True, tok
+
+
+# ── H4. cost_too_high boundary (cost_of_r > max_frac_of_r is STRICT) ─────────
+def test_cost_exactly_at_cap_is_not_too_high_reason_is_cost_of_r() -> None:
+    """cost_of_r == 0.25 (exactly the cap) -> cost_too_high is False (strict >). So the
+    derate reason is the benign 'cost_of_r', NOT 'cost_of_r_high'. Typical-for-name so
+    no anomaly lever; cost is at the cap so it derates to the floor via the cost lever."""
+    # cost_of_r = (0.05*5)/1.0 = 0.25 exactly. spread 500bps, p50=500 -> anomaly_ratio=1.0
+    allow, mult, reason, meta = _derate(
+        "ATCAP", entry_price=5.0, spread_bps=500.0, stop_distance=1.0,
+        p50=500, p75=560, p90=620,
+    )
+    assert allow is True
+    assert meta["cost_of_r"] == pytest.approx(0.25, abs=1e-9)
+    assert reason == "cost_of_r"               # NOT cost_of_r_high (boundary is exclusive)
+    floor = settings.chili_momentum_spread_cost_derate_floor
+    assert mult == pytest.approx(floor, abs=1e-9)  # at the cap the linear ramp reaches floor
+
+
+def test_cost_eps_above_cap_is_too_high_reason_is_cost_of_r_high() -> None:
+    """cost_of_r just above the cap -> cost_too_high True -> reason 'cost_of_r_high'."""
+    # cost_of_r = (0.0502*5)/1.0 = 0.251 > 0.25
+    allow, mult, reason, meta = _derate(
+        "OVERCAP", entry_price=5.0, spread_bps=502.0, stop_distance=1.0,
+        p50=502, p75=560, p90=620,  # typical-for-name -> only cost lever, no anomaly, no extreme
+    )
+    assert allow is True
+    assert meta["cost_of_r"] > 0.25
+    assert reason == "cost_of_r_high"
+    assert meta.get("extreme_floor") is None  # typical -> not an extreme anomaly -> no floor flag
+
+
+# ── H5. cost-of-R engage dead-band boundary (cost_of_r > engage_cost STRICT) ──
+def test_cost_exactly_at_engage_point_does_not_derate() -> None:
+    """cost_of_r == engage_cost (0.5*0.25=0.125) -> strict > fails -> NO derate (mult 1.0)."""
+    # cost_of_r = (0.025*5)/1.0 = 0.125 exactly; typical-for-name -> no anomaly lever
+    allow, mult, reason, meta = _derate(
+        "ENGAGE", entry_price=5.0, spread_bps=250.0, stop_distance=1.0,
+        p50=250, p75=280, p90=320,
+    )
+    assert allow is True
+    assert meta["cost_of_r"] == pytest.approx(0.125, abs=1e-9)
+    assert mult == 1.0
+    assert reason == "pass"
+
+
+def test_cost_eps_above_engage_point_derates_slightly() -> None:
+    """Just past the engage point -> a tiny derate (mult just below 1.0), reason cost_of_r."""
+    # cost_of_r = (0.0252*5)/1.0 = 0.126 > 0.125
+    allow, mult, reason, meta = _derate(
+        "ENGAGE2", entry_price=5.0, spread_bps=252.0, stop_distance=1.0,
+        p50=252, p75=280, p90=320,
+    )
+    assert allow is True
+    floor = settings.chili_momentum_spread_cost_derate_floor
+    assert floor < mult < 1.0
+    assert reason == "cost_of_r"
+
+
+# ── H6. anomaly lever boundaries: above_p75 strict + anomaly_mult threshold ──
+def test_anomaly_at_p75_exactly_does_not_engage_anomaly_lever() -> None:
+    """sb == p75 -> above_p75 is False (strict >). With anomaly_ratio < anomaly_mult and a
+    fat R (cost in dead-band), NEITHER lever engages -> pure pass at mult=1.0."""
+    # sb=120, p50=100 -> anomaly_ratio=1.2 (<2.0); p75=120 -> sb not ABOVE p75.
+    # cost_of_r=(0.012*5)/1.0=0.06 < 0.125 engage -> dead-band.
+    allow, mult, reason, meta = _derate(
+        "ATP75", entry_price=5.0, spread_bps=120.0, stop_distance=1.0,
+        p50=100, p75=120, p90=140,
+    )
+    assert allow is True
+    assert mult == 1.0
+    assert reason == "pass"
+    assert meta["anomaly_ratio"] == pytest.approx(1.2, abs=1e-9)
+
+
+def test_anomaly_eps_above_p75_engages_anomaly_lever() -> None:
+    """sb one tick above p75 -> above_p75 True -> anomaly lever engages even though
+    anomaly_ratio (1.21) is below anomaly_mult (2.0). Proves the OR branch (above_p75)."""
+    allow, mult, reason, meta = _derate(
+        "OVERP75", entry_price=5.0, spread_bps=121.0, stop_distance=1.0,
+        p50=100, p75=120, p90=140,
+    )
+    assert allow is True
+    assert "anomaly_wide_for_name" in reason
+    assert mult < 1.0
+
+
+def test_anomaly_ratio_exactly_at_mult_engages_via_ratio_branch() -> None:
+    """sb == anomaly_mult * p50 (2.0x) but BELOW p75 -> above_p75 False, ratio>=mult True
+    -> engages via the >= anomaly_mult branch. over=(2-1)/(2-1)=1 -> floors the anomaly mult."""
+    # p50=50, sb=100 -> ratio=2.0 ; p75=150 so sb NOT above p75 -> isolates the ratio branch.
+    # R fat so cost in dead-band -> only the anomaly lever acts.
+    allow, mult, reason, meta = _derate(
+        "RATIO2X", entry_price=5.0, spread_bps=100.0, stop_distance=5.0,
+        p50=50, p75=150, p90=200,
+    )
+    assert allow is True
+    assert "anomaly_wide_for_name" in reason
+    floor = settings.chili_momentum_spread_cost_derate_floor
+    assert mult == pytest.approx(floor, abs=1e-9)  # ratio==mult -> over=1 -> anom mult==floor
+
+
+def test_anomaly_ratio_eps_below_mult_and_below_p75_does_not_engage() -> None:
+    """ratio just under anomaly_mult AND below p75 -> neither anomaly sub-condition -> no
+    anomaly derate. With a fat R -> full pass. Guards the strict/threshold boundaries."""
+    # p50=50, sb=99 -> ratio=1.98 (<2.0); p75=150 -> not above. cost tiny.
+    allow, mult, reason, meta = _derate(
+        "JUSTUNDER", entry_price=5.0, spread_bps=99.0, stop_distance=5.0,
+        p50=50, p75=150, p90=200,
+    )
+    assert allow is True
+    assert mult == 1.0
+    assert reason == "pass"
+
+
+# ── H7. extreme_anomaly boundary (sb >= p90*extreme_mult is >=, inclusive) ───
+def test_extreme_anomaly_exactly_at_threshold_floors() -> None:
+    """sb == p90*extreme_mult (80*1.5=120) is INCLUSIVE (>=) -> extreme. Paired with a
+    tiny R so cost>cap -> extreme_cost_floor -> mult=floor, extreme_floor flag set."""
+    # cost_of_r=(0.012*5)/0.1=0.6 > 0.25 ; sb=120 == 80*1.5 -> extreme.
+    allow, mult, reason, meta = _derate(
+        "EXACTEXTREME", entry_price=5.0, spread_bps=120.0, stop_distance=0.1,
+        p50=50, p75=70, p90=80,
+    )
+    assert allow is True
+    floor = settings.chili_momentum_spread_cost_derate_floor
+    assert mult == pytest.approx(floor, abs=1e-9)
+    assert meta.get("extreme_floor") is True
+    assert "extreme_spread_floored" in reason
+
+
+def test_extreme_anomaly_eps_below_threshold_is_not_extreme() -> None:
+    """sb one tick below p90*extreme_mult (119 < 120) -> NOT extreme even if cost>cap.
+    So no extreme_floor flag; it derates via the cost+anomaly levers but is not floored
+    by the deterministic extreme path. Proves the >= boundary is not off-by-one loose."""
+    # cost_of_r=(0.0119*5)/0.1=0.595>0.25 (cost_too_high). sb=119 < 120 -> not extreme.
+    allow, mult, reason, meta = _derate(
+        "JUSTBELOWEXTREME", entry_price=5.0, spread_bps=119.0, stop_distance=0.1,
+        p50=50, p75=70, p90=80,
+    )
+    assert allow is True
+    assert meta.get("extreme_floor") is None
+    assert "extreme_spread_floored" not in reason
+    assert "cost_of_r_high" in reason  # cost>cap but not extreme -> high cost reason, no floor
+
+
+# ── H8. BOTH levers engage -> the SMALLER (most cautious) multiplier wins ─────
+def test_both_levers_take_smaller_multiplier() -> None:
+    """When cost-of-R and anomaly BOTH engage but are NOT extreme, the result is the
+    minimum of the two derates and the reason names BOTH levers."""
+    # p50=50 sb=130 -> ratio=2.6 (anomaly engages, heavy). p75=70 -> above p75.
+    # cost_of_r=(0.013*5)/0.20=0.325>0.25 cap but anomaly only modestly extreme:
+    # p90=80, 80*1.5=120, sb=130>=120 -> THIS would be extreme. Use p90=100 so 100*1.5=150>130
+    # -> NOT extreme; both non-extreme levers act.
+    allow, mult, reason, meta = _derate(
+        "BOTH", entry_price=5.0, spread_bps=130.0, stop_distance=0.20,
+        p50=50, p75=70, p90=100,
+    )
+    assert allow is True
+    assert meta.get("extreme_floor") is None      # 130 < 150 -> not extreme
+    assert "anomaly_wide_for_name" in reason
+    assert ("cost_of_r" in reason or "cost_of_r_high" in reason)
+    # result is the min of the two component multipliers -> at/above floor, below 1.0
+    floor = settings.chili_momentum_spread_cost_derate_floor
+    assert floor <= mult < 1.0
+
+
+# ── H9. meta payload fidelity (audit-trail fields) ───────────────────────────
+def test_meta_records_spread_symbol_and_trigger_reason() -> None:
+    allow, mult, reason, meta = _derate(
+        "pavs", entry_price=5.0, spread_bps=300.0, stop_distance=2.0,
+        p50=300, p75=340, p90=380, entry_trigger_reason="vwap_reclaim",
+    )
+    assert meta["symbol"] == "PAVS"                 # uppercased
+    assert meta["spread_bps"] == pytest.approx(300.0, abs=0.05)
+    assert meta["entry_trigger_reason"] == "vwap_reclaim"
+    assert meta["is_reclaim"] is True
+    assert meta["max_frac_of_r"] == pytest.approx(
+        settings.chili_momentum_spread_cost_reclaim_max_fraction_of_r, abs=1e-9)
+    assert meta["name_p50_bps"] == pytest.approx(300.0, abs=0.05)
+    assert meta["name_samples"] == 50
+
+
+def test_meta_entry_trigger_reason_none_is_none_not_string() -> None:
+    allow, mult, reason, meta = _derate(
+        "X", entry_price=5.0, spread_bps=100.0, stop_distance=2.0, p50=100,
+        entry_trigger_reason=None,
+    )
+    assert meta["entry_trigger_reason"] is None
+    assert meta["is_reclaim"] is False
+
+
+# ── H10. misconfig fallbacks (defensive clamps in the gate body) ─────────────
+def test_floor_misconfig_falls_back_to_half() -> None:
+    """A floor outside (0,1] is rejected and replaced by 0.5. Force an extreme floor case
+    and assert the effective floored mult is 0.5 despite the bad setting."""
+    from unittest.mock import patch
+    with patch.object(settings, "chili_momentum_spread_cost_derate_floor", 1.5):
+        allow, mult, reason, meta = _derate(
+            "TOXIC", entry_price=5.0, spread_bps=300.0, stop_distance=0.30,
+            p50=50, p75=70, p90=80,
+        )
+    assert allow is True
+    assert mult == pytest.approx(0.5, abs=1e-9)  # bad 1.5 -> defaulted to 0.5
+
+
+def test_floor_zero_misconfig_falls_back_to_half() -> None:
+    from unittest.mock import patch
+    with patch.object(settings, "chili_momentum_spread_cost_derate_floor", 0.0):
+        allow, mult, reason, meta = _derate(
+            "TOXIC", entry_price=5.0, spread_bps=300.0, stop_distance=0.30,
+            p50=50, p75=70, p90=80,
+        )
+    assert mult == pytest.approx(0.5, abs=1e-9)
+
+
+def test_engage_frac_misconfig_falls_back_to_half() -> None:
+    """An engage_frac outside [0,1) is rejected -> 0.5. With a bad value (1.5) the
+    dead-band must still be the 0.5 default; a cost at 0.125 stays in the dead-band."""
+    from unittest.mock import patch
+    with patch.object(settings, "chili_momentum_spread_cost_derate_engage_frac", 1.5):
+        # cost_of_r = 0.125 == 0.5*0.25 default engage point -> still dead-band (pass)
+        allow, mult, reason, meta = _derate(
+            "ENG", entry_price=5.0, spread_bps=250.0, stop_distance=1.0,
+            p50=250, p75=280, p90=320,
+        )
+    assert mult == 1.0
+    assert reason == "pass"
+
+
+def test_reclaim_base_falls_back_to_standard_when_reclaim_setting_smaller() -> None:
+    """GUARD: the reclaim base can never be STRICTER than the standard base. If the reclaim
+    setting is misconfigured BELOW the standard, max() keeps the standard base. Assert the
+    effective max_frac_of_r equals the standard, not the smaller reclaim misconfig."""
+    from unittest.mock import patch
+    std = settings.chili_momentum_spread_cost_max_fraction_of_r
+    with patch.object(settings, "chili_momentum_spread_cost_reclaim_max_fraction_of_r", 0.10):
+        allow, mult, reason, meta = _derate(
+            "X", entry_price=5.0, spread_bps=100.0, stop_distance=2.0, p50=100,
+            entry_trigger_reason="vwap_reclaim",
+        )
+    assert meta["is_reclaim"] is True
+    assert meta["max_frac_of_r"] == pytest.approx(std, abs=1e-9)  # not the 0.10 misconfig
+
+
+def test_anomaly_mult_misconfig_zero_falls_back_to_two() -> None:
+    """getattr-or-default: a falsy (0.0) anomaly_mult setting falls back to 2.0. With the
+    fallback in force, sb=ratio just under 2.0 + below p75 must NOT engage the anomaly lever."""
+    from unittest.mock import patch
+    with patch.object(settings, "chili_momentum_spread_anomaly_p50_mult", 0.0):
+        # ratio=1.98 (<2.0 fallback), below p75 -> no anomaly derate, fat R -> pass
+        allow, mult, reason, meta = _derate(
+            "AM", entry_price=5.0, spread_bps=99.0, stop_distance=5.0,
+            p50=50, p75=150, p90=200,
+        )
+    assert mult == 1.0
+    assert reason == "pass"
+
+
+# ── H11. negative / NaN spread inputs fail open (sign + finiteness gates) ─────
+def test_negative_spread_fails_open() -> None:
+    a, m, r, _ = _derate("X", entry_price=5.0, spread_bps=-50.0, stop_distance=1.0, p50=50)
+    assert a is True and m == 1.0 and r == "no_spread"
+
+
+def test_nan_spread_fails_open() -> None:
+    a, m, r, _ = _derate(
+        "X", entry_price=5.0, spread_bps=float("nan"), stop_distance=1.0, p50=50)
+    assert a is True and m == 1.0 and r == "no_spread"
+
+
+def test_none_spread_fails_open() -> None:
+    a, m, r, _ = _derate("X", entry_price=5.0, spread_bps=None, stop_distance=1.0, p50=50)
+    assert a is True and m == 1.0 and r == "no_spread"
+
+
+def test_negative_stop_distance_fails_open() -> None:
+    a, m, r, _ = _derate("X", entry_price=5.0, spread_bps=100.0, stop_distance=-1.0, p50=50)
+    assert a is True and m == 1.0 and r == "no_stop_distance"
+
+
+def test_negative_entry_price_fails_open() -> None:
+    a, m, r, _ = _derate("X", entry_price=-5.0, spread_bps=100.0, stop_distance=1.0, p50=50)
+    assert a is True and m == 1.0 and r == "no_entry_price"
+
+
+# ── H12. fail-open precedence: bad basis short-circuits BEFORE any derate ─────
+def test_no_entry_price_short_circuits_before_spread_check() -> None:
+    """When entry_price is unusable the gate returns 'no_entry_price' and an empty meta —
+    it never reaches the spread/stop checks or the percentile read (precedence guard)."""
+    a, m, r, meta = _derate(
+        "X", entry_price=0.0, spread_bps=0.0, stop_distance=0.0, p50=50)
+    assert (a, m, r) == (True, 1.0, "no_entry_price")
+    assert meta == {}  # empty meta -> short-circuited before building the audit dict

@@ -358,3 +358,313 @@ def test_p10_all_crypto_board_fails_open(monkeypatch) -> None:
              _Cand("ETH-USD", ross_signal={"news_catalyst": False})]
     suppress, dbg = _should_suppress_late_day(cands, now=_et(15, 0))
     assert suppress is False
+
+
+# ── HARDENING: prime_window_size_mult_max fail-safe + clamp ────────────────────────
+
+
+def test_mult_max_nonnumeric_failsafe_to_1_5(monkeypatch) -> None:
+    # A garbage configured max (non-numeric) must fail-safe to the documented 1.5, NOT crash
+    # and NOT collapse the lever to 1.0 mid-prime.
+    _enable(monkeypatch)
+    monkeypatch.setattr(
+        settings, "chili_momentum_timeofday_prime_window_size_mult_max", "not-a-number",
+        raising=False,
+    )
+    mult, meta = prime_window_size_multiplier(now=_et(9, 0))
+    assert mult == pytest.approx(1.5)
+    assert meta["in_prime"] is True
+
+
+def test_mult_max_none_failsafe_to_1_5(monkeypatch) -> None:
+    _enable(monkeypatch)
+    monkeypatch.setattr(
+        settings, "chili_momentum_timeofday_prime_window_size_mult_max", None, raising=False,
+    )
+    mult, _ = prime_window_size_multiplier(now=_et(9, 0))
+    # float(None) raises TypeError -> fail-safe 1.5 (NOT 1.0, NOT a crash).
+    assert mult == pytest.approx(1.5)
+
+
+def test_mult_max_exactly_one_is_neutral_in_prime(monkeypatch) -> None:
+    # max==1.0 is the boundary: still "in prime" but a neutral lever (no boost, no shrink).
+    _enable(monkeypatch, max_mult=1.0)
+    mult, meta = prime_window_size_multiplier(now=_et(9, 0))
+    assert mult == pytest.approx(1.0)
+    assert meta["in_prime"] is True  # in-window even though the lever is neutral
+
+
+def test_mult_max_eps_below_one_clamped_to_one(monkeypatch) -> None:
+    # 0.999... < 1.0 must clamp UP to 1.0 (the lever is NEVER a shrink).
+    _enable(monkeypatch, max_mult=0.999)
+    mult, _ = prime_window_size_multiplier(now=_et(9, 0))
+    assert mult == 1.0
+
+
+# ── HARDENING: clock-error fail-open (mod < 0) for BOTH halves ──────────────────────
+
+
+def test_prime_clock_error_fails_open_to_one(monkeypatch) -> None:
+    # A clock failure -> _et_minutes_now returns (-1, False) -> prime lever fails open to 1.0
+    # (never spuriously boosts on a broken clock).
+    _enable(monkeypatch)
+    monkeypatch.setattr(aa, "_et_minutes_now", lambda now=None: (-1, False))
+    mult, meta = prime_window_size_multiplier(now=_et(9, 0))
+    assert mult == 1.0
+    assert meta["reason"] == "outside_window"
+    assert meta["et_min"] == -1
+
+
+def test_late_day_clock_error_fails_open_no_suppress(monkeypatch) -> None:
+    # A clock failure -> (-1, False) -> the cutoff can NEVER suppress (fail-open).
+    _enable(monkeypatch)
+    monkeypatch.setattr(aa, "_et_minutes_now", lambda now=None: (-1, False))
+    monkeypatch.setattr(aa, "_tape_cold", lambda s: True)
+    cands = [_Cand("AAA", ross_signal={"news_catalyst": False})]
+    suppress, dbg = _should_suppress_late_day(cands, now=_et(15, 0))
+    assert suppress is False
+    assert dbg["reason"] == "outside_clock"
+    assert dbg["et_min"] == -1
+
+
+def test_prime_internal_error_fails_neutral(monkeypatch) -> None:
+    # Any exception inside the prime computation (here: _timeofday_bounds raises while in-window)
+    # must fail NEUTRAL to 1.0 with the error reason, not propagate.
+    _enable(monkeypatch)
+
+    def _boom():
+        raise RuntimeError("bounds blew up")
+
+    monkeypatch.setattr(aa, "_timeofday_bounds", _boom)
+    mult, meta = prime_window_size_multiplier(now=_et(9, 0))
+    assert mult == 1.0
+    assert meta["reason"] == "error_fail_neutral"
+
+
+def test_late_day_internal_error_fails_open(monkeypatch) -> None:
+    # An exception AFTER the clock passes (here: _tape_cold_breadth raises) must be swallowed and
+    # return (False, gate_error) -> the gate can only suppress on positive agreement, never on its
+    # own failure.
+    _enable(monkeypatch)
+
+    def _boom(_cands):
+        raise RuntimeError("breadth probe blew up")
+
+    monkeypatch.setattr(aa, "_tape_cold_breadth", _boom)
+    cands = [_Cand("AAA", ross_signal={"news_catalyst": False})]
+    suppress, dbg = _should_suppress_late_day(cands, now=_et(15, 0))
+    assert suppress is False
+    assert dbg["reason"] == "gate_error"
+
+
+# ── HARDENING: naive `now` treated as UTC (DST-correct ET conversion) ──────────────
+
+
+def test_naive_now_treated_as_utc(monkeypatch) -> None:
+    # A naive datetime must be treated as UTC. 13:00 UTC == 09:00 EDT (June, UTC-4) -> in prime.
+    _enable(monkeypatch, max_mult=1.5)
+    naive_utc = datetime(2026, 6, 29, 13, 0)  # Monday 13:00 UTC, no tzinfo
+    mult, meta = prime_window_size_multiplier(now=naive_utc)
+    assert mult == pytest.approx(1.5)
+    assert meta["in_prime"] is True
+
+
+def test_aware_and_naive_utc_agree(monkeypatch) -> None:
+    # The aware helper (_et) and a naive UTC datetime for the same instant must agree.
+    _enable(monkeypatch, max_mult=1.3)
+    aware = _et(9, 0)  # 13:00 UTC aware
+    naive = datetime(2026, 6, 29, 13, 0)  # same instant, naive
+    assert prime_window_size_multiplier(now=aware)[0] == prime_window_size_multiplier(now=naive)[0]
+
+
+# ── HARDENING: custom (non-default) clock bounds resolve + bind ────────────────────
+
+
+def test_custom_prime_window_bounds_bind(monkeypatch) -> None:
+    # Override the prime window to 06:00-07:00; 06:30 must be in-prime, 05:59 and 07:00 out.
+    _enable(monkeypatch, max_mult=1.4)
+    monkeypatch.setattr(
+        settings, "chili_momentum_timeofday_prime_window_start_et", "06:00", raising=False
+    )
+    monkeypatch.setattr(
+        settings, "chili_momentum_timeofday_prime_window_end_et", "07:00", raising=False
+    )
+    assert prime_window_size_multiplier(now=_et(6, 30))[0] == pytest.approx(1.4)
+    assert prime_window_size_multiplier(now=_et(5, 59))[0] == 1.0
+    assert prime_window_size_multiplier(now=_et(7, 0))[0] == 1.0  # end exclusive
+
+
+def test_custom_fallback_clock_binds(monkeypatch) -> None:
+    # Override the fallback to 12:00; a faded board at 12:00 suppresses, at 11:59 does not.
+    _enable(monkeypatch)
+    monkeypatch.setattr(
+        settings, "chili_momentum_timeofday_fallback_clock_et", "12:00", raising=False
+    )
+    monkeypatch.setattr(aa, "_tape_cold", lambda s: True)
+    cands = [_Cand("AAA", ross_signal={"news_catalyst": False})]
+    assert _should_suppress_late_day(cands, now=_et(12, 0))[0] is True
+    assert _should_suppress_late_day(cands, now=_et(11, 59))[0] is False
+
+
+def test_malformed_hhmm_falls_back_to_defaults(monkeypatch) -> None:
+    # Garbage HHMM strings must fail-safe to the documented defaults (04:00 / 10:30 / 14:30),
+    # NOT crash and NOT silently disable the window. With junk bounds, 09:00 still reads in-prime
+    # (default window) and 15:00 faded still suppresses (default fallback).
+    _enable(monkeypatch)
+    monkeypatch.setattr(
+        settings, "chili_momentum_timeofday_prime_window_start_et", "garbage", raising=False
+    )
+    monkeypatch.setattr(
+        settings, "chili_momentum_timeofday_prime_window_end_et", "99:99", raising=False
+    )
+    monkeypatch.setattr(
+        settings, "chili_momentum_timeofday_fallback_clock_et", None, raising=False
+    )
+    start, end, fallback = aa._timeofday_bounds()
+    assert (start, end, fallback) == (4 * 60, 10 * 60 + 30, 14 * 60 + 30)
+    assert prime_window_size_multiplier(now=_et(9, 0))[0] > 1.0
+    monkeypatch.setattr(aa, "_tape_cold", lambda s: True)
+    assert _should_suppress_late_day(
+        [_Cand("AAA", ross_signal={"news_catalyst": False})], now=_et(15, 0)
+    )[0] is True
+
+
+# ── HARDENING: catalyst-axis sub-paths (pct / grade / has_catalyst / absent) ───────
+
+
+def test_catalyst_via_pct_blocks_suppression(monkeypatch) -> None:
+    # A graded catalyst sub-score (news_catalyst_pct > 0) is a fresh catalyst -> not poor.
+    _enable(monkeypatch)
+    monkeypatch.setattr(aa, "_tape_cold", lambda s: True)
+    cands = [_Cand("AAA", ross_signal={"news_catalyst_pct": 0.42})]
+    suppress, dbg = _should_suppress_late_day(cands, now=_et(15, 0))
+    assert suppress is False
+    assert dbg["has_catalyst"] is True
+
+
+def test_catalyst_pct_zero_is_present_but_false(monkeypatch) -> None:
+    # news_catalyst_pct == 0.0 is PRESENT (field exists) but FALSE (no headline) -> with cold
+    # tape the regime IS poor -> suppress. (Distinguishes 'present-and-false' from 'absent'.)
+    _enable(monkeypatch)
+    monkeypatch.setattr(aa, "_tape_cold", lambda s: True)
+    cands = [_Cand("AAA", ross_signal={"news_catalyst_pct": 0.0})]
+    suppress, dbg = _should_suppress_late_day(cands, now=_et(15, 0))
+    assert suppress is True
+    assert dbg["has_catalyst"] is False
+
+
+def test_catalyst_via_grade_blocks_suppression(monkeypatch) -> None:
+    # A non-empty news_catalyst_grade counts as a fresh catalyst.
+    _enable(monkeypatch)
+    monkeypatch.setattr(aa, "_tape_cold", lambda s: True)
+    cands = [_Cand("AAA", ross_signal={"news_catalyst_grade": "A"})]
+    assert _should_suppress_late_day(cands, now=_et(15, 0))[0] is False
+
+
+def test_catalyst_grade_empty_string_is_present_but_false(monkeypatch) -> None:
+    # An empty/whitespace grade is present-but-false -> does NOT block suppression on cold tape.
+    _enable(monkeypatch)
+    monkeypatch.setattr(aa, "_tape_cold", lambda s: True)
+    cands = [_Cand("AAA", ross_signal={"news_catalyst_grade": "   "})]
+    assert _should_suppress_late_day(cands, now=_et(15, 0))[0] is True
+
+
+def test_catalyst_via_generic_has_catalyst_flag(monkeypatch) -> None:
+    # The generic has_catalyst flag is also recognized.
+    _enable(monkeypatch)
+    monkeypatch.setattr(aa, "_tape_cold", lambda s: True)
+    cands = [_Cand("AAA", ross_signal={"has_catalyst": True})]
+    assert _should_suppress_late_day(cands, now=_et(15, 0))[0] is False
+
+
+def test_catalyst_absent_field_fails_open_no_suppress(monkeypatch) -> None:
+    # CRITICAL fail-open: when NO candidate carries ANY catalyst field, the absence is treated as
+    # 'has catalyst' (data absent != proven no-catalyst) -> regime NOT poor -> NOT suppressed,
+    # even with stone-cold tape past the fallback.
+    _enable(monkeypatch)
+    monkeypatch.setattr(aa, "_tape_cold", lambda s: True)
+    cands = [_Cand("AAA"), _Cand("BBB")]  # no ross_signal at all -> no catalyst fields
+    suppress, dbg = _should_suppress_late_day(cands, now=_et(15, 0))
+    assert suppress is False
+    assert dbg["has_catalyst"] is True
+    assert dbg["reason"] == "afternoon_still_strong"
+
+
+# ── HARDENING: empty / None candidate board edges ──────────────────────────────────
+
+
+def test_empty_candidates_faded_clock_not_suppressed(monkeypatch) -> None:
+    # Empty board: no equity tape (breadth fail-open hot) AND no catalyst field (fail-open) ->
+    # regime NOT poor -> not suppressed even past the fallback.
+    _enable(monkeypatch)
+    suppress, dbg = _should_suppress_late_day([], now=_et(15, 0))
+    assert suppress is False
+
+
+def test_none_candidates_does_not_crash(monkeypatch) -> None:
+    # None passed as the board must not raise (helpers guard `candidates or []`).
+    _enable(monkeypatch)
+    suppress, _ = _should_suppress_late_day(None, now=_et(15, 0))  # type: ignore[arg-type]
+    assert suppress is False
+
+
+def test_fade_disabled_empty_board_still_clock_suppresses(monkeypatch) -> None:
+    # With fade disabled the breadth/catalyst board is irrelevant: an empty board past the
+    # fallback still suppresses (clock-only), proving the fade branch is fully bypassed.
+    _enable(monkeypatch, fade_enabled=False)
+    suppress, dbg = _should_suppress_late_day([], now=_et(15, 0))
+    assert suppress is True
+    assert dbg["reason"] == "past_fallback_clock_only"
+
+
+# ── HARDENING: weekend never suppresses the late-day cutoff (DOW axis) ─────────────
+
+
+def test_late_day_weekend_not_suppressed(monkeypatch) -> None:
+    # Saturday past the fallback with a faded board: the weekday flag is False -> outside_clock ->
+    # fail-open (the cutoff is a weekday-equity-session concept).
+    _enable(monkeypatch)
+    monkeypatch.setattr(aa, "_tape_cold", lambda s: True)
+    cands = [_Cand("AAA", ross_signal={"news_catalyst": False})]
+    suppress, dbg = _should_suppress_late_day(cands, now=_et(15, 0, weekday=5))
+    assert suppress is False
+    assert dbg["reason"] == "outside_clock"
+
+
+# ── HARDENING: prime meta payload shape (window echo, et_min) ──────────────────────
+
+
+def test_prime_meta_echoes_window_and_et_min(monkeypatch) -> None:
+    # The in-prime meta must carry the resolved window + the et_min so the runner log is auditable.
+    _enable(monkeypatch, max_mult=1.5)
+    mult, meta = prime_window_size_multiplier(now=_et(9, 0))
+    assert meta["window"] == [4 * 60, 10 * 60 + 30]
+    assert meta["et_min"] == 9 * 60  # 09:00 ET
+    assert meta["prime_mult"] == pytest.approx(1.5)
+
+
+def test_outside_prime_meta_echoes_window(monkeypatch) -> None:
+    # Outside-but-readable-clock meta also echoes the window (distinguishes from disabled/error).
+    _enable(monkeypatch)
+    mult, meta = prime_window_size_multiplier(now=_et(12, 0))
+    assert mult == 1.0
+    assert meta["window"] == [4 * 60, 10 * 60 + 30]
+    assert meta["et_min"] == 12 * 60
+
+
+# ── HARDENING: runner product parity when flag OFF (byte-identical) ────────────────
+
+
+def test_runner_product_flag_off_is_identity(monkeypatch) -> None:
+    # Mirror the live_runner gate: when the schedule flag is OFF the prime mult is exactly 1.0,
+    # so the _eff_max_loss product is byte-identical to the no-feature baseline.
+    monkeypatch.setattr(
+        settings, "chili_momentum_timeofday_schedule_enabled", False, raising=False
+    )
+    base = 50.0
+    others = 1.5 * 2.0 * 1.4
+    # flag-off path: runner sets _prime_window_mult = 1.0 without even calling the helper.
+    prime_off = 1.0
+    eff_off = min(base * others * prime_off, base * 3.0)
+    baseline = min(base * others, base * 3.0)
+    assert eff_off == pytest.approx(baseline)

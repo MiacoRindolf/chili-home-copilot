@@ -393,3 +393,253 @@ def test_p8_grade_rank_norms_symbol(monkeypatch) -> None:
         " abcd ", strong_symbols={"ABCD"}, weak_symbols=set(), fake_symbols=set()
     )
     assert rank == 3
+
+
+# ══════════════════════════════════════════════════════════════════════════════════
+# HARDENING (adversarial branch coverage) — appended.
+#
+# Targets the remaining UNTESTED branches in catalyst_conviction_size_multiplier and
+# catalyst_grade_rank:
+#   H1  step  falsy-zero / None  guard  (risk_policy.py:1062 — `_step_raw if not None`)
+#   H2  max_mult None  guard            (risk_policy.py:1064)
+#   H3  max(0, rank) negative-rank floor (risk_policy.py:1078)
+#   H4  meta payload completeness on the STRONG path
+#   H5  int() coercion of a float grade_rank
+#   H6  fetch-fresh path (sets omitted => grade_rank called with None kwargs)
+#   H7  catalyst_grade_rank edge inputs: None / "" symbol, fail-open try/except,
+#       empty/None strong set, crypto, weak-AND-fake stacking, guard-off + weak
+# ══════════════════════════════════════════════════════════════════════════════════
+
+
+# ── H1: the falsy-zero / None step guard (the explicit `is not None` check) ────────
+
+
+def test_h1_step_zero_is_not_overwritten_by_default(monkeypatch) -> None:
+    """REGRESSION GUARD: a legitimate step=0.0 must STAY 0.0, NOT fall back to the 0.15
+    default. With `... or 0.15` (the bug this guard prevents) a strong catalyst would
+    wrongly multiply by 1.45 instead of 1.0. Assert the SPECIFIC neutral value."""
+    _enable(monkeypatch, step=0.0, max_mult=1.5)
+    strong, weak, fake = _strong()
+    mult, meta = catalyst_conviction_size_multiplier(
+        "ABCD", strong_symbols=strong, weak_symbols=weak, fake_symbols=fake
+    )
+    assert mult == 1.0  # 1.0 + 0.0*3 == 1.0 — NOT 1.45 (the `or 0.15` fallback bug)
+    assert meta["step"] == 0.0
+    assert meta["grade_rank"] == 3  # the grade is still strong; only the step is 0
+
+
+def test_h1_step_none_falls_back_to_default(monkeypatch) -> None:
+    # An explicitly-None step (config absent) DOES fall back to the 0.15 default.
+    _enable(monkeypatch, max_mult=1.5)
+    monkeypatch.setattr(
+        settings, "chili_momentum_catalyst_conviction_step", None, raising=False
+    )
+    strong, weak, fake = _strong()
+    mult, meta = catalyst_conviction_size_multiplier(
+        "ABCD", strong_symbols=strong, weak_symbols=weak, fake_symbols=fake
+    )
+    assert mult == pytest.approx(1.45)  # default 0.15 * rank 3
+    assert meta["step"] == pytest.approx(0.15)
+
+
+# ── H2: the None-aware max_multiplier guard ───────────────────────────────────────
+
+
+def test_h2_max_mult_none_falls_back_to_default(monkeypatch) -> None:
+    # max_multiplier=None (config absent) must fall back to 1.5, not crash / fail-neutral.
+    _enable(monkeypatch, step=0.15)
+    monkeypatch.setattr(
+        settings, "chili_momentum_catalyst_conviction_max_multiplier", None, raising=False
+    )
+    strong, weak, fake = _strong()
+    mult, meta = catalyst_conviction_size_multiplier(
+        "ABCD", strong_symbols=strong, weak_symbols=weak, fake_symbols=fake
+    )
+    assert mult == pytest.approx(1.45)
+    assert meta["max_multiplier"] == pytest.approx(1.5)
+    assert meta.get("reason") != "error_fail_neutral"  # None is handled, not an error
+
+
+# ── H3: the max(0, rank) negative-rank floor ──────────────────────────────────────
+
+
+def test_h3_negative_rank_floored_to_no_boost(monkeypatch) -> None:
+    """If the grade accessor ever returned a NEGATIVE rank, max(0, rank) must floor the
+    boost to 0 (multiplier 1.0) — a catalyst can only ADD size, never shrink it."""
+    _enable(monkeypatch, step=0.15, max_mult=1.5)
+    monkeypatch.setattr(cat, "catalyst_grade_rank", lambda *a, **k: -5)
+    mult, meta = catalyst_conviction_size_multiplier("ABCD")
+    assert mult == 1.0  # 1.0 + 0.15*max(0,-5) == 1.0, NOT 1.0 - 0.75
+    assert meta["grade_rank"] == -5  # the raw rank is echoed, but the BOOST is floored
+
+
+def test_h3_rank_one_partial_boost(monkeypatch) -> None:
+    # A hypothetical intermediate rank (1) yields the proportional step boost — proves the
+    # formula uses the rank, not a hard 3-or-0 branch.
+    _enable(monkeypatch, step=0.15, max_mult=1.5)
+    monkeypatch.setattr(cat, "catalyst_grade_rank", lambda *a, **k: 1)
+    mult, _ = catalyst_conviction_size_multiplier("ABCD")
+    assert mult == pytest.approx(1.15)  # 1.0 + 0.15*1
+
+
+# ── H4: meta payload completeness on the STRONG (enabled) path ─────────────────────
+
+
+def test_h4_meta_payload_complete_on_strong(monkeypatch) -> None:
+    _enable(monkeypatch, step=0.15, max_mult=1.5)
+    strong, weak, fake = _strong()
+    mult, meta = catalyst_conviction_size_multiplier(
+        "ABCD", strong_symbols=strong, weak_symbols=weak, fake_symbols=fake
+    )
+    # The enabled path returns the full diagnostic payload (NOT the disabled/error shape).
+    assert set(meta.keys()) == {"conviction_mult", "grade_rank", "step", "max_multiplier"}
+    assert meta["conviction_mult"] == pytest.approx(round(mult, 4))
+    assert meta["step"] == pytest.approx(0.15)
+    assert meta["max_multiplier"] == pytest.approx(1.5)
+    assert "reason" not in meta  # reason only on disabled / error
+
+
+# ── H5: int() coercion of a float grade_rank ──────────────────────────────────────
+
+
+def test_h5_float_rank_coerced_to_int(monkeypatch) -> None:
+    # catalyst_grade_rank is wrapped in int(); a float rank (e.g. 3.0) coerces cleanly.
+    _enable(monkeypatch, step=0.15, max_mult=1.5)
+    monkeypatch.setattr(cat, "catalyst_grade_rank", lambda *a, **k: 3.0)
+    mult, meta = catalyst_conviction_size_multiplier("ABCD")
+    assert mult == pytest.approx(1.45)
+    assert meta["grade_rank"] == 3
+    assert isinstance(meta["grade_rank"], int)
+
+
+# ── H6: fetch-fresh path — sets omitted => grade_rank called with None kwargs ──────
+
+
+def test_h6_sets_omitted_forwards_none_to_grade_rank(monkeypatch) -> None:
+    """When the strong/weak/fake sets are NOT passed, the multiplier forwards None to
+    catalyst_grade_rank (which fetches fresh upstream). Assert the None forwarding so the
+    'fetch once upstream' contract can't silently regress to always re-fetching."""
+    _enable(monkeypatch, step=0.15, max_mult=1.5)
+    captured: dict = {}
+
+    def _spy(symbol, *, strong_symbols=None, weak_symbols=None, fake_symbols=None):
+        captured["strong"] = strong_symbols
+        captured["weak"] = weak_symbols
+        captured["fake"] = fake_symbols
+        return 3
+
+    monkeypatch.setattr(cat, "catalyst_grade_rank", _spy)
+    mult, _ = catalyst_conviction_size_multiplier("ABCD")
+    assert mult == pytest.approx(1.45)
+    assert captured == {"strong": None, "weak": None, "fake": None}
+
+
+def test_h6_passed_sets_forwarded_verbatim(monkeypatch) -> None:
+    # Conversely, explicit sets are forwarded verbatim (no fresh fetch).
+    _enable(monkeypatch, step=0.15, max_mult=1.5)
+    captured: dict = {}
+
+    def _spy(symbol, *, strong_symbols=None, weak_symbols=None, fake_symbols=None):
+        captured["strong"] = strong_symbols
+        captured["weak"] = weak_symbols
+        captured["fake"] = fake_symbols
+        return 3
+
+    monkeypatch.setattr(cat, "catalyst_grade_rank", _spy)
+    s, w, f = {"ABCD"}, {"WEAK"}, {"FAKE"}
+    catalyst_conviction_size_multiplier(
+        "ABCD", strong_symbols=s, weak_symbols=w, fake_symbols=f
+    )
+    assert captured == {"strong": s, "weak": w, "fake": f}
+
+
+# ── H7: catalyst_grade_rank direct edge / failure coverage ─────────────────────────
+
+
+def test_h7_grade_rank_none_symbol_is_zero(monkeypatch) -> None:
+    # A None symbol must not crash — _norm("") => "" not in strong => 0.
+    monkeypatch.setattr(
+        settings, "chili_momentum_fake_catalyst_guard_enabled", True, raising=False
+    )
+    assert catalyst_grade_rank(None, strong_symbols={"ABCD"}) == 0
+
+
+def test_h7_grade_rank_empty_symbol_is_zero(monkeypatch) -> None:
+    monkeypatch.setattr(
+        settings, "chili_momentum_fake_catalyst_guard_enabled", True, raising=False
+    )
+    assert catalyst_grade_rank("", strong_symbols={"ABCD"}) == 0
+
+
+def test_h7_grade_rank_empty_strong_set_is_zero(monkeypatch) -> None:
+    # `not strong or sym not in strong` — an empty strong set short-circuits to 0.
+    monkeypatch.setattr(
+        settings, "chili_momentum_fake_catalyst_guard_enabled", True, raising=False
+    )
+    assert catalyst_grade_rank("ABCD", strong_symbols=set()) == 0
+
+
+def test_h7_grade_rank_crypto_short_circuits_zero(monkeypatch) -> None:
+    # The -USD guard returns 0 BEFORE consulting the strong set (even if -USD root is strong).
+    monkeypatch.setattr(
+        settings, "chili_momentum_fake_catalyst_guard_enabled", True, raising=False
+    )
+    assert catalyst_grade_rank("ETH-USD", strong_symbols={"ETH"}) == 0
+
+
+def test_h7_grade_rank_weak_and_fake_both_present_is_zero(monkeypatch) -> None:
+    # Both suppressors set: weak is checked first and dominates -> 0 (guard ON).
+    monkeypatch.setattr(
+        settings, "chili_momentum_fake_catalyst_guard_enabled", True, raising=False
+    )
+    rank = catalyst_grade_rank(
+        "ABCD", strong_symbols={"ABCD"}, weak_symbols={"ABCD"}, fake_symbols={"ABCD"}
+    )
+    assert rank == 0
+
+
+def test_h7_grade_rank_weak_still_dominates_when_guard_off(monkeypatch) -> None:
+    # Guard OFF lifts the FAKE suppression but NOT the WEAK one — weak always dominates.
+    monkeypatch.setattr(
+        settings, "chili_momentum_fake_catalyst_guard_enabled", False, raising=False
+    )
+    rank = catalyst_grade_rank(
+        "ABCD", strong_symbols={"ABCD"}, weak_symbols={"ABCD"}, fake_symbols={"ABCD"}
+    )
+    assert rank == 0  # weak still suppresses even with the fake guard OFF
+
+
+def test_h7_grade_rank_fail_open_on_internal_error(monkeypatch) -> None:
+    """The try/except in catalyst_grade_rank fails OPEN to 0 (no conviction invented). Force
+    an error inside the body by handing a strong_symbols whose membership test raises."""
+    monkeypatch.setattr(
+        settings, "chili_momentum_fake_catalyst_guard_enabled", True, raising=False
+    )
+
+    class _Boom:
+        def __contains__(self, item):
+            raise RuntimeError("synthetic membership failure")
+
+        def __bool__(self):
+            return True
+
+    rank = catalyst_grade_rank("ABCD", strong_symbols=_Boom())
+    assert rank == 0  # fail-open, not a propagated exception
+
+
+def test_h7_conviction_mult_fail_neutral_when_grade_rank_fails_open(monkeypatch) -> None:
+    # End-to-end: a grade_rank that fails-open to 0 yields a neutral 1.0 multiplier (NOT
+    # the error_fail_neutral branch — grade_rank swallows its own error and returns 0).
+    _enable(monkeypatch, step=0.15, max_mult=1.5)
+
+    class _Boom:
+        def __contains__(self, item):
+            raise RuntimeError("boom")
+
+        def __bool__(self):
+            return True
+
+    mult, meta = catalyst_conviction_size_multiplier("ABCD", strong_symbols=_Boom())
+    assert mult == 1.0
+    assert meta["grade_rank"] == 0
+    assert meta.get("reason") != "error_fail_neutral"  # handled inside grade_rank

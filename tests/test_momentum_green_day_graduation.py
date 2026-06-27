@@ -628,3 +628,336 @@ def test_nonpositive_lookback_returns_neutral(db: Session, monkeypatch) -> None:
     streak, meta = consecutive_green_days(db, execution_family=_EF, lookback_days=0)
     assert streak == 0
     assert meta["reason"] == "no_input"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HARDENING PASS — adversarial branch/boundary coverage (each asserts the SPECIFIC
+# reason/value so it FAILS if its branch regresses).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ── input-guard: db is None (no DB at all) ──────────────────────────────────────
+
+
+def test_db_none_streak_no_input(monkeypatch) -> None:
+    # `db is None` is the FIRST guard branch (distinct from no execution_family / lookback<=0).
+    _enable(monkeypatch)
+    streak, meta = consecutive_green_days(None, execution_family=_EF, lookback_days=30)
+    assert streak == 0
+    assert meta["reason"] == "no_input"
+    assert meta["streak"] == 0
+
+
+def test_db_none_graduation_fail_neutral(monkeypatch) -> None:
+    # graduation with db=None still flag-ON: streak read returns 0 -> mult 1.0 (never errors).
+    _enable(monkeypatch)
+    mult, meta = green_day_graduation_multiplier(None, execution_family=_EF)
+    assert mult == 1.0
+    assert meta["consecutive_green_days"] == 0
+    assert meta["graduation_mult"] == 1.0
+
+
+def test_negative_lookback_no_input(db: Session, monkeypatch) -> None:
+    # lookback_days < 0 (not just == 0) also hits the `<= 0` guard.
+    _enable(monkeypatch)
+    streak, meta = consecutive_green_days(db, execution_family=_EF, lookback_days=-5)
+    assert streak == 0
+    assert meta["reason"] == "no_input"
+
+
+def test_empty_execution_family_string_no_input(db: Session, monkeypatch) -> None:
+    # `not execution_family` catches the empty string too (falsy), not only None.
+    _enable(monkeypatch)
+    streak, meta = consecutive_green_days(db, execution_family="", lookback_days=30)
+    assert streak == 0
+    assert meta["reason"] == "no_input"
+
+
+# ── no_buckets vs no_history: real rows exist but ALL are never-entered ──────────
+
+
+def test_only_never_entered_rows_no_buckets(db: Session, monkeypatch) -> None:
+    """Rows exist (so not `no_history`), but EVERY row is a never-entered class -> the
+    is_real_entry_outcome filter empties `by_day` -> the `no_buckets` branch fires, not
+    `no_history`. Distinguishes two different empty-result branches.
+    """
+    u, v = _setup(db)
+    _enable(monkeypatch)
+    today_et = datetime.now(_ET).date()
+    for days_ago, oc in ((1, "no_fill"), (2, "cancelled_pre_entry"), (3, "risk_block")):
+        d = today_et - timedelta(days=days_ago)
+        _add_outcome(db, u, v, pnl=0.0,
+                     terminal_at=_utc_for_et(d.year, d.month, d.day, 15),
+                     symbol=f"NE{days_ago}-USD", outcome_class=oc)
+    streak, meta = consecutive_green_days(db, execution_family=_EF, lookback_days=30)
+    assert streak == 0
+    assert meta["reason"] == "no_buckets", meta  # NOT no_history (rows DID come back)
+
+
+def test_no_history_when_only_paper_rows(db: Session, monkeypatch) -> None:
+    # mode != "live" rows are filtered at SQL level -> no rows -> `no_history` (not no_buckets).
+    u, v = _setup(db)
+    _enable(monkeypatch)
+    today_et = datetime.now(_ET).date()
+    d = today_et - timedelta(days=1)
+    _add_outcome(db, u, v, pnl=99.0, terminal_at=_utc_for_et(d.year, d.month, d.day, 15),
+                 symbol="PAPER-USD", outcome_class="small_win", mode="paper")
+    streak, meta = consecutive_green_days(db, execution_family=_EF, lookback_days=30)
+    assert streak == 0
+    assert meta["reason"] == "no_history", meta  # paper excluded by the mode=='live' filter
+
+
+# ── never-entered class taxonomy: flat_unknown COUNTS (not in never-entered set) ─
+
+
+def test_flat_unknown_real_pnl_counts_toward_streak(db: Session, monkeypatch) -> None:
+    """flat_unknown is NOT in _NEVER_ENTERED_OUTCOMES, so a flat_unknown row carrying a
+    REAL realized PnL IS a real-entry verdict and DOES participate. A green flat_unknown day
+    therefore extends the streak. (Locks the taxonomy boundary — over-filtering would break it.)
+    """
+    u, v = _setup(db)
+    _enable(monkeypatch)
+    today_et = datetime.now(_ET).date()
+    d1 = today_et - timedelta(days=1)
+    _add_outcome(db, u, v, pnl=15.0, terminal_at=_utc_for_et(d1.year, d1.month, d1.day, 15),
+                 symbol="FU1-USD", outcome_class="flat_unknown")
+    d2 = today_et - timedelta(days=2)
+    _add_outcome(db, u, v, pnl=15.0, terminal_at=_utc_for_et(d2.year, d2.month, d2.day, 15),
+                 symbol="FU2-USD", outcome_class="success")
+    streak, meta = consecutive_green_days(db, execution_family=_EF, lookback_days=30)
+    assert streak == 2, meta  # both days are real-entry greens
+
+
+def test_archived_class_is_never_entered_and_ignored(db: Session, monkeypatch) -> None:
+    # archived IS a never-entered class: a positive-pnl archived row must NOT create a green
+    # bucket (would otherwise be a phantom green day inflating the streak).
+    u, v = _setup(db)
+    _enable(monkeypatch)
+    today_et = datetime.now(_ET).date()
+    # yesterday: a real green
+    d1 = today_et - timedelta(days=1)
+    _add_outcome(db, u, v, pnl=20.0, terminal_at=_utc_for_et(d1.year, d1.month, d1.day, 15),
+                 symbol="REAL1-USD", outcome_class="small_win")
+    # day-2: ONLY an archived row with a (spurious) positive pnl -> not a bucket
+    d2 = today_et - timedelta(days=2)
+    _add_outcome(db, u, v, pnl=999.0, terminal_at=_utc_for_et(d2.year, d2.month, d2.day, 15),
+                 symbol="ARCH2-USD", outcome_class="archived")
+    # day-3: a real green
+    d3 = today_et - timedelta(days=3)
+    _add_outcome(db, u, v, pnl=20.0, terminal_at=_utc_for_et(d3.year, d3.month, d3.day, 15),
+                 symbol="REAL3-USD", outcome_class="small_win")
+    streak, meta = consecutive_green_days(db, execution_family=_EF, lookback_days=30)
+    # archived day-2 is invisible -> streak walks yesterday + day-3 contiguously = 2.
+    assert streak == 2, meta
+
+
+def test_governance_exit_real_loss_with_null_sibling_resets(db: Session, monkeypatch) -> None:
+    """governance_exit is NOT never-entered (a real force-close can carry a real loss). A day
+    with a REAL governance_exit loss must reset, even though a NULL-realized sibling row on the
+    same day is dropped by the realized-not-null SQL filter. (Per the outcome_labels docstring.)
+    """
+    u, v = _setup(db)
+    _enable(monkeypatch)
+    today_et = datetime.now(_ET).date()
+    d1 = today_et - timedelta(days=1)
+    _add_outcome(db, u, v, pnl=20.0, terminal_at=_utc_for_et(d1.year, d1.month, d1.day, 15),
+                 symbol="G1-USD", outcome_class="small_win")
+    d2 = today_et - timedelta(days=2)
+    # the NULL-realized sibling (dropped at SQL level)
+    _add_outcome(db, u, v, pnl=None, terminal_at=_utc_for_et(d2.year, d2.month, d2.day, 13),
+                 symbol="GX2null-USD", outcome_class="governance_exit")
+    # the REAL realized loss (counts)
+    _add_outcome(db, u, v, pnl=-30.0, terminal_at=_utc_for_et(d2.year, d2.month, d2.day, 15),
+                 symbol="GX2real-USD", outcome_class="governance_exit")
+    streak, meta = consecutive_green_days(db, execution_family=_EF, lookback_days=30)
+    assert streak == 1, meta  # day-2 nets -30 (real) -> resets at yesterday
+
+
+# ── gap days: a missing CALENDAR day is NOT a reset (only red/flat buckets reset) ─
+
+
+def test_calendar_gap_day_does_not_break_streak(db: Session, monkeypatch) -> None:
+    """The walk iterates over the SORTED keys of `by_day` (days that actually traded), not a
+    dense calendar. A day with NO trades at all is simply absent — it neither counts nor resets.
+    Two green trading days with an idle calendar day between them are a contiguous streak of 2.
+    """
+    u, v = _setup(db)
+    _enable(monkeypatch)
+    today_et = datetime.now(_ET).date()
+    # green at days_ago 1 and 3; days_ago 2 has NO rows (a non-trading / idle day).
+    for days_ago in (1, 3):
+        d = today_et - timedelta(days=days_ago)
+        _add_outcome(db, u, v, pnl=20.0, terminal_at=_utc_for_et(d.year, d.month, d.day, 15),
+                     symbol=f"GAP{days_ago}-USD", outcome_class="small_win")
+    streak, meta = consecutive_green_days(db, execution_family=_EF, lookback_days=30)
+    assert streak == 2, meta  # the idle gap day does not reset
+    assert meta["days_seen"] == 2
+
+
+# ── lookback window boundary (terminal_at >= far_start, < today_start) ───────────
+
+
+def test_lookback_edge_day_included(db: Session, monkeypatch) -> None:
+    """A green day exactly `lookback` ET days ago sits AT far_start (terminal_at >= far_start
+    is inclusive) and so IS counted. eps-below the window (one day older) would be excluded.
+    """
+    u, v = _setup(db)
+    _enable(monkeypatch, lookback=5)
+    today_et = datetime.now(_ET).date()
+    # contiguous greens for days_ago 1..5 (5 == lookback): all inside [far_start, today_start)
+    for days_ago in range(1, 6):
+        d = today_et - timedelta(days=days_ago)
+        _add_outcome(db, u, v, pnl=10.0, terminal_at=_utc_for_et(d.year, d.month, d.day, 15),
+                     symbol=f"LB{days_ago}-USD", outcome_class="small_win")
+    streak, meta = consecutive_green_days(db, execution_family=_EF, lookback_days=5)
+    assert streak == 5, meta  # day at days_ago==lookback is included (inclusive lower bound)
+
+
+def test_day_older_than_lookback_excluded(db: Session, monkeypatch) -> None:
+    # A green day OLDER than the lookback window is invisible -> a 1-day window sees only
+    # yesterday. (Locks the upper edge: rows before far_start are filtered out at SQL level.)
+    u, v = _setup(db)
+    _enable(monkeypatch, lookback=1)
+    today_et = datetime.now(_ET).date()
+    # yesterday (in window) green
+    d1 = today_et - timedelta(days=1)
+    _add_outcome(db, u, v, pnl=10.0, terminal_at=_utc_for_et(d1.year, d1.month, d1.day, 15),
+                 symbol="IN-USD", outcome_class="small_win")
+    # 5 days ago (out of a 1-day window) green
+    d5 = today_et - timedelta(days=5)
+    _add_outcome(db, u, v, pnl=10.0, terminal_at=_utc_for_et(d5.year, d5.month, d5.day, 15),
+                 symbol="OUT-USD", outcome_class="small_win")
+    streak, meta = consecutive_green_days(db, execution_family=_EF, lookback_days=1)
+    assert streak == 1, meta
+    assert meta["days_seen"] == 1  # the older day never entered the window
+
+
+# ── settings fallbacks: None / falsy knobs use documented defaults via `or` ──────
+
+
+def test_none_settings_use_defaults(db: Session, monkeypatch) -> None:
+    """step/max/lookback set to None -> the `or <default>` fallbacks fire (0.1 / 2.0 / 30).
+    A 3-day streak with the default step 0.1 yields 1.2.
+    """
+    u, v = _setup(db)
+    monkeypatch.setattr(settings, "chili_momentum_green_day_graduation_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_green_day_step_per_day", None, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_green_day_max_multiplier", None, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_green_day_lookback_days", None, raising=False)
+    _add_green_streak(db, u, v, n_days=3)
+    mult, meta = green_day_graduation_multiplier(db, execution_family=_EF)
+    assert meta["step_per_day"] == pytest.approx(0.1)
+    assert meta["max_multiplier"] == pytest.approx(2.0)
+    assert mult == pytest.approx(1.2)
+
+
+def test_zero_step_falls_back_to_default(db: Session, monkeypatch) -> None:
+    # step == 0.0 is falsy -> `or 0.1` substitutes the default (NOT a frozen multiplier).
+    u, v = _setup(db)
+    _enable(monkeypatch)
+    monkeypatch.setattr(settings, "chili_momentum_green_day_step_per_day", 0.0, raising=False)
+    _add_green_streak(db, u, v, n_days=4)
+    mult, meta = green_day_graduation_multiplier(db, execution_family=_EF)
+    assert meta["step_per_day"] == pytest.approx(0.1)  # 0.0 -> default
+    assert mult == pytest.approx(1.3)  # 1 + 0.1*3
+
+
+def test_zero_lookback_setting_falls_back_to_default(db: Session, monkeypatch) -> None:
+    # lookback setting 0 is falsy -> `or 30`. Without the fallback, lookback_days=0 would
+    # short-circuit consecutive_green_days to no_input and the streak would be 0.
+    u, v = _setup(db)
+    _enable(monkeypatch)
+    monkeypatch.setattr(settings, "chili_momentum_green_day_lookback_days", 0, raising=False)
+    _add_green_streak(db, u, v, n_days=3)
+    mult, meta = green_day_graduation_multiplier(db, execution_family=_EF)
+    assert meta["consecutive_green_days"] == 3  # default-30 window saw all three days
+    assert mult == pytest.approx(1.2)
+
+
+def test_negative_step_not_falsy_passes_through(db: Session, monkeypatch) -> None:
+    """ADVERSARIAL: a NEGATIVE step is truthy, so `or 0.1` does NOT replace it. With a long
+    streak the term `1 + step*(streak-1)` goes below 1.0, but the outer max(1.0, ...) floors
+    it. So a negative knob still cannot shrink size below 1.0 (never-veto invariant holds).
+    """
+    u, v = _setup(db)
+    _enable(monkeypatch)
+    monkeypatch.setattr(settings, "chili_momentum_green_day_step_per_day", -0.5, raising=False)
+    _add_green_streak(db, u, v, n_days=5)
+    mult, meta = green_day_graduation_multiplier(db, execution_family=_EF)
+    assert meta["step_per_day"] == pytest.approx(-0.5)  # passed through (truthy)
+    assert mult == 1.0  # floored, NOT 1 + (-0.5)*4 = -1.0
+
+
+# ── meta-shape contract (load-bearing for the runner's logging/compose) ──────────
+
+
+def test_graduation_meta_shape_when_enabled(db: Session, monkeypatch) -> None:
+    # The meta dict the runner consumes carries all the documented keys with right types.
+    u, v = _setup(db)
+    _enable(monkeypatch, step=0.1, max_mult=2.0)
+    _add_green_streak(db, u, v, n_days=3, pnl_per_day=25.0)
+    mult, meta = green_day_graduation_multiplier(db, execution_family=_EF)
+    assert set(("graduation_mult", "consecutive_green_days", "step_per_day",
+                "max_multiplier", "green_usd", "days_seen")).issubset(meta.keys())
+    assert meta["graduation_mult"] == pytest.approx(1.2)
+    assert meta["consecutive_green_days"] == 3
+    assert meta["green_usd"] == pytest.approx(75.0)  # 3 * 25
+    assert meta["days_seen"] == 3
+
+
+def test_streak_meta_green_usd_only_sums_green_prefix(db: Session, monkeypatch) -> None:
+    # green_usd accumulates ONLY the counted green prefix, not buckets behind the reset.
+    u, v = _setup(db)
+    _enable(monkeypatch)
+    today_et = datetime.now(_ET).date()
+    seq = [(1, 30.0), (2, 20.0), (3, -100.0), (4, 50.0)]  # green green RED green
+    for days_ago, pnl in seq:
+        d = today_et - timedelta(days=days_ago)
+        _add_outcome(db, u, v, pnl=pnl,
+                     terminal_at=_utc_for_et(d.year, d.month, d.day, 15),
+                     symbol=f"S{days_ago}-USD",
+                     outcome_class="small_win" if pnl >= 0 else "stop_loss")
+    streak, meta = consecutive_green_days(db, execution_family=_EF, lookback_days=30)
+    assert streak == 2
+    assert meta["green_usd"] == pytest.approx(50.0)  # 30 + 20 only; the +50 behind RED excluded
+    assert meta["days_seen"] == 4  # all four traded days are buckets
+
+
+# ── today-boundary: a trade exactly at today's ET 00:00 is excluded ──────────────
+
+
+def test_today_boundary_excluded_strict(db: Session, monkeypatch) -> None:
+    """terminal_at < today_start is STRICT: a fill at exactly today's ET 00:00:00 belongs to
+    TODAY (excluded), not yesterday. Pairing it with a real yesterday green proves the cut.
+    """
+    u, v = _setup(db)
+    _enable(monkeypatch)
+    today_et_midnight_utc = (
+        datetime.now(_ET).replace(hour=0, minute=0, second=0, microsecond=0)
+        .astimezone(_UTC).replace(tzinfo=None)
+    )
+    # a (would-be huge green) row at exactly today 00:00 ET -> excluded as "today"
+    _add_outcome(db, u, v, pnl=500.0, terminal_at=today_et_midnight_utc,
+                 symbol="MIDNIGHT-USD", outcome_class="small_win")
+    # yesterday real green
+    d1 = datetime.now(_ET).date() - timedelta(days=1)
+    _add_outcome(db, u, v, pnl=10.0, terminal_at=_utc_for_et(d1.year, d1.month, d1.day, 15),
+                 symbol="YDAY-USD", outcome_class="small_win")
+    streak, meta = consecutive_green_days(db, execution_family=_EF, lookback_days=30)
+    assert streak == 1, meta  # midnight row is today -> excluded
+    assert meta["green_usd"] == pytest.approx(10.0)  # the +500 today is NOT counted
+
+
+# ── flag-OFF parity is byte-identical regardless of knob values ──────────────────
+
+
+def test_flag_off_parity_ignores_other_knobs(db: Session, monkeypatch) -> None:
+    # With the flag OFF, step/max/lookback are irrelevant -> identical (1.0, disabled) meta.
+    u, v = _setup(db)
+    monkeypatch.setattr(settings, "chili_momentum_green_day_graduation_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_green_day_step_per_day", 9.9, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_green_day_max_multiplier", 99.0, raising=False)
+    _add_green_streak(db, u, v, n_days=20)
+    mult, meta = green_day_graduation_multiplier(db, execution_family=_EF)
+    assert mult == 1.0
+    assert meta == {"reason": "disabled", "graduation_mult": 1.0}  # exact, byte-identical

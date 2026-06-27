@@ -26,6 +26,7 @@ NOT enabled for production until dedupe/reconcile safety is proven on the agenti
 from __future__ import annotations
 
 import logging
+import math
 import uuid
 from typing import Any, Callable, Optional
 
@@ -43,7 +44,7 @@ def _split_base_size(total: float, blocks: int, *, increment: float | None) -> l
 
     See tests/test_momentum_order_path_dedupe.py for exhaustive split-exactness,
     determinism, distinct-cid, and fail-closed-to-single proofs."""
-    if blocks <= 1 or total <= 0:
+    if blocks <= 1 or not math.isfinite(total) or total <= 0:
         return [total]
     inc = float(increment) if increment and increment > 0 else None
     if inc:
@@ -141,7 +142,9 @@ class ChunkingVenueAdapter:
             total = float(base_size)
         except (TypeError, ValueError):
             return _single()
-        if total <= 0:
+        # NaN/inf passes float() and `total <= 0` (nan<=0 is False); guard it so a non-finite
+        # size fails-CLOSED to a single order instead of crashing the order-path tick.
+        if not math.isfinite(total) or total <= 0:
             return _single()
         pieces = _split_base_size(
             total, self._blocks, increment=self._base_increment(product_id)
@@ -223,7 +226,10 @@ def maybe_wrap_chunking(factory: Callable[[], Any]) -> Callable[[], Any]:
     returned verbatim, so the live-runner gets the exact same adapter object it always did.
     """
     try:
-        from ...config import settings  # local import: keep module IO-free at import
+        from ....config import settings  # local import: keep module IO-free at import
+        # (4 dots -> app.config; venue/ is app.services.trading.venue, same depth as the
+        # sibling adapters. A 3-dot ...config = app.services.config which does NOT exist,
+        # so the import silently raised and chunking never activated.)
 
         if not bool(getattr(settings, "chili_momentum_order_chunking_enabled", False)):
             return factory

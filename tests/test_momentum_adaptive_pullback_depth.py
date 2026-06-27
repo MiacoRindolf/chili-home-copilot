@@ -146,3 +146,118 @@ def test_none_or_nonpositive_atr_uses_base_floor(atr_pct) -> None:
     )
     # Still byte-identical (0.0) when disabled, irrespective of atr_pct shape.
     assert _adaptive_pullback_depth_ceiling(atr_pct, enabled=False) == 0.0
+
+
+# ════════════════════════════════════════════════════════════════════════════════════
+# HARDENING (THIN, adversarial): boundary ATR, min-seam crossover, monotonicity,
+# huge/zero atr cap-binding, and flag-parity edges. Each asserts the SPECIFIC value or
+# branch reason so a regression in that exact seam fails loudly (not just truthiness).
+# ════════════════════════════════════════════════════════════════════════════════════
+
+# The ATR% at which the ceiling formula hits the hard cap: 0.50 + a*1.5 == 0.75 -> a = 1/6.
+_CAP_BIND_ATR = (_VOL_SHALLOW_CEIL - _VOL_SHALLOW_BASE) / _VOL_SHALLOW_ATR_MULT  # 1/6
+
+
+# ── H1. Cap-binding BOUNDARY: eps-below caps below 0.75, exactly-at and eps-above pin ─
+def test_cap_bind_boundary_exact_and_around() -> None:
+    # Sanity: the derived crossover is 1/6 with this documented base/mult.
+    assert _CAP_BIND_ATR == pytest.approx(1.0 / 6.0, abs=1e-12)
+    eps = 1e-6
+    below = _adaptive_pullback_depth_ceiling(_CAP_BIND_ATR - eps, enabled=True)
+    at = _adaptive_pullback_depth_ceiling(_CAP_BIND_ATR, enabled=True)
+    above = _adaptive_pullback_depth_ceiling(_CAP_BIND_ATR + eps, enabled=True)
+    # eps-below the crossover the cap does NOT yet bind -> strictly under 0.75.
+    assert below < _VOL_SHALLOW_CEIL
+    assert below == pytest.approx(
+        _VOL_SHALLOW_BASE + (_CAP_BIND_ATR - eps) * _VOL_SHALLOW_ATR_MULT, abs=1e-12
+    )
+    # exactly-at and eps-above the cap binds at 0.75 EXACTLY (min clamps, never overshoots).
+    assert at == pytest.approx(_VOL_SHALLOW_CEIL, abs=1e-12)
+    assert above == pytest.approx(_VOL_SHALLOW_CEIL, abs=1e-12)
+
+
+# ── H2. The min SEAM only TIGHTENS: eff_ceil(enabled) is never looser than flag_ceil ─
+@pytest.mark.parametrize(
+    "atr_pct", [0.0, CALM_ATR, 0.02, 0.03, EXPLOSIVE_ATR, 0.10, _CAP_BIND_ATR, 0.20, 0.50]
+)
+def test_seam_never_relaxes_existing_ceiling(atr_pct: float) -> None:
+    eff_on = _eff_ceil(atr_pct, enabled=True)
+    flag_only = _flag_ceil_only(atr_pct)
+    # Enabling the feature can only narrow (or equal) the existing ceiling, never widen.
+    assert eff_on <= flag_only + 1e-12
+    # And the seam equals the literal min of the two ceilings (no other arithmetic).
+    adaptive = _adaptive_pullback_depth_ceiling(atr_pct, enabled=True)
+    assert eff_on == pytest.approx(min(flag_only, adaptive), abs=1e-12)
+
+
+# ── H3. flag_ceil vs adaptive CROSSOVER: which limb the min picks flips with ATR% ────
+def test_min_seam_picks_tighter_limb_either_side_of_crossover() -> None:
+    # flag_ceil = 0.70 + 1.5*a ; adaptive = 0.50 + 1.5*a (until adaptive caps at 0.75).
+    # Below the adaptive cap the two move in PARALLEL (adaptive always 0.20 lower), so the
+    # min picks ADAPTIVE for every calm/explosive ATR -> the seam genuinely tightens.
+    for atr in (CALM_ATR, EXPLOSIVE_ATR, 0.10):
+        adaptive = _adaptive_pullback_depth_ceiling(atr, enabled=True)
+        flag_only = _flag_ceil_only(atr)
+        assert adaptive < flag_only  # adaptive is the binding (tighter) limb
+        assert _eff_ceil(atr, enabled=True) == pytest.approx(adaptive, abs=1e-12)
+    # Once adaptive is capped (0.75) but flag_ceil is still climbing toward 0.90, adaptive
+    # remains the tighter limb -> the seam stays pinned at the 0.75 cap.
+    big = 0.20  # > 1/6 crossover; flag_ceil = 0.70 + 0.30 = 1.00 -> clamped 0.90
+    assert _flag_ceil_only(big) == pytest.approx(0.90, abs=1e-12)
+    assert _adaptive_pullback_depth_ceiling(big, enabled=True) == pytest.approx(0.75, 1e-12)
+    assert _eff_ceil(big, enabled=True) == pytest.approx(0.75, abs=1e-12)
+
+
+# ── H4. Strict MONOTONICITY then plateau: ceiling rises with ATR% up to the cap, flat after ─
+def test_ceiling_monotone_nondecreasing_and_plateaus() -> None:
+    sweep = [0.0, 0.005, CALM_ATR, 0.02, 0.03, EXPLOSIVE_ATR, 0.10, _CAP_BIND_ATR]
+    vals = [_adaptive_pullback_depth_ceiling(a, enabled=True) for a in sweep]
+    # Strictly increasing while under the cap (calm < explosive, the load-bearing widening).
+    for lo, hi in zip(vals, vals[1:]):
+        assert hi >= lo
+    assert vals[0] == pytest.approx(_VOL_SHALLOW_BASE, abs=1e-12)  # ATR 0 -> base floor
+    assert vals[2] > vals[0]  # calm already above the bare floor
+    assert vals[5] > vals[2]  # explosive strictly wider than calm
+    # After the crossover it plateaus at the cap (no further widening).
+    plateau = [_adaptive_pullback_depth_ceiling(a, enabled=True) for a in (0.17, 0.30, 2.0)]
+    assert all(v == pytest.approx(_VOL_SHALLOW_CEIL, abs=1e-12) for v in plateau)
+
+
+# ── H5. HUGE / pathological ATR% never overshoots the cap; NaN-free, bounded ─────────
+@pytest.mark.parametrize("atr_pct", [1.0, 5.0, 1e6, float("inf")])
+def test_huge_atr_pins_cap_no_overshoot(atr_pct: float) -> None:
+    ceiling = _adaptive_pullback_depth_ceiling(atr_pct, enabled=True)
+    assert ceiling == pytest.approx(_VOL_SHALLOW_CEIL, abs=1e-12)
+    assert ceiling == ceiling  # not NaN
+    # Disabled still byte-identical 0.0 even at pathological ATR%.
+    assert _adaptive_pullback_depth_ceiling(atr_pct, enabled=False) == 0.0
+
+
+# ── H6. FLAG PARITY at the same atr: ON tightens by exactly the base gap, OFF is no-op ─
+@pytest.mark.parametrize("atr_pct", [0.0, CALM_ATR, EXPLOSIVE_ATR, 0.10])
+def test_flag_parity_off_is_noop_on_tightens_by_base_gap(atr_pct: float) -> None:
+    # OFF: the seam is EXACTLY the legacy ceiling (the regression-proof invariant).
+    assert _eff_ceil(atr_pct, enabled=False) == _flag_ceil_only(atr_pct)
+    # ON (below the cap): the binding ceiling drops by precisely the documented base gap
+    # between the flag ceiling (0.70) and the adaptive base (0.50) = 0.20, since both
+    # limbs share the SAME ATR multiplier and the lower limb binds.
+    if atr_pct < _CAP_BIND_ATR:
+        gap = _BULL_FLAG_RETRACE_CEIL - _VOL_SHALLOW_BASE  # 0.20
+        assert _eff_ceil(atr_pct, enabled=True) == pytest.approx(
+            _flag_ceil_only(atr_pct) - gap, abs=1e-12
+        )
+
+
+# ── H7. The disabled SHORT-CIRCUIT: enabled=False returns before reading atr at all ──
+def test_disabled_short_circuits_before_reading_atr() -> None:
+    # A non-numeric atr would raise in float(...) IF the function read it while disabled.
+    # The early `if not enabled: return 0.0` must fire first -> no exception, exact 0.0.
+    class _Boom:
+        def __float__(self):  # pragma: no cover - must never be called when disabled
+            raise AssertionError("atr_pct read while disabled -- short-circuit regressed")
+
+    assert _adaptive_pullback_depth_ceiling(_Boom(), enabled=False) == 0.0
+    # Whereas ENABLED it WOULD consult atr (here the guarded None-path returns the base).
+    assert _adaptive_pullback_depth_ceiling(None, enabled=True) == pytest.approx(
+        _VOL_SHALLOW_BASE, abs=1e-12
+    )

@@ -356,3 +356,358 @@ def test_flag_off_on_every_adversarial_case():
         ok, reason, _ = add_into_halt_ok(df=_backside_df(), **args)
         assert ok is False
         assert reason == "add_into_halt_disabled"
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════════
+# HARDENING (appended) — branch + BOUNDARY coverage for every leg not yet pinned above. Each
+# test asserts the SPECIFIC reason/value so it FAILS if its branch regresses (not just truthy).
+# ════════════════════════════════════════════════════════════════════════════════════════════
+
+
+# ── (H-A) PRECONDITION legs the original suite never reached ────────────────────────────────
+
+def test_not_rth_blocks_add():
+    # Halts/resumes only matter in regular hours; an extended-hours add is refused BEFORE any
+    # profit / chase compute (in_rth gate sits above the input checks).
+    args = dict(_FAV)
+    args["in_rth"] = False
+    ok, reason, dbg = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is False
+    assert reason == "add_into_halt_not_rth"
+    assert dbg == {}  # refused before any dbg population
+
+
+def test_missing_avg_entry_fail_closed():
+    args = dict(_FAV)
+    args["avg_entry"] = None  # cannot compute risk -> fail-closed
+    ok, reason, _ = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is False
+    assert reason == "add_into_halt_missing_inputs"
+
+
+def test_missing_original_stop_fail_closed():
+    args = dict(_FAV)
+    args["original_stop"] = None  # no risk basis -> fail-closed
+    ok, reason, _ = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is False
+    assert reason == "add_into_halt_missing_inputs"
+
+
+def test_missing_bid_fail_closed():
+    args = dict(_FAV)
+    args["bid"] = None  # no add price -> fail-closed
+    ok, reason, _ = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is False
+    assert reason == "add_into_halt_missing_inputs"
+
+
+def test_nonpositive_risk_blocks_add():
+    # original_stop ABOVE avg_entry -> risk = a - os_ <= 0 -> "bad_inputs" (cannot normalize R).
+    args = dict(_FAV)
+    args["original_stop"] = 10.0  # equal to avg_entry -> risk == 0
+    ok, reason, _ = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is False
+    assert reason == "add_into_halt_bad_inputs"
+
+
+def test_inverted_stop_negative_risk_blocks_add():
+    args = dict(_FAV)
+    args["original_stop"] = 11.0  # above avg_entry 10.0 -> risk = -1.0 < 0
+    ok, reason, _ = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is False
+    assert reason == "add_into_halt_bad_inputs"
+
+
+def test_nonpositive_bid_blocks_add():
+    args = dict(_FAV)
+    args["bid"] = 0.0  # b <= 0 -> bad_inputs
+    ok, reason, _ = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is False
+    assert reason == "add_into_halt_bad_inputs"
+
+
+# ── (H-B) PROFIT-R boundary (eps-below blocks, exactly-at passes) ───────────────────────────
+# R = avg_entry(10) - original_stop(9) = 1.0 ; min_profit_r default 1.0 ⇒ need bid >= 11.0.
+
+def test_profit_exactly_at_min_r_fires():
+    args = dict(_FAV)
+    args["bid"] = 11.0          # profit_r == 1.0 == min_r -> NOT (< min_r) -> passes profit leg
+    args["breakout_level"] = 10.95  # keep not-extended (cap 0.16 -> thr ~12.70)
+    ok, reason, dbg = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is True, (reason, dbg)
+    assert reason == "add_into_halt_ok"
+    assert dbg["profit_r"] == 1.0
+
+
+def test_profit_eps_below_min_r_blocks():
+    args = dict(_FAV)
+    args["bid"] = 10.999        # profit_r 0.999 < 1.0 -> just under the floor
+    ok, reason, dbg = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is False
+    assert reason == "add_into_halt_insufficient_profit"
+    assert dbg["profit_r"] < dbg["min_profit_r"]
+
+
+def test_min_profit_r_override_respected():
+    # A higher min_profit_r setting raises the bar: +2R bid that fires at default 1.0 now fails
+    # when the floor is lifted to 3.0 (proves the setting binds, not a hardcoded 1.0).
+    args = dict(_FAV)  # bid 12.0 -> profit_r 2.0
+    s = _on(chili_momentum_add_into_halt_min_profit_r=3.0)
+    ok, reason, dbg = add_into_halt_ok(df=_frontside_df(), settings_obj=s, **args)
+    assert ok is False
+    assert reason == "add_into_halt_insufficient_profit"
+    assert dbg["min_profit_r"] == 3.0
+
+
+# ── (H-C) STRUCTURAL STOP boundary + edge ───────────────────────────────────────────────────
+
+def test_stop_exactly_at_original_fires():
+    # current_stop == original_stop (not loosened) -> intact; the added shares carry it.
+    args = dict(_FAV)
+    args["current_stop"] = 9.0  # == original_stop
+    ok, reason, dbg = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is True, (reason, dbg)
+    assert dbg["add_structural_stop"] == 9.0
+
+
+def test_stop_eps_below_original_within_tolerance_fires():
+    # current_stop below original but inside the 1e-9 tolerance (os_ - 1e-9) -> NOT loosened.
+    args = dict(_FAV)
+    args["current_stop"] = 9.0 - 5e-10  # within tolerance band
+    ok, reason, _ = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is True
+
+
+def test_current_stop_none_uses_original_as_add_stop():
+    # No live stop reading -> the add carries the ORIGINAL structural stop (not a refusal).
+    args = dict(_FAV)
+    args["current_stop"] = None
+    ok, reason, dbg = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is True, (reason, dbg)
+    assert dbg["add_structural_stop"] == 9.0  # the original stop
+
+
+def test_bad_stop_nonnumeric_fail_closed():
+    args = dict(_FAV)
+    args["current_stop"] = "tight"  # non-numeric -> fail-closed (cannot prove intact)
+    ok, reason, _ = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is False
+    assert reason == "add_into_halt_bad_stop"
+
+
+# ── (H-D) EXTENSION VETO boundary (cap = max(floor 0.08, K·atr)); + missing-atr fail-closed ──
+
+def test_extension_eps_below_cap_fires():
+    # atr_pct 0.005 -> cap = max(0.08, 0.04) = 0.08 ; bid 12.0 -> threshold = bid -> set the
+    # break level JUST above 12.0/1.08 so bid sits eps BELOW the veto threshold -> add fires.
+    args = dict(_FAV)
+    args["atr_pct"] = 0.005
+    args["breakout_level"] = 12.0 / 1.08 + 1e-6  # threshold = lvl*1.08 just ABOVE bid 12.0
+    ok, reason, _ = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is True, reason
+    assert reason == "add_into_halt_ok"
+
+
+def test_extension_exactly_at_cap_blocks():
+    # bid exactly == lvl*(1+cap) -> veto is `ep >= thr` -> blocks AT the boundary. Derive the
+    # cap the SAME way the source does, from the REAL config defaults (K=1.0, floor_pct=0.10),
+    # so the breakout level lands the entry exactly AT the cap. atr_pct 0.005 is small enough
+    # that the floor (0.10) binds: cap = max(0.10, 1.0*0.005) = 0.10. Setting breakout_level =
+    # bid/(1+cap) makes the threshold exactly == bid 12.0, so `ep >= thr` fires (and would NOT
+    # fire if the veto ever regressed to strict `>` — keeps the boundary test adversarial).
+    cap = max(
+        float(_real_settings.chili_momentum_entry_extension_floor_pct),
+        float(_real_settings.chili_momentum_entry_extension_atr_mult) * 0.005,
+    )
+    args = dict(_FAV)
+    args["atr_pct"] = 0.005
+    args["breakout_level"] = 12.0 / (1.0 + cap)  # threshold == bid 12.0 -> veto fires AT cap
+    ok, reason, _ = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is False
+    assert reason == "add_into_halt_extended"
+
+
+def test_missing_atr_pct_fail_closed():
+    # The OTHER extension input: atr_pct None (breakout_level present) -> cannot prove
+    # not-extended -> fail-closed (the original suite only covered breakout_level None).
+    args = dict(_FAV)
+    args["atr_pct"] = None
+    ok, reason, _ = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is False
+    assert reason == "add_into_halt_no_extension_inputs"
+
+
+# ── (H-E) STRUCTURE df edges ────────────────────────────────────────────────────────────────
+
+def test_empty_df_fail_closed():
+    ok, reason, _ = add_into_halt_ok(df=pd.DataFrame(), settings_obj=_on(), **_FAV)
+    assert ok is False
+    assert reason == "add_into_halt_no_structure"
+
+
+def test_thin_df_below_min_bars_fail_closed():
+    # len(df) < 5 -> too thin to prove front-side -> fail-closed.
+    ok, reason, _ = add_into_halt_ok(df=_frontside_df(n=4), settings_obj=_on(), **_FAV)
+    assert ok is False
+    assert reason == "add_into_halt_no_structure"
+
+
+# ── (H-F) HALT-CHAIN block-count BOUNDARY (default 3) ───────────────────────────────────────
+
+def test_halt_chain_one_below_block_fires():
+    # count == block_count - 1 (2) -> below the block -> still fires (boundary is `>=`).
+    args = dict(_FAV)
+    args["consecutive_halt_up_count"] = 2  # default block_count 3
+    ok, reason, dbg = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is True, (reason, dbg)
+    assert dbg["consecutive_halt_up"] == 2
+    assert dbg["halt_chain_block_count"] == 3
+
+
+def test_halt_chain_exactly_at_block_blocks():
+    args = dict(_FAV)
+    args["consecutive_halt_up_count"] = 3  # == block_count -> blocked (>=)
+    ok, reason, _ = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is False
+    assert reason == "add_into_halt_halt_chain_blocked"
+
+
+def test_halt_chain_block_count_override_respected():
+    # A custom (lower) block_count binds: count 2 fires at default 3 but BLOCKS at block_count 2.
+    args = dict(_FAV)
+    args["consecutive_halt_up_count"] = 2
+    s = _on(chili_momentum_halt_chain_block_count=2)
+    ok, reason, dbg = add_into_halt_ok(df=_frontside_df(), settings_obj=s, **args)
+    assert ok is False
+    assert reason == "add_into_halt_halt_chain_blocked"
+    assert dbg["halt_chain_block_count"] == 2
+
+
+def test_halt_chain_block_count_floor_is_two():
+    # The block-count is floored at 2 (max(2, ...)): a configured 1 still blocks at count 2,
+    # never at count 1 (a single halt-up is normal, not a blow-off chain).
+    args = dict(_FAV)
+    args["consecutive_halt_up_count"] = 1
+    s = _on(chili_momentum_halt_chain_block_count=1)
+    ok, reason, dbg = add_into_halt_ok(df=_frontside_df(), settings_obj=s, **args)
+    assert ok is True, (reason, dbg)
+    assert dbg["halt_chain_block_count"] == 2  # floored
+
+
+def test_halt_chain_none_count_treated_zero_fires():
+    # consecutive_halt_up_count None -> int(None or 0) == 0 -> below block -> fires.
+    args = dict(_FAV)
+    args["consecutive_halt_up_count"] = None
+    ok, reason, dbg = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is True, (reason, dbg)
+    assert dbg["consecutive_halt_up"] == 0
+
+
+# ── (H-G) HALT-RESUMPTION direction BOUNDARY + missing/bad halt signals ─────────────────────
+# halt_level 11.0 ; favorable resume requires resumption_open NOT below halt_level.
+
+def test_resumption_exactly_at_halt_level_fires():
+    args = dict(_FAV)
+    args["resumption_open"] = 11.0  # == halt_level -> NOT below -> favorable -> fires
+    ok, reason, dbg = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is True, (reason, dbg)
+    assert dbg["resumption_open"] == 11.0
+
+
+def test_resumption_eps_below_halt_level_blocks():
+    args = dict(_FAV)
+    args["resumption_open"] = 11.0 * (1.0 - 1e-6)  # just under halt_level -> unfavorable
+    ok, reason, _ = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is False
+    assert reason == "add_into_halt_unfavorable_resumption"
+
+
+def test_halt_level_nonpositive_fail_closed():
+    # halt_level present but <= 0 -> not a real halt signal -> fail-closed.
+    args = dict(_FAV)
+    args["halt_level"] = 0.0
+    ok, reason, _ = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is False
+    assert reason == "add_into_halt_no_halt_signal"
+
+
+def test_halt_level_nonnumeric_fail_closed():
+    args = dict(_FAV)
+    args["halt_level"] = "up"  # non-numeric -> bad_halt_level
+    ok, reason, _ = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is False
+    assert reason == "add_into_halt_bad_halt_level"
+
+
+def test_resumption_nonnumeric_fail_closed():
+    args = dict(_FAV)
+    args["resumption_open"] = "open"  # non-numeric -> bad_resumption
+    ok, reason, _ = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is False
+    assert reason == "add_into_halt_bad_resumption"
+
+
+def test_missing_halt_level_fail_closed_under_master():
+    # halt_level None (master ON, sub-flags default) -> cannot prove resume direction at all.
+    args = dict(_FAV)
+    args["halt_level"] = None
+    ok, reason, _ = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is False
+    assert reason == "add_into_halt_no_halt_signal"
+
+
+# ── (H-H) LEG-ORDER / fail-CLOSED PRECEDENCE — the riskiest leg wins when several are bad ────
+
+def test_tape_leg_precedes_profit_and_extension():
+    # No tape AND underwater AND extended all at once -> the TAPE leg (runs first among risk
+    # legs) is the refusal reason, proving tape is the outermost chase guard.
+    args = dict(_FAV)
+    args["tape_confirmed"] = None
+    args["bid"] = 10.0          # underwater
+    args["breakout_level"] = 7.6  # extended
+    ok, reason, _ = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is False
+    assert reason == "add_into_halt_no_tape"
+
+
+def test_limit_down_precedes_everything():
+    # is_limit_up_halt False short-circuits ABOVE the input checks -> not_limit_up even with
+    # every other input also broken.
+    args = dict(_FAV)
+    args["is_limit_up_halt"] = False
+    args["avg_entry"] = None
+    args["tape_confirmed"] = None
+    ok, reason, dbg = add_into_halt_ok(df=_frontside_df(), settings_obj=_on(), **args)
+    assert ok is False
+    assert reason == "add_into_halt_not_limit_up"
+    assert dbg == {}
+
+
+# ── (H-I) FLAG-OFF byte-identical for EVERY refusal-reason input (not just the favorable case) ─
+
+def test_flag_off_returns_empty_dbg_on_precondition_breakers():
+    # Even inputs that would trip the EARLY (pre-dbg) legs under the master flag still return
+    # the disabled tuple with an EMPTY dbg when the flag is OFF (disabled short-circuits first).
+    for mutate in (
+        {"in_rth": False},
+        {"is_limit_up_halt": False},
+        {"avg_entry": None},
+        {"original_stop": 11.0},   # negative risk
+        {"halt_level": None},
+    ):
+        args = dict(_FAV)
+        args.update(mutate)
+        ok, reason, dbg = add_into_halt_ok(df=_frontside_df(), **args)
+        assert ok is False
+        assert reason == "add_into_halt_disabled"
+        assert dbg == {}
+
+
+def test_flag_off_default_settings_obj_is_production():
+    # Calling WITHOUT settings_obj uses the global production settings, where the master flag
+    # is OFF by default -> disabled. (Guards the production default itself, not a stub.)
+    assert getattr(_real_settings, "chili_momentum_add_into_halt_enabled", False) is False
+    ok, reason, dbg = add_into_halt_ok(df=_frontside_df(), **_FAV)
+    assert ok is False
+    assert reason == "add_into_halt_disabled"
+    assert dbg == {}

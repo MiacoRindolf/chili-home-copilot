@@ -465,3 +465,312 @@ def test_flag_off_still_byte_identical_with_deep_reclaim(monkeypatch) -> None:
     ok, reason, dbg = pullback_break_confirmation(df, entry_interval="1m", require_retest=True)
     assert reason not in ("htf_against_veto", "doji_trigger_veto"), (reason, dbg)
     assert "htf" not in dbg and "doji" not in dbg, dbg
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HARDENING — appended adversarial branch/boundary coverage (TESTS-ONLY)
+# ══════════════════════════════════════════════════════════════════════════════
+from unittest.mock import patch  # noqa: E402
+
+from app.services.trading.momentum_neural.candles import (  # noqa: E402
+    _ohlc,
+    is_strong_bull_break_candle,
+)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DOJI VETO — BOUNDARY exactness (the `body_frac >= thresh` comparison)
+# ──────────────────────────────────────────────────────────────────────────────
+def test_doji_body_frac_exactly_at_threshold_passes() -> None:
+    """BOUNDARY: ``body/range`` EXACTLY == threshold must PASS (the guard is ``>=``, not ``>``).
+    A RED bar at the boundary (so the strong-body override can NOT rescue it) isolates the
+    comparison: it passes ONLY because ``0.25 >= 0.25``. If the op regressed to ``>`` this red,
+    lower-half bar would (wrongly) veto."""
+    # range 1.0, body 0.25 -> frac exactly 0.25; RED (close<open), lower-half close.
+    o, h, l, c = 100.25, 100.50, 99.50, 100.00
+    assert not is_strong_bull_break_candle(o, h, l, c)  # guard: override can NOT rescue it
+    veto, dbg = _doji_trigger_veto(o, h, l, c, atr_pct=None, base_body_frac=0.25)
+    assert veto is False, dbg
+    assert dbg["doji_body_frac"] == dbg["doji_threshold"] == 0.25, dbg
+    assert "doji_override" not in dbg  # it passed on the >= branch, NOT the strong override
+
+
+def test_doji_eps_below_threshold_vetoes() -> None:
+    """BOUNDARY eps-below: a RED bar a hair under the threshold (frac 0.10 < 0.25) and NOT a
+    conviction shape => VETO. Asserts the SPECIFIC frac/threshold so a band shift is caught."""
+    o, h, l, c = 100.10, 101.00, 99.00, 99.90  # range 2.0, body 0.20 -> frac 0.10; RED
+    veto, dbg = _doji_trigger_veto(o, h, l, c, atr_pct=None, base_body_frac=0.25)
+    assert veto is True, dbg
+    assert dbg["doji_body_frac"] == 0.10 and dbg["doji_threshold"] == 0.25, dbg
+
+
+def test_doji_eps_above_threshold_passes() -> None:
+    """BOUNDARY eps-above: frac 0.26 > 0.25 => not a doji => PASS, even on a RED bar (the
+    >= branch returns before the strong-override is consulted)."""
+    o, h, l, c = 100.26, 100.50, 99.50, 100.00  # range 1.0, body 0.26 -> frac 0.26; RED
+    veto, dbg = _doji_trigger_veto(o, h, l, c, atr_pct=None, base_body_frac=0.25)
+    assert veto is False, dbg
+    assert dbg["doji_body_frac"] == 0.26, dbg
+    assert "doji_override" not in dbg
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DOJI VETO — the strong-full-body OVERRIDE rescue path (its own branch)
+# ──────────────────────────────────────────────────────────────────────────────
+def test_doji_strong_full_body_override_rescues_thin_fraction() -> None:
+    """⭐ The OVERRIDE branch in isolation: a TALL-RANGE conviction candle whose body is a TINY
+    FRACTION of its range (frac 0.033 << 0.25 -> would be a doji on the ratio alone) but which IS
+    a strong bull break (green, close at the very top, negligible upper wick) must PASS via the
+    ``is_strong_bull_break_candle`` override. Proves the override carve-out actually fires (a
+    wide-range break is not mislabeled a doji)."""
+    # range 6.0 (low far below), body 0.2 -> frac 0.033; close at top (close_pos 0.95), tiny upper wick.
+    o, h, l, c = 100.5, 101.0, 95.0, 100.7
+    assert _ohlc(o, h, l, c)[1] / _ohlc(o, h, l, c)[0] < 0.25  # genuinely thin fraction
+    assert is_strong_bull_break_candle(o, h, l, c)             # but a conviction candle
+    veto, dbg = _doji_trigger_veto(o, h, l, c, atr_pct=None, base_body_frac=0.25)
+    assert veto is False, dbg
+    assert dbg.get("doji_override") == "strong_full_body", dbg
+
+
+def test_doji_thin_fraction_NOT_strong_is_vetoed() -> None:
+    """GUARD for the override: the SAME thin fraction but WITHOUT the conviction shape (close in
+    the LOWER half of a tall range -> not strong) must STILL veto. The override is surgical: it
+    rescues only true conviction candles, never every wide-range bar."""
+    o, h, l, c = 100.0, 105.0, 99.0, 100.9  # range 6.0, body 0.9 -> frac 0.15; close_pos 0.317 -> NOT strong
+    assert not is_strong_bull_break_candle(o, h, l, c)
+    veto, dbg = _doji_trigger_veto(o, h, l, c, atr_pct=None, base_body_frac=0.25)
+    assert veto is True, dbg
+    assert "doji_override" not in dbg, dbg
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DOJI VETO — atr_pct clamp / None handling
+# ──────────────────────────────────────────────────────────────────────────────
+def test_doji_negative_atr_is_clamped_to_zero() -> None:
+    """``atr_pct`` is clamped by ``max(0.0, atr_pct)`` -> a NEGATIVE atr can never SHRINK the band
+    below the base. With frac 0.28 and base 0.25, a (nonsensical) atr_pct=-5.0 must keep the
+    threshold at 0.25 (not 0.25 + -5.0 = -4.75, which would wrongly pass everything... here it
+    would wrongly VETO by lowering thresh? no — lowering thresh makes MORE pass). The clamp keeps
+    threshold == base so 0.28 >= 0.25 -> PASS, threshold pinned at base."""
+    o, h, l, c = 99.86, 100.70, 99.70, 100.14  # frac 0.28
+    veto, dbg = _doji_trigger_veto(o, h, l, c, atr_pct=-5.0, base_body_frac=0.25)
+    assert veto is False, dbg
+    assert dbg["doji_threshold"] == 0.25, dbg  # clamp held the base; not 0.25 + (-5.0)
+
+
+def test_doji_none_atr_uses_base_only() -> None:
+    """``atr_pct=None`` -> threshold is exactly the base (Ross floor), no widening."""
+    veto, dbg = _doji_trigger_veto(99.86, 100.70, 99.70, 100.14, atr_pct=None, base_body_frac=0.25)
+    assert dbg["doji_threshold"] == 0.25, dbg
+    assert veto is False, dbg  # 0.28 >= 0.25
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# HTF-AGAINST — MACD-PEAKED branch (b) in ISOLATION (patched indicator layer)
+# ──────────────────────────────────────────────────────────────────────────────
+# NOTE: branch (b) is hard to reach with a synthetic price frame because the 5m resample of a
+# realistic 1m df is short (~10-12 bars) -> macd_hist is all None until ~35+ HTF bars, and on a
+# steady ramp the histogram peaks EARLY (signal-EMA smoothing) so the local-peak window
+# hist[-1] < hist[-2] >= hist[-3] rarely lands at the tail. We therefore patch
+# ``compute_all_from_df`` (the indicator layer) to feed exact ema_9 / macd_hist arrays — a
+# legitimate unit isolation of the rollover predicate, decoupled from MACD warmup math.
+def _real_htf_frame() -> pd.DataFrame:
+    """A real DatetimeIndex 1m frame whose 5m resample is non-None (so the patched arrays are
+    consumed). Gentle rise so EMA-9, if computed, would be rising (branch (a) inert) — but we
+    patch the arrays anyway, so only their length (== len(htf)) matters."""
+    rows = [(100.0 + i * 0.05, 100.0 + i * 0.05 + 0.1, 100.0 + i * 0.05 - 0.1, 100.0 + i * 0.05 + 0.05, 1000.0)
+            for i in range(60)]
+    return _dt_index(_df(rows))
+
+
+def _htf_with_arrays(ema9, hist, **kw):
+    """Run _htf_against_veto on a real htf frame but with compute_all_from_df patched to return
+    the given ema_9 / macd_hist arrays (auto-sized to the resampled htf length)."""
+    df = _real_htf_frame()
+    htf = _resample_htf(df)
+    n = len(htf)
+    ema_full = (ema9 + [ema9[-1]] * n)[:n] if ema9 else [100.0] * n
+    hist_full = ([0.0] * n + hist)[-n:] if hist else [0.0] * n
+    with patch.object(entry_gates, "compute_all_from_df",
+                      return_value={"ema_9": ema_full, "macd_hist": hist_full}):
+        return _htf_against_veto(df, **kw)
+
+
+def test_htf_macd_peaked_vetoes() -> None:
+    """⭐ BRANCH (b): a clearly PEAKED 5m MACD histogram (hist[-1] < hist[-2] >= hist[-3], with
+    hist[-2] > threshold) with EMA-9 flat/rising (branch (a) inert) => VETO via macd_peaked."""
+    ema_rising = [100.0 + i * 0.1 for i in range(40)]
+    veto, dbg = _htf_with_arrays(ema_rising, [0.10, 0.30, 0.20])  # 0.20 < 0.30 >= 0.10, 0.30>0
+    assert veto is True, dbg
+    assert dbg.get("htf_against") == "macd_peaked", dbg
+    assert dbg.get("htf_macd_hist") == [0.10, 0.30, 0.20], dbg
+
+
+def test_htf_macd_peaked_equal_prior_is_boundary_inclusive() -> None:
+    """BOUNDARY: the rollover test is ``hist[-2] >= hist[-3]`` (inclusive). hist == [0.30,0.30,0.20]
+    -> h1==h2 still counts as a peak => VETO. If the op regressed to a strict ``>`` this would pass."""
+    veto, dbg = _htf_with_arrays([100.0 + i * 0.1 for i in range(40)], [0.30, 0.30, 0.20])
+    assert veto is True, dbg
+    assert dbg.get("htf_against") == "macd_peaked", dbg
+
+
+def test_htf_macd_still_declining_does_not_peak() -> None:
+    """A histogram that PEAKED EARLIER and is monotonically falling at the tail
+    (hist[-2] < hist[-3]) is NOT a fresh rollover => PASS (no veto)."""
+    veto, dbg = _htf_with_arrays([100.0 + i * 0.1 for i in range(40)], [0.40, 0.30, 0.20])
+    assert veto is False, dbg
+    assert dbg.get("htf_against") is None, dbg
+
+
+def test_htf_macd_rising_does_not_peak() -> None:
+    """A still-RISING histogram (hist[-1] >= hist[-2]) is momentum, not a top => PASS."""
+    veto, dbg = _htf_with_arrays([100.0 + i * 0.1 for i in range(40)], [0.10, 0.20, 0.30])
+    assert veto is False, dbg
+
+
+def test_htf_macd_peaked_below_threshold_passes() -> None:
+    """The peak must clear ``macd_threshold``: the same peaked shape with a high threshold
+    (h1=0.30 not > 0.50) does NOT veto. Proves macd_threshold actually gates the branch."""
+    veto, dbg = _htf_with_arrays(
+        [100.0 + i * 0.1 for i in range(40)], [0.10, 0.30, 0.20], macd_threshold=0.50
+    )
+    assert veto is False, dbg
+
+
+def test_htf_macd_negative_peak_passes() -> None:
+    """A 'peak' in NEGATIVE histogram territory (h1=-0.10 not > default thresh 0.0) is not an
+    up-impulse topping over => PASS. Guards the ``hist[-2] > macd_threshold`` clause."""
+    veto, dbg = _htf_with_arrays([100.0 + i * 0.1 for i in range(40)], [-0.30, -0.10, -0.20])
+    assert veto is False, dbg
+
+
+def test_htf_ema_rolldown_takes_precedence_over_macd() -> None:
+    """When BOTH a sustained EMA roll-down AND a non-peaked hist are present, branch (a) wins and
+    short-circuits (the macd debug key is never written)."""
+    ema_down = [100.0 - i * 0.1 for i in range(40)]
+    veto, dbg = _htf_with_arrays(ema_down, [0.10, 0.20, 0.30])  # rising hist (no peak)
+    assert veto is True, dbg
+    assert dbg.get("htf_against") == "ema9_sustained_rolldown", dbg
+    assert dbg.get("htf_macd_hist") is None, dbg  # branch (b) never reached
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# HTF-AGAINST — rolldown_bars clamp + slope debug
+# ──────────────────────────────────────────────────────────────────────────────
+def test_htf_rolldown_bars_clamped_to_min_two() -> None:
+    """``rolldown_bars`` is clamped by ``max(2, int(rolldown_bars))``: a single down-tick that
+    PASSES at the default also vetoes at BOTH rolldown_bars=1 and rolldown_bars=0 (both clamp up
+    to 2 = require one down STEP). Proves the clamp floor (no degenerate 1-sample window)."""
+    df = _htf_single_downtick_1m()
+    assert _htf_against_veto(df, rolldown_bars=3)[0] is False  # default: single tick passes
+    veto1, dbg1 = _htf_against_veto(df, rolldown_bars=1)
+    veto0, dbg0 = _htf_against_veto(df, rolldown_bars=0)
+    assert veto1 is True and veto0 is True, (dbg1, dbg0)
+    assert dbg1.get("htf_ema9_rolldown_bars") == 2, dbg1  # clamped up to 2
+    assert dbg0.get("htf_ema9_rolldown_bars") == 2, dbg0
+
+
+def test_htf_records_ema9_slope_even_when_passing() -> None:
+    """The single-step EMA-9 slope is ALWAYS recorded when readable (even on a PASS) — proving the
+    gate SAW the HTF and deliberately chose not to veto (not a thin-frame no-read). An aligned-up
+    HTF records a POSITIVE slope and passes."""
+    veto, dbg = _htf_against_veto(_htf_uptrend_1m())
+    assert veto is False, dbg
+    assert dbg.get("htf_ema9_slope", 0.0) > 0.0, dbg
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _resample_htf — EDGE inputs (None / empty / missing Close / thin)
+# ──────────────────────────────────────────────────────────────────────────────
+def test_resample_htf_none_input() -> None:
+    assert _resample_htf(None) is None  # type: ignore[arg-type]
+
+
+def test_resample_htf_empty_frame() -> None:
+    assert _resample_htf(_dt_index(_df([]))) is None
+
+
+def test_resample_htf_missing_close_column() -> None:
+    """No Close column -> cannot build the HTF -> None (caller fails open)."""
+    df = pd.DataFrame([{"Open": 1.0, "High": 2.0, "Low": 0.5, "Volume": 10.0} for _ in range(10)])
+    df.index = pd.date_range("2026-06-27 09:30", periods=10, freq="1min")
+    assert _resample_htf(df) is None
+
+
+def test_resample_htf_single_bar_too_thin() -> None:
+    assert _resample_htf(_dt_index(_df([_base(100.0)]))) is None
+
+
+def test_htf_against_none_df_fails_open() -> None:
+    """A None df can NEVER block (fail-open all the way through)."""
+    veto, dbg = _htf_against_veto(None)  # type: ignore[arg-type]
+    assert veto is False
+    assert "htf_against" not in dbg
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DOJI VETO via _doji_trigger_veto — NaN / None body inputs fail-open
+# ──────────────────────────────────────────────────────────────────────────────
+def test_doji_nan_inputs_fail_open() -> None:
+    """NaN OHLC must not blow up and must NOT block (fail-open)."""
+    nan = float("nan")
+    veto, _ = _doji_trigger_veto(nan, nan, nan, nan, atr_pct=None, base_body_frac=0.25)
+    assert veto is False
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# INTEGRATION — doji veto is SKIPPED for a tick-break (forming bar unreadable);
+# HTF veto still applies on a tick-break (reads completed HTF bars).
+# ──────────────────────────────────────────────────────────────────────────────
+def _tickbreak_stub(pattern: str, pb_high: float, pb_low: float):
+    """A trigger stub that does NOT fire on the completed bar (ok=False) but ARMS a tick-wait
+    reason with pullback levels, so a ``live_price`` over ``pb_high`` produces a TICK break."""
+    def _fake(high, low, close, ema9, cur, **kw):  # noqa: ANN001
+        debug = {
+            "entry_interval": kw.get("entry_interval", "5m"),
+            "pattern": pattern,
+            "pullback_high": pb_high,
+            "pullback_low": pb_low,
+        }
+        return False, "waiting_for_break", pb_high, pb_low, debug
+    return _fake
+
+
+def test_doji_veto_skipped_on_tick_break(monkeypatch) -> None:
+    """⭐ A TICK break (live_price crosses the armed level) does NOT evaluate the doji gate — the
+    breaking bar is still FORMING, so its body/wick are unknowable (the conviction-candle gate
+    skips it identically). Even though the last completed bar is a doji, the tick fire is NOT
+    vetoed by ``doji_trigger_veto``. RangeIndex frame -> HTF fails open, isolating the doji skip."""
+    _flag_on(monkeypatch)
+    df = _df(_doji_break_rows())  # last completed bar is a doji
+    pb_high = float(df["High"].iloc[-1]) - 0.5  # below the live_price we pass so the tick crosses
+    pb_low = float(df["Low"].iloc[-1]) - 1.0
+    monkeypatch.setattr(
+        entry_gates, "_evaluate_break_retest", _tickbreak_stub("bull_flag", pb_high, pb_low),
+        raising=True,
+    )
+    ok, reason, dbg = pullback_break_confirmation(
+        df, entry_interval="1m", require_retest=True, live_price=pb_high + 1.0, symbol="TEST",
+    )
+    # The doji gate must NOT be the verdict (it was skipped for the forming tick bar).
+    assert reason != "doji_trigger_veto", (reason, dbg)
+    assert "doji" not in dbg, dbg  # the doji block never ran
+
+
+def test_htf_veto_applies_on_tick_break(monkeypatch) -> None:
+    """⭐ The HTF gate DOES apply on a tick break (it reads COMPLETED 5m bars, independent of the
+    forming 1m bar). A clearly-bearish HTF on a NON-deep-reclaim tick break is still vetoed by
+    ``htf_against_veto`` — and crucially NOT by the doji gate (which was skipped)."""
+    _flag_on(monkeypatch)
+    df = _htf_sustained_rolldown_1m()  # DatetimeIndex, clearly-bearish 5m HTF
+    pb_high = float(df["High"].iloc[-1]) - 0.5
+    pb_low = float(df["Low"].iloc[-1]) - 1.0
+    monkeypatch.setattr(
+        entry_gates, "_evaluate_break_retest", _tickbreak_stub("bull_flag", pb_high, pb_low),
+        raising=True,
+    )
+    ok, reason, dbg = pullback_break_confirmation(
+        df, entry_interval="1m", require_retest=True, live_price=pb_high + 1.0, symbol="TEST",
+    )
+    assert ok is False, (reason, dbg)
+    assert reason == "htf_against_veto", (reason, dbg)

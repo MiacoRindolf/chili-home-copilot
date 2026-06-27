@@ -675,7 +675,10 @@ def _asetup_margin_multiple() -> float:
     """The ONE documented margin for the adaptive A+ bar (std-devs below the median). Larger
     => more permissive (lower bar); smaller => stricter. Fail-safe to 1.0 on a bad value."""
     try:
-        m = float(getattr(settings, "chili_momentum_no_asetup_sit_cash_margin_multiple", 1.0) or 1.0)
+        # None-aware default (NOT `or 1.0` — a legit margin=0.0 is falsy and would wrongly
+        # fall back to 1.0; the `m >= 0.0 else 1.0` below already fail-safes negatives).
+        _raw = getattr(settings, "chili_momentum_no_asetup_sit_cash_margin_multiple", 1.0)
+        m = float(_raw if _raw is not None else 1.0)
     except (TypeError, ValueError):
         return 1.0
     return m if m >= 0.0 else 1.0

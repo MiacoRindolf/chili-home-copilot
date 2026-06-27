@@ -453,3 +453,371 @@ class TestCupAndHandleGuardOrdering:
         assert ok is False
         assert reason == "cup_and_handle_tape_unconfirmed"
         g.mocks[f"{_GATES}.tape_confirms_hold"].assert_called_once()
+
+
+# ───────────────────────── compute_all_from_df SERIES REQUIREMENT (chase-hole fence) ─────
+#
+# The gate's docstring + the inline comment (entry_gates.py ~5923-5926) call out the EXACT
+# chase-hole that bit cup_and_handle on first ship: compute_all_from_df only computes what is
+# REQUESTED, so if ema_20/macd/macd_signal/vwap are NOT in the ``needed`` set the NOT-BACKSIDE
+# + NOT-PARABOLIC guards silently run on empty series and no-op (a chase hole). These tests
+# pin the request set so a regression that drops a key (re-opening the hole) FAILS here.
+
+class TestCupAndHandleSeriesRequirement:
+    def test_compute_all_requests_all_six_chase_guard_series(self):
+        """compute_all_from_df must be asked for ema_9 + ema_20 + macd + macd_signal + vwap +
+        volume_ratio. Dropping ema_20/macd is the exact chase-hole the gate guards against
+        (backside read silently no-ops) -> assert the FULL request set."""
+        df = _cup_handle_df()
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards() as g:
+            _base_settings(ms)
+            ok, reason, dbg = cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+        assert ok is True, f"clean cup must fire, got {reason}"
+        caf = g.mocks[f"{_GATES}.compute_all_from_df"]
+        caf.assert_called_once()
+        needed = caf.call_args.kwargs.get("needed")
+        assert needed is not None, "compute_all_from_df must be called with a needed= set"
+        assert {"ema_9", "ema_20", "macd", "macd_signal", "vwap", "volume_ratio"}.issubset(set(needed)), (
+            f"missing chase-guard series in request set -> chase hole; got {needed}"
+        )
+
+    def test_backside_runs_on_real_series_not_empty(self):
+        """The ema_9/ema_20/macd/macd_signal arrays returned by compute_all_from_df must be
+        PASSED to _detect_back_side (the guard must see real data, not [] ). Assert the call
+        received the cur index + non-empty ema9 series."""
+        df = _cup_handle_df()
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards() as g:
+            _base_settings(ms)
+            cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+        dbs = g.mocks[f"{_GATES}._detect_back_side"]
+        dbs.assert_called_once()
+        # positional: (ema9, ema20, macd, macd_signal, cur, ...)
+        args = dbs.call_args.args
+        assert len(args[0]) == 13, "ema_9 series passed to backside must be the real (len-13) array"
+        assert args[4] == 12, "cur index passed to backside must be the last bar"
+
+
+# ───────────────────────── EQUAL-HIGHS BAND BOUNDARY (eps-below vs eps-above) ────────────
+#
+# atr_abs is mocked to 0.20, band_mult=0.6 -> equal-highs band = 0.12. The two tops are
+# "equal" iff abs(h1-h2) <= 0.12. Test exactly-at / eps-below / eps-above the band edge.
+
+class TestCupAndHandleEqualHighsBoundary:
+    def _run_with_top1(self, top1_high):
+        df = _cup_handle_df()
+        # idx 3 stays a confirmed swing high as long as its High exceeds neighbours (9.70/9.78).
+        df.loc[3, "High"] = top1_high
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards():
+            _base_settings(ms)
+            return cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+
+    def test_tops_just_inside_band_fires(self):
+        """|h1-h2| just BELOW the 0.12 band (0.11 apart) -> equal enough -> FIRES."""
+        # top1 = 9.89, top2 = 10.00 -> 0.11 apart (< 0.12). peak=10.00 so the break geometry holds.
+        ok, reason, dbg = self._run_with_top1(9.89)
+        assert ok is True, f"0.11-apart tops are within the 0.12 band -> must fire, got {reason}"
+        assert reason == "cup_and_handle_break"
+        assert dbg["equal_band"] == pytest.approx(0.12, abs=1e-6)
+
+    def test_tops_at_band_edge_fires(self):
+        """|h1-h2| right at the band edge (0.1199.. <= 0.12 band) -> ``> band`` is False ->
+        still equal -> FIRES. (Boundary: the reject is strict ``>``, so at/just-under passes.)"""
+        ok, reason, dbg = self._run_with_top1(9.88)  # 10.00-9.88 = 0.1199.. <= 0.12 band
+        assert ok is True, f"at-band-edge must pass the strict > reject, got {reason}"
+        assert reason == "cup_and_handle_break"
+        assert dbg["equal_band"] == pytest.approx(0.12, abs=1e-9)
+
+    def test_tops_just_outside_band_no_fire(self):
+        """|h1-h2| just ABOVE the band (0.13 apart) -> unequal tops -> NO FIRE."""
+        ok, reason, dbg = self._run_with_top1(9.87)  # 0.13 apart > 0.12
+        assert ok is False
+        assert reason == "cup_and_handle_tops_unequal"
+
+
+# ───────────────────────── CUP LOOKBACK BOUNDARY (tops too far apart) ────────────────────
+
+class TestCupAndHandleLookbackBoundary:
+    def test_tops_within_lookback_fires(self):
+        """The two tops are 4 bars apart (idx 3 & 7); with lookback=4 that is exactly at the
+        ceiling (``> lookback`` is False) -> readable cup -> FIRES."""
+        df = _cup_handle_df()
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards():
+            _base_settings(ms)
+            ms.chili_momentum_cup_and_handle_lookback_bars = 4  # i2-i1 == 4, not > 4
+            ok, reason, dbg = cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+        assert ok is True, f"4-apart tops with lookback=4 must fire, got {reason}"
+        assert dbg["cup_bars_apart"] == 4
+
+    def test_tops_beyond_lookback_no_fire(self):
+        """The two tops are 4 bars apart but lookback=3 -> ``4 > 3`` -> tops too far apart
+        (two unrelated highs, not a readable cup) -> NO FIRE."""
+        df = _cup_handle_df()
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards():
+            _base_settings(ms)
+            ms.chili_momentum_cup_and_handle_lookback_bars = 3  # 4 > 3
+            ok, reason, dbg = cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+        assert ok is False
+        assert reason == "cup_and_handle_tops_too_far"
+        assert dbg["cup_bars_apart"] == 4
+        assert dbg["cup_lookback"] == 3
+
+
+# ───────────────────────── HANDLE DEPTH BOUNDARY (shallow cap edge) ──────────────────────
+#
+# eff_shallow = _vol_aware_pullback_tolerances(atr_pct=0.02, 0.50)[0] = min(0.75, 0.50+0.02*1.5)
+#             = 0.53.  collapse_cap = _collapse_cap(0.02) = min(0.25, max(0.06, 6*0.02)) = 0.12.
+# So the BINDING handle-depth cap is collapse_cap=0.12 (12% off the rim). Test the edge.
+
+class TestCupAndHandleDepthBoundary:
+    def _run_with_handle_low(self, handle_low):
+        df = _cup_handle_df()
+        df.loc[10, "Low"] = handle_low  # idx 10 is the handle low inside the [9:12] window
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards():
+            _base_settings(ms)
+            return cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+
+    def test_handle_just_inside_collapse_cap_fires(self):
+        """Handle depth just UNDER the 12% collapse cap (rim 10.00, low 8.85 -> 11.5%) -> a
+        shallow handle -> FIRES (and the EMA-hold must still pass; 9-EMA mocked at 9.50, so
+        keep the low above 9.50*(1-wick))."""
+        # 11.5% depth is below collapse_cap but the handle low 8.85 < 9.50 EMA would trip the
+        # EMA-hold first. Use a depth just under 12% that is also above the EMA: low 9.55 -> 4.5%.
+        ok, reason, dbg = self._run_with_handle_low(9.55)
+        assert ok is True, f"shallow handle (4.5%) must fire, got {reason}"
+        assert dbg["handle_depth_pct"] == pytest.approx(4.5, abs=0.05)
+
+    def test_handle_at_collapse_cap_edge_fires(self):
+        """Depth EXACTLY at the cap is allowed: the reject is strict ``depth > cap``. A handle
+        low of 8.80 (rim 10.00) gives depth == collapse_cap (0.12) -> ``0.12 > 0.12`` is False
+        -> the cap passes. The 9-EMA is mocked low (8.00) so ONLY the depth cap is the binding
+        boundary under test (the EMA-hold can't pre-reject)."""
+        df = _cup_handle_df()
+        df.loc[10, "Low"] = 8.80  # rim 10.00 -> depth = 0.12 == collapse_cap (strict > fails)
+        low_ema = {**_good_arrays(), "ema_9": [8.00] * 13}  # EMA below the handle low -> EMA-hold OK
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards(arrays=low_ema):
+            _base_settings(ms)
+            ok, reason, dbg = cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+        assert ok is True, f"depth exactly at collapse cap must pass strict > reject, got {reason}"
+        assert dbg["handle_depth_pct"] == pytest.approx(12.0, abs=0.05)
+
+    def test_handle_eps_beyond_collapse_cap_no_fire(self):
+        """Depth one tick BEYOND the cap (low 8.79 -> 12.1%) -> a breakdown, not a handle ->
+        NO FIRE (even with the EMA-hold satisfied so the cap is the binding reject)."""
+        df = _cup_handle_df()
+        df.loc[10, "Low"] = 8.79  # depth 0.121 > 0.12
+        low_ema = {**_good_arrays(), "ema_9": [8.00] * 13}
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards(arrays=low_ema):
+            _base_settings(ms)
+            ok, reason, dbg = cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+        assert ok is False
+        assert reason == "cup_and_handle_handle_too_deep"
+
+
+# ───────────────────────── 9-EMA HOLD BOUNDARY + fail-OPEN on missing EMA ────────────────
+
+class TestCupAndHandleEma9HoldBoundary:
+    def test_ema9_none_fails_open_does_not_block(self):
+        """ema_9[cur] is None (missing read) -> the EMA-hold is SKIPPED (fail-OPEN; an absent
+        EMA must never block) -> the cup still FIRES on the other guards."""
+        df = _cup_handle_df()
+        none_ema = {**_good_arrays(), "ema_9": [None] * 13}
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards(arrays=none_ema):
+            _base_settings(ms)
+            ok, reason, dbg = cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+        assert ok is True, f"missing EMA must fail-open (not block), got {reason}"
+        assert reason == "cup_and_handle_break"
+        assert "ema9" not in dbg  # the below-ema9 branch was never entered
+
+    def test_handle_just_above_ema9_band_fires(self):
+        """handle_low just ABOVE the (vol-aware) 9-EMA tolerance band -> holds the EMA -> FIRES.
+        ema_wick at atr_pct=0.02 = max(0.001, 0.02*0.5)=0.01 -> band edge = ema*(1-0.01).
+        handle_low 9.70, set ema so 9.70 sits just inside: ema=9.79 -> 9.79*0.99=9.6921 < 9.70."""
+        df = _cup_handle_df()
+        edge_ema = {**_good_arrays(), "ema_9": [9.79] * 13}
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards(arrays=edge_ema):
+            _base_settings(ms)
+            ok, reason, dbg = cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+        assert ok is True, f"handle just inside the EMA band must fire, got {reason}"
+
+    def test_handle_just_below_ema9_band_no_fire(self):
+        """handle_low just BELOW the EMA tolerance band -> over-extended below the 9-EMA -> the
+        risky handle Ross warns against -> NO FIRE. ema=9.81 -> 9.81*0.99=9.7119 > 9.70."""
+        df = _cup_handle_df()
+        edge_ema = {**_good_arrays(), "ema_9": [9.81] * 13}
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards(arrays=edge_ema):
+            _base_settings(ms)
+            ok, reason, dbg = cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+        assert ok is False
+        assert reason == "cup_and_handle_handle_below_ema9"
+        assert dbg["ema9"] == pytest.approx(9.81, abs=1e-6)
+
+
+# ───────────────────────── HANDLE WINDOW DEGENERACY (no handle bars) ─────────────────────
+
+class TestCupAndHandleHandleWindow:
+    def test_no_handle_when_top2_is_adjacent_to_cur(self):
+        """When the second top is the bar immediately before cur (h_start == h_end) there are
+        NO completed handle bars between the rim and the break -> ``cup_and_handle_no_handle``.
+        Build a frame whose 2nd swing high sits at idx == cur-1."""
+        # 13 bars; a clean cup with EXACTLY two swing highs at the rim (idx 3 & idx 11) and
+        # monotone legs (no interior local maxima). i2 = 11 = cur-1 -> h_start = i2+1 = 12 ==
+        # h_end = cur = 12 -> ``h_end <= h_start`` -> no completed handle bars.
+        bars = [
+            (9.20, 9.00), (9.60, 9.30), (9.85, 9.55),
+            (10.00, 9.70),   # 3 TOP1 (rim)
+            (9.70, 9.45), (9.50, 9.25), (9.40, 9.15),   # cup decline (single valley at idx 6)
+            (9.45, 9.20), (9.55, 9.30), (9.70, 9.45), (9.85, 9.60),  # monotone rise back
+            (10.00, 9.75),   # 11 TOP2 (rim, idx == cur-1)
+            (9.96, 9.85),    # 12 cur (does NOT break on the bar; no handle bars exist)
+        ]
+        rows = [{"Open": (h + l) / 2, "High": h, "Low": l, "Close": (h + l) / 2, "Volume": 1_000_000}
+                for h, l in bars]
+        df = pd.DataFrame(rows)
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards():
+            _base_settings(ms)
+            ok, reason, dbg = cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+        assert ok is False
+        assert reason == "cup_and_handle_no_handle"
+
+
+# ───────────────────────── TICK-BREAK vs VOLUME (vol only gates completed bar) ──────────
+
+class TestCupAndHandleTickBreakVolume:
+    def test_tick_break_fires_without_volume_surge(self):
+        """The tick-break path returns BEFORE the completed-bar volume gate, so a live tick
+        through the rim fires even with NO volume surge (volume only gates the completed-bar
+        break). Proves the two fire paths have DISTINCT post-tape requirements."""
+        df = _cup_handle_df()
+        df.loc[12, "High"] = _RIM - 0.01  # no completed-bar break -> only the tick path
+        weak_vol = {**_good_arrays(), "volume_ratio": [1.0] * 13}  # no surge anywhere
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards(arrays=weak_vol):
+            _base_settings(ms)
+            ok, reason, dbg = cup_and_handle_confirmation(
+                df, entry_interval="5m", symbol="TEST", db=MagicMock(), live_price=_RIM + 0.20,
+            )
+        assert ok is True, f"tick-break must fire without a volume surge, got {reason}"
+        assert reason == "cup_and_handle_break_tick_ok"
+        assert dbg["live_price"] == pytest.approx(_RIM + 0.20, abs=1e-6)
+
+    def test_volume_at_threshold_fires(self):
+        """Completed-bar break with volume_ratio EXACTLY at the spike multiple (1.5) -> the
+        reject is strict ``< mult`` -> at-threshold passes -> FIRES."""
+        df = _cup_handle_df()
+        at_vol = {**_good_arrays(), "volume_ratio": [1.0] * 12 + [1.5]}  # exactly 1.5
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards(arrays=at_vol):
+            _base_settings(ms)
+            ok, reason, dbg = cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+        assert ok is True, f"volume exactly at the spike multiple must pass strict < reject, got {reason}"
+        assert reason == "cup_and_handle_break"
+        assert dbg["vol_ratio"] == pytest.approx(1.5, abs=1e-6)
+
+    def test_volume_eps_below_threshold_no_fire(self):
+        """volume_ratio one tick BELOW the multiple (1.49 < 1.5) -> dead break -> NO FIRE."""
+        df = _cup_handle_df()
+        lo_vol = {**_good_arrays(), "volume_ratio": [1.0] * 12 + [1.49]}
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards(arrays=lo_vol):
+            _base_settings(ms)
+            ok, reason, dbg = cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+        assert ok is False
+        assert reason == "cup_and_handle_low_volume"
+        assert dbg["vol_ratio"] == pytest.approx(1.49, abs=1e-6)
+
+    def test_volume_ratio_fallback_from_raw_volume(self):
+        """When compute_all_from_df returns NO volume_ratio (vr empty / None at cur), the gate
+        falls back to a raw 21-bar relvol off the Volume column. Build a break bar with a big
+        raw-volume surge so the fallback clears the multiple -> FIRES."""
+        df = _cup_handle_df()
+        # make the break bar's raw Volume 5x the trailing mean so the fallback relvol >> 1.5.
+        df.loc[12, "Volume"] = 5_000_000
+        no_vr = {**_good_arrays(), "volume_ratio": []}  # empty -> fallback path
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards(arrays=no_vr):
+            _base_settings(ms)
+            ok, reason, dbg = cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+        assert ok is True, f"raw-volume fallback surge must fire, got {reason}"
+        assert reason == "cup_and_handle_break"
+        assert dbg["vol_ratio"] >= 1.5
+
+
+# ───────────────────────── GUARD ORDERING: tape strictly AFTER L2 / extension ───────────
+
+class TestCupAndHandleGuardChain:
+    def test_l2_veto_short_circuits_before_tape(self):
+        """L2 veto fires BEFORE the tape gate -> when L2 vetoes, tape_confirms_hold is NEVER
+        called (proves the structural/L2 chase-guards run ahead of the last tape gate)."""
+        df = _cup_handle_df()
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards() as g:
+            _base_settings(ms)
+            g.mocks[f"{_GATES}._l2_entry_veto"].return_value = ("l2_big_seller", {})
+            ok, reason, dbg = cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+        assert ok is False
+        assert reason == "cup_and_handle_l2_big_seller"
+        g.mocks[f"{_GATES}.tape_confirms_hold"].assert_not_called()
+
+    def test_extension_short_circuits_before_l2_and_tape(self):
+        """The parabolic-extension guard runs BEFORE L2 and tape -> when it vetoes, neither
+        _l2_entry_veto nor tape_confirms_hold is called."""
+        df = _cup_handle_df()
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards() as g:
+            _base_settings(ms)
+            g.mocks[f"{_GATES}._hod_extension_ok"].return_value = (False, {"hod_extended_vs": "vwap"})
+            ok, reason, dbg = cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+        assert ok is False
+        assert reason == "cup_and_handle_extended"
+        g.mocks[f"{_GATES}._l2_entry_veto"].assert_not_called()
+        g.mocks[f"{_GATES}.tape_confirms_hold"].assert_not_called()
+
+    def test_backside_short_circuits_before_extension(self):
+        """The backside guard (the #1 chase guard) runs BEFORE the extension/L2/tape chain ->
+        when it vetoes, _hod_extension_ok is never reached."""
+        df = _cup_handle_df()
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards() as g:
+            _base_settings(ms)
+            g.mocks[f"{_GATES}._detect_back_side"].return_value = (True, "macd_cross_down")
+            ok, reason, dbg = cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+        assert ok is False
+        assert reason == "cup_and_handle_back_side"
+        g.mocks[f"{_GATES}._hod_extension_ok"].assert_not_called()
+
+
+# ───────────────────────── FLAG DEFAULT + TOP-LEVEL FAIL-OPEN (except path) ──────────────
+
+class TestCupAndHandleFlagAndFailOpen:
+    def test_flag_defaults_off_when_attribute_absent(self):
+        """The flag default is False: a settings object WITHOUT the attribute -> getattr default
+        False -> disabled (NO FIRE) BEFORE any computation. (Conservative default-off; the gate
+        is opt-in.)"""
+        df = _cup_handle_df()
+        # A bare settings stand-in with NO cup_and_handle flag attribute.
+        bare = SimpleNamespace()
+        with patch(f"{_GATES}.settings", bare):
+            ok, reason, dbg = cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST")
+        assert ok is False
+        assert reason == "cup_and_handle_disabled"
+
+    def test_internal_exception_fails_open_to_error_decline(self):
+        """Any unexpected exception inside the gate -> caught -> fail-OPEN to a BENIGN decline
+        ``cup_and_handle_error`` (never a fire, never a raise that crashes the runner tick).
+        Force compute_all_from_df to raise AFTER the structure passes."""
+        df = _cup_handle_df()
+        with patch(f"{_GATES}.settings") as ms, \
+                patch(f"{_GATES}._batch_c_atr_pct", return_value=(0.02, 0.20)), \
+                patch(f"{_GATES}.compute_all_from_df", side_effect=RuntimeError("boom")):
+            _base_settings(ms)
+            ok, reason, dbg = cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST", db=MagicMock())
+        assert ok is False
+        assert reason == "cup_and_handle_error"
+        assert dbg == {"entry_interval": "5m"}
+
+    def test_flag_off_skips_all_indicator_computation(self):
+        """Flag OFF must short-circuit BEFORE compute_all_from_df / _batch_c_atr_pct run
+        (byte-identical no-op; no indicator work, no guard calls)."""
+        df = _cup_handle_df()
+        with patch(f"{_GATES}.settings") as ms, \
+                patch(f"{_GATES}.compute_all_from_df") as caf, \
+                patch(f"{_GATES}._batch_c_atr_pct") as atr:
+            ms.chili_momentum_cup_and_handle_entry_enabled = False
+            ok, reason, dbg = cup_and_handle_confirmation(df, entry_interval="5m", symbol="TEST")
+        assert ok is False
+        assert reason == "cup_and_handle_disabled"
+        caf.assert_not_called()
+        atr.assert_not_called()

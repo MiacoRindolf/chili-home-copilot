@@ -222,3 +222,124 @@ def test_flag_off_byte_identical_on_slow_frame():
     # and OFF never stamps the gate-only debug keys.
     assert "max_recovery_bars" not in dbg_off
     assert "strong_action" not in dbg_off
+
+
+# ── HARDENING: explicit per-bar BOUNDARY around max_recovery_bars (3 / 4 / 5 / 6) ──────
+# The gate's decision is: bars < max FIRE; bar == max FIRES only on strong_action; bar > max
+# REJECT unconditionally. Pin every boundary so an off-by-one (e.g. `>=` instead of `>`, or
+# `== max` flipped to `< max`) regression is caught at the exact transition.
+@pytest.mark.parametrize(
+    "offset, flush_dry, expect_ok, expect_reason",
+    [
+        # 3rd bar (< max=4): the bar-count gate is a no-op. With strong action it fires;
+        # with weak action the EXISTING flush-dry guard (NOT the bar-count gate) declines it.
+        (3, True, True, "wick_reclaim"),
+        (3, False, False, "wick_reclaim_flush_not_dry"),
+        # 4th bar (== max=4): the relaxation boundary — fires ONLY with strong action
+        (4, True, True, "wick_reclaim"),
+        (4, False, False, "wick_reclaim_slow_recovery"),
+        # 5th bar (> max=4): rejected unconditionally, even on strong action
+        (5, True, False, "wick_reclaim_slow_recovery"),
+        (5, False, False, "wick_reclaim_slow_recovery"),
+        # 6th bar (> max=4): rejected unconditionally, even on strong action
+        (6, True, False, "wick_reclaim_slow_recovery"),
+        (6, False, False, "wick_reclaim_slow_recovery"),
+    ],
+)
+def test_bar_count_boundary_matrix(offset, flush_dry, expect_ok, expect_reason):
+    # widen the scan look-back so the rejection is always DISCOVERED -> the bar-count gate
+    # (not a too-narrow scan window) is the decider.
+    df, atr_list, vr_list = _frame(rej_offset=offset, flush_dry=flush_dry)
+    ok, reason, dbg = _run(
+        df, atr_list, vr_list, _settings(gate_on=True, vwap_K=offset + 1)
+    )
+    assert ok is expect_ok, (offset, flush_dry, reason, dbg)
+    assert reason == expect_reason, (offset, flush_dry, dbg)
+    if expect_reason == "wick_reclaim_slow_recovery":
+        # a rejection by the gate stamps the offset + cap so triage sees WHY it was slow.
+        assert dbg.get("rejection_bar_offset") == offset, dbg
+        assert dbg.get("max_recovery_bars") == 4, dbg
+        assert dbg.get("strong_action") is bool(flush_dry), dbg
+
+
+# ── 3rd-bar weak-action is NOT attributed to the slow-recovery gate ────────────────────
+# Below the boundary the gate must let weak action through to the EXISTING flush-dry guard
+# (so a weak-action sub-boundary frame is decided by flush-dry, never by the bar-count gate).
+def test_third_bar_weak_action_not_slow_recovery():
+    df, atr_list, vr_list = _frame(rej_offset=3, flush_dry=False)
+    ok, reason, dbg = _run(
+        df, atr_list, vr_list, _settings(gate_on=True, vwap_K=4)
+    )
+    # offset 3 < max 4 -> the bar-count gate is a no-op and must NOT claim this case.
+    # Control passes through to the EXISTING flush-dry guard, which (flush_dry=False) is what
+    # actually declines it -> proving the weak action was attributed to the right (pre-gate)
+    # leg, not mis-attributed to the slow-recovery bar-count gate.
+    assert reason != "wick_reclaim_slow_recovery", (reason, dbg)
+    assert ok is False, (reason, dbg)
+    assert reason == "wick_reclaim_flush_not_dry", (reason, dbg)
+    assert "max_recovery_bars" not in dbg, dbg
+
+
+# ── EDGE: None / empty / short (<10 bars) frames -> the insufficient-bars fail-open ────
+def test_none_frame_insufficient_bars():
+    ok, reason, dbg = _run(None, [], [], _settings(gate_on=True))
+    assert ok is False
+    assert reason == "wick_reclaim_insufficient_bars", (reason, dbg)
+
+
+def test_empty_frame_insufficient_bars():
+    df = pd.DataFrame({"Open": [], "High": [], "Low": [], "Close": [], "Volume": []})
+    ok, reason, dbg = _run(df, [], [], _settings(gate_on=True))
+    assert ok is False
+    assert reason == "wick_reclaim_insufficient_bars", (reason, dbg)
+
+
+def test_short_frame_below_min_bars():
+    # 9 rows: one under the len(df) < 10 floor -> rejected BEFORE any gate logic runs.
+    df = pd.DataFrame(
+        {
+            "Open": [10.0] * 9,
+            "High": [10.1] * 9,
+            "Low": [9.9] * 9,
+            "Close": [10.05] * 9,
+            "Volume": [1.0] * 9,
+        }
+    )
+    ok, reason, dbg = _run(df, [_ATR_ABS] * 9, [1.0] * 9, _settings(gate_on=True))
+    assert ok is False
+    assert reason == "wick_reclaim_insufficient_bars", (reason, dbg)
+
+
+# ── EDGE: a missing OHLCV column -> the broad except fail-OPEN (never raises/blocks) ───
+def test_missing_column_fails_open():
+    # drop "Open": the >=10-bar guard passes, then df["Open"] raises -> the function's
+    # try/except must fail-OPEN to a benign decline, NOT propagate the KeyError.
+    df, atr_list, vr_list = _frame(rej_offset=2, flush_dry=True)
+    df = df.drop(columns=["Open"])
+    ok, reason, dbg = _run(df, atr_list, vr_list, _settings(gate_on=True))
+    assert ok is False
+    assert reason == "wick_reclaim_error", (reason, dbg)
+
+
+# ── FLAG PARITY on the 4th-bar WEAK frame: ON rejects (gate), OFF falls through ────────
+# Complements the slow-frame parity test: on the boundary weak-action frame the gate ON
+# returns the gate reason; OFF must NEVER return it (the whole gate block is skipped).
+def test_flag_off_byte_identical_on_fourth_bar_weak():
+    df, atr_list, vr_list = _frame(rej_offset=4, flush_dry=False)
+
+    ok_on, reason_on, dbg_on = _run(
+        df, atr_list, vr_list, _settings(gate_on=True, vwap_K=5)
+    )
+    ok_off, reason_off, dbg_off = _run(
+        df, atr_list, vr_list, _settings(gate_on=False, vwap_K=5)
+    )
+
+    # ON: the relaxation is withheld -> the bar-count gate rejects.
+    assert ok_on is False and reason_on == "wick_reclaim_slow_recovery"
+    # OFF: the gate is skipped entirely. flush_dry=False -> the EXISTING flush-dry guard is
+    # what now decides (the pre-gate behaviour), so the reason is the flush-dry one, never
+    # the slow-recovery one, and the gate-only debug keys are absent.
+    assert reason_off != "wick_reclaim_slow_recovery", (reason_off, dbg_off)
+    assert reason_off == "wick_reclaim_flush_not_dry", (reason_off, dbg_off)
+    assert "max_recovery_bars" not in dbg_off
+    assert "strong_action" not in dbg_off or "rejection_bar_offset" not in dbg_off
