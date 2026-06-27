@@ -42,5 +42,5 @@ Per-round shas: 7edb559→19c7a32→dce8bc0→90c9cd6→d82973b.
 - **LOW tail (note only):** vol-band algo-shutdown detector, tape volume-price divergence/absorption, jackknife-candle disqualify, stair-step trend state machine, MM-bid-ladder structure signals. PSY101/RH101 residual = human-discipline, correctly NOT mechanized.
 
 ### Part B build plan (each: build → unit-test → run → if green, ON + deploy)
-- [ ] B1 pre-arm move-exhaustion abandon (risk-reducing veto)
-- [ ] B2 catalyst-conviction size multiplier (bounded, under 3x ceiling)
+- [x] B1 pre-arm move-exhaustion abandon (bbcd224) — 20 tests green; ON
+- [x] B2 catalyst-conviction size multiplier (a0b1102) — 28 tests green (caught+fixed a falsy-zero bug); ON
