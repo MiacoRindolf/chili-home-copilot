@@ -5332,6 +5332,11 @@ def tick_live_session(
                 le["entry_l2_snapshot"] = _l2
             else:
                 le.pop("entry_l2_snapshot", None)
+            # Persist the FIRED trigger reason so the entry-sizing path (which runs on a
+            # LATER tick in LIVE_ENTRY_CANDIDATE, where the local _trigger_reason is no
+            # longer in scope) can thread it into the adaptive spread-cost veto for the
+            # RECLAIM carve-out (derate-only + permissive R base for dip/VWAP-reclaims).
+            le["entry_trigger_reason"] = _trigger_reason
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
             _emit(
@@ -6741,6 +6746,10 @@ def tick_live_session(
                     stop_distance=_scv_stop_dist,
                     db=db,
                     flag_enabled=True,
+                    # RECLAIM CARVE-OUT: thread the FIRED entry-trigger reason so a
+                    # dip/VWAP-reclaim (which fires at the widest-spread moment) is
+                    # DERATE-ONLY (never hard-vetoed) + judged vs the permissive R base.
+                    entry_trigger_reason=le.get("entry_trigger_reason"),
                 )
                 if not _scv_allow:
                     le["spread_cost_veto"] = {"reason": _scv_reason, **(_scv_meta or {})}

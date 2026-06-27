@@ -4223,6 +4223,13 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_COST_MAX_FRACTION_OF_R"),
         description="ONE documented base: the max fraction of the structural risk R (= stop_distance) the round-trip spread cost may consume. Above this the spread is eating the edge; combined with an extreme name-relative anomaly it hard-vetoes, otherwise it size-derates toward the floor. Adaptive (R-relative), not a flat $ or bps.",
     )
+    chili_momentum_spread_cost_reclaim_max_fraction_of_r: float = Field(
+        default=0.35,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_COST_RECLAIM_MAX_FRACTION_OF_R"),
+        description="RECLAIM CARVE-OUT — the ONE documented MORE-PERMISSIVE max fraction of the structural risk R the round-trip spread may consume when the entry-trigger is a RECLAIM/dip family (dip_buy / vwap_reclaim / flush_dip / deep_reclaim / wick_reclaim / bounce / curl). A reclaim fires at the widest-spread / thinnest-book moment by construction (the other entry gates already carve it out), so it gets a looser R base (default 0.35 vs the non-reclaim 0.25) AND is DERATE-ONLY (never hard-veto). Non-reclaim entries use chili_momentum_spread_cost_max_fraction_of_r unchanged. Adaptive (R-relative), not a flat $ or bps.",
+    )
     chili_momentum_spread_anomaly_p50_mult: float = Field(
         default=2.0,
         ge=1.0,
