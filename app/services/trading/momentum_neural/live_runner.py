@@ -2739,6 +2739,129 @@ def _breakout_bailout_lock_in_seconds(*, explosive: bool) -> float:
         return 0.0
 
 
+def bail_on_no_confirmation(
+    *,
+    entry_price: float,
+    bid: float,
+    high_water_mark: float | None,
+    held_seconds: float,
+    min_hold_seconds: float,
+    window_seconds: float,
+    buffer_bps: float,
+    ofi: float | None = None,
+) -> bool:
+    """GAP1 — affirmative breakout-or-bailout (Warrior re-audit 2026-06-26). The deployed
+    bailout is REACTIVE (price-retest-FAIL on the bid). This is the AFFIRMATIVE side: within
+    [min_hold, window] seconds of the fill, BAIL only on GENUINE non-confirmation —
+
+      * NO new high since entry above the confirmation buffer (high_water_mark <
+        entry*(1+buffer)), i.e. the breakout never followed through; AND
+      * the live bid is at/below the entry (near/below the fill, not extended up); AND
+      * the tape is NOT accelerating up (ofi is None/unknown OR ofi <= 0). When live OFI
+        shows buyers stepping IN (ofi > 0) the entry IS confirming → never bail.
+
+    A winner that POPS then consolidates is IMMUNE: its high_water_mark prints above the
+    buffer, so the first clause is False and this returns False. Pure / fail-closed (any
+    bad input → False → no bail; the structural stop is unaffected)."""
+    try:
+        e = float(entry_price)
+        b = float(bid)
+    except (TypeError, ValueError):
+        return False
+    if not (math.isfinite(e) and math.isfinite(b)) or e <= 0 or b <= 0:
+        return False
+    try:
+        held = float(held_seconds)
+        win = float(window_seconds)
+        mn = float(min_hold_seconds)
+    except (TypeError, ValueError):
+        return False
+    if win <= 0 or held < mn or held > win:
+        return False
+    # CONFIRMATION = a new high above the buffer over entry. high_water_mark is the
+    # peak bid since entry; absent it, treat the current bid as the best high seen
+    # (fail-closed toward NOT bailing if it has extended).
+    try:
+        bps = max(0.0, float(buffer_bps))
+    except (TypeError, ValueError):
+        bps = 0.0
+    confirm_level = e * (1.0 + bps / 10_000.0)
+    hwm = None
+    try:
+        if high_water_mark is not None and math.isfinite(float(high_water_mark)):
+            hwm = float(high_water_mark)
+    except (TypeError, ValueError):
+        hwm = None
+    peak = max(hwm if hwm is not None else b, b)
+    if peak >= confirm_level:
+        return False  # a new high above the buffer = the breakout confirmed → immune
+    # No follow-through high. Require the bid to be at/below entry (non-confirmation),
+    # NOT merely consolidating a few bps up.
+    if b > e:
+        return False
+    # Tape must not be accelerating up. Unknown OFI (None) does not block the bail
+    # (the no-new-high + bid<=entry conditions already establish non-confirmation),
+    # but a positive OFI (buyers stepping in) is live confirmation → do NOT bail.
+    try:
+        if ofi is not None and float(ofi) > 0.0:
+            return False
+    except (TypeError, ValueError):
+        pass
+    return True
+
+
+def instant_bid_below_fill_cut(
+    *,
+    entry_price: float,
+    bid: float,
+    held_seconds: float,
+    window_seconds: float,
+    margin_bps: float,
+) -> bool:
+    """GAP2 — instant bid-below-fill cut (Warrior re-audit 2026-06-26). Right after the
+    fill, if the live BID has dropped BELOW the fill price by MORE than spread noise (the
+    move failed at the entry tick), cut FAST instead of waiting for the structural stop.
+
+    The noise discriminator is ``margin_bps``: the bid must be < entry*(1 - margin/1e4),
+    so a bid merely sitting at/just under the fill (the normal spread on a fresh long) does
+    NOT trigger — only a genuine bid-collapse below the fill does. Tight window (first few
+    seconds). Pure / fail-closed (bad input → False → no cut)."""
+    try:
+        e = float(entry_price)
+        b = float(bid)
+        held = float(held_seconds)
+        win = float(window_seconds)
+        mbps = max(0.0, float(margin_bps))
+    except (TypeError, ValueError):
+        return False
+    if not (math.isfinite(e) and math.isfinite(b)) or e <= 0 or b <= 0:
+        return False
+    if win <= 0 or held < 0 or held > win:
+        return False
+    threshold = e * (1.0 - mbps / 10_000.0)
+    return b < threshold
+
+
+def _regime_holdtime_band_mult(*, explosive: bool) -> float:
+    """GAP3 (regime-conditioned hold-time, Warrior re-audit 2026-06-26): the give-back
+    band multiplier for the runner cushion-trail, conditioned on the ENTRY regime via the
+    deployed explosiveness classifier. HOT/explosive ⇒ hot_mult (>= 1.0, hold the runner
+    through red LONGER); COLD/non-explosive ⇒ cold_mult (<= 1.0, cut chop QUICKER).
+    Returns 1.0 (byte-identical, no scaling) unless the GAP3 flag is ON. The trail is
+    ratchet-only, so a hot mult can only DECLINE to tighten the live stop — it never
+    widens an existing stop (no risk added)."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_regime_holdtime_enabled", False)):
+            return 1.0
+        if explosive:
+            m = float(getattr(settings, "chili_momentum_regime_holdtime_hot_mult", 1.25) or 1.25)
+            return max(1.0, m)
+        m = float(getattr(settings, "chili_momentum_regime_holdtime_cold_mult", 0.85) or 0.85)
+        return min(1.0, max(1e-6, m))
+    except (TypeError, ValueError):
+        return 1.0
+
+
 def _held_position_keeps_exit_on_boundary_fail(state: str, has_position: Any) -> bool:
     """A held momentum position must keep its EXIT/stop management even when the
     entry-oriented boundary risk eval (viability freshness / caps / concurrency)
@@ -6893,6 +7016,93 @@ def tick_live_session(
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
+        # GAP2 — INSTANT BID-BELOW-FILL CUT (Warrior re-audit 2026-06-26). Right after
+        # the fill, if the live bid has collapsed BELOW the fill by more than spread
+        # noise (the move failed at the entry tick), cut FAST via the BAILOUT machinery
+        # — well inside the structural stop. ENTERED-only (scaling/trailing are already
+        # in profit, past their target partial). Fresh-quote gated (never on a stale/
+        # halted book). Flag OFF (default) ⇒ this whole block is a no-op ⇒ byte-identical.
+        # PROTECTIVE: only cuts a FAILED entry faster; it never widens any stop.
+        if (
+            st == STATE_LIVE_ENTERED
+            and bool(getattr(settings, "chili_momentum_instant_bid_below_fill_cut_enabled", False))
+            and bid is not None
+            and math.isfinite(float(bid))
+            and float(bid) > 0
+            and int(le.get("halt_stale_streak") or 0) == 0
+            and not le.get("suspected_halt_since_utc")
+            and instant_bid_below_fill_cut(
+                entry_price=avg,
+                bid=float(bid),
+                held_seconds=held,
+                window_seconds=float(getattr(settings, "chili_momentum_instant_bid_cut_window_seconds", 6.0) or 0.0),
+                margin_bps=float(getattr(settings, "chili_momentum_instant_bid_cut_margin_bps", 25.0) or 0.0),
+            )
+        ):
+            le["last_bailout_trigger"] = "instant_bid_below_fill"
+            _commit_le(sess, le)
+            _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+            _emit(db, sess, "live_bailout", {
+                "reason": "instant_bid_below_fill_cut",
+                "entry_price": avg,
+                "bid": bid,
+                "held_seconds": held,
+                "window_seconds": float(getattr(settings, "chili_momentum_instant_bid_cut_window_seconds", 6.0) or 0.0),
+                "margin_bps": float(getattr(settings, "chili_momentum_instant_bid_cut_margin_bps", 25.0) or 0.0),
+            })
+            db.flush()
+            return {"ok": True, "session_id": sess.id, "state": sess.state}
+
+        # GAP1 — BAIL ON ABSENCE-OF-STRENGTH (affirmative breakout-or-bailout, Warrior
+        # re-audit 2026-06-26). Within [min_hold, window] seconds of the fill, if the
+        # breakout showed NO confirming strength — no new high above the confirm buffer
+        # AND the bid is at/below entry AND the tape is not accelerating up — the thesis
+        # did not confirm, so BAIL before the stop via the BAILOUT machinery. A winner
+        # that pops then consolidates (high-water mark above the buffer) is IMMUNE. The
+        # OFI read is fail-open (None ⇒ governed by the price conditions). ENTERED-only,
+        # fresh-quote gated. Flag OFF (default) ⇒ no-op ⇒ byte-identical. PROTECTIVE only.
+        if (
+            st == STATE_LIVE_ENTERED
+            and bool(getattr(settings, "chili_momentum_bail_on_no_confirmation_enabled", False))
+            and bid is not None
+            and math.isfinite(float(bid))
+            and float(bid) > 0
+            and int(le.get("halt_stale_streak") or 0) == 0
+            and not le.get("suspected_halt_since_utc")
+        ):
+            _nc_ofi = None
+            try:
+                from .pipeline import _live_ofi_microprice as _nc_ofi_fn
+
+                _nc_ofi, _ = _nc_ofi_fn(sess.symbol, db=db)
+            except Exception:
+                _nc_ofi = None
+            if bail_on_no_confirmation(
+                entry_price=avg,
+                bid=float(bid),
+                high_water_mark=_float_or_none(pos.get("high_water_mark")),
+                held_seconds=held,
+                min_hold_seconds=float(getattr(settings, "chili_momentum_no_confirmation_min_hold_seconds", 8.0) or 0.0),
+                window_seconds=float(getattr(settings, "chili_momentum_no_confirmation_window_seconds", 20.0) or 0.0),
+                buffer_bps=float(getattr(settings, "chili_momentum_no_confirmation_buffer_bps", 10.0) or 0.0),
+                ofi=_nc_ofi,
+            ):
+                le["last_bailout_trigger"] = "no_confirmation"
+                _commit_le(sess, le)
+                _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                _emit(db, sess, "live_bailout", {
+                    "reason": "bail_on_no_confirmation",
+                    "entry_price": avg,
+                    "bid": bid,
+                    "high_water_mark": _float_or_none(pos.get("high_water_mark")),
+                    "held_seconds": held,
+                    "window_seconds": float(getattr(settings, "chili_momentum_no_confirmation_window_seconds", 20.0) or 0.0),
+                    "buffer_bps": float(getattr(settings, "chili_momentum_no_confirmation_buffer_bps", 10.0) or 0.0),
+                    "ofi": _nc_ofi,
+                })
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state}
+
         if st == STATE_LIVE_BAILOUT:
             # MAX-LOSS-CIRCUIT HALT GATE (2026-06-17): a circuit-originated bailout must
             # NOT submit into a halted/frozen book — a marketable-but-capped floor cannot
@@ -7100,6 +7310,13 @@ def tick_live_session(
                     _commit_le(sess, le)
             except Exception:
                 _ema5 = None
+            # GAP3: regime-conditioned hold-time — scale the give-back band by the
+            # entry regime (HOT ⇒ wider/hold longer, COLD ⇒ tighter/cut quicker).
+            # Default 1.0 (flag OFF) ⇒ byte-identical; ratchet-only ⇒ never weakens
+            # the live stop. Reuses the deployed _session_is_explosive classifier.
+            _regime_band_mult = _regime_holdtime_band_mult(
+                explosive=_session_is_explosive(via)
+            )
             _trailed = cushion_adaptive_trail_stop(
                 high_water_mark=_hwm_trail,
                 entry_price=avg,
@@ -7111,6 +7328,7 @@ def tick_live_session(
                 current_stop=stop_px,
                 side_long=True,
                 ema_5m=_ema5,
+                regime_band_mult=_regime_band_mult,
             )
             if _trailed > stop_px:
                 pos["stop_price"] = _trailed

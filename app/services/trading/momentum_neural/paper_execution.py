@@ -738,6 +738,7 @@ def cushion_adaptive_trail_stop(
     current_stop: float,
     side_long: bool = True,
     ema_5m: float | None = None,
+    regime_band_mult: float = 1.0,
 ) -> float:
     """Cushion-adaptive runner trail (Ross day-4, 2026-06-11): exit patience is
     NOT one number — it scales with the CUSHION. "In the small account, the
@@ -786,6 +787,19 @@ def cushion_adaptive_trail_stop(
         day_r = 0.0
     patience = min(1.0, (unrealized_r + day_r) / max(rr, 1e-9))
     trail_bps = floor_bps + (ceil_bps - floor_bps) * patience
+    # GAP3 (regime-conditioned hold-time, Warrior re-audit 2026-06-26): scale the
+    # give-back band by the ENTRY regime. HOT/explosive ⇒ mult > 1 (wider band ⇒ a
+    # LOWER trailed candidate ⇒ the runner is held through red longer); COLD ⇒
+    # mult < 1 (tighter band ⇒ a HIGHER trailed candidate ⇒ chop is cut quicker).
+    # Default 1.0 ⇒ byte-identical. This only ever moves the trailed CANDIDATE; the
+    # ratchet-only max(cs, be, trailed) below means an existing stop is NEVER widened
+    # (a hot mult cannot loosen the live stop — it just declines to tighten it).
+    try:
+        _rbm = float(regime_band_mult)
+        if math.isfinite(_rbm) and _rbm > 0:
+            trail_bps = trail_bps * _rbm
+    except (TypeError, ValueError):
+        pass
     if side_long:
         trailed = hwm * (1.0 - trail_bps / 10_000.0)
         # 5m-EMA structural runner anchor (2026-06-12 exit study: the bps band

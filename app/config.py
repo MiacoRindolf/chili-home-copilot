@@ -4703,6 +4703,85 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ORDER_NOTIONAL_GUARD_BPS"),
         description="Extra bps cushion applied to live market-entry ask when sizing against max notional; 0 disables.",
     )
+    # ── EXIT GAPS (Warrior re-audit 2026-06-26): PROTECTIVE exits only — they cut a
+    # FAILED/non-confirming entry FASTER (never weaken an existing stop) or HOLD a hot
+    # runner LONGER. Each kill-switch defaults OFF ⇒ the lane is BYTE-IDENTICAL. They
+    # reuse the deployed bailout / cushion-trail machinery; they NEVER fire on a winner
+    # that pops-then-consolidates (genuine non-confirmation is required) and NEVER add risk.
+    #
+    # GAP 1 — bail on ABSENCE-of-strength (affirmative breakout-or-bailout). The deployed
+    # bailout is REACTIVE (price-retest-FAIL + tape-weakness). This adds the affirmative
+    # side: within a short window after the fill, if the breakout shows NO confirming
+    # strength — tape NOT accelerating up AND no new high since entry AND price at/below a
+    # small buffer over the entry — the thesis did not confirm, so bail before the stop.
+    # A winner that pops (prints a new high above the confirm buffer) is IMMUNE.
+    chili_momentum_bail_on_no_confirmation_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BAIL_ON_NO_CONFIRMATION_ENABLED"),
+        description="GAP1: within the no-confirmation window after entry, bail if the breakout shows NO confirming strength (no new high since entry AND price at/below the confirm buffer over entry). A new high above the buffer makes the position immune (a popping winner is never cut). OFF (default) ⇒ byte-identical.",
+    )
+    chili_momentum_no_confirmation_window_seconds: float = Field(
+        default=20.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NO_CONFIRMATION_WINDOW_SECONDS"),
+        description="GAP1: seconds after entry fill during which the no-confirmation bail can fire. The check only applies inside this window; afterwards the structural stop/trail governs as today.",
+    )
+    chili_momentum_no_confirmation_min_hold_seconds: float = Field(
+        default=8.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NO_CONFIRMATION_MIN_HOLD_SECONDS"),
+        description="GAP1: minimum seconds the position must be held before the no-confirmation bail can fire (give the very first ticks a chance to print follow-through). Must be < the window.",
+    )
+    chili_momentum_no_confirmation_buffer_bps: float = Field(
+        default=10.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NO_CONFIRMATION_BUFFER_BPS"),
+        description="GAP1: confirmation buffer in bps above the entry fill. A new high at/above entry*(1+buffer) is CONFIRMATION (immune). The bail requires the high-water mark to be BELOW this buffer (no follow-through) AND the live bid at/below entry. Larger ⇒ stricter immunity (harder to count as confirmed).",
+    )
+    # GAP 2 — INSTANT bid-below-fill cut. Right after the fill, if the BID drops BELOW the
+    # fill price by more than spread noise (the move failed at the entry tick), cut FAST —
+    # don't wait for the structural stop. Distinguishes a real bid-collapse from normal
+    # spread chatter via a bps margin below the fill. Tight first-seconds window.
+    chili_momentum_instant_bid_below_fill_cut_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_INSTANT_BID_BELOW_FILL_CUT_ENABLED"),
+        description="GAP2: within the instant-cut window after entry, cut fast if the live bid has dropped below the fill price by more than the noise margin (entry failed at the tick). OFF (default) ⇒ byte-identical.",
+    )
+    chili_momentum_instant_bid_cut_window_seconds: float = Field(
+        default=6.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_INSTANT_BID_CUT_WINDOW_SECONDS"),
+        description="GAP2: seconds after entry fill during which the instant bid-below-fill cut can fire. Tight (first few seconds); afterwards the structural stop governs.",
+    )
+    chili_momentum_instant_bid_cut_margin_bps: float = Field(
+        default=25.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_INSTANT_BID_CUT_MARGIN_BPS"),
+        description="GAP2: how far BELOW the fill (bps) the bid must drop before the instant cut fires — the spread-noise discriminator. The bid must be < entry*(1 - margin) so a bid merely sitting at/just under the fill (normal spread) does NOT trigger.",
+    )
+    # GAP 3 — REGIME-CONDITIONED HOLD-TIME. The deployed regime conditions SIZE only. This
+    # scales the runner trail give-back by the entry regime: an EXPLOSIVE (hot) name gets a
+    # WIDER trail (hold the runner through red LONGER); a non-explosive (cold/choppy) name
+    # gets a TIGHTER trail (cut quicker). Reuses _session_is_explosive (the deployed regime
+    # classifier) + the cushion-trail band. LENGTHENS hot holds; only tightens cold ones.
+    chili_momentum_regime_holdtime_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REGIME_HOLDTIME_ENABLED"),
+        description="GAP3: scale the runner cushion-trail give-back by the entry regime — HOT/explosive ⇒ wider trail (hold longer), COLD ⇒ tighter trail (cut quicker). The structural stop is NEVER widened past its current value (ratchet-only preserved). OFF (default) ⇒ byte-identical.",
+    )
+    chili_momentum_regime_holdtime_hot_mult: float = Field(
+        default=1.25,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REGIME_HOLDTIME_HOT_MULT"),
+        description="GAP3: trail-band give-back multiple for a HOT (explosive) regime — >= 1.0 (widens the give-back so a runner is held through red longer). Applied to the cushion-trail band bps.",
+    )
+    chili_momentum_regime_holdtime_cold_mult: float = Field(
+        default=0.85,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REGIME_HOLDTIME_COLD_MULT"),
+        description="GAP3: trail-band give-back multiple for a COLD (non-explosive) regime — <= 1.0 (tightens the give-back so a chop is cut quicker). Applied to the cushion-trail band bps.",
+    )
     # ── Entry fill-rate (the equity 0-fill blocker: a marketable limit was cancelled
     # the instant the bid pipped one tick past it, while it was at the front of the book
     # and about to fill → orphaned). All three default to TODAY's exact behavior (parity
