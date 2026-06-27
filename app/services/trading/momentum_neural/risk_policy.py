@@ -695,6 +695,92 @@ def daily_trade_count_budget_decision(
         return True, {"reason": "error_fail_open"}
 
 
+def _minutes_since_rth_open_et() -> float | None:
+    """Minutes since the 09:30 ET RTH open for TODAY (clamped >= 0), or None.
+
+    Returns None BEFORE 09:30 ET (premarket — the time-fatigue leg is neutral there;
+    the early window has its own clock policy) and None on any error. Pure read of the
+    wall clock — no I/O. Used ONLY by the GAP-2 fatigue derate (size-down)."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        et = ZoneInfo("America/New_York")
+        now_et = datetime.now(et)
+        open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        if now_et < open_et:
+            return None
+        return max(0.0, (now_et - open_et).total_seconds() / 60.0)
+    except Exception:
+        return None
+
+
+def fatigue_derate_multiplier(
+    *,
+    trade_count_today: int,
+    max_trades_per_day: int,
+    minutes_since_open: float | None = None,
+    is_crypto: bool = False,
+) -> tuple[float, dict[str, Any]]:
+    """TIME + DECISION-FATIGUE size-down multiplier in [floor, 1.0] (GAP 2, PSY101).
+
+    Ross trades best EARLY: decision quality degrades as the session lengthens and as the
+    trade count climbs. This derate REDUCES the per-trade risk budget the deeper into the
+    session / the more trades taken today — it is bounded to ``(floor, 1.0]`` and is NEVER
+    > 1.0, so it can ONLY shrink size (the caller composes it multiplicatively under the
+    existing 3x clamp; the equity-relative notional ceiling + liquidity cap still bound qty).
+
+        time_frac  = clamp(minutes_since_open / full_session_minutes, 0, 1)   # 0 at open
+        trade_frac = clamp(trade_count_today / max(max_trades_per_day, 1), 0, 1)
+        derate     = 1.0 - 0.5*(1-floor as weight)... -> implemented as:
+        derate     = 1.0 - (1.0 - floor) * (0.5*time_frac + 0.5*trade_frac)
+        result     = clamp(derate, floor, 1.0)
+
+    The TWO legs are weighted equally and TOGETHER can pull the multiplier all the way to
+    ``floor`` (both maxed). Crypto (24/7, no RTH open) zeroes the TIME leg (``minutes_since_open``
+    is None) so only the trade-count leg applies — the time clock is meaningless there.
+
+    FAIL-NEUTRAL (returns 1.0): the flag is checked by the CALLER, so this helper is only
+    invoked when enabled; any bad/degenerate input here still returns 1.0 (never a derate
+    smaller than warranted, never > 1.0). Pure; no I/O. docs/DESIGN/MOMENTUM_LANE.md"""
+    meta: dict[str, Any] = {"fatigue_mult": 1.0}
+    try:
+        floor = float(getattr(settings, "chili_momentum_fatigue_derate_floor", 0.5) or 0.5)
+        if not math.isfinite(floor) or floor <= 0:
+            floor = 0.5
+        floor = max(0.1, min(1.0, floor))
+        full_min = float(getattr(settings, "chili_momentum_fatigue_full_session_minutes", 240.0) or 240.0)
+        if not math.isfinite(full_min) or full_min <= 0:
+            full_min = 240.0
+        # TIME leg (equities only; crypto has no RTH open -> neutral).
+        time_frac = 0.0
+        if not is_crypto and minutes_since_open is not None:
+            try:
+                time_frac = max(0.0, min(1.0, float(minutes_since_open) / full_min))
+            except (TypeError, ValueError):
+                time_frac = 0.0
+        # TRADE-COUNT leg.
+        try:
+            tc = max(0, int(trade_count_today))
+            mx = max(1, int(max_trades_per_day))
+            trade_frac = max(0.0, min(1.0, tc / mx))
+        except (TypeError, ValueError):
+            trade_frac = 0.0
+        fatigue = 0.5 * time_frac + 0.5 * trade_frac  # in [0, 1]
+        derate = 1.0 - (1.0 - floor) * fatigue
+        mult = max(floor, min(1.0, derate))
+        meta = {
+            "fatigue_mult": round(mult, 4),
+            "time_frac": round(time_frac, 4),
+            "trade_frac": round(trade_frac, 4),
+            "minutes_since_open": (round(float(minutes_since_open), 1) if minutes_since_open is not None else None),
+            "trade_count_today": int(max(0, int(trade_count_today))) if isinstance(trade_count_today, (int, float)) else 0,
+            "floor": round(floor, 3),
+        }
+        return mult, meta
+    except Exception:
+        return 1.0, {"fatigue_mult": 1.0, "reason": "error_fail_neutral"}
+
+
 def _prior_session_pnl_over_equity(
     db: Any, *, execution_family: str | None, lookback_days: int
 ) -> tuple[float | None, list[float]]:

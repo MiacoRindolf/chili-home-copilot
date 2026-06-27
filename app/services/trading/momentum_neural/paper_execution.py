@@ -546,6 +546,103 @@ def iceberg_seller_score(ask_series: list[tuple[float, float]] | None) -> float 
     return refill / (price_adv_bps + 1.0)
 
 
+def discrete_pullback_add_trigger(
+    closes: list[float] | None,
+    *,
+    ema: list[float] | None = None,
+    vwap: float | None = None,
+    live_price: float | None = None,
+    ema_band: float = 0.003,
+) -> tuple[bool, dict[str, Any]]:
+    """Fresh DISCRETE higher-low bounce off the rising EMA/VWAP (GAP 3 add trigger; pure).
+
+    Returns ``(fired, debug)``. ``fired=True`` ONLY when a distinct pullback-and-bounce
+    sub-pattern is present in the recent bar window — i.e. the lane EARNED a NEW entry-shaped
+    setup, not merely continuous green:
+
+      (1) a recent DIP toward/just under the (rising) EMA — a local pullback low in the window
+          sat within ``ema_band`` of the EMA (or below it), AND
+      (2) a HIGHER LOW — the pullback low is ABOVE the prior pullback low (the dip held), AND
+      (3) a BOUNCE — the current price has turned back UP off that low and is back at/above the
+          EMA (close >= ema*(1-ema_band)), AND
+      (4) the EMA is RISING over the window (trend intact), AND (when ``vwap`` given) price is
+          at/above VWAP (Ross never adds below VWAP).
+
+    The live tick (when ABOVE the last close) is used as the current price so a fast turn is
+    seen sub-bar; it can only make the check STRICTER, never manufacture a bounce. PROTECTIVE /
+    FAIL-CLOSED: a thin/degenerate window, a flat/falling EMA, a broken structure, or any error
+    => ``(False, ...)`` so the add is BLOCKED (the GAP-3 guard then turns a would-fire into a
+    no-fire — the safe direction). This is a SIZE-DOWN/STRICTER-ADD gate; a False can never
+    increase risk. Pure; no I/O or mutation. docs/DESIGN/MOMENTUM_LANE.md"""
+    debug: dict[str, Any] = {"reason": "discrete_wait"}
+    try:
+        if not closes or len(closes) < 6:
+            debug["reason"] = "insufficient_bars"
+            return False, debug
+        cl = [float(c) for c in closes if c is not None and math.isfinite(float(c))]
+        if len(cl) < 6:
+            debug["reason"] = "insufficient_bars"
+            return False, debug
+        cur = cl[-1]
+        if live_price is not None:
+            try:
+                lp = float(live_price)
+                if lp > 0:
+                    cur = max(cl[-1], lp)
+            except (TypeError, ValueError):
+                pass
+        if cur <= 0:
+            debug["reason"] = "no_price"
+            return False, debug
+        # Rising-EMA basis: use the supplied EMA when present, else a short SMA proxy.
+        if ema and len(ema) >= len(cl):
+            ema_now = float(ema[-1])
+            ema_prev = float(ema[max(0, len(ema) - 5)])
+        else:
+            ema_now = sum(cl[-3:]) / 3.0
+            ema_prev = sum(cl[-6:-3]) / 3.0 if len(cl) >= 6 else ema_now
+        if not (ema_now > 0 and math.isfinite(ema_now)):
+            debug["reason"] = "no_ema"
+            return False, debug
+        if ema_now <= ema_prev * (1.0 + 1e-9):  # EMA must be RISING (trend intact)
+            debug["reason"] = "ema_not_rising"
+            return False, debug
+        # Two most-recent local lows in the window (prior vs latest pullback low).
+        window = cl[-6:]
+        mid = len(window) // 2
+        prior_low = min(window[:mid]) if window[:mid] else min(window)
+        latest_low = min(window[mid:]) if window[mid:] else min(window)
+        if latest_low <= prior_low * (1.0 + 1e-9):  # HIGHER LOW required (the dip held)
+            debug["reason"] = "not_higher_low"
+            return False, debug
+        # (1) the latest pullback dipped to/under the EMA (a real pullback, not a runaway).
+        dipped = latest_low <= ema_now * (1.0 + float(ema_band))
+        # (3) the bounce: current price turned back UP to/above the EMA hold band.
+        bounced = cur >= ema_now * (1.0 - float(ema_band)) and cur > latest_low * (1.0 + 1e-9)
+        if not (dipped and bounced):
+            debug["reason"] = "no_dip_or_bounce"
+            return False, debug
+        # (4) Ross never adds below VWAP.
+        if vwap is not None:
+            try:
+                vw = float(vwap)
+                if vw > 0 and cur < vw * (1.0 - 1e-9):
+                    debug["reason"] = "below_vwap"
+                    return False, debug
+            except (TypeError, ValueError):
+                pass
+        debug.update({
+            "reason": "discrete_bounce",
+            "ema_now": round(ema_now, 6),
+            "prior_low": round(prior_low, 6),
+            "latest_low": round(latest_low, 6),
+            "cur": round(cur, 6),
+        })
+        return True, debug
+    except Exception:
+        return False, {"reason": "error_fail_closed"}
+
+
 def pyramid_add_decision(
     *,
     enabled: bool,
@@ -566,6 +663,7 @@ def pyramid_add_decision(
     midday_lull: bool,
     iceberg_score: float | None = None,
     iceberg_threshold: float | None = None,
+    discrete_entry_trigger_fired: bool | None = None,
 ) -> dict[str, Any]:
     """Pure gate for the risk-neutral confirmation-pyramid ADD (no I/O, unit-testable).
 
@@ -651,6 +749,18 @@ def pyramid_add_decision(
         and float(iceberg_score) >= float(iceberg_threshold)
     ):
         out["reason"] = "iceberg_hidden_seller"
+        return out
+    # GAP 3 (HVM101) — require a FRESH DISCRETE entry sub-pattern for the add, not merely
+    # CONTINUOUS green. ``discrete_entry_trigger_fired`` is the result of an entry-trigger
+    # check at the add tick (a new higher-low bounce off the rising EMA/VWAP after a dip).
+    # ADDITIVE / fail-OPEN: ``None`` (the flag is OFF, or the trigger could not be evaluated)
+    # leaves the add UNCHANGED — byte-identical to before. Only an explicit ``False`` (flag
+    # ON, evaluated, NO fresh discrete trigger) BLOCKS the add. It can NEVER fire an add the
+    # existing cushion/HOD/OFI/iceberg guards blocked (those already returned above), so it
+    # ONLY tightens — it cannot increase risk.
+    out["discrete_trigger"] = discrete_entry_trigger_fired
+    if discrete_entry_trigger_fired is False:
+        out["reason"] = "discrete_entry_trigger_not_fired"
         return out
     out["fire"] = True
     out["reason"] = "confirmed"

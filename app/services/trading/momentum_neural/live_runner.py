@@ -6219,8 +6219,38 @@ def tick_live_session(
                     le["hot_cold_size"] = _hc_meta
             except Exception:
                 _hot_cold_mult = 1.0
+        # GAP 2 TIME/DECISION-FATIGUE DERATE (PSY101; Ross trades best EARLY): size DOWN
+        # as the session lengthens (minutes since the 09:30 ET RTH open) and/or today's
+        # real entered-trade count grows. The multiplier is bounded (floor, 1.0] — it can
+        # ONLY shrink the per-trade risk budget, composes multiplicatively under the SAME
+        # 3x clamp below, and compute_risk_first_quantity still caps qty at max_notional,
+        # so it can NEVER push notional past any ceiling. ENTRY-fill sizing path only (it
+        # physically cannot reach an exit). OFF (default) / fail-neutral => 1.0 (byte-
+        # identical). Replay applies the SAME helper with the SAME inputs => parity.
+        _time_fatigue_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_fatigue_derate_enabled", False)):
+            try:
+                from .risk_policy import (
+                    _count_real_entries_today as _fd_count,
+                    _minutes_since_rth_open_et as _fd_minutes,
+                    fatigue_derate_multiplier as _fd_mult,
+                )
+
+                _fd_is_crypto = str(sess.symbol or "").upper().endswith("-USD")
+                _fd_trades = _fd_count(db, execution_family=ef)
+                _fd_max = int(getattr(settings, "chili_momentum_daily_trade_count_base", 5) or 5)
+                _time_fatigue_mult, _time_fatigue_meta = _fd_mult(
+                    trade_count_today=_fd_trades,
+                    max_trades_per_day=_fd_max,
+                    minutes_since_open=(None if _fd_is_crypto else _fd_minutes()),
+                    is_crypto=_fd_is_crypto,
+                )
+                if _time_fatigue_mult < 1.0:
+                    le["time_fatigue_derate"] = _time_fatigue_meta
+            except Exception:
+                _time_fatigue_mult = 1.0
         _eff_max_loss = min(
-            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult) * float(_fatigue_mult) * float(_sym_fatigue_mult) * float(_hot_cold_mult),
+            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult) * float(_fatigue_mult) * float(_sym_fatigue_mult) * float(_hot_cold_mult) * float(_time_fatigue_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE
@@ -6487,6 +6517,14 @@ def tick_live_session(
             )
             if not _tcb_ok:
                 _emit(db, sess, "live_entry_blocked_daily_trade_count_budget", _tcb_meta)
+                # GAP 1: hitting the daily trade-count budget is a broken over-trading
+                # discipline rule — arm the NEXT-day lockout (no-op unless the flag is on).
+                # Best-effort; never affects this tick's block result.
+                try:
+                    from ..governance import set_next_day_trading_lockout
+                    set_next_day_trading_lockout("daily_trade_count_budget")
+                except Exception:
+                    pass
                 _safe_transition(db, sess, STATE_WATCHING_LIVE)
                 db.flush()
                 return {
@@ -6881,6 +6919,59 @@ def tick_live_session(
         held = (_utcnow() - t0).total_seconds()
         trail_activate_return = 1.0 + float(params["trail_activate_return_bps"]) / 10_000.0
 
+        # GAP 4 CONSECUTIVE-HALT-DOWN LIQUIDATE (SS101-062 ZJYL/HKD halt-ladder trap):
+        # a name that prints CONSECUTIVE down-halts (each halt RESUMES LOWER = a cascading
+        # limit-down death-spiral) is a trap — stand aside rather than hold. Uses the lane's
+        # existing halt lifecycle (suspected_halt_since_utc set at the stale-quote onset,
+        # halt_resumed_at_utc stamped on the resume): we stamp the last FRESH bid before a
+        # halt, and on each NEW resume compare the resume bid to that pre-halt ref. A resume
+        # LOWER increments the consecutive-down counter; a flat/up resume RESETS it. At/above
+        # the threshold we LIQUIDATE via the SAME bailout exit machinery. RISK-REDUCING ONLY:
+        # it can ONLY force an EXIT of an already-held position (never opens/sizes/holds);
+        # flag OFF (default) => the whole block is skipped => byte-identical.
+        if (
+            bool(getattr(settings, "chili_momentum_halt_down_cascade_liquidate_enabled", False))
+            and st in (STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING)
+            and bid is not None
+            and math.isfinite(float(bid))
+            and float(bid) > 0
+        ):
+            _in_halt = bool(le.get("suspected_halt_since_utc"))
+            if not _in_halt:
+                # Fresh, non-halted tick: remember the last good bid as the pre-halt ref.
+                le["halt_down_pre_ref_bid"] = float(bid)
+            _resume_marker = le.get("halt_resumed_at_utc")
+            _last_processed = le.get("halt_down_last_resume_utc")
+            if _resume_marker and _resume_marker != _last_processed:
+                # A halt has just RESUMED — classify it as down / flat-up exactly once.
+                le["halt_down_last_resume_utc"] = _resume_marker
+                _pre_ref = _float_or_none(le.get("halt_down_pre_ref_bid"))
+                _cnt = int(le.get("halt_down_consecutive_count") or 0)
+                if _pre_ref is not None and _pre_ref > 0 and float(bid) < _pre_ref * (1.0 - 1e-9):
+                    _cnt += 1  # resumed LOWER -> a down-halt in the cascade
+                    le["halt_down_consecutive_count"] = _cnt
+                    _emit(db, sess, "halt_down_detected", {
+                        "consecutive": _cnt, "pre_halt_bid": round(_pre_ref, 6),
+                        "resume_bid": round(float(bid), 6),
+                    })
+                else:
+                    _cnt = 0  # resumed flat/up -> the cascade broke, reset
+                    le["halt_down_consecutive_count"] = 0
+                # Reset the pre-ref so the NEXT halt measures from this resume's price.
+                le["halt_down_pre_ref_bid"] = float(bid)
+                _commit_le(sess, le)
+                _threshold = int(getattr(settings, "chili_momentum_halt_down_cascade_threshold", 2) or 2)
+                if _cnt >= max(2, _threshold) and st != STATE_LIVE_BAILOUT:
+                    _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                    _emit(db, sess, "live_bailout", {
+                        "reason": "halt_down_cascade_liquidate",
+                        "consecutive_halt_downs": _cnt,
+                        "threshold": max(2, _threshold),
+                        "unrealized_pnl": (float(bid) - avg) * qty,
+                    })
+                    db.flush()
+                    return {"ok": True, "session_id": sess.id, "state": sess.state}
+
         # C1: Per-trade loss enforcement
         max_loss_usd = float(caps.get("max_loss_per_trade_usd") or 0)
         if max_loss_usd > 0 and st != STATE_LIVE_BAILOUT:
@@ -6950,6 +7041,15 @@ def tick_live_session(
                     if _circuit.get("breach"):
                         le["max_loss_circuit_fired"] = True
                         le["max_loss_circuit_floor_price"] = _circuit["floor_price"]
+                        # GAP 1: a max-loss-circuit fire is a single-trade max-loss rule
+                        # break (the tilt/revenge-prone signature) — arm the NEXT-day
+                        # lockout (no-op unless the flag is on). Best-effort; never affects
+                        # the bailout that follows.
+                        try:
+                            from ..governance import set_next_day_trading_lockout
+                            set_next_day_trading_lockout("max_loss_circuit")
+                        except Exception:
+                            pass
                         # EQUITY-FIRST: the absolute floor + repeg-skip apply to the RH
                         # EQUITY paths only (where the gap-through tail lives) — BOTH the
                         # unofficial robin_stocks rail (robinhood_spot) AND the sanctioned
@@ -7890,6 +7990,40 @@ def tick_live_session(
                                 # Fail-OPEN: any L2 read/parse error leaves the add unchanged.
                                 _iceberg_score = None
                                 _iceberg_thresh = None
+                        # GAP 3 DISCRETE-ADD trigger (HVM101): require a FRESH discrete
+                        # entry sub-pattern (a new higher-low bounce off the rising 9-EMA/
+                        # VWAP) for the add, not merely CONTINUOUS cushion+HOD+OFI. Computed
+                        # here from a fresh bar frame + the SAME indicator_core 9-EMA the
+                        # entry triggers use; passed to pyramid_add_decision. None (flag OFF,
+                        # crypto, or any read/parse error) => the add is UNCHANGED (the guard
+                        # is inert / fail-OPEN). An explicit False (flag ON, evaluated, no
+                        # fresh trigger) BLOCKS the add — it can ONLY tighten, never loosen.
+                        _discrete_add = None
+                        if _is_equity_pyr and bool(
+                            getattr(settings, "chili_momentum_pyramid_discrete_add_enabled", False)
+                        ):
+                            try:
+                                from ..market_data import fetch_ohlcv_df as _da_fetch
+                                from ..indicator_core import compute_all_from_df as _da_compute
+                                from .paper_execution import discrete_pullback_add_trigger as _da_trig
+
+                                _da_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+                                _da_df = _da_fetch(sess.symbol, interval=_da_iv, period="5d")
+                                if _da_df is not None and not getattr(_da_df, "empty", True) and len(_da_df) >= 6:
+                                    _da_arr = _da_compute(_da_df, needed={"ema_9", "vwap"})
+                                    _da_closes = [float(x) for x in _da_df["Close"].astype(float).tolist()[-12:]]
+                                    _da_ema = _da_arr.get("ema_9") or []
+                                    _da_ema = [float(e) for e in _da_ema[-12:]] if _da_ema else None
+                                    _da_vwap_arr = _da_arr.get("vwap") or []
+                                    _da_vwap = float(_da_vwap_arr[-1]) if _da_vwap_arr else None
+                                    _da_fired, _da_dbg = _da_trig(
+                                        _da_closes, ema=_da_ema, vwap=_da_vwap, live_price=float(bid),
+                                    )
+                                    _discrete_add = bool(_da_fired)
+                                    le["pyramid_discrete_trigger"] = {"fired": _discrete_add, **_da_dbg}
+                            except Exception:
+                                # Fail-OPEN: any read/parse error leaves the add unchanged.
+                                _discrete_add = None
                         # SHARED pure predicate (one source of truth w/ replay + tests).
                         _decn = pyramid_add_decision(
                             enabled=True,  # outer block already gated on the flag
@@ -7910,6 +8044,7 @@ def tick_live_session(
                             midday_lull=_lull,
                             iceberg_score=_iceberg_score,
                             iceberg_threshold=_iceberg_thresh,
+                            discrete_entry_trigger_fired=_discrete_add,
                         )
                         _R0 = _decn.get("R0")
                         # GAP 6 ADD-INTO-THE-HALT (Warrior re-audit, RISKIEST — default OFF).

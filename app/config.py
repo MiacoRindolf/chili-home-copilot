@@ -5995,6 +5995,74 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ADD_INTO_HALT_MIN_PROFIT_R"),
         description="GAP 6: the minimum open profit (in units of the entry's structural risk R = avg_entry - original_stop) required before an add-into-halt is permitted. 1.0 = at least +1R in the green. Only consulted when chili_momentum_add_into_halt_enabled is ON.",
     )
+    # ── Warrior RISK re-audit gaps (4 RISK controls; each default OFF = byte-identical) ──
+    # GAP 1 — RULE-BREAK -> NO-TRADE-NEXT-DAY LOCKOUT (PSY101 Mod 10 operant conditioning):
+    # when a hard discipline rule is broken TODAY (a global daily-loss breach, the daily-
+    # trade-count budget exceeded, or a max-loss-circuit fire), arm a lockout that BLOCKS live
+    # arming for the NEXT ET trading session and AUTO-CLEARS once that session's ET day rolls
+    # past (never permanent). Persisted in trading_risk_state (regime='rulebreak_nextday_lockout')
+    # reusing the kill-switch DB infrastructure. RISK-REDUCING ONLY: it can ONLY block arming,
+    # never permit a trade that was otherwise blocked, never change sizing. OFF (default) => the
+    # lockout is never armed AND never consulted => byte-identical.
+    chili_momentum_rulebreak_nextday_lockout_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RULEBREAK_NEXTDAY_LOCKOUT_ENABLED"),
+        description="GAP 1 (RISK): when a discipline rule is broken today (daily-loss breach / trade-count budget exceeded / max-loss circuit fire), block LIVE ARMING for the next ET trading session, auto-clearing after that session's ET day rolls. Persisted in trading_risk_state (regime='rulebreak_nextday_lockout'). RISK-REDUCING ONLY (it can only block arming, never permit or up-size). false (default) = never armed, never consulted = byte-identical.",
+    )
+    # GAP 2 — TIME/DECISION-FATIGUE DERATE (PSY101 decision-fatigue; Ross trades best EARLY):
+    # size DOWN as the session lengthens (minutes since the 09:30 ET RTH open) and/or today's
+    # real entered-trade count grows. A multiplier in [floor, 1.0] applied to the per-trade RISK
+    # budget BEFORE compute_risk_first_quantity. RISK-REDUCING ONLY by construction: it is bounded
+    # to (0, 1.0] (never > 1.0), composes multiplicatively under the existing 3x clamp, and the
+    # equity-relative notional ceiling + liquidity cap still bound qty — so it can ONLY shrink size.
+    # OFF (default) => multiplier forced to 1.0 => byte-identical.
+    chili_momentum_fatigue_derate_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FATIGUE_DERATE_ENABLED"),
+        description="GAP 2 (RISK): derate the per-trade risk budget DOWN as the session lengthens (minutes since 09:30 ET open) and/or today's entered-trade count grows (Ross trades best early). Multiplier in [floor, 1.0]; composes under the existing 3x clamp. RISK-REDUCING ONLY (<= 1.0, only shrinks size). false (default) = 1.0 = byte-identical.",
+    )
+    chili_momentum_fatigue_derate_floor: float = Field(
+        default=0.5,
+        ge=0.1,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FATIGUE_DERATE_FLOOR"),
+        description="GAP 2: the FLOOR of the time/trade-count fatigue multiplier (the most the budget can be reduced). 0.5 = at most half size at peak fatigue. The ONE documented base; the derate is otherwise derived from elapsed RTH minutes + trade count. Only consulted when chili_momentum_fatigue_derate_enabled is ON.",
+    )
+    chili_momentum_fatigue_full_session_minutes: float = Field(
+        default=240.0,
+        gt=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FATIGUE_FULL_SESSION_MINUTES"),
+        description="GAP 2: minutes since the 09:30 ET RTH open at which the TIME leg of the fatigue derate reaches full weight (240 = 4h ~ Ross's prime 09:30-13:30 window). Only consulted when chili_momentum_fatigue_derate_enabled is ON.",
+    )
+    # GAP 3 — PYRAMID-ADD REQUIRES A FRESH DISCRETE SUB-PATTERN (HVM101): the deployed pyramid
+    # add fires on CONTINUOUS cushion + new-HOD + OFI. This ADDS an extra AND guard requiring a
+    # FRESH DISCRETE entry trigger (a new higher-low bounce off the rising EMA/VWAP after a dip)
+    # so the lane adds on a re-set setup, not merely continuous green. RISK-REDUCING ONLY: it can
+    # ONLY turn a would-fire add into a no-fire (it never relaxes the existing cushion/HOD/OFI/
+    # iceberg guards, never fires an add they blocked). OFF (default) => the discrete trigger is
+    # passed as None => the guard is inert => byte-identical to the existing pyramid behavior.
+    chili_momentum_pyramid_discrete_add_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PYRAMID_DISCRETE_ADD_ENABLED"),
+        description="GAP 3 (RISK): require a FRESH DISCRETE entry sub-pattern (a new higher-low bounce off the rising EMA/VWAP) for a pyramid ADD, on top of the existing CONTINUOUS cushion + new-HOD + OFI guards. RISK-REDUCING ONLY (it only tightens the add — turns a would-fire into a no-fire — never loosens a veto). false (default) = discrete trigger passed as None = guard inert = byte-identical.",
+    )
+    # GAP 4 — CONSECUTIVE-HALT-DOWN LIQUIDATE (SS101-062 ZJYL/HKD halt-ladder liquidation trap):
+    # if a HELD name prints CONSECUTIVE halt-DOWNs (each halt resumes LOWER = a cascading
+    # limit-down death-spiral) at/above the threshold, LIQUIDATE via the SAME bailout exit
+    # machinery rather than holding into the cascade. RISK-REDUCING ONLY: it can ONLY force an
+    # EXIT of an existing position (it never opens, sizes, or holds anything). OFF (default) =>
+    # the consecutive-down-halt counter is never consulted for a liquidation => byte-identical.
+    chili_momentum_halt_down_cascade_liquidate_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_DOWN_CASCADE_LIQUIDATE_ENABLED"),
+        description="GAP 4 (RISK): when a held name prints CONSECUTIVE down-halts (each halt resumes lower = a cascading limit-down) at/above chili_momentum_halt_down_cascade_threshold, LIQUIDATE via the existing bailout exit. RISK-REDUCING ONLY (it can only force an EXIT, never open/size/hold). false (default) = never consulted = byte-identical.",
+    )
+    chili_momentum_halt_down_cascade_threshold: int = Field(
+        default=2,
+        ge=2,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_DOWN_CASCADE_THRESHOLD"),
+        description="GAP 4: the number of CONSECUTIVE down-halts (resume-lower events) at/above which the held position is liquidated. 2 = the second consecutive limit-down resume triggers the stand-aside (SS101-062). Only consulted when chili_momentum_halt_down_cascade_liquidate_enabled is ON.",
+    )
     # ── FIX D: cache the Robinhood Agentic MCP adapter (perf bug-fix) ────────────────
     chili_momentum_cache_rh_agentic_adapter: bool = Field(
         default=True,

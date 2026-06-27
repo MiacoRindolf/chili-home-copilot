@@ -2414,6 +2414,22 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     except Exception:
         pass
 
+    # Guard 1b (GAP 1): NEXT-DAY rule-break lockout (PSY101 Mod 10). If a hard discipline
+    # rule was broken in a PRIOR ET session (daily-loss breach / trade-count budget /
+    # max-loss circuit), block LIVE ARMING for this session — auto-clears once the lockout's
+    # ET day rolls past. RISK-REDUCING ONLY: it can only SKIP arming (never permits a trade
+    # nor sizes one). Flag OFF (default) => check returns not-locked => byte-identical.
+    try:
+        from ..governance import check_next_day_trading_lockout
+
+        _locked, _lock_meta = check_next_day_trading_lockout()
+        if _locked:
+            out["skipped"] = "rulebreak_nextday_lockout"
+            out["lockout"] = _lock_meta
+            return out
+    except Exception:
+        pass
+
     # Reap stale pre-entry sessions FIRST so a faded leftover (e.g. a name armed
     # long ago whose intraday move never triggered) does not pin the only slot.
     reaped = _reap_stale_watching_sessions(db, user_id=uid, now=datetime.utcnow())
