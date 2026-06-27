@@ -6754,11 +6754,14 @@ def tick_live_session(
         # trade's expected R (round-trip spread cost as a fraction of the structural stop
         # distance). NEVER a flat bps bar — Ross low-float movers inherently trade wide
         # spreads (project_momentum_zero_fills_root_cause), so a flat veto re-creates the
-        # 0-fills over-restriction. This DERATES (sizes down, composing under the SAME 3x
-        # clamp + hard max_notional ceiling, so it can NEVER push notional past any cap) for
-        # moderate anomaly/cost and HARD-VETOES only at the extreme (EXTREME outlier vs the
-        # name's OWN p90 AND cost eats > the documented max fraction of R). A wide-but-TYPICAL
-        # low-float spread with a good R PASSES at mult=1.0. Flag OFF / fail-open => 1.0.
+        # 0-fills over-restriction. This is DERATE-ONLY (2026-06-27): it NEVER blocks an entry,
+        # only sizes it DOWN (composing under the SAME 3x clamp + hard max_notional ceiling, so
+        # it can NEVER push notional past any cap) — a momentum entry fires at the widest-spread
+        # instant, so blocking on spread IS the 0-fills trap. At the extreme (EXTREME outlier vs
+        # the name's OWN p90 AND cost eats > the documented max fraction of R) it FLOORS the size;
+        # a wide-but-TYPICAL low-float spread with a good R PASSES at mult=1.0. Flag OFF / fail-
+        # open => 1.0. (adaptive_spread_cost_veto_derate always returns allow=True; the `if not
+        # _scv_allow` branch below is kept as a defensive guard but is currently unreachable.)
         if bool(getattr(settings, "chili_momentum_adaptive_spread_cost_veto_enabled", False)):
             try:
                 from .spread_cost_veto import adaptive_spread_cost_veto_derate
