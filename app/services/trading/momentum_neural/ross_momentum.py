@@ -99,6 +99,52 @@ ROSS_FLOAT_ROTATION_PILLAR_WEIGHT = 0.10
 ROSS_FLOAT_ROTATION_CLEAR_FLOOR = 1.0
 ROSS_FLOAT_ROTATION_SATURATION = 5.0
 
+# OVER-ROTATION (exhaustion) references (opt-in via chili_momentum_float_overrotation_fix_enabled).
+# Ross SS101 nuance the legacy monotone curve MISSES: low-float rotation is BULLISH early, but a name
+# that has ALREADY rotated its float many times — especially MIDDAY/late — is EXHAUSTED (the buyers are
+# spent; the supply that absorbed all that volume now caps it). So projected-rotation contributes
+# positively up to a HEALTHY threshold, then is PENALISED for excess. The penalty is scaled by how much
+# of the morning session has elapsed (muted at the open where early float-burn is normal, full strength
+# late-morning) so a fast-but-fresh opening rotation is NOT punished. These are the ONE documented base
+# each (a healthy-rotation threshold + a session-minute at which the exhaustion read is fully on); the
+# within-batch PERCENTILE of float_rotation_pct still ORDERS names, so they shape the raw curve only.
+# All defaults live in app.config; these module fallbacks keep the function importable/testable IO-free.
+ROSS_FLOAT_OVERROTATION_THRESHOLD = 3.0       # projected float-turns above this = exhaustion-prone
+ROSS_FLOAT_OVERROTATION_SESSION_MINUTE = 120.0  # minutes-since-open at which the penalty is full-strength
+
+# DAILY 200-EMA ROOM reference (opt-in via chili_momentum_daily_200ema_room_enabled). Ross wants ROOM
+# above the daily 200MA: a name pinned to / just UNDER the 200MA from below is buying into macro
+# resistance (worse); clear room ABOVE = clean sky (better). ``dist_to_sma_200_atr`` (signed daily-ATR
+# units, + above / − below) is mapped to a [0,1] sub-score centered at 0.5 (neutral): >= +clear-room ATR
+# ⇒ ~1.0 (max reward), pinned (≈0) ⇒ ~0.5, well below ⇒ toward 0 (de-rate). The ONE documented knob is
+# the clear-room ATR (how far above the 200MA = fully clean sky). A re-rank tilt folded INTO
+# daily_structure_pct, never a veto.
+ROSS_DAILY_200EMA_CLEAR_ROOM_ATR = 1.0
+
+
+def daily_200ema_room_subscore(
+    dist_to_sma_200_atr: float | None,
+    *,
+    clear_room_atr: float = ROSS_DAILY_200EMA_CLEAR_ROOM_ATR,
+) -> float | None:
+    """Map signed daily-200MA distance (in daily-ATR units) to a [0,1] room sub-score.
+
+    ``dist_to_sma_200_atr``: + above the 200MA / − below (the daily_levels field).
+    Returns a [0,1] sub-score centered on 0.5 (neutral): clear room ABOVE the 200MA
+    (>= ``clear_room_atr``) ⇒ ~1.0 (reward), pinned (~0 ATR) ⇒ ~0.5, well BELOW the
+    200MA (buying into overhead macro resistance) ⇒ toward 0 (de-rate). Symmetric ramp
+    of half-width ``clear_room_atr`` around the 200MA. Fail-OPEN to ``None`` (omit the
+    tilt) when the distance is unknown (< 200 daily bars) — never de-ranked for absent
+    macro data. Pure / side-effect-free.
+    """
+    d = _to_float(dist_to_sma_200_atr)
+    if d is None:
+        return None
+    half = max(1e-9, float(clear_room_atr))
+    # 0.5 at the 200MA; +0.5 at +clear_room ATR above; -0.5 at -clear_room ATR below; clamp.
+    sub = 0.5 + 0.5 * max(-1.0, min(1.0, d / half))
+    return round(max(0.0, min(1.0, sub)), 4)
+
 # NEWS-CATALYST pillar weight (opt-in via chili_momentum_news_catalyst_weight_enabled, default OFF).
 # This is the FOURTH Ross pillar — the 🔥 on his scanner — that the scorer historically left a
 # STUB (never built; a name's news-ness never influenced its rank). Like float_rotation / squeeze_fuel
@@ -114,6 +160,54 @@ ROSS_FLOAT_ROTATION_SATURATION = 5.0
 # never rejected for lack of news). Absent set / flag OFF ⇒ the pillar is not in the blend ⇒
 # byte-identical ranking.
 ROSS_NEWS_CATALYST_PILLAR_WEIGHT = 0.10
+
+# PRICE SWEET-SPOT pillar weight (opt-in via chili_momentum_price_sweetspot_tilt_enabled, default OFF).
+# Ross trades mostly $3-10 (the high-conviction band); $1-3 and $10-20 are secondary. The lane's HARD
+# price-band gate ($1-20, in auto_arm) is UNTOUCHED — this is a SOFT PREFERENCE tilt only: a composable
+# price_band pillar the pipeline folds onto the active weight-set (score_universe self-renormalises),
+# boosting names in the sweet-spot and mildly de-rating names outside it (but still within the band).
+# 0.05 = the SMALLEST minority magnitude (half the other tilts) — price is a weak preference next to
+# float/RVOL/change, so it can only break near-ties, never out-rank a more-explosive name. Absent /
+# zero-weight / flag OFF ⇒ the pillar is not in the blend ⇒ byte-identical.
+ROSS_PRICE_SWEETSPOT_PILLAR_WEIGHT = 0.05
+# The documented sweet-spot bounds (Ross's $3-10 high-conviction band). Module fallbacks; the live
+# values come from config (chili_momentum_price_sweetspot_min / _max). Names INSIDE [min,max] read 1.0;
+# outside ramps down over a symmetric band-width toward the 0.5 neutral midpoint (never below — a price
+# outside the sweet-spot is a weak preference, not a fade).
+ROSS_PRICE_SWEETSPOT_MIN = 3.0
+ROSS_PRICE_SWEETSPOT_MAX = 10.0
+
+
+def price_sweetspot_subscore(
+    price: float | None,
+    *,
+    sweet_min: float = ROSS_PRICE_SWEETSPOT_MIN,
+    sweet_max: float = ROSS_PRICE_SWEETSPOT_MAX,
+) -> float | None:
+    """Map a name's price to a [0.5,1.0] sweet-spot preference sub-score.
+
+    Inside the Ross sweet-spot ``[sweet_min, sweet_max]`` ⇒ 1.0 (full preference). Outside,
+    a linear ramp DOWN toward the 0.5 neutral midpoint over a band-width equal to the
+    sweet-spot's own width on each side (so a name one sweet-width below ``sweet_min`` or
+    above ``sweet_max`` reads ~0.5). Never below 0.5 — a price outside the sweet-spot is a
+    weak DE-PREFERENCE, never treated as a fade (the hard band gate still bounds the pool).
+    Fail-OPEN to ``None`` (omit the pillar) on missing / non-positive price. Pure.
+    """
+    p = _to_float(price)
+    if p is None or p <= 0:
+        return None
+    lo = float(sweet_min)
+    hi = float(sweet_max)
+    if hi <= lo:
+        return None
+    if lo <= p <= hi:
+        return 1.0
+    width = hi - lo  # symmetric ramp half-width = the sweet-spot's own width
+    if p < lo:
+        frac = max(0.0, min(1.0, (lo - p) / width))
+    else:  # p > hi
+        frac = max(0.0, min(1.0, (p - hi) / width))
+    return round(1.0 - 0.5 * frac, 4)
 
 # News-catalyst grade reference sub-scores (centered on the 0.5 neutral midpoint, like squeeze_fuel).
 # STRONG (FDA/trial/partnership/contract/M&A/earnings-beat — the headlines Ross FAVORS) boosts ABOVE
@@ -558,6 +652,13 @@ def score_universe(
     _nc_raw = {sym: _first_float(sig or {}, "news_catalyst_pct") for sym, sig in signals.items()}
     nc_sorted = sorted(v for v in _nc_raw.values() if v is not None)
     _w_nc = float(w.get("news_catalyst") or 0.0)
+    # Price sweet-spot pillar (composable, opt-in): the per-symbol raw ``price_band_pct`` sub-score
+    # (Ross $3-10 preference -> [0.5,1.0]) stamped by the bridge. Graceful-degrade exactly like
+    # news_catalyst — absent / zero-weight ⇒ not in the blend (byte-identical). A SOFT preference,
+    # never a gate (the hard $1-20 band gate is enforced separately in auto_arm).
+    _pb_raw = {sym: _first_float(sig or {}, "price_band_pct") for sym, sig in signals.items()}
+    pb_sorted = sorted(v for v in _pb_raw.values() if v is not None)
+    _w_pb = float(w.get("price_band") or 0.0)
     # 6th/7th pillars (attention-leadership variant): the name's amplitude-leadership
     # share+rank of the live mover-field (the TRUE winner/loser separator) + its
     # dormant->explosive volume. Stamped cross-sectionally in _bridge_scanner_to_viability
@@ -593,6 +694,8 @@ def score_universe(
         sf_pct = _percentile_rank(_sf, sf_sorted) if _sf is not None else None
         _nc = _nc_raw.get(sym)
         nc_pct = _percentile_rank(_nc, nc_sorted) if _nc is not None else None
+        _pb = _pb_raw.get(sym)
+        pb_pct = _percentile_rank(_pb, pb_sorted) if _pb is not None else None
 
         present: list[tuple[float, float]] = []  # (percentile, weight)
         if rvol_pct is not None:
@@ -615,6 +718,8 @@ def score_universe(
             present.append((sf_pct, _w_sf))
         if nc_pct is not None and _w_nc > 0:
             present.append((nc_pct, _w_nc))
+        if pb_pct is not None and _w_pb > 0:
+            present.append((pb_pct, _w_pb))
 
         wsum = sum(wt for _, wt in present)
         score = (sum(pct * wt for pct, wt in present) / wsum) if wsum > 0 else 0.0
@@ -661,6 +766,8 @@ def score_universe(
                 _secondary.append((sf_pct, _w_sf))
             if nc_pct is not None and _w_nc > 0:
                 _secondary.append((nc_pct, _w_nc))
+            if pb_pct is not None and _w_pb > 0:
+                _secondary.append((pb_pct, _w_pb))
             _sec_wsum = sum(wt for _, wt in _secondary)
             quality_blend = (sum(p * wt for p, wt in _secondary) / _sec_wsum) if _sec_wsum > 0 else 0.5
             quality_blend = max(0.0, min(1.0, quality_blend))
@@ -685,6 +792,7 @@ def score_universe(
                 "float_rotation_pct": _fr if _w_fr > 0 else None,
                 "squeeze_fuel_pct": _sf if _w_sf > 0 else None,
                 "news_catalyst_pct": _nc if _w_nc > 0 else None,
+                "price_band_pct": _pb if _w_pb > 0 else None,
                 "pillars_present": [
                     name
                     for name, val in (
@@ -695,6 +803,7 @@ def score_universe(
                         ("float_rotation", fr_pct if _w_fr > 0 else None),
                         ("squeeze_fuel", sf_pct if _w_sf > 0 else None),
                         ("news_catalyst", nc_pct if _w_nc > 0 else None),
+                        ("price_band", pb_pct if _w_pb > 0 else None),
                     )
                     if val is not None
                 ],
@@ -1265,6 +1374,9 @@ def float_rotation_signal(
     *,
     clear_floor: float = ROSS_FLOAT_ROTATION_CLEAR_FLOOR,
     saturation: float = ROSS_FLOAT_ROTATION_SATURATION,
+    overrotation_threshold: float | None = None,
+    overrotation_session_minute: float | None = None,
+    minutes_since_open: float | None = None,
 ) -> FloatRotationSignal:
     """Compute Ross's float-rotation sustainability sub-score for one EQUITY name.
 
@@ -1283,6 +1395,16 @@ def float_rotation_signal(
     cannot clear its float — fades); ``saturation`` and above ⇒ 1.0 (ample fuel). Between,
     a smooth ramp. Fail-OPEN to ``rotation_pct=None`` (omit the pillar) on any missing /
     non-positive input — a name is NEVER de-ranked for absent float/volume data.
+
+    OVER-ROTATION (exhaustion) fix — opt-in, byte-identical when OFF: when
+    ``overrotation_threshold`` is provided (the caller resolves the kill-switch +
+    config), projected rotation ABOVE the threshold is treated as float-EXHAUSTION
+    rather than ever-more fuel: the sub-score is bent back DOWN from the saturation
+    peak the further it over-rotates. The penalty is scaled by the morning-session
+    fraction (``minutes_since_open`` / ``overrotation_session_minute``, clamped to
+    [0,1]) so it is MUTED at the open (early float-burn is normal/bullish) and reaches
+    full strength late-morning (a spent name midday/late = the exhaustion read). When
+    ``overrotation_threshold`` is ``None`` the legacy monotone curve is used unchanged.
     """
     cv = _to_float(cumulative_session_volume)
     fl = _to_float(shares_float)
@@ -1311,17 +1433,61 @@ def float_rotation_signal(
     else:
         rot_pct = 0.5 + 0.5 * max(0.0, min(1.0, (projected - float(clear_floor)) / span))
     rot_pct = max(0.0, min(1.0, rot_pct))
+
+    # ── OVER-ROTATION (exhaustion) bend (opt-in; byte-identical when threshold is None) ──
+    # A name projecting to rotate its float FAR beyond a healthy threshold has spent its
+    # buyers — especially midday/late. Bend the (otherwise saturating) sub-score DOWN by how
+    # far past the threshold it over-rotates, scaled by the morning-session fraction so the
+    # read is muted at the open and full-strength late. This NEVER raises the score (it only
+    # de-rates excess) and is clamped to the neutral midpoint as a floor (exhaustion de-rates,
+    # it never makes a real-fuel name look like a fade).
+    overrotated = False
+    over_excess = None
+    session_weight = None
+    if overrotation_threshold is not None:
+        thr = _to_float(overrotation_threshold)
+        if thr is not None and thr > 0 and projected > thr:
+            overrotated = True
+            # excess in [0,1]: 0 just above the threshold, 1.0 at >= saturation-beyond-threshold.
+            _over_span = max(1e-9, float(saturation))
+            over_excess = max(0.0, min(1.0, (projected - thr) / _over_span))
+            # session weight in [0,1]: 0 at the open, 1.0 at/after the full-strength minute.
+            full_min = _to_float(overrotation_session_minute)
+            mo = _to_float(minutes_since_open)
+            if full_min is not None and full_min > 0 and mo is not None and mo >= 0:
+                session_weight = max(0.0, min(1.0, mo / full_min))
+            else:
+                # unknown clock ⇒ apply at full strength (conservative: assume not-fresh).
+                session_weight = 1.0
+            # Pull rot_pct down from its (near-saturation) value toward the 0.5 neutral floor,
+            # by (excess * session_weight) * (the available headroom above neutral). Half-weight
+            # the bend (0.5*) so it stays a MEASURED de-rate, never a cliff.
+            headroom = max(0.0, rot_pct - 0.5)
+            rot_pct = rot_pct - 0.5 * over_excess * session_weight * headroom
+            rot_pct = max(0.0, min(1.0, rot_pct))
+
+    if overrotated:
+        reason = "overrotated_exhaustion"
+    elif projected >= float(clear_floor):
+        reason = "projects_to_clear"
+    else:
+        reason = "stalling_rotation"
     return FloatRotationSignal(
         rotation_pct=round(rot_pct, 4),
         float_rotation=round(rotation, 4),
         projected_rotation_at_eod=round(projected, 4),
-        reason=("projects_to_clear" if projected >= float(clear_floor) else "stalling_rotation"),
+        reason=reason,
         debug={
             "cum_vol": round(cv, 2),
             "float": round(fl, 2),
             "session_fraction": (round(sf_used, 4) if sf_used is not None else None),
             "clear_floor": float(clear_floor),
             "saturation": float(saturation),
+            "overrotated": overrotated,
+            "overrotation_threshold": (float(overrotation_threshold)
+                                       if overrotation_threshold is not None else None),
+            "over_excess": (round(over_excess, 4) if over_excess is not None else None),
+            "session_weight": (round(session_weight, 4) if session_weight is not None else None),
         },
     )
 

@@ -832,7 +832,10 @@ def run_momentum_neural_tick(
             # tilt PREFERS clean daily breakouts; it can never block a fill.
             if bool(getattr(settings, "chili_momentum_daily_context_enabled", True)):
                 try:
-                    from .ross_momentum import ROSS_PILLAR_WEIGHTS_DAILY_CONTEXT
+                    from .ross_momentum import (
+                        ROSS_PILLAR_WEIGHTS_DAILY_CONTEXT,
+                        daily_200ema_room_subscore as _r200_sub,
+                    )
                     from .daily_levels import compute_daily_context
                     from ..market_data import fetch_ohlcv_df as _fetch_daily
 
@@ -842,6 +845,12 @@ def run_momentum_neural_tick(
                     _gap_tilt = bool(getattr(settings, "chili_momentum_gap_geometry_tilt_enabled", True))
                     _rej_derate = bool(getattr(settings, "chili_momentum_red_rejection_derate_enabled", True))
                     _blue_ipo = bool(getattr(settings, "chili_momentum_blue_sky_recent_ipo_enabled", True))
+                    # 200-EMA ROOM tilt (opt-in, default OFF ⇒ dist_to_sma_200_atr stays discarded =
+                    # byte-identical). Reward clear room above the daily 200MA, penalise pinned/below.
+                    # Folded INTO daily_structure_pct (no viability.py change). Resolve flag + knob once.
+                    _r200_on = bool(getattr(settings, "chili_momentum_daily_200ema_room_enabled", False))
+                    _r200_clear = float(getattr(
+                        settings, "chili_momentum_daily_200ema_clear_room_atr", 1.0))
                     # blue-sky needs a long window to know the all-time-high + IPO recency;
                     # fetch max history only when that tilt is on (else keep the 1y default).
                     _period = "max" if _blue_ipo else "1y"
@@ -879,7 +888,18 @@ def run_momentum_neural_tick(
                                 fresh_catalyst=_fresh_cat,
                             )
                             if _dctx.daily_structure_pct is not None:
-                                _sig["daily_structure_pct"] = _dctx.daily_structure_pct
+                                _ds_val = _dctx.daily_structure_pct
+                                # 200-EMA ROOM blend (opt-in): fold the [0,1] room sub-score INTO
+                                # daily_structure_pct as an equal-weight average (a MEASURED minority
+                                # nudge, never a veto). OFF / unknown (< 200 bars) ⇒ unchanged.
+                                if _r200_on:
+                                    _room = _r200_sub(
+                                        _dctx.dist_to_sma_200_atr, clear_room_atr=_r200_clear)
+                                    if _room is not None:
+                                        _ds_val = max(0.0, min(1.0, 0.5 * _ds_val + 0.5 * _room))
+                                        _sig["dist_to_sma_200_atr"] = _dctx.dist_to_sma_200_atr
+                                        _sig["daily_200ema_room_pct"] = _room
+                                _sig["daily_structure_pct"] = _ds_val
                                 _sig["daily_breaking_major"] = bool(_dctx.breaking_major_level)
                                 _n_daily += 1
                         except Exception:
@@ -906,6 +926,18 @@ def run_momentum_neural_tick(
                     )
                     from .market_profile import minutes_since_regular_open as _mins_open
 
+                    # OVER-ROTATION (exhaustion) fix — opt-in, default OFF (byte-identical).
+                    # Resolve the kill-switch + its two documented knobs ONCE; when OFF we pass
+                    # overrotation_threshold=None ⇒ the signal uses the legacy monotone curve.
+                    _overrot_on = bool(getattr(
+                        settings, "chili_momentum_float_overrotation_fix_enabled", False))
+                    _overrot_thr = (
+                        float(getattr(settings, "chili_momentum_float_overrotation_threshold", 3.0))
+                        if _overrot_on else None
+                    )
+                    _overrot_min = float(getattr(
+                        settings, "chili_momentum_float_overrotation_session_minute", 120.0))
+
                     _n_fr = 0
                     for _sym, _sig in _ross_signals.items():
                         if not isinstance(_sig, dict) or str(_sym).upper().endswith("-USD"):
@@ -927,7 +959,12 @@ def run_momentum_neural_tick(
                             # session fraction: regular session is 390 min (09:30-16:00 ET).
                             _mo = _mins_open(_sym)
                             _sf = (max(0.0, float(_mo)) / 390.0) if _mo is not None else None
-                            _fr = _float_rotation_signal(_cum_vol, _flt, _sf)
+                            _fr = _float_rotation_signal(
+                                _cum_vol, _flt, _sf,
+                                overrotation_threshold=_overrot_thr,
+                                overrotation_session_minute=_overrot_min,
+                                minutes_since_open=(float(_mo) if _mo is not None else None),
+                            )
                             if _fr.rotation_pct is not None:
                                 _sig["float_rotation_pct"] = _fr.rotation_pct
                                 _sig["float_rotation"] = _fr.float_rotation
@@ -1021,6 +1058,7 @@ def run_momentum_neural_tick(
                 try:
                     from .ross_momentum import (
                         ROSS_NEWS_CATALYST_PILLAR_WEIGHT,
+                        ROSS_NEWS_GRADE_STRONG,
                         news_catalyst_signal as _news_catalyst_signal,
                     )
                     from .catalyst import (
@@ -1028,7 +1066,18 @@ def run_momentum_neural_tick(
                         strong_catalyst_symbols as _nc_strong,
                         weak_catalyst_symbols as _nc_weak,
                         fake_catalyst_symbols as _nc_fake,
+                        pr_cadence_active as _pr_cadence_active,
                     )
+
+                    # NEWS-PR CADENCE (opt-in, default OFF ⇒ no cadence boost = byte-identical):
+                    # Ross watches the top/bottom of the hour PREMARKET (7:00/7:30/8:00/8:30 ET)
+                    # for PR drops. When ON AND ET-now is inside a premarket PR window, a catalyst
+                    # name (already stamped with a news_catalyst_pct) gets a small additional
+                    # LEAN-IN toward 1.0 — a time-of-day nudge ON TOP of the grade, never a new
+                    # pillar and never a penalty (outside the window the name is unchanged).
+                    _pr_cadence_on = bool(getattr(
+                        settings, "chili_momentum_news_pr_cadence_enabled", False))
+                    _pr_window_now = _pr_cadence_on and _pr_cadence_active()
 
                     # Cached, best-effort grade sets (each fails-open to empty).
                     def _safe_set(fn) -> set[str]:
@@ -1056,14 +1105,72 @@ def run_momentum_neural_tick(
                                     all_catalyst_symbols=_set_all,
                                 )
                                 if _nc.news_pct is not None:
-                                    _sig["news_catalyst_pct"] = _nc.news_pct
+                                    _np = _nc.news_pct
+                                    # PR-CADENCE lean-in (opt-in): during a premarket PR window a
+                                    # FRESH-news catalyst name is treated as AT LEAST strong-grade
+                                    # (Ross leans in when the PR drops on the half/whole hour). Reuses
+                                    # the documented STRONG grade reference — no new magic number — and
+                                    # only ever RAISES the sub-score, never penalises. Outside the
+                                    # window (or flag OFF) ⇒ _np == _nc.news_pct ⇒ byte-identical.
+                                    if _pr_window_now:
+                                        _np = max(_np, float(ROSS_NEWS_GRADE_STRONG))
+                                    _sig["news_catalyst_pct"] = _np
                                     _sig["news_catalyst_grade"] = _nc.grade
+                                    if _pr_window_now and _np > _nc.news_pct:
+                                        _sig["news_pr_cadence_boost"] = True
                                     _n_nc += 1
                             except Exception:
                                 continue
                         if _n_nc > 0:
                             _weights = dict(_weights)
                             _weights["news_catalyst"] = ROSS_NEWS_CATALYST_PILLAR_WEIGHT
+                except Exception:
+                    pass
+            # PRICE SWEET-SPOT TILT (default OFF ⇒ byte-identical): Ross trades mostly $3-10.
+            # The HARD $1-20 price-band gate (auto_arm) is UNTOUCHED — this is a SOFT PREFERENCE
+            # pillar that BOOSTS names in the $3-10 sweet-spot and mildly de-rates names outside
+            # it (but still within the broad band). Map each EQUITY signal's current price to a
+            # [0.5,1.0] price_band_pct sub-score and FOLD a SMALL 0.05-weight pillar onto the
+            # active weight-set (composable — score_universe self-renormalises). MEASURED: price
+            # is the weakest pillar (half the others), so it only breaks near-ties; float/RVOL/
+            # change stay primary. Equity-only (crypto price semantics differ; the band gate is
+            # equity-only too). Flag DEFAULT-OFF; OFF ⇒ no sub-score stamped, no weight folded ⇒
+            # byte-identical.
+            if bool(getattr(settings, "chili_momentum_price_sweetspot_tilt_enabled", False)):
+                try:
+                    from .ross_momentum import (
+                        ROSS_PRICE_SWEETSPOT_PILLAR_WEIGHT,
+                        price_sweetspot_subscore as _price_sweetspot_subscore,
+                    )
+
+                    _ss_min = float(getattr(settings, "chili_momentum_price_sweetspot_min", 3.0))
+                    _ss_max = float(getattr(settings, "chili_momentum_price_sweetspot_max", 10.0))
+                    _n_pb = 0
+                    for _sym, _sig in _ross_signals.items():
+                        if not isinstance(_sig, dict) or str(_sym).upper().endswith("-USD"):
+                            continue  # equities only
+                        try:
+                            _px = None
+                            for _pk in ("price", "last", "close", "last_price"):
+                                _pv = _sig.get(_pk)
+                                if _pv is not None:
+                                    try:
+                                        _px = float(_pv)
+                                        break
+                                    except (TypeError, ValueError):
+                                        continue
+                            if _px is None:
+                                continue  # fail-open: omit the pillar for this name
+                            _pb = _price_sweetspot_subscore(
+                                _px, sweet_min=_ss_min, sweet_max=_ss_max)
+                            if _pb is not None:
+                                _sig["price_band_pct"] = _pb
+                                _n_pb += 1
+                        except Exception:
+                            continue
+                    if _n_pb > 0:
+                        _weights = dict(_weights)
+                        _weights["price_band"] = ROSS_PRICE_SWEETSPOT_PILLAR_WEIGHT
                 except Exception:
                     pass
             meta["ross_scores"] = {

@@ -2205,6 +2205,61 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FLOAT_ROTATION_TILT_ENABLED"),
         description="Volume/float rotation sustainability tilt (>=~5x EOD): reward names rotating their float multiple times as a fuel-remaining signal.",
     )
+    # ── Ross re-audit SELECTION tilts (each kill-switched DEFAULT-OFF = byte-identical) ──
+    # Four MEASURED selection-side tilts from the 2026-06-26 Warrior-courses re-audit. Each is a
+    # minority RE-RANK that NEVER dominates the explosive RVOL/change/float core and can NEVER
+    # fabricate an entry (selection/eligibility/arming only). Default OFF ⇒ no sub-score is stamped
+    # and no pillar weight is folded ⇒ ranking is byte-identical to the deployed image.
+    chili_momentum_float_overrotation_fix_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLOAT_OVERROTATION_FIX_ENABLED"),
+        description="Ross SS101 EXHAUSTION fix: the deployed float-rotation sub-score rewards higher projected rotation MONOTONICALLY, but EXCESSIVE rotation (over-rotated, especially midday/late session) is an exhaustion NEGATIVE, not bullish. When ON, the float_rotation_pct sub-score contributes positively up to a healthy threshold, then PENALISES projected rotation above it, AND de-weights the penalty severity by how much of the morning session has elapsed (the over-rotation read is muted at the open, strongest late). MEASURED re-rank only (never a veto, equity-only). OFF ⇒ the legacy monotone sub-score is used ⇒ byte-identical.",
+    )
+    chili_momentum_float_overrotation_threshold: float = Field(
+        default=3.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLOAT_OVERROTATION_THRESHOLD"),
+        description="The ONE documented knob for the over-rotation fix: projected-rotation-at-EOD (float turns) at/below this stays bullish; ABOVE it is treated as float-exhaustion and penalised (de-rated below the saturation peak). Reference float-multiple, not a hard cutoff (the within-batch percentile still orders names). Adaptive in spirit — a generalised Ross 'healthy rotation' ceiling.",
+    )
+    chili_momentum_float_overrotation_session_minute: float = Field(
+        default=120.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLOAT_OVERROTATION_SESSION_MINUTE"),
+        description="Minutes after the regular open (09:30 ET) at which the over-rotation penalty reaches FULL strength (e.g. 120 = ~11:30, late-morning). Before this the penalty ramps in linearly from the open (early float burn is normal/bullish); at/after it the exhaustion read is fully applied. The ONE documented session-clock knob.",
+    )
+    chili_momentum_daily_200ema_room_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_200EMA_ROOM_ENABLED"),
+        description="Wire the dead-computed daily 200-SMA room (daily_levels.dist_to_sma_200_atr — signed daily-ATR units, + above / − below) as a MEASURED selection tilt: reward CLEAR room above the daily 200MA (clean sky, no overhead macro resistance), penalise names pinned to / just under the 200MA from below (buying into resistance). Folded into daily_structure_pct alongside the other daily tilts (no viability.py change). OFF ⇒ dist_to_sma_200_atr stays discarded ⇒ byte-identical.",
+    )
+    chili_momentum_daily_200ema_clear_room_atr: float = Field(
+        default=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_200EMA_CLEAR_ROOM_ATR"),
+        description="The ONE documented knob for the 200-EMA room tilt: daily-ATR units of room ABOVE the 200MA at which the name is treated as fully 'clear sky' (max reward). Pinned/below-200MA reads ramp toward the de-rate. Adaptive (ATR-relative), not a fixed $.",
+    )
+    chili_momentum_news_pr_cadence_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NEWS_PR_CADENCE_ENABLED"),
+        description="Ross PR-clock cadence: PRs drop on the top/bottom of the hour premarket (7:00/7:30/8:00/8:30 ET). When ON, a CATALYST name (present in the news set) gets a small additional selection LEAN-IN during a PR window — but ONLY in premarket hours, ET. Outside the windows the name is NEUTRAL (no boost). Requires the news-catalyst pillar to be stamping; a pure time-of-day gate on top of it. OFF ⇒ no cadence boost ⇒ byte-identical.",
+    )
+    chili_momentum_news_pr_cadence_hours: str = Field(
+        default="7:00-7:30,8:00-8:30",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NEWS_PR_CADENCE_HOURS"),
+        description="The ONE documented knob for the PR-cadence windows: comma-separated HH:MM-HH:MM ranges in ET (premarket) during which catalyst names get the cadence lean-in. Default = the top/bottom-of-hour PR drops Ross watches (7:00-7:30, 8:00-8:30).",
+    )
+    chili_momentum_price_sweetspot_tilt_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PRICE_SWEETSPOT_TILT_ENABLED"),
+        description="Ross $3-10 SWEET-SPOT preference (NOT a hard cut — the $1-20 price-band gate is untouched): a MEASURED selection tilt that BOOSTS names in the $3-10 high-conviction band and mildly de-rates names outside it but still within the broad band. Folded as a composable price_band pillar onto the active Ross weight-set (score_universe self-renormalises). OFF ⇒ no sub-score is stamped and no pillar is folded ⇒ byte-identical.",
+    )
+    chili_momentum_price_sweetspot_min: float = Field(
+        default=3.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PRICE_SWEETSPOT_MIN"),
+        description="Lower bound of the Ross high-conviction sweet-spot ($3). Names at/above this and at/below the max get the full boost; below ramps down. Documented reference, not a hard gate.",
+    )
+    chili_momentum_price_sweetspot_max: float = Field(
+        default=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PRICE_SWEETSPOT_MAX"),
+        description="Upper bound of the Ross high-conviction sweet-spot ($10). Above this (but within the $1-20 band) ramps down toward the de-rate. Documented reference, not a hard gate.",
+    )
     chili_momentum_explosive_scoring_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_SCORING_ENABLED"),
