@@ -7213,6 +7213,8 @@ def tick_live_session(
         # existing late-fill sweep + pre-submit guard track each leg to a terminal resolution
         # (adopted | void) — no chunk leg can become an untracked stranded naked long. Absent
         # / single-order ⇒ chunk_order_ids is empty ⇒ this is a no-op (byte-identical).
+        # Invariants proven in tests/test_momentum_order_path_dedupe.py (recorded-before-ok,
+        # distinct cids, fail-closed-to-single, sweep adopts every leg, no double-count).
         for _chunk_oid in (res.get("chunk_order_ids") or []):
             _record_entry_order_placed(le, _chunk_oid)
         if res.get("chunk_order_ids"):

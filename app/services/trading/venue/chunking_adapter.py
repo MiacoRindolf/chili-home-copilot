@@ -39,7 +39,10 @@ def _split_base_size(total: float, blocks: int, *, increment: float | None) -> l
     """Split ``total`` into ``blocks`` near-equal pieces, each a multiple of ``increment``
     (when given) and each strictly positive. Any rounding remainder is added to the LAST
     block so the children sum EXACTLY to ``total`` (no over/under-fill vs the parent qty).
-    Returns ``[total]`` (a single piece) when a clean ``blocks``-way split is not possible."""
+    Returns ``[total]`` (a single piece) when a clean ``blocks``-way split is not possible.
+
+    See tests/test_momentum_order_path_dedupe.py for exhaustive split-exactness,
+    determinism, distinct-cid, and fail-closed-to-single proofs."""
     if blocks <= 1 or total <= 0:
         return [total]
     inc = float(increment) if increment and increment > 0 else None
@@ -178,6 +181,24 @@ class ChunkingVenueAdapter:
                 child_order_ids.append(str(oid))
             if first is None:
                 first = res
+        all_ok = bool(results) and all(bool(r.get("ok")) for r in results)
+        # FAIL-CLOSED-TO-SINGLE on a partial submit: if ANY child failed, the children
+        # that DID ack are a half-placed multi-leg resting at the broker. Best-effort
+        # CANCEL each placed child so the broker is left with no stranded resting leg
+        # (the agentic rail's stranded-naked-long history). This is belt-and-suspenders:
+        # the placed oids stay in chunk_order_ids so the live-runner's late-fill sweep
+        # ALSO tracks each to a terminal resolution even if a cancel loses a race.
+        cancelled_child_ids: list[str] = []
+        if not all_ok and child_order_ids:
+            for oid in child_order_ids:
+                try:
+                    self._base.cancel_order(str(oid))
+                    cancelled_child_ids.append(str(oid))
+                except Exception as exc:  # noqa: BLE001 — never crash the tick on cleanup
+                    logger.warning(
+                        "[chunking_adapter] partial-submit cleanup cancel failed for %s: %s",
+                        oid, exc,
+                    )
         # The primary result mirrors the FIRST child (so the caller's existing
         # res.get("order_id") path stays valid) but carries the full child lineage for
         # reconciliation. ok = True only if EVERY child acked (so a partial multi-submit
@@ -186,9 +207,11 @@ class ChunkingVenueAdapter:
         primary[CHUNK_RESULT_KEY] = child_order_ids
         primary["chunk_results"] = results
         primary["chunk_blocks"] = len(pieces)
-        primary["ok"] = bool(results) and all(bool(r.get("ok")) for r in results)
-        if not primary["ok"] and "error" not in primary:
-            primary["error"] = "chunk_partial_submit"
+        primary["ok"] = all_ok
+        if not primary["ok"]:
+            primary["chunk_cancelled_order_ids"] = cancelled_child_ids
+            if "error" not in primary:
+                primary["error"] = "chunk_partial_submit"
         return primary
 
 
