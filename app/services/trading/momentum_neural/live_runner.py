@@ -112,6 +112,12 @@ from .entry_gates import (
     tape_confirmed_hold_trigger,
     tape_confirms_hold,
 )
+from .entry_gates import (
+    _dip_buy_in_rth_window,
+    _l2_big_buyer_bid_starter,
+    add_into_halt_ok,
+    round_number_entry_context,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -4192,10 +4198,32 @@ def tick_live_session(
 
                                     _fd_ok, _fd_reason, _fd_debug = flush_dip_buy_confirmation(
                                         _df_trig, entry_interval=_iv_trig, live_price=_live_px,
-                                        symbol=sess.symbol,
+                                        symbol=sess.symbol, now=None,
                                     )
                                     if _fd_ok:
                                         _trigger_ok, _trigger_reason, _pb_debug = _fd_ok, _fd_reason, _fd_debug
+                                        # GAP 5 BIG-BUYER-ON-BID starter (Warrior re-audit):
+                                        # an ENABLER overlay (NEVER a veto — it cannot block).
+                                        # When a flush-dip starter fires, read the bid-side L2
+                                        # mirror: a large stacked BUYER on the bid near a half/
+                                        # whole dollar (with the existing spread caveat) CONFIRMS
+                                        # the dip-buy starter. Surface it as a conviction
+                                        # annotation on the dip-fire (FAIL-CLOSED inside: flag
+                                        # OFF / no L2 / wide spread ⇒ None ⇒ no annotation, no
+                                        # behavior change). docs/DESIGN/MOMENTUM_LANE.md
+                                        try:
+                                            _bbp = _l2_big_buyer_bid_starter(
+                                                sess.symbol, db=db, l2_as_of=None,
+                                                price=_live_px,
+                                                atr_pct=(
+                                                    _fd_debug.get("atr_pct")
+                                                    if isinstance(_fd_debug, dict) else None
+                                                ),
+                                            )
+                                            if _bbp is not None and isinstance(_pb_debug, dict):
+                                                _pb_debug["big_buyer_bid"] = _bbp[1]
+                                        except Exception:
+                                            pass
                                 except Exception:
                                     pass
                             if not _trigger_ok:
@@ -4514,6 +4542,46 @@ def tick_live_session(
                                         # fires the instant the ask trades through the swing
                                         # high (the ladder gave only a terminal wait).
                                         _trigger_reason, _pb_debug = _bf_reason, _bf_dbg
+                                except Exception:
+                                    pass
+
+                                # GAP 1 WEDGE break + GAP 3 ABSORPTION/SNAP (Warrior re-audit):
+                                # two NEW breakout-family triggers that join the SAME candidate
+                                # set so the setup-selector arbitrates them by R:R. Each is flag-
+                                # gated INSIDE the detector (default OFF -> returns disabled before
+                                # any compute, byte-identical), carries the SAME chase-guards (tape
+                                # REQUIRED+fail-closed via tape_confirms_hold INSIDE the detector,
+                                # _hod_extension_ok + _detect_back_side + front_side_state +
+                                # _l2_entry_veto) and returns the shared (ok, reason, debug) with
+                                # pullback_low/high under the IDENTICAL keys, so the structural-stop
+                                # + bailout machinery below is reused unchanged. l2_as_of=None = the
+                                # LIVE default. docs/DESIGN/MOMENTUM_LANE.md
+                                try:
+                                    from .entry_gates import absorption_snap_entry, wedge_break_entry
+
+                                    for _wa_fn in (wedge_break_entry, absorption_snap_entry):
+                                        try:
+                                            _wa_ok, _wa_reason, _wa_dbg = _wa_fn(
+                                                _df_trig, entry_interval=_iv_trig,
+                                                live_price=_live_px, symbol=sess.symbol,
+                                                now=None, db=db, l2_as_of=None,
+                                            )
+                                        except Exception:
+                                            _wa_ok, _wa_reason, _wa_dbg = False, "wedge_absorption_error", {}
+                                        if _wa_ok:
+                                            _breakouts.append((_wa_ok, _wa_reason, _wa_dbg))
+                                        elif (
+                                            _wa_reason in TICK_ARMED_WAIT_REASONS
+                                            and isinstance(_wa_dbg, dict)
+                                            and _wa_dbg.get("pullback_high")
+                                            and not _trigger_ok
+                                            and _trigger_reason not in TICK_ARMED_WAIT_REASONS
+                                        ):
+                                            # Surface the wedge / absorption WAIT so tick-speed
+                                            # dispatch fires the instant the ask trades through the
+                                            # wedge apex / absorption level (the ladder gave only a
+                                            # terminal wait).
+                                            _trigger_reason, _pb_debug = _wa_reason, _wa_dbg
                                 except Exception:
                                     pass
 
@@ -6476,6 +6544,33 @@ def tick_live_session(
                 "ok": True, "session_id": sess.id, "state": sess.state,
                 "skipped": "entry_extension_veto",
             }
+        # ── GAP 2 ROUND-NUMBER ENTRY-TIMING CONTEXT (Warrior re-audit) — a CONTEXT modifier,
+        # NOT a standalone veto: prefer a break-and-HOLD OVER a whole/half-dollar round number;
+        # AVOID firing right INTO a round number from BELOW (overhead supply). It only DEFERS
+        # (stay WATCHING, re-enter on the hold-over) — the EXACT extension-veto defer pattern;
+        # it can NEVER terminalize or block an exit. ADDITIVE: flag OFF / no level / no round
+        # number nearby ⇒ permit (byte-identical). Reuses entry_limit_px + breakout_level_price
+        # + the clean regime ATR computed just above for the extension veto. ──
+        _rn_ok, _rn_reason, _rn_dbg = round_number_entry_context(
+            _ev_entry, _ev_lvl, _ev_atr,
+        )
+        if not _rn_ok:
+            _log.info(
+                "[momentum_neural] entry ROUND-NUMBER DEFER %s: entry=%s vs break=%s round=%s — into overhead, re-watching for hold-over",
+                sess.symbol, _ev_entry, _ev_lvl, _rn_dbg.get("round_number"),
+            )
+            _emit(db, sess, "live_entry_round_number_defer", {
+                "entry_price": round(_ev_entry, 6) if _ev_entry is not None else None,
+                "breakout_level": round(_ev_lvl, 6) if _ev_lvl is not None else None,
+                "reason": _rn_reason,
+                **_rn_dbg,
+            })
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            db.flush()
+            return {
+                "ok": True, "session_id": sess.id, "state": sess.state,
+                "skipped": "entry_round_number_into_overhead",
+            }
         # ── L2 ENTRY CONFIRMER (Phase 1, DEFER-only) — docs/DESIGN/L2_PRIMARY_SIGNAL.md ──
         # The LAST gate before submit, and it runs ONLY here (an ENTRY-only candidate that
         # cleared the chart trigger + BOTH vetoes above): a veto ALWAYS wins, we never
@@ -7599,6 +7694,61 @@ def tick_live_session(
                             iceberg_threshold=_iceberg_thresh,
                         )
                         _R0 = _decn.get("R0")
+                        # GAP 6 ADD-INTO-THE-HALT (Warrior re-audit, RISKIEST — default OFF).
+                        # When the name has a SUSPECTED HALT in progress (le["suspected_halt_
+                        # since_utc"], the lane's stale-quote halt onset) while the held
+                        # position is GREEN, this is the "add into a limit-up halt" scenario.
+                        # It is EXTRA-GUARDED + fail-CLOSED via add_into_halt_ok: ALREADY IN
+                        # PROFIT (>= min R) + limit-UP (bullish; inferred from the green
+                        # position) + structural stop intact + RTH-only. It can only ever
+                        # TIGHTEN the add (turn a would-fire into a no-fire); it NEVER loosens
+                        # an add or any veto. Flag OFF ⇒ this whole block is skipped ⇒ byte-
+                        # identical to the existing pyramid behavior. Deploy recipe: KEEP OFF
+                        # until soaked. docs/DESIGN/MOMENTUM_LANE.md
+                        if (
+                            _decn.get("fire")
+                            and bool(getattr(settings, "chili_momentum_add_into_halt_enabled", False))
+                            and le.get("suspected_halt_since_utc")
+                        ):
+                            try:
+                                _orig_stop = _float_or_none(
+                                    (le.get("entry_sizing") or {}).get("stop_price")
+                                    if isinstance(le.get("entry_sizing"), dict) else None
+                                )
+                                if _orig_stop is None:
+                                    _orig_stop = _float_or_none(le.get("pyramid_entry_stop_ref")) or float(pos["stop_price"])
+                                # limit-UP direction = a GREEN held position during the halt
+                                # (the name halted to the UPSIDE — we are in profit on it).
+                                _is_limit_up = float(bid) > float(pos["avg_entry_price"])
+                                # RTH-only (stops fire only in RTH; equity gate, crypto exempt).
+                                _halt_in_rth, _ = _dip_buy_in_rth_window(
+                                    now=_utcnow(), bar_ts=None, symbol=sess.symbol,
+                                )
+                                _ah_ok, _ah_reason, _ah_dbg = add_into_halt_ok(
+                                    avg_entry=float(pos["avg_entry_price"]),
+                                    original_stop=_orig_stop,
+                                    current_stop=float(pos["stop_price"]),
+                                    bid=float(bid),
+                                    is_limit_up_halt=bool(_is_limit_up),
+                                    in_rth=bool(_halt_in_rth),
+                                )
+                                if not _ah_ok:
+                                    # EXTRA guard refused the halt-add: turn the decision into a
+                                    # no-fire (NEVER an exit). The normal (non-halt) add path is
+                                    # untouched (this only runs when a halt is suspected).
+                                    _emit(db, sess, "live_pyramid_add_into_halt_refused", {
+                                        "reason": _ah_reason, **_ah_dbg,
+                                    })
+                                    _decn = dict(_decn)
+                                    _decn["fire"] = False
+                                else:
+                                    _emit(db, sess, "live_pyramid_add_into_halt_ok", {
+                                        "reason": _ah_reason, **_ah_dbg,
+                                    })
+                            except Exception:
+                                # fail-CLOSED: any error refuses the halt-add (never the exit).
+                                _decn = dict(_decn)
+                                _decn["fire"] = False
                         if _decn.get("fire"):
                             # GUARD #4 ADMISSION — the add is the FIRST post-entry BUY;
                             # it MUST be refused whenever a NEW entry would be refused.

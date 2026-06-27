@@ -5849,6 +5849,73 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_NO_SIGNAL_DERANK_FRACTION"),
         description="FIX 2: the de-rank penalty is ROSS_QUALITY_VIABILITY_TILT x 0.5 x this fraction (the SAME tilt magnitude the scored names use — adaptive, not a scattered magic number; default 1.0 -> a 0.10 viability penalty that pushes an empty-signal name clearly below a scored mover). Only consulted when chili_momentum_no_signal_derank_enabled is ON.",
     )
+    # ── WARRIOR RE-AUDIT (2026-06-26): 6 ENTRY-trigger gaps, all default OFF = byte-identical.
+    # Each new trigger carries the SAME chase-guards (tape REQUIRED+fail-closed, extension
+    # veto, NOT-backside / NOT-below-VWAP, a structural stop) and routes through the IDENTICAL
+    # LIVE_ENTRY_CANDIDATE -> LIVE_PENDING_ENTRY veto chain. No existing veto is weakened. ──
+    chili_momentum_wedge_break_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WEDGE_BREAK_ENTRY_ENABLED"),
+        description="GAP 1: enter a CONVERGING-WEDGE break — 3+ taps on a DESCENDING upper trendline AND an ASCENDING lower trendline coiling to an apex, fire on the body/wick breaking OUT of the wedge at the apex with tape; stop = back INTO the wedge (the apex-low). A falling/descending wedge (downward upper line) is the stronger bull setup; a rising/ascending wedge (both lines rising) is lower-odds and is SKIPPED (never fires). Carries the SAME chase-guards as momentum_continuation_trigger: tape REQUIRED via the live_runner tape_confirms_hold call, _hod_extension_ok (NOT parabolic) + _detect_back_side + front_side_state (NOT backside / NOT below-VWAP) + _l2_entry_veto, joins the SAME setup-selector candidate set + the downstream LIVE_PENDING_ENTRY vetoes. false (default) = the trigger returns disabled before any compute = byte-identical.",
+    )
+    chili_momentum_round_number_entry_timing_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROUND_NUMBER_ENTRY_TIMING_ENABLED"),
+        description="GAP 2: a CONTEXT modifier (NOT a veto on its own — it only DEFERS, identical to the extension veto, and re-enters on a hold over the level) on the existing breakout entries: prefer a break-and-HOLD OVER a whole/half-dollar round number; avoid firing right INTO a round number from BELOW (overhead supply). When the marketable entry sits just BELOW a round number AND the breakout level has NOT yet cleared+held it, defer (stay WATCHING). ADDITIVE: OFF / no level / no round number nearby ⇒ no effect, byte-identical.",
+    )
+    chili_momentum_absorption_snap_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ABSORPTION_SNAP_ENTRY_ENABLED"),
+        description="GAP 3: an L2/tape LONG trigger — a large resting SELLER on the ask being ABSORBED (eaten, the ask-wall refilled repeatedly but price HOLDS just under it on buy-side OFI) then the SNAP when the wall CLEARS (price ticks through the absorption level on accelerating buy flow). Reuses read_ladder_distribution (OFI / micro_edge / ask_build) + the bar structure; stop = back below the absorption level. Carries the SAME chase-guards (tape REQUIRED via the live_runner tape_confirms_hold call, _hod_extension_ok + _detect_back_side + front_side_state + the downstream vetoes), joins the SAME setup-selector candidate set. false (default) = returns disabled before any compute = byte-identical.",
+    )
+    chili_momentum_dip_buy_rth_only_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_BUY_RTH_ONLY_ENABLED"),
+        description="GAP 4 (bug fix): the flush-dip / deep-reclaim DIP-BUY only works 09:30-16:00 ET because stops fire then (there are NO stops premarket, so a premarket dip-buy that breaks down cannot be exited at the stop). flush_dip_buy_confirmation has an unused now param + no clock check, and _evaluate_deep_reclaim's morning-only gate is SKIPPED when bar_ts is None (it leaks premarket). When ON, the flush-dip gate requires the current bar (now param, else df.index[-1]) to be inside the RTH window [chili_momentum_dip_buy_rth_start_hour, chili_momentum_dip_buy_rth_end_hour) ET; outside ⇒ no fire. EQUITY-ONLY (crypto is 24/7 and exempt). ADDITIVE: OFF / crypto / no usable clock ⇒ no gate, byte-identical.",
+    )
+    chili_momentum_dip_buy_rth_start_hour: float = Field(
+        default=9.5,
+        ge=0.0,
+        le=24.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_BUY_RTH_START_HOUR"),
+        description="GAP 4: RTH window START as ET hours-of-day (9.5 = 09:30). Only consulted when chili_momentum_dip_buy_rth_only_enabled is ON.",
+    )
+    chili_momentum_dip_buy_rth_end_hour: float = Field(
+        default=16.0,
+        ge=0.0,
+        le=24.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_BUY_RTH_END_HOUR"),
+        description="GAP 4: RTH window END as ET hours-of-day (16.0 = 16:00). The window is half-open [start, end). Only consulted when chili_momentum_dip_buy_rth_only_enabled is ON.",
+    )
+    chili_momentum_big_buyer_bid_starter_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BIG_BUYER_BID_STARTER_ENABLED"),
+        description="GAP 5: the BID-side MIRROR of _l2_entry_veto (which vetoes on a big SELLER / hidden seller) — a large stacked BUYER on the bid (depth-imbalance percentile at/ABOVE chili_momentum_big_buyer_bid_pctile_ceiling, a TREND of accumulation in its own window) near a whole/half dollar PERMITS / confirms a dip-buy starter. Keeps the existing SPREAD caveat (a wide bid-ask spread still blocks — never arm a starter on an illiquid book). It is an ENABLER (a positive confirmation overlay), never a veto: it cannot block any existing entry. Reuses read_ladder_distribution; FAIL-CLOSED (returns None / no permit on missing/stale/wide-spread L2). false (default) = never consulted = byte-identical.",
+    )
+    chili_momentum_big_buyer_bid_pctile_ceiling: float = Field(
+        default=0.85,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BIG_BUYER_BID_PCTILE_CEILING"),
+        description="GAP 5: depth-imbalance percentile at/ABOVE which the NEWEST book is treated as a big resting BID wall (accumulation trend) → permit/confirm the dip-buy starter. Self-relative to the symbol's own recent window (mirror of chili_momentum_entry_l2_bigseller_pctile_floor). Only consulted when chili_momentum_big_buyer_bid_starter_enabled is on.",
+    )
+    chili_momentum_big_buyer_bid_max_spread_bps: float = Field(
+        default=80.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BIG_BUYER_BID_MAX_SPREAD_BPS"),
+        description="GAP 5: the SPREAD caveat — a bid-ask spread (bps) at/above this BLOCKS the big-buyer-on-bid permit (a wide spread = illiquid book, never arm a starter there). Only consulted when chili_momentum_big_buyer_bid_starter_enabled is on.",
+    )
+    chili_momentum_add_into_halt_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADD_INTO_HALT_ENABLED"),
+        description="GAP 6 (RISKIEST — KEEP OFF UNTIL SOAKED): permit a SMALL pyramid ADD while the name is HALTED LIMIT-UP, gated by EVERY extra condition (fail-CLOSED on any miss): (1) ALREADY IN PROFIT on the name (bid > avg_entry by chili_momentum_add_into_halt_min_profit_r of the entry risk), (2) the halt is LIMIT-UP / bullish (resume side is up — read from the halt state), (3) the add is SMALL (the existing pyramid sizing + chili_momentum_pyramid_max_adds cap already bound it; this gate adds NO new size), (4) the ORIGINAL STRUCTURAL STOP is intact (unchanged since entry), (5) RTH-only. It NEVER adds if underwater. ROUTES through the SAME pyramid_add_decision + risk_evaluator admission as a normal add (kill-switch, daily-loss registry, governance). false (default) = the halt-add path is never entered = byte-identical to the existing pyramid behavior. Deploy recipe: KEEP OFF until soaked.",
+    )
+    chili_momentum_add_into_halt_min_profit_r: float = Field(
+        default=1.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADD_INTO_HALT_MIN_PROFIT_R"),
+        description="GAP 6: the minimum open profit (in units of the entry's structural risk R = avg_entry - original_stop) required before an add-into-halt is permitted. 1.0 = at least +1R in the green. Only consulted when chili_momentum_add_into_halt_enabled is ON.",
+    )
     # ── FIX D: cache the Robinhood Agentic MCP adapter (perf bug-fix) ────────────────
     chili_momentum_cache_rh_agentic_adapter: bool = Field(
         default=True,
