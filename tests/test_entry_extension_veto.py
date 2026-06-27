@@ -140,8 +140,18 @@ def test_veto_noop_when_breakout_level_none():
     assert _entry_extension_veto(15.51, None, 0.015, settings) is False
 
 
-def test_veto_noop_when_atr_pct_none():
-    assert _entry_extension_veto(15.51, 12.94, None, settings) is False
+def test_veto_floor_cap_when_atr_pct_none():
+    # HIGH-2 fail-SAFE: a missing ATR (None) must NOT disarm the chase-guard. The cap
+    # collapses to the FLAT extension floor (max(0.10, 0) = 0.10), so the RUN chase
+    # (15.51 vs 12.94 = +19.9%) is still ABOVE the floor and VETOES.
+    assert _entry_extension_veto(15.51, 12.94, None, settings) is True
+
+
+def test_veto_within_floor_when_atr_pct_none_does_not_veto():
+    # Companion to the floor-cap fail-safe: an entry WITHIN the floor (10.30 vs 10.00 =
+    # +3%, well under the 10% floor) with atr_pct=None must STILL be allowed — the fail-safe
+    # falls back to the floor cap, it does NOT over-block calm break-and-go entries.
+    assert _entry_extension_veto(10.30, 10.00, None, settings) is False
 
 
 def test_veto_noop_when_entry_price_none():

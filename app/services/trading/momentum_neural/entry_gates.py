@@ -128,9 +128,9 @@ def momentum_volume_confirmation(df: pd.DataFrame) -> tuple[bool, str]:
         win = vol.tail(20)
         avg_v = float(win.iloc[:-1].mean()) if len(win) > 1 else float(vol.iloc[-1])
         cur_v = float(vol.iloc[-1])
-        if avg_v <= 0:
+        if not math.isfinite(avg_v) or avg_v <= 0:
             return False, "volume_avg_zero"
-        if cur_v < 1.5 * avg_v:
+        if not math.isfinite(cur_v) or cur_v < 1.5 * avg_v:
             return False, "volume_below_1p5x_avg"
         prev = float(close.iloc[-2]) if len(close) > 1 else price
         if price <= prev:
@@ -147,7 +147,9 @@ def momentum_volume_confirmation(df: pd.DataFrame) -> tuple[bool, str]:
         return False, "volume_window_short"
     avg_v = float(win.iloc[:-1].mean())
     cur_v = float(vol.iloc[-1])
-    if avg_v <= 0 or cur_v < 1.5 * avg_v:
+    if not math.isfinite(avg_v) or avg_v <= 0:
+        return False, "volume_avg_zero"
+    if not math.isfinite(cur_v) or cur_v < 1.5 * avg_v:
         return False, "volume_below_1p5x_avg"
     return True, "momentum_ok_abs_vol"
 
@@ -2264,11 +2266,20 @@ def _entry_extension_veto(
     try:
         if not bool(getattr(settings, "chili_momentum_entry_extension_veto_enabled", True)):
             return False
-        if entry_price is None or breakout_level is None or atr_pct is None:
-            return False  # missing level/atr -> never veto (parity)
+        if entry_price is None or breakout_level is None:
+            return False  # missing level/price -> never veto (parity)
         ep = float(entry_price)
         lvl = float(breakout_level)
-        a = float(atr_pct)
+        # HIGH-2 fail-SAFE: a missing/non-finite ATR (thin low-float runner with no
+        # computable volatility) must NOT disarm the chase-guard. Fall back to a=0.0
+        # so the cap collapses to the FLAT extension floor and an entry extended beyond
+        # the floor still VETOES, instead of being chased far over the break unguarded.
+        if atr_pct is None:
+            a = 0.0
+        else:
+            a = float(atr_pct)
+            if not math.isfinite(a):
+                a = 0.0
         if lvl <= 0 or ep <= 0:
             return False  # bad level/price -> never veto (parity)
         k = float(getattr(settings, "chili_momentum_entry_extension_atr_mult", 8.0))

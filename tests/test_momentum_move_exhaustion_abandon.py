@@ -151,7 +151,7 @@ def test_peak_tracks_running_max(monkeypatch):
     _update_viability_peak("ABCD", 0.50, now)
     _update_viability_peak("ABCD", 0.90, now)
     _update_viability_peak("ABCD", 0.60, now)             # a dip does NOT lower the peak
-    assert _VIABILITY_PEAK["ABCD"][0] == 0.90
+    assert _VIABILITY_PEAK[("ABCD", None)][0] == 0.90  # MED-5: keyed by (symbol, session_id)
 
 
 # ── THE agreement rule (conservative: faded AND (cold OR regressed)) ──────────────────
@@ -392,7 +392,7 @@ def test_peak_stale_rebuilds_from_lower_fresh_score(monkeypatch):
     now = _utcnow()
     _update_viability_peak("RB", 0.90, now - timedelta(seconds=601))  # stale high
     _update_viability_peak("RB", 0.30, now)                            # fresh, lower
-    assert _VIABILITY_PEAK["RB"][0] == 0.30  # rebuilt, NOT max(0.90, 0.30)
+    assert _VIABILITY_PEAK[("RB", None)][0] == 0.30  # rebuilt, NOT max(0.90, 0.30)
 
 
 def test_peak_within_window_keeps_running_max(monkeypatch):
@@ -401,7 +401,7 @@ def test_peak_within_window_keeps_running_max(monkeypatch):
     now = _utcnow()
     _update_viability_peak("MX", 0.90, now)
     _update_viability_peak("MX", 0.30, now + timedelta(seconds=10))  # within window, lower
-    assert _VIABILITY_PEAK["MX"][0] == 0.90  # max kept
+    assert _VIABILITY_PEAK[("MX", None)][0] == 0.90  # max kept
 
 
 def test_peak_noop_on_empty_symbol_or_none_score():
@@ -584,7 +584,7 @@ def test_move_is_exhausted_peak_refreshed_before_regression_test(monkeypatch):
     # faded + cold (tape) still abandons via the cold-tape arm — but regression must be clean.
     assert dbg["faded_from_hod"] is True
     assert abandon is True  # cold-tape arm
-    assert _VIABILITY_PEAK["UP"][0] == 0.95  # peak raised by this pass
+    assert _VIABILITY_PEAK[("UP", None)][0] == 0.95  # peak raised by this pass (MED-5 key)
 
 
 def test_move_is_exhausted_fail_open_on_garbage():

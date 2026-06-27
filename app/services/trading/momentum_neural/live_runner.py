@@ -568,6 +568,22 @@ def _float_or_none(value: Any) -> float | None:
     return out if math.isfinite(out) else None
 
 
+def _safe_mult(x: Any) -> float:
+    """LOW-7 fail-NEUTRAL: sanitize ONE size-multiplier factor before it enters the product.
+    A non-finite (NaN/inf) or NEGATIVE multiplier from any upstream helper is coerced to 1.0
+    (neutral) so it cannot poison the combined product — a negative would flip the sign of the
+    budget and a NaN would make the whole budget NaN, each silently KILLING the fill instead of
+    sizing it. A valid (finite, >= 0) factor passes through unchanged, so the happy path and the
+    downstream 3x clamp + max_notional ceiling are untouched."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return 1.0
+    if not math.isfinite(v) or v < 0.0:
+        return 1.0
+    return v
+
+
 def _order_total_fees_usd(no: Any) -> float | None:
     """Broker-reported commission on an order, from the raw payload.
 
@@ -3351,6 +3367,14 @@ def _register_stale_quote_tick(db, sess, le: dict, tick: Any = None) -> None:
     le["halt_stale_streak"] = streak
     if streak == _halt_stale_ticks_threshold() and not le.get("suspected_halt_since_utc"):
         le["suspected_halt_since_utc"] = _utcnow().isoformat()
+        # MED-3 fail-SAFE: clear any PRIOR resume markers at the onset of a NEW halt so a
+        # RE-HALT does not read stale resume data (halt_resumed_at_utc / halt_resumption_open
+        # are stamped on resume but were never cleared at a fresh halt onset). The resume-stamp
+        # logic is unchanged; this only prevents the re-halt window from inheriting the last
+        # resume. Use pop (not set-None) so a FIRST halt with no prior resume leaves the keys
+        # ABSENT — byte-identical when no resume has occurred yet.
+        le.pop("halt_resumed_at_utc", None)
+        le.pop("halt_resumption_open", None)
         # GAP 2/3 — capture the halt_level (last good price) once, at halt onset. Only
         # when a resume-direction / false-halt flag is ON and a tick is available; the
         # bid is the last good top-of-book before the book went dark (mid as fallback).
@@ -6716,8 +6740,12 @@ def tick_live_session(
                     le["prime_window_size"] = _pw_meta
             except Exception:
                 _prime_window_mult = 1.0
+        # LOW-7: sanitize EACH per-factor multiplier (fail-NEUTRAL to 1.0 on NaN/inf/negative)
+        # as it enters the product so a single poisoned helper can never NaN-out or sign-flip the
+        # whole budget and silently kill the fill. The 3x clamp + max_notional ceiling below are
+        # unchanged; a valid product is byte-identical.
         _eff_max_loss = min(
-            float(_base_max_loss) * float(_streak_mult) * float(_graduation_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult) * float(_fatigue_mult) * float(_sym_fatigue_mult) * float(_hot_cold_mult) * float(_time_fatigue_mult) * float(_halt_size_mult) * float(_dip_velocity_mult) * float(_catalyst_conviction_mult) * float(_prime_window_mult),
+            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # ADAPTIVE SPREAD-COST VETO/DERATE (2026-06-27, DEFAULT OFF ⇒ byte-identical):

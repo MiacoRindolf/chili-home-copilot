@@ -408,7 +408,16 @@ def _session_still_front_side(le: Any) -> bool:
 # within the decay window) is dropped so a fresh resurgence rebuilds its own peak. Written
 # unconditionally each pass (flag-independent), but only READ when the exhaustion flag is on,
 # so a populated peak NEVER changes flag-OFF behavior (byte-identical).
-_VIABILITY_PEAK: dict[str, tuple[float, datetime]] = {}
+_VIABILITY_PEAK: dict[tuple[str, Any], tuple[float, datetime]] = {}
+
+
+def _viability_peak_key(sym_u: str, session_id: Any = None) -> tuple[str, Any]:
+    """MED-5 fail-SAFE: key the per-symbol viability peak by ``(symbol, session_id)`` so two
+    DIFFERENT sessions (or a re-arm) of the same ticker do NOT share the running max. A fresh
+    re-arm at a lower score then builds its OWN peak instead of being wrongly judged regressed
+    against a PRIOR session's peak. ``session_id=None`` (the default) preserves the legacy
+    symbol-only behavior for a single continuous session — byte-identical for that case."""
+    return (sym_u, session_id)
 
 
 def _move_exhaustion_abandon_enabled() -> bool:
@@ -445,48 +454,55 @@ def _row_ross_score(row: Any) -> float | None:
     return None
 
 
-def _update_viability_peak(sym_u: str, ross_score: float | None, now: datetime) -> None:
-    """Record/raise the per-symbol session viability PEAK from the current ross_score.
+def _update_viability_peak(
+    sym_u: str, ross_score: float | None, now: datetime, *, session_id: Any = None
+) -> None:
+    """Record/raise the per-(symbol, session) viability PEAK from the current ross_score.
     Decays a stale entry (older than the TTL) back to a fresh peak so a name that fell out
     and resurged rebuilds its own peak. Written unconditionally (flag-independent); the peak
     is only READ by the exhaustion gate when its flag is on, so this never alters flag-OFF
-    behavior. Bounded prune (same shape as _REAP_COOLDOWN)."""
+    behavior. Bounded prune (same shape as _REAP_COOLDOWN). ``session_id=None`` keeps the
+    legacy symbol-only key (single-session behavior unchanged)."""
     if not sym_u or ross_score is None:
         return
     try:
         rs = float(ross_score)
     except (TypeError, ValueError):
         return
+    key = _viability_peak_key(sym_u, session_id)
     ttl = _move_exhaustion_peak_ttl_seconds()
-    prev = _VIABILITY_PEAK.get(sym_u)
+    prev = _VIABILITY_PEAK.get(key)
     if prev is not None:
         prev_peak, prev_at = prev
         if ttl > 0 and (now - prev_at).total_seconds() <= ttl:
             # within the session window -> keep the running MAX, refresh the timestamp.
-            _VIABILITY_PEAK[sym_u] = (max(float(prev_peak), rs), now)
+            _VIABILITY_PEAK[key] = (max(float(prev_peak), rs), now)
         else:
-            _VIABILITY_PEAK[sym_u] = (rs, now)  # stale -> rebuild from the fresh score
+            _VIABILITY_PEAK[key] = (rs, now)  # stale -> rebuild from the fresh score
     else:
-        _VIABILITY_PEAK[sym_u] = (rs, now)
+        _VIABILITY_PEAK[key] = (rs, now)
     if len(_VIABILITY_PEAK) > 500:
         stale = now - timedelta(hours=1)
         for k in [k for k, v in _VIABILITY_PEAK.items() if v[1] < stale]:
             _VIABILITY_PEAK.pop(k, None)
 
 
-def _viability_regressed(sym_u: str, ross_now: float | None, now: datetime) -> bool:
+def _viability_regressed(
+    sym_u: str, ross_now: float | None, now: datetime, *, session_id: Any = None
+) -> bool:
     """True iff the name's CURRENT ross_score has regressed meaningfully off its recent
     in-process PEAK: ``ross_now <= peak * (1 - regress_frac)``. FAIL-OPEN (False) on any
     missing datum — no current score, no tracked peak, a stale/zero peak, or the axis
     disabled (regress_frac <= 0) — so absent conviction history can never block an arm.
-    Adaptive: the drop is measured as a FRACTION of the name's OWN peak (no fixed score)."""
+    Adaptive: the drop is measured as a FRACTION of the name's OWN peak (no fixed score).
+    Keyed by ``(symbol, session_id)`` so a re-arm reads its OWN peak (MED-5)."""
     try:
         frac = float(getattr(settings, "chili_momentum_move_exhaustion_regress_frac", 0.20) or 0.0)
     except (TypeError, ValueError):
         frac = 0.0
     if frac <= 0.0 or ross_now is None:
         return False
-    entry = _VIABILITY_PEAK.get(sym_u)
+    entry = _VIABILITY_PEAK.get(_viability_peak_key(sym_u, session_id))
     if entry is None:
         return False
     peak, at = entry
@@ -586,9 +602,12 @@ def _move_is_exhausted(symbol: str, df: Any, row: Any) -> tuple[bool, dict[str, 
         sym_u = str(symbol or "").upper()
         now = _utcnow()
         ross_now = _row_ross_score(row)
+        # MED-5: discriminate the peak per ARM (variant) so a re-arm of the same ticker does
+        # not inherit a prior arm's peak (None when absent -> legacy symbol-only behavior).
+        _peak_sid: Any = getattr(row, "variant_id", None)
         # Refresh the peak FIRST so the running max includes this pass's score, THEN test
         # regression against it (a name still printing its peak is never regressed).
-        _update_viability_peak(sym_u, ross_now, now)
+        _update_viability_peak(sym_u, ross_now, now, session_id=_peak_sid)
 
         fss = None
         try:
@@ -606,7 +625,7 @@ def _move_is_exhausted(symbol: str, df: Any, row: Any) -> tuple[bool, dict[str, 
         # and the regression axis when the cheap structure read already shows a fade. A fresh
         # near-HOD mover skips the tape read entirely (cheap + can never be abandoned).
         tape_cold = _tape_cold(symbol) if faded else False
-        regressed = _viability_regressed(sym_u, ross_now, now) if faded else False
+        regressed = _viability_regressed(sym_u, ross_now, now, session_id=_peak_sid) if faded else False
         abandon = _exhaustion_abandon_eligible(faded, tape_cold, regressed)
         dbg = {
             "faded_from_hod": bool(faded),

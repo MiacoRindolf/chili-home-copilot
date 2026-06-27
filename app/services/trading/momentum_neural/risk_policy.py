@@ -560,15 +560,24 @@ def _et_day_bounds_utc(*, days_ago: int = 0) -> tuple[datetime, datetime]:
     Mirrors ``governance.global_realized_pnl_today_et``'s ET-session windowing so the
     daily-trade-count budget and the prior-day damper bucket trades on the SAME calendar
     boundary the daily-loss cap uses (no off-by-one between the gate and the breaker)."""
+    from datetime import datetime as _dt
     from datetime import timedelta as _td
     from zoneinfo import ZoneInfo
 
     et = ZoneInfo("America/New_York")
-    now_et = datetime.now(et)
-    start_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0) - _td(days=days_ago)
-    end_et = start_et + _td(days=1)
-    start_utc = start_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
-    end_utc = end_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+    utc = ZoneInfo("UTC")
+    # MED-4 fail-SAFE: do the day arithmetic in ET CALENDAR-DATE space, not by subtracting
+    # an ABSOLUTE 24h timedelta from a DST-aware datetime. An ET calendar day is 23h/25h
+    # across a DST transition, so `now_et.replace(hour=0) - timedelta(days=N)` drifted the
+    # window an hour on transition days. Subtract days on the DATE, then build the aware ET
+    # midnight from that date via zoneinfo so each [start,end) is a true ET calendar day.
+    today_et_date = datetime.now(et).date()
+    start_date = today_et_date - _td(days=days_ago)
+    end_date = start_date + _td(days=1)
+    start_et = _dt(start_date.year, start_date.month, start_date.day, 0, 0, 0, 0, tzinfo=et)
+    end_et = _dt(end_date.year, end_date.month, end_date.day, 0, 0, 0, 0, tzinfo=et)
+    start_utc = start_et.astimezone(utc).replace(tzinfo=None)
+    end_utc = end_et.astimezone(utc).replace(tzinfo=None)
     return start_utc, end_utc
 
 
