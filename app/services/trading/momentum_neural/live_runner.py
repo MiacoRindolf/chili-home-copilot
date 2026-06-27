@@ -6661,8 +6661,26 @@ def tick_live_session(
                 _dip_velocity_mult = float(_dvm)
         except Exception:
             _dip_velocity_mult = 1.0
+        # CATALYST-CONVICTION lever (Ross E2): a STRONG, credible catalyst (the deployed
+        # strong/weak/fake news grade — no new feed) carries a bounded (>=1.0) UPWARD size
+        # multiplier. It composes multiplicatively under the SAME min(..., base*3.0) clamp +
+        # the hard max_notional ceiling below, so it can NEVER push notional past any ceiling
+        # and is NEVER a veto. Default (flag OFF / no-or-weak-or-fake catalyst) => 1.0
+        # (byte-identical). Lane-agnostic (grade is per-symbol news); fail-neutral to 1.0.
+        _catalyst_conviction_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_catalyst_conviction_enabled", False)):
+            try:
+                from .risk_policy import catalyst_conviction_size_multiplier
+
+                _catalyst_conviction_mult, _cc_meta = catalyst_conviction_size_multiplier(
+                    sess.symbol
+                )
+                if _catalyst_conviction_mult > 1.0:
+                    le["catalyst_conviction_size"] = _cc_meta
+            except Exception:
+                _catalyst_conviction_mult = 1.0
         _eff_max_loss = min(
-            float(_base_max_loss) * float(_streak_mult) * float(_graduation_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult) * float(_fatigue_mult) * float(_sym_fatigue_mult) * float(_hot_cold_mult) * float(_time_fatigue_mult) * float(_halt_size_mult) * float(_dip_velocity_mult),
+            float(_base_max_loss) * float(_streak_mult) * float(_graduation_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult) * float(_fatigue_mult) * float(_sym_fatigue_mult) * float(_hot_cold_mult) * float(_time_fatigue_mult) * float(_halt_size_mult) * float(_dip_velocity_mult) * float(_catalyst_conviction_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE

@@ -2406,6 +2406,31 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_GREEN_DAY_LOOKBACK_DAYS"),
         description="How many ET calendar days back to scan when counting the consecutive green-day streak for graduation. Clamped 1..120. Default 30.",
     )
+    # ── CATALYST-CONVICTION SIZE MULTIPLIER (Ross E2 grade → size) ────────────────────
+    # DEFAULT OFF. A bounded UPWARD size multiplier on the per-trade risk basis driven by
+    # the DEPLOYED catalyst grade (the SAME strong/weak/fake news accessors the lane already
+    # uses — no new feed): a STRONG, credible catalyst (FDA/trial/M&A/contract/beat) is a real
+    # reason a low-float runs, so Ross "earns the size" on conviction. Mirrors green-day
+    # graduation: mult = clamp(1.0 + step * grade_rank, 1.0, max_multiplier); STRONG => rank>0
+    # (boost), weak/fake/none => rank 0 (1.0, no boost — a catalyst only ADDS, no-news shrink
+    # is handled elsewhere). Composes MULTIPLICATIVELY into the runner's 3x combined-multiplier
+    # ceiling (auto-contained) + the downstream hard notional ceiling — NEVER a veto, never
+    # blocks/shrinks an entry. OFF => multiplier always 1.0 (byte-identical sizing).
+    chili_momentum_catalyst_conviction_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_CONVICTION_ENABLED"),
+        description="CATALYST-CONVICTION SIZE: graduate to bigger size when the name carries a STRONG, credible catalyst (the deployed strong/weak/fake news grade — no new feed). A bounded UPWARD multiplier on the per-trade risk basis (composes into the existing 3x combined-multiplier ceiling + the hard notional ceiling), applied at entry-quantity compute time — NOT a veto, never blocks/shrinks an entry. Ships DEFAULT-OFF. OFF => multiplier always 1.0 (byte-identical sizing).",
+    )
+    chili_momentum_catalyst_conviction_step: float = Field(
+        default=0.15, ge=0.0, le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_CONVICTION_STEP"),
+        description="The per-grade-rank size step for catalyst conviction: multiplier = 1.0 + step * grade_rank, capped at chili_momentum_catalyst_conviction_max_multiplier. STRONG catalyst => rank 3 (=> 1.0 + 0.15*3 = 1.45, clamped to max). weak/fake/none => rank 0 => 1.0. Clamped 0..1.",
+    )
+    chili_momentum_catalyst_conviction_max_multiplier: float = Field(
+        default=1.5, ge=1.0, le=2.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_CONVICTION_MAX_MULTIPLIER"),
+        description="The hard ceiling on the catalyst-conviction size multiplier (a catalyst can never size the lane above this). Conservative default 1.5; clamped 1.0..2.0 so it stays well under the runner's 3x combined-multiplier ceiling.",
+    )
     # ── ADDITIVE ITEM 4: PROCESS-OVER-PROFITS SCORE (logged rule-adherence) ──────────
     # DEFAULT OFF. A LOGGED-ONLY rule-adherence score (entered-on-trigger / honored-stop /
     # no-chase) distinct from realized PnL. Read-only journaling — NEVER gates, re-sizes,

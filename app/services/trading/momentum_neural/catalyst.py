@@ -570,6 +570,59 @@ def fake_catalyst_symbols() -> set[str]:
         return set()
 
 
+# CATALYST-CONVICTION grade rank (Ross E2): a single integer "how trusted is this catalyst"
+# rank read off the SAME deployed strong/weak/fake news accessors the lane already uses (no new
+# feed). Used by the catalyst_conviction_size_multiplier to graduate to bigger size ONLY on a
+# real, credible catalyst. Dominance mirrors the selection grader: WEAK and FAKE both SUPPRESS
+# the strong boost (a diluting / rumored / hacked "strong" headline earns NO conviction rank),
+# so only a clean STRONG catalyst ranks > 0. Crypto / no news / absent feed => 0 (neutral).
+_CATALYST_GRADE_RANK_STRONG = 3
+
+
+def catalyst_grade_rank(
+    symbol: str,
+    *,
+    strong_symbols: set[str] | None = None,
+    weak_symbols: set[str] | None = None,
+    fake_symbols: set[str] | None = None,
+) -> int:
+    """Integer conviction rank for the DEPLOYED catalyst grade of ``symbol``.
+
+      * STRONG (FDA/trial/M&A/contract/beat), NOT also weak and NOT also fake
+            -> ``_CATALYST_GRADE_RANK_STRONG`` (3)  [the only positive rank]
+      * WEAK / FAKE / MEDIUM / no headline / crypto / absent feed -> 0 (neutral)
+
+    Weak DOMINATES (a name that is both diluting and 'partnering' is a dilution fade) and FAKE
+    DOMINATES (a rumored / hacked / unsolicited "strong" headline is a credibility trap) — both
+    suppress the strong rank to 0, mirroring ``catalyst_grade_selection_delta``. The fake
+    suppression is gated by ``chili_momentum_fake_catalyst_guard_enabled`` (default ON) so the
+    grade source stays consistent with selection. Pure + fail-open: any unreadable symbol /
+    absent set yields 0 (no conviction boost — a missing feed never invents conviction).
+
+    Sets are passed in by the caller (so the news fetch is done once upstream); when omitted
+    they are fetched fresh here from the same accessors. [momentum_neural] catalyst-conviction."""
+    try:
+        if "-USD" in str(symbol or "").upper():
+            return 0
+        sym = _norm(symbol)
+        strong = strong_catalyst_symbols() if strong_symbols is None else strong_symbols
+        weak = weak_catalyst_symbols() if weak_symbols is None else weak_symbols
+        fake = fake_catalyst_symbols() if fake_symbols is None else fake_symbols
+        if not strong or sym not in strong:
+            return 0
+        # Weak suppresses strong (always); fake suppresses strong only when the guard is ON.
+        if weak and sym in weak:
+            return 0
+        if fake and sym in fake and bool(
+            getattr(settings, "chili_momentum_fake_catalyst_guard_enabled", True)
+        ):
+            return 0
+        return _CATALYST_GRADE_RANK_STRONG
+    except Exception:
+        logger.debug("[catalyst] grade-rank fetch failed", exc_info=True)
+        return 0
+
+
 def fake_catalyst_viability_delta(symbol: str, fake_symbols: set[str] | None) -> float:
     """SOFT credibility DOWN-WEIGHT for a FAKE / unverified / hacked-PR / rumor / unsolicited-
     buyout headline (Ross AS101/HVM101 distrust). Negative half-tilt — the same magnitude the

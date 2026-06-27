@@ -1028,6 +1028,64 @@ def green_day_graduation_multiplier(
         return 1.0, {"reason": "error_fail_neutral", "graduation_mult": 1.0}
 
 
+def catalyst_conviction_size_multiplier(
+    symbol: str,
+    *,
+    strong_symbols: set[str] | None = None,
+    weak_symbols: set[str] | None = None,
+    fake_symbols: set[str] | None = None,
+) -> tuple[float, dict[str, Any]]:
+    """CATALYST-CONVICTION size multiplier (NOT a hard live-block).
+
+    When the name carries a STRONG, credible catalyst (the DEPLOYED strong/weak/fake news
+    grade — FDA/trial/M&A/contract/beat, not also diluting/rumored/hacked) scale the per-trade
+    risk basis UP a bounded amount — Ross's "a real reason a low-float runs earns the size".
+
+      mult = clamp(1.0 + step * grade_rank, 1.0, max_multiplier)
+
+    ``grade_rank`` comes from ``catalyst_grade_rank`` (STRONG=3, weak/fake/none=0), so weak and
+    fake DOMINATE (suppress the boost to rank 0). Mirrors ``green_day_graduation_multiplier``:
+    composes multiplicatively into the runner's existing 3x combined-multiplier ceiling +
+    downstream hard notional ceiling, applied at entry-quantity compute time — it is NEVER a
+    veto and NEVER shrinks a trade (a catalyst only ADDS; the no-news shrink lives elsewhere).
+    ADDITIVE / FAIL-NEUTRAL: flag OFF, no/weak/fake catalyst, or any error => ``(1.0, ...)``
+    (never changes sizing). Read-only; reuses the SAME news accessors (no new feed). The
+    grade sets may be passed in (fetched once upstream); omitted => fetched fresh here.
+    [momentum_neural] catalyst-conviction."""
+    if not bool(getattr(settings, "chili_momentum_catalyst_conviction_enabled", False)):
+        return 1.0, {"reason": "disabled", "conviction_mult": 1.0}
+    try:
+        from .catalyst import catalyst_grade_rank
+
+        # None-aware defaults (NOT `or` — a legit step=0.0 is falsy and would wrongly fall back)
+        _step_raw = getattr(settings, "chili_momentum_catalyst_conviction_step", 0.15)
+        step = float(_step_raw if _step_raw is not None else 0.15)
+        _max_raw = getattr(settings, "chili_momentum_catalyst_conviction_max_multiplier", 1.5)
+        max_mult = float(_max_raw if _max_raw is not None else 1.5)
+        if max_mult < 1.0:
+            max_mult = 1.0
+        rank = int(
+            catalyst_grade_rank(
+                symbol,
+                strong_symbols=strong_symbols,
+                weak_symbols=weak_symbols,
+                fake_symbols=fake_symbols,
+            )
+        )
+        # A catalyst only ADDS: clamp floor 1.0 (rank<=0 / negative step => no boost), ceiling
+        # max_mult. The runner's min(..., base*3.0) clamp + the hard notional ceiling further
+        # contain the COMBINED multiplier — this factor can never push past any ceiling.
+        mult = max(1.0, min(max_mult, 1.0 + step * max(0, rank)))
+        return mult, {
+            "conviction_mult": round(mult, 4),
+            "grade_rank": rank,
+            "step": step,
+            "max_multiplier": max_mult,
+        }
+    except Exception:
+        return 1.0, {"reason": "error_fail_neutral", "conviction_mult": 1.0}
+
+
 def compute_risk_first_quantity(
     *,
     entry_price: float,
