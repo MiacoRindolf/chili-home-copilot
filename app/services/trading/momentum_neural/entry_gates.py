@@ -4681,12 +4681,26 @@ def cup_and_handle_confirmation(
     a rounded double-top followed by a SEPARATE handle phase. ``blue_sky_break`` keys off no
     overhead supply; this keys off the double-top + handle structure.
 
-    ANTI-CHASE: the ATR pivot filter (the two tops must be REAL pivots) + the ATR-derived
-    equal-highs band + the vol-aware shallow handle cap + the ``_collapse_cap`` depth gate +
-    the 9-EMA hold + the L2 hidden-seller veto (Ross watches L2 for "a big seller right around
-    five") -- so it never fires on a vertical blow-off or a deep breakdown. ADDITIVE: flag OFF /
-    thin (<2*window+3 bars) / no double-top / handle too deep -> ``(False, reason, {...})`` with
-    NO side effects; fail-OPEN to a benign decline on any error. docs/DESIGN/MOMENTUM_LANE.md"""
+    ANTI-CHASE (parity with wedge_break_entry / hod_break_confirmation — the gatekeeper's
+    chase-safety bar): the structural guards (the ATR pivot filter so the two tops are REAL
+    pivots + the ATR-derived equal-highs band + the vol-aware shallow handle cap + the
+    ``_collapse_cap`` depth gate + the 9-EMA hold) PLUS the FOUR shared chase-guards every
+    other live breakout trigger carries:
+      * NOT BACKSIDE / NOT BELOW-VWAP -- ``_detect_back_side`` (1m EMA/MACD rollover) AND
+        ``front_side_state`` (folds in below-VWAP / faded; fails CLOSED on a thin frame);
+      * NOT PARABOLIC -- ``_hod_extension_ok`` (the SAME adaptive ATR extension cap vs the
+        9-EMA AND VWAP) so a vertical run INTO the rim is rejected as a blow-off;
+      * L2 hidden-seller / big-seller veto (``_l2_entry_veto``; Ross watches L2 for "a big
+        seller right around five");
+      * TAPE REQUIRED + FAIL-CLOSED -- ``tape_confirms_hold`` is the LAST gate before EITHER
+        fire path (tick-break OR completed bar): buyers must be lifting the ask THIS tick, and
+        a disabled-flag / no-tape / thin / stale / crypto / error ⇒ NO fire.
+    -- so it never fires on a vertical blow-off, a rolled-over backside, a below-VWAP fade, a
+    hidden-seller wall, or a dead break with no buyers on tape. The STRUCTURAL STOP is the
+    handle low (``pullback_low``; the vol-floor layer widens it downstream, INVARIANT A).
+    ADDITIVE: flag OFF / thin (<2*window+3 bars) / no double-top / handle too deep / any veto
+    -> ``(False, reason, {...})`` with NO side effects; fail-OPEN to a benign decline on any
+    error. docs/DESIGN/MOMENTUM_LANE.md"""
     debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "cup_and_handle"}
     try:
         if not bool(getattr(settings, "chili_momentum_cup_and_handle_entry_enabled", False)):
@@ -4781,8 +4795,15 @@ def cup_and_handle_confirmation(
         # HOLD THE 9-EMA: the handle low must hold above the 9-EMA (vol-aware wick tolerance)
         # -- Ross: "much better ... we're right at the nine moving average" (an over-extended,
         # below-EMA handle is the risky one he warns against). Fail-OPEN on a missing EMA.
-        arrays = compute_all_from_df(df, needed={"ema_9", "volume_ratio"})
+        # Request ema_9 + volume_ratio (handle-hold + break surge) PLUS ema_20 / macd /
+        # macd_signal / vwap so the NOT-BACKSIDE + NOT-PARABOLIC chase-guards below get REAL
+        # series -- compute_all_from_df only computes what is requested, so an un-requested
+        # ema_20/macd would silently no-op _detect_back_side (a chase hole). Mirrors wedge_break.
+        arrays = compute_all_from_df(
+            df, needed={"ema_9", "ema_20", "macd", "macd_signal", "vwap", "volume_ratio"},
+        )
         ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
         ema_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
         if ema_cur is not None and handle_low < float(ema_cur) * (1.0 - ema_wick):
             debug["ema9"] = round(float(ema_cur), 6)
@@ -4796,6 +4817,45 @@ def cup_and_handle_confirmation(
         debug["pullback_high"] = float(level)
         debug["pullback_low"] = float(stop)
 
+        # ── NOT BACKSIDE / NOT BELOW-VWAP (the #1 chase guard — mirrors wedge / hod_break) ──
+        # Never fire the rim break into a name that has rolled to the BACK side. _detect_back_
+        # side reads the 1m EMA/MACD rollover; front_side_state reads WHERE the name sits in
+        # its OWN session (below VWAP / faded — Ross never buys below VWAP). The front_side
+        # read fails CLOSED on a thin/degenerate frame (this is a new-conviction fire path).
+        _bs, _bs_reason = _detect_back_side(
+            ema9, (arrays.get("ema_20") or []),
+            (arrays.get("macd") or []), (arrays.get("macd_signal") or []),
+            cur, macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+        )
+        if _bs:
+            debug["back_side"] = _bs_reason
+            return False, "cup_and_handle_back_side", debug
+        try:
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            if getattr(_fs, "is_backside", False):
+                debug["front_side_state"] = getattr(_fs, "reason", "backside")
+                return False, "cup_and_handle_backside_lifecycle", debug
+        except (TypeError, ValueError, AttributeError, KeyError):
+            # thin/degenerate frame -> fail-CLOSED for this new-conviction fire path.
+            debug["reason"] = "front_side_read_error"
+            return False, "cup_and_handle_backside_lifecycle", debug
+
+        # ── NOT PARABOLIC: extension vs the 9-EMA AND VWAP (the blow-off defense) ────────
+        # The cup rim (= the entry) must not sit excessively extended above the 9-EMA / VWAP:
+        # a vertical run INTO the rim is a parabolic blow-off, not a tested double-top break.
+        # Reuses the SAME adaptive ATR extension yardstick the chase veto uses (fail-OPEN on a
+        # missing reference so thin data never blocks).
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        _ext_ok, _ext_dbg = _hod_extension_ok(
+            level=level, ema9_cur=ema_cur, vwap_cur=vwap_cur, atr_pct=atr_pct, rvol=None,
+        )
+        if not _ext_ok:
+            debug.update(_ext_dbg)
+            return False, "cup_and_handle_extended", debug
+
         # L2 hidden-seller / big-seller veto (reused; fail-open on disabled/null L2). Ross
         # explicitly watches L2 here for "a big seller right around five" before the break.
         _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
@@ -4804,21 +4864,35 @@ def cup_and_handle_confirmation(
             debug.update(_l2patch)
             return False, f"cup_and_handle_{_reason}", debug
 
-        # TRIGGER: the first NEW HIGH above the cup rim (the double-top peak).
+        # TRIGGER: the first NEW HIGH above the cup rim (the double-top peak) -- either the
+        # live tick already trading through the rim (tick-break) OR a completed bar that broke
+        # it. Compute WHICH before the tape gate so TAPE REQUIRED applies to BOTH fire paths.
         cur_hi = float(high.iloc[cur])
-        # TICK-BREAK: structure valid on completed bars + the live tick already trading
-        # through the rim -> enter on that tick (mirrors the other Batch-C triggers; the
-        # caller's tick-break block applies the thrust buffer via the WAIT reason).
-        if (
-            live_price is not None and float(live_price) > 0
-            and float(live_price) > level
-        ):
+        _tick_break = bool(
+            live_price is not None and float(live_price) > 0 and float(live_price) > level
+        )
+        _bar_break = bool(cur_hi > level)
+        if not (_tick_break or _bar_break):
+            return False, "waiting_for_break", debug  # tick-armable (pullback_high set)
+
+        # ── TAPE REQUIRED + FAIL-CLOSED (the LAST gate; no fire without buyers on tape) ──
+        # Mirrors wedge / absorption: buyers must be actively lifting the ask THIS tick
+        # (signed_tape_accel > 0 AND tick_rate at/above its self-relative floor). Any disabled-
+        # flag / no-tape / thin / stale / crypto / error ⇒ NO fire (never chase a dead break).
+        # Applies to BOTH the tick-break and the completed-bar break.
+        _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+        debug["tape_reason"] = _tape_dbg.get("reason")
+        if not _tape_ok:
+            return False, "cup_and_handle_tape_unconfirmed", debug
+
+        if _tick_break:
+            # TICK-BREAK: structure valid on completed bars + the live tick already trading
+            # through the rim -> enter on that tick (mirrors the other Batch-C triggers; the
+            # caller's tick-break block applies the thrust buffer via the WAIT reason).
             debug["tick_break"] = True
             debug["live_price"] = float(live_price)
             return True, "cup_and_handle_break_tick_ok", debug
-        if cur_hi <= level:
-            return False, "waiting_for_break", debug  # tick-armable (pullback_high set)
-        # A completed bar broke the rim -> require a VOLUME spike on the break bar (Ross:
+        # A completed bar broke the rim -> ALSO require a VOLUME spike on the break bar (Ross:
         # "high volume surge" on the first new-high candle).
         vr = arrays.get("volume_ratio") or []
         vol_ratio = None
