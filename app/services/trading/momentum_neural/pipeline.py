@@ -1173,6 +1173,64 @@ def run_momentum_neural_tick(
                         _weights["price_band"] = ROSS_PRICE_SWEETSPOT_PILLAR_WEIGHT
                 except Exception:
                     pass
+            # OVERHEAD-SUPPLY CEILING SELECTION TILT (default OFF ⇒ byte-identical): de-weight a
+            # name climbing toward a prior huge-VOLUME doji / round-trip overhead level from below
+            # (trapped supply ahead — Ross "don't buy into resistance"). REUSES the SAME daily
+            # context the daily-structure pillar already fetched: overhead_supply_atr(ctx, entry)
+            # gives the daily-ATR room UP to the nearest ceiling, which the [0,1] sub-score maps
+            # (clear sky ⇒ 1.0, pinned at the level ⇒ 0.0). A composable 0.10-weight pillar folded
+            # onto the active weight-set (score_universe self-renormalises). DISTINCT from the
+            # entry-side overhead VETO (a hard pre-fill gate) — this only RE-RANKS selection, it can
+            # never block a fill or remove a name from the pool. Equity-only (crypto has no daily
+            # overhead-supply structure). Flag DEFAULT-OFF; OFF ⇒ no sub-score stamped, no weight
+            # folded ⇒ byte-identical ranking.
+            if bool(getattr(settings, "chili_momentum_overhead_supply_tilt_enabled", False)):
+                try:
+                    from .daily_levels import (
+                        compute_daily_context as _ohs_compute_daily_context,
+                        overhead_supply_atr as _ohs_overhead_supply_atr,
+                    )
+                    from ..market_data import fetch_ohlcv_df as _ohs_fetch_daily
+                    from .ross_momentum import (
+                        ROSS_OVERHEAD_SUPPLY_CLEAR_ROOM_ATR,
+                        ROSS_OVERHEAD_SUPPLY_PILLAR_WEIGHT,
+                        overhead_supply_subscore as _overhead_supply_subscore,
+                    )
+
+                    _ohs_lb = int(getattr(settings, "chili_momentum_daily_lookback_days", 20) or 20)
+                    _ohs_clear = float(getattr(
+                        settings, "chili_momentum_overhead_supply_clear_room_atr",
+                        ROSS_OVERHEAD_SUPPLY_CLEAR_ROOM_ATR))
+                    _n_oh = 0
+                    for _sym, _sig in _ross_signals.items():
+                        if not isinstance(_sig, dict) or "-USD" in str(_sym):
+                            continue  # equities only (crypto has no daily overhead structure)
+                        try:
+                            _px = None
+                            for _pk in ("price", "last", "close", "last_price"):
+                                _pv = _sig.get(_pk)
+                                if _pv is not None:
+                                    try:
+                                        _px = float(_pv)
+                                        break
+                                    except (TypeError, ValueError):
+                                        continue
+                            if _px is None or _px <= 0:
+                                continue  # fail-open: omit the pillar for this name
+                            _ddf2 = _ohs_fetch_daily(_sym, interval="1d", period="1y")
+                            _dctx2 = _ohs_compute_daily_context(_ddf2, lookback=_ohs_lb, price=_px)
+                            _room = _ohs_overhead_supply_atr(_dctx2, entry=_px)
+                            _oh = _overhead_supply_subscore(_room, clear_room_atr=_ohs_clear)
+                            if _oh is not None:
+                                _sig["overhead_supply_pct"] = _oh
+                                _n_oh += 1
+                        except Exception:
+                            continue
+                    if _n_oh > 0:
+                        _weights = dict(_weights)
+                        _weights["overhead_supply"] = ROSS_OVERHEAD_SUPPLY_PILLAR_WEIGHT
+                except Exception:
+                    pass
             meta["ross_scores"] = {
                 s: rs.score
                 for s, rs in _ross_score_universe(_ross_signals, weights=_weights).items()

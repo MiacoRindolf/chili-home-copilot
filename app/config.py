@@ -2346,6 +2346,109 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ICEBERG_ADD_PROBE_ENABLED"),
         description="Per-add iceberg/hidden-seller probe: compare filled-through vs displayed ask to detect a hidden seller before each scale-in add.",
     )
+    # ── ORDER-PATH ITEM 1: ANTICIPATION STARTER (probe-then-add entry) ───────────────
+    # DEFAULT OFF (NEW + order-path: the agentic rail had a duplicate-fill + stranded-
+    # naked-long history). When ON, the live entry is split into a small PROBE leg (a
+    # fraction of the intended qty) submitted on the pivot break; the REMAINDER is added
+    # only after the position confirms (fill seen) via the EXISTING pyramid/scale-in add
+    # machinery (which already carries the full veto chain + dedupe-safe client_order_id +
+    # broker_order_id recording + orphan reconciliation). OFF => the single-leg entry path
+    # is byte-identical (no probe split, qty unchanged, no remainder add). docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_anticipation_starter_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ANTICIPATION_STARTER_ENABLED"),
+        description="ANTICIPATION STARTER (probe-then-add): split the live entry into a small PROBE leg on the pivot break, then ADD the remainder after the position confirms — REUSING the existing pyramid/scale-in add path (full veto chain, dedupe-safe per-leg client_order_id, broker_order_id recorded + orphan-reconciled to the parent). NEW order-path => ships DEFAULT-OFF, do not enable without soak (the agentic rail's duplicate-fill / stranded-naked-long history). OFF => single-leg entry byte-identical (no split, no remainder add).",
+    )
+    chili_momentum_anticipation_probe_fraction: float = Field(
+        default=0.25, ge=0.05, le=0.95,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ANTICIPATION_PROBE_FRACTION"),
+        description="The ONE documented knob for the anticipation starter: the fraction of the risk-first entry quantity submitted as the initial PROBE leg (the remainder is added on confirmation via the pyramid path). Clamped 0.05..0.95. Only consulted when chili_momentum_anticipation_starter_enabled.",
+    )
+    # ── ORDER-PATH ITEM 2: ORDER CHUNKING (split parent into venue blocks) ───────────
+    # DEFAULT OFF (NEW + order-path). When ON, a ChunkingVenueAdapter WRAPPER intercepts
+    # place_limit_order_gtc and splits the parent order into N equal blocks, each with a
+    # FRESH client_order_id (so the venue accepts them as distinct orders) and each
+    # broker_order_id collected for reconciliation. For a small CASH account the benefit
+    # is marginal (N× spread/commission). OFF => the wrapper is not inserted; the base
+    # adapter is returned and every place_*_order is byte-identical to the single order.
+    chili_momentum_order_chunking_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ORDER_CHUNKING_ENABLED"),
+        description="ORDER CHUNKING: a venue-adapter WRAPPER that splits a parent place_limit_order_gtc into N equal blocks for queue priority, each with a fresh client_order_id and a collected broker_order_id (dedupe/reconcile preserved). Multiplies broker_order_ids => ships DEFAULT-OFF; do NOT enable until dedupe/reconcile safety is proven on the agentic rail (marginal benefit for a small cash account). OFF => the wrapper is not inserted and the base adapter is returned byte-identical.",
+    )
+    chili_momentum_order_chunking_blocks: int = Field(
+        default=1, ge=1, le=10,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ORDER_CHUNKING_BLOCKS"),
+        description="The ONE documented knob for order chunking: how many equal blocks to split the parent order into (1 = no split, byte-identical even with the wrapper inserted). Clamped 1..10. Only consulted when chili_momentum_order_chunking_enabled.",
+    )
+    # ── BEHAVIORAL ITEM 3: GREEN-DAY GRADUATION (consecutive-green size multiplier) ──
+    # DEFAULT OFF. A size-multiplier gate (NOT a hard live-block): after a consecutive
+    # green-day streak (realized daily PnL > 0, ET calendar, auto-derived from history)
+    # the per-trade risk basis is scaled UP a bounded amount. OFF => multiplier is always
+    # 1.0 (byte-identical sizing). Operator can size-down Monday validation by disabling.
+    chili_momentum_green_day_graduation_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_GREEN_DAY_GRADUATION_ENABLED"),
+        description="GREEN-DAY GRADUATION: graduate to bigger size ONLY after a consecutive green-day streak (realized daily PnL > 0, bucketed by ET calendar day, auto-derived from MomentumAutomationOutcome history — no scattered magic). A bounded UPWARD size multiplier on the per-trade risk basis (composes into the existing 3x combined-multiplier ceiling), applied at entry-quantity compute time — NOT a veto, never blocks an entry. Ships DEFAULT-OFF (operator decides; can size-down Monday validation). OFF => multiplier always 1.0 (byte-identical sizing).",
+    )
+    chili_momentum_green_day_step_per_day: float = Field(
+        default=0.1, ge=0.0, le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_GREEN_DAY_STEP_PER_DAY"),
+        description="The per-extra-green-day size step for green-day graduation: multiplier = 1.0 + step * max(0, consecutive_green_days - 1), capped at chili_momentum_green_day_max_multiplier. Default 0.1 (day-2 => 1.1x, day-3 => 1.2x ...). Clamped 0..1.",
+    )
+    chili_momentum_green_day_max_multiplier: float = Field(
+        default=2.0, ge=1.0, le=3.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_GREEN_DAY_MAX_MULTIPLIER"),
+        description="The hard ceiling on the green-day graduation multiplier (the streak can never size the lane above this). Clamped 1.0..3.0. Default 2.0.",
+    )
+    chili_momentum_green_day_lookback_days: int = Field(
+        default=30, ge=1, le=120,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_GREEN_DAY_LOOKBACK_DAYS"),
+        description="How many ET calendar days back to scan when counting the consecutive green-day streak for graduation. Clamped 1..120. Default 30.",
+    )
+    # ── ADDITIVE ITEM 4: PROCESS-OVER-PROFITS SCORE (logged rule-adherence) ──────────
+    # DEFAULT OFF. A LOGGED-ONLY rule-adherence score (entered-on-trigger / honored-stop /
+    # no-chase) distinct from realized PnL. Read-only journaling — NEVER gates, re-sizes,
+    # or vetoes an entry. OFF => the score is not computed and nothing is logged.
+    chili_momentum_process_score_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PROCESS_SCORE_ENABLED"),
+        description="PROCESS-OVER-PROFITS SCORE: a logged rule-adherence metric over closed sessions (entered-on-trigger / honored-stop / no-chase, via outcome_labels classes) distinct from realized PnL. Read-only journaling surface — NEVER gates, re-sizes, or vetoes trading. OFF => the score is not computed / not logged (byte-identical).",
+    )
+    chili_momentum_process_score_window: int = Field(
+        default=30, ge=1, le=500,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PROCESS_SCORE_WINDOW"),
+        description="Rolling window of recent REAL ENTERED closed trades scored by the process-over-profits rule-adherence metric. Read-only journaling only. Clamped 1..500.",
+    )
+    # ── ADDITIVE ITEM 5: OVERHEAD-SUPPLY CEILING (selection de-weight tilt) ──────────
+    # DEFAULT OFF. A bounded SELECTION tilt (like the other ross_momentum pillars) that
+    # de-weights a name approaching a prior huge-VOLUME doji / round-trip overhead level
+    # from below. A re-rank only — NEVER an entry gate, NEVER removes a name from the pool.
+    # OFF => the sub-score is not stamped and the pillar is absent from the blend (byte-identical).
+    chili_momentum_overhead_supply_tilt_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERHEAD_SUPPLY_TILT_ENABLED"),
+        description="OVERHEAD-SUPPLY CEILING (selection tilt): de-weight a name approaching a prior huge-VOLUME doji / round-trip overhead level from below (trapped supply ahead). A composable 0.10-weight FIFTH pillar folded onto the active Ross weight-set (score_universe self-renormalises), percentile-ranked within the batch — a name far below an overhead level scores HIGH (1.0), one AT/above scores LOW (0.0). A re-rank tilt ONLY: it can never block a fill or remove a name from the candidate pool (operator can still manually arm a de-weighted name). DISTINCT from chili_momentum_overhead_veto_enabled (which is an ENTRY veto). OFF => the sub-score is never stamped and the pillar is never folded => BYTE-IDENTICAL ranking.",
+    )
+    chili_momentum_overhead_supply_clear_room_atr: float = Field(
+        default=1.5, ge=0.1, le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERHEAD_SUPPLY_CLEAR_ROOM_ATR"),
+        description="The ONE documented base for the overhead-supply selection tilt: daily-ATR room to the nearest overhead level at/above which a name reads ~1.0 (clear sky, max reward); pinned at the level reads 0.0 (max de-weight). The within-batch PERCENTILE of the sub-score is what actually orders names (adaptive), so this only shapes the raw curve. Clamped 0.1..10.",
+    )
+    # ── ADDITIVE ITEM 6: METRICS SURFACE (operator journaling KPIs) ──────────────────
+    # DEFAULT OFF. A read-only reporting surface (accuracy% + profit-loss ratio + green-day
+    # streak) over already-computed trade data. No trading impact whatsoever. OFF => the
+    # surface returns empty dicts / is not called.
+    chili_momentum_challenge_metrics_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CHALLENGE_METRICS_ENABLED"),
+        description="METRICS SURFACE: a read-only operator-journaling surface exposing accuracy% (rule-adherence) + profit-loss ratio + consecutive-green-day streak over already-computed closed-session data. A reporting function only — NO trading impact (never gates, sizes, or vetoes). OFF => the surface returns empty dicts / is not called (byte-identical).",
+    )
+    chili_momentum_challenge_metrics_window: int = Field(
+        default=50, ge=1, le=500,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CHALLENGE_METRICS_WINDOW"),
+        description="Window of recent closed sessions the challenge-metrics surface aggregates accuracy% + profit-loss ratio over. Read-only journaling only. Clamped 1..500.",
+    )
     chili_momentum_adv_ceiling_ref_shares: float = Field(
         default=10_000_000.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ADV_CEILING_REF_SHARES"),

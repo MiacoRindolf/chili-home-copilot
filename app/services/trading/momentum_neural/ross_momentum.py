@@ -209,6 +209,54 @@ def price_sweetspot_subscore(
         frac = max(0.0, min(1.0, (p - hi) / width))
     return round(1.0 - 0.5 * frac, 4)
 
+# OVERHEAD-SUPPLY ceiling pillar weight (opt-in via chili_momentum_overhead_supply_tilt_enabled,
+# default OFF). A composable SELECTION tilt (like float_rotation / squeeze_fuel / news_catalyst):
+# a name climbing toward a prior huge-VOLUME doji / round-trip overhead level (trapped supply ahead)
+# is DE-WEIGHTED — those trapped longs sell into the rip (Ross SS101: "don't buy into resistance"),
+# while a name with clear sky above (far below any overhead level) is rewarded. ``score_universe``
+# reads the per-symbol raw ``overhead_supply_pct`` sub-score (stamped by the bridge from the daily
+# context overhead level + room-in-ATR) and renormalises over the present pillars. 0.10 = the same
+# minority magnitude as the other secondary tilts — it RE-RANKS the pool, it can NEVER block a fill
+# or remove a name from the pool. DISTINCT from the entry-side overhead VETO (chili_momentum_overhead_
+# veto_enabled), which is a hard pre-fill gate. Absent ``overhead_supply_pct`` (no daily context /
+# crypto / flag OFF) ⇒ the pillar is simply not present in the blend ⇒ byte-identical ranking.
+ROSS_OVERHEAD_SUPPLY_PILLAR_WEIGHT = 0.10
+
+# Overhead-supply room reference (the ONE documented base): clear sky at/above this many DAILY-ATR
+# units of room to the nearest overhead level reads ~1.0 (fully de-risked, max reward). At the level
+# (0 room) reads 0.0 (max de-weight). A name ABOVE the level (negative room — already broken through,
+# the supply is now below it as support) reads 1.0 (no overhead). Linear ramp; the within-batch
+# PERCENTILE of overhead_supply_pct is what actually ORDERS names (adaptive), so this only shapes the
+# raw sub-score's curve, never a hard cutoff.
+ROSS_OVERHEAD_SUPPLY_CLEAR_ROOM_ATR = 1.5
+
+
+def overhead_supply_subscore(
+    room_to_overhead_atr: float | None,
+    *,
+    clear_room_atr: float = ROSS_OVERHEAD_SUPPLY_CLEAR_ROOM_ATR,
+) -> float | None:
+    """Map signed room-to-nearest-overhead (in DAILY-ATR units) to a [0,1] supply sub-score.
+
+    ``room_to_overhead_atr``: how far the nearest prior huge-volume / round-trip overhead level
+    sits ABOVE the current price, in daily-ATR units (+ = overhead still ahead, the price is below
+    it; 0 = pinned at the level; negative = price already ABOVE the level, supply is now below as
+    support). Returns a [0,1] sub-score: clear sky (room >= ``clear_room_atr``) ⇒ 1.0 (max reward),
+    pinned at the level (0 room) ⇒ 0.0 (max de-weight), already broken above (negative room) ⇒ 1.0
+    (no overhead ahead). Linear ramp over ``clear_room_atr``. Fail-OPEN to ``None`` (omit the tilt)
+    when the room is unknown — a name is never de-ranked for absent daily context. Pure / IO-free.
+    """
+    r = _to_float(room_to_overhead_atr)
+    if r is None:
+        return None
+    if r < 0.0:
+        # Price already ABOVE the level: no overhead ahead (supply is now support below) ⇒ full reward.
+        return 1.0
+    # r == 0.0 (pinned AT the level) ⇒ 0.0 (max de-weight); ramps up to 1.0 at clear_room_atr.
+    half = max(1e-9, float(clear_room_atr))
+    sub = max(0.0, min(1.0, r / half))
+    return round(sub, 4)
+
 # News-catalyst grade reference sub-scores (centered on the 0.5 neutral midpoint, like squeeze_fuel).
 # STRONG (FDA/trial/partnership/contract/M&A/earnings-beat — the headlines Ross FAVORS) boosts ABOVE
 # neutral; WEAK (dilution/compliance/legal — Ross distrusts) de-rates BELOW; FAKE (unverified/hacked-PR/
@@ -659,6 +707,13 @@ def score_universe(
     _pb_raw = {sym: _first_float(sig or {}, "price_band_pct") for sym, sig in signals.items()}
     pb_sorted = sorted(v for v in _pb_raw.values() if v is not None)
     _w_pb = float(w.get("price_band") or 0.0)
+    # Overhead-supply ceiling pillar (composable, opt-in): the per-symbol raw ``overhead_supply_pct``
+    # sub-score (room-to-nearest-overhead shaped to [0,1]; high = clear sky, low = climbing into trapped
+    # supply) stamped by the bridge. Graceful-degrade exactly like price_band — absent / zero-weight ⇒
+    # not in the blend (byte-identical). A name with NO daily overhead context is NEUTRAL (omitted).
+    _oh_raw = {sym: _first_float(sig or {}, "overhead_supply_pct") for sym, sig in signals.items()}
+    oh_sorted = sorted(v for v in _oh_raw.values() if v is not None)
+    _w_oh = float(w.get("overhead_supply") or 0.0)
     # 6th/7th pillars (attention-leadership variant): the name's amplitude-leadership
     # share+rank of the live mover-field (the TRUE winner/loser separator) + its
     # dormant->explosive volume. Stamped cross-sectionally in _bridge_scanner_to_viability
@@ -696,6 +751,8 @@ def score_universe(
         nc_pct = _percentile_rank(_nc, nc_sorted) if _nc is not None else None
         _pb = _pb_raw.get(sym)
         pb_pct = _percentile_rank(_pb, pb_sorted) if _pb is not None else None
+        _oh = _oh_raw.get(sym)
+        oh_pct = _percentile_rank(_oh, oh_sorted) if _oh is not None else None
 
         present: list[tuple[float, float]] = []  # (percentile, weight)
         if rvol_pct is not None:
@@ -720,6 +777,8 @@ def score_universe(
             present.append((nc_pct, _w_nc))
         if pb_pct is not None and _w_pb > 0:
             present.append((pb_pct, _w_pb))
+        if oh_pct is not None and _w_oh > 0:
+            present.append((oh_pct, _w_oh))
 
         wsum = sum(wt for _, wt in present)
         score = (sum(pct * wt for pct, wt in present) / wsum) if wsum > 0 else 0.0
@@ -768,6 +827,8 @@ def score_universe(
                 _secondary.append((nc_pct, _w_nc))
             if pb_pct is not None and _w_pb > 0:
                 _secondary.append((pb_pct, _w_pb))
+            if oh_pct is not None and _w_oh > 0:
+                _secondary.append((oh_pct, _w_oh))
             _sec_wsum = sum(wt for _, wt in _secondary)
             quality_blend = (sum(p * wt for p, wt in _secondary) / _sec_wsum) if _sec_wsum > 0 else 0.5
             quality_blend = max(0.0, min(1.0, quality_blend))
@@ -793,6 +854,7 @@ def score_universe(
                 "squeeze_fuel_pct": _sf if _w_sf > 0 else None,
                 "news_catalyst_pct": _nc if _w_nc > 0 else None,
                 "price_band_pct": _pb if _w_pb > 0 else None,
+                "overhead_supply_pct": _oh if _w_oh > 0 else None,
                 "pillars_present": [
                     name
                     for name, val in (
@@ -804,6 +866,7 @@ def score_universe(
                         ("squeeze_fuel", sf_pct if _w_sf > 0 else None),
                         ("news_catalyst", nc_pct if _w_nc > 0 else None),
                         ("price_band", pb_pct if _w_pb > 0 else None),
+                        ("overhead_supply", oh_pct if _w_oh > 0 else None),
                     )
                     if val is not None
                 ],

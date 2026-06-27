@@ -3860,6 +3860,19 @@ def tick_live_session(
         factory = adapter_factory or resolve_live_spot_adapter_factory(ef)
     except ExecutionFamilyNotImplementedError:
         return {"ok": True, "skipped": "execution_family_not_implemented", "execution_family": ef}
+    # ORDER CHUNKING (item 2, DEFAULT OFF ⇒ byte-identical): wrap the resolved factory so the
+    # entry place_limit_order_gtc is split into N venue blocks for queue priority. When the
+    # flag is OFF or blocks<=1, maybe_wrap_chunking returns the factory UNCHANGED (the exact
+    # same adapter object), so every place_*_order is byte-identical. The wrapper is transparent
+    # to every other VenueAdapter method (delegates) and folds child broker_order_ids onto the
+    # parent for the existing dedupe/orphan reconciliation. NEW order-path: do not enable
+    # without soak (the agentic rail's duplicate-fill history).
+    try:
+        from ..venue.chunking_adapter import maybe_wrap_chunking as _maybe_wrap_chunking
+
+        factory = _maybe_wrap_chunking(factory)
+    except Exception:
+        pass  # fail-closed to the base factory (byte-identical)
     adapter = factory()
     if not adapter.is_enabled():
         return {"ok": True, "skipped": "coinbase_adapter_unavailable"}
@@ -6323,6 +6336,7 @@ def tick_live_session(
         # cold or after 3 straight losses. Bounds [0.5, 1.5]; fail-neutral 1.0.
         from .risk_policy import (
             cushion_risk_multiplier,
+            green_day_graduation_multiplier,
             prior_day_pnl_damper_multiplier,
             streak_risk_multiplier,
         )
@@ -6330,6 +6344,13 @@ def tick_live_session(
         # Segregate the streak dial by THIS lane (ef = normalized execution_family,
         # resolved above) so a crypto/paper-twin loss never de-risks the equity lane.
         _streak_mult, _streak_meta = streak_risk_multiplier(db, execution_family=ef)
+        # GREEN-DAY GRADUATION (default OFF ⇒ 1.0 byte-identical): graduate to bigger size
+        # only after a consecutive green-day streak (auto-derived from realized daily PnL,
+        # ET calendar). A bounded UPWARD multiplier — composes into the combined ceiling
+        # below, NEVER a veto. Lane-segregated by ef (same as the streak dial).
+        _graduation_mult, _graduation_meta = green_day_graduation_multiplier(
+            db, execution_family=ef
+        )
         _base_max_loss = policy_float_cap(
             caps, "max_loss_per_trade_usd", settings.chili_momentum_risk_max_loss_per_trade_usd
         )
@@ -6365,6 +6386,10 @@ def tick_live_session(
             except Exception:
                 pass
         le["streak_risk"] = _streak_meta
+        # GREEN-DAY GRADUATION meta (only stash when it actually graduated size up, to keep
+        # the OFF path byte-identical in the live-entry blob). 1.0 ⇒ nothing recorded.
+        if _graduation_mult > 1.0:
+            le["green_day_graduation"] = _graduation_meta
         # Day-cushion ladder (Ross 06-11): start the day at half risk; earn the
         # right to full and then aggressive size from TODAY's banked P&L.
         _cushion_mult, _cushion_meta = cushion_risk_multiplier(
@@ -6600,7 +6625,7 @@ def tick_live_session(
         except Exception:
             _dip_velocity_mult = 1.0
         _eff_max_loss = min(
-            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult) * float(_fatigue_mult) * float(_sym_fatigue_mult) * float(_hot_cold_mult) * float(_time_fatigue_mult) * float(_halt_size_mult) * float(_dip_velocity_mult),
+            float(_base_max_loss) * float(_streak_mult) * float(_graduation_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult) * float(_fatigue_mult) * float(_sym_fatigue_mult) * float(_hot_cold_mult) * float(_time_fatigue_mult) * float(_halt_size_mult) * float(_dip_velocity_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE
@@ -6632,6 +6657,53 @@ def tick_live_session(
             _safe_transition(db, sess, STATE_LIVE_ERROR)
             db.flush()
             return {"ok": False, "error": "size_zero"}
+        # ── ANTICIPATION STARTER (item 1, DEFAULT OFF ⇒ byte-identical) ──────────────
+        # Probe-then-add: submit a SMALL probe leg on the pivot break now, and ADD the
+        # remainder only after the probe CONFIRMS (a real fill = the break is real) —
+        # reusing the EXISTING pyramid in-flight add machinery (PHASE-1 broker-truth
+        # merge + dedupe-on-broker_order_id + orphan/late-fill tracking). EQUITY-ONLY
+        # (the crypto maker-only path is a distinct order shape; equity-first like the
+        # pyramid add). When the probe split would leave either leg below base_min_size
+        # we FALL BACK to the full single entry (byte-identical). Flag OFF ⇒ none of this
+        # runs, qty unchanged. The remainder is realised by the pyramid path; it does NOT
+        # bypass any veto (it only fires on a confirmed fill + passes the same in-flight
+        # dedupe). docs/DESIGN/MOMENTUM_LANE.md
+        le.pop("anticipation_remainder_qty", None)
+        le.pop("anticipation_armed", None)
+        if (
+            bool(getattr(settings, "chili_momentum_anticipation_starter_enabled", False))
+            and not str(sess.symbol or "").upper().endswith("-USD")
+        ):
+            try:
+                _ant_frac = float(
+                    getattr(settings, "chili_momentum_anticipation_probe_fraction", 0.25) or 0.25
+                )
+                _ant_frac = max(0.05, min(0.95, _ant_frac))
+                _ant_full = float(qty)
+                _ant_probe = _round_base_size(_ant_full * _ant_frac, inc, mn)
+                _ant_rem = _round_base_size(_ant_full - _ant_probe, inc, mn)
+                _ant_min = float(mn) if mn and mn > 0 else 1.0
+                # Only split when BOTH legs are independently viable (>= base_min_size) and the
+                # remainder is positive; else keep the single full entry (byte-identical).
+                if (
+                    _ant_probe is not None and _ant_rem is not None
+                    and _ant_probe >= _ant_min and _ant_rem >= _ant_min
+                    and (_ant_probe + _ant_rem) <= _ant_full + 1e-9
+                ):
+                    qty = _ant_probe
+                    le["anticipation_armed"] = True
+                    le["anticipation_full_qty"] = _ant_full
+                    le["anticipation_probe_qty"] = _ant_probe
+                    le["anticipation_remainder_qty"] = _ant_rem
+                    le["anticipation_probe_fraction"] = _ant_frac
+                    _emit(db, sess, "live_anticipation_probe_sized", {
+                        "full_qty": _ant_full, "probe_qty": _ant_probe,
+                        "remainder_qty": _ant_rem, "probe_fraction": _ant_frac,
+                    })
+            except Exception:
+                # Fail-CLOSED to the full single entry (never a malformed split).
+                le.pop("anticipation_remainder_qty", None)
+                le.pop("anticipation_armed", None)
         estimated_guarded_notional = qty * guarded_ask
         if estimated_guarded_notional > max_notional + 1e-9:
             _emit(
@@ -7136,6 +7208,15 @@ def tick_live_session(
         # never forgotten — the late-fill sweep + pre-submit guard track it to a
         # terminal resolution (adopted | void). No fill can become untracked again.
         _record_entry_order_placed(le, res.get("order_id"))
+        # ORDER CHUNKING (item 2): when the chunking wrapper split this entry into N child
+        # blocks, fold EVERY child broker_order_id into the SAME entry-order history so the
+        # existing late-fill sweep + pre-submit guard track each leg to a terminal resolution
+        # (adopted | void) — no chunk leg can become an untracked stranded naked long. Absent
+        # / single-order ⇒ chunk_order_ids is empty ⇒ this is a no-op (byte-identical).
+        for _chunk_oid in (res.get("chunk_order_ids") or []):
+            _record_entry_order_placed(le, _chunk_oid)
+        if res.get("chunk_order_ids"):
+            le["entry_chunk_order_ids"] = [str(o) for o in res.get("chunk_order_ids")]
         le["entry_place_result"] = {"ok": res.get("ok"), "error": res.get("error")}
         _commit_le(sess, le)
         _emit(db, sess, "live_entry_submitted", {
@@ -8239,6 +8320,127 @@ def tick_live_session(
                                 })
                 except Exception:
                     pass
+
+            # ── ANTICIPATION STARTER REMAINDER (item 1, DEFAULT OFF ⇒ byte-identical) ──
+            # The entry placed only the PROBE leg; once the probe CONFIRMS (a real held
+            # position = the break is real) add the stashed remainder ONCE, reusing the
+            # SAME in-flight broker-truth merge the pyramid uses (pyramid_blend_on_fill —
+            # the shared/tested helper) on a SEPARATE in-flight slot so it is independent
+            # of the pyramid flag. Two phases, both FALL THROUGH (no early return) so the
+            # stop-breach check still runs this tick. Dedupe: one in-flight remainder order
+            # at a time (idempotent); orphan-safe: the child order_id is folded into the
+            # entry-order history so the late-fill sweep tracks it to terminal. Only fires
+            # when armed (probe split happened) AND the position is GREEN (confirmation) —
+            # it never bypasses a veto (a confirmed fill IS the trigger). Absent the arm
+            # (flag OFF / no split) ⇒ this whole block is a no-op (byte-identical).
+            if le.get("anticipation_armed") or le.get("anticipation_add_order_id"):
+                try:
+                    # PHASE 1 — resolve an in-flight remainder add (mirror the pyramid merge).
+                    _ant_oid = le.get("anticipation_add_order_id")
+                    if _ant_oid:
+                        _ano, _ = adapter.get_order(str(_ant_oid))
+                        if _ano is not None and not _order_open(_ano):
+                            _ant_filled = float(getattr(_ano, "filled_size", 0) or 0)
+                            if _ant_filled > 0:
+                                _Pa_a = float(getattr(_ano, "average_filled_price", 0) or 0) or float(
+                                    le.get("anticipation_add_limit_px") or ask
+                                )
+                                _blend_a = pyramid_blend_on_fill(
+                                    q0=float(pos["quantity"]),
+                                    a0=float(pos["avg_entry_price"]),
+                                    qa_f=_ant_filled,
+                                    Pa_f=_Pa_a,
+                                    stop_px=float(pos["stop_price"]),
+                                    original_quantity=_float_or_none(pos.get("original_quantity")),
+                                )
+                                pos["avg_entry_price"] = _blend_a["a1"]
+                                pos["quantity"] = _blend_a["q1"]
+                                pos["original_quantity"] = _blend_a["original_quantity"]
+                                pos["notional_usd"] = _blend_a["q1"] * _blend_a["a1"]
+                                pos["stop_price"] = _blend_a["s1"]
+                                stop_px = _blend_a["s1"]
+                                _ant_fee = _order_total_fees_usd(_ano) or 0.0
+                                if _ant_fee > 0.0:
+                                    le["entry_fee_usd_unbooked"] = (
+                                        float(le.get("entry_fee_usd_unbooked") or 0.0) + _ant_fee
+                                    )
+                                _mark_entry_order_resolved(le, str(_ant_oid), "adopted")
+                                le["anticipation_completed"] = True
+                                le.pop("anticipation_add_order_id", None)
+                                le.pop("anticipation_add_limit_px", None)
+                                le.pop("anticipation_armed", None)
+                                le.pop("anticipation_remainder_qty", None)
+                                le["position"] = pos
+                                _commit_le(sess, le)
+                                _emit(db, sess, "live_anticipation_remainder_filled", {
+                                    "add_qty": _ant_filled, "add_price": _Pa_a,
+                                    "q1": _blend_a["q1"], "a1": _blend_a["a1"],
+                                })
+                            else:
+                                # Terminal with NO fill — clear the in-flight slot so a later
+                                # tick may retry the remainder. No pos mutation.
+                                le.pop("anticipation_add_order_id", None)
+                                le.pop("anticipation_add_limit_px", None)
+                                _commit_le(sess, le)
+                    # PHASE 2 — submit the remainder ONCE when armed + confirmed green + idle.
+                    _ant_rem = _float_or_none(le.get("anticipation_remainder_qty"))
+                    if (
+                        le.get("anticipation_armed")
+                        and not le.get("anticipation_add_order_id")
+                        and not le.get("anticipation_completed")
+                        and _ant_rem is not None and _ant_rem > 0
+                        and float(bid) > float(pos["avg_entry_price"])  # confirmation: position is GREEN
+                    ):
+                        _ant_ask = float(ask) if (ask and float(ask) > 0) else float(bid)
+                        _ant_guard_ask = _ant_ask * _adaptive_notional_guard_multiplier(
+                            expected_move_bps=_expected_move_bps
+                        )
+                        _ant_limit_str = _fmt_limit_price_buy(_ant_guard_ask)
+                        _ant_place_n = int(le.get("anticipation_place_count", 0) or 0) + 1
+                        le["anticipation_place_count"] = _ant_place_n
+                        _ant_seed = (
+                            f"{sess.id}|{sess.correlation_id or 'x'}|ant|{_ant_place_n}"
+                        ).encode("utf-8")
+                        _ant_suffix = hashlib.sha1(_ant_seed).hexdigest()[:10]
+                        _ant_cid = (
+                            f"chili_ml_ant_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{_ant_suffix}"
+                        )[:120]
+                        try:
+                            from .market_profile import market_session_now as _ant_sess_now
+                            _ant_ext = _ant_sess_now(sess.symbol) != "regular"
+                        except Exception:
+                            _ant_ext = False
+                        _ant_res = adapter.place_limit_order_gtc(
+                            product_id=product_id,
+                            side="buy",
+                            base_size=_fmt_base_size(_ant_rem),
+                            limit_price=_ant_limit_str,
+                            client_order_id=_ant_cid,
+                            extended_hours=_ant_ext,
+                            time_in_force="gfd",
+                        ) or {}
+                        if _ant_res.get("ok") and _ant_res.get("order_id"):
+                            le["anticipation_add_order_id"] = str(_ant_res["order_id"])
+                            le["anticipation_add_limit_px"] = float(_ant_guard_ask)
+                            # Fold the remainder leg into the entry-order history so the
+                            # late-fill sweep + pre-submit guard track it to terminal (no
+                            # stranded naked leg). SAME safety net as the primary entry.
+                            _record_entry_order_placed(le, _ant_res.get("order_id"))
+                            _commit_le(sess, le)
+                            _emit(db, sess, "live_anticipation_remainder_submitted", {
+                                "order_id": le["anticipation_add_order_id"],
+                                "client_order_id": _ant_cid,
+                                "remainder_qty": float(_ant_rem),
+                                "limit_price": _ant_limit_str,
+                            })
+                except Exception:
+                    # Fail-OPEN: any error leaves the position unchanged (the probe leg is
+                    # already a complete, fully-managed position on its own). Never crash
+                    # the tick; never mutate pos outside the confirmed-fill PHASE-1 merge.
+                    logger.debug(
+                        "[momentum_live] anticipation remainder pass skipped session=%s",
+                        sess.id, exc_info=True,
+                    )
 
             # ── RISK-NEUTRAL CONFIRMATION PYRAMID (single add to a winner) ───────
             # Placed AFTER the cushion-trail ratchet + OFI-lock + v2-ladder, so

@@ -910,6 +910,116 @@ def prior_day_pnl_damper_multiplier(
         return 1.0, {"damper_mult": 1.0, "reason": "error_fail_neutral"}
 
 
+def consecutive_green_days(
+    db: Any, *, execution_family: str | None, lookback_days: int = 30
+) -> tuple[int, dict[str, Any]]:
+    """Count consecutive GREEN ET calendar days (net realized PnL > 0) for the lane,
+    walking BACKWARDS from the most-recent PAST day (today excluded — today's session is
+    incomplete; including it would let an intraday red flicker collapse the streak mid-day).
+
+    Buckets terminated live outcomes by ET calendar day, sums net realized PnL per day, and
+    counts how many of the most-recent CONTIGUOUS past days closed green, stopping at the
+    first red (or zero) day. Read-only, ephemeral (recomputed each call — never persisted),
+    lookahead-free. Returns ``(streak, meta)``; thin/failed history => ``(0, ...)`` (neutral).
+    """
+    meta: dict[str, Any] = {"streak": 0, "lookback_days": int(lookback_days)}
+    if db is None or not execution_family or lookback_days <= 0:
+        return 0, {**meta, "reason": "no_input"}
+    try:
+        from ....models.trading import MomentumAutomationOutcome
+
+        far_start, _ = _et_day_bounds_utc(days_ago=int(lookback_days))
+        today_start, _ = _et_day_bounds_utc(days_ago=0)
+        rows = (
+            db.query(
+                MomentumAutomationOutcome.terminal_at,
+                MomentumAutomationOutcome.realized_pnl_usd,
+            )
+            .filter(
+                MomentumAutomationOutcome.execution_family == execution_family,
+                MomentumAutomationOutcome.mode == "live",
+                MomentumAutomationOutcome.realized_pnl_usd.isnot(None),
+                MomentumAutomationOutcome.terminal_at >= far_start,
+                MomentumAutomationOutcome.terminal_at < today_start,
+            )
+            .all()
+        )
+    except Exception:
+        logger.debug("[momentum_neural] green-day streak read failed", exc_info=True)
+        return 0, {**meta, "reason": "read_failed"}
+    if not rows:
+        return 0, {**meta, "reason": "no_history"}
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    utc = ZoneInfo("UTC")
+    by_day: dict[Any, float] = {}
+    for ts, pnl in rows:
+        try:
+            if ts is None or pnl is None:
+                continue
+            d = ts.replace(tzinfo=utc).astimezone(et).date()
+            by_day[d] = by_day.get(d, 0.0) + float(pnl)
+        except Exception:
+            continue
+    if not by_day:
+        return 0, {**meta, "reason": "no_buckets"}
+    days_sorted = sorted(by_day.keys(), reverse=True)  # most-recent first
+    streak = 0
+    green_usd = 0.0
+    for d in days_sorted:
+        if by_day[d] > 0.0:
+            streak += 1
+            green_usd += by_day[d]
+        else:
+            break
+    return streak, {
+        **meta,
+        "streak": int(streak),
+        "green_usd": round(green_usd, 2),
+        "days_seen": len(by_day),
+    }
+
+
+def green_day_graduation_multiplier(
+    db: Any, *, execution_family: str | None
+) -> tuple[float, dict[str, Any]]:
+    """GREEN-DAY GRADUATION size multiplier (NOT a hard live-block).
+
+    After a consecutive green-day streak (realized daily PnL > 0, ET calendar, auto-derived
+    from history), scale the per-trade risk basis UP a bounded amount so the lane graduates
+    to bigger size only once it has PROVEN consistency — Ross/Mike's "earn the size" rule.
+
+      mult = clamp(1.0 + step * max(0, streak - 1), 1.0, max_multiplier)
+
+    Day-1 (streak<=1) => 1.0 (no graduation off a single green day). Composes multiplicatively
+    into the runner's existing combined-multiplier ceiling, applied at entry-quantity compute
+    time — it is NEVER a veto and never blocks an entry. ADDITIVE / FAIL-NEUTRAL: flag OFF,
+    thin history, or any error => ``(1.0, ...)`` (never changes sizing). Read-only; ephemeral
+    (the streak is recomputed each call, never persisted). [momentum_neural] graduation."""
+    if not bool(getattr(settings, "chili_momentum_green_day_graduation_enabled", False)):
+        return 1.0, {"reason": "disabled", "graduation_mult": 1.0}
+    try:
+        step = float(getattr(settings, "chili_momentum_green_day_step_per_day", 0.1) or 0.1)
+        max_mult = float(getattr(settings, "chili_momentum_green_day_max_multiplier", 2.0) or 2.0)
+        lookback = int(getattr(settings, "chili_momentum_green_day_lookback_days", 30) or 30)
+        if max_mult < 1.0:
+            max_mult = 1.0
+        streak, s_meta = consecutive_green_days(
+            db, execution_family=execution_family, lookback_days=lookback
+        )
+        mult = max(1.0, min(max_mult, 1.0 + step * max(0, int(streak) - 1)))
+        return mult, {
+            "graduation_mult": round(mult, 4),
+            "consecutive_green_days": int(streak),
+            "step_per_day": step,
+            "max_multiplier": max_mult,
+            **{k: v for k, v in s_meta.items() if k in ("green_usd", "days_seen")},
+        }
+    except Exception:
+        return 1.0, {"reason": "error_fail_neutral", "graduation_mult": 1.0}
+
+
 def compute_risk_first_quantity(
     *,
     entry_price: float,

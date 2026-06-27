@@ -309,6 +309,30 @@ def get_momentum_risk_policy() -> dict[str, Any]:
     return resolve_effective_risk_policy()
 
 
+@router.get("/metrics")
+def get_momentum_metrics(
+    db: Session = Depends(get_db),
+    execution_family: str = Query("coinbase_spot", min_length=1, max_length=32),
+) -> dict[str, Any]:
+    """READ-ONLY operator-journaling surface (items 4 + 6): the process-over-profits
+    rule-adherence score and the challenge KPIs (accuracy% / profit-loss ratio / green-day
+    streak) over already-closed sessions. Pure reporting — NO trading impact. Both halves are
+    flag-gated (process_score / challenge_metrics): a disabled half returns null / {} so the
+    surface is byte-identical when off."""
+    from ...services.trading.momentum_neural.metrics_surface import (
+        challenge_metrics_summary,
+        process_over_profits_score,
+    )
+
+    ef = (execution_family or "").strip() or None
+    return {
+        "ok": True,
+        "execution_family": ef,
+        "process_score": process_over_profits_score(db, execution_family=ef),
+        "challenge_metrics": challenge_metrics_summary(db, execution_family=ef),
+    }
+
+
 @router.get("/risk/evaluate")
 def get_momentum_risk_evaluate(
     request: Request,
