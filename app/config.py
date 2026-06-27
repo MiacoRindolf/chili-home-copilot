@@ -6237,6 +6237,40 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_EXTENSION_FLOOR_PCT"),
         description="Entry-extension veto: minimum allowed extension above the breakout level (fraction, e.g. 0.10 = 10%) regardless of ATR — a calm name still gets at least this room. Recalibrated 06-24 0.05->0.10: the high-ATR binding constraint that vetoes RUN(+19.9%)/PLSM(+33.8%) is K*0.12=0.12 (K=1.0, regime_atr clamp ceiling 0.12), governed by K NOT the floor, so raising the floor to 0.10 keeps RUN/PLSM vetoed across the full vol range while ALLOWING a calm +9.9% break-and-go (cap = max(0.10, 1.0*atr)). The cap is max(this, K*atr_pct).",
     )
+    # ── CANDLE-QUALITY + MULTI-TF (HTF-against) ENTRY VETO ───────────────────────
+    # Two ADDITIVE entry-quality gates that slot AFTER the trigger fires and BEFORE the
+    # downstream VWAP/MACD/volume confirmations: (1) DOJI veto — reject when the trigger
+    # candle has a weak body relative to its range (indecision), a strong full-body
+    # commitment candle passes; (2) MULTI-TF ALIGNMENT — reject ONLY when the higher TF
+    # (5m, derived from the 1m df, no new feed) is CLEARLY AGAINST the long (5m EMA-9
+    # rolling DOWN or MACD histogram clearly peaked/rolled). A NEUTRAL/LAGGING HTF (not
+    # yet up but not down) MUST still pass — requiring full multi-TF alignment would break
+    # Ross's 1m-FAST geometry (the 1m leads, the HTF lags). Default OFF -> byte-identical
+    # (both gates skipped). Fail-OPEN on thin/unreadable data (never block a valid break).
+    chili_momentum_candle_quality_multitf_veto_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CANDLE_QUALITY_MULTITF_VETO_ENABLED"),
+        description="Master enable for BOTH the doji veto and the HTF-against (multi-TF alignment) veto in pullback_break_confirmation. false = byte-identical (both gates skipped, no change to entry logic). true = a doji trigger candle vetoes AND a 5m HTF that is clearly bearish (EMA-9 rolling down / MACD peaked) vetoes; a neutral/lagging HTF still passes (1m-fast preserved).",
+    )
+    chili_momentum_doji_body_frac: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DOJI_BODY_FRAC"),
+        description="Doji veto: the ADAPTIVE base body/range fraction below which the trigger candle is a DOJI (indecision) and the entry is vetoed. ONE documented base = 0.25 (25% of the range is the calm-name indecision floor). The effective threshold WIDENS with volatility: doji_threshold = base + atr_pct (an explosive ~5% ATR name gets a looser doji band so its normal full-body bars are not over-restricted). Range-relative, no fixed cents. A green full-body commitment candle (close in upper half, upper wick not dominant) always passes regardless. Only consulted with chili_momentum_candle_quality_multitf_veto_enabled on.",
+    )
+    chili_momentum_htf_against_macd_threshold: float = Field(
+        default=0.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HTF_AGAINST_MACD_THRESHOLD"),
+        description="HTF-against veto: the 5m MACD histogram is treated as PEAKED/rolled-over (HTF clearly bearish) when hist[-1] < hist[-2] >= hist[-3] AND hist[-2] > this threshold. Default 0.0 = any positive-then-declining rollover counts (strict). Raise to require MORE 5m up-momentum before the rollover registers as HTF-against (e.g. 0.01). Self-relative MACD on the resampled HTF bars, no new feed. Only consulted with chili_momentum_candle_quality_multitf_veto_enabled on.",
+    )
+    chili_momentum_htf_against_ema9_rolldown_bars: int = Field(
+        default=3,
+        ge=2,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HTF_AGAINST_EMA9_ROLLDOWN_BARS"),
+        description="HTF-against veto: the 5m EMA-9 counts as CLEARLY rolling DOWN (HTF bearish) only on a SUSTAINED decline — the EMA-9 must be strictly lower across each of the last N HTF samples (a multi-bar negative slope), NOT a single lagging down-tick. ONE documented base = 3 samples (the EMA-9 has fallen for 2 consecutive 5m steps). A single down-tick (a lagging EMA dipping for one sample off a flush while the 1m has already turned up) must NOT register as clearly-against — that is exactly the dip-rip/VWAP-reclaim the lane wants to catch. Raise for a longer required roll-down; lower (min 2) for a quicker read. Only consulted with chili_momentum_candle_quality_multitf_veto_enabled on.",
+    )
     # ── L2 ENTRY CONFIRMER (Phase 1, DEFER-only) ─────────────────────────────────
     # docs/DESIGN/L2_PRIMARY_SIGNAL.md — graduate L2/T&S from veto→CONFIRMER. AFTER the
     # chart trigger fires AND AFTER both existing vetoes (_l2_entry_veto + _entry_flow_veto)

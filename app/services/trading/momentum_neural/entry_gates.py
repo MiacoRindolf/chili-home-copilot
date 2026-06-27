@@ -370,6 +370,162 @@ def _detect_back_side(
     return False, ""
 
 
+def _doji_trigger_veto(
+    o: float, h: float, l: float, c: float, *, atr_pct: float | None, base_body_frac: float,
+) -> tuple[bool, dict[str, Any]]:
+    """DOJI VETO (candle-quality gate): the TRIGGER candle is a true DOJI — a weak body
+    relative to its range = indecision, not a conviction break. Returns ``(veto, debug)``;
+    ``veto=True`` means BLOCK the entry (a doji broke the level).
+
+    ADAPTIVE threshold (no fixed magic): a candle is a doji when ``body/range`` falls below
+    ``base_body_frac + atr_pct`` — the ONE documented base (``base_body_frac`` = 0.25, the
+    calm-name indecision floor) WIDENS with the instrument's volatility so an explosive
+    high-ATR name (whose normal bars carry larger wicks) is not over-restricted. ``atr_pct``
+    None -> just the base (Ross floor).
+
+    OVERRIDE: a STRONG full-body commitment candle ALWAYS passes regardless of the body/range
+    ratio — green (close >= open), closing in the upper half of its range, with a non-dominant
+    upper wick (reuses ``is_strong_bull_break_candle``). This keeps a wide-range conviction
+    candle (whose body may be a smaller fraction of a very tall range) from being mislabeled a
+    doji.
+
+    FAIL-SAFE: a zero-range / unreadable bar -> ``veto=False`` (never block on unreadable data).
+    Range-relative, pure, side-effect-free."""
+    from .candles import _ohlc, is_strong_bull_break_candle
+
+    dbg: dict[str, Any] = {}
+    try:
+        rng, body, _upper, _lower = _ohlc(o, h, l, c)
+        if rng <= 0:
+            return False, dbg  # unreadable bar -> never block (fail-safe)
+        body_frac = body / rng
+        thresh = float(base_body_frac) + max(0.0, float(atr_pct or 0.0))
+        dbg["doji_body_frac"] = round(body_frac, 4)
+        dbg["doji_threshold"] = round(thresh, 4)
+        if body_frac >= thresh:
+            return False, dbg  # full enough body -> not a doji
+        # Body is thin in fraction terms, BUT a strong full-body commitment candle still
+        # passes (a tall-range conviction bar can have a small body FRACTION yet be a real
+        # break). Only veto when it is NOT that conviction shape.
+        if is_strong_bull_break_candle(o, h, l, c):
+            dbg["doji_override"] = "strong_full_body"
+            return False, dbg
+        return True, dbg
+    except (TypeError, ValueError):
+        return False, dbg  # bad inputs -> fail-open (never block on a bug)
+
+
+def _resample_htf(df: pd.DataFrame, rule: str = "5min") -> pd.DataFrame | None:
+    """Resample a 1m OHLCV frame to a higher timeframe (default 5m) for the HTF-against
+    read — NO NEW FEED, the HTF is DERIVED from the 1m df the lane already supplies. Requires
+    a DatetimeIndex (the live runner / replay always pass one); returns ``None`` when the
+    index is not datetime or the frame is too thin to resample (-> caller fails open). Pure."""
+    try:
+        if df is None or getattr(df, "empty", True) or len(df) < 2:
+            return None
+        idx = df.index
+        if not isinstance(idx, pd.DatetimeIndex):
+            return None
+        cols = {x.lower(): x for x in df.columns}
+        agg = {}
+        if "open" in cols:
+            agg[cols["open"]] = "first"
+        if "high" in cols:
+            agg[cols["high"]] = "max"
+        if "low" in cols:
+            agg[cols["low"]] = "min"
+        if "close" in cols:
+            agg[cols["close"]] = "last"
+        if "volume" in cols:
+            agg[cols["volume"]] = "sum"
+        if "close" not in cols:
+            return None
+        htf = df.resample(rule).agg(agg).dropna(how="any")
+        if htf is None or getattr(htf, "empty", True) or len(htf) < 2:
+            return None
+        return htf
+    except (TypeError, ValueError, KeyError, AttributeError):
+        return None
+
+
+def _htf_against_veto(
+    df: pd.DataFrame, *, rule: str = "5min", macd_threshold: float = 0.0,
+    rolldown_bars: int = 3,
+) -> tuple[bool, dict[str, Any]]:
+    """MULTI-TF ALIGNMENT veto: the HIGHER TF (5m, resampled from the 1m ``df`` — no new
+    feed) is CLEARLY AGAINST the long. Returns ``(veto, debug)``; ``veto=True`` means BLOCK.
+
+    ⚠️ THE TRAP this gate is built to AVOID: requiring full multi-TF alignment breaks Ross's
+    1m-FAST geometry (the 1m leads, the HTF lags). So this fires ONLY when the HTF is CLEARLY
+    bearish/rolling-down — NEVER when it is merely neutral/lagging (not yet up but not down),
+    and NEVER on a single lagging EMA down-tick (a slow 5m EMA dips for ONE sample off a flush
+    while the 1m has already turned up — that is the dip-rip/VWAP-reclaim the lane catches).
+
+    CLEARLY AGAINST (veto) — reuses the SAME EMA/MACD-rollover structure as the 1m
+    ``_detect_back_side``, applied to the 5m arrays, but demanding a SUSTAINED (not single-bar)
+    deterioration:
+      (a) 5m EMA-9 SUSTAINED roll-down — strictly lower across EACH of the last ``rolldown_bars``
+          samples (a multi-bar negative slope, ONE documented base = 3 samples / 2 consecutive
+          down steps). A single lagging down-tick does NOT count; OR
+      (b) 5m MACD histogram clearly PEAKED — ``hist[-1] < hist[-2] >= hist[-3]`` with
+          ``hist[-2] > macd_threshold`` (an up-impulse that has topped and rolled over).
+
+    NEUTRAL/LAGGING (PASS) — EMA-9 flat/rising, EMA-9 dipping for only a single sample, MACD
+    histogram rising/flat/near-zero, or too few HTF bars to read a trend: all PASS (no
+    over-restriction on the lagging HTF). An aligned-UP HTF (EMA rising) also passes.
+
+    FAIL-OPEN: non-datetime index / thin HTF / missing arrays / any error -> ``veto=False``
+    (a missing HTF feed can NEVER block a valid 1m-fast entry). Pure, side-effect-free."""
+    dbg: dict[str, Any] = {}
+    try:
+        htf = _resample_htf(df, rule=rule)
+        if htf is None:
+            return False, dbg  # cannot read HTF -> fail-open (1m-fast preserved)
+        arrays = compute_all_from_df(htf, needed={"ema_9", "macd", "macd_signal", "macd_hist"})
+        ema9 = arrays.get("ema_9") or []
+        hist = arrays.get("macd_hist") or []
+        hcur = len(htf) - 1
+        # (a) 5m EMA-9 SUSTAINED roll-down — strictly lower across EACH of the last N samples
+        # (a multi-bar negative slope), NOT a single lagging down-tick. Needs N+1 EMA samples
+        # to read N consecutive steps; too few -> no read (neutral, PASS).
+        try:
+            _n = max(2, int(rolldown_bars))
+            e_cur = ema9[hcur] if 0 <= hcur < len(ema9) else None
+            e_prev = ema9[hcur - 1] if 0 <= hcur - 1 < len(ema9) else None
+            if e_cur is not None and e_prev is not None:
+                dbg["htf_ema9_slope"] = round(float(e_cur) - float(e_prev), 6)
+            if hcur - (_n - 1) >= 0 and len(ema9) > hcur:
+                _window = [ema9[hcur - k] for k in range(_n)]  # newest -> oldest
+                if all(x is not None for x in _window):
+                    _vals = [float(x) for x in _window]
+                    # newest strictly below next-older at EVERY step = sustained down-slope.
+                    _sustained = all(_vals[k] < _vals[k + 1] for k in range(_n - 1))
+                    dbg["htf_ema9_rolldown_bars"] = _n
+                    if _sustained:
+                        dbg["htf_against"] = "ema9_sustained_rolldown"
+                        return True, dbg
+        except (TypeError, ValueError, IndexError):
+            pass
+        # (b) 5m MACD histogram clearly PEAKED (positive-then-declining rollover).
+        try:
+            if len(hist) >= 3:
+                h0 = hist[hcur] if hist[hcur] is not None else None
+                h1 = hist[hcur - 1] if hist[hcur - 1] is not None else None
+                h2 = hist[hcur - 2] if hist[hcur - 2] is not None else None
+                if h0 is not None and h1 is not None and h2 is not None:
+                    h0, h1, h2 = float(h0), float(h1), float(h2)
+                    dbg["htf_macd_hist"] = [round(h2, 6), round(h1, 6), round(h0, 6)]
+                    if (h0 < h1) and (h1 >= h2) and (h1 > float(macd_threshold)):
+                        dbg["htf_against"] = "macd_peaked"
+                        return True, dbg
+        except (TypeError, ValueError, IndexError):
+            pass
+        # Neither rolling-down nor peaked -> neutral/lagging or aligned-up -> PASS.
+        return False, dbg
+    except (TypeError, ValueError, KeyError, AttributeError, IndexError):
+        return False, dbg  # any error -> fail-open (never block a valid 1m-fast entry)
+
+
 # LULD halt-band proximity (re-analysis survivor S3, video 60): buying a dip whose STOP
 # sits inside (or just above) the LULD down-halt band risks getting halt-TRAPPED mid-
 # cascade — the stock halts on a further drop and the position can't be exited at the stop
@@ -6167,6 +6323,63 @@ def pullback_break_confirmation(
                 debug["front_side_state_live_new_high"] = _reason
         except (TypeError, ValueError, AttributeError, KeyError):
             pass  # thin/degenerate frame or other error -> fail-open (never block on a bug)
+
+    # ── CANDLE-QUALITY + MULTI-TF (HTF-against) ENTRY VETO (flag-gated, default OFF) ──
+    # Two ADDITIVE entry-quality gates, slotted AFTER the trigger fires + the backside vetoes
+    # and BEFORE the downstream VWAP/MACD/volume confirmations (validate the trigger candle's
+    # quality + the HTF context before the heavier checks). Flag OFF -> the whole block is
+    # skipped -> BYTE-IDENTICAL.
+    #
+    # EXEMPT the deep-reclaim/dip-buy reversal path (same `if not _deep_reclaim` carve-out the
+    # backside gates above use): that mode INTENTIONALLY catches the turn off a dip, so it
+    # expects a lagging HTF (a slow 5m EMA still leaning down off the flush) and an indecision
+    # bar at the very bottom — exactly the shapes these two gates veto. Without this carve-out
+    # the HTF/doji gates kill the dip-rip / VWAP-reclaim. The deep-reclaim path carries its own
+    # dip-vs-dump discipline (#734). docs/DESIGN/MOMENTUM_LANE.md
+    if not _deep_reclaim and bool(
+        getattr(settings, "chili_momentum_candle_quality_multitf_veto_enabled", False)
+    ):
+        # (6) DOJI VETO — the TRIGGER candle is a true doji (weak body relative to range =
+        # indecision). Skip on a TICK-break (the breaking bar is still FORMING mid-bar — its
+        # body/wick are unknowable, exactly as the conviction-candle gate skips it). A strong
+        # full-body commitment candle passes (handled inside _doji_trigger_veto). ATR-adaptive
+        # band (ONE documented base, widened by atr_pct); fail-safe on a zero-range bar.
+        if not _tick_break:
+            try:
+                _dj_o = float(df["Open"].iloc[cur])
+                _dj_h, _dj_l, _dj_c = (
+                    float(high.iloc[cur]), float(low.iloc[cur]), float(close.iloc[cur])
+                )
+                _dj_base = float(getattr(settings, "chili_momentum_doji_body_frac", 0.25))
+                _dj_veto, _dj_dbg = _doji_trigger_veto(
+                    _dj_o, _dj_h, _dj_l, _dj_c, atr_pct=atr_pct, base_body_frac=_dj_base,
+                )
+                if _dj_dbg:
+                    debug["doji"] = _dj_dbg
+                if _dj_veto:
+                    return False, "doji_trigger_veto", debug
+            except (TypeError, ValueError, IndexError, KeyError):
+                pass  # unreadable trigger bar -> fail-open (never block on a bug)
+
+        # (7) HTF-AGAINST VETO — the higher TF (5m, resampled from the 1m df, NO new feed) is
+        # CLEARLY bearish (5m EMA-9 in a SUSTAINED roll-down or MACD clearly peaked). A
+        # NEUTRAL/LAGGING HTF (not yet up but not down) — including a single lagging EMA
+        # down-tick — MUST still pass -> the 1m-FAST geometry is preserved (the 1m leads, the
+        # HTF lags; requiring full alignment would break Ross's method). Applies to tick-breaks
+        # too (it reads COMPLETED HTF bars, independent of the forming 1m bar). Fail-OPEN on
+        # non-datetime index / thin HTF (a missing feed never blocks).
+        try:
+            _htf_thresh = float(getattr(settings, "chili_momentum_htf_against_macd_threshold", 0.0))
+            _htf_bars = int(getattr(settings, "chili_momentum_htf_against_ema9_rolldown_bars", 3))
+            _htf_veto, _htf_dbg = _htf_against_veto(
+                df, rule="5min", macd_threshold=_htf_thresh, rolldown_bars=_htf_bars,
+            )
+            if _htf_dbg:
+                debug["htf"] = _htf_dbg
+            if _htf_veto:
+                return False, "htf_against_veto", debug
+        except (TypeError, ValueError, AttributeError):
+            pass  # thin / non-datetime frame -> fail-open (1m-fast preserved)
 
     # Volume spike on the trigger (break / reclaim) bar.
     vol_ratio = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
