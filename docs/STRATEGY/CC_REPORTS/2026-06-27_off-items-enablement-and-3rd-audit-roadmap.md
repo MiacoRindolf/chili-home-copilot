@@ -22,10 +22,25 @@ Acceptance per item: green unit tests + 4/4 adversarial verify + flag-OFF byte-i
 After Part A, re-audit ALL 7 Warrior courses (AS101/HVM101/PSY101/RH101/SCAL101/TOS101/SS101) against the now-much-more-complete deployed code (all 7 gap-fill clusters + the 5 enabled items). Read transcript CONTENT + DIFFERENT key-frames (not filenames/function-names — the 3x over-claim root cause). Diff vs the deployed code. Find any STILL-missed gaps; scrutinize whether the now-enabled items behave as Ross teaches. Honest calibrated verdict. Fill mechanizable gaps in verified kill-switched clusters.
 
 ## Progress log (update as I go)
-- [ ] R1 order-path — workflow wlrhjucec running → run tests → enable
-- [ ] R2 add-into-halt
-- [ ] R3 green-day-graduation
-- [ ] R4 cup-and-handle (coordinate w/ parallel session)
-- [ ] Part B — 3rd-pass re-audit + fill
+- [x] R1 order-path (7edb559) — hardened stranded-leg bug; 33 tests green; anticipation+chunking(blocks=2) ON
+- [x] R2 add-into-halt (19c7a32) — 4 guards + fail-closed-under-master fix; 24 tests green; ON
+- [x] R3 green-day-graduation (dce8bc0) — never-entered-exclusion bugfix; 33 bounds tests green; ON
+- [x] R4 cup-and-handle (90c9cd6+d82973b) — cherry-picked parallel hardening (10c7018) + 22 tests green; ON
+- [~] Part B — 3rd-pass re-audit (completeness tail + coherence) — workflow wc7v2b29f RUNNING
 
-Live img at start of this run: `chili-app:main-clean-dfce6a8` (PR #822, branch chili/momentum-defensive-veto-bundle).
+**Part A DONE: all 5 OFF items implemented-properly + unit-tested (111 tests) + enabled.** Live img `chili-app:main-clean-d82973b` (PR #822). Started this run at dfce6a8.
+Per-round shas: 7edb559→19c7a32→dce8bc0→90c9cd6→d82973b.
+
+## Part B — 3rd-pass re-audit findings (wc7v2b29f, 23 agents)
+**Honest verdict: ~85% Ross-complete + largely coherent.** The audit itself contained ≥1 false alarm caught by reading deployed code.
+- **VERIFIED FALSE ALARM (no fix):** cushion(2x)×green-day(2x)=4x "exceeds the 3x ceiling" — REFUTED: live_runner.py:6664-6667 `_eff_max_loss = min(base*ALL_16_mults, base*3.0)` — both are inside the hard min() clamp, so the product is hard-capped at 3x. Risk ceiling holds; enabling green-day did NOT breach it.
+- **VERIFIED FALSE ALARM:** "pullback_break_confirmation skips a guard" — refuted by the synthesizer reading code (primary triggers carry backside/front_side/red-vol/explosive + extension/flow/L2/tape).
+- **2 HIGH-leverage GAPS to BUILD (the operator's own flagged levers):**
+  1. **Catalyst-driven conviction SIZE multiplier** — the "#1 profitability lever". Data feed + viability tilt exist, but no mechanical `conviction_size_factor` on the SIZING path. Build a bounded catalyst-grade size mult, composed UNDER the 3x ceiling (auto-clamped), kill-switched + tested.
+  2. **Regime-aware PRE-arm move-exhaustion abandon** — the 2026-06-24 PLSM 19→10 chase. A preventative "move-is-done, sit-flat" gate keyed to tape-coldness / leader-crashing / viability-regression BEFORE arming (only a post-exit reactive cooldown exists). Risk-reducing veto, kill-switched + tested.
+- **MEDIUM punch-list (pre-existing, note only):** vwap_reclaim flat magic-number defaults (min_below_bars=2 — not vol-scaled; aligns w/ the no-magic preference); vwap/wick_reclaim lighter-guarded than primary triggers; daily-loss recovery auto-clear races the arm kill-switch (1-2 tick lag); hard-stop-vs-trail priority on micro-pullbacks.
+- **LOW tail (note only):** vol-band algo-shutdown detector, tape volume-price divergence/absorption, jackknife-candle disqualify, stair-step trend state machine, MM-bid-ladder structure signals. PSY101/RH101 residual = human-discipline, correctly NOT mechanized.
+
+### Part B build plan (each: build → unit-test → run → if green, ON + deploy)
+- [ ] B1 pre-arm move-exhaustion abandon (risk-reducing veto)
+- [ ] B2 catalyst-conviction size multiplier (bounded, under 3x ceiling)
