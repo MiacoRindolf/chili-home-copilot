@@ -426,22 +426,62 @@ def add_into_halt_ok(
     bid: float | None,
     is_limit_up_halt: bool,
     in_rth: bool,
+    tape_confirmed: bool | None = None,
+    breakout_level: float | None = None,
+    atr_pct: float | None = None,
+    df: Any = None,
+    consecutive_halt_up_count: int | None = None,
+    halt_level: float | None = None,
+    resumption_open: float | None = None,
     settings_obj: Any = settings,
 ) -> tuple[bool, str, dict[str, Any]]:
     """GAP 6 (Warrior re-audit, RISKIEST — default OFF): the EXTRA-GUARDED predicate that
     permits a SMALL pyramid ADD while a name is HALTED LIMIT-UP. EVERY condition must hold;
     FAIL-CLOSED on any miss (a missing input ⇒ no add). Pure; never raises.
 
+    ADD-INTO-HALT is LOSS-SENSITIVE: you cannot exit a halted name, so a bad add is
+    dangerous. It therefore carries ALL the breakout-entry chase guards PLUS the now-live
+    Cluster-A halt-family context (the same gates the entry path uses — REUSED here, never
+    duplicated). Every chase guard fails-CLOSED on a missing input.
+
     Conditions (ALL required):
-      (1) flag ON (``chili_momentum_add_into_halt_enabled``);
-      (2) the halt is LIMIT-UP / bullish (``is_limit_up_halt``) — NEVER a limit-down halt;
-      (3) RTH (``in_rth``) — halts/resumes only matter in regular hours;
-      (4) ALREADY IN PROFIT by >= ``chili_momentum_add_into_halt_min_profit_r`` of the entry
-          risk R = (avg_entry − original_stop): ``bid >= avg_entry + min_profit_r · R``
-          (NEVER add if underwater — the profit-first rule);
-      (5) the ORIGINAL STRUCTURAL STOP is intact (``current_stop`` has not LOOSENED below
-          ``original_stop`` — a stop can only tighten; if it moved DOWN, structure changed,
-          refuse).
+      (1)  flag ON (``chili_momentum_add_into_halt_enabled``);
+      (2)  the halt is LIMIT-UP / bullish (``is_limit_up_halt``) — NEVER a limit-down halt;
+      (3)  RTH (``in_rth``) — halts/resumes only matter in regular hours;
+      (4)  ALREADY IN PROFIT by >= ``chili_momentum_add_into_halt_min_profit_r`` of the entry
+           risk R = (avg_entry − original_stop): ``bid >= avg_entry + min_profit_r · R``
+           (NEVER add if underwater — the profit-first rule);
+      (5)  the ORIGINAL STRUCTURAL STOP is intact (``current_stop`` has not LOOSENED below
+           ``original_stop`` — a stop can only tighten; if it moved DOWN, structure changed,
+           refuse). The structural stop on the ADDED shares = this same intact stop.
+
+    CHASE GUARDS (each fail-CLOSED on missing data — a missing input ⇒ NO add):
+      (T)  TAPE REQUIRED: ``tape_confirmed`` must be explicitly True. None / False ⇒ no add
+           (you do not add into a halt without confirming the tape is lifting).
+      (E)  EXTENSION VETO / NOT-PARABOLIC: reuse ``_entry_extension_veto`` — if the add price
+           (``bid``) sits too far above the breakout level for the name's ATR, it is a blow-off
+           top, refuse. Requires ``breakout_level`` + ``atr_pct`` (missing ⇒ fail-closed here).
+      (B)  NOT-BACKSIDE / ABOVE-VWAP: reuse ``_detect_back_side`` (1m EMA/MACD rollover) +
+           ``front_side_state`` (below-VWAP / faded / rolled-over top) on ``df``. Backside or
+           below VWAP ⇒ refuse. Missing/thin ``df`` ⇒ fail-closed here.
+
+    HALT-FAMILY CONTEXT — evaluated DIRECTLY on the raw halt signals under the MASTER
+    flag, INDEPENDENT of the standalone Cluster-A sub-flags (``halt_chain_risk_gate_
+    enabled`` / ``halt_resumption_direction_enabled`` / ``false_halt_avoid_enabled``).
+    Those sub-flags govern the PRIMARY-ENTRY path; a halt-ADD is loss-sensitive and must
+    self-enforce the halt context whenever the master flag is ON — otherwise a sub-flag-OFF
+    lane would silently fail-OPEN and add into a blow-off it could not exit. FAIL-CLOSED on
+    any MISSING halt signal:
+      (H1) HALT-CHAIN risk: if ``consecutive_halt_up_count`` >= ``chili_momentum_halt_
+           chain_block_count`` (an extended consecutive-halt-up blow-off), refuse the add.
+           (Reuses the same block-count setting — no new magic. The de-weight branch only
+           shrinks size on the primary path; it never refuses an add.)
+      (H2) HALT-RESUMPTION DIRECTION: a ``halt_level`` is REQUIRED. The resume must NOT be
+           unfavorable — ``resumption_open`` must NOT be below ``halt_level``. A lower resume
+           ⇒ refuse. A MISSING ``halt_level`` ⇒ fail-closed (``add_into_halt_no_halt_signal``);
+           a missing ``resumption_open`` ⇒ fail-closed (``add_into_halt_no_resumption``).
+      (H3) FALSE-HALT AVOID: a WEAK resume (``resumption_open`` below ``halt_level``) is a
+           false halt ⇒ refuse (same predicate as H2 — a sub-threshold resume is unfavorable).
 
     Returns ``(ok, reason, debug)``. ``ok=True`` ONLY when every leg passes. The add SIZE is
     NOT decided here — the existing pyramid sizing + ``chili_momentum_pyramid_max_adds`` cap
@@ -469,18 +509,125 @@ def add_into_halt_ok(
             "avg_entry": round(a, 6), "original_stop": round(os_, 6),
             "bid": round(b, 6), "profit_r": round(profit_r, 3), "min_profit_r": min_r,
         })
+
+        # ── (T) TAPE REQUIRED + fail-CLOSED ────────────────────────────────────────────
+        # No add into a halt without an explicit tape confirmation. None (no tape read) or
+        # False (tape not lifting) ⇒ refuse. This runs FIRST among the risk legs so a
+        # tape-less halt can never even reach the profit/structure checks.
+        if tape_confirmed is not True:
+            dbg["tape_confirmed"] = tape_confirmed
+            return False, "add_into_halt_no_tape", dbg
+
         # (4) PROFIT-FIRST: never add unless sufficiently in the green.
         if profit_r < min_r:
             return False, "add_into_halt_insufficient_profit", dbg
         # (5) STRUCTURAL STOP INTACT: the current stop must NOT be below the original
-        # (a stop only ever tightens; a looser stop = structure changed, refuse).
+        # (a stop only ever tightens; a looser stop = structure changed, refuse). The
+        # structural stop carried on the ADDED shares is THIS intact stop.
+        _add_stop = os_
         if current_stop is not None:
             try:
-                if float(current_stop) < os_ - 1e-9:
-                    dbg["current_stop"] = round(float(current_stop), 6)
+                _cs = float(current_stop)
+                if _cs < os_ - 1e-9:
+                    dbg["current_stop"] = round(_cs, 6)
                     return False, "add_into_halt_stop_loosened", dbg
+                _add_stop = _cs  # the (possibly tightened) live stop bounds the added shares
             except (TypeError, ValueError):
                 return False, "add_into_halt_bad_stop", dbg
+        dbg["add_structural_stop"] = round(_add_stop, 6)
+
+        # ── (E) EXTENSION VETO / NOT-PARABOLIC ─────────────────────────────────────────
+        # Reuse the entry-extension chase guard: the add price (bid) must NOT sit too far
+        # above the breakout level for the name's ATR. Missing level/atr ⇒ fail-CLOSED
+        # (we will NOT add into a halt without the data to prove it is not extended).
+        if breakout_level is None or atr_pct is None:
+            dbg["breakout_level"] = breakout_level
+            dbg["atr_pct"] = atr_pct
+            return False, "add_into_halt_no_extension_inputs", dbg
+        if _entry_extension_veto(b, float(breakout_level), float(atr_pct), settings_obj):
+            dbg["breakout_level"] = round(float(breakout_level), 6)
+            dbg["atr_pct"] = round(float(atr_pct), 6)
+            return False, "add_into_halt_extended", dbg
+
+        # ── (B) NOT-BACKSIDE / ABOVE-VWAP ──────────────────────────────────────────────
+        # Reuse _detect_back_side (1m EMA/MACD rollover) + front_side_state (below-VWAP /
+        # faded / rolled-over top). Missing/thin df ⇒ fail-CLOSED (no add without the
+        # structure to prove front-side).
+        if df is None or getattr(df, "empty", True) or len(df) < 5:
+            return False, "add_into_halt_no_structure", dbg
+        try:
+            _arrays = compute_all_from_df(
+                df, needed={"ema_9", "ema_20", "macd", "macd_signal"}
+            )
+            _ema9 = _arrays.get("ema_9") or []
+            _ema20 = _arrays.get("ema_20") or []
+            _macd = _arrays.get("macd") or []
+            _macd_sig = _arrays.get("macd_signal") or []
+            _cur = len(df) - 1
+            _bs, _bs_reason = _detect_back_side(
+                _ema9, _ema20, _macd, _macd_sig, _cur,
+                macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+            )
+            if _bs:
+                dbg["back_side"] = _bs_reason
+                return False, "add_into_halt_back_side", dbg
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            dbg["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            if getattr(_fs, "is_backside", False):
+                dbg["front_side_state"] = getattr(_fs, "reason", "backside")
+                return False, "add_into_halt_backside_lifecycle", dbg
+        except Exception:
+            # thin / degenerate frame ⇒ fail-CLOSED for this loss-sensitive add.
+            return False, "add_into_halt_structure_error", dbg
+
+        # ── (H1) HALT-CHAIN risk — evaluate the RAW chain count DIRECTLY under the MASTER ─
+        # flag, INDEPENDENT of chili_momentum_halt_chain_risk_gate_enabled. add-into-halt is
+        # loss-sensitive: the standalone risk-gate's flag controls the *primary-entry* path,
+        # but a halt-ADD must self-enforce the chain block whenever the master flag is ON —
+        # otherwise a sub-flag-OFF lane would silently skip H1 (fail-OPEN) and add into an
+        # over-extended halt-chain blow-off. Reuse the SAME block-count setting (no new
+        # magic). At/above the block count ⇒ refuse. Below it ⇒ pass (the de-weight branch
+        # only shrinks size on the primary path; it never refuses an add).
+        try:
+            _hc_count = int(consecutive_halt_up_count or 0)
+            _hc_block_at = max(2, int(getattr(settings_obj, "chili_momentum_halt_chain_block_count", 3) or 3))
+            dbg["consecutive_halt_up"] = _hc_count
+            dbg["halt_chain_block_count"] = _hc_block_at
+            if _hc_count >= _hc_block_at:
+                return False, "add_into_halt_halt_chain_blocked", dbg
+        except (TypeError, ValueError):
+            return False, "add_into_halt_halt_chain_error", dbg
+
+        # ── (H2/H3) HALT-RESUMPTION DIRECTION + FALSE-HALT — evaluate DIRECTLY on the raw ─
+        # halt_level / resumption_open under the MASTER flag, INDEPENDENT of the resumption-
+        # direction / false-halt sub-flags. A halt-ADD must CONFIRM the resume was favorable
+        # (resumption_open NOT below halt_level); an unfavorable / weak resume is a false
+        # halt ⇒ refuse. FAIL-CLOSED on a MISSING halt signal: no halt_level ⇒ we cannot
+        # prove the resume direction at all (add_into_halt_no_halt_signal); a halt_level but
+        # no resumption_open ⇒ we cannot confirm the resume (add_into_halt_no_resumption).
+        # We will NOT add into a halt we cannot confirm resumed favorably.
+        if halt_level is None:
+            return False, "add_into_halt_no_halt_signal", dbg
+        try:
+            _hl = float(halt_level)
+        except (TypeError, ValueError):
+            return False, "add_into_halt_bad_halt_level", dbg
+        if not (_hl > 0):
+            return False, "add_into_halt_no_halt_signal", dbg
+        dbg["halt_level"] = round(_hl, 6)
+        if resumption_open is None:
+            return False, "add_into_halt_no_resumption", dbg
+        try:
+            _ro = float(resumption_open)
+        except (TypeError, ValueError):
+            return False, "add_into_halt_bad_resumption", dbg
+        dbg["resumption_open"] = round(_ro, 6)
+        if _ro < _hl * (1.0 - 1e-9):
+            # below the halt level on the resume = unfavorable / false halt.
+            return False, "add_into_halt_unfavorable_resumption", dbg
+
         return True, "add_into_halt_ok", dbg
     except Exception:
         return False, "add_into_halt_error", dbg  # any error -> fail-CLOSED

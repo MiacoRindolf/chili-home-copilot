@@ -6255,6 +6255,12 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ADD_INTO_HALT_MIN_PROFIT_R"),
         description="GAP 6: the minimum open profit (in units of the entry's structural risk R = avg_entry - original_stop) required before an add-into-halt is permitted. 1.0 = at least +1R in the green. Only consulted when chili_momentum_add_into_halt_enabled is ON.",
     )
+    chili_momentum_add_into_halt_swing_lookback: int = Field(
+        default=6,
+        ge=2,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADD_INTO_HALT_SWING_LOOKBACK"),
+        description="GAP 6 hardening: the number of recent COMPLETED bars used to derive the breakout level (recent swing high) the add price is measured against for the extension / not-parabolic chase guard. Mirrors the momentum-continuation swing_lookback default (6). Only consulted when chili_momentum_add_into_halt_enabled is ON.",
+    )
     # ── Warrior RISK re-audit gaps (4 RISK controls; each default OFF = byte-identical) ──
     # GAP 1 — RULE-BREAK -> NO-TRADE-NEXT-DAY LOCKOUT (PSY101 Mod 10 operant conditioning):
     # when a hard discipline rule is broken TODAY (a global daily-loss breach, the daily-

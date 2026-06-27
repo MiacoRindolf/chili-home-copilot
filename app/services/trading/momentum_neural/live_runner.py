@@ -3345,6 +3345,10 @@ def _register_stale_quote_tick(db, sess, le: dict, tick: Any = None) -> None:
                 and (
                     bool(getattr(settings, "chili_momentum_halt_resumption_direction_enabled", False))
                     or bool(getattr(settings, "chili_momentum_false_halt_avoid_enabled", False))
+                    # The add-into-halt master needs halt_level for its H2/H3 leg (now
+                    # self-sufficient under the master). Master OFF + sub-flags OFF ⇒ no
+                    # halt_level is written ⇒ byte-identical.
+                    or bool(getattr(settings, "chili_momentum_add_into_halt_enabled", False))
                 )
             ):
                 _hl = None
@@ -3522,7 +3526,13 @@ def _register_fresh_quote_tick(db, sess, le: dict, tick: Any = None) -> None:
         # captured halt_level (GAP 2/3 capture) and the resumption price; up ⇒ +1, else
         # reset. Fail-open: any miss leaves the counter unchanged (never blocks on a bug).
         try:
-            if bool(getattr(settings, "chili_momentum_halt_chain_risk_gate_enabled", False)):
+            # The add-into-halt MASTER flag also needs the chain count (its H1 leg is now
+            # self-sufficient under the master, independent of the sub-flag) — capture it
+            # when EITHER the standalone chain gate OR the add-into-halt master is ON. Both
+            # OFF ⇒ the counter is never touched ⇒ byte-identical.
+            if bool(getattr(settings, "chili_momentum_halt_chain_risk_gate_enabled", False)) or bool(
+                getattr(settings, "chili_momentum_add_into_halt_enabled", False)
+            ):
                 _hl = _float_or_none(le.get("halt_level"))
                 _resume_px = None
                 if tick is not None:
@@ -3540,6 +3550,33 @@ def _register_fresh_quote_tick(db, sess, le: dict, tick: Any = None) -> None:
                     # No directional read available ⇒ count it as a halt-up (conservative:
                     # an unclassified halt still extends the chain → tighter, not looser).
                     le["halt_chain_up_count"] = _prev + 1
+        except Exception:
+            pass
+        # Capture the RESUMPTION price (the first fresh price on resume) so the
+        # add-into-halt H2/H3 (resumption-direction / false-halt) legs can compare it to
+        # the captured halt_level. Flag-gated: only written when a halt-family direction
+        # flag is ON, so an OFF lane is byte-identical (no new le key). Fail-open on a miss.
+        try:
+            if (
+                bool(getattr(settings, "chili_momentum_halt_resumption_direction_enabled", False))
+                or bool(getattr(settings, "chili_momentum_false_halt_avoid_enabled", False))
+                # The add-into-halt master needs the resumption price for its H2/H3 leg.
+                # Master OFF + sub-flags OFF ⇒ no halt_resumption_open is written ⇒
+                # byte-identical.
+                or bool(getattr(settings, "chili_momentum_add_into_halt_enabled", False))
+            ) and tick is not None:
+                _ro_px = None
+                try:
+                    _ro_px = float(
+                        getattr(tick, "open", None)
+                        or getattr(tick, "bid", None)
+                        or getattr(tick, "mid", None)
+                        or 0
+                    ) or None
+                except (TypeError, ValueError):
+                    _ro_px = None
+                if _ro_px is not None and _ro_px > 0:
+                    le["halt_resumption_open"] = _ro_px
         except Exception:
             pass
         le.pop("suspected_halt_since_utc", None)
@@ -8715,6 +8752,49 @@ def tick_live_session(
                                 _halt_in_rth, _ = _dip_buy_in_rth_window(
                                     now=_utcnow(), bar_ts=None, symbol=sess.symbol,
                                 )
+                                # ── CHASE-GUARD context for the loss-sensitive halt-add ──
+                                # TAPE REQUIRED + fail-closed: read the live executed tape;
+                                # the add fires ONLY when the tape is lifting (trade_flow > 0).
+                                # None (no read) ⇒ tape_confirmed=None ⇒ the gate fails closed.
+                                _ah_tape = None
+                                try:
+                                    from .pipeline import _live_trade_flow as _ah_tf_fn
+                                    _ah_tf, _ = _ah_tf_fn(sess.symbol, db=db)
+                                    if _ah_tf is not None:
+                                        _ah_tape = bool(float(_ah_tf) > 0.0)
+                                except Exception:
+                                    _ah_tape = None  # fail-CLOSED in the gate
+                                # EXTENSION + NOT-BACKSIDE structure: a fresh OHLCV frame +
+                                # the breakout level (recent swing high) + ATR%. Missing ⇒
+                                # the gate fails closed on its own. crypto/thin ⇒ None df.
+                                _ah_df = None
+                                _ah_level = None
+                                _ah_atr_pct = None
+                                try:
+                                    from ..market_data import fetch_ohlcv_df as _ah_fetch
+                                    from ..indicator_core import compute_all_from_df as _ah_compute
+                                    _ah_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+                                    _ah_df = _ah_fetch(sess.symbol, interval=_ah_iv, period="5d")
+                                    if _ah_df is not None and not getattr(_ah_df, "empty", True) and len(_ah_df) >= 6:
+                                        _ah_arr = _ah_compute(_ah_df, needed={"atr"})
+                                        _ah_atr = _ah_arr.get("atr") or []
+                                        _ah_cur = len(_ah_df) - 1
+                                        _ah_close = float(_ah_df["Close"].astype(float).iloc[_ah_cur])
+                                        if _ah_atr and _ah_cur < len(_ah_atr) and _ah_atr[_ah_cur] is not None and _ah_close > 0:
+                                            _ah_atr_pct = float(_ah_atr[_ah_cur]) / _ah_close
+                                        # breakout level = the recent COMPLETED-bar swing high
+                                        # (the level the add price is measured against for
+                                        # extension), excluding the current forming bar.
+                                        _ah_k = max(2, int(getattr(settings, "chili_momentum_add_into_halt_swing_lookback", 6) or 6))
+                                        _ah_ws = max(0, _ah_cur - _ah_k)
+                                        if _ah_ws < _ah_cur:
+                                            _ah_level = float(_ah_df["High"].astype(float).iloc[_ah_ws:_ah_cur].max())
+                                    else:
+                                        _ah_df = None  # too thin for the structure read
+                                except Exception:
+                                    _ah_df = None
+                                    _ah_level = None
+                                    _ah_atr_pct = None
                                 _ah_ok, _ah_reason, _ah_dbg = add_into_halt_ok(
                                     avg_entry=float(pos["avg_entry_price"]),
                                     original_stop=_orig_stop,
@@ -8722,6 +8802,13 @@ def tick_live_session(
                                     bid=float(bid),
                                     is_limit_up_halt=bool(_is_limit_up),
                                     in_rth=bool(_halt_in_rth),
+                                    tape_confirmed=_ah_tape,
+                                    breakout_level=_ah_level,
+                                    atr_pct=_ah_atr_pct,
+                                    df=_ah_df,
+                                    consecutive_halt_up_count=int(le.get("halt_chain_up_count") or 0),
+                                    halt_level=_float_or_none(le.get("halt_level")),
+                                    resumption_open=_float_or_none(le.get("halt_resumption_open")),
                                 )
                                 if not _ah_ok:
                                     # EXTRA guard refused the halt-add: turn the decision into a
