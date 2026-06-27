@@ -4195,6 +4195,61 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_RISK_MULTIPLE"),
         description="K — the circuit fires when unrealized loss <= -(K x structural_risk) and flattens at avg - K*stop_distance. ge=1.0 so the floor can never sit looser than the structural stop.",
     )
+    # ── ADAPTIVE SPREAD-COST VETO/DERATE (2026-06-27, DEFAULT OFF = byte-identical) ──
+    # Judges the live entry spread RELATIVE to (a) the name's OWN recent typical spread
+    # (rolling p50/p75/p90 over its momentum_nbbo_spread_tape history) and (b) the trade's
+    # expected reward (round-trip spread cost as a fraction of the structural risk R =
+    # stop_distance). NEVER a flat bps bar — Ross low-float movers inherently trade wide
+    # spreads (PAVS 317bps is the real market, not a bug; project_momentum_zero_fills_root_
+    # cause). A flat spread veto re-creates the documented 0-fills over-restriction. So this
+    # DERATES (sizes down) for moderate anomaly/cost and HARD-VETOES only at the extreme
+    # (an EXTREME outlier vs the name's OWN p90 AND the cost eats > max fraction of R). A
+    # wide-but-TYPICAL low-float spread with a good R PASSES unaffected. Flag OFF = the
+    # sizing path is byte-identical (the derate function returns (True, 1.0) pass-through).
+    chili_momentum_adaptive_spread_cost_veto_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_SPREAD_COST_VETO_ENABLED"),
+        description="Kill-switch for the adaptive spread-cost veto/derate at entry sizing. DEFAULT FALSE = byte-identical (no new gate/derate). When ON: judge the live spread vs the name's OWN rolling spread distribution + vs expected-R; graceful size-down for moderate cases, hard veto only at the extreme. Adaptive (name-relative + R-relative), no flat bps.",
+    )
+    chili_momentum_spread_cost_max_fraction_of_r: float = Field(
+        default=0.25,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_COST_MAX_FRACTION_OF_R"),
+        description="ONE documented base: the max fraction of the structural risk R (= stop_distance) the round-trip spread cost may consume. Above this the spread is eating the edge; combined with an extreme name-relative anomaly it hard-vetoes, otherwise it size-derates toward the floor. Adaptive (R-relative), not a flat $ or bps.",
+    )
+    chili_momentum_spread_anomaly_p50_mult: float = Field(
+        default=2.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_ANOMALY_P50_MULT"),
+        description="ONE documented base: a live spread >= this multiple of the name's OWN rolling median (p50) is 'anomalously wide FOR IT' and triggers the graceful size-down. Name-relative so a chronically-wide low-float name (judged vs its own norm) is NOT penalised for its baseline width.",
+    )
+    chili_momentum_spread_anomaly_extreme_p90_mult: float = Field(
+        default=1.5,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_ANOMALY_EXTREME_P90_MULT"),
+        description="Extra multiple beyond the name's OWN p90 that defines an EXTREME outlier (e.g. 1.5x the p90). A HARD VETO requires BOTH this extreme name-relative anomaly AND cost > max_fraction_of_r. Name-relative; thin-history names (no distribution) can never reach this -> never hard-vetoed on thin data.",
+    )
+    chili_momentum_spread_cost_derate_floor: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_COST_DERATE_FLOOR"),
+        description="Floor for the spread-cost size-down multiplier — the derate never zeroes the size (preserves the explosive tail; size, not rejection, is the lever). Composes multiplicatively with the other size-down levers under the same 3x clamp.",
+    )
+    chili_momentum_spread_cost_derate_engage_frac: float = Field(
+        default=0.5,
+        ge=0.0,
+        lt=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_COST_DERATE_ENGAGE_FRAC"),
+        description="Dead-band: the cost-of-R size-down only ENGAGES once the round-trip spread cost reaches this fraction of the max-fraction-of-R cap (e.g. 0.5 = the upper half). Below it, a cheap-vs-R spread passes at mult=1.0 — this is what keeps a tight/typical low-float spread from over-restricting (the no-0-fills guarantee). Then linear to the floor at the cap.",
+    )
+    chili_momentum_spread_norm_lookback_days: float = Field(
+        default=20.0,
+        gt=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_NORM_LOOKBACK_DAYS"),
+        description="Rolling window (trading days) of the name's OWN momentum_nbbo_spread_tape history used to compute its typical-spread distribution (p50/p75/p90). Self-relative per symbol; reuses the deployed tape (no new table).",
+    )
     # ── FULL-CLOCK WINDOW (2026-06-25): two staged tiers ─────────────────────────
     # TIER 1 — EARLY PREMARKET (low risk, DEFAULT-ON). Adaptive pre-entry-window unlock:
     # the entry window opens at the FIRST-MOVER tape time once >=N spread-clean names move

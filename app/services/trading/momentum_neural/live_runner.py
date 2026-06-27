@@ -6683,6 +6683,49 @@ def tick_live_session(
             float(_base_max_loss) * float(_streak_mult) * float(_graduation_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult) * float(_fatigue_mult) * float(_sym_fatigue_mult) * float(_hot_cold_mult) * float(_time_fatigue_mult) * float(_halt_size_mult) * float(_dip_velocity_mult) * float(_catalyst_conviction_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
+        # ADAPTIVE SPREAD-COST VETO/DERATE (2026-06-27, DEFAULT OFF ⇒ byte-identical):
+        # judge the live entry spread RELATIVE to (a) the name's OWN recent typical spread
+        # distribution (rolling p50/p75/p90 over momentum_nbbo_spread_tape) and (b) the
+        # trade's expected R (round-trip spread cost as a fraction of the structural stop
+        # distance). NEVER a flat bps bar — Ross low-float movers inherently trade wide
+        # spreads (project_momentum_zero_fills_root_cause), so a flat veto re-creates the
+        # 0-fills over-restriction. This DERATES (sizes down, composing under the SAME 3x
+        # clamp + hard max_notional ceiling, so it can NEVER push notional past any cap) for
+        # moderate anomaly/cost and HARD-VETOES only at the extreme (EXTREME outlier vs the
+        # name's OWN p90 AND cost eats > the documented max fraction of R). A wide-but-TYPICAL
+        # low-float spread with a good R PASSES at mult=1.0. Flag OFF / fail-open => 1.0.
+        if bool(getattr(settings, "chili_momentum_adaptive_spread_cost_veto_enabled", False)):
+            try:
+                from .spread_cost_veto import adaptive_spread_cost_veto_derate
+
+                # stop_distance mirrors compute_risk_first_quantity's basis exactly.
+                _scv_stop_dist = float(guarded_ask) * max(
+                    0.003, float(_eff_atr_pct or 0.0) * float(_stop_atr_mult or 0.60)
+                )
+                _scv_allow, _scv_mult, _scv_reason, _scv_meta = adaptive_spread_cost_veto_derate(
+                    symbol=sess.symbol,
+                    entry_price=float(guarded_ask),
+                    current_spread_bps=spread_bps_live,
+                    stop_distance=_scv_stop_dist,
+                    db=db,
+                    flag_enabled=True,
+                )
+                if not _scv_allow:
+                    le["spread_cost_veto"] = {"reason": _scv_reason, **(_scv_meta or {})}
+                    _emit(db, sess, "live_entry_spread_cost_veto",
+                          {"reason": _scv_reason, "meta": _scv_meta})
+                    db.flush()
+                    return {"ok": True, "session_id": sess.id, "state": sess.state,
+                            "skipped": "spread_cost_veto"}
+                if 0.0 < _scv_mult < 1.0:
+                    _eff_max_loss = min(
+                        float(_eff_max_loss) * float(_scv_mult),
+                        float(_base_max_loss) * 3.0,  # same hard combined-multiplier ceiling
+                    )
+                    le["spread_cost_derate"] = {"reason": _scv_reason, "mult": round(_scv_mult, 4),
+                                                **(_scv_meta or {})}
+            except Exception:
+                pass  # fail-open: a spread-cost gate failure must never block a fill
         # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE
         # risk-first at the chased price instead of over-sizing off notional. [G1 review #2]
         le["entry_resize_basis"] = {
