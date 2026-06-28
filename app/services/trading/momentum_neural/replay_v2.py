@@ -912,18 +912,28 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                     continue  # ride one bounded beat
                 p.pop("stop_breach_chop_holds", None)
                 why = "trail_stop" if (p["scaled"] or p["trail_armed"]) and p["stop"] > p["stop0"] else "stop"
-                # GUARD-#1 (replay mirror of the #769 max-loss circuit clamp): a
-                # pyramided position's worst-case realized loss is capped at the
-                # STARTER's original risk R0. On a gap-through below the absolute floor
-                # (entry - R0/qty) the exit prices AT the floor (not the deeper bid), so
-                # realized loss <= R0 — exactly what live's clamped circuit guarantees.
-                # No pyramid => p["pyr_R0"] absent => exits at the bid (byte-identical).
+                # GUARD-#1 (replay mirror of the #769 max-loss circuit — T1.1 fidelity fix
+                # 2026-06-27): the LIVE runner caps EVERY entry's realized loss via
+                # risk_policy.max_loss_circuit_decision (floor = avg - k*stop_distance, basis =
+                # structural stop_distance*qty) when chili_momentum_max_loss_circuit_enabled is on
+                # — NOT only pyramids. The old replay mirror floored ONLY pyramided positions
+                # (pyr_R0 set), so single-entry gap-throughs (99% of fills) exited at the raw deep
+                # bid and over-counted the loss tail vs live (the -$1,988-vs-$345 5.8x driver).
+                # Wire the SAME live leaf with the SAME args (pyr_R0 threads as the risk anchor,
+                # exactly as live le["pyramid_risk_anchor_usd"]): a breach exits AT the floor
+                # (<= ~k*R); a clean stop (bid > floor / no breach) is byte-identical to the raw
+                # bid. Flag OFF => exit at the raw bid (pre-circuit byte-identical).
                 _exit_px = bid
-                _pyr_R0 = p.get("pyr_R0")
-                if _pyr_R0 and _pyr_R0 > 0 and p["qty"] > 0:
-                    _floor_px = p["entry"] - float(_pyr_R0) / p["qty"]
-                    if _exit_px < _floor_px:
-                        _exit_px = _floor_px
+                if bool(getattr(settings, "chili_momentum_max_loss_circuit_enabled", False)):
+                    from .risk_policy import max_loss_circuit_decision
+                    _sd_circ = float(p["entry"]) - float(p.get("stop0", p["stop"]))
+                    _k_circ = float(getattr(settings, "chili_momentum_max_loss_risk_multiple", 2.0) or 2.0)
+                    _circ = max_loss_circuit_decision(
+                        avg=p["entry"], qty=p["qty"], stop_distance=_sd_circ, bid=bid, k=_k_circ,
+                        risk_anchor_usd=p.get("pyr_R0"),
+                    )
+                    if _circ.get("breach") and _circ.get("floor_price") is not None:
+                        _exit_px = max(bid, float(_circ["floor_price"]))
                 close_trade(s, p, _exit_px, why, when=now)
                 continue
             # flicker recovery: bid back above stop clears the hold counter (live 4047-4054)
@@ -1147,7 +1157,17 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             if nxt[1] > limit:  # next bid above our limit: it ran away inside the ack window
                 _tr(s, "gate_fail:ack_timeout", now)
                 continue
-            fill_px = ask  # marketable limit realizes ~the ask (live: 1.66 limit -> 1.63-1.64 fills)
+            # T1.2 FILL-PRICE FIDELITY (2026-06-27): the marketable LIMIT rests at `limit`
+            # (just above the ask) but FILLS as price pulls back toward the bid/mid, NOT by
+            # sweeping the offer — 74 real broker entries averaged ~247bps BELOW the intended
+            # limit (0 ever filled above it). Modeling fill@ask paid the full spread on every
+            # entry that live does NOT, the dominant driver of the -$1,988-vs-$345 (5.8x) loss
+            # overstatement. Realize at the MID — the tape-anchored central fill of a resting
+            # marketable limit (the improvement scales with the live spread; NO hardcoded bps) —
+            # bounded above by the limit (never worse) and below by the bid (never better than
+            # the best bid). For wide low-float spreads this ~= the empirical -247bps; for tight
+            # names it collapses to ~the ask (small improvement), exactly the live shape.
+            fill_px = min(limit, max(bid, mid))
             pblow = dbg.get("pullback_low")
             # LIVE stop width: vol-floored by the 15m expected move (the floor can BIND
             # here, exactly like live_runner.py:2358-2382), then structural pullback-low
