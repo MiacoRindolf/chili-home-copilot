@@ -65,6 +65,20 @@ INS = sa.text(
     "VALUES (:sym, :at, :px, :sz, :bid, :ask)"
 )
 
+# Also feed the momentum ENTRY-GATE's NBBO freshness tape with this SAME tick-level IQFeed L1.
+# The entry gate reads momentum_nbbo_spread_tape for its stale_bbo freshness check, but that
+# table was fed ONLY by the slower/sparser Massive WS recorder — so the fresh tick-level IQFeed
+# quotes (this bridge) NEVER reached the entry decision and wide-spread movers false-blocked on
+# stale_bbo (VNTG had 1578 IQFeed ticks/5min @1s old, yet the gate saw a 10-270s WS quote).
+# Mirror each valid-quote tick into the tape (source='iqfeed_l1') so the gate uses the freshest
+# available quote. Default ON; IQFEED_WRITE_NBBO_TAPE=0 reverts.
+WRITE_NBBO_TAPE = os.environ.get("IQFEED_WRITE_NBBO_TAPE", "1").strip().lower() not in ("0", "false", "no")
+NBBO_INS = sa.text(
+    "INSERT INTO momentum_nbbo_spread_tape "
+    "(symbol, observed_at, bid, ask, mid, spread_bps, day_volume, source) "
+    "VALUES (:sym, :at, :bid, :ask, :mid, :spread_bps, NULL, 'iqfeed_l1')"
+)
+
 _pending: list[dict] = []
 _pending_lock = threading.Lock()
 _last_trade: dict[str, str] = {}        # symbol -> last seen Most-Recent-Trade-Time (dedup key)
@@ -192,6 +206,18 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
             try:
                 with engine.begin() as c:
                     c.execute(INS, rows)
+                    if WRITE_NBBO_TAPE:
+                        nbbo = []
+                        for r in rows:
+                            b, a = r.get("bid"), r.get("ask")
+                            if b and a and b > 0 and a > 0 and a >= b:
+                                mid = (b + a) / 2.0
+                                nbbo.append({
+                                    "sym": r["sym"], "at": r["at"], "bid": b, "ask": a,
+                                    "mid": mid, "spread_bps": (a - b) / mid * 10_000.0,
+                                })
+                        if nbbo:
+                            c.execute(NBBO_INS, nbbo)
             except Exception as e:
                 log.warning("trade insert failed (%d rows): %s", len(rows), e)
     running = False
