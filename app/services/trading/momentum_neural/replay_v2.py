@@ -139,6 +139,13 @@ REPLAY_FIDELITY_V2 = bool(
 REPLAY_ENGINE_ON = bool(
     getattr(settings, "chili_momentum_replay_engine_on", False)
 )
+# RECORDED-FILLS CONSUMER (2026-06-28, "RECORD don't derive"): for armed_source=='live'
+# ONLY, consume the recorded broker truth in momentum_fill_outcomes instead of deriving
+# fills from the tape — exact SETUP/FILL fidelity for the names live actually traded.
+# INDEPENDENT of FIDELITY_V2. DEFAULT-OFF ⇒ byte-identical (no recorded-fill load).
+REPLAY_RECORDED_FILLS = bool(
+    getattr(settings, "chili_momentum_replay_recorded_fills_enabled", False)
+)
 
 REPLAY_RESULTS_DIR = os.environ.get("CHILI_REPLAY_RESULTS_DIR", "/app/data/replays")
 
@@ -306,6 +313,96 @@ def _premarket_utc_hhmm(date: str) -> str:
         return t.strftime("%H:%M")
     except Exception:
         return "11:00"  # 07:00 EDT
+
+
+def _load_recorded_fills(date: str) -> dict[str, list[dict]]:
+    """RECORDED-FILLS CONSUMER ("RECORD don't derive") — load the day's REAL broker fills
+    from ``momentum_fill_outcomes`` (equity lane = symbol NOT LIKE '%-USD') and collapse the
+    per-leg rows into per-``(session_id, leg_seq)`` round-trips. Returns ``{SYMBOL_UPPER:
+    [round_trip, ...]}`` — a symbol present in the map = it RECORDED a live entry fill that day
+    (the FILL-SET truth the replay must reproduce exactly for live-armed names).
+
+    Leg model (verified in-container 2026-06-28): one row per fill leg, ``side`` in
+    {entry, exit, partial_exit, scale_out}. A round-trip is keyed by ``(session_id, leg_seq)``:
+      * entry leg     — ``broker_fill_price`` = the realized entry fill, ``qty``,
+                        ``spread_bps_at_decision``, ``intended_price`` (the marketable-limit).
+      * exit-side legs — exit/partial_exit/scale_out: ``broker_fill_price`` = the exit fill,
+                        ``realized_pnl_usd`` = that leg's realized $; ``exit_reason`` the live
+                        exit reason. The round-trip's exit price = the LAST exit-side leg's fill,
+                        its $ = the SUM of all exit-side legs' realized_pnl_usd, its exit reason =
+                        the last terminal (non-partial) exit leg's reason (else the last leg's).
+    An entry with NO exit-side leg (open at EOD / a re-arm that did not close) is still a faithful
+    FILL — emitted with exit=entry and $=Σ(any partials) so the SETUP counts (the operator's
+    priority is setup/fill accuracy, not the $). Faithful by construction: NO derivation, NO tape.
+    REPLAY-ONLY (read-only single SELECT; rolled back). [momentum_neural]"""
+    out: dict[str, list[dict]] = defaultdict(list)
+    db = SessionLocal()
+    try:
+        rows = db.execute(
+            text(
+                "SELECT symbol, session_id, leg_seq, side, qty, broker_fill_price, "
+                "entry_price, intended_price, spread_bps_at_decision, realized_pnl_usd, "
+                "exit_reason, fill_ts "
+                "FROM momentum_fill_outcomes "
+                "WHERE symbol NOT LIKE '%-USD' "
+                "AND created_at >= :lo AND created_at < :hi "
+                "ORDER BY symbol, session_id, leg_seq, fill_ts, id"
+            ),
+            {"lo": f"{date} 00:00:00", "hi": f"{date} 23:59:59"},
+        ).fetchall()
+    finally:
+        db.rollback(); db.close()
+
+    # group raw legs by (symbol, session_id, leg_seq)
+    grp: dict[tuple, list] = defaultdict(list)
+    for r in rows:
+        grp[(str(r[0]).upper(), r[1], r[2])].append(r)
+
+    def _f(x, d=0.0):
+        try:
+            return float(x) if x is not None else d
+        except (TypeError, ValueError):
+            return d
+
+    for (sym, sid, leg), legs in grp.items():
+        entry_leg = next((l for l in legs if str(l[3]) == "entry"), None)
+        if entry_leg is None:
+            continue  # an exit with no recorded entry leg cannot anchor a round-trip
+        exit_legs = [l for l in legs if str(l[3]) in ("exit", "partial_exit", "scale_out")]
+        entry_px = _f(entry_leg[5])               # broker_fill_price on the entry leg
+        qty = _f(entry_leg[4])
+        spread = _f(entry_leg[8])
+        intended = _f(entry_leg[7], entry_px)
+        entry_ts = entry_leg[11]
+        if entry_px <= 0 or qty <= 0:
+            continue
+        # exit price = the LAST exit-side leg's fill; $ = Σ realized_pnl over exit-side legs;
+        # reason = the last TERMINAL (exit) leg's reason, else the last exit-side leg's reason.
+        pnl = sum(_f(l[9]) for l in exit_legs)
+        if exit_legs:
+            exit_px = _f(exit_legs[-1][5], entry_px)
+            _terminal = [l for l in exit_legs if str(l[3]) == "exit"]
+            _src_leg = _terminal[-1] if _terminal else exit_legs[-1]
+            exit_reason = str(_src_leg[10] or "exit")
+            exit_ts = exit_legs[-1][11]
+            closed = bool(_terminal)
+        else:
+            exit_px = entry_px            # open at EOD / unclosed re-arm: flat-mark the fill
+            exit_reason = "open_eod"
+            exit_ts = entry_ts
+            closed = False
+        out[sym].append({
+            "sym": sym, "session_id": sid, "leg_seq": leg,
+            "entry": entry_px, "exit": exit_px, "qty": qty,
+            "spread_bps": spread, "intended": intended,
+            "usd": pnl, "exit_reason": exit_reason, "closed": closed,
+            "entry_ts": _aware(entry_ts) if entry_ts is not None else None,
+            "exit_ts": _aware(exit_ts) if exit_ts is not None else None,
+        })
+    # stable order per symbol: by entry time then leg_seq
+    for sym in out:
+        out[sym].sort(key=lambda d: (d["entry_ts"] or _aware(datetime(1970, 1, 1)), d["leg_seq"]))
+    return dict(out)
 
 
 class Tape:
@@ -636,6 +733,36 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             live_spans[str(sym2).upper()].append((_aware(a2), _aware(b2)))
         result["live_sessions"] = sum(len(v) for v in live_spans.values())
 
+    # RECORDED-FILLS CONSUMER ("RECORD don't derive"): for armed_source=='live' + flag ON,
+    # load the day's REAL broker fills and partition the live-armed universe into
+    #   * recorded_filled_syms — live ARMED *and* recorded a broker entry fill: the replay
+    #     emits these from the RECORDED round-trips (exact entry/exit/spread/$/qty) and the
+    #     derived tape model is BYPASSED for them.
+    #   * live_armed_syms \ recorded_filled_syms — live armed but the recorded truth shows NO
+    #     fill (live cancelled pre-entry): the replay DROPS them (trace gate_fail:live_cancelled)
+    #     so the over-firing derived auto-fill can't invent a trade live never took.
+    # A name the replay arms that live NEVER armed (pure counterfactual) is untouched here and
+    # keeps the DERIVED model (tagged ':counterfactual' at emission). OFF / non-live ⇒ all empty.
+    recorded_fills: dict[str, list[dict]] = {}
+    live_armed_syms: set[str] = set()
+    recorded_filled_syms: set[str] = set()
+    use_recorded = bool(REPLAY_RECORDED_FILLS and armed_source == "live")
+    if use_recorded:
+        live_armed_syms = set(live_spans or {})
+        try:
+            recorded_fills = _load_recorded_fills(date)
+        except Exception:
+            logger.warning("[replay_v2] recorded-fill load failed; falling back to derived", exc_info=True)
+            recorded_fills = {}
+            use_recorded = False
+        recorded_filled_syms = {s for s in recorded_fills if s in live_armed_syms}
+        result["recorded_fills_consumer"] = {
+            "enabled": True,
+            "live_armed": len(live_armed_syms),
+            "recorded_filled": sorted(recorded_filled_syms),
+            "live_cancelled_dropped": sorted(live_armed_syms - recorded_filled_syms),
+        }
+
     armed: dict[str, dict] = {}
     trigger_cache: dict[tuple, tuple] = {}
     trace: list[dict] = []
@@ -857,11 +984,21 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
         # structural risk. The MESO separator: winners thrust, losers fade (~0R).
         _mfe_px = max(float(p.get("hwm", p["entry"])), float(p["entry"]))
         _run_r = _run_r_value(p["entry"], p.get("stop0", p["stop"]), _mfe_px)
+        # RECORDED-FILLS CONSUMER: when active, any DERIVED trade that reaches here is a
+        # pure COUNTERFACTUAL (live-armed-and-filled names are emitted from the recorded
+        # round-trips, not here; live-armed-not-filled names are dropped) — so tag its why
+        # ':counterfactual' + source='derived' to distinguish it from the recorded_live set.
+        # OFF ⇒ no new keys / no suffix (byte-identical why + dict).
+        _extra: dict = {}
+        if use_recorded:
+            why = why + ":counterfactual"
+            _extra["source"] = "derived"
         trades.append({**p["meta"], "exit": round(exit_px, 4), "why": why,
                        "exit_t": (str(when)[11:16] if when is not None else None),
                        "stop": round(p.get("stop0", p["stop"]), 4),
                        "target": round(p["target"], 4),
                        "mfe_px": round(_mfe_px, 4), "run_r": round(_run_r, 2),
+                       **_extra,
                        "usd": round(pnl + p.get("scale_usd", 0.0), 0)})
         # G2: per-symbol post-loss discipline — mirror live _symbol_loss_guards (only a
         # net LOSS cools down + strikes; a WIN stays re-armable, preserving the legit
@@ -1166,6 +1303,19 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                 armed_spans[s].append([str(now)[11:16], None])
         for s in list(armed):
             if s in open_pos:
+                continue
+            # RECORDED-FILLS CONSUMER ("RECORD don't derive"): bypass the DERIVED fill model
+            # for any live-armed name. A name the recorded broker truth shows FILLED is emitted
+            # from its RECORDED round-trips (handled once, just below the loop), so skip it here;
+            # a live-armed name with NO recorded fill = live CANCELLED it pre-entry, so DROP it
+            # (the over-firing derived auto-fill must not invent a trade live never took). OFF /
+            # non-live ⇒ this whole block is skipped (byte-identical). Counterfactual names (not
+            # live-armed) never enter this branch and keep the derived model.
+            if use_recorded and s in live_armed_syms:
+                if s not in recorded_filled_syms:
+                    _tr(s, "gate_fail:live_cancelled", now)
+                # FILLED names are emitted from the recorded round-trips (post-loop); either
+                # way the derived path does not run for a live-armed name.
                 continue
             # G1: concurrency cap — live holds only ~MAX_OPEN_CONCURRENT positions at once
             # (adaptive_max_concurrent_live_sessions base); open_pos is the held analog.
@@ -1504,6 +1654,43 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
         p = open_pos[s]
         last_bid = tape.by_sym[s][-1][1]
         close_trade(s, p, last_bid, "eod", when=day_grid[-1])
+
+    # RECORDED-FILLS CONSUMER ("RECORD don't derive"): emit the live-armed FILLED names from
+    # the RECORDED broker round-trips (NOT the derived tape model — those were skipped in the
+    # entry loop above). Each round-trip = one trade with the EXACT recorded entry/exit/spread/
+    # $/qty; why='recorded_live' (or carrying the live exit reason). The point-estimate $ now
+    # sums RECORDED $ for these + DERIVED $ for any counterfactual names. This is what makes the
+    # live-armed fill-SET match what live actually traded. OFF / non-live ⇒ none of this runs.
+    if use_recorded and recorded_filled_syms:
+        _rec_emitted = 0
+        for s in sorted(recorded_filled_syms):
+            for rt in recorded_fills.get(s, []):
+                _ent = float(rt["entry"]); _exi = float(rt["exit"]); _q = float(rt["qty"])
+                _usd = float(rt["usd"])
+                state["cum"] += _usd
+                state["peak"] = max(state["peak"], state["cum"])
+                _et = rt.get("entry_ts"); _xt = rt.get("exit_ts")
+                _why = "recorded_live:" + str(rt.get("exit_reason") or "open_eod")
+                trades.append({
+                    "sym": s,
+                    "t": (str(_et)[11:16] if _et is not None else None),
+                    "entry": round(_ent, 4), "qty": round(_q, 0),
+                    "spread_bps": round(float(rt.get("spread_bps") or 0.0), 0),
+                    "partial": 1.0,
+                    "fidelity": "recorded", "entry_fidelity": "recorded_broker",
+                    "source": "recorded_live",
+                    "session_id": rt.get("session_id"), "leg_seq": rt.get("leg_seq"),
+                    "exit": round(_exi, 4), "why": _why,
+                    "exit_t": (str(_xt)[11:16] if _xt is not None else None),
+                    # recorded broker truth carries no modeled bracket; stop/target/run_r are
+                    # not derivable from a fill leg → null (the $ + setup are the truth here).
+                    "stop": None, "target": None, "mfe_px": None, "run_r": None,
+                    "closed": bool(rt.get("closed")),
+                    "usd": round(_usd, 0),
+                })
+                _rec_emitted += 1
+        if isinstance(result.get("recorded_fills_consumer"), dict):
+            result["recorded_fills_consumer"]["recorded_trades_emitted"] = _rec_emitted
 
     # close any still-open armed spans at EOD
     eod_label = str(day_grid[-1])[11:16]

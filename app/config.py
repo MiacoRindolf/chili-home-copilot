@@ -4321,6 +4321,24 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_REPLAY_ENGINE_ON"),
     )
+    # REPLAY RECORDED-FILLS CONSUMER (2026-06-28, "RECORD don't derive"): for armed_source
+    # ='live' replays ONLY, when ON, the replay stops DERIVING fills from the tape for names
+    # the live lane actually armed and instead consumes the RECORDED broker truth in
+    # momentum_fill_outcomes (one row per fill leg; collapsed into per-(session_id, leg_seq)
+    # round-trips). A live-armed name that the recorded truth shows FILLED is emitted with its
+    # RECORDED entry/exit/spread/$/qty (why='recorded_live'); a live-armed name with NO recorded
+    # fill (live cancelled it pre-entry) is DROPPED (trace gate_fail:live_cancelled). This makes
+    # the live-armed fill-SET exactly match what live traded (06-24: the derived model fires 25
+    # distinct names but live only filled 9). Names the replay arms that live NEVER armed (pure
+    # counterfactual) keep the existing DERIVED tape model (why suffix ':counterfactual'), so the
+    # engine's own selection is still exercised. INDEPENDENT of chili_momentum_replay_fidelity_v2
+    # (the operator can flip either alone). DEFAULT-OFF => byte-identical to current HEAD (no
+    # recorded-fill load, derived model for every name). REPLAY-ONLY: read ONLY inside replay_v2.py;
+    # it never touches any live-trading code path. docs/STRATEGY replay-lab convergence.
+    chili_momentum_replay_recorded_fills_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REPLAY_RECORDED_FILLS_ENABLED"),
+    )
     # LIVE feature-capture (2026-06-23): when ON, the live runner records the SAME
     # lookahead-free entry-feature vector (shared entry_features.capture_entry_features)
     # onto the session's live-exec blob at the entry fill, so outcome_extract reads it for
