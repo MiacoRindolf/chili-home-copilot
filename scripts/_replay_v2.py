@@ -6,6 +6,7 @@ The web UI runs the same engine at /trading/replay.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -14,10 +15,34 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.services.trading.momentum_neural.replay_v2 import run_replay  # noqa: E402
 
 if __name__ == "__main__":
-    date = sys.argv[1] if len(sys.argv) > 1 else None
+    argv = [a for a in sys.argv[1:]]
+    # --json: print the full run_replay result dict as JSON to stdout (machine-readable,
+    # for the version-diff harness which captures + parses two ledgers from subprocesses).
+    # Additive + parity-safe: the human print path below is untouched when --json is absent.
+    json_mode = "--json" in argv
+    if json_mode:
+        argv = [a for a in argv if a != "--json"]
+    # --armed-source=<asof|live|full_pipeline>: optional, defaults to the engine default.
+    armed_source = "live"
+    _rest = []
+    for a in argv:
+        if a.startswith("--armed-source="):
+            armed_source = a.split("=", 1)[1] or armed_source
+        else:
+            _rest.append(a)
+    argv = _rest
+    date = argv[0] if argv else None
     if not date:
-        print("usage: python scripts/_replay_v2.py YYYY-MM-DD"); raise SystemExit(2)
-    r = run_replay(date)
+        print("usage: python scripts/_replay_v2.py YYYY-MM-DD [--json] [--armed-source=live]")
+        raise SystemExit(2)
+    if json_mode:
+        # persist=False so a diff run never clobbers the shared /app/data/replays cache;
+        # the harness pins the basis + flags via env, so both subprocess runs are isolated.
+        r = run_replay(date, persist=False, armed_source=armed_source)
+        sys.stdout.write(json.dumps(r, default=str))
+        sys.stdout.flush()
+        raise SystemExit(1 if r.get("error") else 0)
+    r = run_replay(date, armed_source=armed_source)
     print(f"=== REPLAY v2 — {date} ===")
     print(f"tape: {r['tape_symbols']} symbols | halt windows: {r['halt_windows']} on {r['halted_symbols']} symbols | candidates: {r['candidates']}")
     if r.get("error"):
