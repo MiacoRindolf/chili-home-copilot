@@ -519,6 +519,31 @@ def _record_fill_outcome_safe(
         # SAVEPOINT: the insert (incl. its guarded leg_seq read) is fully isolated —
         # any error rolls back ONLY this nested block, leaving the trade txn clean.
         with db.begin_nested():
+            # IDEMPOTENT BY broker_order_id (2026-06-27 duplicate-fill root cause):
+            # a recycled watcher / repeg / late-fill sweep can re-poll the SAME real
+            # broker order — and because leg_seq is MAX+1 per (session, side), the
+            # ON CONFLICT (session_id, side, leg_seq) clause can NEVER catch that
+            # repeat (it always picks a fresh leg_seq), double-logging one fill.
+            # When the broker assigned an order id, SKIP cleanly if a row for this
+            # (session, side, broker_order_id) already exists — the leg is logged.
+            # broker_order_id IS NULL (paper / synthetic / broker-zero escape) keeps
+            # the leg_seq path unchanged. Same SAVEPOINT, no new flag (already gated
+            # by chili_momentum_fill_log_enabled above).
+            if params["broker_order_id"] is not None:
+                _dup = db.execute(
+                    _text(
+                        "SELECT 1 FROM momentum_fill_outcomes "
+                        "WHERE session_id = :sid AND side = :side "
+                        "AND broker_order_id = :boid LIMIT 1"
+                    ),
+                    {
+                        "sid": params["session_id"],
+                        "side": params["side"],
+                        "boid": params["broker_order_id"],
+                    },
+                ).scalar()
+                if _dup is not None:
+                    return  # already logged this broker order leg — idempotent skip
             row = db.execute(
                 _text(
                     "SELECT COALESCE(MAX(leg_seq), -1) + 1 FROM momentum_fill_outcomes "
@@ -3256,6 +3281,190 @@ def _mark_entry_order_resolved(le: dict, order_id, outcome: str) -> None:
     res = dict(le.get("entry_orders_resolved") or {})
     res[str(order_id)] = outcome
     le["entry_orders_resolved"] = res
+
+
+# ── RECYCLE entry/position lifecycle reset (2026-06-27 duplicate-fill root cause) ──
+# At COOLDOWN -> WATCHING_LIVE the session RECYCLES into a fresh watcher. Today it keeps
+# the PRIOR trade's entry-order / position state in `le`, so the recycled watcher's first
+# WATCHING tick re-runs the late-fill sweep (`_unresolved_entry_order_ids` /
+# `_sweep_unresolved_entry_orders`) and the pre-submit poll against ITS OWN already-filled
+# entry order -> re-points + adopts a SECOND phantom position (AREC sid 9331: two entry
+# rows same broker_order_id, 221sh x2 -> stuck live_bailout spin).
+#
+# `_RECYCLE_ENTRY_STATE_KEYS` is the COMPLETE set of per-trade lifecycle keys cleared on
+# recycle so the next cycle starts as a clean watcher with NO entry order to re-poll. It
+# COVERS every key the entry-poll / adoption path reads to decide "do I already have an
+# entry order to adopt?" — the load-bearing five: entry_order_id, entry_order_ids_all,
+# entry_orders_resolved, entry_submitted, position (read at lines ~2279/4186/4220/4366 +
+# _unresolved_entry_order_ids). The rest are entry-sizing, pending-entry, repeg, scale-out,
+# pyramid/anticipation/micropullback add-leg, exit-order, stop/breach, max-loss-circuit and
+# halt-entry markers that all belong to the trade that just closed.
+#
+# NOT cleared (must persist across cycles): the symbol/variant identity (sess columns, not
+# le), cooldown bookkeeping (handled inline), trade_cycles, the cumulative daily-loss
+# accounting (realized_pnl_usd / fees_usd_total), the session-discipline counters
+# (per_symbol_fatigue / win_cycle_fatigue / *_fatigue_derate / green_day_graduation /
+# prior_day_pnl_damper / *_size* selection tilts), the symbol-level halt-resume CHAIN counters
+# (halt_chain_up_count / halt_down_consecutive_count — they track the SYMBOL across cycles), the
+# sizing audit metadata that is recomputed fresh every entry pass (streak_risk / cushion_risk /
+# schedule_risk / liquidity_risk / *_size* / *_cap, never read back as cross-cycle state), the
+# deferred post-exit-excursion learning marker (post_exit_excursion_pending — a separate horizon
+# job consumes it AFTER the exit), the per-tick telemetry (tick_count / last_mid / last_tick_utc /
+# last_quote_quality_gate), and the last_exit_* / last_partial_exit_* summary fields (read by
+# summarize_live_execution + the recycle event). See _record_fill_outcome_safe +
+# tests/test_momentum_recycle_no_phantom.py.
+_RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
+    # ── load-bearing: the entry-order / position adoption gate ──
+    "entry_order_id",
+    "entry_order_ids_all",
+    "entry_orders_resolved",
+    "entry_submitted",
+    "position",
+    # ── entry submit / sizing / pricing context ──
+    "entry_submit_utc",
+    "entry_client_order_id",
+    "entry_limit_price",
+    "entry_original_limit_px",
+    "entry_order_type",
+    "entry_place_count",
+    "entry_place_result",
+    "entry_repeg_count",
+    "entry_chunk_order_ids",
+    "entry_decision_packet_id",
+    "entry_features",
+    "entry_l2_snapshot",
+    "entry_regime_snapshot_json",
+    "entry_sizing",
+    "entry_resize_basis",
+    "entry_want_qty",
+    "entry_stop_atr_pct",
+    "entry_stop_model",
+    "entry_dollar_vol",
+    "entry_expected_move_bps",
+    "entry_notional_guard",
+    "entry_slip_bps_ref",
+    "entry_spread_bps_at_decision",
+    "entry_trigger_reason",
+    "entry_trigger_debug",
+    "entry_liq_mult",
+    "entry_session_extended",
+    "entry_session_overnight",
+    "entry_fee_usd_unbooked",
+    "admission_viability_score",
+    "breakout_level_price",
+    "watch_break_level",
+    # ── pending-exit / exit-order lifecycle ──
+    "exit_order_id",
+    "exit_client_order_id",
+    "exit_order_type",
+    "exit_limit_price",
+    "exit_place_result",
+    "exit_execution_intents",
+    "exit_floor_anchored",
+    "exit_floor_order",
+    "exit_next_retry_at_utc",
+    "exit_pending_first_seen_utc",
+    "exit_submit_attempts",
+    "exit_session_extended",
+    "exit_candle1m_min",
+    "exit_candle1m_exh",
+    "pending_exit_reason",
+    "pending_exit_quantity",
+    "pending_exit_submitted_at_utc",
+    "pending_exit_is_scale_out",
+    "last_exit_pending_confirmation",
+    "broker_zero_confirm_streak",
+    # ── scale-out / runner ladder ──
+    "scale_limit_order_id",
+    "scale_limit_px",
+    "scale_limit_qty",
+    "scale_limit_adopted_qty",
+    "scale_limit_source",
+    "ladder_cooldown_until_utc",
+    "measured_move_partial_armed",
+    "exhaustion_lock_partial_armed",
+    # ── pyramid add legs ──
+    "pyramid_order_id",
+    "pyramid_limit_px",
+    "pyramid_pending_R0",
+    "pyramid_add_count",
+    "pyramid_place_count",
+    "pyramid_submit_retry_count",
+    "pyramid_prev_stop",
+    "pyramid_entry_stop_ref",
+    "pyramid_risk_anchor_usd",
+    "pyramid_confirm_ofi",
+    "pyramid_discrete_trigger",
+    # ── anticipation probe / remainder ──
+    "anticipation_add_order_id",
+    "anticipation_add_limit_px",
+    "anticipation_armed",
+    "anticipation_completed",
+    "anticipation_full_qty",
+    "anticipation_probe_qty",
+    "anticipation_probe_fraction",
+    "anticipation_remainder_qty",
+    "anticipation_place_count",
+    # ── micropullback re-entry add leg ──
+    "micropullback_reentry_order_id",
+    "micropullback_reentry_limit_px",
+    "micropullback_reentry_count",
+    "micropullback_reentry_cooldown_until_utc",
+    "micropullback_reentry_pending_R0",
+    "micropullback_confirm_ofi",
+    "micropullback_confirm_trade_flow",
+    "micropullback_last_shelf",
+    "micropullback_pending_dip_low",
+    "micropullback_prev_stop",
+    # ── stop / breach / max-loss circuit / excursion markers ──
+    "structural_stop_price",
+    "structural_stop_atr_pct",
+    "stop_breach_pending_utc",
+    "stop_breach_chop_holds",
+    "max_loss_circuit_fired",
+    "max_loss_circuit_floor_price",
+    "prev_signed_tape_accel",
+    "last_bailout_trigger",
+    "benched_backside_hod",
+    # ── halt-entry markers tied to the closed position (NOT the symbol-level halt
+    #    CHAIN counters halt_chain_up_count / halt_down_consecutive_count, which track
+    #    the SYMBOL's resume sequence across watcher cycles and are kept) ──
+    "halt_entry_size_mult",
+    "halt_resumption_open",
+    "halt_resumed_at_utc",
+    "halt_down_pre_ref_bid",
+    "halt_down_last_resume_utc",
+    "suspected_halt_since_utc",
+    "halt_stale_streak",
+    "halt_level",
+    # ── EMA-trail / cadence carry computed against the closed position ──
+    "ema5m_min",
+    "ema5m_val",
+    "cadence_prev_ema5m",
+    "cadence_prev_rvol",
+    "cadence_cls",
+)
+# DELIBERATELY KEPT (NOT in the reset set): post_exit_excursion_pending. It is the deferred
+# shake-out-learning marker for the trade that JUST closed; a separate horizon job
+# (post_exit_excursion.run_post_exit_excursion_pass, ~30min horizon) labels it AFTER the exit
+# and the cooldown (typically seconds–minutes) is far shorter than that horizon. Clearing it on
+# recycle would DROP that learning signal before the horizon elapses — a regression. The exit
+# path OVERWRITES (not appends) this marker on the next real exit, and the labeler already skips
+# sessions that re-entered a holding state, so carrying it forward cannot mis-label the new trade.
+
+
+def _reset_entry_state_on_recycle(le: dict) -> list[str]:
+    """Pop every per-trade entry/position lifecycle key so the recycled watcher starts
+    CLEAN (no entry order for the late-fill sweep / pre-submit poll to re-adopt). Returns
+    the keys that were actually present (for the live_recycled audit). Identity, cooldown
+    bookkeeping, trade_cycles, cumulative PnL/fees and discipline counters are preserved
+    (they are not in _RECYCLE_ENTRY_STATE_KEYS)."""
+    cleared: list[str] = []
+    for k in _RECYCLE_ENTRY_STATE_KEYS:
+        if k in le:
+            le.pop(k, None)
+            cleared.append(k)
+    return cleared
 
 
 def _sweep_unresolved_entry_orders(adapter, db, sess, le: dict) -> bool:
@@ -10049,11 +10258,20 @@ def tick_live_session(
         if _utcnow() >= until:
             le.pop("cooldown_until_utc", None)
             le["trade_cycles"] = int(le.get("trade_cycles") or 0) + 1
+            # RECYCLE ENTRY-STATE RESET (2026-06-27 duplicate-fill root cause): clear the
+            # PRIOR trade's entry-order / position lifecycle state so the recycled watcher
+            # starts CLEAN — without this it re-polls / re-adopts its OWN already-filled
+            # entry order on the next WATCHING tick -> phantom 2x long + stuck bailout spin
+            # (AREC sid 9331). OFF => byte-identical to the legacy recycle (state retained).
+            _recycle_reset_keys: list[str] = []
+            if bool(getattr(settings, "chili_momentum_recycle_entry_state_reset_enabled", True)):
+                _recycle_reset_keys = _reset_entry_state_on_recycle(le)
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_WATCHING_LIVE)
             _emit(db, sess, "live_recycled", {
                 "realized_pnl_usd": le.get("realized_pnl_usd"),
                 "trade_cycles": le["trade_cycles"],
+                "entry_state_reset_keys": _recycle_reset_keys,
             })
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}

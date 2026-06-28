@@ -2190,6 +2190,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FILL_LOG_ENABLED"),
         description="Kill-switch: True => the momentum live lane records one momentum_fill_outcomes row per real broker fill leg (entry/exit/partial/scale-out). Default OFF (no writes, byte-identical). Write-only Stage-1.",
     )
+    chili_momentum_recycle_entry_state_reset_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RECYCLE_ENTRY_STATE_RESET_ENABLED"),
+        description="SAFETY: True (default) => on the COOLDOWN->WATCHING_LIVE recycle the live runner clears the prior trade's entry-order / position lifecycle state (entry_order_id, entry_order_ids_all, entry_orders_resolved, entry_submitted, position, + per-trade exit/scale/pyramid/anticipation/micropullback/stop/halt markers) so the recycled watcher starts as a CLEAN watcher with no entry order to re-poll. Fixes the duplicate-fill root cause (AREC sid 9331: a recycled watcher re-adopted its OWN filled entry order -> phantom 2x long + stuck live_bailout spin). OFF => the recycle is byte-identical to the legacy behavior (state retained). Identity / cooldown / trade_cycles / cumulative PnL+fees / discipline counters always persist.",
+    )
     chili_momentum_fake_catalyst_guard_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_FAKE_CATALYST_GUARD_ENABLED"),
