@@ -146,6 +146,20 @@ REPLAY_ENGINE_ON = bool(
 REPLAY_RECORDED_FILLS = bool(
     getattr(settings, "chili_momentum_replay_recorded_fills_enabled", False)
 )
+# PRINTS-BASED FILL MODEL (2026-06-28, STEP 2; docs/DESIGN/VERSION_AGNOSTIC_BACKTEST.md): the
+# quote-touch fill OVER-fills because quotes can't see executions — the TRADE PRINTS can. When
+# ON, the entry-fill seam swaps the quote model (min(limit,max(bid,mid)) + the touch-through
+# test) for prints_fill_decision over the immutable iqfeed_trade_ticks (version-agnostic: any
+# version's (sym,limit,qty,t0) is scored against the same recorded prints). DEFAULT-OFF ⇒ the
+# EXACT current quote fill (md5-of-trades byte-identical). REPLAY-ONLY (no live-path read).
+REPLAY_PRINTS_FILL = bool(
+    getattr(settings, "chili_momentum_replay_prints_fill_enabled", False)
+)
+# Adaptive review-latency multiplier on the DERIVED latency (NOT a constant latency). 1.0 =
+# use the lane's own median (live_entry_submitted - live_entry_candidate_detected) as measured.
+REPLAY_REVIEW_LATENCY_K = float(
+    getattr(settings, "chili_momentum_replay_review_latency_k", 1.0) or 1.0
+)
 
 REPLAY_RESULTS_DIR = os.environ.get("CHILI_REPLAY_RESULTS_DIR", "/app/data/replays")
 
@@ -532,6 +546,308 @@ class Tape:
         return out
 
 
+class TradeTape:
+    """STEP 2 — the immutable per-symbol TRADE PRINTS for one date (the prints-based fill
+    model; docs/DESIGN/VERSION_AGNOSTIC_BACKTEST.md). A twin of ``Tape`` but over
+    ``iqfeed_trade_ticks`` (real per-trade executions: price + size + bid/ask at the print)
+    instead of the 1-min NBBO. Bulk-loads the whole day ONCE, indexes by symbol, and exposes
+    a lookahead-free ``prints_through`` (executions AT/THROUGH a limit in a half-open window
+    using only ``observed_at`` in [t_lo, t_hi)).
+
+    Why this exists: the quote-touch fill in the entry seam treats a quote touch as a fill and
+    OVER-fills (BEEM 29/34 predicted vs 1/34 live) because quotes cannot SEE executions. A
+    through-print IS an execution — direct evidence shares traded at/through the limit. The
+    fill model below cumulates real print size against an inferred queue to decide FILL /
+    PARTIAL / CANCEL and a MEASURED ``fill_vwap``. Version-agnostic: nothing here reads
+    ``momentum_fill_outcomes``; any version's order at any ``(sym, limit, qty, t0)`` is scored
+    against these same recorded prints. Reuses the bid/ask carried on each print so
+    ``queue_ahead`` (the L1 size-at-touch proxy) can be inferred without a separate L2 load."""
+
+    def __init__(self, date: str):
+        # per-symbol list of (ts, price, size, bid, ask) in time order
+        self.by_sym: dict[str, list[tuple[datetime, float, float, float, float]]] = defaultdict(list)
+        db = SessionLocal()
+        try:
+            rows = db.execute(
+                text(
+                    "SELECT symbol, observed_at, price, size, bid, ask "
+                    "FROM iqfeed_trade_ticks "
+                    "WHERE observed_at >= :lo AND observed_at < :hi "
+                    "AND price > 0 AND size > 0 "
+                    "ORDER BY symbol, observed_at"
+                ),
+                {"lo": f"{date} {_premarket_utc_hhmm(date)}:00", "hi": f"{date} 20:10:00"},
+            ).fetchall()
+        except Exception:
+            # iqfeed_trade_ticks may not exist on this DB / date → no prints; the fill model
+            # degrades every order to quote_fallback (handled by the caller). Fail-open.
+            rows = []
+        finally:
+            db.rollback()
+            db.close()
+        for sym, ts, px, sz, bid, ask in rows:
+            ts = _aware(ts)
+            self.by_sym[str(sym)].append(
+                (ts, float(px), float(sz or 0.0),
+                 float(bid) if bid is not None else 0.0,
+                 float(ask) if ask is not None else 0.0)
+            )
+        self._times: dict[str, list[datetime]] = {s: [r[0] for r in v] for s, v in self.by_sym.items()}
+        # adaptive per-name inter-trade cadence (median gap between prints) — the fallback
+        # review-latency basis when no automation-event latencies exist for the day.
+        self._cadence_s: dict[str, float] = {}
+        for s, tms in self._times.items():
+            if len(tms) < 2:
+                continue
+            gaps = sorted((b - a).total_seconds() for a, b in zip(tms, tms[1:]) if b > a)
+            if gaps:
+                self._cadence_s[s] = gaps[len(gaps) // 2]
+        # DERIVED review latency (seconds): the lane's OWN median submit-minus-detected
+        # latency from the recorded automation events for this date (NOT a constant). Computed
+        # once here so the fill window opens at t0 - review_latency without a per-call query.
+        self.review_latency_s: float | None = _derive_review_latency_s(date)
+
+    def symbols(self) -> list[str]:
+        return list(self.by_sym.keys())
+
+    def cadence_s(self, sym: str) -> float | None:
+        """Adaptive inter-trade cadence (median print gap, seconds) for the name, or None."""
+        return self._cadence_s.get(sym)
+
+    def queue_ahead_at(self, sym: str, ts, side: str = "long") -> float | None:
+        """L1 size-at-touch proxy for the resting queue ahead of our order: the bid/ask SIZE is
+        not carried on the print, so we use the most recent print's size at/just-before ``ts``
+        as the observable depth proxy (the live model degrades to 0 + a low-confidence flag when
+        absent). Returns the print size of the last print at/before ts, or None if no print."""
+        times = self._times.get(sym)
+        if not times:
+            return None
+        i = bisect.bisect_right(times, _aware(ts)) - 1
+        if i < 0:
+            return None
+        return float(self.by_sym[sym][i][2])
+
+    def prints_through(self, sym: str, limit: float, side: str, t_lo, t_hi) -> list[tuple[float, float, datetime]]:
+        """LOOKAHEAD-FREE executions AT/THROUGH ``limit`` whose ``observed_at`` ∈ [t_lo, t_hi),
+        in time order, as ``(price, size, ts)``. For a long marketable buy LIMIT, an execution
+        "through" the limit is a print at ``price <= limit`` (the offer traded down to/through
+        our resting bid-side limit). Reuses the bisected ``_times`` index (no scan)."""
+        times = self._times.get(sym)
+        if not times:
+            return []
+        lo = bisect.bisect_left(times, _aware(t_lo))
+        hi = bisect.bisect_left(times, _aware(t_hi))
+        out: list[tuple[float, float, datetime]] = []
+        _long = (side or "long").lower() != "short"
+        for r in self.by_sym[sym][lo:hi]:
+            _ts, _px, _sz = r[0], r[1], r[2]
+            if _sz <= 0:
+                continue
+            if (_long and _px <= limit) or ((not _long) and _px >= limit):
+                out.append((_px, _sz, _ts))
+        return out
+
+    def has_prints_near(self, sym: str, t_lo, t_hi) -> bool:
+        """LOOKAHEAD-FREE local coverage probe: does the name have ANY print (at ANY price, not
+        just through our limit) whose ``observed_at`` ∈ [t_lo, t_hi]? Used to source-tag a fill
+        honestly: 'prints_fill' means there WAS local print coverage for THIS order's window so a
+        no-through-print is a genuine no-fill; 'quote_fallback' means the name had no prints in
+        the neighborhood of this order at all (so the absence of a through-print is uninformative).
+        Whole-day cadence cannot answer this — a name can have prints elsewhere in the day yet none
+        in this order's window. Inclusive on t_hi so a print exactly at the ack horizon still counts
+        as coverage. Reuses the bisected ``_times`` index (no scan)."""
+        times = self._times.get(sym)
+        if not times:
+            return False
+        lo = bisect.bisect_left(times, _aware(t_lo))
+        hi = bisect.bisect_right(times, _aware(t_hi))
+        return hi > lo
+
+
+def _derive_review_latency_s(date: str) -> float | None:
+    """ADAPTIVE review latency for the prints-fill window (NO magic constant): the MEDIAN of the
+    momentum lane's OWN recorded (live_entry_submitted.ts − live_entry_candidate_detected.ts)
+    latencies for ``date``, paired per session in time order. Returns seconds, or None when no
+    pairable events exist (the caller then falls back to the name's inter-trade print cadence).
+    REPLAY-ONLY read of recorded events (the same table _build_divergence joins)."""
+    db = SessionLocal()
+    try:
+        rows = db.execute(
+            text(
+                "SELECT e.session_id, e.event_type, e.ts FROM trading_automation_events e "
+                "JOIN trading_automation_sessions s ON s.id = e.session_id "
+                "WHERE s.mode='live' AND s.symbol NOT LIKE '%-USD' "
+                "AND e.event_type IN ('live_entry_candidate_detected','live_entry_submitted') "
+                "AND e.ts >= :lo AND e.ts < :hi ORDER BY e.session_id, e.ts"
+            ),
+            {"lo": f"{date} 04:00:00", "hi": f"{date} 23:59:59"},
+        ).fetchall()
+    except Exception:
+        return None
+    finally:
+        db.rollback(); db.close()
+    # pair each detected with the NEXT submit in the same session (FIFO) → latency seconds
+    pending: dict = {}
+    lats: list[float] = []
+    for sid, et, ts in rows:
+        if et == "live_entry_candidate_detected":
+            pending.setdefault(sid, []).append(ts)
+        elif et == "live_entry_submitted":
+            q = pending.get(sid)
+            if q:
+                det = q.pop(0)
+                dt = (ts - det).total_seconds()
+                if dt >= 0:
+                    lats.append(dt)
+    if not lats:
+        return None
+    lats.sort()
+    return lats[len(lats) // 2]
+
+
+def prints_fill_decision(
+    trade_tape: "TradeTape",
+    sym: str,
+    limit: float,
+    qty: float,
+    t0,
+    *,
+    side: str = "long",
+    queue_ahead: float | None,
+    review_latency_s: float | None,
+    ack_window_s: float,
+    bid: float,
+    participation: float,
+    min_size: float = 1.0,
+) -> dict:
+    """STEP 2 prints-based fill model. Scores ONE order ``(sym, limit, qty, t0)`` against the
+    immutable trade prints in [t0 − review_latency, t0 + ack_window):
+
+      * cumulate ``participation * size`` of the through-prints (executions at/through the limit),
+      * ``filled = max(0, min(qty, cum_size − queue_ahead))`` (queue_ahead = inferred size ahead),
+      * ``fill_vwap`` = the size-weighted price over the FILLING slice, bounded [bid, limit]
+        (never better than the best bid, never worse than our limit),
+      * ``filled >= qty`` → FILL; ``0 < filled < qty`` → PARTIAL (caller emits + cancels the
+        remainder; below ``min_size`` → CANCEL); ``filled <= 0`` → CANCEL.
+
+    Returns {filled_qty, fill_vwap, status ∈ FILL|PARTIAL|CANCEL, source, meta}. ``source`` =
+    'prints_fill' when the name has ANY print in a neighborhood of THIS order ([t_lo, t_hi]),
+    'quote_fallback' when it has NO local print coverage for this order's window (so the caller
+    widens the confidence band) — tagged off LOCAL coverage, not whole-day cadence, so it honestly
+    reflects whether THIS order could be resolved against prints. When the queue depth ahead of us
+    is unobservable (no print at/before the window open), ``queue_ahead`` falls back to a
+    CONSERVATIVE non-zero proxy = the median in-window through-print size (so a single tiny print
+    cannot clear an unknown queue and over-fill); ``meta.low_confidence`` flags this, and
+    ``meta.queue_proxy`` records which basis was used ('observed' | 'median_through_print' |
+    'none'). Lookahead-free (only ``observed_at`` ∈ the window). NO magic numbers — every input is
+    derived/passed."""
+    review_latency_s = max(0.0, float(review_latency_s or 0.0))
+    t_lo = _aware(t0) - timedelta(seconds=review_latency_s)
+    t_hi = _aware(t0) + timedelta(seconds=max(0.0, float(ack_window_s)))
+    prints = trade_tape.prints_through(sym, limit, side, t_lo, t_hi)
+    # SEMANTICS: the queue ahead of us must be the queue that EXISTED when the fill window OPENS
+    # (t_lo = t0 − review_latency), NOT at t0. The through-prints we credit span [t_lo, t_hi); if
+    # we snapshotted the queue at t0 we'd consume prints in [t_lo, t0) against a queue that did
+    # not yet exist at the time those prints happened — systematically over-filling on fast movers
+    # (most through-prints sit in that backward sub-window). Re-snapshot at t_lo so the queue and
+    # the through-prints share the same time origin. The caller-supplied ``queue_ahead`` (taken at
+    # t0) is used only to preserve the low-confidence flag (None ⇒ no observable depth proxy).
+    low_conf = queue_ahead is None
+    qa_at_open = trade_tape.queue_ahead_at(sym, t_lo, side=side)
+    qa_obs = qa_at_open if qa_at_open is not None else queue_ahead
+    if qa_obs is not None:
+        # We have an OBSERVED depth proxy (a print's size at/just-before the window open).
+        qa = max(0.0, float(qa_obs))
+    else:
+        # FIX 1 — CONSERVATIVE UNKNOWN-QUEUE PROXY (anti-over-fill). When the queue depth is
+        # unobservable (no print at/before t_lo to read a size off) the previous code coerced the
+        # queue to 0.0, which FULLY BYPASSES the queue gate: a single tiny through-print then clears
+        # the (unknown) queue and the order fills as if first-in-line — exactly the BEEM over-fill
+        # the prints model exists to prevent. Instead, stand a NON-ZERO proxy queue ahead of us,
+        # derived from the order's OWN in-window through-prints: the MEDIAN through-print size. This
+        # is adaptive (no constant) and makes the model demand at least a typical-print's worth of
+        # flow before we are credited — so one undersized print can no longer clear an unknown
+        # queue. low_confidence stays set so the caller still widens the band. If there are no
+        # through-prints the proxy is 0.0 (moot — the no-print branch below returns CANCEL anyway).
+        _sizes = sorted(_sz for (_px, _sz, _ts) in prints if _sz > 0)
+        qa = float(_sizes[len(_sizes) // 2]) if _sizes else 0.0
+    # queue_proxy semantics for the meta/audit: 'observed' = a real print size at/before t_lo;
+    # 'median_through_print' = FIX-1 conservative non-zero proxy (queue depth unobservable);
+    # 'none' = no through-prints so the proxy was moot (the no-print branch returns below).
+    qa_proxy = "observed" if qa_obs is not None else ("median_through_print" if prints else "none")
+    # FIX 2 — HONEST SOURCE TAG (local coverage, not whole-day cadence). The previous code tagged
+    # 'prints_fill' vs 'quote_fallback' off whole-day cadence_s (>=2 prints ANYWHERE in the day),
+    # which mis-tagged an order whose OWN [t_lo, t_hi] window had no prints as 'prints_fill'. Tag
+    # off whether the name has ANY print in a NEIGHBORHOOD of THIS order instead, so quote_fallback
+    # honestly means "no local print coverage for THIS order's window." Lookahead-free (the probe
+    # only inspects observed_at ≤ t_hi). When there ARE through-prints we resolved against real
+    # prints ⇒ always 'prints_fill'; only the no-through-print path consults local coverage.
+    src = "prints_fill" if trade_tape.has_prints_near(sym, t_lo, t_hi) else "quote_fallback"
+    if not prints:
+        # No execution at/through the limit in the window — version-agnostically this is a
+        # genuine NO-FILL (the offer never traded down to us). But there may simply be no print
+        # COVERAGE for this name/day (87% of candidates have no prints, per the design audit);
+        # the caller distinguishes by checking whether the name has ANY prints at all.
+        return {
+            "filled_qty": 0.0, "fill_vwap": None, "status": "CANCEL",
+            "source": src,
+            "meta": {"reason": "no_through_print", "queue_ahead": qa, "queue_proxy": qa_proxy,
+                     "review_latency_s": round(review_latency_s, 3),
+                     "low_confidence": low_conf, "n_prints": 0},
+        }
+    # cumulate participation-weighted through-print size; consume queue_ahead first, then fill us
+    cum = 0.0
+    fill_sz = 0.0
+    fill_notional = 0.0
+    remaining_q = max(0.0, float(qty))
+    for _px, _sz, _ts in prints:
+        avail = max(0.0, float(participation)) * float(_sz)
+        if avail <= 0:
+            continue
+        cum += avail
+        # shares available to US after the inferred queue ahead is served
+        usable = cum - qa
+        if usable <= fill_sz:
+            continue  # still serving the queue / already counted
+        take = min(remaining_q - fill_sz, usable - fill_sz)
+        if take <= 0:
+            continue
+        # the filling price is bounded [bid, limit] — never better than the best bid, never
+        # worse than our resting limit (the empirical resting-limit fill shape, no hardcoded bps)
+        px_eff = min(limit, max(float(bid), float(_px)))
+        fill_sz += take
+        fill_notional += take * px_eff
+        if fill_sz >= remaining_q:
+            break
+    filled = max(0.0, min(float(qty), fill_sz))
+    if filled <= 0:
+        return {
+            "filled_qty": 0.0, "fill_vwap": None, "status": "CANCEL",
+            "source": src,
+            "meta": {"reason": "queue_not_cleared", "queue_ahead": qa, "queue_proxy": qa_proxy,
+                     "cum_size": round(cum, 1),
+                     "review_latency_s": round(review_latency_s, 3),
+                     "low_confidence": low_conf, "n_prints": len(prints)},
+        }
+    fill_vwap = fill_notional / filled if filled > 0 else None
+    if fill_vwap is not None:
+        fill_vwap = min(limit, max(float(bid), float(fill_vwap)))
+    if filled >= float(qty) - 1e-9:
+        status = "FILL"
+    elif filled >= float(min_size):
+        status = "PARTIAL"
+    else:
+        status = "CANCEL"
+    return {
+        "filled_qty": filled, "fill_vwap": fill_vwap, "status": status,
+        "source": src,
+        "meta": {"reason": status.lower(), "queue_ahead": qa, "queue_proxy": qa_proxy,
+                 "cum_size": round(cum, 1),
+                 "review_latency_s": round(review_latency_s, 3),
+                 "low_confidence": low_conf, "n_prints": len(prints)},
+    }
+
+
 def _expected_move_bps_15m(upto: pd.DataFrame, H: str, L: str, C: str) -> float | None:
     """Live's expected-move basis (live_runner._expected_move_bps_from_ohlcv):
     mean true range of the last <=14 FIFTEEN-minute bars over the last close, in
@@ -601,6 +917,10 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
     started = datetime.now(timezone.utc)
     tape = Tape(date)
     syms = tape.symbols()
+    # STEP 2 prints-based fill model: bulk-load the day's TRADE PRINTS once (twin of Tape over
+    # iqfeed_trade_ticks) only when the flag is on. OFF ⇒ None ⇒ the entry seam keeps the EXACT
+    # quote fill (byte-identical). REPLAY-ONLY.
+    trade_tape = TradeTape(date) if REPLAY_PRINTS_FILL else None
     result: dict = {
         "date": date,
         "engine": "v2",
@@ -1524,6 +1844,53 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             # the best bid). For wide low-float spreads this ~= the empirical -247bps; for tight
             # names it collapses to ~the ask (small improvement), exactly the live shape.
             fill_px = min(limit, max(bid, mid))
+            # ── STEP 2 fill-source bookkeeping (default quote model unless prints override) ──
+            _fill_source = "quote_fallback" if REPLAY_PRINTS_FILL else "quote"
+            _prints_avail: float | None = None      # max fillable shares per the prints (None ⇒ unbounded)
+            _prints_meta: dict | None = None
+            _entry_partial_pf: float | None = None   # prints PARTIAL fraction (None ⇒ not applicable)
+            # STEP 2 PRINTS-BASED FILL MODEL (docs/DESIGN/VERSION_AGNOSTIC_BACKTEST.md): the
+            # quote-touch above can't SEE executions and OVER-fills. When the prints flag is on,
+            # resolve the fill against the immutable TRADE PRINTS: an execution AT/THROUGH the
+            # limit is direct evidence shares traded. The window opens at t0 − DERIVED review
+            # latency (median submit-minus-detected of the lane's OWN recorded events × K; NO
+            # magic constant) and closes at t0 + the SAME ack window the fidelity_v2 test uses
+            # (chili_momentum_entry_max_rest_bars × entry-interval). queue_ahead = the L1 size-
+            # at-touch proxy (degrade to 0 + low-confidence when absent). On status==CANCEL the
+            # trade is DROPPED (gate_fail:prints_no_fill); else fill_vwap REPLACES the quote
+            # fill and the available print size caps qty below (PARTIAL). The qty-dependent
+            # PARTIAL/CANCEL split is finalized AFTER sizing; here we capture the max fillable +
+            # the measured vwap. OFF ⇒ this whole block is skipped ⇒ byte-identical.
+            if REPLAY_PRINTS_FILL and trade_tape is not None:
+                _rest_bars_p = float(getattr(settings, "chili_momentum_entry_max_rest_bars", 2.0) or 2.0)
+                _ack_window_p = _rest_bars_p * float(ENTRY_BAR_MIN) * 60.0
+                # DERIVED review latency: the day's median lane latency (× K), fallback = the
+                # name's inter-trade print cadence (× K) when no events exist. NO constant.
+                _rev_lat = trade_tape.review_latency_s
+                if _rev_lat is None:
+                    _rev_lat = trade_tape.cadence_s(s)
+                _rev_lat = (float(_rev_lat) if _rev_lat is not None else 0.0) * REPLAY_REVIEW_LATENCY_K
+                _qa = trade_tape.queue_ahead_at(s, now, side="long")
+                # ask an unbounded qty so the decision returns the MAX fillable (cum_size −
+                # queue_ahead) + the vwap; the qty-bounded PARTIAL/CANCEL is finalized after the
+                # real sizing below (sizing needs fill_px, which the vwap here provides).
+                _probe_qty = 1e12
+                _pf = prints_fill_decision(
+                    trade_tape, s, limit, _probe_qty, now, side="long",
+                    queue_ahead=_qa, review_latency_s=_rev_lat,
+                    ack_window_s=_ack_window_p, bid=bid,
+                    participation=PARTICIPATION_CAP, min_size=1.0,
+                )
+                _prints_meta = _pf.get("meta")
+                _fill_source = _pf.get("source", "quote_fallback")
+                if _pf["status"] == "CANCEL" or float(_pf.get("filled_qty") or 0.0) <= 0.0:
+                    # no execution at/through the limit in the window → live never filled here
+                    _tr(s, "gate_fail:prints_no_fill", now)
+                    continue
+                # measured fill price REPLACES the quote estimate (already bounded [bid, limit])
+                if _pf.get("fill_vwap") is not None:
+                    fill_px = float(_pf["fill_vwap"])
+                _prints_avail = float(_pf["filled_qty"])
             pblow = dbg.get("pullback_low")
             # LIVE stop width: vol-floored by the 15m expected move (the floor can BIND
             # here, exactly like live_runner.py:2358-2382), then structural pullback-low
@@ -1594,6 +1961,20 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             if qty <= 0:
                 _tr(s, "gate_fail:no_liquidity_printed", now)
                 continue
+            # STEP 2 PRINTS PARTIAL/CANCEL: cap the desired qty by the shares the PRINTS actually
+            # delivered at/through the limit in the window (_prints_avail). filled>=desired ⇒ FILL;
+            # 0<filled<desired ⇒ PARTIAL (fill what printed, cancel the remainder); below the live
+            # min size ⇒ CANCEL (drop). OFF / no prints flag ⇒ _prints_avail is None ⇒ no-op.
+            if _prints_avail is not None:
+                # min size = the SAME base_min_size compute_risk_first_quantity used above (1.0
+                # whole share); a sub-min partial is a CANCEL, not a fill. No new magic number.
+                _min_size_pf = 1.0
+                _filled_pf = max(0.0, min(qty, _prints_avail))
+                if _filled_pf < _min_size_pf:
+                    _tr(s, "gate_fail:prints_no_fill", now)
+                    continue
+                _entry_partial_pf = (_filled_pf / qty) if qty > 0 else 1.0
+                qty = _filled_pf
             # ENGINE-ON (A) AGGREGATE-RISK ADMISSION — the candidate's SHAPE-AWARE dollars-at-
             # risk are now known: (entry-stop)*qty. Admit iff the running open aggregate plus
             # this candidate's risk stays within budget_fraction x equity, via the SAME live
@@ -1643,6 +2024,16 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                          "qty": round(qty, 0), "spread_bps": round(sbps, 0),
                          "partial": round(qty / want_qty if want_qty > 0 else 1.0, 2),
                          "fidelity": "tape", "entry_fidelity": _entry_fidelity,
+                         # STEP 2: how this fill was RESOLVED — 'prints_fill' (measured against
+                         # real executions) vs 'quote_fallback' (no prints / degraded queue → the
+                         # quote model) so the confidence band can widen on the latter. Only
+                         # emitted when the prints flag is ON (flag-off ⇒ key absent ⇒ md5-of-
+                         # trades byte-identical to HEAD). Carries the prints meta (queue_ahead /
+                         # review_latency_s / n_prints / low_confidence) when the model ran.
+                         **({"source": _fill_source} if REPLAY_PRINTS_FILL else {}),
+                         **({"prints_meta": _prints_meta} if _prints_meta else {}),
+                         **({"prints_partial": round(_entry_partial_pf, 2)}
+                            if _entry_partial_pf is not None else {}),
                          **({"band_tail": True} if _band_tail else {}),
                          **({"features": _feat} if _feat else {})},
             }

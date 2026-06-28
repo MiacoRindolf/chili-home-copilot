@@ -4339,6 +4339,37 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_REPLAY_RECORDED_FILLS_ENABLED"),
     )
+    # REPLAY PRINTS-BASED FILL MODEL (2026-06-28, STEP 2 of the version-agnostic backtest;
+    # docs/DESIGN/VERSION_AGNOSTIC_BACKTEST.md): the quote-touch fill OVER-fills (a marketable
+    # LIMIT is "filled" the instant a quote touches it — BEEM predicted 29/34 fills vs live's
+    # 1/34) because QUOTES cannot see executions. The TRADE PRINTS (iqfeed_trade_ticks: price/
+    # size/observed_at) CAN: a real execution AT/THROUGH the limit is direct evidence shares
+    # traded. When ON, replay_v2 REPLACES the quote-touch fill (min(limit,max(bid,mid))) with a
+    # prints_fill_decision: cumulate participation*size of through-prints in [t0-review_latency,
+    # t0+ack_window], fill = max(0, min(qty, cum_size - queue_ahead)), fill_vwap = the size-
+    # weighted print price over the filling slice (bounded [bid, limit]); >=qty => FILL,
+    # 0<filled<qty => PARTIAL (emit + cancel remainder; below min-size => CANCEL), 0 =>
+    # CANCEL (trace gate_fail:prints_no_fill, the trade is dropped). Each trade is tagged
+    # source=prints_fill (resolved against real prints) vs quote_fallback (no prints / degraded
+    # queue => the existing quote model, low-confidence flagged). Version-AGNOSTIC: nothing
+    # reads momentum_fill_outcomes — any version's (sym,limit,qty,t0) is scored against the
+    # immutable recorded prints. DEFAULT-OFF => the EXACT current quote fill (md5-of-trades
+    # byte-identical to HEAD). REPLAY-ONLY: read ONLY inside replay_v2.py.
+    chili_momentum_replay_prints_fill_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REPLAY_PRINTS_FILL_ENABLED"),
+    )
+    # PRINTS-FILL REVIEW-LATENCY MULTIPLIER (adaptive, NO constant latency): the prints-fill
+    # window opens at t0 - review_latency, where review_latency is DERIVED — the median of the
+    # lane's OWN recorded (live_entry_submitted.ts - live_entry_candidate_detected.ts) latencies
+    # for the day (fallback = the name's inter-trade print cadence when no events exist). This
+    # multiplier scales that derived latency (1.0 = use it as measured; >1 widens the review
+    # lookback, <1 tightens it) so the operator can stress the fill model WITHOUT hardcoding a
+    # latency. REPLAY-ONLY; only consulted when chili_momentum_replay_prints_fill_enabled is ON.
+    chili_momentum_replay_review_latency_k: float = Field(
+        default=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REPLAY_REVIEW_LATENCY_K"),
+    )
     # LIVE feature-capture (2026-06-23): when ON, the live runner records the SAME
     # lookahead-free entry-feature vector (shared entry_features.capture_entry_features)
     # onto the session's live-exec blob at the entry fill, so outcome_extract reads it for
