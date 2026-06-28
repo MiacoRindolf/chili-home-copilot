@@ -2782,10 +2782,14 @@ def bull_flag_confirmation(
         opn = df["Open"].astype(float) if "Open" in getattr(df, "columns", []) else None
         n = len(df)
         cur = n - 1
+        # Request vwap too so the NOT-PARABOLIC extension guard's VWAP arm gets a REAL series
+        # (compute_all_from_df only computes what is requested — an un-requested vwap would
+        # silently no-op the extension VWAP arm, a chase hole). Mirrors wedge_break / cup.
         arrays = compute_all_from_df(
-            df, needed={"ema_9", "ema_20", "macd", "macd_signal", "volume_ratio", "atr"}
+            df, needed={"ema_9", "ema_20", "macd", "macd_signal", "vwap", "volume_ratio", "atr"}
         )
         ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
         vr = arrays.get("volume_ratio") or []
         atr = arrays.get("atr") or []
 
@@ -2939,6 +2943,10 @@ def bull_flag_confirmation(
                             }
 
         # -- ANTI-CHASE: backside / rolled-over top veto (reused, fail-OPEN) ---------------
+        # _detect_back_side reads the 1m EMA/MACD rollover; front_side_state reads WHERE the
+        # name sits in its OWN session (below VWAP / faded — Ross never buys below VWAP). The
+        # front_side read fails CLOSED on a thin/degenerate frame (this is a new-conviction
+        # fire path). Mirrors wedge_break / cup_and_handle.
         _bs, _bs_reason = _detect_back_side(
             ema9, (arrays.get("ema_20") or []),
             (arrays.get("macd") or []), (arrays.get("macd_signal") or []),
@@ -2947,6 +2955,18 @@ def bull_flag_confirmation(
         if _bs:
             debug["back_side"] = _bs_reason
             return False, "bull_flag_back_side", debug
+        try:
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            if getattr(_fs, "is_backside", False):
+                debug["front_side_state"] = getattr(_fs, "reason", "backside")
+                return False, "bull_flag_backside_lifecycle", debug
+        except (TypeError, ValueError, AttributeError, KeyError):
+            # thin/degenerate frame -> fail-CLOSED for this new-conviction fire path.
+            debug["reason"] = "front_side_read_error"
+            return False, "bull_flag_backside_lifecycle", debug
 
         # -- L2 hidden-seller veto (reused; fail-open on disabled/null/stale L2) -----------
         _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
@@ -2961,6 +2981,20 @@ def bull_flag_confirmation(
         debug["pullback_low"] = float(stop)
         debug["sustained_rvol"] = round(srv_guard, 2) if srv_guard is not None else None
 
+        # -- NOT PARABOLIC: extension vs the 9-EMA AND VWAP (the blow-off defense) ---------
+        # The pullback-swing-high break level (= the entry) must not sit excessively extended
+        # above the 9-EMA / VWAP — a vertical run INTO the break is a parabolic blow-off, not a
+        # tested flag break. Reuses the SAME adaptive ATR extension yardstick the chase veto
+        # uses (fail-OPEN on a missing reference so thin data never blocks). Mirrors wedge/cup.
+        ema9_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        _ext_ok, _ext_dbg = _hod_extension_ok(
+            level=level, ema9_cur=ema9_cur, vwap_cur=vwap_cur, atr_pct=atr_pct, rvol=None,
+        )
+        if not _ext_ok:
+            debug.update(_ext_dbg)
+            return False, "bull_flag_extended", debug
+
         # -- TICK-BREAK: the live ask already trading through the swing high ("the second it
         # breaks ... I'm a buyer"), gated by the premarket + dipbuy thrust buffers.
         if (
@@ -2974,6 +3008,13 @@ def bull_flag_confirmation(
                 live_price=float(live_price), level=float(level), atr_pct=atr_pct,
             )
         ):
+            # -- TAPE REQUIRED + FAIL-CLOSED (the LAST gate; no fire without buyers on tape) --
+            # Mirrors wedge / cup: buyers must be actively lifting the ask THIS tick. Any
+            # disabled-flag / no-tape / thin / stale / crypto / error ⇒ NO fire.
+            _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+            debug["tape_reason"] = _tape_dbg.get("reason")
+            if not _tape_ok:
+                return False, "bull_flag_tape_unconfirmed", debug
             debug["tick_break"] = True
             debug["live_price"] = float(live_price)
             return True, "bull_flag_break_tick_ok", debug
@@ -3008,6 +3049,15 @@ def bull_flag_confirmation(
         debug["vol_ratio"] = round(vol_ratio, 2)
         if vol_ratio < _vol_mult:
             return False, "bull_flag_low_volume", debug
+
+        # -- TAPE REQUIRED + FAIL-CLOSED (the LAST gate before the completed-bar fire too) --
+        # Mirrors wedge / cup: a completed-bar break with no buyers lifting the ask is a dead
+        # break — never chase it. Any disabled-flag / no-tape / thin / stale / crypto / error
+        # ⇒ NO fire.
+        _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+        debug["tape_reason"] = _tape_dbg.get("reason")
+        if not _tape_ok:
+            return False, "bull_flag_tape_unconfirmed", debug
         return True, "bull_flag_break", debug
     except Exception:
         return False, "bull_flag_error", {"entry_interval": entry_interval, "pattern": "bull_flag"}
@@ -5721,6 +5771,16 @@ def inverse_head_shoulders_confirmation(
         debug["pullback_high"] = float(level)
         debug["pullback_low"] = float(stop)
 
+        # Request ema_9 + volume_ratio (break surge) PLUS ema_20 / macd / macd_signal / vwap
+        # so the NOT-BACKSIDE + NOT-PARABOLIC chase-guards below get REAL series —
+        # compute_all_from_df only computes what is requested, so an un-requested ema_20/macd
+        # would silently no-op _detect_back_side (a chase hole). Mirrors wedge_break / cup.
+        arrays = compute_all_from_df(
+            df, needed={"ema_9", "ema_20", "macd", "macd_signal", "vwap", "volume_ratio"},
+        )
+        ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
+
         # L2 hidden-seller / big-seller veto (reused; fail-open on disabled/null L2).
         _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
         if _l2v is not None:
@@ -5728,30 +5788,72 @@ def inverse_head_shoulders_confirmation(
             debug.update(_l2patch)
             return False, f"inverse_head_shoulders_{_reason}", debug
 
-        # BACK-SIDE veto (reused; fail-open). Never fire a fresh long into a rolled-over,
-        # back-side-of-the-move tape — the pattern only buys an exhaustion bottom turning up.
+        # ── NOT BACKSIDE / NOT BELOW-VWAP (the #1 chase guard — mirrors wedge / cup) ─────
+        # Never fire a fresh long into a rolled-over, back-side-of-the-move tape — the pattern
+        # only buys an exhaustion bottom turning up. _detect_back_side reads the 1m EMA/MACD
+        # rollover (ARRAY signature, mirrors wedge/cup — NOT the old df+kwarg call that raised
+        # TypeError + silently no-opped); front_side_state reads WHERE the name sits in its OWN
+        # session (below VWAP / faded). The front_side read fails CLOSED on a thin frame.
+        _bs, _bs_reason = _detect_back_side(
+            ema9, (arrays.get("ema_20") or []),
+            (arrays.get("macd") or []), (arrays.get("macd_signal") or []),
+            cur, macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+        )
+        if _bs:
+            debug["back_side"] = _bs_reason
+            return False, "inverse_head_shoulders_back_side", debug
         try:
-            _bs = _detect_back_side(df, entry_interval=entry_interval)
-            if _bs is not None and bool(_bs.get("back_side")):
-                debug["back_side"] = True
-                debug.update({k: _bs[k] for k in ("back_side_reason",) if k in _bs})
-                return False, "inverse_head_shoulders_back_side", debug
-        except Exception:
-            pass  # fail-open: a backside-detector error never blocks the fire
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            if getattr(_fs, "is_backside", False):
+                debug["front_side_state"] = getattr(_fs, "reason", "backside")
+                return False, "inverse_head_shoulders_backside_lifecycle", debug
+        except (TypeError, ValueError, AttributeError, KeyError):
+            # thin/degenerate frame -> fail-CLOSED for this new-conviction fire path.
+            debug["reason"] = "front_side_read_error"
+            return False, "inverse_head_shoulders_backside_lifecycle", debug
+
+        # ── NOT PARABOLIC: extension vs the 9-EMA AND VWAP (the blow-off defense) ────────
+        # The neckline break level (= the entry) must not sit excessively extended above the
+        # 9-EMA / VWAP. Reuses the SAME adaptive ATR extension yardstick the chase veto uses
+        # (fail-OPEN on a missing reference so thin data never blocks). Mirrors cup_and_handle.
+        ema9_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        _ext_ok, _ext_dbg = _hod_extension_ok(
+            level=level, ema9_cur=ema9_cur, vwap_cur=vwap_cur, atr_pct=atr_pct, rvol=None,
+        )
+        if not _ext_ok:
+            debug.update(_ext_dbg)
+            return False, "inverse_head_shoulders_extended", debug
 
         # ── TRIGGER: the break above the neckline (the edges of the two shoulders) ───────
+        # Compute WHICH fire path BEFORE the tape gate so TAPE REQUIRED applies to BOTH the
+        # tick-break and the completed-bar break (mirrors cup_and_handle).
         cur_hi = float(high.iloc[cur])
-        if (
-            live_price is not None and float(live_price) > 0
-            and float(live_price) > level
-        ):
+        _tick_break = bool(
+            live_price is not None and float(live_price) > 0 and float(live_price) > level
+        )
+        _bar_break = bool(cur_hi > level)
+        if not (_tick_break or _bar_break):
+            return False, "waiting_for_break", debug  # tick-armable (pullback_high set)
+
+        # ── TAPE REQUIRED + FAIL-CLOSED (the LAST gate; no fire without buyers on tape) ──
+        # Mirrors wedge / absorption / cup: buyers must be actively lifting the ask THIS tick.
+        # Any disabled-flag / no-tape / thin / stale / crypto / error ⇒ NO fire. Applies to
+        # BOTH the tick-break and the completed-bar break.
+        _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+        debug["tape_reason"] = _tape_dbg.get("reason")
+        if not _tape_ok:
+            return False, "inverse_head_shoulders_tape_unconfirmed", debug
+
+        if _tick_break:
             debug["tick_break"] = True
             debug["live_price"] = float(live_price)
             return True, "inverse_head_shoulders_break_tick_ok", debug
-        if cur_hi <= level:
-            return False, "waiting_for_break", debug  # tick-armable (pullback_high set)
-        arrays_v = compute_all_from_df(df, needed={"volume_ratio"})
-        vr = arrays_v.get("volume_ratio") or []
+        # A completed bar broke the neckline -> ALSO require a VOLUME spike on the break bar.
+        vr = arrays.get("volume_ratio") or []
         vol_ratio = None
         try:
             vol_ratio = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
@@ -7980,6 +8082,26 @@ def ma_vwap_pullback_confirmation(
             debug["back_side"] = _bs_reason
             return False, "ma_vwap_pullback_back_side", debug
 
+        # -- NOT BELOW-VWAP (the lifecycle veto — mirrors cup_and_handle / wedge): never fire a
+        # 9/20-EMA reclaim while the name sits BELOW VWAP (a backside reclaim Ross skips —
+        # "I never buy below VWAP"). front_side_state reads WHERE the name sits in its OWN
+        # session; it fails CLOSED on a thin/degenerate frame (this is a new-conviction fire
+        # path). The _detect_back_side EMA/MACD read above does NOT cover below-VWAP, so this
+        # is the distinct lifecycle arm. (No inline tape here — this gate matches the live
+        # DIP-BUY family that substitutes tick-thrust + volume for tape.)
+        try:
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            if getattr(_fs, "is_backside", False):
+                debug["front_side_state"] = getattr(_fs, "reason", "backside")
+                return False, "ma_vwap_pullback_backside_lifecycle", debug
+        except (TypeError, ValueError, AttributeError, KeyError):
+            # thin/degenerate frame -> fail-CLOSED for this new-conviction fire path.
+            debug["reason"] = "front_side_read_error"
+            return False, "ma_vwap_pullback_backside_lifecycle", debug
+
         # -- L2 hidden-seller veto (reused; fail-open on disabled/null L2)
         _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
         if _l2v is not None:
@@ -8149,10 +8271,14 @@ def bottom_reversal_confirmation(
         debug["pullback_low"] = float(series_low)
 
         # ── ATR% yardstick (tick-thrust + volume floors) ───────────────────────────────
+        # Request vwap too so the NOT-PARABOLIC extension guard's VWAP arm gets a REAL series
+        # (compute_all_from_df only computes what is requested — an un-requested vwap would
+        # silently no-op the extension VWAP arm, a chase hole). Mirrors absorption_snap / cup.
         arrays = compute_all_from_df(
-            df, needed={"ema_9", "ema_20", "macd", "macd_signal", "volume_ratio", "atr"}
+            df, needed={"ema_9", "ema_20", "macd", "macd_signal", "vwap", "volume_ratio", "atr"}
         )
         ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
         vr = arrays.get("volume_ratio") or []
         atr = arrays.get("atr") or []
         atr_pct = None
@@ -8240,6 +8366,42 @@ def bottom_reversal_confirmation(
             debug.update(_l2patch)
             return False, f"bottom_reversal_{_reason}", debug
 
+        # ── NOT PARABOLIC: extension vs the 9-EMA AND VWAP (the blow-off / knife-catch
+        # defense — mirrors absorption_snap). A snap-back into a parabolic prior-high is a
+        # chase: the green-bar break LEVEL (= the entry) must not sit excessively extended
+        # above the 9-EMA / VWAP. Reuses the SAME adaptive ATR extension yardstick the chase
+        # veto uses (fail-OPEN on a missing reference so thin data never blocks). ──────────
+        ema9_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        _ext_ok, _ext_dbg = _hod_extension_ok(
+            level=level, ema9_cur=ema9_cur, vwap_cur=vwap_cur, atr_pct=atr_pct, rvol=None,
+        )
+        if not _ext_ok:
+            debug.update(_ext_dbg)
+            return False, "bottom_reversal_extended", debug
+
+        # ── OPTIONAL VELOCITY REFINEMENT (the "jackknife" sharp-V delta): gate the flush to be
+        # a sharp V (a violent algo-stop-run that snaps back), NOT a slow grind down. Reuses the
+        # EXISTING _dip_velocity yardstick (per-bar % drop relative to the name's OWN ATR%; a
+        # drop is "steep" when the per-bar move exceeds ~1 ATR%). Require flush_roc_per_bar >=
+        # k*atr_pct, where k = the config floor. floor=0.0 ⇒ OFF ⇒ byte-identical current
+        # behavior. fail-OPEN (no gate) on missing atr%/degenerate data. ───────────────────
+        vel_floor = float(getattr(settings, "chili_momentum_bottom_reversal_velocity_floor_atr_mult", 0.0) or 0.0)
+        if vel_floor > 0.0 and atr_pct is not None and atr_pct > 0:
+            try:
+                # the red-run START price = the open of the first red bar (top of the flush);
+                # the flush depth = (start - series_low) / start, spread over the red bars =
+                # a per-bar ROC measured the SAME way _dip_velocity_size_mult reads it.
+                _start_px = float(opn.iloc[red_lo_start])
+                if _start_px > 0 and red_count > 0:
+                    flush_roc_per_bar = ((_start_px - float(series_low)) / _start_px) / float(red_count)
+                    debug["flush_roc_per_bar"] = round(flush_roc_per_bar, 6)
+                    debug["velocity_floor_atr_mult"] = round(vel_floor, 3)
+                    if flush_roc_per_bar < vel_floor * float(atr_pct):
+                        return False, "bottom_reversal_flush_too_slow", debug
+            except (TypeError, ValueError, IndexError, ZeroDivisionError):
+                pass  # fail-OPEN: a velocity-read error never blocks the fire
+
         # ── TICK-BREAK: the live ask breaking the green bar's HIGH with the ATR thrust
         # buffer (the SAME contract the rest of the ladder uses). ──────────────────────
         if (
@@ -8253,6 +8415,14 @@ def bottom_reversal_confirmation(
                 live_price=float(live_price), level=float(level), atr_pct=atr_pct,
             )
         ):
+            # ── TAPE REQUIRED + FAIL-CLOSED (the LAST gate; no fire without buyers on tape) ──
+            # Mirrors absorption_snap: buyers must be actively lifting the ask THIS tick. Any
+            # disabled-flag / no-tape / thin / stale / crypto / error ⇒ NO fire (never chase a
+            # snap-back into a dead bottom).
+            _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+            debug["tape_reason"] = _tape_dbg.get("reason")
+            if not _tape_ok:
+                return False, "bottom_reversal_tape_unconfirmed", debug
             debug["tick_break"] = True
             debug["live_price"] = float(live_price)
             return True, "bottom_reversal_tick_ok", debug
@@ -8262,6 +8432,14 @@ def bottom_reversal_confirmation(
         # completed bar (the green CLOSE itself confirms the reversal -> fire now).
         if live_price is not None and float(live_price) > 0 and float(live_price) <= level:
             return False, "waiting_for_break", debug
+
+        # ── TAPE REQUIRED + FAIL-CLOSED (the LAST gate before the completed-bar fire too) ──
+        # The green candle has closed, but still require buyers on tape — a green close on a
+        # dead tape is a knife-catch, not a reversal. Mirrors absorption_snap; fail-CLOSED.
+        _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+        debug["tape_reason"] = _tape_dbg.get("reason")
+        if not _tape_ok:
+            return False, "bottom_reversal_tape_unconfirmed", debug
 
         # Completed-bar confirmation: the green candle has closed (the first-green-close
         # confirmation Ross enters on). Fire.
