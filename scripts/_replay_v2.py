@@ -27,6 +27,14 @@ if __name__ == "__main__":
         print("  %s %-6s entry=%.3f exit=%.3f qty=%-7.0f spread=%3.0fbps runR=%+.2f partial=%.2f %-26s $%+8.0f" % (
             t["t"], t["sym"], t["entry"], t["exit"], t["qty"], t["spread_bps"], t.get("run_r", 0.0), t["partial"], t["why"], t["usd"]))
     print(f"DAY TOTAL (v2, real-spread fidelity): ${r['total_usd']:+,.0f}")
+    # FIDELITY-V2 confidence band (present only when chili_momentum_replay_fidelity_v2 is on).
+    _band = r.get("day_pnl_band")
+    if _band:
+        _bm = r.get("day_pnl_band_meta", {})
+        _ov, _ln = _bm.get("fill_set_overlap"), _bm.get("live_filled_names")
+        _ov_str = (f" | fill-set overlap {_ov}/{_ln}" if _ov is not None and _ln else "")
+        print(f"DAY $ BAND (fidelity-v2): ${r['total_usd']:+,.0f} over [${_band[0]:+,.0f}, ${_band[1]:+,.0f}]"
+              f"{_ov_str} (brackets the irreducible rail-4xx tail; tape-ceiling misses = one-sided floor)")
     _w = [t["run_r"] for t in r["trades"] if t.get("usd", 0) > 0 and "run_r" in t]
     _l = [t["run_r"] for t in r["trades"] if t.get("usd", 0) <= 0 and "run_r" in t]
     if _w or _l:

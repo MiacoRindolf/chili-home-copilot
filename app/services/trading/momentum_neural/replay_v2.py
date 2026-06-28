@@ -125,8 +125,151 @@ REPLAY_TICK_ENTRY = bool(
 REPLAY_FULL_PIPELINE = bool(
     getattr(settings, "chili_momentum_replay_full_pipeline_enabled", False)
 )
+# FIDELITY-V2 (2026-06-28, diagnosis wf4wdtntt): two INDEPENDENT replay-only flags.
+#   * FIDELITY_V2 — size off the full live ~18-dial de-risk stack (collapse the 2.71x
+#     over-size) + a marketable-LIMIT FILL-OR-REJECT with a per-minute fill governor
+#     (collapse the 2.24x over-fill) + a confidence band over the irreducible tail.
+#   * ENGINE_ON — A/B the live ENGINE: aggregate-risk admission (vs the fixed slot cap)
+#     + adaptive watch-fanout (vs the fixed MAX_SLOTS). HONEST: barely moves this data.
+# Both DEFAULT-OFF ⇒ EVERY edit below is no-op'd ⇒ byte-identical to current HEAD (an
+# md5-of-trades parity check proves it). READ ONLY in this replay module — no live path.
+REPLAY_FIDELITY_V2 = bool(
+    getattr(settings, "chili_momentum_replay_fidelity_v2", False)
+)
+REPLAY_ENGINE_ON = bool(
+    getattr(settings, "chili_momentum_replay_engine_on", False)
+)
 
 REPLAY_RESULTS_DIR = os.environ.get("CHILI_REPLAY_RESULTS_DIR", "/app/data/replays")
+
+
+def _replay_derisk_stack_multiplier(
+    *, cum_pnl_usd: float, peak_pnl_usd: float, base_loss_usd: float,
+    trade_pnls: list[float], symbol_loss_strikes: int,
+) -> tuple[float, dict]:
+    """FIDELITY-V2 SIZE FIDELITY — the replay-side image of the live ~18-dial de-risk
+    stack (live_runner.py:7307-7310 ``_eff_max_loss`` product, capped at base*3.0).
+
+    The live dials each read live DB state that is meaningless inside a replay (the live
+    system's realized day P&L, its streak window, its consecutive-green-days). So instead
+    of calling them against the live DB, we feed the SAME bounded FORMULAS the live dials
+    use their published callable bounds — applied to the REPLAY's OWN simulated running
+    state, which is the faithful analog of what the dial would read live AT THAT POINT of
+    the simulated day:
+
+      * cushion   — cushion_risk_multiplier formula: clamp(0.5 + 0.5*cushion/base, 1.0, 2.0)
+                    where cushion = max(0, replay's realized day P&L so far) [state["cum"]].
+      * green-day — green_day_graduation_multiplier: OFF by default (returns 1.0) — gated on
+                    the live flag exactly like the runner; a single replayed day cannot
+                    establish a multi-day green streak, so it is 1.0 here (parity with the
+                    runner's day-1 => 1.0 rule). The dial is wired (reads the live flag) so
+                    if the operator turns graduation on it composes identically.
+      * streak    — streak_risk_multiplier formula: clamp(0.5 + win_rate, 0.5, 1.5) over the
+                    last 10 REAL entered trades; >=3 consecutive losses => 0.5; <5 => 1.0 —
+                    computed from the replay's OWN closed-trade P&L list (the same lane).
+      * per-name  — per-name de-risk: the replay already tracks per-symbol loss_strikes for
+                    the live G2 2-strike guard; mirror live's per-symbol-fatigue down-size on a
+                    name that has already chopped us today (>=1 prior loss strike) by the SAME
+                    live knob chili_momentum_per_symbol_yellow_size_fraction — gated on the SAME
+                    chili_momentum_per_symbol_fatigue_enabled flag (no new magic number).
+
+    Each factor is bounded exactly as its live callable; the COMBINED product is clamped at
+    base*3.0 (live_runner.py:7309) — the SAME hard ceiling. Returns (mult, meta). All knobs
+    read the SAME settings the runner reads. REPLAY-ONLY (zero live-path effect)."""
+    meta: dict = {}
+    base = float(base_loss_usd or 0.0)
+    if base <= 0:
+        return 1.0, {"reason": "no_base_loss", "stack_mult": 1.0}
+
+    # ── cushion dial (cushion_risk_multiplier formula, replay day-P&L as the cushion) ──
+    cushion = max(0.0, float(cum_pnl_usd or 0.0))
+    cushion_mult = max(1.0, min(2.0, 0.5 + 0.5 * (cushion / base)))
+    meta["cushion_mult"] = round(cushion_mult, 4)
+
+    # ── green-day graduation dial — gated on the live flag (runner parity: day-1 => 1.0) ──
+    green_day_mult = 1.0
+    if bool(getattr(settings, "chili_momentum_green_day_graduation_enabled", False)):
+        # A single replayed session cannot establish a >1-day green streak, so the
+        # graduation multiplier is 1.0 (clamp(1.0 + step*max(0, streak-1)) with streak<=1).
+        green_day_mult = 1.0
+    meta["green_day_mult"] = round(green_day_mult, 4)
+
+    # ── streak dial (streak_risk_multiplier formula over the replay's closed trades) ──
+    streak_mult = 1.0
+    pnls = [float(p) for p in (trade_pnls or [])][-10:]
+    pnls = list(reversed(pnls))  # newest first, mirroring the live query order
+    if len(pnls) >= 5:
+        win_rate = sum(1 for p in pnls if p > 0) / len(pnls)
+        consec_losses = 0
+        for p in pnls:
+            if p <= 0:
+                consec_losses += 1
+            else:
+                break
+        streak_mult = max(0.5, min(1.5, 0.5 + win_rate))
+        if consec_losses >= 3:
+            streak_mult = 0.5
+    meta["streak_mult"] = round(streak_mult, 4)
+
+    # ── per-name de-risk dial — live per_symbol_fatigue yellow size-down on a name that
+    # has already chopped us today (>=1 prior loss strike). Reuses the EXACT live knob +
+    # flag the runner's per_symbol_fatigue_size_multiplier reads (no new magic number).
+    per_name_mult = 1.0
+    strikes = int(symbol_loss_strikes or 0)
+    if strikes > 0 and bool(getattr(settings, "chili_momentum_per_symbol_fatigue_enabled", False)):
+        _frac = float(getattr(settings, "chili_momentum_per_symbol_yellow_size_fraction", 0.5) or 0.5)
+        if 0.0 < _frac < 1.0 and _frac == _frac:  # NaN guard, same as the live helper
+            per_name_mult = _frac
+    meta["per_name_mult"] = round(per_name_mult, 4)
+
+    combined = cushion_mult * green_day_mult * streak_mult * per_name_mult
+    # Sanitize + the SAME hard combined-multiplier ceiling the runner applies (3x base).
+    if not (combined == combined) or combined < 0:  # NaN/negative fail-neutral
+        combined = 1.0
+    combined = min(combined, 3.0)
+    meta["stack_mult"] = round(combined, 4)
+    return combined, meta
+
+
+class _ReplayFillGovernor:
+    """FIDELITY-V2 per-minute fill-admission TOKEN BUCKET — the SIMULATION-TIME image of
+    rail_governor.GovernorConfig (the live adaptive rate governor that bounds rail call
+    rate so a burst of simultaneous admissions can never flood/429 the broker).
+
+    The live governor is a WALL-CLOCK token bucket (time.monotonic); a replay runs on a
+    simulated minute grid, so wall-clock is meaningless here. This mirrors the SAME config
+    (burst capacity + refill_rps, read from the SAME chili_momentum_rail_governor_* settings)
+    but refills against SIMULATION minutes: tokens replenish at refill_rps tokens/second of
+    sim-time elapsed, capped at burst. When N triggers fire in the same sim-minute, only up
+    to the available tokens admit; the rest are DEFERRED (the live 429/queue analog), exactly
+    the burst-fill artifact that spiked the replay/live ratio to 6.7-8.0x on the high-fan-out
+    days (06-23/24). Gated on the SAME chili_momentum_entry_placement_governor_enabled kill-
+    switch the live governor uses — OFF ⇒ admit() always True (no rate limit). REPLAY-ONLY."""
+
+    def __init__(self) -> None:
+        self._burst = max(1.0, float(getattr(settings, "chili_momentum_rail_governor_burst", 4.0) or 4.0))
+        self._rps = max(1e-3, float(getattr(settings, "chili_momentum_rail_governor_start_rps", 2.0) or 2.0))
+        self._enabled = bool(getattr(settings, "chili_momentum_entry_placement_governor_enabled", True))
+        self._tokens = self._burst
+        self._last = None  # last sim-time we refilled at (tz-aware datetime)
+        self.deferrals = 0
+
+    def admit(self, now) -> bool:
+        """Take one fill token at simulation-time ``now``. Refill from sim-elapsed
+        seconds; defer (return False) when the bucket is empty. OFF ⇒ always True."""
+        if not self._enabled:
+            return True
+        na = _aware(now)
+        if self._last is not None:
+            elapsed = (na - self._last).total_seconds()
+            if elapsed > 0:
+                self._tokens = min(self._burst, self._tokens + elapsed * self._rps)
+        self._last = na
+        if self._tokens >= 1.0:
+            self._tokens -= 1.0
+            return True
+        self.deferrals += 1
+        return False
 
 
 def _run_r_value(entry: float, stop0: float, mfe_px: float) -> float:
@@ -520,6 +663,14 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
     loss_strikes: dict = {}          # symbol -> count of losing trades today
     state = {"cum": 0.0, "peak": 0.0, "halted": None}
     day_grid = pd.date_range(f"{date} {_premarket_utc_hhmm(date)}:00", f"{date} 19:59:00", freq="1min", tz="UTC")
+    # ── FIDELITY-V2 / ENGINE-ON running ledgers (no-op when both flags OFF) ──────────
+    # ENGINE-ON aggregate dollars-at-risk across OPEN positions (Σ(entry-stop)*qty),
+    # accumulated on fill + released on close (mirrors aggregate_open_risk_usd); the
+    # admit_by_aggregate_risk gate reads it. FIDELITY-V2 per-minute fill governor + the
+    # irreducible-tail names the confidence band brackets.
+    engine_open_risk_usd = {"v": 0.0}
+    fill_governor = _ReplayFillGovernor() if REPLAY_FIDELITY_V2 else None
+    band_tail = {"rail_4xx": [], "tape_ceiling_miss": []}  # symbols feeding the band
 
     def asof_rank(now) -> list[str]:
         sigs = {}
@@ -719,6 +870,11 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             _w = when if when is not None else now
             loss_strikes[s] = loss_strikes.get(s, 0) + 1
             loss_cooldown_until[s] = _aware(_w) + timedelta(minutes=LOSS_COOLDOWN_MIN)
+        # ENGINE-ON: release this position's dollars-at-risk from the running aggregate
+        # (mirrors the live atomic boundary releasing on exit). No-op when the flag is OFF
+        # (engine_open_risk_usd stays 0.0 because nothing accumulated into it).
+        if REPLAY_ENGINE_ON:
+            engine_open_risk_usd["v"] = max(0.0, engine_open_risk_usd["v"] - float(p.get("open_risk_usd", 0.0)))
         del open_pos[s]
         if state["halted"] is None and state["cum"] <= -daily_loss_cap_usd:
             state["halted"] = "daily_loss"
@@ -967,6 +1123,16 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                     del armed[s]
             ranked = _rank(now)   # full_pipeline re-screen+re-score when on; asof otherwise
             pos = {s: i for i, s in enumerate(ranked)}
+            # ENGINE-ON (B): the WATCH-fanout cap floats with the live-eligible FIELD SIZE
+            # (adaptive_watch_fanout) instead of the fixed MAX_SLOTS — wider watch breadth
+            # when many names are igniting. field_size = the eligible-name count at `now`
+            # (``ranked`` IS that as-of field). Reads the SAME watch_fanout settings the
+            # live auto_arm reads. OFF ⇒ _slots == MAX_SLOTS (byte-identical). HONEST: on
+            # this data the slot cap rarely binds, so this barely moves the trade-set.
+            _slots = MAX_SLOTS
+            if REPLAY_ENGINE_ON:
+                from .risk_policy import adaptive_watch_fanout as _awf
+                _slots = int(_awf(len(ranked)))
             for s in ranked:
                 if s in armed or s in open_pos:
                     continue
@@ -977,11 +1143,11 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                 if not _arm_freshness_ok(s, now):
                     _tr(s, "arm_skip:faded_impulse", now)
                     continue
-                if len(armed) < MAX_SLOTS:
+                if len(armed) < _slots:
                     armed[s] = {"since": now}
                     armed_spans[s].append([str(now)[11:16], None])
                     continue
-                if pos[s] >= MAX_SLOTS:
+                if pos[s] >= _slots:
                     break  # ranked is ordered — nothing further down can displace either
                 # Displacement arming: live re-scans continuously, so a newly-hot name
                 # (e.g. a halt-resume pop) gets armed within minutes; first-come-slots +
@@ -991,7 +1157,7 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                 # still holding a top rank is never displaced, so pullback dips that
                 # stay top-ranked keep their watcher while the entry forms).
                 evict = max((a for a in armed if a not in open_pos), key=lambda a: pos.get(a, 1 << 30), default=None)
-                if evict is None or pos.get(evict, 1 << 30) < MAX_SLOTS:
+                if evict is None or pos.get(evict, 1 << 30) < _slots:
                     break  # every armed symbol still holds a top rank
                 if armed_spans[evict] and armed_spans[evict][-1][1] is None:
                     armed_spans[evict][-1][1] = str(now)[11:16]
@@ -1003,7 +1169,12 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                 continue
             # G1: concurrency cap — live holds only ~MAX_OPEN_CONCURRENT positions at once
             # (adaptive_max_concurrent_live_sessions base); open_pos is the held analog.
-            if len(open_pos) >= MAX_OPEN_CONCURRENT:
+            # ENGINE-ON (A): the FIXED count cap is replaced by the engine's shape-aware
+            # admit_by_aggregate_risk — but the candidate's dollars-at-risk ((entry-stop)*qty)
+            # are not known until the fill block computes the stop + qty, so the aggregate-risk
+            # admission is evaluated THERE (search 'admit_by_aggregate_risk'); here we only skip
+            # the fixed count gate when ENGINE_ON. OFF ⇒ the fixed count gate (byte-identical).
+            if not REPLAY_ENGINE_ON and len(open_pos) >= MAX_OPEN_CONCURRENT:
                 _tr(s, "gate_fail:concurrency_cap", now)
                 continue
             # G2: per-symbol re-entry discipline — 2-strike (today's losses) then a
@@ -1139,6 +1310,13 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             # low-float movers live now accepts (the NXTS-class divergence on the under-fill side).
             _skip_spread = bool(getattr(settings, "chili_momentum_skip_spread_gate_for_limit_entry", True))
             _spread_ceiling = SPREAD_ABS_CAP_BPS if _skip_spread else max_spread
+            # FIDELITY-V2 (STEP 2a) SPREAD-CEILING REJECT: the deterministic auto-fill below
+            # passed 59 names the live rail killed (diagnosis). When fidelity_v2 is on, judge
+            # the spread at the live RAIL's adaptive threshold (the SAME adaptive_max_spread_bps
+            # gate, NOT the lenient skip-for-limits abs-cap) so wide low-float quotes the rail
+            # would not have crossed are rejected (trace gate_fail:wide_spread). OFF ⇒ unchanged.
+            if REPLAY_FIDELITY_V2:
+                _spread_ceiling = max_spread
             if sbps > _spread_ceiling:
                 _tr(s, "gate_fail:wide_spread_%.0fbps" % sbps, now)
                 continue
@@ -1157,6 +1335,34 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             if nxt[1] > limit:  # next bid above our limit: it ran away inside the ack window
                 _tr(s, "gate_fail:ack_timeout", now)
                 continue
+            # FIDELITY-V2 (STEP 2b) MARKETABLE-LIMIT FILL-OR-REJECT — the dominant over-fill
+            # lever (302 of 451 reducible live cancels were cancelled_pre_entry: the resting
+            # marketable LIMIT never crossed within the ack window, then cancelled). The
+            # deterministic auto-fill above converts those to fills live cancels. When
+            # fidelity_v2 is on, model the resting LIMIT as FILLED only if WITHIN THE ACK
+            # WINDOW the tape shows the offer actually TRADED THROUGH the limit (an ask<=limit
+            # print), else CANCELLED. The ack window = the SAME live backstop the runner uses:
+            # chili_momentum_entry_max_rest_bars x the entry-interval seconds (live_runner.py
+            # :6128-6131). Plus the per-minute fill-admission TOKEN BUCKET (STEP 2c) suppresses
+            # the burst-fill artifact on high-fan-out minutes. OFF ⇒ none of this runs.
+            if REPLAY_FIDELITY_V2:
+                _rest_bars = float(getattr(settings, "chili_momentum_entry_max_rest_bars", 2.0) or 2.0)
+                _ack_window_s = _rest_bars * float(ENTRY_BAR_MIN) * 60.0
+                _ack_end = _aware(now) + timedelta(seconds=_ack_window_s)
+                _through = False
+                for _ts, _b, _a, _src in tape.prices_between(s, now, _ack_end):
+                    if _a <= limit:  # the offer traded down through our resting limit
+                        _through = True
+                        break
+                if not _through:
+                    _tr(s, "gate_fail:limit_not_filled", now)
+                    continue
+                # STEP 2c per-minute fill-admission token bucket (rail-governor analog): a
+                # burst of simultaneous triggers cannot all "fill" — admit up to the bucket,
+                # defer the rest (live would 429/queue). OFF ⇒ admit() always True (no-op).
+                if fill_governor is not None and not fill_governor.admit(now):
+                    _tr(s, "gate_fail:fill_governor_deferred", now)
+                    continue
             # T1.2 FILL-PRICE FIDELITY (2026-06-27): the marketable LIMIT rests at `limit`
             # (just above the ask) but FILLS as price pulls back toward the bid/mid, NOT by
             # sweeping the offer — 74 real broker entries averaged ~247bps BELOW the intended
@@ -1199,12 +1405,29 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             # inflating per-trade $ (and thus loss magnitude) on chaotic tight-stop low-float names.
             # atr_pct=eff is the structural-or-vol-floored stop the exit also uses, so qty is sized
             # off the same stop (matching the old denominator) but with the live floors/rounding.
+            # FIDELITY-V2 (STEP 1) SIZE FIDELITY — the biggest + most consistent lever: replay
+            # sized $1,994 median vs live $463 (~4.3x) because it modeled only the BASE risk
+            # budget. Multiply the per-trade max-loss by the LIVE ~18-dial de-risk stack
+            # (cushion / green-day / streak / per-name de-risk) — each via the SAME live
+            # callable's bounded formula, computed against the REPLAY's OWN running simulated
+            # state (state["cum"] day P&L for cushion; the closed-trade P&L list for the streak;
+            # per-symbol loss_strikes for the per-name de-risk), capped at the SAME base*3.0
+            # combined ceiling the runner uses. NO hardcoded multipliers. OFF ⇒ _stack_mult=1.0
+            # ⇒ byte-identical max_loss_usd.
+            _stack_mult = 1.0
+            if REPLAY_FIDELITY_V2:
+                _stack_mult, _stack_meta = _replay_derisk_stack_multiplier(
+                    cum_pnl_usd=state["cum"], peak_pnl_usd=state["peak"],
+                    base_loss_usd=risk_per_trade_usd,
+                    trade_pnls=[float(t.get("usd", 0.0)) for t in trades],
+                    symbol_loss_strikes=loss_strikes.get(s, 0),
+                )
             # (The remaining T1.3 piece = the full ~18-dial risk-budget stack; budget here stays the
             # liquidity-adjusted base, the dominant term on these days where cushion/green-day~=1.0.)
             from .risk_policy import compute_risk_first_quantity
             want_qty, _rf_meta = compute_risk_first_quantity(
                 entry_price=fill_px, atr_pct=eff,
-                max_loss_usd=risk_per_trade_usd * _liq_mult,
+                max_loss_usd=risk_per_trade_usd * _liq_mult * _stack_mult,
                 max_notional_ceiling_usd=max_notional,
                 base_increment=1.0, base_min_size=1.0, stop_atr_mult=STOP_ATR_MULT,
             )
@@ -1221,6 +1444,38 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             if qty <= 0:
                 _tr(s, "gate_fail:no_liquidity_printed", now)
                 continue
+            # ENGINE-ON (A) AGGREGATE-RISK ADMISSION — the candidate's SHAPE-AWARE dollars-at-
+            # risk are now known: (entry-stop)*qty. Admit iff the running open aggregate plus
+            # this candidate's risk stays within budget_fraction x equity, via the SAME live
+            # admit_by_aggregate_risk helper + the SAME chili_momentum_max_aggregate_risk_pct_
+            # of_equity budget (wiring the live risk_block denials the replay used to let
+            # through). HONEST: on this data the budget rarely binds (peak ~9 tight-stop names
+            # ~$1.2k vs ~$1.35k budget), so this is engine A/B fidelity, not a reliability lever.
+            # OFF ⇒ this whole block is skipped (no aggregate maintained) ⇒ byte-identical.
+            _cand_risk_usd = max(0.0, (fill_px - stop)) * qty
+            if REPLAY_ENGINE_ON:
+                from .risk_policy import admit_by_aggregate_risk as _admit
+                _ok_adm, _adm_meta = _admit(
+                    open_risk_usd=engine_open_risk_usd["v"],
+                    candidate_risk_usd=_cand_risk_usd,
+                    equity_usd=basis_usd,
+                    budget_fraction=float(getattr(settings, "chili_momentum_max_aggregate_risk_pct_of_equity", 0.03) or 0.0),
+                )
+                if not _ok_adm:
+                    _tr(s, "gate_fail:risk_block", now)
+                    continue
+                engine_open_risk_usd["v"] += _cand_risk_usd
+            # FIDELITY-V2 (STEP 3 input) IRREDUCIBLE-TAIL TAG: a fill on a WIDE-spread low-float
+            # name is exactly the rail-4xx-reject class (LHSW/RGNX/SKYQ/WKSP — error_exit-
+            # dominated; 23.3% of live over-fill attempts) whose live fill/no-fill the replay
+            # genuinely CANNOT resolve offline. Tag a fill as band-tail when its entry spread is
+            # in the wide irreducible tail (>= the live rail abs-cap broken-quote ceiling, the
+            # documented widest the rail tolerates) so the confidence band brackets these names'
+            # PnL between fill and no-fill extremes. NOT a hardcoded bps — reads SPREAD_ABS_CAP_BPS,
+            # the SAME live setting. OFF ⇒ never tagged (band stays empty / point==band).
+            _band_tail = bool(REPLAY_FIDELITY_V2 and sbps >= SPREAD_ABS_CAP_BPS)
+            if _band_tail:
+                band_tail["rail_4xx"].append(s)
             _tr(s, "fill@%.4g" % fill_px, now)
             _feat = None
             if bool(getattr(settings, "chili_momentum_replay_capture_features", False)):
@@ -1231,10 +1486,14 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                 "entry": fill_px, "qty": qty, "qty0": qty, "stop": stop, "stop0": stop,
                 "target": target, "hwm": fill_px, "atrp": eff, "scaled": False,
                 "trail_armed": False, "scale_usd": 0.0,
+                # ENGINE-ON: this position's dollars-at-risk to RELEASE from the running
+                # aggregate on close (0.0 when ENGINE_ON is OFF ⇒ no aggregate maintained).
+                "open_risk_usd": (_cand_risk_usd if REPLAY_ENGINE_ON else 0.0),
                 "meta": {"sym": s, "t": str(_fire_ts)[11:16], "entry": round(fill_px, 4),
                          "qty": round(qty, 0), "spread_bps": round(sbps, 0),
                          "partial": round(qty / want_qty if want_qty > 0 else 1.0, 2),
                          "fidelity": "tape", "entry_fidelity": _entry_fidelity,
+                         **({"band_tail": True} if _band_tail else {}),
                          **({"features": _feat} if _feat else {})},
             }
     finally:
@@ -1301,6 +1560,60 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
     # known skews so any A/B reads run_r, not usd. (wf w6c11y2s9.)
     result["sizing_basis_usd"] = round(basis_usd, 2)
     result["daily_loss_cap_usd"] = round(daily_loss_cap_usd, 2)
+    # FIDELITY-V2 (STEP 3) CONFIDENCE BAND — the day-$ is an INTERVAL, never a false-precise
+    # single number. The point estimate stays result["total_usd"]; the band brackets the
+    # IRREDUCIBLE tail the replay genuinely cannot resolve offline (diagnosis honest_ceiling):
+    #   (i)  RAIL-4xx names (wide-spread low-float, error_exit-dominated) — whether they
+    #        filled live is a coin flip. Bracket each such replay trade between FILLED (its
+    #        realized PnL, already in total) and NOT-FILLED ($0). So removing the tail's
+    #        PROFITS gives the conservative low; removing its LOSSES gives the optimistic high.
+    #   (ii) TAPE-CEILING MISSES — live-filled equity names the replay never quoted (no tape
+    #        row ⇒ no replay entry). A one-sided FLOOR caveat (their live PnL is unknown), so
+    #        it is annotated with the realized fill-set overlap, not numerically folded in.
+    # OFF ⇒ band == [point, point] and the note is unchanged (byte-identical result shape adds
+    # only the additive day_pnl_band key; trades/total are untouched).
+    if REPLAY_FIDELITY_V2:
+        _tail_names = set(band_tail["rail_4xx"])
+        _tail_trades = [t for t in trades if t.get("band_tail") or t["sym"] in _tail_names]
+        _tail_profit = sum(float(t["usd"]) for t in _tail_trades if float(t["usd"]) > 0)
+        _tail_loss = sum(float(t["usd"]) for t in _tail_trades if float(t["usd"]) <= 0)
+        _point = float(state["cum"])
+        _band_low = _point - _tail_profit   # the rail-4xx winners may NOT have filled live
+        _band_high = _point - _tail_loss    # the rail-4xx losers may NOT have filled live
+        # tape-ceiling misses: live-filled equity names this replay never entered (the
+        # one-sided floor). Best-effort live read (bounded, rollback'd, SELECT-only); a DB
+        # error degrades to an empty miss-set (the band still emits from the rail tail).
+        _miss = []
+        _live_n = None
+        try:
+            _dbm = SessionLocal()
+            try:
+                _rowsm = _dbm.execute(
+                    text(
+                        "SELECT DISTINCT symbol FROM momentum_fill_outcomes "
+                        "WHERE symbol NOT LIKE '%-USD' AND created_at >= :lo AND created_at < :hi"
+                    ),
+                    {"lo": f"{date} 04:00:00", "hi": f"{date} 23:59:59"},
+                ).fetchall()
+            finally:
+                _dbm.rollback(); _dbm.close()
+            _live_set = {str(r[0]).upper() for r in _rowsm}
+            _live_n = len(_live_set)
+            _miss = sorted(_live_set - {t["sym"].upper() for t in trades})
+        except Exception:
+            logger.warning("[replay_v2] band tape-ceiling-miss read failed", exc_info=True)
+        _overlap = (_live_n - len(_miss)) if _live_n is not None else None
+        result["day_pnl_band"] = [round(_band_low, 0), round(_band_high, 0)]
+        result["day_pnl_band_meta"] = {
+            "point_usd": round(_point, 0),
+            "rail_4xx_tail_names": sorted(_tail_names),
+            "rail_4xx_tail_profit_usd": round(_tail_profit, 0),
+            "rail_4xx_tail_loss_usd": round(_tail_loss, 0),
+            "tape_ceiling_miss_names": _miss,
+            "tape_ceiling_miss_count": len(_miss),
+            "live_filled_names": _live_n,
+            "fill_set_overlap": _overlap,
+        }
     result["dollar_skew_note"] = (
         "Sizing basis is now LIVE-faithful (real account equity, same equity-fractions + "
         "daily-loss cap as live). RESIDUAL replay->live gaps (decision-side, being closed "
@@ -1308,6 +1621,16 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
         "(a gap-through loss runs deeper than live), frictionless ask/bid fills. Lead A/Bs "
         "with run_r; absolute $ are now ~live-scale, treat the residual gaps as noise."
     )
+    if REPLAY_FIDELITY_V2 and result.get("day_pnl_band"):
+        _bm = result["day_pnl_band_meta"]
+        _ov = _bm.get("fill_set_overlap")
+        _ln = _bm.get("live_filled_names")
+        result["dollar_skew_note"] += (
+            " FIDELITY-V2: day-$ is %s over band [%s, %s]"
+            % (result["total_usd"], result["day_pnl_band"][0], result["day_pnl_band"][1])
+            + (", fill-set overlap %s/%s" % (_ov, _ln) if _ov is not None and _ln else "")
+            + " (band brackets the irreducible rail-4xx tail; tape-ceiling misses are a one-sided floor)."
+        )
     result["day_halted"] = state["halted"]
     result["duration_s"] = round((datetime.now(timezone.utc) - started).total_seconds(), 1)
     if persist:

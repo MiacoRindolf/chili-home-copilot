@@ -4292,6 +4292,35 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_REPLAY_CAPTURE_FEATURES"),
     )
+    # REPLAY FIDELITY V2 (2026-06-28): the replay's absolute $ were ~6x-overstated =
+    # 2.24x OVER-FILL x 2.71x OVER-SIZE (diagnosis wf4wdtntt). When ON, replay_v2 (a)
+    # SIZES each entry through the SAME live ~18-dial de-risk stack (cushion / green-day /
+    # streak / per-name de-risk) the runner applies — computed against the REPLAY's own
+    # running simulated state, via the SAME live callables (no hardcoded multipliers) —
+    # and applies the governor under-fill; (b) replaces the deterministic auto-fill with a
+    # marketable-LIMIT FILL-OR-REJECT (spread-ceiling reject + ack-window through-trade
+    # confirmation + a per-minute fill-admission token bucket mirroring the rail governor);
+    # (c) emits a result["day_pnl_band"] confidence interval over the irreducible tail.
+    # DEFAULT-OFF => byte-identical to current HEAD (an md5-of-trades parity check guards
+    # it). REPLAY-ONLY: this flag is read ONLY inside replay_v2.py; it never touches any
+    # live-trading code path. docs/STRATEGY replay-lab convergence.
+    chili_momentum_replay_fidelity_v2: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REPLAY_FIDELITY_V2"),
+    )
+    # REPLAY ENGINE-ON (2026-06-28): A/B the live momentum ENGINE offline, INDEPENDENT of
+    # the fidelity flag. When ON, replay_v2 swaps (A) the fixed MAX_OPEN_CONCURRENT slot
+    # cap for the engine's shape-aware admit_by_aggregate_risk (running aggregate (entry-
+    # stop)*qty vs chili_momentum_max_aggregate_risk_pct_of_equity x equity) and (B) the
+    # fixed MAX_SLOTS watch cap for adaptive_watch_fanout(field_size). Both read the SAME
+    # live settings the runner reads (no replay-only constants). HONEST: on the 06/22-26
+    # data the slot cap rarely binds, so this barely moves the trade-SET — it is for
+    # engine-on/off A/B fidelity, NOT reliability. DEFAULT-OFF => byte-identical. REPLAY-
+    # ONLY. docs/DESIGN/MOMENTUM_ENGINE.md.
+    chili_momentum_replay_engine_on: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REPLAY_ENGINE_ON"),
+    )
     # LIVE feature-capture (2026-06-23): when ON, the live runner records the SAME
     # lookahead-free entry-feature vector (shared entry_features.capture_entry_features)
     # onto the session's live-exec blob at the entry fill, so outcome_extract reads it for
