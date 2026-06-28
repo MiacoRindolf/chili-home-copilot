@@ -134,6 +134,188 @@ def _utcnow() -> datetime:
     return datetime.utcnow()
 
 
+# ── CHUNK 3 — S4 FAST EXECUTOR: rail-governed calls + RTT measurement ─────────────
+# A process-local exponential-moving-average of the MEASURED rail round-trip time, used
+# by the inline micro-repeg (inter-repeg delay) and the fast ack-poll (poll cadence) so
+# both adapt to the rail's real latency instead of a fixed clock. Bounded scalar (no
+# growth); seeded None until the first measured call. docs/DESIGN/MOMENTUM_ENGINE.md §3.
+_RAIL_RTT_EMA_S: float | None = None
+_RAIL_RTT_ALPHA = 0.3  # EMA smoothing on the measured RTT
+
+
+def _note_rail_rtt(elapsed_s: float) -> None:
+    """Fold a measured rail RTT into the process-local EMA (clamped to a sane band so a
+    one-off stall / clock skew can't poison the adaptive delays)."""
+    global _RAIL_RTT_EMA_S
+    try:
+        s = float(elapsed_s)
+    except (TypeError, ValueError):
+        return
+    if not (s >= 0.0) or s > 30.0:  # NaN-safe + reject absurd measurements
+        return
+    if _RAIL_RTT_EMA_S is None:
+        _RAIL_RTT_EMA_S = s
+    else:
+        _RAIL_RTT_EMA_S = (1.0 - _RAIL_RTT_ALPHA) * _RAIL_RTT_EMA_S + _RAIL_RTT_ALPHA * s
+
+
+def _measured_rail_rtt_s() -> float | None:
+    return _RAIL_RTT_EMA_S
+
+
+def _rail_lane_key(sess) -> str:
+    """Token-bucket key. ONE bucket per (user) lane so ALL of that user's lane rail
+    calls (places + polls across every session/symbol) share the SAME budget — that is
+    what bounds multi-admission. Falls back to the global lane bucket if user is unset."""
+    try:
+        return f"momentum:{int(getattr(sess, 'user_id', 0) or 0)}"
+    except (TypeError, ValueError):
+        return "momentum"
+
+
+def _governed_get_order(adapter, oid, *, sess=None):
+    """Rate-governed wrapper around ``adapter.get_order`` (a LIST endpoint sharing the
+    rail budget). Acquires a token (flag-OFF ⇒ instant pass-through, byte-identical),
+    times the call into the RTT EMA, and feeds the outcome back to the governor (a 429
+    halves the rate). Returns the EXACT ``(order, freshness)`` tuple ``get_order`` does;
+    on a governor DEFER returns ``(None, None)`` so the caller treats it as 'not yet
+    confirmed' (the resting order persists — never a silent drop, it is logged)."""
+    import time as _time
+
+    from .rail_governor import acquire_rail, note_rail_outcome
+
+    res = acquire_rail(settings, lane_key=_rail_lane_key(sess))
+    if not res.acquired:
+        _log.info(
+            "[momentum_s4] rail governor DEFER get_order oid=%s waited=%.3fs rps=%.3f",
+            oid, res.waited_s, res.refill_rps,
+        )
+        return None, None
+    _t0 = _time.monotonic()
+    try:
+        out = adapter.get_order(str(oid))
+    except Exception as exc:  # measure + feed back even on failure
+        # A 429 on the POLL path now SURFACES (the adapter re-raises the rate-limit case
+        # instead of masking it as a benign None) so the governor can HALVE the rate —
+        # without this, repeated poll-side 429s read as successes and WIDEN the rate INTO
+        # the rate limit. note_rail_outcome only halves on a recognized rate-limit signal;
+        # any other exception is NEUTRAL (neither widen nor halve).
+        note_rail_outcome(settings, exc, lane_key=_rail_lane_key(sess))
+        raise
+    _note_rail_rtt(_time.monotonic() - _t0)
+    # get_order returns (order, freshness). A 429 surfaces as the EXCEPTION above; a bare
+    # None order here is AMBIGUOUS (not-found vs a swallowed transient) so it is NEUTRAL —
+    # only an order object carrying a 429-shaped status halves the rate, a real order
+    # widens it. A None must NOT be counted as a success (that would falsely widen toward
+    # the limit on a transient poll error). [poll-path 429 unmasking, 2026-06-27]
+    _ord = out[0] if isinstance(out, tuple) and out else None
+    if _ord is not None:
+        note_rail_outcome(settings, _ord, lane_key=_rail_lane_key(sess))
+    return out
+
+
+def _fast_ack_poll_entry(adapter, oid, *, sess, interval_window_s: float):
+    """CHUNK 3-B — FAST ACK-POLL. Poll ``get_order`` repeatedly WITHIN the current tick
+    to confirm an entry fill without waiting for the next external WS/batch tick. The
+    cadence rides the MEASURED rail RTT (seed -> geometric widen); the TOTAL window is
+    bounded by ``interval_window_s`` (rest_bars * entry_interval, the EXISTING ack-timeout
+    backstop) AND a hard iteration cap (belt-and-suspenders). Every poll goes through the
+    rail governor (shared budget). Returns the FIRST order object that is done/filled, or
+    the LAST polled order (so the caller's existing open/cancel/repeg logic runs exactly
+    as today on a non-fill). Flag OFF ⇒ a single governed poll (one `get_order`), so the
+    confirm is byte-identical to the deployed tick-coupled path (modulo the governor,
+    which is itself byte-identical when OFF)."""
+    import time as _time
+
+    no, fr = _governed_get_order(adapter, oid, sess=sess)
+    # Already terminal/filled on the first look, or fast-poll disabled ⇒ done.
+    if not bool(getattr(settings, "chili_momentum_entry_fast_poll_enabled", True)):
+        return no, fr
+    if no is not None and (_order_done_for_entry(no) or float(getattr(no, "filled_size", 0) or 0.0) > 0.0):
+        return no, fr
+    seed = float(getattr(settings, "chili_momentum_entry_fast_poll_seed_interval_s", 0.25) or 0.25)
+    widen = float(getattr(settings, "chili_momentum_entry_fast_poll_widen_factor", 1.6) or 1.6)
+    max_iters = int(getattr(settings, "chili_momentum_entry_fast_poll_max_iters", 12) or 12)
+    # Cadence base = the measured RTT if we have one (poll about as fast as the rail
+    # answers), else the conservative seed. Never below the seed (no busy-spin).
+    rtt = _measured_rail_rtt_s()
+    interval = max(seed, rtt) if (rtt is not None and rtt > 0) else seed
+    window = max(0.0, float(interval_window_s))
+    if window <= 0.0:
+        return no, fr
+    # IDLE-IN-TRANSACTION GUARD (2026-06-27): `tick_live_session` holds a
+    # `SELECT ... FOR UPDATE NOWAIT` row lock on the session for the WHOLE call, so any
+    # sleeping done here pins a DB connection in an OPEN transaction (and blocks
+    # broker-sync / the reconciler from touching this session). The geometric widen to
+    # max_iters could otherwise sleep ~100s+ at a 5m interval (the rest_bars*interval
+    # window is NOT the binding cap there). Bound the TOTAL in-tick wall-clock to a small
+    # ceiling so worst-case lock-hold is single-digit seconds (ONE documented knob,
+    # default 5s). The fast-poll is a latency OPTIMIZER, not the ack-timeout backstop —
+    # an unfilled order still falls through to the existing event-driven cancel/repeg
+    # path on the NEXT tick, with the row lock RELEASED in between.
+    _fp_hard_ceiling_s = float(
+        getattr(settings, "chili_momentum_entry_fast_poll_max_wall_s", 5.0) or 5.0
+    )
+    window = min(window, max(0.0, _fp_hard_ceiling_s))
+    deadline = _time.monotonic() + window
+    iters = 0
+    polls = 1
+    while iters < max_iters and _time.monotonic() < deadline:
+        sleep_s = min(interval, max(0.0, deadline - _time.monotonic()))
+        if sleep_s > 0:
+            _time.sleep(sleep_s)
+        _no, _fr = _governed_get_order(adapter, oid, sess=sess)
+        polls += 1
+        iters += 1
+        interval = interval * widen  # geometric widening
+        if _no is None:
+            # governor DEFER or a transient None — keep the last good `no`, retry.
+            continue
+        no, fr = _no, _fr
+        if _order_done_for_entry(no) or float(getattr(no, "filled_size", 0) or 0.0) > 0.0:
+            _log.info(
+                "[momentum_s4] fast-poll CONFIRM oid=%s after polls=%d rtt=%s",
+                oid, polls, (round(rtt, 4) if rtt else None),
+            )
+            break
+    return no, fr
+
+
+def _governed_place(adapter, place_fn, *, sess=None, **kwargs):
+    """Rate-governed wrapper around an order PLACE (place_limit_order_gtc /
+    place_market_order). Acquires a token (flag-OFF ⇒ instant pass-through,
+    byte-identical), times the call into the RTT EMA, and feeds the place result back to
+    the governor (a 429 halves the rate, a clean place widens it). On a governor DEFER
+    returns a synthetic ``{"ok": False, "error": "rail_governor_deferred", ...}`` so the
+    caller's existing not-ok branch re-watches / retries next tick (never a silent
+    drop)."""
+    import time as _time
+
+    from .rail_governor import acquire_rail, note_rail_outcome
+
+    res = acquire_rail(settings, lane_key=_rail_lane_key(sess))
+    if not res.acquired:
+        _log.info(
+            "[momentum_s4] rail governor DEFER place waited=%.3fs rps=%.3f",
+            res.waited_s, res.refill_rps,
+        )
+        return {
+            "ok": False,
+            "error": "rail_governor_deferred",
+            "deferred": True,
+            "client_order_id": kwargs.get("client_order_id"),
+        }
+    _t0 = _time.monotonic()
+    try:
+        out = place_fn(**kwargs)
+    except Exception as exc:
+        note_rail_outcome(settings, exc, lane_key=_rail_lane_key(sess))
+        raise
+    _note_rail_rtt(_time.monotonic() - _t0)
+    note_rail_outcome(settings, out, lane_key=_rail_lane_key(sess))
+    return out
+
+
 # ── P0: per-(symbol, day) DailyContext cache (NO new per-tick fetch) ──────────────
 # The blue-sky entry trigger + the overhead-supply veto need the daily-chart context
 # (overhead supply, clear-sky room, swing/gap/rejection levels). The DailyContext is a
@@ -5935,7 +6117,21 @@ def tick_live_session(
                     "blocked": True, "reason": "unresolved_entry_orders",
                 }
         if le.get("entry_submitted") and le.get("entry_order_id"):
-            no, _ = adapter.get_order(str(le["entry_order_id"]))
+            # CHUNK 3-B — FAST ACK-POLL: confirm the entry fill WITHIN this tick by
+            # polling get_order at the measured rail RTT (geometric widen), bounded by the
+            # EXISTING rest_bars * entry_interval ack-timeout window + a hard iter cap +
+            # the rail governor. On confirm we fall straight into the SAME adopt path
+            # below (no new write path). On a non-fill `no` is the last poll, so the
+            # existing open/cancel/repeg logic runs exactly as today. Fast-poll OFF ⇒ a
+            # single governed get_order (byte-identical confirm). The window mirrors the
+            # cancel-side backstop at the bottom of this branch (rest_bars * interval).
+            _fp_window_s = (
+                float(getattr(settings, "chili_momentum_entry_max_rest_bars", 2.0) or 2.0)
+                * float(_entry_interval_seconds())
+            )
+            no, _ = _fast_ack_poll_entry(
+                adapter, le["entry_order_id"], sess=sess, interval_window_s=_fp_window_s,
+            )
             # OPEN-WITH-FILLS (2026-06-11 INDP): RH can hold an order in state
             # "open" with shares ALREADY filled (a silently-failed cancel + a
             # later fill). Those shares are OURS the moment they exist — adopt
@@ -6177,7 +6373,7 @@ def tick_live_session(
                             # If it filled, leave the session pending so the entry
                             # fill-handler above ADOPTS it next tick; only cancel +
                             # re-watch a genuinely-still-open order. docs/DESIGN/MOMENTUM_LANE.md
-                            _fresh, _ = adapter.get_order(str(le["entry_order_id"]))
+                            _fresh, _ = _governed_get_order(adapter, le["entry_order_id"], sess=sess)
                             # Adopt the moment ANY size is filled — a partial on a
                             # marketable limit means we are AT THE FRONT and the rest is
                             # in flight; cancelling now orphans the clip. Matches the
@@ -6202,7 +6398,7 @@ def tick_live_session(
                             # session PENDING so the fill-handler above adopts it next tick.
                             # [SDOT 2026-06-10: 56sh / $1,608 filled while the ack-timeout
                             # cancel raced -> orphaned, operator had to exit it by hand.]
-                            _post, _ = adapter.get_order(str(le["entry_order_id"]))
+                            _post, _ = _governed_get_order(adapter, le["entry_order_id"], sess=sess)
                             if _post and _order_done_for_entry(_post):
                                 db.flush()
                                 return {
@@ -6254,68 +6450,204 @@ def tick_live_session(
                             _rp_n = int(le.get("entry_repeg_count", 0) or 0)
                             _rp_max = int(getattr(settings, "chili_momentum_entry_max_repegs", 3) or 0)
                             _rp_is_equity = not str(sess.symbol or "").upper().endswith("-USD")
-                            if (
+                            # CHUNK 3-A — INLINE MICRO-REPEG. When enabled, the bounded
+                            # repegs run WITHIN this tick (loop below) instead of one repeg
+                            # per external WS tick — "3 repegs over 6–45s" -> "3 over ~3
+                            # RTTs." EVERY existing bound is preserved and re-evaluated each
+                            # iteration: the cumulative-spread ceiling (_entry_repeg_price),
+                            # the risk-first re-size, the max-repeg counter (_rp_n<_rp_max),
+                            # the equity gate (_rp_is_equity), the fresh-quote gate. The
+                            # aggressiveness scales with repeg_index/max (first sits at the
+                            # guarded ask via the live-ask read, later iters lean toward the
+                            # ceiling but NEVER past it — _entry_repeg_price caps at the
+                            # cumulative budget). Inter-repeg delay is adaptive: min(measured
+                            # rail RTT, the inline max-delay ceiling). Flag OFF ⇒ the loop
+                            # body runs AT MOST ONCE and returns -> the current one-repeg-per-
+                            # tick behavior (byte-identical). _local ask/fresh re-read each
+                            # iter (seeded from the cancel-time _pask/_pfr).
+                            _inline = bool(getattr(settings, "chili_momentum_entry_inline_repeg_enabled", True))
+                            _rp_ask = _pask
+                            _rp_fr = _pfr
+                            _rp_iters = 0
+                            _rp_did = False
+                            while (
                                 _cancel_why == "entry_limit_left_behind"
                                 and bool(getattr(settings, "chili_momentum_entry_chase_enabled", True))
                                 and _rp_is_equity
                                 and _rp_n < _rp_max
-                                and _pask and _pask > 0
-                                and _pfr is not None and is_fresh_enough(_pfr)
+                                and _rp_ask and _rp_ask > 0
+                                and _rp_fr is not None and is_fresh_enough(_rp_fr)
                             ):
                                 _rp_new = _entry_repeg_price(
                                     original_limit_px=float(le.get("entry_original_limit_px") or _lim_px or 0.0),
-                                    live_ask=float(_pask),
+                                    live_ask=float(_rp_ask),
                                     expected_move_bps=(float(_emb) if _emb else None),
                                 )
                                 _rp_maxn = float((le.get("entry_notional_guard") or {}).get("max_notional_usd") or 0.0)
-                                if _rp_new and _rp_new > _lim_px and _rp_maxn > 0:
-                                    # RISK-FIRST re-size at the chased price (notional is the
-                                    # CEILING only) so a chase can't over-risk past max_loss.
-                                    # [G1 review #2]
-                                    _rb = le.get("entry_resize_basis") or {}
-                                    _rp_qty, _ = compute_risk_first_quantity(
-                                        entry_price=_rp_new,
-                                        atr_pct=float(_rb.get("atr_pct") or 0.0),
-                                        max_loss_usd=float(_rb.get("max_loss_usd") or 0.0),
-                                        max_notional_ceiling_usd=_rp_maxn,
-                                        base_increment=float(_rb.get("base_increment") or 1.0),
-                                        base_min_size=float(_rb.get("base_min_size") or 1.0),
-                                        stop_atr_mult=float(_rb.get("stop_atr_mult") or 0.60),
+                                if not (_rp_new and _rp_new > _lim_px and _rp_maxn > 0):
+                                    break  # ran past the cumulative ceiling -> stop chasing
+                                # RISK-FIRST re-size at the chased price (notional is the
+                                # CEILING only) so a chase can't over-risk past max_loss.
+                                # [G1 review #2]
+                                _rb = le.get("entry_resize_basis") or {}
+                                _rp_qty, _ = compute_risk_first_quantity(
+                                    entry_price=_rp_new,
+                                    atr_pct=float(_rb.get("atr_pct") or 0.0),
+                                    max_loss_usd=float(_rb.get("max_loss_usd") or 0.0),
+                                    max_notional_ceiling_usd=_rp_maxn,
+                                    base_increment=float(_rb.get("base_increment") or 1.0),
+                                    base_min_size=float(_rb.get("base_min_size") or 1.0),
+                                    stop_atr_mult=float(_rb.get("stop_atr_mult") or 0.60),
+                                )
+                                if not (_rp_qty and _rp_qty >= 1.0):
+                                    break
+                                _rp_old_eid = le.get("entry_order_id")
+                                # DUPLICATE-FILL GUARD (2026-06-27): the PRE-loop cancel
+                                # at the top of this branch only retired the ORIGINAL
+                                # order (O0). On EVERY subsequent inline iteration the
+                                # prior repeg (O1, O2, ...) is STILL a live resting order
+                                # at the broker — placing the next repeg WITHOUT cancelling
+                                # it first leaves two live buy orders that can BOTH fill
+                                # (phantom 2x long). So before each subsequent place,
+                                # CANCEL the current `le["entry_order_id"]` and CONFIRM it
+                                # terminal-cancelled, re-using the same race-guard the
+                                # per-tick path uses: adopt a fill, never place a second
+                                # live order while the prior repeg's fate is indeterminate.
+                                # `_rp_did` is True only AFTER the first repeg placed, so on
+                                # the first iteration (O0 already confirmed-cancelled above)
+                                # this block is skipped -> byte-identical to the legacy
+                                # one-repeg-per-tick path.
+                                if _rp_did:
+                                    try:
+                                        adapter.cancel_order(str(_rp_old_eid))
+                                    except Exception:
+                                        _log.debug(
+                                            "[momentum_s4] inline repeg pre-place cancel failed oid=%s",
+                                            _rp_old_eid, exc_info=True,
+                                        )
+                                    _rp_post, _ = _governed_get_order(
+                                        adapter, _rp_old_eid, sess=sess
                                     )
-                                    if _rp_qty and _rp_qty >= 1.0:
-                                        _rp_old_eid = le.get("entry_order_id")
-                                        _rp_pn = int(le.get("entry_place_count", 0) or 0) + 1
-                                        le["entry_place_count"] = _rp_pn
-                                        _rp_seed = f"{sess.id}|{sess.correlation_id or 'x'}|entry|{_rp_pn}".encode("utf-8")
-                                        _rp_cid = f"chili_ml_e_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{hashlib.sha1(_rp_seed).hexdigest()[:10]}"[:120]
-                                        _rp_res = adapter.place_limit_order_gtc(
-                                            product_id=product_id,
-                                            side="buy",
-                                            base_size=_fmt_base_size(_rp_qty),
-                                            limit_price=_fmt_limit_price_buy(_rp_new),
-                                            client_order_id=_rp_cid,
-                                            time_in_force="gfd",
-                                            extended_hours=bool(le.get("entry_session_extended")),
-                                        ) or {}
-                                        if _rp_res.get("ok"):
-                                            # OLD order confirmed terminal-cancelled above -> mark
-                                            # resolved so it can never resurface as an orphan.
-                                            # [G1 review #3]
-                                            _mark_entry_order_resolved(le, str(_rp_old_eid), "void")
-                                            le["entry_order_id"] = _rp_res.get("order_id")
-                                            le["entry_client_order_id"] = _rp_res.get("client_order_id") or _rp_cid
-                                            le["entry_limit_price"] = _fmt_limit_price_buy(_rp_new)
-                                            le["entry_repeg_count"] = _rp_n + 1
-                                            le["entry_submit_utc"] = _utcnow().isoformat()
-                                            le["entry_submitted"] = True
-                                            _record_entry_order_placed(le, _rp_res.get("order_id"))
-                                            _commit_le(sess, le)
-                                            _emit(db, sess, "entry_repegged", {
-                                                "old_limit": _lim_px, "new_limit": _rp_new,
-                                                "live_ask": _pask, "qty": _rp_qty, "n": _rp_n + 1,
-                                            })
-                                            db.flush()
-                                            return {"ok": True, "session_id": sess.id, "state": sess.state, "pending": "entry_repegged"}
+                                    if _rp_post and (
+                                        _order_done_for_entry(_rp_post)
+                                        or float(getattr(_rp_post, "filled_size", 0) or 0.0) > 0.0
+                                    ):
+                                        # The prior repeg filled during the cancel race —
+                                        # adopt it next tick (pointer intact), never place
+                                        # a second order on top of a real position.
+                                        _commit_le(sess, le)
+                                        db.flush()
+                                        return {
+                                            "ok": True, "session_id": sess.id,
+                                            "state": sess.state,
+                                            "pending": "inline_repeg_cancel_raced_fill_adopt",
+                                        }
+                                    if _rp_post is None or _order_open(_rp_post):
+                                        # Cancel NOT confirmed terminal (still open) OR the
+                                        # fetch failed (indeterminate): NEVER place a second
+                                        # live order while the prior repeg may still fill
+                                        # (naked-double-long guard). Stop chasing; keep the
+                                        # session PENDING with the pointer intact so the
+                                        # next tick re-checks venue truth (adopt / retry).
+                                        _emit(db, sess, "entry_repeg_cancel_unconfirmed", {
+                                            "order_id": str(_rp_old_eid),
+                                            "venue_status": getattr(_rp_post, "status", None),
+                                        })
+                                        _commit_le(sess, le)
+                                        db.flush()
+                                        return {
+                                            "ok": True, "session_id": sess.id,
+                                            "state": sess.state,
+                                            "pending": "inline_repeg_cancel_unconfirmed",
+                                        }
+                                    # else: _rp_post confirmed terminal-cancelled -> safe to
+                                    # place the replacement below (old order definitively gone).
+                                _rp_pn = int(le.get("entry_place_count", 0) or 0) + 1
+                                le["entry_place_count"] = _rp_pn
+                                _rp_seed = f"{sess.id}|{sess.correlation_id or 'x'}|entry|{_rp_pn}".encode("utf-8")
+                                _rp_cid = f"chili_ml_e_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{hashlib.sha1(_rp_seed).hexdigest()[:10]}"[:120]
+                                _rp_res = _governed_place(
+                                    adapter, adapter.place_limit_order_gtc, sess=sess,
+                                    product_id=product_id,
+                                    side="buy",
+                                    base_size=_fmt_base_size(_rp_qty),
+                                    limit_price=_fmt_limit_price_buy(_rp_new),
+                                    client_order_id=_rp_cid,
+                                    time_in_force="gfd",
+                                    extended_hours=bool(le.get("entry_session_extended")),
+                                ) or {}
+                                if not _rp_res.get("ok"):
+                                    # Governor DEFER or a place reject: stop the inline loop;
+                                    # the resting state is unchanged (old order already
+                                    # cancelled above), so fall through to the cancel+re-watch
+                                    # below — the next tick retries. Never a silent drop.
+                                    break
+                                # OLD order confirmed terminal-cancelled above -> mark
+                                # resolved so it can never resurface as an orphan. [G1 #3]
+                                _mark_entry_order_resolved(le, str(_rp_old_eid), "void")
+                                _rp_old_limit = _lim_px  # capture BEFORE reassigning for the emit
+                                le["entry_order_id"] = _rp_res.get("order_id")
+                                le["entry_client_order_id"] = _rp_res.get("client_order_id") or _rp_cid
+                                le["entry_limit_price"] = _fmt_limit_price_buy(_rp_new)
+                                _rp_n = _rp_n + 1
+                                le["entry_repeg_count"] = _rp_n
+                                le["entry_submit_utc"] = _utcnow().isoformat()
+                                le["entry_submitted"] = True
+                                _record_entry_order_placed(le, _rp_res.get("order_id"))
+                                _commit_le(sess, le)
+                                _lim_px = _rp_new  # the new resting limit for the next iter
+                                _rp_iters += 1
+                                _rp_did = True
+                                _emit(db, sess, "entry_repegged", {
+                                    "old_limit": _rp_old_limit, "new_limit": _rp_new,
+                                    "live_ask": _rp_ask, "qty": _rp_qty, "n": _rp_n,
+                                    "inline": _inline, "iter": _rp_iters,
+                                })
+                                if not _inline:
+                                    break  # one-repeg-per-tick (byte-identical legacy path)
+                                # ── INLINE continuation: re-read the live quote and decide
+                                # whether the move is STILL running away (left-behind) within
+                                # this tick. Adaptive inter-repeg delay = min(measured RTT,
+                                # the inline max-delay ceiling) — no fixed clock. Re-check the
+                                # cancel reason against the FRESH bid so we never chase a name
+                                # whose bid has fallen back through our (now higher) limit.
+                                import time as _t_inline
+                                _delay = float(getattr(settings, "chili_momentum_entry_inline_repeg_max_delay_s", 0.75) or 0.75)
+                                _rtt = _measured_rail_rtt_s()
+                                if _rtt is not None and _rtt > 0:
+                                    _delay = min(_delay, _rtt)
+                                if _delay > 0:
+                                    _t_inline.sleep(_delay)
+                                try:
+                                    _itick, _rp_fr = adapter.get_best_bid_ask(product_id)
+                                    _rp_bid = float(_itick.bid) if (_itick is not None and _itick.bid) else None
+                                    _rp_ask = float(_itick.ask) if (_itick is not None and _itick.ask) else None
+                                except Exception:
+                                    break  # stale/failed quote -> stop (fail-closed)
+                                # Recompute the cancel reason off the fresh quote: only keep
+                                # looping while STILL left-behind (bid above our new limit).
+                                _chase_ceiling2 = _entry_chase_ceiling_px(
+                                    limit_px=_lim_px,
+                                    expected_move_bps=(float(_emb) if _emb else None),
+                                )
+                                _cancel_why = _pending_entry_cancel_reason(
+                                    bid=_rp_bid,
+                                    structural_stop=_stop_px,
+                                    limit_px=_lim_px,
+                                    elapsed_s=0.0,  # within-tick: bar backstop n/a here
+                                    rest_bars=float(getattr(
+                                        settings, "chili_momentum_entry_max_rest_bars", 2.0) or 2.0),
+                                    interval_s=_entry_interval_seconds(),
+                                    chase_ceiling_px=_chase_ceiling2,
+                                )
+                            if _rp_did:
+                                if _rp_iters > 1:
+                                    _log.info(
+                                        "[momentum_s4] inline micro-repeg %s: %d repegs in one tick (n=%d/%d)",
+                                        sess.symbol, _rp_iters, _rp_n, _rp_max,
+                                    )
+                                db.flush()
+                                return {"ok": True, "session_id": sess.id, "state": sess.state, "pending": "entry_repegged", "repegs": _rp_iters}
                             _emit(db, sess, "entry_ack_timeout", {
                                 "elapsed_sec": (_utcnow() - t_sub).total_seconds(),
                                 "reason": _cancel_why,
@@ -6332,6 +6664,24 @@ def tick_live_session(
                         pass
                 db.flush()
                 return {"ok": True, "session_id": sess.id, "state": sess.state, "pending": "entry_open"}
+            # NO CONFIRMATION OBTAINED (2026-06-27): `no is None` means the entry-confirm
+            # poll produced no order object — either a governor DEFER (the shared rail
+            # bucket was empty so every governed poll deferred) or a transient get_order
+            # failure. The order's fate is UNKNOWN, NOT confirmed-bad: a healthy resting /
+            # about-to-fill entry order must NOT be pushed to LIVE_ERROR and orphaned (no
+            # lane stop). Stay PENDING with entry_submitted / entry_order_id INTACT and
+            # retry next tick (mirrors the cancel_indeterminate / entry_open pending
+            # returns). Only a REAL order object in a bad terminal state falls through to
+            # LIVE_ERROR below.
+            if no is None:
+                _emit(db, sess, "entry_confirm_deferred", {
+                    "order_id": str(le.get("entry_order_id")),
+                })
+                db.flush()
+                return {
+                    "ok": True, "session_id": sess.id, "state": sess.state,
+                    "pending": "entry_confirm_deferred",
+                }
             _emit(db, sess, "live_error", {"reason": "entry_order_state", "status": no.status if no else None})
             _safe_transition(db, sess, STATE_LIVE_ERROR)
             db.flush()
@@ -7770,7 +8120,33 @@ def tick_live_session(
                 "ok": True, "session_id": sess.id, "state": sess.state,
                 "skipped": "l2_confirm_defer", "l2_confirm": _l2c_dbg,
             }
-        res = adapter.place_limit_order_gtc(**_entry_kwargs)
+        # CHUNK 3-C — RAIL-GOVERNED PLACE: the token bucket shared with every other lane
+        # rail call (places + get_order polls) bounds the rate so multi-admission cannot
+        # flood / 429 the broker (the flooding risk Chunk 2 introduced by deleting the
+        # slot count). Governor OFF ⇒ _governed_place is an instant pass-through and this
+        # is byte-identical to `adapter.place_limit_order_gtc(**_entry_kwargs)`. A
+        # governor DEFER returns ok=False/error=rail_governor_deferred -> the existing
+        # not-ok branch below re-watches / retries next tick (never a silent drop).
+        res = _governed_place(
+            adapter, adapter.place_limit_order_gtc, sess=sess, **_entry_kwargs
+        )
+        # GOVERNOR DEFER (not a broker reject): the rail bucket was empty, so NO order was
+        # submitted. Do NOT mark entry_submitted, do NOT write an entry-reject cooldown
+        # (the name is fine — the rail was busy), do NOT transition to LIVE_ERROR. Stay
+        # WATCHING so the next tick re-attempts once the bucket refills — the entry is
+        # deferred, never dropped. This branch only runs when the governor is ON and the
+        # rate is currently saturated; OFF ⇒ res never carries `deferred`.
+        if res.get("deferred"):
+            _emit(db, sess, "live_entry_governor_deferred", {
+                "client_order_id": res.get("client_order_id"),
+                "limit_price": entry_limit_str,
+            })
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            db.flush()
+            return {
+                "ok": True, "session_id": sess.id, "state": sess.state,
+                "skipped": "rail_governor_deferred",
+            }
         le["entry_submitted"] = True
         le["entry_submit_utc"] = _utcnow().isoformat()
         le["entry_order_type"] = "limit"

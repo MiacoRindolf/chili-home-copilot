@@ -43,6 +43,25 @@ logger = logging.getLogger(__name__)
 
 _VENUE = "robinhood_agentic_mcp"
 
+
+def _is_rate_limit_exc(exc: Exception) -> bool:
+    """True iff an adapter exception represents a 429 / rate-limit push-back from the
+    rail. Recognizes the typed RhMcpError code (``http_429``, set at
+    ``rh_mcp_client.py`` when the transport returns HTTP 429) and the rate-limit text
+    forms (``429`` / ``rate limit`` / ``too many requests``). Used so the POLL path can
+    SURFACE a 429 to the rail governor instead of masking it as a benign None."""
+    code = str(getattr(exc, "code", "") or "")
+    if code in ("http_429",) or code.endswith("_429"):
+        return True
+    low = str(exc or "").lower()
+    return (
+        "429" in low
+        or "rate limit" in low
+        or "rate-limit" in low
+        or "ratelimit" in low
+        or "too many requests" in low
+    )
+
 # ── Tool map (finalized 2026-06-19 against the real RH Agentic schema) ────────────
 # Capability -> ordered keyword groups; a tool matches a capability if its name (lower)
 # contains every keyword in any one group. Override per-capability with an explicit name
@@ -393,6 +412,14 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
             return (self._normalize_order(match) if match else None), fresh
         except (VenueAdapterError, RhMcpError) as exc:
             logger.warning("[rh_mcp_adapter] get_order(%s) failed: %s", order_id, exc)
+            # RATE-LIMIT OBSERVABILITY (2026-06-27): get_order is a LIST endpoint sharing
+            # the per-account rail budget, so a 429 on the POLL path is a primary flooding
+            # signal. Swallowing it to (None, fresh) makes the rail governor read the poll
+            # as a SUCCESS and WIDEN the rate INTO the rate limit (defeating its purpose).
+            # Re-raise ONLY the rate-limit case so the governed wrapper can HALVE the rate;
+            # every other transient error still returns (None, fresh) (unchanged behavior).
+            if _is_rate_limit_exc(exc):
+                raise
             return None, fresh
 
     def get_fills(self, *, product_id: Optional[str] = None, limit: int = 50):

@@ -3437,6 +3437,144 @@ class Settings(BaseSettings):
         le=100,
         validation_alias=AliasChoices("CHILI_MOMENTUM_WATCH_FANOUT_FLOOR"),
     )
+    # ── CHUNK 3 — S4 FAST EXECUTOR + RAIL GOVERNOR ──────────────────────────
+    # Turn engine ADMISSIONS into fills in a few RTTs (not the 2–15s tick-coupled
+    # latency) AND bound the rail rate so multi-admission cannot flood / 429 the
+    # broker (the execution-flooding risk Chunk 2 introduced by removing the slot
+    # count). Three default-ON, kill-switched levers. Flag-OFF for ALL THREE ⇒
+    # byte-identical to the deployed order path. docs/DESIGN/MOMENTUM_ENGINE.md §3.
+    #
+    # A. INLINE MICRO-REPEG. true (default) = run the bounded entry repegs WITHIN
+    # the same tick (re-reading the live ask each iter) instead of one repeg per
+    # external WS tick. EVERY existing bound is preserved: the cumulative-spread
+    # ceiling (_entry_repeg_price), the risk-first re-size on each repeg, the
+    # max-repeg counter (chili_momentum_entry_max_repegs), the equity/fresh-quote
+    # gate. "3 repegs over 6–45s" -> "3 repegs over ~3 RTTs." false ⇒ the current
+    # one-repeg-per-tick behavior (byte-identical).
+    chili_momentum_entry_inline_repeg_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_INLINE_REPEG_ENABLED"),
+    )
+    # Inline-repeg inter-iteration delay is ADAPTIVE (no magic clock): it waits the
+    # smaller of (the measured rail RTT) and (a fraction of the name's expected per-bar
+    # move time). This is the upper BOUND on that adaptive wait — a single documented
+    # ceiling so a stuck RTT measurement can never spin the inline loop tightly.
+    chili_momentum_entry_inline_repeg_max_delay_s: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_INLINE_REPEG_MAX_DELAY_S"),
+    )
+    # B. FAST ACK-POLL. true (default) = after submit, poll get_order to confirm the
+    # fill WITHOUT waiting for the next external tick — interval = the measured RTT
+    # widening geometrically, total window bounded by the EXISTING rest-bars * interval
+    # backstop (chili_momentum_entry_max_rest_bars). On confirm, adopt immediately via
+    # the SAME adopt path. false ⇒ the current tick-coupled confirm (byte-identical).
+    chili_momentum_entry_fast_poll_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FAST_POLL_ENABLED"),
+    )
+    # Fast-poll seed interval (s) when no RTT has been measured yet, and the geometric
+    # widening factor. The TOTAL poll window is bounded by rest_bars * entry_interval
+    # (already configured) — these only shape the within-window cadence. One documented
+    # conservative seed; the cadence then rides the measured RTT.
+    chili_momentum_entry_fast_poll_seed_interval_s: float = Field(
+        default=0.25,
+        ge=0.01,
+        le=5.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FAST_POLL_SEED_INTERVAL_S"),
+    )
+    chili_momentum_entry_fast_poll_widen_factor: float = Field(
+        default=1.6,
+        ge=1.0,
+        le=4.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FAST_POLL_WIDEN_FACTOR"),
+    )
+    # Hard cap on fast-poll iterations within a tick (belt-and-suspenders bound beside
+    # the wall-clock window) so a misconfigured RTT can never busy-poll the rail.
+    chili_momentum_entry_fast_poll_max_iters: int = Field(
+        default=12,
+        ge=1,
+        le=200,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FAST_POLL_MAX_ITERS"),
+    )
+    # IDLE-IN-TRANSACTION GUARD: hard ceiling (seconds) on the TOTAL in-tick fast-poll
+    # wall-clock. tick_live_session holds a SELECT ... FOR UPDATE row lock for the whole
+    # call, so any in-tick sleep pins a DB connection in an open transaction; this bounds
+    # worst-case lock-hold to single-digit seconds (the geometric widen to max_iters could
+    # otherwise sleep ~100s+ at a 5m interval). The fast-poll is a latency optimizer — an
+    # unfilled order still falls through to the event-driven cancel/repeg path next tick.
+    chili_momentum_entry_fast_poll_max_wall_s: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=30.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FAST_POLL_MAX_WALL_S"),
+    )
+    # C. THE ADAPTIVE RAIL RATE GOVERNOR (the load-bearing new safety component). true
+    # (default) = a process-local token bucket shared by ALL lane rail calls (order
+    # PLACES and get_order POLLS — get_order is a LIST endpoint on the SAME budget) so
+    # multi-admission cannot flood / 429 the broker. The rate SELF-DISCOVERS: it WIDENS
+    # on a run of successes and HALVES on a 429 / rate-limit push-back. When the bucket
+    # is empty a call WAITS briefly (max_wait_s) then DEFERS to the next tick (never a
+    # silent drop — it logs). false ⇒ no governor in the loop (byte-identical).
+    chili_momentum_entry_placement_governor_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_PLACEMENT_GOVERNOR_ENABLED"),
+    )
+    # Governor knobs — the ONE documented CONSERVATIVE starting bound is start_rps
+    # (~2 rail calls/s, well under any plausible broker per-account budget); the rate
+    # then self-discovers between min_rps and max_rps. burst = bucket capacity. The
+    # remaining knobs shape the adaptive widen/halve. No fixed steady-state RPS magic.
+    chili_momentum_rail_governor_start_rps: float = Field(
+        default=2.0,
+        ge=0.01,
+        le=100.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RAIL_GOVERNOR_START_RPS"),
+    )
+    chili_momentum_rail_governor_min_rps: float = Field(
+        default=0.25,
+        ge=0.001,
+        le=100.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RAIL_GOVERNOR_MIN_RPS"),
+    )
+    chili_momentum_rail_governor_max_rps: float = Field(
+        default=20.0,
+        ge=0.01,
+        le=1000.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RAIL_GOVERNOR_MAX_RPS"),
+    )
+    chili_momentum_rail_governor_burst: float = Field(
+        default=4.0,
+        ge=1.0,
+        le=100.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RAIL_GOVERNOR_BURST"),
+    )
+    chili_momentum_rail_governor_max_wait_s: float = Field(
+        default=1.5,
+        ge=0.0,
+        le=30.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RAIL_GOVERNOR_MAX_WAIT_S"),
+    )
+    chili_momentum_rail_governor_widen_after_successes: int = Field(
+        default=8,
+        ge=1,
+        le=1000,
+        validation_alias=AliasChoices(
+            "CHILI_MOMENTUM_RAIL_GOVERNOR_WIDEN_AFTER_SUCCESSES"
+        ),
+    )
+    chili_momentum_rail_governor_widen_factor: float = Field(
+        default=1.25,
+        ge=1.0,
+        le=4.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RAIL_GOVERNOR_WIDEN_FACTOR"),
+    )
+    chili_momentum_rail_governor_halve_factor: float = Field(
+        default=0.5,
+        ge=0.001,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RAIL_GOVERNOR_HALVE_FACTOR"),
+    )
     # Hard operator backstop on OPEN POSITIONS; adaptive risk-budget N (≤15) binds
     # first (reference numbers are ceilings, not the active value).
     chili_momentum_max_open_positions_ceiling: int = Field(
