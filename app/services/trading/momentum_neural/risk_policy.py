@@ -448,6 +448,127 @@ def effective_position_cap(*, crypto: bool = False) -> int:
     return max(1, min(max(adaptive_n, pos_floor), ceiling))
 
 
+def adaptive_watch_fanout(field_size: int | None = None) -> int:
+    """Adaptive WATCH-fanout cap (CHUNK 2 engine core): how many $0-risk pre-fill
+    watchers the lane may hold concurrently.
+
+    A machine's edge is BREADTH — when 40 names are igniting it should watch more
+    than when 3 are. The cap floats with the live field rather than a flat 15:
+
+        cap = clamp(field_size, floor, watch_fanout_max)
+
+    where ``field_size`` = the count of distinct live-eligible names right now
+    (passed by the caller from the same source the arm queue ranks from), ``floor``
+    = ``chili_momentum_watch_fanout_floor`` (the ONE documented base — never watch
+    fewer than this so the lane is always primed for the first igniter), and
+    ``watch_fanout_max`` is the hard upper bound (the documented per-tick
+    processing-cost ceiling). Watchers are FREE ($0 risk); the atomic risk-budget
+    governs real admission, so widening the watch field never widens risk.
+
+    When the adaptive flag is OFF, or ``field_size`` is unavailable/unusable, this
+    returns the flat ``chili_momentum_watch_fanout_max`` — BYTE-IDENTICAL to the
+    legacy flat cap. docs/DESIGN/MOMENTUM_ENGINE.md §2."""
+    try:
+        hard_max = int(getattr(settings, "chili_momentum_watch_fanout_max", 15) or 15)
+    except (TypeError, ValueError):
+        hard_max = 15
+    hard_max = max(1, hard_max)
+    if not bool(getattr(settings, "chili_momentum_watch_fanout_adaptive_enabled", True)):
+        return hard_max
+    if field_size is None:
+        return hard_max
+    try:
+        fs = int(field_size)
+    except (TypeError, ValueError):
+        return hard_max
+    if fs < 0:
+        return hard_max
+    try:
+        floor = int(getattr(settings, "chili_momentum_watch_fanout_floor", 5) or 5)
+    except (TypeError, ValueError):
+        floor = 5
+    floor = max(1, min(floor, hard_max))
+    return max(floor, min(fs, hard_max))
+
+
+def admit_by_aggregate_risk(
+    *,
+    open_risk_usd: float,
+    candidate_risk_usd: float,
+    equity_usd: float | None,
+    budget_fraction: float | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """ATOMIC SHAPE-AWARE risk-budget admission decision (pure, zero-I/O, testable).
+
+    Admit a new entry iff::
+
+        open_risk_usd + candidate_risk_usd <= budget_fraction * equity_usd
+
+    where ``candidate_risk_usd`` is the candidate's ACTUAL shape-aware dollars-at-
+    risk = ``(entry_price - structural_stop_price) * fill_qty`` (so a tight-stop
+    scalp consumes far less budget than a wide-stop trade of the same notional — the
+    count would have treated them equally), ``open_risk_usd`` = the summed entry-to-
+    stop $ across currently-OPEN positions (``aggregate_open_risk_usd``), and the
+    budget = ``budget_fraction`` (defaults to the REUSED
+    ``chili_momentum_max_aggregate_risk_pct_of_equity``, no new magic number) times
+    equity.
+
+    The caller MUST evaluate this INSIDE the per-(user,lane) advisory lock so two
+    near-simultaneous fills cannot both pass against a stale ``open_risk_usd`` (the
+    fill-burst race) — this function is the pure arithmetic; the lock is the
+    serializer.
+
+    FAIL-CLOSED on an unknown/unusable account or candidate risk: a non-positive /
+    non-finite ``equity_usd`` returns ``admit=False`` (never size against an unknown
+    account — [[feedback_adaptive_no_magic]]); a non-finite/negative candidate risk
+    returns ``admit=False``. A budget_fraction <= 0 DISABLES the gate (admit=True,
+    reason='budget_disabled') — the operator's documented kill of the dollar cap.
+
+    Returns ``(admit, meta)``."""
+    if budget_fraction is None:
+        try:
+            budget_fraction = float(getattr(
+                settings, "chili_momentum_max_aggregate_risk_pct_of_equity", 0.03) or 0.0)
+        except (TypeError, ValueError):
+            budget_fraction = 0.0
+    try:
+        bf = float(budget_fraction)
+    except (TypeError, ValueError):
+        bf = 0.0
+    if bf <= 0 or not math.isfinite(bf):
+        return True, {"reason": "budget_disabled", "budget_fraction": bf}
+    try:
+        eq = float(equity_usd) if equity_usd is not None else 0.0
+    except (TypeError, ValueError):
+        eq = 0.0
+    if eq <= 0 or not math.isfinite(eq):
+        return False, {"reason": "equity_unavailable", "budget_fraction": bf}
+    try:
+        cand = float(candidate_risk_usd)
+    except (TypeError, ValueError):
+        cand = float("nan")
+    if not math.isfinite(cand) or cand < 0:
+        return False, {"reason": "candidate_risk_invalid",
+                       "candidate_risk_usd": candidate_risk_usd}
+    try:
+        opn = float(open_risk_usd)
+    except (TypeError, ValueError):
+        opn = 0.0
+    if not math.isfinite(opn) or opn < 0:
+        opn = 0.0
+    cap = bf * eq
+    projected = opn + cand
+    admit = projected <= cap + 1e-9
+    return admit, {
+        "open_risk_usd": round(opn, 2),
+        "candidate_risk_usd": round(cand, 2),
+        "projected_usd": round(projected, 2),
+        "cap_usd": round(cap, 2),
+        "budget_fraction": bf,
+        "equity_usd": round(eq, 2),
+    }
+
+
 def streak_risk_multiplier(db, *, execution_family: str | None = None) -> tuple[float, dict]:
     """Streak-adaptive risk dial (Ross: 'coming out of the gates swinging' on a
     hot streak; 'size down' when cold). A multiplier on the per-trade max loss

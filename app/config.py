@@ -3363,20 +3363,79 @@ class Settings(BaseSettings):
     # MASTER KILL-SWITCH. false = legacy single live-session cap (byte-identical
     # to today: watchers + holders share one risk-budget cap, so the lane watches
     # only ~5-15 names). true = watchers governed by the watch-FANOUT cap (zero
-    # risk), the risk-budget cap charges only OPEN POSITIONS. Do NOT flip true
-    # until the atomic fill-cap + fill-burst test land.
+    # risk), the risk-budget cap charges only OPEN POSITIONS.
+    # CHUNK 2 (engine core, 2026-06-28): flipped DEFAULT True now that the atomic
+    # shape-aware fill-cap + fill-burst test land below — a flat/stuck broker-zero
+    # session holds ZERO aggregate_open_risk_usd so it can no longer block a real
+    # entry. Set False to revert to the legacy count-based single-cap path
+    # (byte-identical). docs/DESIGN/MOMENTUM_ENGINE.md §2 / Phase 4.
     chili_momentum_decouple_watching_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_DECOUPLE_WATCHING_ENABLED"),
+    )
+    # ── ATOMIC SHAPE-AWARE RISK-BUDGET ADMISSION (CHUNK 2 engine core) ───────
+    # MASTER for the new admission governor. true (default) = the advisory-locked
+    # fill boundary in live_runner ADMITS iff (aggregate_open_risk_usd + this
+    # candidate's ACTUAL (entry-stop)*fill_qty) <= the equity-relative aggregate
+    # budget — a CONTINUOUS dollars-at-risk gate that replaces the slot COUNT as
+    # the primary governor (the count, effective_position_cap, stays as a misconfig
+    # BACKSTOP). The budget FRACTION REUSES chili_momentum_max_aggregate_risk_pct_of_
+    # equity (no new magic number). Shape-aware: 10 tight-stop scalps admit where 10
+    # wide-stop trades would not, for the same dollar budget. Computed INSIDE the
+    # per-(user,lane) advisory lock so a fill-burst cannot pass two against a stale
+    # aggregate. false ⇒ the exact legacy count check (byte-identical).
+    # docs/DESIGN/MOMENTUM_ENGINE.md §2 / Phase 4.
+    chili_momentum_atomic_risk_budget_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ATOMIC_RISK_BUDGET_ENABLED"),
+    )
+    # ── FILL-BOUNDARY BREAKER RE-CHECK (CHUNK 2 safety completion) ───────────
+    # true (default) = re-check the three FINANCIAL breakers (per-broker daily-loss,
+    # portfolio drawdown, profit-giveback halt) at the live_runner fill boundary,
+    # INSIDE the advisory lock, atomically with the risk-budget admission — closing
+    # the gap that default-ON decouple_watching widens: a watcher armed while the day
+    # was green can persist across ticks, trigger, and submit an entry AFTER the day
+    # breaches (the breakers are only checked in auto_arm's arm-pass guards, not at the
+    # fill boundary). On any breach -> BLOCK the entry (do NOT place the order), emit
+    # live_entry_blocked_by_breaker, stay WATCHING (retry next tick once the breaker
+    # clears). The kill-switch is already re-checked in the runner; this ADDS the three
+    # financial breakers beside it. false ⇒ no boundary re-check (byte-identical to the
+    # current path). Reuses the SAME governance helpers auto_arm uses (no reimplementation).
+    chili_momentum_fill_boundary_breaker_recheck_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FILL_BOUNDARY_BREAKER_RECHECK_ENABLED"),
     )
     # Max simultaneous WATCHERS (pre-fill, $0 risk) when decoupled. REST-safe
     # ceiling 20 without the WS-quote re-route; default 15 = today's runner-list
-    # limit (zero behaviour change day one). Watch more → catch more breaks.
+    # limit. This is the FALLBACK / hard upper bound when the adaptive fanout
+    # (below) is disabled or the field/equity basis is unavailable.
     chili_momentum_watch_fanout_max: int = Field(
         default=15,
         ge=1,
         le=100,
         validation_alias=AliasChoices("CHILI_MOMENTUM_WATCH_FANOUT_MAX"),
+    )
+    # ── ADAPTIVE watch-fanout (CHUNK 2) ─────────────────────────────────────
+    # true (default) = derive the watcher cap from the live field (how many names
+    # are actually igniting) rather than a flat 15 — a machine's edge is BREADTH,
+    # so when 40 names are moving the lane should watch more than when 3 are.
+    # The cap = clamp(live_eligible_field_size, base_floor, watch_fanout_max):
+    # it floats UP with the field but never past watch_fanout_max (the documented
+    # per-tick processing-cost ceiling) nor below the floor below. Watchers are
+    # FREE ($0 risk); only the atomic risk-budget governs real admission. false ⇒
+    # the flat chili_momentum_watch_fanout_max (byte-identical).
+    chili_momentum_watch_fanout_adaptive_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WATCH_FANOUT_ADAPTIVE_ENABLED"),
+    )
+    # The single documented FLOOR for the adaptive watch-fanout: never watch fewer
+    # than this many names even on a quiet field (so the lane is always primed for
+    # the first igniter). The cap floats between this floor and watch_fanout_max.
+    chili_momentum_watch_fanout_floor: int = Field(
+        default=5,
+        ge=1,
+        le=100,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WATCH_FANOUT_FLOOR"),
     )
     # Hard operator backstop on OPEN POSITIONS; adaptive risk-budget N (≤15) binds
     # first (reference numbers are ceilings, not the active value).

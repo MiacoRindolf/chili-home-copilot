@@ -1558,6 +1558,32 @@ def _active_live_session_count(db: Session, *, user_id: int | None) -> int:
     return int(q.count())
 
 
+def _count_live_eligible_field(db: Session) -> int:
+    """Distinct live-eligible names in the field RIGHT NOW (the adaptive watch-fanout
+    basis, CHUNK 2). Same eligibility + lane filter the arm queue ranks from
+    (``_fresh_live_eligible_candidates``): scope=symbol, live_eligible, fresh within
+    the live viability gate, crypto/equity lane filter. Counts DISTINCT symbols (a
+    symbol has many variant rows) so the fanout reflects how many NAMES are igniting,
+    not row count. Fail-soft: any error returns 0 ⇒ the flat fanout_max fallback."""
+    try:
+        max_age = float(
+            getattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0
+        )
+        cutoff = datetime.utcnow() - timedelta(seconds=max_age)
+        q = db.query(MomentumSymbolViability.symbol).filter(
+            MomentumSymbolViability.scope == "symbol",
+            MomentumSymbolViability.live_eligible.is_(True),
+            MomentumSymbolViability.freshness_ts >= cutoff,
+        )
+        if _auto_arm_crypto_only():
+            q = q.filter(MomentumSymbolViability.symbol.like("%-USD%"))
+        elif _auto_arm_equity_only():
+            q = q.filter(~MomentumSymbolViability.symbol.like("%-USD%"))
+        return int(q.distinct().count())
+    except Exception:
+        return 0
+
+
 def _count_watching_prefill(db: Session, *, user_id: int | None) -> int:
     """Decouple_watching: $0-risk pre-fill watchers (armed/queued/watching/candidate/
     pending_entry), twin-excluded. Governed by the watch-FANOUT cap, not the risk
@@ -3133,9 +3159,14 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         # into a full book) — the AUTHORITATIVE position cap is the advisory-locked
         # fill boundary in live_runner (a soft re-count cannot be atomic at arm time).
         from .risk_evaluator import count_open_positions as _count_open_positions
+        from .risk_policy import adaptive_watch_fanout as _adaptive_watch_fanout
         from .risk_policy import effective_position_cap as _effective_position_cap
 
-        _fanout = int(getattr(settings, "chili_momentum_watch_fanout_max", 15) or 15)
+        # ADAPTIVE watch-fanout (CHUNK 2): the cap floats with the live field size
+        # (clamp(field, floor, fanout_max)) so the lane watches MORE when more names
+        # are igniting. Flag-off / field unavailable ⇒ the flat fanout_max (byte-
+        # identical). Watchers are $0-risk; the atomic risk-budget governs admission.
+        _fanout = int(_adaptive_watch_fanout(_count_live_eligible_field(db)))
         _watch_ct = _count_watching_prefill(db, user_id=uid)
         if _watch_ct >= _fanout:
             # RANK-DISPLACEMENT: rather than skip, try to evict the worst inert watcher so

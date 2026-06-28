@@ -7277,11 +7277,14 @@ def tick_live_session(
 
             from .risk_evaluator import (
                 aggregate_open_crypto_risk_usd,
+                aggregate_open_risk_usd,
                 count_inflight_entry_orders,
                 count_open_positions,
+                sum_inflight_entry_risk_usd,
             )
             from .risk_policy import (
                 _account_equity_usd,
+                admit_by_aggregate_risk,
                 effective_position_cap,
                 equity_relative_loss_cap,
             )
@@ -7292,6 +7295,12 @@ def tick_live_session(
             _lane_key = (_MOMENTUM_LANE_LOCK_NS << 32) | (int(sess.user_id) & 0xFFFFFFFF)
             db.execute(_sql_text("SELECT pg_advisory_xact_lock(:k)"), {"k": _lane_key})
 
+            # ── COUNT BACKSTOP (effective_position_cap) ──────────────────────
+            # When the atomic risk-budget governor (below) is ON, this count is a
+            # MISCONFIG BACKSTOP — an outer ceiling, not the primary governor. The
+            # primary admission is the shape-aware dollar budget. When the atomic
+            # flag is OFF, this count is the SOLE governor (byte-identical to the
+            # legacy decouple_watching path). docs/DESIGN/MOMENTUM_ENGINE.md §2.
             _cap = effective_position_cap(crypto=_is_crypto)
             _pos_ct = count_open_positions(db, user_id=sess.user_id, mode="live") + (
                 count_inflight_entry_orders(db, user_id=sess.user_id, exclude_session_id=sess.id)
@@ -7304,6 +7313,104 @@ def tick_live_session(
                     "ok": True, "session_id": sess.id, "state": sess.state,
                     "skipped": "position_cap_at_fill", "pos_ct": _pos_ct, "cap": _cap,
                 }
+            # ── ATOMIC SHAPE-AWARE RISK-BUDGET ADMISSION (CHUNK 2 PRIMARY) ────
+            # The load-bearing engine-core change: admit iff the EQUITY lane's open
+            # dollars-at-risk PLUS this candidate's ACTUAL (entry-stop)*fill_qty fit
+            # the equity-relative aggregate budget (REUSED 0.03 fraction). This is
+            # the CONTINUOUS dollars-at-risk governor that replaces the slot COUNT —
+            # a flat/stuck broker-zero session holds ZERO aggregate_open_risk_usd, so
+            # it can NEVER block a real entry (starvation dissolved by construction).
+            # Computed INSIDE the advisory lock so a fill-burst cannot pass two
+            # candidates against a stale aggregate (the second sees the first's
+            # committed in-flight risk). Shape-aware: a tight-stop scalp consumes far
+            # less budget than a wide-stop trade, so MORE tight scalps admit for the
+            # same dollars (the count treated them equally). Crypto keeps its own
+            # dollar backstop below (aggregate_open_risk_usd is equity-only by
+            # design — the 2026-06-11 correlation guard). FAIL-CLOSED on unknown
+            # equity / un-computable candidate risk (never size against the unknown).
+            # Flag OFF ⇒ this block is a no-op; the count above is the sole governor.
+            if (
+                bool(getattr(settings, "chili_momentum_atomic_risk_budget_enabled", True))
+                and not _is_crypto
+            ):
+                # FIX A (basis-INDEPENDENT budget): the 0.03 aggregate fraction was
+                # calibrated against STABLE/UNLEVERED equity. Reading the default
+                # buying-power basis (use_bp + apply_margin_multiple) would DOUBLE the
+                # dollar ceiling on a 2x-margin account — the same "2x-margin -> 4x-risk"
+                # basis bug the operator fixed for the slot COUNT (commit 0276285). Read
+                # the stabilized total equity (prefer_equity routes through the last-good
+                # stabilizer; apply_margin_multiple=False forces the unlevered basis), so
+                # the budget ceiling is independent of margin. Still FAIL-CLOSED: a hard
+                # outage returns None -> admit_by_aggregate_risk treats it as
+                # equity_unavailable -> reject (never size against the unknown).
+                _eq_eq = _account_equity_usd(
+                    ef, apply_margin_multiple=False, prefer_equity=True
+                )
+                # Shape-aware candidate risk = per-share structural stop distance
+                # (frozen by compute_risk_first_quantity at :7020 into _rf_meta) ×
+                # the FULL intended qty. FIX B (anticipation under-charge): when the
+                # anticipation starter splits the entry into a small probe leg now +
+                # a pyramid remainder later (:7073), `qty` is only the PROBE — charging
+                # the budget for the probe alone would admit ~4x too many anticipation
+                # positions (the remainder is added under the SAME risk thesis). Budget
+                # the FULL intended risk as ONE unit via anticipation_full_qty; fall back
+                # to qty when the split did not arm (le has no anticipation_full_qty).
+                # Mirrors max_loss_circuit_decision's structural-risk basis exactly.
+                try:
+                    _cand_stop_dist = float((_rf_meta or {}).get("stop_distance") or 0.0)
+                except (TypeError, ValueError):
+                    _cand_stop_dist = 0.0
+                try:
+                    _cand_full_qty = float(le.get("anticipation_full_qty") or qty)
+                except (TypeError, ValueError):
+                    _cand_full_qty = float(qty)
+                _cand_risk_usd = _cand_stop_dist * _cand_full_qty
+                # In-flight equity entries (submitted, not yet held) carry $ at-risk
+                # the held-only aggregate can't see. Charge each its ACTUAL per-order
+                # risk so a fill-burst can't slip dollars past the ceiling — the COUNT
+                # above bounds the count atomically in the same lock; this bounds the
+                # DOLLARS. Over-estimating is the safe side.
+                _open_eq_risk, _ = aggregate_open_risk_usd(db, user_id=sess.user_id)
+                # Per-trade loss-fraction FALLBACK. equity_relative_loss_cap(0.0, ...)
+                # short-circuits to 0.0 (a non-positive fixed fallback is preserved by
+                # _equity_relative_cap), so pass the SAME positive per-trade dollar
+                # fallback the sizing path uses (chili_momentum_risk_max_loss_per_trade_usd)
+                # — it resolves to equity x loss_fraction when equity is available and to
+                # the fixed floor on an equity-fetch outage. Charging 0.0 would let an
+                # in-flight fill-burst slip dollars past the ceiling.
+                _per_trade_loss_fallback = float(
+                    getattr(settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0) or 50.0
+                )
+                _per_trade_inflight_fallback = float(
+                    equity_relative_loss_cap(_per_trade_loss_fallback, ef) or 0.0
+                )
+                # FIX C (in-flight proxy shape/multiplier-awareness): a flat
+                # count * one-loss-fraction proxy under-charges a burst of HIGH-multiplier
+                # entries (_eff_max_loss can be up to 3x the base via :6957). Sum the REAL
+                # per-order risk each in-flight sibling persisted at submit time
+                # (le['entry_inflight_risk_usd'], set below), falling back to the positive
+                # flat per-trade estimate only when a sibling has none (pre-submit race /
+                # older image). Excludes this submitter's own row.
+                _inflight_eq_risk = sum_inflight_entry_risk_usd(
+                    db,
+                    user_id=sess.user_id,
+                    per_trade_fallback_usd=_per_trade_inflight_fallback,
+                    crypto_only=False,
+                    exclude_session_id=sess.id,
+                )
+                _admit, _admit_meta = admit_by_aggregate_risk(
+                    open_risk_usd=_open_eq_risk + _inflight_eq_risk,
+                    candidate_risk_usd=_cand_risk_usd,
+                    equity_usd=_eq_eq,
+                )
+                if not _admit:
+                    _emit(db, sess, "live_entry_blocked_atomic_risk_budget", _admit_meta)
+                    _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                    db.flush()
+                    return {
+                        "ok": True, "session_id": sess.id, "state": sess.state,
+                        "skipped": "atomic_risk_budget", "budget": _admit_meta,
+                    }
             # ADAPTIVE DAILY TRADE-COUNT BUDGET (SCAL101): cap the NUMBER of fresh entries
             # per ET session — a discipline/overtrading guard distinct from the slot COUNT
             # above. Ceiling floats with regime heat (today's banked cushion) + recent
@@ -7366,7 +7473,17 @@ def tick_live_session(
                         "skipped": "equity_unavailable",
                     }
                 _open_cryp_risk, _ = aggregate_open_crypto_risk_usd(db, user_id=sess.user_id)
-                _planned_usd = float(equity_relative_loss_cap(0.0, ef) or 0.0)
+                # Per-trade loss-fraction proxy. equity_relative_loss_cap(0.0, ...)
+                # short-circuits to 0.0 (a non-positive fixed fallback is preserved),
+                # which would NEVER charge the candidate OR in-flight crypto dollars —
+                # the dollar cap would be dead. Pass the same positive per-trade dollar
+                # fallback (chili_momentum_risk_max_loss_per_trade_usd) so _planned_usd
+                # resolves to equity x loss_fraction (fixed floor on equity outage; we
+                # already fail-closed above when equity is unknown).
+                _per_trade_loss_fallback = float(
+                    getattr(settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0) or 50.0
+                )
+                _planned_usd = float(equity_relative_loss_cap(_per_trade_loss_fallback, ef) or 0.0)
                 # In-flight crypto entries (submitted, not yet filled) carry $ at-risk the
                 # held-only aggregate can't see. Charge each a conservative per-trade proxy
                 # (every crypto entry sizes to ~one loss-fraction) so a fill-burst can't
@@ -7393,6 +7510,94 @@ def tick_live_session(
                     return {
                         "ok": True, "session_id": sess.id, "state": sess.state,
                         "skipped": "crypto_dollar_cap",
+                    }
+            # ── FILL-BOUNDARY FINANCIAL-BREAKER RE-CHECK (safety completion) ──
+            # The three FINANCIAL breakers (per-broker daily-loss, portfolio drawdown,
+            # profit-giveback halt) are checked ONLY in auto_arm's arm-pass guards, not
+            # at THIS fill boundary. default-ON decouple_watching lets a watcher armed
+            # while the day was GREEN persist across many ticks, trigger, and submit an
+            # entry AFTER the day breaches — filling into a breached day. Re-check all
+            # three here, INSIDE the advisory lock (atomic with the risk-budget admit
+            # above), so a breach + a fill cannot race. On ANY breach: BLOCK the entry
+            # (do NOT submit), stay WATCHING (mirrors the count/risk-budget block — NOT
+            # terminal; it retries next tick once the breaker clears). Reuses the EXACT
+            # governance helpers auto_arm uses (broker_daily_loss_breached :3233 /
+            # check_portfolio_drawdown_breaker :3211 / evaluate_profit_giveback_halt
+            # :3268) — NO reimplementation. Per-broker daily-loss uses THIS session's
+            # execution_family (ef). Equity + crypto both honored. The kill-switch is
+            # already re-checked upstream (:4274/:4523); this ADDS the three financial
+            # breakers beside it. Flag OFF ⇒ this block is a no-op (byte-identical). The
+            # helpers fail-CLOSED on their own (return not-breached on internal error),
+            # mirroring auto_arm's fail-open early-out semantics; a breaker that DOES
+            # breach blocks. [[project_per_broker_daily_loss]] [[project_profitability_levers]]
+            if bool(
+                getattr(
+                    settings,
+                    "chili_momentum_fill_boundary_breaker_recheck_enabled",
+                    True,
+                )
+            ):
+                _breaker_block: Optional[dict] = None
+                # (1) Per-broker daily-loss breaker (auto_arm.py:3230-3233 call shape).
+                try:
+                    from ..governance import broker_daily_loss_breached as _bdlb
+
+                    _dl_breached, _dl_info = _bdlb(db, ef, user_id=int(sess.user_id))
+                    if _dl_breached:
+                        _breaker_block = {
+                            "breaker": "daily_loss_cap_broker",
+                            "family": _dl_info.get("family"),
+                            "daily_pnl_usd": round(
+                                float(_dl_info.get("realized", 0.0) or 0.0), 2
+                            ),
+                            "max_daily_loss_usd": round(
+                                float(_dl_info.get("cap", 0.0) or 0.0), 2
+                            ),
+                        }
+                except Exception:
+                    pass
+                # (2) Portfolio drawdown breaker (auto_arm.py:3209-3211 call shape).
+                if _breaker_block is None:
+                    try:
+                        from ..portfolio_risk import (
+                            check_portfolio_drawdown_breaker as _cpdb,
+                        )
+
+                        _dd_tripped, _dd_reason = _cpdb(db, int(sess.user_id))
+                        if _dd_tripped:
+                            _breaker_block = {
+                                "breaker": "drawdown_breaker",
+                                "dd_reason": _dd_reason,
+                            }
+                    except Exception:
+                        pass
+                # (3) Profit-giveback session halt (auto_arm.py:3266-3270 call shape).
+                if _breaker_block is None:
+                    try:
+                        from .risk_evaluator import (
+                            evaluate_profit_giveback_halt as _epgh,
+                        )
+
+                        _gb = _epgh(
+                            db, user_id=int(sess.user_id), execution_family=ef
+                        )
+                        if _gb.get("halted"):
+                            _breaker_block = {
+                                "breaker": "profit_giveback",
+                                "daily_pnl_usd": _gb.get("daily_pnl_usd"),
+                                "peak_pnl_usd": _gb.get("peak_pnl_usd"),
+                                "giveback_fraction": _gb.get("giveback_fraction"),
+                            }
+                    except Exception:
+                        pass
+                if _breaker_block is not None:
+                    _emit(db, sess, "live_entry_blocked_by_breaker", _breaker_block)
+                    _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                    db.flush()
+                    return {
+                        "ok": True, "session_id": sess.id, "state": sess.state,
+                        "skipped": "fill_boundary_breaker",
+                        "breaker": _breaker_block.get("breaker"),
                     }
         # ── end atomic position cap; the lock releases when this tick's txn commits ─
         # ── ENTRY-TIME FLOW VETO: never BUY this exact tick into max selling. Keys on
@@ -7570,6 +7775,27 @@ def tick_live_session(
         le["entry_submit_utc"] = _utcnow().isoformat()
         le["entry_order_type"] = "limit"
         le["entry_limit_price"] = entry_limit_str
+        # FIX C (in-flight proxy shape/multiplier-awareness): persist THIS order's REAL
+        # shape-aware $-at-risk so a sibling fill-burst charges the actual per-order risk
+        # (multiplier-aware) instead of a flat per-trade fallback. Mirrors the held
+        # aggregate basis (entry-stop)*qty and the admission's FULL-intended-risk basis
+        # (anticipation_full_qty so the probe+remainder count as ONE unit). Best-effort
+        # side channel; sum_inflight_entry_risk_usd falls back to the flat estimate if
+        # absent, so a failure here never under-counts to $0. Gated on the SAME flags as
+        # the reader so a flag-off persisted snapshot is byte-identical (nothing writes
+        # or reads this key when the budget gate is off).
+        if (
+            getattr(settings, "chili_momentum_decouple_watching_enabled", False)
+            and bool(getattr(settings, "chili_momentum_atomic_risk_budget_enabled", True))
+        ):
+            try:
+                _il_stop_dist = float((_rf_meta or {}).get("stop_distance") or 0.0)
+                _il_full_qty = float(le.get("anticipation_full_qty") or qty)
+                _il_risk = _il_stop_dist * _il_full_qty
+                if _il_risk > 0:
+                    le["entry_inflight_risk_usd"] = _il_risk
+            except (TypeError, ValueError):
+                pass
         # FILL_OUTCOME_LOG (mig308): capture the REAL decision-time BBO spread at the
         # submit pulse so the fill row (and the replay) sees the spread the gate
         # actually faced, not a later NBBO snapshot. Side channel only — no behavior.

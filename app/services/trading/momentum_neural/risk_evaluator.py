@@ -205,6 +205,74 @@ def count_inflight_entry_orders(
     return n
 
 
+def sum_inflight_entry_risk_usd(
+    db: Session,
+    *,
+    user_id: int,
+    per_trade_fallback_usd: float,
+    crypto_only: Optional[bool] = None,
+    exclude_session_id: Optional[int] = None,
+) -> float:
+    """In-flight (submitted-but-not-yet-held) entry $-at-risk for the dollar budget.
+
+    Mirrors :func:`count_inflight_entry_orders`'s SAME born-but-not-held set
+    (``state == live_pending_entry`` AND ``entry_submitted`` set AND no ``position``
+    yet) but sums the ACTUAL per-order risk the live runner persists onto each
+    session at submit time (``le['entry_inflight_risk_usd']`` = that order's real
+    shape-aware ``(entry-stop)*qty``, which already reflects the per-trade
+    multiplier). A flat ``count * per_trade_fallback`` under-charges a burst of
+    HIGH-multiplier entries; reading the persisted per-order risk makes the
+    in-flight charge multiplier-aware.
+
+    CONSERVATIVE FALLBACK: when a sibling has no persisted (positive, finite)
+    ``entry_inflight_risk_usd`` (a pre-submit race, or a session written by an
+    older image), charge the positive flat ``per_trade_fallback_usd`` estimate
+    instead — never $0 (an under-estimate would let a fill-burst slip dollars past
+    the ceiling; an over-estimate is the safe side). Same advisory-lock atomicity
+    contract as the count: the caller evaluates this INSIDE the per-(user,lane)
+    lock so each serialized submitter sees the prior one's committed risk."""
+    q = db.query(TradingAutomationSession).filter(
+        TradingAutomationSession.user_id == int(user_id),
+        TradingAutomationSession.mode == "live",
+        TradingAutomationSession.state == STATE_LIVE_PENDING_ENTRY,
+        TradingAutomationSession.execution_family != "alpaca_spot",
+    )
+    if crypto_only is True:
+        q = q.filter(TradingAutomationSession.symbol.like("%-USD"))
+    elif crypto_only is False:
+        q = q.filter(~TradingAutomationSession.symbol.like("%-USD"))
+    if exclude_session_id is not None:
+        q = q.filter(TradingAutomationSession.id != int(exclude_session_id))
+    try:
+        fallback = float(per_trade_fallback_usd)
+    except (TypeError, ValueError):
+        fallback = 0.0
+    if not (fallback > 0):
+        fallback = 0.0
+    total = 0.0
+    try:
+        rows = q.all()
+    except Exception:
+        return 0.0
+    for s in rows:
+        try:
+            snap = s.risk_snapshot_json or {}
+            le = snap.get("momentum_live_execution") if isinstance(snap, dict) else None
+            if not (isinstance(le, dict) and le.get("entry_submitted") and not le.get("position")):
+                continue
+            try:
+                persisted = float(le.get("entry_inflight_risk_usd") or 0.0)
+            except (TypeError, ValueError):
+                persisted = 0.0
+            # Persisted real risk when present + sane; else the positive flat estimate.
+            total += persisted if persisted > 0 else fallback
+        except (TypeError, ValueError, AttributeError):
+            # An un-inspectable sibling still carries real risk — charge the floor.
+            total += fallback
+            continue
+    return total
+
+
 def aggregate_open_crypto_risk_usd(db: Session, *, user_id: int) -> tuple[float, list[dict[str, Any]]]:
     """Crypto mirror of :func:`aggregate_open_risk_usd` (which is equity-only —
     it filters OUT ``-USD``). Sum of entry-to-stop $ at-risk across OPEN live
