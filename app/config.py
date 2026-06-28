@@ -4753,6 +4753,28 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_OFI_HIDDEN_SELLER_ENABLED"),
         description="Accelerant: hidden-seller absorption at the highs arms the lock on profit-arm + micro-rollover alone (distribution is the one LEADING signal). OFF at ship — promote only after OFI+micro proves net-positive (log-only-first).",
     )
+    # ── Tape-acceleration reversal exit (sell-into-strength climax lock) ──────────
+    # Sibling of the OFI exhaustion lock for the names the lock MISSES. The OFI lock
+    # is L2-data-starved on equity (only ~88/684 names carry iqfeed_depth_snapshots);
+    # this rides signed_tape_accel from the executed TRADE tape (iqfeed_trade_ticks,
+    # broad equity coverage). It locks the runner at the spike's climax — the moment
+    # the aggressive-buy push ENDS / turns while price is still NEAR the high — so the
+    # next tick exits near the top BEFORE the giveback. RATCHET-ONLY (Invariant A):
+    # it can only ever exit a WINNER near its top, never cut a loser early, never
+    # loosen a stop. Reuses the OFI lock's arm_frac + base_lock_bps (NO new magic
+    # numbers) — the ONE new documented knob is the near-high giveback band fraction.
+    # Crypto (signed_tape_accel_features ⇒ None) no-ops ⇒ byte-identical.
+    chili_momentum_exit_tape_accel_reversal_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_TAPE_ACCEL_REVERSAL_ENABLED"),
+        description="Kill-switch for the tape-acceleration reversal exit (sell-into-strength climax lock on the equity TRADE tape). Default ON — it is a fail-safe, ratchet-only WINNER exit (Invariant A: can only raise the stop, never cut a loser, never loosen). OFF ⇒ no signed_tape_accel fetch, the held tick is byte-identical. Crypto always no-ops (no equity tick tape).",
+    )
+    chili_momentum_exit_accel_reversal_giveback_frac: float = Field(
+        default=0.35,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_ACCEL_REVERSAL_GIVEBACK_FRAC"),
+        description="The ONE new knob: 'near-high' band for the sell-into-strength fire, as a fraction of the position's OWN risk unit (giveback (hwm−bid) must be ≤ giveback_frac · risk_dist). Adaptive to the name's ATR — NOT a fixed %. If price has already given back more than this, the trail owns the exit (this never fires after a real drop). The arm point (arm_frac·rr) and the climax cushion (base_lock_bps) are REUSED from the OFI exhaustion lock — no duplicate magic numbers.",
+    )
     # 1m CANDLE EXHAUSTION CONFIRMER (2026-06-16): the live entry trigger runs on 1m,
     # but the exhaustion lock's only candle read (the standalone topping-tail exit) uses
     # the 15m _entry_df — too coarse to corroborate a fast 1m momentum rollover. Fetch a

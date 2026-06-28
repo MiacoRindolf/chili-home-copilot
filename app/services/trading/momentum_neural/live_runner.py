@@ -82,6 +82,7 @@ from .paper_execution import (
     scale_out_quantity,
     stop_target_prices,
     structural_or_vol_floored_atr_pct,
+    tape_accel_reversal_exit,
     utc_iso,
 )
 from .persistence import variant_for_id
@@ -8351,6 +8352,70 @@ def tick_live_session(
                         if _lock.get("fired") and _lock.get("partial_arm"):
                             le["exhaustion_lock_partial_armed"] = True
                             _commit_le(sess, le)
+                except Exception:
+                    pass
+
+            # TAPE-ACCELERATION REVERSAL EXIT (sibling of the OFI lock). The OFI lock is
+            # L2-data-starved on equity (only ~88/684 names carry iqfeed_depth_snapshots);
+            # this rides signed_tape_accel from the executed TRADE tape (iqfeed_trade_ticks,
+            # broad equity coverage) so it covers the names the OFI lock misses. It SELLS
+            # INTO STRENGTH at the spike's climax — the moment the executed-buy push ends /
+            # turns while price is still near the high — BEFORE the giveback. COMPOSES with
+            # the OFI lock: both run, whichever ratchets the stop HIGHER wins (Invariant A).
+            # signed_tape_accel_features returns None for crypto / empty tape ⇒ the helper
+            # no-ops ⇒ crypto byte-identical. Kill-switch gates the WHOLE block (OFF ⇒ no
+            # fetch, byte-identical). RATCHET-ONLY: it can only ever exit a WINNER near its
+            # top, never cut a loser early, never loosen the stop.
+            if bool(
+                getattr(settings, "chili_momentum_exit_tape_accel_reversal_enabled", True)
+            ):
+                try:
+                    from .entry_gates import signed_tape_accel_features
+
+                    _tape = signed_tape_accel_features(sess.symbol, db=db)
+                    _accel = None
+                    if _tape is not None:
+                        _accel = _float_or_none(_tape.get("signed_tape_accel"))
+                    _prev_accel = _float_or_none(le.get("prev_signed_tape_accel"))
+                    _ar = tape_accel_reversal_exit(
+                        high_water_mark=_hwm_trail,
+                        entry_price=avg,
+                        bid=bid,
+                        atr_pct=_atr_pct_trail,
+                        stop_atr_mult=_sm,
+                        reward_risk=class_aware_reward_risk(sess.symbol),
+                        current_stop=stop_px,
+                        breakeven_floor=_be_floor,
+                        signed_tape_accel=_accel,
+                        prev_signed_tape_accel=_prev_accel,
+                        side_long=True,
+                    )
+                    # A/B telemetry on EVERY tick (with the lock-OFF counterfactual) so
+                    # realized PnL is measured vs the baseline before we trust it.
+                    _emit(db, sess, "live_tape_accel_reversal_exit", {
+                        "fired": bool(_ar.get("fired")),
+                        "trigger": _ar.get("trigger"),
+                        "peak_r": _ar.get("peak_r"),
+                        "armed": bool(_ar.get("armed")),
+                        "reason": _ar.get("reason"),
+                        "signed_tape_accel": _accel,
+                        "prev_signed_tape_accel": _prev_accel,
+                        "adaptive_stop": _ar.get("new_stop_floor"),
+                        "counterfactual_fixed_stop": _ar.get("counterfactual_fixed_stop"),
+                        "bid": bid,
+                        "high_water_mark": _hwm_trail,
+                    })
+                    # Store the current accel as the next tick's prev (genuine-TURN read).
+                    if _accel is not None:
+                        le["prev_signed_tape_accel"] = _accel
+                        _commit_le(sess, le)
+                    # RATCHET-ONLY stop write (belt-and-suspenders > stop_px guard).
+                    _ar_stop = _float_or_none(_ar.get("new_stop_floor"))
+                    if _ar.get("fired") and _ar_stop is not None and _ar_stop > stop_px:
+                        pos["stop_price"] = _ar_stop
+                        stop_px = _ar_stop
+                        le["position"] = pos
+                        _commit_le(sess, le)
                 except Exception:
                     pass
 

@@ -1168,6 +1168,189 @@ def ofi_exhaustion_lock(
     return out
 
 
+def tape_accel_reversal_exit(
+    *,
+    high_water_mark: float,
+    entry_price: float,
+    bid: float,
+    atr_pct: float,
+    stop_atr_mult: float,
+    reward_risk: float,
+    current_stop: float,
+    breakeven_floor: float,
+    signed_tape_accel: float | None,
+    prev_signed_tape_accel: float | None = None,
+    side_long: bool = True,
+) -> dict[str, Any]:
+    """Tape-acceleration reversal exit — SELL INTO STRENGTH at the spike's climax.
+
+    The operator's model: the equity winners give back the spike because no exit
+    fires at exhaustion — ``scale_out_limit`` banks dust (~$2) and ``trail_stop``
+    only triggers AFTER the giveback. The OFI-exhaustion lock (``ofi_exhaustion_lock``
+    above) is the L2-flow analogue, but it is L2-DATA-STARVED on equity (only ~88/684
+    names carry ``iqfeed_depth_snapshots``) so it no-ops on most names. This helper
+    rides ``signed_tape_accel`` from the executed TRADE tape (``iqfeed_trade_ticks``,
+    broad equity coverage) — it covers the names the OFI lock misses.
+
+    It locks the runner the moment the executed-tape PUSH ends / turns NEAR the high
+    (sell into strength, before the giveback), NOT after a drop (that is the trail's
+    job). It is a sibling of the OFI lock and COMPOSES with it: both run, whichever
+    ratchets the stop HIGHER wins via Invariant A.
+
+    Gates (confluence-AND, fail-safe):
+
+      1. profit-arm  ``peak_r ≥ arm_r`` (= ``arm_frac · rr``, floored 0.5R) — only
+         ever lock a WINNER. Below the arm the trail/stop owns healthy pullbacks.
+      2. REVERSAL    ``signed_tape_accel ≤ 0`` (the aggressive-buy push has ended /
+         turned). When ``prev_signed_tape_accel`` is supplied, require a genuine TURN
+         (``prev > 0 ∧ current ≤ 0``) for a cleaner climax read; with no prior sample
+         ``accel ≤ 0`` alone qualifies. STILL ACCELERATING (``accel > 0``) ⇒ NO fire
+         (do not sell into a building spike).
+      3. NEAR-HIGH   the giveback ``(hwm − bid)`` is SMALL — within an adaptive band
+         (``giveback_frac · risk_dist``, the position's own ATR unit). If price has
+         already given a lot back, this is the trail's job, not a sell-into-strength.
+
+    On arm ∧ reversal ∧ near-high: candidate stop = ``bid − cushion`` where the
+    cushion is a tight adaptive band off the bid (``base_lock_bps`` — the SAME
+    irreducible base the OFI lock uses; NO new magic number). The next tick then
+    exits at/near the top.
+
+    RATCHET-ONLY / NEVER-LOOSEN (Invariant A): ``new_stop_floor`` is unconditionally
+    ``max(current_stop, breakeven_floor, candidate)`` — it can only RAISE, never null,
+    never write below the structural stop. ``fired = new_stop_floor > current_stop``.
+    The caller re-applies its own ``> stop_px`` guard (belt-and-suspenders). This can
+    therefore ONLY exit a winner near its top; it can NEVER cut a loser early or loosen
+    a stop.
+
+    Pure (no I/O) for replay/live parity. FAIL-SAFE: a short, any non-finite/missing
+    input, or ``signed_tape_accel is None`` ⇒ no-op (``new_stop_floor == current_stop``,
+    ``fired == False``). Crypto (``signed_tape_accel_features`` returns None upstream)
+    therefore no-ops ⇒ byte-identical. ALWAYS returns ``counterfactual_fixed_stop ==
+    current_stop`` (the lock-OFF baseline) so realized PnL can be A/B-measured.
+    """
+    out: dict[str, Any] = {
+        "new_stop_floor": current_stop,
+        "fired": False,
+        "armed": False,
+        "trigger": None,
+        "peak_r": None,
+        "counterfactual_fixed_stop": current_stop,  # lock-OFF baseline (no tighten)
+        "reason": None,
+    }
+    if not side_long:
+        out["reason"] = "not_long"
+        return out
+    # FAIL-SAFE: a missing tape signal (crypto / empty tape / any None) ⇒ no-op.
+    if signed_tape_accel is None:
+        out["reason"] = "no_tape"
+        return out
+    try:
+        hwm = float(high_water_mark)
+        entry = float(entry_price)
+        b = float(bid)
+        cs = float(current_stop)
+        be = float(breakeven_floor)
+        accel = float(signed_tape_accel)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_input"
+        return out
+    if not (
+        math.isfinite(hwm)
+        and math.isfinite(entry)
+        and math.isfinite(b)
+        and math.isfinite(cs)
+        and math.isfinite(accel)
+    ):
+        out["reason"] = "non_finite"
+        return out
+    if entry <= 0 or hwm <= 0 or b <= 0:
+        out["reason"] = "non_positive_price"
+        return out
+
+    # The trade's own risk unit, frozen at entry — IDENTICAL risk_dist convention to
+    # ofi_exhaustion_lock: entry · max(0.003, atr_pct · stop_atr_mult). atr_pct is the
+    # raw entry_stop_atr_pct and stop_atr_mult the plan's stop_atr_mult (the SAME two
+    # arguments the lock receives at the held tick), so peak_r here == the lock's peak_r.
+    risk_dist = entry * max(0.003, float(atr_pct or 0.0) * float(stop_atr_mult or 0.0))
+    if not (math.isfinite(risk_dist) and risk_dist > 0):
+        out["reason"] = "bad_risk_dist"
+        return out
+    peak_r = max(0.0, (hwm - entry) / risk_dist)
+    out["peak_r"] = round(peak_r, 4)
+
+    # ---- knobs: REUSE the OFI lock's irreducible base + arm_frac (no new magic) ----
+    try:
+        rr = float(reward_risk) if math.isfinite(float(reward_risk)) and float(reward_risk) > 0 else 2.0
+    except (TypeError, ValueError):
+        rr = 2.0
+    try:
+        arm_frac = float(getattr(settings, "chili_momentum_exit_ofi_arm_frac", 0.5) or 0.5)
+    except (TypeError, ValueError):
+        arm_frac = 0.5
+    arm_frac = min(max(arm_frac, 0.0), 1.0)
+    # arm_r derives from the plan's OWN reward:risk, floored 0.5R (parity with the OFI
+    # lock) — a sub-1R plan still arms a winner.
+    arm_r = max(0.5, arm_frac * rr)
+    try:
+        base_lock_bps = float(getattr(settings, "chili_momentum_exit_ofi_base_lock_bps", 120.0) or 120.0)
+    except (TypeError, ValueError):
+        base_lock_bps = 120.0
+    base_lock_bps = max(1.0, base_lock_bps)
+    # The ONE new documented knob: how close to the high the price must still be for
+    # this to count as "into strength" (giveback ≤ giveback_frac · risk_dist).
+    try:
+        giveback_frac = float(
+            getattr(settings, "chili_momentum_exit_accel_reversal_giveback_frac", 0.35) or 0.35
+        )
+    except (TypeError, ValueError):
+        giveback_frac = 0.35
+    giveback_frac = max(0.0, giveback_frac)
+    giveback_dist = giveback_frac * risk_dist
+
+    # ---- gate 1: profit-arm (only ever lock a winner) ----
+    if peak_r < arm_r:
+        out["reason"] = "below_arm"
+        return out
+    out["armed"] = True
+
+    # ---- gate 2: tape-acceleration REVERSAL (the executed push has ended/turned) ----
+    if prev_signed_tape_accel is not None:
+        try:
+            prev = float(prev_signed_tape_accel)
+        except (TypeError, ValueError):
+            prev = None
+        if prev is not None and math.isfinite(prev):
+            # genuine TURN: was pushing up, now ≤ 0 (a cleaner climax than ≤0 alone).
+            reversal = (prev > 0.0) and (accel <= 0.0)
+        else:
+            reversal = accel <= 0.0
+    else:
+        reversal = accel <= 0.0
+    if not reversal:
+        out["reason"] = "still_accelerating"
+        return out
+
+    # ---- gate 3: NEAR-HIGH (sell INTO strength, not after a drop) ----
+    giveback = hwm - b
+    if giveback > giveback_dist:
+        out["reason"] = "gave_back_too_much"  # the trail owns this, not the lock
+        return out
+
+    # ---- lock at the climax: tight adaptive cushion off the BID ----
+    # cushion = base_lock_bps off the bid (the SAME irreducible base the OFI lock uses).
+    # The candidate sits a hair below the live bid so the NEXT tick exits near the top;
+    # Invariant A guarantees it can only ever RAISE the stop.
+    cushion = b * (base_lock_bps / 10_000.0)
+    candidate = b - cushion
+    floors = [c for c in (cs, be, candidate) if math.isfinite(c)]
+    new_floor = max(floors) if floors else cs
+    out["new_stop_floor"] = new_floor
+    out["fired"] = bool(new_floor > cs)
+    out["trigger"] = "tape_accel_reversal"
+    out["reason"] = "fired" if out["fired"] else "ratchet_no_raise"
+    return out
+
+
 # ── Measured-move scale target + double-top exhaustion (winner-management) ─────
 # Ross "measured move": the FIRST leg up off the base breakout has a height; the
 # move often extends a SECOND leg of about the SAME height. We measure the name's
