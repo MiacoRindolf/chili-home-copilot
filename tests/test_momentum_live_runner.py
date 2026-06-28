@@ -604,13 +604,84 @@ def test_kill_switch_blocks_before_entry(monkeypatch, db: Session) -> None:
     ad.place_limit_order_gtc.assert_not_called()
 
 
-def test_wide_live_bbo_blocks_market_entry_without_error(monkeypatch, db: Session) -> None:
+def test_broken_bbo_above_abs_cap_blocks_entry_without_error(monkeypatch, db: Session) -> None:
+    """SKIP-FOR-LIMITS (operator 2026-06-23): the momentum entry is a marketable
+    LIMIT whose price bounds the fill cost, so a merely-wide-but-LIVE spread is no
+    longer a hard veto — it is handled as a sized cost + the bounded limit (see
+    ``test_merely_wide_bbo_proceeds_to_limit_entry``). The SURVIVING hard block is the
+    BROKEN-QUOTE abs-cap ceiling: a spread WIDER than
+    ``chili_momentum_risk_max_spread_bps_abs_cap`` is a halted / toxic book and is
+    still rejected with ``wide_bbo_spread`` — the session stays WATCHING_LIVE and no
+    order (market OR limit) is placed, without raising."""
     reset_duplicate_client_order_guard_for_tests()
     monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
-    monkeypatch.setattr(settings, "chili_momentum_risk_max_spread_bps_live", 12.0)
+    # Production default: the entry quote gate uses ONLY the broken-quote abs cap as
+    # its ceiling. Pin both so the quote below (400bps) is unambiguously a broken book
+    # (400 > 300) regardless of any future default change.
+    monkeypatch.setattr(settings, "chili_momentum_skip_spread_gate_for_limit_entry", True)
+    monkeypatch.setattr(settings, "chili_momentum_risk_max_spread_bps_abs_cap", 300.0)
     vid, _ = _seed_live_eligible_row(db, symbol="WID-USD")
     db.commit()
-    uid = _uid(db, "wide")
+    uid = _uid(db, "broken")
+    from app.services.trading.momentum_neural.persistence import create_trading_automation_session
+
+    sess = create_trading_automation_session(
+        db,
+        user_id=uid,
+        symbol="WID-USD",
+        variant_id=vid,
+        mode="live",
+        state=STATE_LIVE_PENDING_ENTRY,
+        risk_snapshot_json={
+            RISK_SNAPSHOT_KEY: {"allowed": True},
+            "momentum_risk_policy_summary": {"disable_live_if_governance_inhibit": True},
+        },
+    )
+    db.commit()
+    ad = _mk_adapter()
+    fresh = _fresh()
+    ad.get_best_bid_ask.return_value = (
+        NormalizedTicker(
+            product_id="WID-USD",
+            bid=98.0,
+            ask=102.0,
+            mid=100.0,
+            spread_bps=400.0,
+            freshness=fresh,
+        ),
+        fresh,
+    )
+
+    with patch("app.services.trading.momentum_neural.live_runner.is_kill_switch_active", return_value=False):
+        out = tick_live_session(db, sess.id, adapter_factory=lambda: ad)
+    db.commit()
+    db.refresh(sess)
+
+    assert out == {"ok": True, "blocked": True, "reason": "wide_bbo_spread"}
+    assert sess.state == STATE_WATCHING_LIVE
+    ad.place_market_order.assert_not_called()
+    ad.place_limit_order_gtc.assert_not_called()
+    gate = (sess.risk_snapshot_json or {})["momentum_live_execution"]["last_quote_quality_gate"]
+    assert gate["spread_bps"] == 400.0
+    assert gate["max_spread_bps"] == 300.0
+
+
+def test_merely_wide_bbo_proceeds_to_limit_entry(monkeypatch, db: Session) -> None:
+    """SKIP-FOR-LIMITS (operator 2026-06-23) new correct behavior: a wide-but-LIVE
+    spread BELOW the broken-quote abs cap (200bps < 300bps) is NOT hard-vetoed — the
+    Ross low-float movers the lane targets inherently trade wide (the old flat
+    wide-spread veto was the equity 0-fills trap). It proceeds to a price-BOUNDED
+    marketable LIMIT entry (``place_limit_order_gtc``), so the fill cost is capped by
+    the limit price (never a naked market order); the spread is absorbed as a sized
+    cost (the derate-only L2.2 multiplier) + the bounded limit. Regression guard
+    against re-introducing a flat wide-spread entry veto."""
+    reset_duplicate_client_order_guard_for_tests()
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_skip_spread_gate_for_limit_entry", True)
+    monkeypatch.setattr(settings, "chili_momentum_risk_max_spread_bps_abs_cap", 300.0)
+    vid, _ = _seed_live_eligible_row(db, symbol="WID-USD")
+    db.commit()
+    uid = _uid(db, "merelywide")
     from app.services.trading.momentum_neural.persistence import create_trading_automation_session
 
     sess = create_trading_automation_session(
@@ -645,12 +716,12 @@ def test_wide_live_bbo_blocks_market_entry_without_error(monkeypatch, db: Sessio
     db.commit()
     db.refresh(sess)
 
-    assert out == {"ok": True, "blocked": True, "reason": "wide_bbo_spread"}
-    assert sess.state == STATE_WATCHING_LIVE
+    # NOT hard-blocked on spread — it proceeded past the quote gate to the entry.
+    assert out.get("reason") != "wide_bbo_spread"
+    assert sess.state == STATE_LIVE_PENDING_ENTRY
+    # Bounded marketable LIMIT, never a naked market order.
     ad.place_market_order.assert_not_called()
-    ad.place_limit_order_gtc.assert_not_called()
-    gate = (sess.risk_snapshot_json or {})["momentum_live_execution"]["last_quote_quality_gate"]
-    assert gate["spread_bps"] == 200.0
+    ad.place_limit_order_gtc.assert_called()
 
 
 def test_live_execution_summary_persisted(monkeypatch, db: Session) -> None:
