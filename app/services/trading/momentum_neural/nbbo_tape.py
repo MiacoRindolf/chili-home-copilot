@@ -373,6 +373,218 @@ def tape_running_up_symbols(db: Session, *, now_utc: Optional[datetime] = None) 
     return [s for _, s in bursts[:max_symbols]]
 
 
+def _ross_threshold_crossed(
+    symbol: str,
+    *,
+    rvol: Optional[float] = None,
+    gap_pct: Optional[float] = None,
+    move_pct: Optional[float] = None,
+    price: Optional[float] = None,
+    dollar_volume: Optional[float] = None,
+    float_shares: Optional[float] = None,
+) -> bool:
+    """True when a name AFFIRMATIVELY crosses ANY Ross explosiveness axis while sitting
+    inside the small-cap band — the basis-complete ignite predicate (docs/DESIGN/
+    MOMENTUM_ENGINE.md §1).
+
+    Fires when ANY of: relative volume >= the Ross RVOL floor, OR gap% >= the Ross
+    change floor, OR intraday move% >= the Ross change floor. The within-band guards
+    (price 1-20 — the codebase's low-float proxy — and $-volume >= 1M) are AND-gates that
+    must NOT veto on ABSENT data — only on data that affirmatively shows the name is out
+    of band. So:
+      * price: rejected only if PRESENT and outside [_PRICE_MIN, _PRICE_MAX] (the
+        EQUITY_ROSS_SMALLCAP price band IS the low-float proxy; low_float_bias is a price
+        proxy and there is no separate float-ceiling field, so we do NOT invent one);
+      * dollar_volume: rejected only if PRESENT and below _MIN_DOLLAR_VOLUME;
+      * float_shares: accepted for signature-completeness / forward-compat; rejected only
+        if a future float feed PRESENTS a value affirmatively above a configured ceiling.
+
+    Reuses the EXISTING Ross floors (ross_momentum.ROSS_ELIGIBILITY_*) and the nbbo
+    price/$-vol bounds — introduces NO new thresholds. Pure + side-effect-free; mirrors
+    the fail-OPEN discipline of ross_momentum.below_explosive_floor (a name is benched
+    only on data that disproves it, never on missing data). The downstream Ross
+    percentile re-rank + every entry-side veto still run after this — this is a SELECTION
+    feeder predicate, never an entry decision."""
+    if not str(symbol or "").strip():
+        return False
+    # Within-band AND-gates (fail-open on absent data).
+    p = _f(price)
+    if p is not None and not (_PRICE_MIN <= p <= _PRICE_MAX):
+        return False
+    dv = _f(dollar_volume)
+    if dv is not None and dv < _MIN_DOLLAR_VOLUME:
+        return False
+    fs = _f(float_shares)
+    if fs is not None:
+        try:
+            from .universe import EQUITY_ROSS_SMALLCAP
+
+            _fmax = getattr(EQUITY_ROSS_SMALLCAP, "float_shares_max", None)
+        except Exception:
+            _fmax = None
+        if _fmax is not None and fs > float(_fmax):
+            return False
+    # Reuse the EXISTING Ross floors (no new thresholds).
+    try:
+        from .ross_momentum import (
+            ROSS_ELIGIBILITY_CHANGE_FLOOR_PCT as _CHG_FLOOR,
+            ROSS_ELIGIBILITY_RVOL_FLOOR as _RVOL_FLOOR,
+        )
+    except Exception:
+        _RVOL_FLOOR, _CHG_FLOOR = 5.0, 10.0
+    rv = _f(rvol)
+    if rv is not None and rv >= float(_RVOL_FLOOR):
+        return True
+    g = _f(gap_pct)
+    if g is not None and g >= float(_CHG_FLOOR):
+        return True
+    mv = _f(move_pct)
+    if mv is not None and mv >= float(_CHG_FLOOR):
+        return True
+    return False
+
+
+def tape_delta_threshold_crossers(
+    db: Session,
+    *,
+    since: datetime,
+    now_utc: Optional[datetime] = None,
+) -> tuple[list[dict[str, Any]], Optional[datetime]]:
+    """INCREMENTAL tape-delta read for the S1 event feeder (docs/DESIGN/MOMENTUM_ENGINE.md
+    §5 Trigger B). The hwm (``observed_at > since``) is used ONLY as a CHANGE-DETECTION
+    gate — which symbols printed a NEW row since the last run and are therefore worth
+    recomputing. The move MAGNITUDE compared to the Ross floor is computed over a fixed
+    ``running_up_lookback_min`` window (now − lookback → latest), NOT over the narrow
+    hwm delta: a name up big on the day but ticking calmly in the last few seconds would
+    otherwise never cross the 10% intraday floor. We then return the crossers + the NEW
+    high-water mark (the max observed_at among the new rows).
+
+    Modeled on ``tape_running_up_symbols`` (the same per-symbol first/last-mid burst SQL,
+    same fixed-window move basis, same max-symbols cap) but with the ``observed_at > :hwm``
+    delta-gate restricting which symbols are recomputed. The tape carries no RVOL/gap
+    field, so this axis is move%-driven (price-bus Trigger A supplies the RVOL axis); the
+    within-band price + $-volume guards reuse the tape's own bid/mid + day_volume. Crossers
+    carry ``{symbol, move_pct, last_mid, day_volume}`` so the caller can hand them to the
+    single-symbol score path.
+
+    The crosser list is BOUNDED by ``chili_momentum_running_up_max_symbols`` (top movers
+    by move%, fastest first) — the event feeder only needs the top movers per cadence, and
+    an unbounded fan-out risks an OHLCV-fetch storm + provider throttling on a broad
+    risk-on open.
+
+    Returns ``([], None)`` on no new rows / failure (caller keeps its hwm). Best-effort;
+    never raises."""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    if since.tzinfo is not None:
+        since = since.astimezone(timezone.utc).replace(tzinfo=None)
+    lookback_min = float(
+        getattr(settings, "chili_momentum_running_up_lookback_min", 5.0) or 5.0
+    )
+    max_symbols = int(getattr(settings, "chili_momentum_running_up_max_symbols", 6) or 6)
+    # The move-magnitude window is anchored at now − lookback (a meaningful burst window),
+    # NOT at the hwm; clamp it to be no later than the hwm so we never read first_mid from
+    # AHEAD of the new rows we're gating on.
+    window_start = now_utc.replace(tzinfo=None) - timedelta(minutes=lookback_min)
+    if window_start > since:
+        window_start = since
+    _MIN_SAMPLES = 2  # delta windows are short; need at least a from→to to read a move
+    try:
+        rows = db.execute(
+            text(
+                # `recent` = move-magnitude window (now − lookback → latest): first/last mid.
+                # `fresh`  = hwm change-gate: symbols with a NEW row since :since + the new hwm.
+                "WITH recent AS ("
+                "  SELECT symbol, mid, day_volume, observed_at,"
+                "         row_number() OVER (PARTITION BY symbol ORDER BY observed_at ASC) rn_a,"
+                "         row_number() OVER (PARTITION BY symbol ORDER BY observed_at DESC) rn_d,"
+                "         count(*) OVER (PARTITION BY symbol) n"
+                "  FROM momentum_nbbo_spread_tape"
+                "  WHERE observed_at >= :window_start AND mid > 0 AND symbol NOT LIKE '%-USD'"
+                "), "
+                "fresh AS ("
+                "  SELECT symbol, max(observed_at) AS sym_hwm"
+                "  FROM momentum_nbbo_spread_tape"
+                "  WHERE observed_at > :since AND mid > 0 AND symbol NOT LIKE '%-USD'"
+                "  GROUP BY symbol"
+                ") "
+                "SELECT a.symbol, a.mid AS first_mid, d.mid AS last_mid,"
+                "       d.day_volume AS last_vol, fresh.sym_hwm "
+                "FROM recent a "
+                "JOIN recent d ON d.symbol = a.symbol AND d.rn_d = 1 "
+                "JOIN fresh ON fresh.symbol = a.symbol "
+                "WHERE a.rn_a = 1 AND a.n >= :min_n"
+            ),
+            {"window_start": window_start, "since": since, "min_n": _MIN_SAMPLES},
+        ).fetchall()
+    except Exception as exc:
+        logger.debug("[nbbo_tape] tape-delta crossers read failed: %s", exc)
+        return [], None
+    crossers: list[dict[str, Any]] = []
+    new_hwm: Optional[datetime] = None
+    for sym, first_mid, last_mid, last_vol, sym_hwm in rows:
+        if sym_hwm is not None:
+            _m = sym_hwm if sym_hwm.tzinfo is not None else sym_hwm.replace(tzinfo=timezone.utc)
+            if new_hwm is None or _m > new_hwm:
+                new_hwm = _m
+        f, l = _f(first_mid), _f(last_mid)
+        if f is None or l is None or f <= 0:
+            continue
+        move_pct = (l - f) / f * 100.0
+        dvol = _f(last_vol)
+        if _ross_threshold_crossed(
+            str(sym),
+            move_pct=move_pct,
+            price=l,
+            dollar_volume=(l * dvol if (l and dvol) else None),
+        ):
+            crossers.append({
+                "symbol": str(sym).strip().upper(),
+                "move_pct": round(move_pct, 4),
+                "last_mid": l,
+                "day_volume": dvol,
+            })
+    # Bound the fan-out: top movers by move% (fastest first), capped — mirrors
+    # tape_running_up_symbols. The hwm still advances over ALL new rows (computed above),
+    # so capping the crossers never re-scans the dropped names next run.
+    crossers.sort(key=lambda c: c["move_pct"], reverse=True)
+    return crossers[:max_symbols], new_hwm
+
+
+def tape_inter_row_gap_p50_seconds(
+    db: Session, *, window_s: float = 120.0, now_utc: Optional[datetime] = None,
+) -> Optional[float]:
+    """Median (p50) seconds between consecutive tape rows over the last ``window_s`` —
+    the ADAPTIVE cadence input for the tape-delta ignite job (docs/DESIGN/
+    MOMENTUM_ENGINE.md §5: cadence = clamp(p50_tape_gap, floor, 15)). Reads how fast the
+    tape is actually filling so the job neither hammers a dense tape nor lags a sparse
+    one. Returns None on insufficient data (caller falls back to the floor). Best-effort;
+    never raises."""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    since = now_utc.replace(tzinfo=None) - timedelta(seconds=float(window_s))
+    try:
+        row = db.execute(
+            text(
+                "WITH gaps AS ("
+                "  SELECT EXTRACT(EPOCH FROM (observed_at - lag(observed_at) OVER ("
+                "    ORDER BY observed_at))) AS gap_s"
+                "  FROM momentum_nbbo_spread_tape WHERE observed_at >= :since"
+                ") "
+                "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY gap_s) "
+                "FROM gaps WHERE gap_s IS NOT NULL AND gap_s > 0"
+            ),
+            {"since": since},
+        ).fetchone()
+    except Exception as exc:
+        logger.debug("[nbbo_tape] tape inter-row gap read failed: %s", exc)
+        return None
+    if not row or row[0] is None:
+        return None
+    try:
+        return float(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
 def recent_spread_median_bps(
     db: Session, symbol: str, *, window_s: float, now_utc: Optional[datetime] = None,
 ) -> tuple[float, int] | None:

@@ -321,9 +321,25 @@ class IgnitionScoringLoop:
         move_pct = self._move_pct(sym, quote)
         if move_pct is None:
             return
-        floor = float(getattr(settings, "chili_momentum_ignition_min_pct", 3.0))
-        if move_pct < floor:
-            return  # below the adaptive ignition floor — dead tape, ignore
+        # S1 EVENT FEEDER (docs/DESIGN/MOMENTUM_ENGINE.md §1/§5): when the master flag is
+        # ON, use the BASIS-COMPLETE Ross predicate (RVOL OR gap OR move% crosses a Ross
+        # floor, within the price band) so a flat-day VOLUME spike (the SKYQ case) ignites
+        # too — not just names already up X%. The RVOL axis comes from the tracker's
+        # snapshot RVOL (the SAME value fed to the scorer's pillar). Flag OFF ⇒ the
+        # original move%-only floor gate (BYTE-IDENTICAL to the deployed path).
+        if bool(getattr(settings, "chili_momentum_event_select_primary_enabled", True)):
+            from .nbbo_tape import _ross_threshold_crossed
+
+            _rv = self._tracker.rvol_for(sym)
+            _px = self._quote_price(quote)
+            if not _ross_threshold_crossed(
+                sym, rvol=_rv, move_pct=move_pct, gap_pct=move_pct, price=_px
+            ):
+                return  # no Ross axis crossed — dead tape, ignore
+        else:
+            floor = float(getattr(settings, "chili_momentum_ignition_min_pct", 3.0))
+            if move_pct < floor:
+                return  # below the adaptive ignition floor — dead tape, ignore
         # DEDUP: one score per cooldown window + an inflight guard so two ticks
         # arriving together don't double-dispatch the same symbol.
         now = time.monotonic()

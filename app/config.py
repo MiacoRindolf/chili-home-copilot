@@ -2816,6 +2816,31 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_IGNITION_MIN_PCT"),
         description="The single adaptive FLOOR knob for the WS ignition scorer: the minimum intraday move% (live price vs today's open / prev-close) for a tick to be treated as an ignition worth scoring into viability. A FLOOR / reference point, not a ceiling — the downstream Ross percentile re-rank does the real selection above it. Sized to drop dead tape while still catching the real igniters early.",
     )
+    # ── S1 EVENT-DRIVEN FEEDER (docs/DESIGN/MOMENTUM_ENGINE.md §1, §5) ────────────
+    # A cold new explosive mover today waits up to ~300s for the next viability-refresh
+    # batch (_run_equity_viability_refresh_job, ~half the 600s freshness gate) before it
+    # can earn a viability row and arm. These flags add an EVENT-DRIVEN feeder so the
+    # instant the tape (IQFeed→momentum_nbbo_spread_tape, ~1s) shows a name crossing ANY
+    # Ross axis, it is scored straight into viability (freshness_ts=now) via the SAME
+    # single-symbol run_momentum_neural_tick path the ignition loop uses — target ~5-15s.
+    # The 300s batch stays as the backstop. Every flag OFF ⇒ byte-identical to the batch-
+    # only deployed path.
+    chili_momentum_event_select_primary_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EVENT_SELECT_PRIMARY_ENABLED"),
+        description="MASTER switch for the S1 event-driven selection feeder (docs/DESIGN/MOMENTUM_ENGINE.md §1/§5). When ON, the tape-delta ignite job is REGISTERED and the ignition-loop tick gate uses the basis-complete _ross_threshold_crossed (RVOL OR gap OR move% crosses a Ross floor) instead of the move%-only floor — so a cold new explosive mover reaches live_eligible in ~5-15s instead of waiting ~300s for the next viability-refresh batch. OFF ⇒ the job is NOT registered and the ignition loop keeps its current move%-only gate (byte-identical to the deployed batch-only path). The 300s batch always runs as the backstop.",
+    )
+    chili_momentum_tape_delta_ignite_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TAPE_DELTA_IGNITE_ENABLED"),
+        description="Enable the price-bus-INDEPENDENT tape-delta ignite job: an interval job that reads ONLY tape rows newer than an in-process high-water mark (incremental delta, not a full rescan), applies _ross_threshold_crossed, and scores each crosser into viability via the single-symbol run_momentum_neural_tick path (freshness_ts=now). It is the live winner when the price bus is down (the deployed state). OFF (with the master flag still ON) ⇒ the registered job is a no-op return (byte-identical-off). Only consulted when chili_momentum_event_select_primary_enabled is ON.",
+    )
+    chili_momentum_tape_delta_min_seconds: float = Field(
+        default=5.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TAPE_DELTA_MIN_SECONDS"),
+        description="The ONE documented adaptive FLOOR (seconds) for the tape-delta ignite job's cadence. The job runs at clamp(p50 tape inter-row gap, this floor, 15s) — adaptive to how fast the tape is actually filling, never below this floor (so it can't hammer the DB on a dense tape) and never above 15s (so a cold igniter is caught within one cadence). A floor / reference point, not a fixed clock.",
+    )
     # ── HOT-MOVER RE-CATCH + sub-$1 explosive exemption (the NEXR late-surge miss) ─
     # ROOT CAUSE (verified live 2026-06-24): a name that FADED midday (low pos_in_range)
     # then SURGED late ranks #51+ in build_equity_universe's freshness×move sort, is
