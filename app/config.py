@@ -2392,9 +2392,9 @@ class Settings(BaseSettings):
     # the per-trade risk basis is scaled UP a bounded amount. OFF => multiplier is always
     # 1.0 (byte-identical sizing). Operator can size-down Monday validation by disabling.
     chili_momentum_green_day_graduation_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_GREEN_DAY_GRADUATION_ENABLED"),
-        description="GREEN-DAY GRADUATION: graduate to bigger size ONLY after a consecutive green-day streak (realized daily PnL > 0, bucketed by ET calendar day, auto-derived from MomentumAutomationOutcome history — no scattered magic). A bounded UPWARD size multiplier on the per-trade risk basis (composes into the existing 3x combined-multiplier ceiling), applied at entry-quantity compute time — NOT a veto, never blocks an entry. Ships DEFAULT-OFF (operator decides; can size-down Monday validation). OFF => multiplier always 1.0 (byte-identical sizing).",
+        description="GREEN-DAY GRADUATION: graduate to bigger size ONLY after a consecutive green-day streak (realized daily PnL > 0, bucketed by ET calendar day, auto-derived from MomentumAutomationOutcome history — no scattered magic). A bounded UPWARD size multiplier on the per-trade risk basis (composes into the existing 3x combined-multiplier ceiling), applied at entry-quantity compute time — NOT a veto, never blocks an entry. DEFAULT-ON (no dark flags); self-gating — multiplier stays 1.0 until a real green-day streak exists, so it scales AS expectancy proves out, never before. Kill-switch via env=0 => multiplier always 1.0 (byte-identical sizing).",
     )
     chili_momentum_green_day_step_per_day: float = Field(
         default=0.1, ge=0.0, le=1.0,
@@ -4540,9 +4540,9 @@ class Settings(BaseSettings):
     # reuses the SAME explosive ATR/RVOL floors entry_gates._is_hot_tape uses (no new magic).
     # OFF / fail-neutral => 1.0 (byte-identical). docs/DESIGN/MOMENTUM_LANE.md
     chili_momentum_hot_cold_size_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_COLD_SIZE_ENABLED"),
-        description="Kill-switch for hot/cold-tape size scaling (P3, entry sizing only). false = size multiplier is always 1.0 (byte-identical). Bounded [cold_floor, hot_ceil]; never exceeds the liquidity/equity caps.",
+        description="Hot/cold-tape size scaling (P3, entry sizing only). DEFAULT-ON (no dark flags); never a gate — cold tape sizes DOWN (safe direction), hot tape sizes UP bounded [cold_floor, hot_ceil] and never past the liquidity/equity caps or the 3x clamp. Kill-switch via env=0 => multiplier always 1.0 (byte-identical).",
     )
     chili_momentum_hot_cold_cold_floor: float = Field(
         default=0.6,
@@ -5066,9 +5066,9 @@ class Settings(BaseSettings):
     # gets a TIGHTER trail (cut quicker). Reuses _session_is_explosive (the deployed regime
     # classifier) + the cushion-trail band. LENGTHENS hot holds; only tightens cold ones.
     chili_momentum_regime_holdtime_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_REGIME_HOLDTIME_ENABLED"),
-        description="GAP3: scale the runner cushion-trail give-back by the entry regime — HOT/explosive ⇒ wider trail (hold longer), COLD ⇒ tighter trail (cut quicker). The structural stop is NEVER widened past its current value (ratchet-only preserved). OFF (default) ⇒ byte-identical.",
+        description="GAP3: scale the runner cushion-trail give-back by the entry regime — HOT/explosive ⇒ wider trail (hold longer), COLD ⇒ tighter trail (cut quicker). The structural stop is NEVER widened past its current value (ratchet-only preserved — a hot mult can only tighten a live stop, never loosen it). DEFAULT-ON (no dark flags); exit-side only, adds zero entry over-gating risk. Kill-switch via env=0 ⇒ byte-identical.",
     )
     chili_momentum_regime_holdtime_hot_mult: float = Field(
         default=1.25,
