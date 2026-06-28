@@ -1192,7 +1192,25 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                 _liq_mult, _ = spread_liquidity_risk_multiplier(
                     sbps, em_bps,
                     floor=float(getattr(settings, "chili_momentum_liquidity_risk_floor", 0.5) or 0.5))
-            want_qty = min((risk_per_trade_usd * _liq_mult) / max(fill_px - stop, 1e-9), max_notional / fill_px)
+            # T1.3 SIZING PARITY (2026-06-27): route through the SAME live leaf
+            # compute_risk_first_quantity the runner calls (live_runner.py:6810) instead of a bare
+            # division. The bare `(risk)/(fill-stop)` OVER-sized — no 0.003 stop-distance floor, no
+            # whole-share rounding, no below-min-size rejection, no consistent notional ceiling —
+            # inflating per-trade $ (and thus loss magnitude) on chaotic tight-stop low-float names.
+            # atr_pct=eff is the structural-or-vol-floored stop the exit also uses, so qty is sized
+            # off the same stop (matching the old denominator) but with the live floors/rounding.
+            # (The remaining T1.3 piece = the full ~18-dial risk-budget stack; budget here stays the
+            # liquidity-adjusted base, the dominant term on these days where cushion/green-day~=1.0.)
+            from .risk_policy import compute_risk_first_quantity
+            want_qty, _rf_meta = compute_risk_first_quantity(
+                entry_price=fill_px, atr_pct=eff,
+                max_loss_usd=risk_per_trade_usd * _liq_mult,
+                max_notional_ceiling_usd=max_notional,
+                base_increment=1.0, base_min_size=1.0, stop_atr_mult=STOP_ATR_MULT,
+            )
+            if not want_qty or want_qty < 1.0:
+                _tr(s, "gate_fail:%s" % (_rf_meta.get("reason", "below_min_size")), now)
+                continue
             # shares printed over the next ~minute: diff day-volume against the row
             # ~55s ahead — on the dense WS tape (rows every ~1s) the immediate next
             # row would show a near-zero diff and falsely reject for no liquidity
