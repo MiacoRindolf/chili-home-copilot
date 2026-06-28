@@ -64,6 +64,12 @@ ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED: dict[str, float] = {
 # pool toward clean daily breakouts, it can never block a fill (the entry gate is
 # untouched). A news-gap spike breaking a level scores HIGH (the CUPR guarantee), so it
 # is never demoted. Percentile-ranked like every other pillar (raw range normalised away).
+#
+# (P1) SECOND-DAY / MULTI-DAY CONTINUATION (chili_momentum_second_day_context_enabled) folds
+# INTO this same daily_structure sub-score (in daily_levels.compute_daily_context): a clean
+# DAY-2 holding above the prior-day high/close is BOOSTED and a day-3+ (exhaustion) is DERATED,
+# so it RE-RANKS via the existing daily_structure pillar — no new pillar weight, no new fetch
+# (it reuses the P0 DailyContext daily df). A re-rank tilt only; never blocks a fill.
 ROSS_PILLAR_WEIGHTS_DAILY_CONTEXT: dict[str, float] = {
     "rvol": 0.40,
     "momentum": 0.30,
@@ -92,6 +98,128 @@ ROSS_FLOAT_ROTATION_PILLAR_WEIGHT = 0.10
 # equities only. REFERENCE points (the percentile may discover a different live bar), never hard cutoffs.
 ROSS_FLOAT_ROTATION_CLEAR_FLOOR = 1.0
 ROSS_FLOAT_ROTATION_SATURATION = 5.0
+
+# OVER-ROTATION (exhaustion) references (opt-in via chili_momentum_float_overrotation_fix_enabled).
+# Ross SS101 nuance the legacy monotone curve MISSES: low-float rotation is BULLISH early, but a name
+# that has ALREADY rotated its float many times — especially MIDDAY/late — is EXHAUSTED (the buyers are
+# spent; the supply that absorbed all that volume now caps it). So projected-rotation contributes
+# positively up to a HEALTHY threshold, then is PENALISED for excess. The penalty is scaled by how much
+# of the morning session has elapsed (muted at the open where early float-burn is normal, full strength
+# late-morning) so a fast-but-fresh opening rotation is NOT punished. These are the ONE documented base
+# each (a healthy-rotation threshold + a session-minute at which the exhaustion read is fully on); the
+# within-batch PERCENTILE of float_rotation_pct still ORDERS names, so they shape the raw curve only.
+# All defaults live in app.config; these module fallbacks keep the function importable/testable IO-free.
+ROSS_FLOAT_OVERROTATION_THRESHOLD = 3.0       # projected float-turns above this = exhaustion-prone
+ROSS_FLOAT_OVERROTATION_SESSION_MINUTE = 120.0  # minutes-since-open at which the penalty is full-strength
+
+# DAILY 200-EMA ROOM reference (opt-in via chili_momentum_daily_200ema_room_enabled). Ross wants ROOM
+# above the daily 200MA: a name pinned to / just UNDER the 200MA from below is buying into macro
+# resistance (worse); clear room ABOVE = clean sky (better). ``dist_to_sma_200_atr`` (signed daily-ATR
+# units, + above / − below) is mapped to a [0,1] sub-score centered at 0.5 (neutral): >= +clear-room ATR
+# ⇒ ~1.0 (max reward), pinned (≈0) ⇒ ~0.5, well below ⇒ toward 0 (de-rate). The ONE documented knob is
+# the clear-room ATR (how far above the 200MA = fully clean sky). A re-rank tilt folded INTO
+# daily_structure_pct, never a veto.
+ROSS_DAILY_200EMA_CLEAR_ROOM_ATR = 1.0
+
+
+def daily_200ema_room_subscore(
+    dist_to_sma_200_atr: float | None,
+    *,
+    clear_room_atr: float = ROSS_DAILY_200EMA_CLEAR_ROOM_ATR,
+) -> float | None:
+    """Map signed daily-200MA distance (in daily-ATR units) to a [0,1] room sub-score.
+
+    ``dist_to_sma_200_atr``: + above the 200MA / − below (the daily_levels field).
+    Returns a [0,1] sub-score centered on 0.5 (neutral): clear room ABOVE the 200MA
+    (>= ``clear_room_atr``) ⇒ ~1.0 (reward), pinned (~0 ATR) ⇒ ~0.5, well BELOW the
+    200MA (buying into overhead macro resistance) ⇒ toward 0 (de-rate). Symmetric ramp
+    of half-width ``clear_room_atr`` around the 200MA. Fail-OPEN to ``None`` (omit the
+    tilt) when the distance is unknown (< 200 daily bars) — never de-ranked for absent
+    macro data. Pure / side-effect-free.
+    """
+    d = _to_float(dist_to_sma_200_atr)
+    if d is None:
+        return None
+    half = max(1e-9, float(clear_room_atr))
+    # 0.5 at the 200MA; +0.5 at +clear_room ATR above; -0.5 at -clear_room ATR below; clamp.
+    sub = 0.5 + 0.5 * max(-1.0, min(1.0, d / half))
+    return round(max(0.0, min(1.0, sub)), 4)
+
+# NEWS-CATALYST pillar weight (opt-in via chili_momentum_news_catalyst_weight_enabled, default OFF).
+# This is the FOURTH Ross pillar — the 🔥 on his scanner — that the scorer historically left a
+# STUB (never built; a name's news-ness never influenced its rank). Like float_rotation / squeeze_fuel
+# above it is a SINGLE composable pillar the pipeline folds onto WHATEVER weight-set is already active
+# (``score_universe`` reads the per-symbol raw ``news_catalyst_pct`` sub-score stamped by the bridge
+# from the REAL Polygon/Benzinga catalyst sets, and renormalises over the present pillars). 0.10 = the
+# same MEASURED minority magnitude as daily_structure / float_rotation / squeeze_fuel — it RE-RANKS the
+# pool toward STRONG-news A-setups (UPC/PED/IVF-class 🔥 movers) above no-news ones WITHIN the explosive
+# cohort, and slightly DE-RATES weak (dilution/compliance) / fake (unverified/hacked-PR) headlines. It
+# can NEVER let news dominate float/RVOL/change (the primary pillars keep ~80% of the blend) and can
+# NEVER block a fill or remove a name from the pool. GRACEFUL — a name with NO news data has
+# ``news_catalyst_pct = None`` ⇒ the pillar is simply not present in its blend ⇒ NEUTRAL (no penalty,
+# never rejected for lack of news). Absent set / flag OFF ⇒ the pillar is not in the blend ⇒
+# byte-identical ranking.
+ROSS_NEWS_CATALYST_PILLAR_WEIGHT = 0.10
+
+# PRICE SWEET-SPOT pillar weight (opt-in via chili_momentum_price_sweetspot_tilt_enabled, default OFF).
+# Ross trades mostly $3-10 (the high-conviction band); $1-3 and $10-20 are secondary. The lane's HARD
+# price-band gate ($1-20, in auto_arm) is UNTOUCHED — this is a SOFT PREFERENCE tilt only: a composable
+# price_band pillar the pipeline folds onto the active weight-set (score_universe self-renormalises),
+# boosting names in the sweet-spot and mildly de-rating names outside it (but still within the band).
+# 0.05 = the SMALLEST minority magnitude (half the other tilts) — price is a weak preference next to
+# float/RVOL/change, so it can only break near-ties, never out-rank a more-explosive name. Absent /
+# zero-weight / flag OFF ⇒ the pillar is not in the blend ⇒ byte-identical.
+ROSS_PRICE_SWEETSPOT_PILLAR_WEIGHT = 0.05
+# The documented sweet-spot bounds (Ross's $3-10 high-conviction band). Module fallbacks; the live
+# values come from config (chili_momentum_price_sweetspot_min / _max). Names INSIDE [min,max] read 1.0;
+# outside ramps down over a symmetric band-width toward the 0.5 neutral midpoint (never below — a price
+# outside the sweet-spot is a weak preference, not a fade).
+ROSS_PRICE_SWEETSPOT_MIN = 3.0
+ROSS_PRICE_SWEETSPOT_MAX = 10.0
+
+
+def price_sweetspot_subscore(
+    price: float | None,
+    *,
+    sweet_min: float = ROSS_PRICE_SWEETSPOT_MIN,
+    sweet_max: float = ROSS_PRICE_SWEETSPOT_MAX,
+) -> float | None:
+    """Map a name's price to a [0.5,1.0] sweet-spot preference sub-score.
+
+    Inside the Ross sweet-spot ``[sweet_min, sweet_max]`` ⇒ 1.0 (full preference). Outside,
+    a linear ramp DOWN toward the 0.5 neutral midpoint over a band-width equal to the
+    sweet-spot's own width on each side (so a name one sweet-width below ``sweet_min`` or
+    above ``sweet_max`` reads ~0.5). Never below 0.5 — a price outside the sweet-spot is a
+    weak DE-PREFERENCE, never treated as a fade (the hard band gate still bounds the pool).
+    Fail-OPEN to ``None`` (omit the pillar) on missing / non-positive price. Pure.
+    """
+    p = _to_float(price)
+    if p is None or p <= 0:
+        return None
+    lo = float(sweet_min)
+    hi = float(sweet_max)
+    if hi <= lo:
+        return None
+    if lo <= p <= hi:
+        return 1.0
+    width = hi - lo  # symmetric ramp half-width = the sweet-spot's own width
+    if p < lo:
+        frac = max(0.0, min(1.0, (lo - p) / width))
+    else:  # p > hi
+        frac = max(0.0, min(1.0, (p - hi) / width))
+    return round(1.0 - 0.5 * frac, 4)
+
+# News-catalyst grade reference sub-scores (centered on the 0.5 neutral midpoint, like squeeze_fuel).
+# STRONG (FDA/trial/partnership/contract/M&A/earnings-beat — the headlines Ross FAVORS) boosts ABOVE
+# neutral; WEAK (dilution/compliance/legal — Ross distrusts) de-rates BELOW; FAKE (unverified/hacked-PR/
+# rumor/pump — AS101/HVM101 round-trippers) de-rates HARDER. These shape the RAW sub-score only — the
+# within-batch PERCENTILE of ``news_catalyst_pct`` is what actually ranks names (adaptive), so they are
+# documented REFERENCES, never hard cutoffs. A name PRESENT in the broad catalyst set but in none of the
+# graded sets reads a mild positive (it has SOME fresh news, ungraded).
+ROSS_NEWS_GRADE_STRONG = 0.90    # strong, Ross-favored catalyst (the 🔥)
+ROSS_NEWS_GRADE_PRESENT = 0.60   # fresh news present but ungraded (mild positive)
+ROSS_NEWS_GRADE_WEAK = 0.30      # dilution/compliance/legal (de-rate)
+ROSS_NEWS_GRADE_FAKE = 0.15      # unverified/hacked-PR/rumor/pump (harder de-rate)
 
 # SQUEEZE-FUEL sustainability pillar weight (opt-in via chili_momentum_squeeze_fuel_tilt_enabled).
 # Like ``float_rotation`` this is a SINGLE composable pillar the pipeline folds onto WHATEVER
@@ -154,6 +282,11 @@ ROSS_QUALITY_VIABILITY_TILT = 0.20
 # change semantics differ (24h) and get their own calibration if/when needed.
 ROSS_ELIGIBILITY_RVOL_FLOOR = 5.0
 ROSS_ELIGIBILITY_CHANGE_FLOOR_PCT = 10.0
+# COILING-SQUEEZE exemption: a name whose RVOL is >= this MULTIPLE of the rvol_floor
+# (default 3x5x = 15x) is EXTREME-volume on (typically) a low float = accumulation/coil
+# before the pop, and clears the change floor even at a still-modest %-change (the SDOT
+# case: 65x RVOL, 744K float, +4.4% — Ross trades it; the 10% change floor wrongly benched it).
+ROSS_COILING_EXEMPT_RVOL_MULT = 3.0
 
 # ── 3-layer EXPLOSIVE scorer (flag chili_momentum_explosive_scoring_enabled) ──
 # The legacy blend (linear weighted-AVERAGE of percentiles) is fully COMPENSATORY and
@@ -180,6 +313,16 @@ ROSS_EXPLOSIVE_TIER_EXTREME_MULT = 10.0   # tier 3: rvol AND change >= ~10x batc
 ROSS_EXPLOSIVE_TIER_STRONG_MULT = 3.0     # tier 2: rvol AND change >= ~3x batch median
 ROSS_EXPLOSIVE_CORE_RVOL_EXP = 0.6        # explosive-core RVOL exponent (Ross #1 axis)
 ROSS_EXPLOSIVE_CORE_MOM_EXP = 0.4         # explosive-core momentum exponent ("already moving")
+# FIX A2 — missing-RVOL fallback. When a name has NO rvol (e.g. a ws_ignition mover the
+# feed couldn't pair with a baseline) we no longer zero its core (which the viability tilt
+# then PENALISES toward the floor). Instead we score it on momentum ALONE — but BOUNDED:
+# the momentum-only core is the rvol-neutral assumption rvol_norm=NEUTRAL combined with the
+# real mom_norm, then CAPPED below 1.0. The cap is the load-bearing safety the review asked
+# for: a +400% vertical blow-off (mom_norm≈1.0) with no rvol confirmation can reach AT MOST
+# this ceiling, so it can NEVER out-rank a clean mover that has BOTH rvol and momentum
+# (whose confirmed core can reach 1.0). RVOL-confirmed explosiveness always wins.
+ROSS_EXPLOSIVE_MISSING_RVOL_NEUTRAL = 0.5   # rvol-neutral assumption for a name with no rvol
+ROSS_EXPLOSIVE_MISSING_RVOL_CORE_CEILING = 0.6  # hard cap on a momentum-only (no-rvol) core
 
 
 def _median(sorted_vals: list[float]) -> float | None:
@@ -410,6 +553,21 @@ def below_explosive_floor(
     rvol, momentum, _liq, _tl = _extract_pillars(signal)
     if rvol is not None and float(rvol) < float(rvol_floor):
         return True
+    # COILING-SQUEEZE EXEMPTION (2026-06-26): EXTREME relative volume = accumulation/coiling
+    # BEFORE the pop, even while the %-change is still modest. SDOT (65x RVOL, 744K float,
+    # +4.4%) was wrongly benched by the 10% change floor though it is a textbook Ross squeeze
+    # he was actively trading. A name whose RVOL is EXTREME (>= mult x rvol_floor) clears the
+    # change floor. The rvol_floor itself STILL applies (genuine low-volume names rejected);
+    # this is SELECTION-only — the entry-side vetoes (backside / L2 hidden-seller / tape-confirm)
+    # still guard the actual entry against distribution. Kill-switch + adaptive mult.
+    try:
+        from app.config import settings as _cset
+        _coil_on = bool(getattr(_cset, "chili_momentum_coiling_squeeze_exempt_enabled", True))
+        _coil_mult = float(getattr(_cset, "chili_momentum_coiling_exempt_rvol_mult", ROSS_COILING_EXEMPT_RVOL_MULT) or ROSS_COILING_EXEMPT_RVOL_MULT)
+    except Exception:
+        _coil_on, _coil_mult = True, ROSS_COILING_EXEMPT_RVOL_MULT
+    if _coil_on and rvol is not None and float(rvol) >= _coil_mult * float(rvol_floor):
+        return False
     if momentum is not None and float(momentum) < float(change_floor_pct):
         return True
     return False
@@ -444,13 +602,19 @@ def score_universe(
     if not signals:
         return {}
     w = dict(weights or ROSS_PILLAR_WEIGHTS)
+    # FIX A2 — missing-RVOL degrade flag (shares the ross_rvol_feed kill-switch: the whole
+    # "un-zero the starved ws_ignition scorer" feature is one switch). Default ON; when OFF
+    # the missing-rvol core stays 0.0 (byte-identical to the legacy explosive path).
+    _missing_rvol_degrade = True
     if explosive is None:
         # Resolve the live config flag lazily (keeps this module IO-free at import).
         try:
             from app.config import settings as _settings  # local import: no top-level dep
             explosive = bool(getattr(_settings, "chili_momentum_explosive_scoring_enabled", True))
+            _missing_rvol_degrade = bool(getattr(_settings, "chili_momentum_ross_rvol_feed_enabled", True))
         except Exception:
             explosive = False  # fail-CLOSED to the legacy blend if config is unavailable
+            _missing_rvol_degrade = False  # fail-CLOSED to the legacy core=0.0 when config absent
 
     pillars: dict[str, tuple[float | None, float | None, float | None, float | None]] = {
         sym: _extract_pillars(sig or {}) for sym, sig in signals.items()
@@ -481,6 +645,20 @@ def score_universe(
     _sf_raw = {sym: _first_float(sig or {}, "squeeze_fuel_pct") for sym, sig in signals.items()}
     sf_sorted = sorted(v for v in _sf_raw.values() if v is not None)
     _w_sf = float(w.get("squeeze_fuel") or 0.0)
+    # News-catalyst pillar (composable, opt-in): the per-symbol raw ``news_catalyst_pct`` sub-score
+    # (catalyst grade -> [0,1] boost/de-rate) stamped by the bridge from the Polygon/Benzinga catalyst
+    # sets. Graceful-degrade exactly like squeeze_fuel — absent / zero-weight ⇒ not in the blend
+    # (byte-identical). A symbol with NO news data is NEUTRAL (the pillar is simply not present for it).
+    _nc_raw = {sym: _first_float(sig or {}, "news_catalyst_pct") for sym, sig in signals.items()}
+    nc_sorted = sorted(v for v in _nc_raw.values() if v is not None)
+    _w_nc = float(w.get("news_catalyst") or 0.0)
+    # Price sweet-spot pillar (composable, opt-in): the per-symbol raw ``price_band_pct`` sub-score
+    # (Ross $3-10 preference -> [0.5,1.0]) stamped by the bridge. Graceful-degrade exactly like
+    # news_catalyst — absent / zero-weight ⇒ not in the blend (byte-identical). A SOFT preference,
+    # never a gate (the hard $1-20 band gate is enforced separately in auto_arm).
+    _pb_raw = {sym: _first_float(sig or {}, "price_band_pct") for sym, sig in signals.items()}
+    pb_sorted = sorted(v for v in _pb_raw.values() if v is not None)
+    _w_pb = float(w.get("price_band") or 0.0)
     # 6th/7th pillars (attention-leadership variant): the name's amplitude-leadership
     # share+rank of the live mover-field (the TRUE winner/loser separator) + its
     # dormant->explosive volume. Stamped cross-sectionally in _bridge_scanner_to_viability
@@ -514,6 +692,10 @@ def score_universe(
         fr_pct = _percentile_rank(_fr, fr_sorted) if _fr is not None else None
         _sf = _sf_raw.get(sym)
         sf_pct = _percentile_rank(_sf, sf_sorted) if _sf is not None else None
+        _nc = _nc_raw.get(sym)
+        nc_pct = _percentile_rank(_nc, nc_sorted) if _nc is not None else None
+        _pb = _pb_raw.get(sym)
+        pb_pct = _percentile_rank(_pb, pb_sorted) if _pb is not None else None
 
         present: list[tuple[float, float]] = []  # (percentile, weight)
         if rvol_pct is not None:
@@ -534,6 +716,10 @@ def score_universe(
             present.append((fr_pct, _w_fr))
         if sf_pct is not None and _w_sf > 0:
             present.append((sf_pct, _w_sf))
+        if nc_pct is not None and _w_nc > 0:
+            present.append((nc_pct, _w_nc))
+        if pb_pct is not None and _w_pb > 0:
+            present.append((pb_pct, _w_pb))
 
         wsum = sum(wt for _, wt in present)
         score = (sum(pct * wt for pct, wt in present) / wsum) if wsum > 0 else 0.0
@@ -547,10 +733,20 @@ def score_universe(
             # (fail-OPEN: a name with no rvol/mom is simply not explosive, never crashes).
             rvol_norm = _log_min_max(rvol, rvol_sorted)
             mom_norm = _log_min_max(mom, mom_sorted)
-            if rvol_norm is None or mom_norm is None:
-                core = 0.0
-            else:
+            if rvol_norm is not None and mom_norm is not None:
                 core = (rvol_norm ** ROSS_EXPLOSIVE_CORE_RVOL_EXP) * (mom_norm ** ROSS_EXPLOSIVE_CORE_MOM_EXP)
+            elif _missing_rvol_degrade and rvol_norm is None and mom_norm is not None:
+                # FIX A2 — name has momentum but NO rvol (a ws_ignition mover the feed couldn't
+                # pair with a baseline). Don't zero it (which the tilt would then penalise toward
+                # the floor). Score it on momentum with an rvol-NEUTRAL assumption, then CAP it so
+                # an unconfirmed vertical name can never out-rank a clean rvol+mom mover.
+                _neutral_core = (
+                    ROSS_EXPLOSIVE_MISSING_RVOL_NEUTRAL ** ROSS_EXPLOSIVE_CORE_RVOL_EXP
+                ) * (mom_norm ** ROSS_EXPLOSIVE_CORE_MOM_EXP)
+                core = min(ROSS_EXPLOSIVE_MISSING_RVOL_CORE_CEILING, _neutral_core)
+            else:
+                # No momentum either (or degrade disabled) -> not explosive. Legacy behaviour.
+                core = 0.0
             # Bounded QUALITY modifier from the EXISTING SECONDARY-pillar blend (liquidity /
             # tradeable_liquidity / daily_structure / float_rotation / squeeze_fuel — NOT the
             # rvol/mom that drive the core). 0.5 + 0.5*quality clamps the modulation to +/-50%,
@@ -568,6 +764,10 @@ def score_universe(
                 _secondary.append((fr_pct, _w_fr))
             if sf_pct is not None and _w_sf > 0:
                 _secondary.append((sf_pct, _w_sf))
+            if nc_pct is not None and _w_nc > 0:
+                _secondary.append((nc_pct, _w_nc))
+            if pb_pct is not None and _w_pb > 0:
+                _secondary.append((pb_pct, _w_pb))
             _sec_wsum = sum(wt for _, wt in _secondary)
             quality_blend = (sum(p * wt for p, wt in _secondary) / _sec_wsum) if _sec_wsum > 0 else 0.5
             quality_blend = max(0.0, min(1.0, quality_blend))
@@ -591,6 +791,8 @@ def score_universe(
                 "daily_structure": _ds if _w_ds > 0 else None,
                 "float_rotation_pct": _fr if _w_fr > 0 else None,
                 "squeeze_fuel_pct": _sf if _w_sf > 0 else None,
+                "news_catalyst_pct": _nc if _w_nc > 0 else None,
+                "price_band_pct": _pb if _w_pb > 0 else None,
                 "pillars_present": [
                     name
                     for name, val in (
@@ -600,6 +802,8 @@ def score_universe(
                         ("daily_structure", ds_pct if _w_ds > 0 else None),
                         ("float_rotation", fr_pct if _w_fr > 0 else None),
                         ("squeeze_fuel", sf_pct if _w_sf > 0 else None),
+                        ("news_catalyst", nc_pct if _w_nc > 0 else None),
+                        ("price_band", pb_pct if _w_pb > 0 else None),
                     )
                     if val is not None
                 ],
@@ -628,6 +832,93 @@ def score_universe(
     for i, s in enumerate(ordered, start=1):
         s.rank = i
     return out
+
+
+# ── SYMBOL-OF-THE-DAY FOCUS (Batch F; flag chili_momentum_symbol_of_day_focus_enabled) ──
+# Ross trades the ONE best mover INTENSELY rather than spreading thin across the board —
+# the "stock of the day". The selection backbone (score_universe + the 3-layer explosive
+# scorer) already RANKS the batch; this layer names the single highest-CONVICTION explosive
+# leader so the arm queue can give it ONE guaranteed priority slot (never starved, never
+# displaced) while the REMAINING slots still fill by the normal rank (no over-concentration).
+#
+# The leader is defined by REUSING the explosive scorer — NO new magic:
+#   * it must CLEAR Ross's hard floors (``below_explosive_floor`` is False — i.e. it is a
+#     real live setup, not the loudest name in a dull batch), then
+#   * it is the maximum by the SAME lexicographic key the explosive ranker sorts on
+#     ``(tier, score, raw rvol*move)`` — i.e. ``rank == 1`` among floor-clearers — with the
+#     conviction tiebreak being the biggest %-move × RVOL (the "biggest explosion" the task
+#     asks for, computed from the raw pillars already on the score breakdown).
+# Pure: operates on the ``score_universe`` output + the raw signal dicts; no IO.
+
+# The ONE documented focus-tilt base. A leader that is already armed/watched earns a small
+# additive ranking bonus each refresh so a TRANSIENT intraday dip does not rotate it out of
+# the slot before its setup plays out (Ross stays ON his stock of the day). Same order of
+# magnitude as ``ROSS_QUALITY_VIABILITY_TILT`` (the lane's one small-tilt base) so it nudges
+# ordering without overpowering a genuinely fresher new leader. Composes with — never
+# overrides — the hard guards (the leader still passes every begin/confirm risk gate).
+ROSS_SYMBOL_OF_DAY_FOCUS_TILT = 0.20
+
+
+def _conviction(score: "RossMomentumScore", signal: dict | None) -> float:
+    """Biggest-explosion conviction = |%-move| × RVOL from the RAW pillars (the breakdown the
+    scorer already stamped, falling back to the signal dict). The leader tiebreak among
+    same-(tier,score) names — 'top explosive score / biggest %-move × RVOL', reusing the
+    scorer's own raw inputs (no new magic). 0.0 when either axis is absent."""
+    bd = getattr(score, "breakdown", None) or {}
+    rvol = bd.get("rvol")
+    mom = bd.get("momentum")
+    if (rvol is None or mom is None) and isinstance(signal, dict):
+        _r, _m, _l, _t = _extract_pillars(signal)
+        rvol = rvol if rvol is not None else _r
+        mom = mom if mom is not None else _m
+    rv = _to_float(rvol)
+    mv = _to_float(mom)
+    if rv is None or mv is None or rv <= 0:
+        return 0.0
+    return abs(mv) * rv
+
+
+def identify_leader(
+    scores: dict[str, "RossMomentumScore"],
+    signals: dict[str, dict] | None = None,
+    *,
+    rvol_floor: float = ROSS_ELIGIBILITY_RVOL_FLOOR,
+    change_floor_pct: float = ROSS_ELIGIBILITY_CHANGE_FLOOR_PCT,
+) -> str | None:
+    """The symbol-of-the-day = the single highest-conviction explosive LEADER in this batch.
+
+    ``scores``: a ``score_universe`` result. ``signals``: the same ``{symbol: result_dict}``
+    fed to ``score_universe`` (optional — used for the floor check + the conviction tiebreak;
+    when omitted the breakdown on each score is used). Returns the leader SYMBOL, or ``None``
+    when no name clears Ross's hard floors (a dull batch has no stock-of-the-day; the lane
+    simply ranks normally that refresh — never forces a weak leader).
+
+    Adaptive / no new magic: the leader is the max by the SAME lexicographic key the explosive
+    ranker sorts on — ``(tier, score, conviction)`` — restricted to names that AFFIRMATIVELY
+    clear the explosiveness floors (``below_explosive_floor`` is False). Equity floors are
+    crypto-tolerant (a crypto name without equity-shaped rvol/change fails the floor OPEN, so
+    it can still lead on tier+score). Pure + side-effect-free."""
+    if not scores:
+        return None
+    sig = signals or {}
+
+    def _clears_floor(sym: str) -> bool:
+        s = sig.get(sym)
+        if not isinstance(s, dict):
+            return True  # no raw signal to disprove explosiveness -> fail-OPEN (rank decides)
+        return not below_explosive_floor(s, rvol_floor=rvol_floor, change_floor_pct=change_floor_pct)
+
+    eligible = [sym for sym in scores if _clears_floor(sym)]
+    if not eligible:
+        return None
+    return max(
+        eligible,
+        key=lambda sym: (
+            int(getattr(scores[sym], "tier", 0) or 0),
+            float(getattr(scores[sym], "score", 0.0) or 0.0),
+            _conviction(scores[sym], sig.get(sym)),
+        ),
+    )
 
 
 # ── Selection→entry alignment: intraday-impulse freshness (M4 keystone) ───────
@@ -1083,6 +1374,9 @@ def float_rotation_signal(
     *,
     clear_floor: float = ROSS_FLOAT_ROTATION_CLEAR_FLOOR,
     saturation: float = ROSS_FLOAT_ROTATION_SATURATION,
+    overrotation_threshold: float | None = None,
+    overrotation_session_minute: float | None = None,
+    minutes_since_open: float | None = None,
 ) -> FloatRotationSignal:
     """Compute Ross's float-rotation sustainability sub-score for one EQUITY name.
 
@@ -1101,6 +1395,16 @@ def float_rotation_signal(
     cannot clear its float — fades); ``saturation`` and above ⇒ 1.0 (ample fuel). Between,
     a smooth ramp. Fail-OPEN to ``rotation_pct=None`` (omit the pillar) on any missing /
     non-positive input — a name is NEVER de-ranked for absent float/volume data.
+
+    OVER-ROTATION (exhaustion) fix — opt-in, byte-identical when OFF: when
+    ``overrotation_threshold`` is provided (the caller resolves the kill-switch +
+    config), projected rotation ABOVE the threshold is treated as float-EXHAUSTION
+    rather than ever-more fuel: the sub-score is bent back DOWN from the saturation
+    peak the further it over-rotates. The penalty is scaled by the morning-session
+    fraction (``minutes_since_open`` / ``overrotation_session_minute``, clamped to
+    [0,1]) so it is MUTED at the open (early float-burn is normal/bullish) and reaches
+    full strength late-morning (a spent name midday/late = the exhaustion read). When
+    ``overrotation_threshold`` is ``None`` the legacy monotone curve is used unchanged.
     """
     cv = _to_float(cumulative_session_volume)
     fl = _to_float(shares_float)
@@ -1129,17 +1433,61 @@ def float_rotation_signal(
     else:
         rot_pct = 0.5 + 0.5 * max(0.0, min(1.0, (projected - float(clear_floor)) / span))
     rot_pct = max(0.0, min(1.0, rot_pct))
+
+    # ── OVER-ROTATION (exhaustion) bend (opt-in; byte-identical when threshold is None) ──
+    # A name projecting to rotate its float FAR beyond a healthy threshold has spent its
+    # buyers — especially midday/late. Bend the (otherwise saturating) sub-score DOWN by how
+    # far past the threshold it over-rotates, scaled by the morning-session fraction so the
+    # read is muted at the open and full-strength late. This NEVER raises the score (it only
+    # de-rates excess) and is clamped to the neutral midpoint as a floor (exhaustion de-rates,
+    # it never makes a real-fuel name look like a fade).
+    overrotated = False
+    over_excess = None
+    session_weight = None
+    if overrotation_threshold is not None:
+        thr = _to_float(overrotation_threshold)
+        if thr is not None and thr > 0 and projected > thr:
+            overrotated = True
+            # excess in [0,1]: 0 just above the threshold, 1.0 at >= saturation-beyond-threshold.
+            _over_span = max(1e-9, float(saturation))
+            over_excess = max(0.0, min(1.0, (projected - thr) / _over_span))
+            # session weight in [0,1]: 0 at the open, 1.0 at/after the full-strength minute.
+            full_min = _to_float(overrotation_session_minute)
+            mo = _to_float(minutes_since_open)
+            if full_min is not None and full_min > 0 and mo is not None and mo >= 0:
+                session_weight = max(0.0, min(1.0, mo / full_min))
+            else:
+                # unknown clock ⇒ apply at full strength (conservative: assume not-fresh).
+                session_weight = 1.0
+            # Pull rot_pct down from its (near-saturation) value toward the 0.5 neutral floor,
+            # by (excess * session_weight) * (the available headroom above neutral). Half-weight
+            # the bend (0.5*) so it stays a MEASURED de-rate, never a cliff.
+            headroom = max(0.0, rot_pct - 0.5)
+            rot_pct = rot_pct - 0.5 * over_excess * session_weight * headroom
+            rot_pct = max(0.0, min(1.0, rot_pct))
+
+    if overrotated:
+        reason = "overrotated_exhaustion"
+    elif projected >= float(clear_floor):
+        reason = "projects_to_clear"
+    else:
+        reason = "stalling_rotation"
     return FloatRotationSignal(
         rotation_pct=round(rot_pct, 4),
         float_rotation=round(rotation, 4),
         projected_rotation_at_eod=round(projected, 4),
-        reason=("projects_to_clear" if projected >= float(clear_floor) else "stalling_rotation"),
+        reason=reason,
         debug={
             "cum_vol": round(cv, 2),
             "float": round(fl, 2),
             "session_fraction": (round(sf_used, 4) if sf_used is not None else None),
             "clear_floor": float(clear_floor),
             "saturation": float(saturation),
+            "overrotated": overrotated,
+            "overrotation_threshold": (float(overrotation_threshold)
+                                       if overrotation_threshold is not None else None),
+            "over_excess": (round(over_excess, 4) if over_excess is not None else None),
+            "session_weight": (round(session_weight, 4) if session_weight is not None else None),
         },
     )
 
@@ -1248,3 +1596,56 @@ def squeeze_fuel_signal(
             "si_prominent": float(si_prominent), "ctb_hard": float(ctb_hard),
         },
     )
+
+
+@dataclass
+class NewsCatalystSignal:
+    """News-catalyst read (the 🔥 pillar). ``news_pct`` in [0,1] is the raw sub-score the bridge
+    stamps + percentile-ranks like the other pillars; ``None`` (graceful) ⇒ the pillar is omitted
+    from the blend for that name (NEUTRAL — no penalty, never rejected for lack of news)."""
+
+    news_pct: float | None   # [0,1] raw sub-score (>0.5 boost, <0.5 de-rate); None = omit (neutral)
+    grade: str               # strong | present | weak | fake | none
+    debug: dict = field(default_factory=dict)
+
+
+def news_catalyst_signal(
+    symbol: str,
+    *,
+    strong_catalyst_symbols: set[str] | None = None,
+    weak_catalyst_symbols: set[str] | None = None,
+    fake_catalyst_symbols: set[str] | None = None,
+    all_catalyst_symbols: set[str] | None = None,
+    grade_strong: float = ROSS_NEWS_GRADE_STRONG,
+    grade_present: float = ROSS_NEWS_GRADE_PRESENT,
+    grade_weak: float = ROSS_NEWS_GRADE_WEAK,
+    grade_fake: float = ROSS_NEWS_GRADE_FAKE,
+) -> NewsCatalystSignal:
+    """Map a symbol's REAL Polygon/Benzinga catalyst grade to the news pillar's [0,1] sub-score.
+
+    The grade comes from the catalyst symbol sets the pipeline already computes (no new fetch):
+      * in the STRONG set (FDA/trial/partnership/contract/M&A/earnings-beat — the 🔥)  -> boost
+      * in the broad catalyst set but ungraded (fresh news, type unknown)               -> mild +
+      * in the WEAK set (dilution/compliance/legal — Ross distrusts)                    -> de-rate
+      * in the FAKE set (unverified/hacked-PR/rumor/pump — round-trippers)              -> harder de-rate
+      * in NONE of the sets                                                             -> news_pct=None
+
+    Precedence FAKE > WEAK > STRONG > PRESENT: a name flagged unverified is de-rated even if a
+    keyword also matched a strong type (credibility dominates), and a known-weak headline de-rates
+    even alongside an ungraded-present hit. GRACEFUL: a name in no set returns ``news_pct=None`` so
+    the pillar is simply omitted from its blend (neutral — never penalised for the ABSENCE of news,
+    never rejected). Pure + side-effect-free (the caller supplies the cached sets)."""
+    sym = str(symbol).upper()
+    _strong = strong_catalyst_symbols or set()
+    _weak = weak_catalyst_symbols or set()
+    _fake = fake_catalyst_symbols or set()
+    _all = all_catalyst_symbols or set()
+    if sym in _fake:
+        return NewsCatalystSignal(round(float(grade_fake), 4), "fake", debug={"sym": sym})
+    if sym in _weak:
+        return NewsCatalystSignal(round(float(grade_weak), 4), "weak", debug={"sym": sym})
+    if sym in _strong:
+        return NewsCatalystSignal(round(float(grade_strong), 4), "strong", debug={"sym": sym})
+    if sym in _all:
+        return NewsCatalystSignal(round(float(grade_present), 4), "present", debug={"sym": sym})
+    return NewsCatalystSignal(None, "none", debug={"sym": sym})

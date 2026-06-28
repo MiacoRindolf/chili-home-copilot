@@ -578,14 +578,18 @@ def test_adaptive_concurrency_is_basis_independent_ratio(monkeypatch):
     monkeypatch.setattr(rp.settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0, raising=False)
     monkeypatch.setattr(rp.settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
     for eq in (10_000.0, 25_000.0, 100_000.0):
-        monkeypatch.setattr(rp, "_account_equity_usd", lambda ef=None, _e=eq: _e)
+        # _equity_relative_cap now calls _account_equity_usd(ef, prefer_equity=...),
+        # so the stub must accept (and ignore) the keyword.
+        monkeypatch.setattr(rp, "_account_equity_usd", lambda ef=None, _e=eq, **_k: _e)
         assert rp.adaptive_max_concurrent_live_sessions() == 10, f"eq={eq}"
 
 
 def test_adaptive_concurrency_clamps_to_ceiling(monkeypatch):
     """A large risk-budget ratio is clamped at the 15 guardrail (0.30 / 0.01 = 30 -> 15)."""
     from app.services.trading.momentum_neural import risk_policy as rp
-    monkeypatch.setattr(rp, "_account_equity_usd", lambda ef=None: 100_000.0)
+    # _equity_relative_cap now calls _account_equity_usd(ef, prefer_equity=...),
+    # so the stub must accept (and ignore) the keyword.
+    monkeypatch.setattr(rp, "_account_equity_usd", lambda ef=None, **_k: 100_000.0)
     monkeypatch.setattr(rp.settings, "chili_momentum_risk_max_concurrent_live_sessions", 5, raising=False)
     monkeypatch.setattr(rp.settings, "chili_momentum_risk_concurrent_open_risk_fraction", 0.30, raising=False)
     monkeypatch.setattr(rp.settings, "chili_momentum_risk_loss_fraction_of_equity", 0.01, raising=False)

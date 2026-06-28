@@ -40,6 +40,9 @@ from .universe import (
     EQUITY_ROSS_SMALLCAP,
     UniverseProfile,
     _f,
+    _intraday_rvol,
+    _snapshot_adv_shares,
+    _snapshot_today_shares,
     build_equity_universe,
 )
 
@@ -67,6 +70,13 @@ class _UniverseTracker:
         self._lock = threading.Lock()
         self._symbols: set[str] = set()
         self._baseline: dict[str, float] = {}
+        # FIX A1: per-symbol intraday RVOL (today's accumulated shares / prevDay ADV),
+        # captured from the SAME full-market snapshot the universe screen uses. This is
+        # a REAL relative-volume value (not a move-proxy) — the ignition feeder ignites
+        # on a volume surge, so this is the magnitude it ignited on. Threaded into
+        # ross_signals as ``vol_ratio`` so the explosive scorer's CORE is no longer
+        # rvol-None -> 0.0 -> tilt-penalised for every ws_ignition mover.
+        self._rvol: dict[str, float] = {}
 
     def refresh(self) -> set[str]:
         """Re-screen the universe; return the CURRENT watch set (uppercased)."""
@@ -92,6 +102,7 @@ class _UniverseTracker:
         # (same base as universe._premarket_change_pct, so move% agrees with the
         # snapshot screen). Built from the SAME snapshot — no extra fetch.
         baseline: dict[str, float] = {}
+        rvol: dict[str, float] = {}
         for s in snapshot or []:
             try:
                 if not isinstance(s, dict):
@@ -104,12 +115,21 @@ class _UniverseTracker:
                 base = _f(day.get("o")) or _f(prev.get("c"))
                 if base and base > 0:
                     baseline[t] = float(base)
+                # FIX A1: REAL intraday relative-volume from the SAME snapshot — today's
+                # accumulated shares (day.v else min.av, ext-hours-aware) / prevDay ADV.
+                # Reuses the universe screen's own helpers so the value AGREES with the
+                # screen. Fail-open: missing either side -> _intraday_rvol returns None ->
+                # the name simply has no rvol fed (the A2 scorer guard handles that name).
+                _rv = _intraday_rvol(_snapshot_today_shares(s), _snapshot_adv_shares(s))
+                if _rv is not None and _rv > 0:
+                    rvol[t] = float(_rv)
             except Exception:
                 continue
 
         with self._lock:
             self._symbols = want
             self._baseline = baseline
+            self._rvol = rvol
         return set(want)
 
     def get_symbols(self) -> set[str]:
@@ -119,6 +139,11 @@ class _UniverseTracker:
     def baseline_for(self, symbol: str) -> float | None:
         with self._lock:
             return self._baseline.get(symbol.upper())
+
+    def rvol_for(self, symbol: str) -> float | None:
+        """FIX A1: last-snapshot intraday RVOL for this name (None if unknown)."""
+        with self._lock:
+            return self._rvol.get(symbol.upper())
 
     def count(self) -> int:
         with self._lock:
@@ -348,6 +373,18 @@ class IgnitionScoringLoop:
                     "source": "ws_ignition",
                 }
             }
+            # FIX A1 (kill-switch chili_momentum_ross_rvol_feed_enabled, default ON):
+            # feed the REAL intraday RVOL the tracker captured from the screen snapshot
+            # into the scorer's rvol pillar (``vol_ratio`` is the first key _extract_pillars
+            # reads). Without this, ws_ignition movers reach the explosive CORE with rvol=None
+            # -> core 0.0 -> ross_score 0.0 -> the viability tilt PENALISES every igniting
+            # mover toward the floor. OFF => the key is omitted => byte-identical (old
+            # None->0.0 path). SELECTION-ONLY: this only shapes the viability rank, never an
+            # entry decision.
+            if bool(getattr(settings, "chili_momentum_ross_rvol_feed_enabled", True)):
+                _rv = self._tracker.rvol_for(symbol)
+                if _rv is not None and _rv > 0:
+                    ross_signals[symbol]["vol_ratio"] = float(_rv)
             run_momentum_neural_tick(
                 db, meta={"tickers": [symbol], "ross_signals": ross_signals}
             )

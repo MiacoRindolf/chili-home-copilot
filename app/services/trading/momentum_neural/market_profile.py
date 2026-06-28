@@ -76,6 +76,18 @@ def market_session_now(symbol: str | None, *, now: datetime | None = None) -> st
     mod = local.hour * 60 + local.minute
     pre = min(_premarket_start_min(), _REGULAR_OPEN_MIN)
     post = max(_afterhours_end_min(), _REGULAR_CLOSE_MIN)
+    # TIER-1 ADAPTIVE EARLY-PREMARKET (chili_momentum_early_premarket_enabled, default ON):
+    # when the tape shows a genuine pre-premarket-start mover, the premarket session opens
+    # from the FIRST-MOVER time (floored at 04:00 ET) instead of the fixed premarket_start
+    # clock — so a 04:23 igniter (FCUV) is tradeable the moment the window unlocks, not at
+    # 07:00. Flag OFF / no qualifying tape => `pre` is unchanged (byte-identical 07:00 clock).
+    if _early_premarket_enabled() and mod < pre and _EXCHANGE_EXT_OPEN_MIN <= mod:
+        try:
+            _unlocked, _first_mod, _ = early_premarket_unlocked(now=ref)
+            if _unlocked and _first_mod is not None:
+                pre = min(pre, int(_first_mod))
+        except Exception:
+            pass
     if pre <= mod < _REGULAR_OPEN_MIN:
         return "premarket"
     if _REGULAR_OPEN_MIN <= mod < _REGULAR_CLOSE_MIN:
@@ -158,6 +170,10 @@ def crypto_schedule_enabled() -> bool:
 _EXCHANGE_EXT_OPEN_MIN = 4 * 60   # 04:00 ET — US extended session opens (exchange fact)
 
 
+def _early_premarket_enabled() -> bool:
+    return bool(getattr(settings, "chili_momentum_early_premarket_enabled", True))
+
+
 def _data_session_open_min() -> int:
     """Minute-of-day the DATA/selection window opens — DERIVED, never a fixed
     clock (operator 2026-06-11, twice: selection must be WARM before the entry
@@ -165,12 +181,90 @@ def _data_session_open_min() -> int:
     lead, and never LATER than the exchange's own 04:00 ET extended open (a
     07:00 entry config keeps the historical 04:00 data start; a 04:00 entry
     config pulls data sampling to 03:00 so the first allowed entry meets a
-    warm tape, not a cold one)."""
+    warm tape, not a cold one).
+
+    TIER-1 PULL (chili_momentum_early_premarket_enabled, default ON): the early-
+    premarket adaptive unlock reads the tape between the exchange 04:00 ET open and
+    premarket_start to find the FIRST mover, so the sampler must be warm by 04:00
+    regardless of a late premarket_start config. When early-premarket is enabled the
+    open always reaches the 04:00 floor (min of the lead-derived open and 04:00); flag
+    OFF = the historical lead-derived open (byte-identical)."""
     try:
         lead = int(getattr(settings, "chili_momentum_selection_prep_lead_min", 60) or 60)
     except (TypeError, ValueError):
         lead = 60
-    return max(0, min(_EXCHANGE_EXT_OPEN_MIN, _premarket_start_min() - max(0, lead)))
+    _lead_open = _premarket_start_min() - max(0, lead)
+    if _early_premarket_enabled():
+        # Guarantee the 04:00-06:00 sampling that drives the adaptive unlock without
+        # touching the 60-min prep-lead default for the entry side: the data open is the
+        # EARLIER of the lead-derived open and the exchange 04:00 ET extended open.
+        return max(0, min(_EXCHANGE_EXT_OPEN_MIN, _lead_open))
+    # Flag OFF = byte-identical to the historical lead-derived open (premarket_start -
+    # prep_lead), with NO 04:00 floor — so disabling the feature fully restores prior
+    # sampling behavior (the parity contract in this function's docstring).
+    return max(0, _lead_open)
+
+
+def early_premarket_unlocked(now: datetime | None = None) -> tuple[bool, int | None, dict]:
+    """TIER-1 adaptive early-premarket unlock (chili_momentum_early_premarket_enabled,
+    default ON). Returns (unlocked, first_mover_minute_of_day_ET | None, detail).
+
+    Derive the entry window from WHEN names actually move, not the fixed premarket_start
+    clock: read the NBBO tape (the rows the sampler already writes from 04:00 ET) for
+    >= N (base 3) DISTINCT spread-clean symbols whose move >= the existing 5% floor within
+    the last M (base 5) minutes AND row freshness < 30s. When unlocked, the entry window
+    opens from the EARLIEST qualifying tape observed_at (the first-mover time), floored at
+    the 04:00 ET exchange extended-open (never earlier).
+
+    The >=3-distinct-symbol + <30s-freshness + spread-clean (_ross_row already drops
+    crossed/locked/>5000bps rows) gates mitigate a false unlock on stale/garbage tape.
+
+    Pure + best-effort: any failure / flag-off returns (False, None, {...}) so
+    market_session_now falls back to the fixed premarket_start clock (byte-identical)."""
+    if not _early_premarket_enabled():
+        return False, None, {"reason": "flag_off"}
+    ref = now or datetime.now(timezone.utc)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    local = ref.astimezone(_NY_TZ)
+    if local.weekday() >= 5:
+        return False, None, {"reason": "weekend"}
+    mod = local.hour * 60 + local.minute
+    # Only meaningful in the pre-entry-window band: at/after the exchange 04:00 open and
+    # BEFORE the configured premarket_start (the window we want to unlock EARLY into).
+    if mod < _EXCHANGE_EXT_OPEN_MIN or mod >= _premarket_start_min():
+        return False, None, {"reason": "outside_early_band"}
+    try:
+        min_movers = int(getattr(settings, "chili_momentum_early_premarket_min_movers", 3) or 3)
+        window_min = int(getattr(settings, "chili_momentum_early_premarket_window_min", 5) or 5)
+    except (TypeError, ValueError):
+        min_movers, window_min = 3, 5
+    try:
+        from .nbbo_tape import early_premarket_first_mover
+
+        first_at_utc, n_movers, lead_sym, lead_pct = early_premarket_first_mover(
+            now_utc=ref.astimezone(timezone.utc),
+            window_min=float(window_min),
+            min_move_pct=float(_MIN_ABS_CHANGE_PCT),
+            freshness_sec=30.0,
+        )
+    except Exception:
+        return False, None, {"reason": "tape_read_error"}
+    if first_at_utc is None or n_movers < min_movers:
+        return False, None, {"reason": "insufficient_movers", "n_movers": n_movers}
+    first_local = first_at_utc.astimezone(_NY_TZ)
+    first_mod = max(_EXCHANGE_EXT_OPEN_MIN, first_local.hour * 60 + first_local.minute)
+    return True, first_mod, {
+        "n_movers": n_movers,
+        "lead_symbol": lead_sym,
+        "lead_pct": lead_pct,
+        "first_mover_min": first_mod,
+    }
+
+
+# Reuse the NBBO-tape 5% mover floor (the existing _MIN_ABS_CHANGE_PCT) so the unlock and
+# the sampler share ONE definition of "moving" — no second magic move threshold.
+_MIN_ABS_CHANGE_PCT = 5.0
 
 
 def is_data_session_now(symbol: str | None, *, now: datetime | None = None) -> bool:
@@ -190,6 +284,55 @@ def is_data_session_now(symbol: str | None, *, now: datetime | None = None) -> b
         return False
     mod = local.hour * 60 + local.minute
     return _data_session_open_min() <= mod < max(_afterhours_end_min(), _REGULAR_CLOSE_MIN)
+
+
+def is_overnight_now(symbol: str | None = None, *, now: datetime | None = None) -> bool:
+    """TIER-2 pure clock predicate: True for EQUITIES inside the RH 24-hour OVERNIGHT band
+    — the weekday hours OUTSIDE premarket/regular/afterhours, i.e. 20:00 ET → 04:00 ET (the
+    next morning's exchange extended-open). RH's 24h equities run Sun 20:00 ET → Fri 20:00 ET
+    (5 overnight sessions); the weekend (Fri 20:00 → Mon 04:00, modulo the Sun-evening open)
+    stays CLOSED, so this returns False then.
+
+    Crypto is 24/7 and has no overnight concept here -> False. This is ONLY the clock fact;
+    the tradeability tier (flag + 24h-eligibility + 24h-liquid + safety) gates the actual
+    trade in ``is_tradeable_now``. The only hard clocks are exchange facts already named once
+    (_EXCHANGE_EXT_OPEN_MIN, _AFTERHOURS via _afterhours_end_min)."""
+    if asset_class_for_symbol(symbol) == "crypto":
+        return False
+    ref = now or datetime.now(timezone.utc)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    local = ref.astimezone(_NY_TZ)
+    wd = local.weekday()  # Mon=0 .. Sun=6
+    mod = local.hour * 60 + local.minute
+    post = max(_afterhours_end_min(), _REGULAR_CLOSE_MIN)  # 20:00 ET afterhours end
+    # The RH overnight session is the EVENING band (post -> 24:00) on Sun..Thu, plus the
+    # EARLY-MORNING band (00:00 -> 04:00) on Mon..Fri. Friday evening and all of Saturday
+    # are closed; Sunday evening (>= post) opens the week.
+    evening = mod >= post and wd in (6, 0, 1, 2, 3)   # Sun, Mon, Tue, Wed, Thu evenings
+    morning = mod < _EXCHANGE_EXT_OPEN_MIN and wd in (0, 1, 2, 3, 4)  # Mon..Fri early AM
+    return bool(evening or morning)
+
+
+def _overnight_trading_enabled() -> bool:
+    return bool(getattr(settings, "chili_momentum_overnight_trading_enabled", False))
+
+
+def _overnight_tape_enabled() -> bool:
+    return bool(getattr(settings, "chili_momentum_overnight_tape_enabled", False))
+
+
+def is_sample_session_now(symbol: str | None, *, now: datetime | None = None) -> bool:
+    """TIER-2 sampler gate: the lane should SAMPLE the NBBO tape now. This is
+    ``is_data_session_now`` OR (overnight-tape flag ON AND ``is_overnight_now``). The
+    24h-eligible WHITELIST restriction + the 60s cadence cap are enforced at the sampler
+    call site (nbbo_tape) — this is just the clock OR. Both Tier-2 flags OFF => exactly
+    ``is_data_session_now`` (byte-identical)."""
+    if is_data_session_now(symbol, now=now):
+        return True
+    if _overnight_tape_enabled() and is_overnight_now(symbol, now=now):
+        return True
+    return False
 
 
 def market_open_now(symbol: str | None, *, now: datetime | None = None) -> bool:
@@ -221,5 +364,29 @@ def minutes_since_regular_open(symbol: str | None, *, now: datetime | None = Non
 def is_tradeable_now(symbol: str | None, *, now: datetime | None = None) -> bool:
     """True whenever the symbol can be traded NOW — regular OR extended hours for
     equities (crypto always). This is the gate the auto-arm + live entry use so the
-    lane can catch Ross's pre-market runners, not just the RTH leftovers."""
-    return market_session_now(symbol, now=now) in ("premarket", "regular", "afterhours")
+    lane can catch Ross's pre-market runners, not just the RTH leftovers.
+
+    TIER-2 OVERNIGHT (chili_momentum_overnight_trading_enabled, DEFAULT OFF): adds an
+    overnight branch — True overnight ONLY IF (flag ON) AND (the symbol is 24h-eligible
+    per the RH tradability probe) AND (it passes the 24h-liquid floor). Equity arming
+    (auto_arm) and entry (live_runner) inherit this automatically with no new call sites.
+    Flag OFF => only premarket|regular|afterhours (byte-identical to today)."""
+    if market_session_now(symbol, now=now) in ("premarket", "regular", "afterhours"):
+        return True
+    if (
+        _overnight_trading_enabled()
+        and asset_class_for_symbol(symbol) == "stock"
+        and is_overnight_now(symbol, now=now)
+    ):
+        # 24h-eligibility + 24h-liquid floor live in auto_arm (the proactive RH tradability
+        # probe + dollar-volume floor); both are checked there BEFORE arming. Keep this
+        # predicate the CLOCK+FLAG gate so the auto-arm path stays the single owner of the
+        # per-symbol eligibility/liquidity checks (no duplicate MCP call here). Fail-closed:
+        # if auto_arm's _is_24h_eligible is unavailable, the auto-arm gate skips the name.
+        try:
+            from .auto_arm import _is_24h_eligible
+
+            return bool(_is_24h_eligible(symbol))
+        except Exception:
+            return False
+    return False

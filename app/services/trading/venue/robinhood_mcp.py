@@ -63,6 +63,9 @@ _TOOL_HINTS: dict[str, list[list[str]]] = {
     "account": [["get", "accounts"], ["account"], ["balance"]],
     "portfolio": [["get", "portfolio"], ["portfolio"], ["buying", "power"]],
     "quotes": [["get", "equity", "quotes"], ["equity", "quotes"], ["quote"]],
+    # 24h-tradeability probe (call BEFORE placing an overnight order to surface
+    # per-session eligibility, so ineligible names are skipped — never order-rejected).
+    "tradability": [["get", "equity", "tradability"], ["equity", "tradability"], ["tradability"]],
 }
 
 # Request-argument keys (the real place_equity_order / review_equity_order schema).
@@ -422,6 +425,67 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
             logger.warning("[rh_mcp_adapter] get_fills failed: %s", exc)
             return [], fresh
 
+    # ── 24h tradeability probe (TIER-2 overnight, call before ordering) ──
+
+    def get_equity_tradability(self, symbols: list[str]) -> dict[str, dict]:
+        """Per-session tradeability for up to 10 equity symbols via the RH MCP
+        ``get_equity_tradability`` tool. Returns ``{SYM: {overnight_eligible, extended_eligible,
+        fractional}}`` parsed from the per-session eligibility field. Call BEFORE placing an
+        overnight order so an ineligible name is SKIPPED at the gate (no untradable-reject spam).
+
+        Batches of <=10 (the tool's cap). Account = the pinned agentic account_number (the tool
+        requires it). Fail-open to ``{}`` on any error / unresolved tool, so the caller fails
+        CLOSED (no positive eligibility = not 24h-armable)."""
+        out: dict[str, dict] = {}
+        syms = [str(s or "").strip().upper() for s in (symbols or []) if str(s or "").strip()]
+        if not syms:
+            return out
+        if not self._resolve_tool("tradability"):
+            return out
+        if not self._account_number:
+            return out
+        for i in range(0, len(syms), 10):
+            batch = syms[i : i + 10]
+            try:
+                res = self._call(
+                    "tradability",
+                    self._read_args({_ARG_KEYS["symbol"]: ",".join(batch)}),
+                )
+            except (VenueAdapterError, RhMcpError, NeedsReauth) as exc:
+                logger.warning("[rh_mcp_adapter] get_equity_tradability(%s) failed: %s", batch, exc)
+                continue
+            for row in self._as_order_dicts(res.data()):
+                sym = str(_pick(row, _RESP_KEYS["symbol"]) or "").strip().upper()
+                if not sym:
+                    continue
+                # Per-session eligibility may arrive flat or nested under a sessions object.
+                sessions = row.get("sessions") if isinstance(row.get("sessions"), dict) else row
+                _ovn = self._truthy(
+                    _pick(sessions, ("all_day_hours", "overnight", "twenty_four_hour", "24_hour"))
+                    if isinstance(sessions, dict)
+                    else None
+                )
+                _ext = self._truthy(_pick(sessions, ("extended_hours", "extended")) if isinstance(sessions, dict) else None)
+                out[sym] = {
+                    "overnight_eligible": _ovn,
+                    "extended_eligible": _ext,
+                    "fractional": self._truthy(_pick(row, ("fractional", "tradable_fractional"))),
+                }
+        return out
+
+    @staticmethod
+    def _truthy(v: Any) -> bool:
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in ("true", "1", "yes", "eligible", "tradable", "open")
+        if isinstance(v, dict):
+            # A session object like {"eligible": true} / {"tradable": true}.
+            for k in ("eligible", "tradable", "is_eligible", "enabled", "open"):
+                if k in v:
+                    return RobinhoodAgenticMcpAdapter._truthy(v[k])
+        return bool(v) if v is not None else False
+
     # ── Account pin (the safety latch) ──────────────────────────────────
 
     @staticmethod
@@ -430,6 +494,7 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
         market_hours_override: Optional[str],
         extended_hours_override: Optional[bool],
         extended_hours: bool,
+        overnight: bool = False,
     ) -> str:
         """Normalize the runner's ext-hours signals into the MCP ``market_hours`` enum.
 
@@ -444,9 +509,18 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
         the order with API 400 ``"instrument is untradable for 24 hour trading"``. That single
         wrong enum errored ~every momentum entry at the rail (372 submits -> 4 fills / 44h;
         NXTS submitted 26x, ALL isError). ``extended_hours`` covers the lane's full window and
-        is accepted for normal equities, so the order actually rests + fills."""
+        is accepted for normal equities, so the order actually rests + fills.
+
+        TIER-2 OVERNIGHT (``overnight=True`` — the runner sets this from
+        ``is_overnight_now`` for a name PRE-VERIFIED 24h-eligible): map to ``all_day_hours``
+        (RH's 24-hour market). This is the ONLY place all_day_hours is re-introduced, and
+        ONLY for names auto_arm already proved 24h-eligible — so the 2026-06-23 regression
+        (all_day_hours on NON-eligible names) cannot recur. An explicit market_hours_override
+        still wins (exit-path conventions are unchanged)."""
         if market_hours_override:
             return str(market_hours_override)
+        if overnight:
+            return "all_day_hours"
         if extended_hours_override or extended_hours:
             return "extended_hours"
         return market_hours or _DEFAULT_MARKET_HOURS
@@ -670,6 +744,7 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
         market_hours_override: Optional[str] = None,
         extended_hours_override: Optional[bool] = None,
         extended_hours: bool = False,
+        overnight: bool = False,
         time_in_force: Optional[str] = None,
     ) -> dict:
         try:
@@ -681,7 +756,8 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
                     base_size=base_size,
                     order_type="market",
                     market_hours=self._resolve_market_hours(
-                        market_hours, market_hours_override, extended_hours_override, extended_hours
+                        market_hours, market_hours_override, extended_hours_override,
+                        extended_hours, overnight=overnight,
                     ),
                     time_in_force=time_in_force,
                     client_order_id=client_order_id,
@@ -707,6 +783,7 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
         market_hours_override: Optional[str] = None,
         extended_hours_override: Optional[bool] = None,
         extended_hours: bool = False,
+        overnight: bool = False,
         time_in_force: Optional[str] = None,
     ) -> dict:
         try:
@@ -719,7 +796,8 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
                     order_type="limit",
                     limit_price=limit_price,
                     market_hours=self._resolve_market_hours(
-                        market_hours, market_hours_override, extended_hours_override, extended_hours
+                        market_hours, market_hours_override, extended_hours_override,
+                        extended_hours, overnight=overnight,
                     ),
                     time_in_force=time_in_force,
                     client_order_id=client_order_id,
@@ -954,7 +1032,30 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
         if positions is None:
             return None
         try:
-            for pos in positions:
+            # UNWRAP the agentic positions payload. get_agentic_open_positions can return
+            # the RH-nested shape [{"positions": [{symbol..}, ...]}] (a single wrapper dict
+            # whose "positions" key holds the real rows) OR a flat list of position dicts.
+            # The wrapper has NO "symbol", so iterating it directly missed EVERY symbol and
+            # returned 0.0 for REAL holdings -> the exit clamp read broker_qty=0 -> blocked
+            # every sell (FCUV/WEN stuck + un-exitable 2026-06-25). Flatten BOTH shapes; and
+            # on an UNRECOGNIZED payload fail SAFE as UNKNOWN (None), never 0.0 — assuming
+            # flat from an unparsed payload is the exact failure that blocked exits.
+            rows: list = []
+            recognized = False
+            for item in positions:
+                if isinstance(item, dict) and isinstance(item.get("positions"), list):
+                    rows.extend(item["positions"])
+                    recognized = True
+                elif isinstance(item, dict) and _pick(item, ("symbol", "ticker", "instrument_symbol")):
+                    rows.append(item)
+                    recognized = True
+            if not recognized and positions:
+                logger.warning(
+                    "[rh_mcp_adapter] get_position_quantity(%s): unrecognized positions shape -> unknown (fail-safe)",
+                    want,
+                )
+                return None
+            for pos in rows:
                 if not isinstance(pos, dict):
                     continue
                 sym = str(_pick(pos, ("symbol", "ticker", "instrument_symbol")) or "").strip().upper()
@@ -962,7 +1063,7 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
                     continue
                 qty = _sf(_pick(pos, ("quantity", "shares", "position", "size")))
                 return abs(qty) if qty is not None else 0.0
-            # Successful fetch, symbol absent from the agentic book -> confirmed flat.
+            # Recognized book, symbol genuinely absent -> confirmed flat.
             return 0.0
         except Exception as exc:  # noqa: BLE001 — fail SAFE
             logger.warning("[rh_mcp_adapter] get_position_quantity(%s) parse failed: %s", want, exc)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -15,6 +16,8 @@ from .variants import MomentumStrategyFamily
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -268,24 +271,33 @@ def score_viability(
         )
 
     if spread_bps is not None:
+        # DERATE the score for wider spreads (tighter books rank higher) but do NOT
+        # disqualify the wide-spread EXPLOSIVE low-float movers the Ross lane EXISTS to
+        # trade — they run ~40-90bps and are entered with marketable-limit / maker orders
+        # that cross the spread; the liquidity floor + risk-first sizing already bound
+        # tradeability/cost. The old hard `live_eligible=False` at 12/25bps SILENTLY
+        # disqualified every squeeze (1,495 "Not live-eligible" entry blocks 2026-06-25 —
+        # ILLR 38-91bps, FCUV 70-87bps — the exact names the lane targets). Disqualify ONLY
+        # a TRULY toxic spread, via ONE documented ceiling (default 300bps = broken/halted
+        # quote), not "elevated".
         if spread_bps > 25:
             base -= 0.12
             warnings.append("Wide spread — edge vs fees doubtful")
-            live_eligible = False
         elif spread_bps > 12:
             base -= 0.05
             warnings.append("Elevated spread — caution for live scalps")
+        _max_spread_bps = float(getattr(settings, "chili_momentum_live_eligible_max_spread_bps", 0.0) or 0.0)
+        if _max_spread_bps > 0.0 and spread_bps > _max_spread_bps:
+            warnings.append(f"Spread {spread_bps:.0f}bps exceeds live ceiling {_max_spread_bps:.0f}bps — untradeable")
             live_eligible = False
 
     if slip_bps is not None and slip_bps > 15:
         base -= 0.06
-        warnings.append("High slippage estimate")
-        live_eligible = False
+        warnings.append("High slippage estimate")  # derate only — do NOT disqualify (handled by entry method + sizing)
 
     if fee_ratio is not None and fee_ratio > 0.35:
         base -= 0.1
-        warnings.append("Fee burden high vs target move")
-        live_eligible = False
+        warnings.append("Fee burden high vs target move")  # derate only — do NOT disqualify the lane's target movers
 
     if feats.product_tradable is False:
         live_eligible = False
@@ -310,6 +322,86 @@ def score_viability(
             live_eligible = False
             warnings.append("Below Ross explosiveness floor (RVOL/change) — not a live setup")
     except (TypeError, AttributeError):
+        pass
+
+    # A-SETUP QUALITY FLOOR (LIVE eligibility only; PAPER untouched). The 'puro talo'
+    # root: the lane had no quality floor, so it armed/traded ANYTHING that fired a
+    # trigger -> B/C junk + small losses (AREC: 107M float, rvol 5.9, +12.9% armed+lost;
+    # CODI: float=None/rvol 0/+0% queued on a bare pullback). Ross trades A-setups ONLY:
+    # LOW-FLOAT EXPLOSIVE names (UPC 648K/+227%, SDOT 744K/+84%, WSHP ~11M/+47%). This
+    # gate keeps a name LIVE-tradeable ONLY if ALL hold: (1) low float (<= ceiling — THE
+    # primary discriminator), (2) real RVOL >= the explosive-rvol floor, (3) meaningful
+    # change >= the change floor, (4) FLOAT-CONFIRMED (fail-CLOSED on missing/None/0 —
+    # cannot confirm low-float => reject; this also rejects empty-signal scanner names).
+    # RESTRICT-only: it can ONLY set live_eligible False, never newly True. Reads the
+    # SAME float/rvol/change the scorer uses (ross_momentum._extract_pillars over
+    # feats.meta["ross_signals"][symbol]). EQUITY-only (crypto 24h RVOL/change semantics
+    # differ). Default-OFF / absent signal -> byte-identical. Each rejection is logged
+    # with its reason so over-tightening is observable. Kill-switch
+    # CHILI_MOMENTUM_A_SETUP_QUALITY_FLOOR_ENABLED.
+    try:
+        if (
+            live_eligible
+            and bool(getattr(settings, "chili_momentum_a_setup_quality_floor_enabled", False))
+            and "-USD" not in str(symbol or "").upper()
+        ):
+            _rsig_a = (
+                feats.meta.get("ross_signals")
+                if isinstance(getattr(feats, "meta", None), dict)
+                else None
+            )
+            _sig_a = _rsig_a.get(symbol) if isinstance(_rsig_a, dict) else None
+            if isinstance(_sig_a, dict):
+                from .ross_momentum import _extract_pillars, _first_float
+
+                _rvol_a, _chg_a, _liq_a, _ = _extract_pillars(_sig_a)
+                _float_a = _first_float(_sig_a, "float_shares")
+                _ceil = float(
+                    getattr(
+                        settings,
+                        "chili_momentum_a_setup_quality_floor_float_ceiling_shares",
+                        20_000_000.0,
+                    )
+                    or 20_000_000.0
+                )
+                _rvol_min = float(
+                    getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 3.0
+                )
+                _chg_min = float(
+                    getattr(
+                        settings,
+                        "chili_momentum_a_setup_quality_floor_change_pct_min",
+                        10.0,
+                    )
+                    or 10.0
+                )
+                _reason: str | None = None
+                # (4) FLOAT-CONFIRMED — fail-CLOSED. Missing/None/0 float => cannot
+                # confirm low-float => not an A-setup (catches CODI + empty signals).
+                if _float_a is None or not (_float_a > 0):
+                    _reason = "no-float"
+                # (1) LOW FLOAT — the primary discriminator (AREC 107M fails).
+                elif _ceil > 0 and _float_a > _ceil:
+                    _reason = f"float {_float_a:,.0f} > ceiling {_ceil:,.0f}"
+                # (2) real RVOL.
+                elif _rvol_a is None or _rvol_a < _rvol_min:
+                    _reason = f"rvol {_rvol_a if _rvol_a is not None else 'none'} < {_rvol_min:g}"
+                # (3) meaningful change/move (absolute — magnitude is what matters).
+                elif _chg_a is None or abs(_chg_a) < _chg_min:
+                    _reason = f"change {_chg_a if _chg_a is not None else 'none'} < {_chg_min:g}%"
+                if _reason is not None:
+                    live_eligible = False
+                    warnings.append(f"Below A-setup quality floor ({_reason}) — not a live setup")
+                    logger.info(
+                        "[momentum_viability] A-setup quality floor REJECT live %s: %s "
+                        "(float=%s rvol=%s change=%s)",
+                        symbol,
+                        _reason,
+                        f"{_float_a:,.0f}" if _float_a is not None else None,
+                        _rvol_a,
+                        _chg_a,
+                    )
+    except (TypeError, ValueError, AttributeError):
         pass
 
     if db is not None:
@@ -341,6 +433,31 @@ def score_viability(
                 warnings.append(f"High Ross momentum quality ({_rqf:.2f})")
             elif _rqf <= 0.2:
                 warnings.append(f"Low Ross momentum quality ({_rqf:.2f}) — generic setup")
+        elif (
+            isinstance(_ross_scores, dict)
+            and _ross_scores
+            and bool(getattr(settings, "chili_momentum_no_signal_derank_enabled", False))
+        ):
+            # FIX 2 — EMPTY-SIGNAL DE-RANK. 40/50 live-eligible names carry EMPTY ross_signals
+            # (GALT/PYXS/ANGI — no momentum/velocity data) yet sit eligible at base ~0.6 via the
+            # fail-OPEN absent-signal no-op above; GALT was ENTERED over the real movers. When the
+            # batch DID score SOME names (_ross_scores non-empty) but THIS symbol has NO ross_score
+            # (a real-momentum signal was absent for it), DE-RANK it so ANY scored real mover
+            # (base + tilt ~0.7+) outranks it for the slots. DE-RANK, not hard-exclude: the name
+            # stays eligible and trades if nothing better is up. ONE documented adaptive setting —
+            # the penalty is sized as a fraction of the SAME ROSS_QUALITY_VIABILITY_TILT magnitude
+            # so it scales with the tilt and is not a scattered magic number; the default pushes an
+            # empty-signal name clearly below a scored mover. A scored real mover (symbol IN
+            # _ross_scores) takes the IF branch above and is NEVER touched by this penalty. OFF
+            # (default) / no scored names ⇒ this branch is skipped ⇒ byte-identical.
+            from .ross_momentum import ROSS_QUALITY_VIABILITY_TILT
+
+            _derank_frac = float(
+                getattr(settings, "chili_momentum_no_signal_derank_fraction", 1.0) or 1.0
+            )
+            _penalty = ROSS_QUALITY_VIABILITY_TILT * 0.5 * max(0.0, _derank_frac)
+            base -= _penalty
+            warnings.append("No Ross momentum signal — de-ranked below scored movers")
     except (TypeError, ValueError, AttributeError):
         pass
 

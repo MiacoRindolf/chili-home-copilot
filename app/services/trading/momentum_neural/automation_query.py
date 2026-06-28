@@ -26,6 +26,7 @@ from ..batch_job_constants import JOB_SCHEDULER_WORKER_HEARTBEAT
 from ..brain_neural_mesh.schema import mesh_enabled
 from ..execution_family_registry import (
     EXECUTION_FAMILY_COINBASE_SPOT,
+    EXECUTION_FAMILY_ROBINHOOD_SPOT,
     ExecutionFamilyNotImplementedError,
     normalize_execution_family,
     resolve_live_spot_adapter_factory,
@@ -99,6 +100,7 @@ from .session_lifecycle import (
     phase_hint,
 )
 from .persistence import (
+    KEY_LIVE_EXEC,
     append_trading_automation_event,
     build_runtime_snapshot_values,
     create_trading_automation_session,
@@ -250,6 +252,211 @@ def expire_stale_live_arm_sessions(db: Session, *, user_id: int) -> int:
         except Exception:
             pass
     return n
+
+
+def _reaper_broker_confirms_flat(sess: TradingAutomationSession) -> Optional[bool]:
+    """AREA C broker-truth gate — fail-safe flat check across ALL execution families.
+
+    Returns:
+      * ``True``  — a SUCCESSFUL broker read confirmed this symbol is held at 0 / dust.
+      * ``False`` — a SUCCESSFUL broker read found a REAL non-zero position (do NOT reap).
+      * ``None``  — UNKNOWN (no adapter / API error / unrecognized payload): the caller
+        MUST leave the session alone (never reap on uncertainty).
+
+    Reuses the same per-family reads the live exit clamp trusts: robinhood_agentic_mcp
+    and any adapter exposing get_position_quantity (None=unknown / 0=flat / >0=held);
+    robinhood_spot via broker_service.get_open_position_quantity; coinbase_spot via the
+    momentum balance/dust check. Unhandled family -> None (fail safe)."""
+    fam = normalize_execution_family(sess.execution_family)
+    sym = sess.symbol
+    # Coinbase: balance/dust check (the proven momentum reconcile path).
+    if fam == EXECUTION_FAMILY_COINBASE_SPOT:
+        try:
+            from .live_runner import _broker_balance_confirms_zero
+
+            # _broker_balance_confirms_zero returns True on flat/dust, False on a
+            # FAILED fetch OR a real holding — it cannot distinguish the two, so it is
+            # only safe to treat True as confirmed-flat. A False is ambiguous -> UNKNOWN.
+            from ...coinbase_service import get_accounts_raw
+
+            if not get_accounts_raw():
+                return None  # disconnected -> unknown
+            return True if _broker_balance_confirms_zero(sym) else False
+        except Exception:
+            return None
+    # Robinhood spot: open-position quantity (None=unknown / 0=flat / >0=held).
+    if fam == EXECUTION_FAMILY_ROBINHOOD_SPOT:
+        try:
+            from ...broker_service import get_open_position_quantity
+
+            q = get_open_position_quantity(sym)
+        except Exception:
+            return None
+        if q is None:
+            return None
+        return float(q) <= 1e-6
+    # Robinhood agentic MCP (the live rail) + any adapter with get_position_quantity.
+    try:
+        from ..venue.factory import get_adapter
+
+        adapter = get_adapter(sess.execution_family)
+    except Exception:
+        adapter = None
+    if adapter is None or not hasattr(adapter, "get_position_quantity"):
+        return None  # unknown family / no truth read -> fail safe
+    try:
+        q = adapter.get_position_quantity(sym)
+    except Exception:
+        return None
+    if q is None:
+        return None
+    return float(q) <= 1e-6
+
+
+def _reaper_has_working_entry_order(sess: TradingAutomationSession) -> Optional[bool]:
+    """AREA C in-flight-order gate. Returns True if ANY recorded entry order is still
+    working at the broker (must NOT reap), False if all are terminal / none exist, or
+    None if the broker read is UNKNOWN (fail safe -> caller skips). Mirrors the order
+    sweep in cancel_automation_session (same _oids extraction + adapter.get_order)."""
+    snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
+    le = snap.get(KEY_LIVE_EXEC) if isinstance(snap, dict) else None
+    le = le if isinstance(le, dict) else {}
+    oids: list[str] = []
+    for o in [le.get("entry_order_id")] + list(le.get("entry_order_ids_all") or []):
+        os_ = str(o or "").strip()
+        if os_ and os_ not in oids:
+            oids.append(os_)
+    if not oids:
+        return False  # no entry order recorded -> nothing in flight
+    try:
+        from ..venue.factory import get_adapter
+
+        adapter = get_adapter(sess.execution_family)
+    except Exception:
+        adapter = None
+    if adapter is None:
+        return None  # unknown -> fail safe
+    for oid in oids:
+        try:
+            no, _ = adapter.get_order(oid)
+        except Exception:
+            return None  # unknown -> fail safe
+        if no is None:
+            return None
+        status = str(getattr(no, "status", "") or "").lower()
+        if status not in (
+            "filled", "cancelled", "canceled", "rejected", "failed", "expired", "done", "closed",
+        ):
+            return True  # still working -> in flight, do NOT reap
+    return False
+
+
+def reap_stale_live_sessions(db: Session, *, user_id: int) -> dict[str, Any]:
+    """AREA C — SAFE BOUNDED reaper for dead-but-lingering live sessions.
+
+    Terminalizes sessions that are CONFIRMED dead: (1) live_error past the TTL, and
+    (2) live_bailout past the TTL whose broker position is CONFIRMED 0. NEVER closes a
+    session with a real broker position OR a working entry order — every close is gated
+    on a SUCCESSFUL broker-flat read + no-in-flight-order read (any UNKNOWN/failed read
+    leaves the session alone). Row-locked (FOR UPDATE) so it serializes against a
+    concurrent live_runner tick. live_arm_pending is handled separately by
+    expire_stale_live_arm_sessions. Bounded: only CONFIRMED-stale (>TTL) rows, capped
+    batch. Kill-switch chili_momentum_stale_session_reaper_enabled=False -> no-op."""
+    out: dict[str, Any] = {"reaped": 0, "skipped_unknown": 0, "skipped_held": 0, "skipped_in_flight": 0, "candidates": 0}
+    if not bool(getattr(settings, "chili_momentum_stale_session_reaper_enabled", True)):
+        return out
+    if not _tables_present(db):
+        return out
+    now = datetime.utcnow()
+    ttl_s = max(
+        300.0,
+        float(getattr(settings, "chili_momentum_stale_session_reaper_ttl_seconds", 7200.0) or 7200.0),
+    )
+    cutoff = now - timedelta(seconds=ttl_s)
+    _reapable = (STATE_LIVE_ERROR, STATE_LIVE_BAILOUT)
+    rows = (
+        db.query(TradingAutomationSession)
+        .filter(
+            TradingAutomationSession.user_id == user_id,
+            TradingAutomationSession.mode == "live",
+            TradingAutomationSession.state.in_(_reapable),
+            TradingAutomationSession.updated_at < cutoff,
+        )
+        .order_by(TradingAutomationSession.updated_at.asc())
+        .limit(50)  # bounded batch — never sweep the whole table in one pass
+        .all()
+    )
+    out["candidates"] = len(rows)
+    for row in rows:
+        sid = row.id
+        # Re-load under a row lock so the decision serializes vs a live_runner tick.
+        q = db.query(TradingAutomationSession).filter(
+            TradingAutomationSession.id == sid,
+            TradingAutomationSession.user_id == user_id,
+        )
+        try:
+            q = q.with_for_update()
+        except Exception:
+            pass
+        sess = q.one_or_none()
+        if sess is None:
+            continue
+        # Re-validate state + age UNDER the lock (a tick may have advanced it).
+        if sess.state not in _reapable:
+            continue
+        _upd = sess.updated_at or sess.started_at or now
+        if _upd >= cutoff:
+            continue
+        # GATE 1 — no working entry order (fail safe on unknown).
+        in_flight = _reaper_has_working_entry_order(sess)
+        if in_flight is None:
+            out["skipped_unknown"] += 1
+            continue
+        if in_flight is True:
+            out["skipped_in_flight"] += 1
+            continue
+        # GATE 2 — broker CONFIRMS flat (fail safe on unknown / real holding).
+        flat = _reaper_broker_confirms_flat(sess)
+        if flat is None:
+            out["skipped_unknown"] += 1
+            continue
+        if flat is False:
+            out["skipped_held"] += 1
+            continue
+        prev = sess.state
+        if prev == STATE_LIVE_BAILOUT:
+            # live_bailout is in LIVE_CANCELLABLE_STATES -> route through the
+            # production terminalizer (adopt-on-cancel-fill is a safe no-op here
+            # since the broker is confirmed flat + no order in flight).
+            res = cancel_automation_session(db, user_id=user_id, session_id=sid)
+            if res.get("ok"):
+                out["reaped"] += 1
+                append_trading_automation_event(
+                    db, sid, "stale_session_reaped",
+                    {"previous_state": prev, "via": "cancel", "reason": "broker_flat_stale_bailout",
+                     "ttl_seconds": ttl_s, "terminal_state": res.get("state")},
+                    correlation_id=sess.correlation_id, source_node_id="momentum_automation_monitor",
+                )
+        else:
+            # live_error has NO legal outgoing FSM edge — terminalize the row directly
+            # (the same pattern expire_stale_live_arm_sessions uses for arm_pending).
+            sess.state = STATE_LIVE_CANCELLED
+            sess.ended_at = now
+            sess.updated_at = now
+            append_trading_automation_event(
+                db, sid, "stale_session_reaped",
+                {"previous_state": prev, "via": "direct", "reason": "broker_flat_stale_error",
+                 "ttl_seconds": ttl_s, "terminal_state": STATE_LIVE_CANCELLED},
+                correlation_id=sess.correlation_id, source_node_id="momentum_automation_monitor",
+            )
+            out["reaped"] += 1
+            try:
+                from .feedback_emit import emit_feedback_after_terminal_transition
+
+                emit_feedback_after_terminal_transition(db, sess)
+            except Exception:
+                pass
+    return out
 
 
 def neural_config_strip() -> dict[str, Any]:

@@ -32,7 +32,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ....config import settings
-from .market_profile import is_data_session_now
+from .market_profile import is_data_session_now, is_overnight_now, is_sample_session_now
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,113 @@ def _in_sampling_window(now_utc: datetime) -> bool:
     # from 4:00, so the tape/selection must already be warm by the first allowed
     # entry (operator 2026-06-11: preparation time before the open). Holidays
     # aren't excluded — stale quotes fail the per-row sanity filters.
-    return is_data_session_now("EQUITY", now=now_utc)
+    #
+    # TIER-2 (chili_momentum_overnight_tape_enabled, DEFAULT OFF): is_sample_session_now
+    # also opens overnight (20:00-04:00 ET) when that flag is ON; the per-row overnight
+    # whitelist + cadence cap are applied in sample_universe_nbbo_spreads. Flag OFF =>
+    # is_sample_session_now == is_data_session_now (byte-identical to the prior gate).
+    return is_sample_session_now("EQUITY", now=now_utc)
+
+
+def early_premarket_first_mover(
+    *,
+    now_utc: datetime,
+    window_min: float,
+    min_move_pct: float,
+    freshness_sec: float,
+) -> tuple[Optional[datetime], int, Optional[str], Optional[float]]:
+    """TIER-1 reader for the adaptive early-premarket unlock (market_profile.
+    early_premarket_unlocked). Over the last ``window_min`` minutes of EQUITY tape, find the
+    DISTINCT symbols whose MID moved >= ``min_move_pct`` AND whose freshest row is younger
+    than ``freshness_sec``. Returns:
+      (earliest_qualifying_observed_at_utc | None, n_qualifying_symbols, lead_symbol, lead_pct).
+
+    Spread-cleanliness is already guaranteed at write time (``_ross_row`` drops crossed/
+    locked/>5000bps rows), so every tape row here is a clean NBBO. Pure read; best-effort
+    ([] semantics) so any failure returns (None, 0, None, None) and the caller falls back
+    to the fixed clock. The first-mover time is the earliest first-seen observation among
+    qualifying symbols — selection RANK prefers the earliest igniter."""
+    from ....db import SessionLocal
+
+    # observed_at is TIMESTAMPTZ (SQLAlchemy returns tz-AWARE UTC). Keep the window bounds
+    # tz-aware too so `last_at < fresh_cut` compares aware-vs-aware (a naive .replace(tzinfo=
+    # None) here raised "can't compare offset-naive and offset-aware datetimes", which the
+    # caller swallowed -> the unlock never fired and silently fell back to the fixed clock).
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    since = now_utc - timedelta(minutes=float(window_min))
+    fresh_cut = now_utc - timedelta(seconds=float(freshness_sec))
+    db = SessionLocal()
+    try:
+        rows = db.execute(
+            text(
+                "WITH recent AS ("
+                "  SELECT symbol, mid, observed_at,"
+                "         row_number() OVER (PARTITION BY symbol ORDER BY observed_at ASC) rn_a,"
+                "         row_number() OVER (PARTITION BY symbol ORDER BY observed_at DESC) rn_d,"
+                "         min(observed_at) OVER (PARTITION BY symbol) first_at,"
+                "         max(observed_at) OVER (PARTITION BY symbol) last_at"
+                "  FROM momentum_nbbo_spread_tape"
+                "  WHERE observed_at >= :since AND mid > 0 AND symbol NOT LIKE '%-USD'"
+                ") "
+                "SELECT a.symbol, a.mid AS first_mid, d.mid AS last_mid, a.first_at, a.last_at "
+                "FROM recent a JOIN recent d ON d.symbol = a.symbol AND d.rn_d = 1 "
+                "WHERE a.rn_a = 1"
+            ),
+            {"since": since},
+        ).fetchall()
+    except Exception as exc:
+        logger.debug("[nbbo_tape] early-premarket first-mover read failed: %s", exc)
+        return None, 0, None, None
+    finally:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+    qualifying: list[tuple[datetime, str, float]] = []
+    for sym, first_mid, last_mid, first_at, last_at in rows:
+        try:
+            f, l = float(first_mid), float(last_mid)
+        except (TypeError, ValueError):
+            continue
+        if f <= 0 or last_at is None or first_at is None:
+            continue
+        # Coerce any naive row datetime to UTC-aware so the comparison can never raise on a
+        # tz-mismatch (defensive: a stray naive row must degrade gracefully, not fail the read).
+        if last_at.tzinfo is None:
+            last_at = last_at.replace(tzinfo=timezone.utc)
+        if first_at.tzinfo is None:
+            first_at = first_at.replace(tzinfo=timezone.utc)
+        if last_at < fresh_cut:  # freshest row too old — name not actually trading now
+            continue
+        pct = abs((l - f) / f * 100.0)
+        if pct >= float(min_move_pct):
+            qualifying.append((first_at, str(sym).upper(), pct))
+    if not qualifying:
+        return None, 0, None, None
+    qualifying.sort(key=lambda t: t[0])  # earliest first-seen = the lead igniter
+    first_at, lead_sym, lead_pct = qualifying[0]
+    return (
+        first_at.replace(tzinfo=timezone.utc) if first_at.tzinfo is None else first_at,
+        len(qualifying),
+        lead_sym,
+        round(lead_pct, 2),
+    )
+
+
+def _overnight_24h_whitelist() -> Optional[set[str]]:
+    """The 24h-eligible symbol whitelist to sample overnight (Tier-2). Sourced from
+    auto_arm's positive-eligibility cache so the sampler only writes overnight rows for
+    names RH says are 24h-tradeable. Returns None when unavailable (caller skips overnight
+    sampling rather than sampling the whole universe). Best-effort."""
+    try:
+        from .auto_arm import known_24h_eligible_symbols
+
+        wl = known_24h_eligible_symbols()
+        return {str(s).upper() for s in wl} if wl else None
+    except Exception:
+        return None
 
 
 def _ross_row(s: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -129,6 +235,18 @@ def sample_universe_nbbo_spreads(db: Session, *, now_utc: Optional[datetime] = N
         r = _ross_row(s)
         if r is not None:
             rows.append(r)
+    # TIER-2 overnight whitelist: outside the normal data session (i.e. we are sampling
+    # ONLY because overnight-tape is enabled), restrict the write to the 24h-eligible
+    # whitelist so the overnight tape can't regrow the table on the full universe (the
+    # exit_parity_log bloat lesson). When the whitelist is unavailable, write nothing
+    # overnight (fail-closed on the higher-risk path). Data-session sampling is unchanged.
+    if rows and not is_data_session_now("EQUITY", now=now_utc) and is_overnight_now(
+        "EQUITY", now=now_utc
+    ):
+        wl = _overnight_24h_whitelist()
+        if not wl:
+            return {"ok": True, "inserted": 0, "skipped": "overnight_no_whitelist"}
+        rows = [r for r in rows if str(r.get("symbol") or "").upper() in wl]
     if not rows:
         return {"ok": True, "inserted": 0, "universe": 0}
 

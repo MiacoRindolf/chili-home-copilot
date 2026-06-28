@@ -14,10 +14,23 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from ....config import settings
 
 logger = logging.getLogger(__name__)
+
+_NY_TZ = ZoneInfo("America/New_York")
+
+# ONE documented knob: the premarket PR-cadence windows (top/bottom of the hour) Ross
+# watches for press releases. Comma-separated HH:MM-HH:MM ranges in ET. Default = the
+# 7:00/7:30/8:00/8:30 drops. Used by ``pr_cadence_active`` (cadence tilt, default OFF).
+PR_CADENCE_HOURS_DEFAULT = "7:00-7:30,8:00-8:30"
+# Premarket window bound (minutes-of-day ET). A PR-cadence lean-in is premarket-only —
+# the regular-session open (09:30 ET) ends the premarket PR-drop regime. Fixed exchange
+# fact, named once here (not a tunable knob).
+_REGULAR_OPEN_MIN_ET = 9 * 60 + 30  # 09:30 ET
 
 # ONE documented knob: how strongly a news catalyst tilts viability (vs Ross's 0.20
 # selection tilt). News is one confirming signal, so a smaller boost.
@@ -52,6 +65,66 @@ def _news_catalyst_max_age_min() -> int:
     except (TypeError, ValueError):
         return NEWS_CATALYST_MAX_AGE_MIN
     return max(15, min(v, 720))
+
+
+def _parse_cadence_windows(spec: str | None) -> list[tuple[int, int]]:
+    """Parse "HH:MM-HH:MM,HH:MM-HH:MM" (ET) into [(start_min, end_min), ...].
+
+    Fail-SAFE: a malformed entry is skipped; a fully-malformed spec falls back to the
+    documented default. Returns minutes-of-day ET ranges (inclusive start, exclusive end).
+    """
+    text = str(spec or "").strip() or PR_CADENCE_HOURS_DEFAULT
+    out: list[tuple[int, int]] = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            lo, hi = part.split("-", 1)
+            lh, lm = lo.strip().split(":", 1)
+            hh, hm = hi.strip().split(":", 1)
+            a = int(lh) * 60 + int(lm)
+            b = int(hh) * 60 + int(hm)
+            if 0 <= a < b <= 24 * 60:
+                out.append((a, b))
+        except Exception:
+            continue
+    if not out:
+        # spec was fully malformed — fall back to the default windows.
+        for part in PR_CADENCE_HOURS_DEFAULT.split(","):
+            lo, hi = part.split("-", 1)
+            lh, lm = lo.split(":", 1)
+            hh, hm = hi.split(":", 1)
+            out.append((int(lh) * 60 + int(lm), int(hh) * 60 + int(hm)))
+    return out
+
+
+def pr_cadence_active(*, now: datetime | None = None) -> bool:
+    """True iff the current ET time is inside a PREMARKET PR-cadence window.
+
+    Ross watches the top/bottom of the hour premarket (7:00/7:30/8:00/8:30 ET) for PR
+    drops. This returns True only when ET-now falls inside one of the configured windows
+    AND it is still premarket (before 09:30 ET) — a pure time-of-day gate the news-cadence
+    tilt keys on. Fail-SAFE to False on any clock error (no boost). ``now`` is injectable
+    for tests (naive ⇒ assumed ET, aware ⇒ converted to ET).
+    """
+    try:
+        if now is None:
+            now_et = datetime.now(_NY_TZ)
+        elif now.tzinfo is None:
+            now_et = now.replace(tzinfo=_NY_TZ)
+        else:
+            now_et = now.astimezone(_NY_TZ)
+        cur = now_et.hour * 60 + now_et.minute
+        if cur >= _REGULAR_OPEN_MIN_ET:
+            return False  # premarket-only
+        spec = getattr(settings, "chili_momentum_news_pr_cadence_hours", PR_CADENCE_HOURS_DEFAULT)
+        for a, b in _parse_cadence_windows(spec):
+            if a <= cur < b:
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def earnings_catalyst_symbols() -> set[str]:

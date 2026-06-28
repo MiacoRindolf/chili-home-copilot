@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Optional
@@ -599,6 +600,105 @@ def _ladder_equity(
     return LadderRead(imb_now, pctile, ofi, micro, bid_refill, ask_build, spread, age, len(series))
 
 
+# --- FLOAT BACKFILL (anti-flicker) ---------------------------------------------------
+# Share FLOAT is STATIC (does not change intraday), so a known value is a CONSTANT, not
+# stale dynamic data — caching/backfilling it is correct + safe. The scanner bridge
+# forwards a ROTATING subset of movers per cycle; a symbol absent from THIS tick's
+# ross_signals never gets float-enriched, so its persisted
+# execution_readiness_json.extra.ross_signals[sym].float_shares flickers to None and the
+# fail-closed A-setup quality floor wrongly rejects a genuine low-float A-setup. We
+# backfill the missing float from the last-known value: a bounded in-process cache first
+# (cheap, survives within the process), else the prior persisted viability row (durable,
+# survives restarts). Gated by chili_momentum_float_persistence_enabled (OFF => no calls
+# => byte-identical). Equities only; never overwrites a fresh real float; never fabricates
+# for a never-seen symbol (stays None => fail-closed reject = correct).
+_FLOAT_CACHE_MAX = 4096  # hard max size (bounded — no unbounded growth)
+_FLOAT_CACHE_TTL_S = 86400.0  # 24h TTL; float is static so a generous TTL is safe
+# symbol -> (float_shares, monotonic_expiry_ts)
+_FLOAT_LAST_KNOWN: dict[str, tuple[float, float]] = {}
+
+
+def _float_cache_get(symbol: str) -> float | None:
+    """Last-known float for symbol from the bounded in-process cache (None if absent/expired)."""
+    try:
+        entry = _FLOAT_LAST_KNOWN.get(symbol)
+        if entry is None:
+            return None
+        val, exp = entry
+        if time.monotonic() >= exp:
+            _FLOAT_LAST_KNOWN.pop(symbol, None)
+            return None
+        return val
+    except Exception:
+        return None
+
+
+def _float_cache_put(symbol: str, float_shares: float) -> None:
+    """Record a known float for symbol (bounded: evicts the oldest-expiring entry when full)."""
+    try:
+        if not float_shares or float_shares <= 0:
+            return
+        if (
+            symbol not in _FLOAT_LAST_KNOWN
+            and len(_FLOAT_LAST_KNOWN) >= _FLOAT_CACHE_MAX
+        ):
+            # evict the entry that expires soonest (approx-LRU; keeps the map bounded)
+            try:
+                oldest = min(_FLOAT_LAST_KNOWN.items(), key=lambda kv: kv[1][1])[0]
+                _FLOAT_LAST_KNOWN.pop(oldest, None)
+            except ValueError:
+                pass
+        _FLOAT_LAST_KNOWN[symbol] = (float(float_shares), time.monotonic() + _FLOAT_CACHE_TTL_S)
+    except Exception:
+        pass
+
+
+def _last_known_float_for_symbol(db: Session, symbol: str) -> float | None:
+    """Last-known float for symbol: bounded in-process cache first, else the prior persisted
+    momentum_symbol_viability row's execution_readiness_json.extra.ross_signals[symbol].float_shares.
+
+    Returns None when no prior value exists (never-seen symbol => stays None => fail-closed).
+    Read-only; best-effort (any error => None, fail-open to the market_cap/price estimate)."""
+    cached = _float_cache_get(symbol)
+    if cached is not None:
+        return cached
+    try:
+        from ....models.trading import MomentumSymbolViability
+
+        rows = (
+            db.query(MomentumSymbolViability.execution_readiness_json)
+            .filter(MomentumSymbolViability.symbol == symbol)
+            .order_by(MomentumSymbolViability.freshness_ts.desc())
+            .limit(4)
+            .all()
+        )
+        for (erj,) in rows:
+            if not isinstance(erj, dict):
+                continue
+            extra = erj.get("extra")
+            if not isinstance(extra, dict):
+                continue
+            rsig = extra.get("ross_signals")
+            if not isinstance(rsig, dict):
+                continue
+            sig = rsig.get(symbol)
+            if not isinstance(sig, dict):
+                continue
+            _f = sig.get("float_shares")
+            if _f is None:
+                continue
+            try:
+                fval = float(_f)
+            except (TypeError, ValueError):
+                continue
+            if fval > 0:
+                _float_cache_put(symbol, fval)  # warm the cache for cheap subsequent ticks
+                return fval
+    except Exception:
+        return None
+    return None
+
+
 def maybe_run_momentum_neural_tick(
     db: Session,
     ev: BrainActivationEvent,
@@ -691,6 +791,14 @@ def run_momentum_neural_tick(
                                     continue
                         return None
 
+                    # anti-flicker backfill: when this cycle can't resolve a real float for a
+                    # symbol (rotating-subset enrichment), fill from the last-known STATIC value
+                    # so float_shares never flickers to None for a name we've already resolved.
+                    # OFF => byte-identical (no cache writes, no last-known reads). FILLS missing
+                    # only; never overwrites a fresh real float; never fabricates a never-seen one.
+                    _float_backfill = bool(
+                        getattr(settings, "chili_momentum_float_persistence_enabled", False)
+                    )
                     for _sym, _sig in _ross_signals.items():
                         if not isinstance(_sig, dict) or "-USD" in str(_sym):
                             continue  # equities only
@@ -698,7 +806,16 @@ def run_momentum_neural_tick(
                             _f = get_ticker_float(_sym)
                             if _f and _f > 0:
                                 _sig["float_shares"] = float(_f)
+                                if _float_backfill:
+                                    _float_cache_put(_sym, float(_f))  # record the fresh real float
                                 continue
+                            # fresh real float unavailable this cycle: BACKFILL last-known (static)
+                            # before the market_cap/price estimate, so a known float never flickers.
+                            if _float_backfill:
+                                _lk = _last_known_float_for_symbol(db, _sym)
+                                if _lk and _lk > 0:
+                                    _sig["float_shares"] = float(_lk)
+                                    continue
                             _mc = _pick_num(_sig, ("market_cap", "marketcap"))
                             _px = _pick_num(_sig, ("price", "last", "close", "last_price"))
                             if _mc and _px and _px > 0:
@@ -715,7 +832,10 @@ def run_momentum_neural_tick(
             # tilt PREFERS clean daily breakouts; it can never block a fill.
             if bool(getattr(settings, "chili_momentum_daily_context_enabled", True)):
                 try:
-                    from .ross_momentum import ROSS_PILLAR_WEIGHTS_DAILY_CONTEXT
+                    from .ross_momentum import (
+                        ROSS_PILLAR_WEIGHTS_DAILY_CONTEXT,
+                        daily_200ema_room_subscore as _r200_sub,
+                    )
                     from .daily_levels import compute_daily_context
                     from ..market_data import fetch_ohlcv_df as _fetch_daily
 
@@ -725,6 +845,12 @@ def run_momentum_neural_tick(
                     _gap_tilt = bool(getattr(settings, "chili_momentum_gap_geometry_tilt_enabled", True))
                     _rej_derate = bool(getattr(settings, "chili_momentum_red_rejection_derate_enabled", True))
                     _blue_ipo = bool(getattr(settings, "chili_momentum_blue_sky_recent_ipo_enabled", True))
+                    # 200-EMA ROOM tilt (opt-in, default OFF ⇒ dist_to_sma_200_atr stays discarded =
+                    # byte-identical). Reward clear room above the daily 200MA, penalise pinned/below.
+                    # Folded INTO daily_structure_pct (no viability.py change). Resolve flag + knob once.
+                    _r200_on = bool(getattr(settings, "chili_momentum_daily_200ema_room_enabled", False))
+                    _r200_clear = float(getattr(
+                        settings, "chili_momentum_daily_200ema_clear_room_atr", 1.0))
                     # blue-sky needs a long window to know the all-time-high + IPO recency;
                     # fetch max history only when that tilt is on (else keep the 1y default).
                     _period = "max" if _blue_ipo else "1y"
@@ -762,7 +888,18 @@ def run_momentum_neural_tick(
                                 fresh_catalyst=_fresh_cat,
                             )
                             if _dctx.daily_structure_pct is not None:
-                                _sig["daily_structure_pct"] = _dctx.daily_structure_pct
+                                _ds_val = _dctx.daily_structure_pct
+                                # 200-EMA ROOM blend (opt-in): fold the [0,1] room sub-score INTO
+                                # daily_structure_pct as an equal-weight average (a MEASURED minority
+                                # nudge, never a veto). OFF / unknown (< 200 bars) ⇒ unchanged.
+                                if _r200_on:
+                                    _room = _r200_sub(
+                                        _dctx.dist_to_sma_200_atr, clear_room_atr=_r200_clear)
+                                    if _room is not None:
+                                        _ds_val = max(0.0, min(1.0, 0.5 * _ds_val + 0.5 * _room))
+                                        _sig["dist_to_sma_200_atr"] = _dctx.dist_to_sma_200_atr
+                                        _sig["daily_200ema_room_pct"] = _room
+                                _sig["daily_structure_pct"] = _ds_val
                                 _sig["daily_breaking_major"] = bool(_dctx.breaking_major_level)
                                 _n_daily += 1
                         except Exception:
@@ -789,6 +926,18 @@ def run_momentum_neural_tick(
                     )
                     from .market_profile import minutes_since_regular_open as _mins_open
 
+                    # OVER-ROTATION (exhaustion) fix — opt-in, default OFF (byte-identical).
+                    # Resolve the kill-switch + its two documented knobs ONCE; when OFF we pass
+                    # overrotation_threshold=None ⇒ the signal uses the legacy monotone curve.
+                    _overrot_on = bool(getattr(
+                        settings, "chili_momentum_float_overrotation_fix_enabled", False))
+                    _overrot_thr = (
+                        float(getattr(settings, "chili_momentum_float_overrotation_threshold", 3.0))
+                        if _overrot_on else None
+                    )
+                    _overrot_min = float(getattr(
+                        settings, "chili_momentum_float_overrotation_session_minute", 120.0))
+
                     _n_fr = 0
                     for _sym, _sig in _ross_signals.items():
                         if not isinstance(_sig, dict) or str(_sym).upper().endswith("-USD"):
@@ -810,7 +959,12 @@ def run_momentum_neural_tick(
                             # session fraction: regular session is 390 min (09:30-16:00 ET).
                             _mo = _mins_open(_sym)
                             _sf = (max(0.0, float(_mo)) / 390.0) if _mo is not None else None
-                            _fr = _float_rotation_signal(_cum_vol, _flt, _sf)
+                            _fr = _float_rotation_signal(
+                                _cum_vol, _flt, _sf,
+                                overrotation_threshold=_overrot_thr,
+                                overrotation_session_minute=_overrot_min,
+                                minutes_since_open=(float(_mo) if _mo is not None else None),
+                            )
                             if _fr.rotation_pct is not None:
                                 _sig["float_rotation_pct"] = _fr.rotation_pct
                                 _sig["float_rotation"] = _fr.float_rotation
@@ -887,6 +1041,136 @@ def run_momentum_neural_tick(
                         if _n_sf > 0:
                             _weights = dict(_weights)
                             _weights["squeeze_fuel"] = ROSS_SQUEEZE_FUEL_PILLAR_WEIGHT
+                except Exception:
+                    pass
+            # NEWS-CATALYST TILT (default OFF => byte-identical): the 🔥 pillar Ross weights
+            # heavily on his scanner — the 4th Ross pillar that was a STUB until now. Map each
+            # symbol's REAL Polygon/Benzinga catalyst GRADE (the strong/weak/fake/all sets the
+            # pipeline already computes from headlines — no new fetch) to a [0,1] news_catalyst_pct
+            # sub-score and FOLD the news_catalyst pillar onto the ACTIVE weight-set (composable —
+            # score_universe self-renormalises over present pillars). MEASURED: 0.10 weight keeps
+            # news a minority RE-RANK; float/RVOL/change stay primary. GRACEFUL: a name in NO
+            # catalyst set gets news_catalyst_pct=None ⇒ the pillar is omitted for it (NEUTRAL, no
+            # penalty, never rejected). Works for equities AND crypto (the catalyst sets are
+            # symbol-keyed). Flag DEFAULT-OFF (operator confirms feed amplitude first); OFF ⇒ the
+            # sub-score is never stamped and the pillar weight is never folded ⇒ byte-identical.
+            if bool(getattr(settings, "chili_momentum_news_catalyst_weight_enabled", False)):
+                try:
+                    from .ross_momentum import (
+                        ROSS_NEWS_CATALYST_PILLAR_WEIGHT,
+                        ROSS_NEWS_GRADE_STRONG,
+                        news_catalyst_signal as _news_catalyst_signal,
+                    )
+                    from .catalyst import (
+                        all_catalyst_symbols as _nc_all,
+                        strong_catalyst_symbols as _nc_strong,
+                        weak_catalyst_symbols as _nc_weak,
+                        fake_catalyst_symbols as _nc_fake,
+                        pr_cadence_active as _pr_cadence_active,
+                    )
+
+                    # NEWS-PR CADENCE (opt-in, default OFF ⇒ no cadence boost = byte-identical):
+                    # Ross watches the top/bottom of the hour PREMARKET (7:00/7:30/8:00/8:30 ET)
+                    # for PR drops. When ON AND ET-now is inside a premarket PR window, a catalyst
+                    # name (already stamped with a news_catalyst_pct) gets a small additional
+                    # LEAN-IN toward 1.0 — a time-of-day nudge ON TOP of the grade, never a new
+                    # pillar and never a penalty (outside the window the name is unchanged).
+                    _pr_cadence_on = bool(getattr(
+                        settings, "chili_momentum_news_pr_cadence_enabled", False))
+                    _pr_window_now = _pr_cadence_on and _pr_cadence_active()
+
+                    # Cached, best-effort grade sets (each fails-open to empty).
+                    def _safe_set(fn) -> set[str]:
+                        try:
+                            return {str(s).upper() for s in (fn() or set())}
+                        except Exception:
+                            return set()
+
+                    _set_all = _safe_set(_nc_all)
+                    _set_strong = _safe_set(_nc_strong)
+                    _set_weak = _safe_set(_nc_weak)
+                    _set_fake = _safe_set(_nc_fake)
+                    # Only do per-symbol work if SOME news data exists this pass (else graceful no-op).
+                    if _set_all or _set_strong or _set_weak or _set_fake:
+                        _n_nc = 0
+                        for _sym, _sig in _ross_signals.items():
+                            if not isinstance(_sig, dict):
+                                continue
+                            try:
+                                _nc = _news_catalyst_signal(
+                                    _sym,
+                                    strong_catalyst_symbols=_set_strong,
+                                    weak_catalyst_symbols=_set_weak,
+                                    fake_catalyst_symbols=_set_fake,
+                                    all_catalyst_symbols=_set_all,
+                                )
+                                if _nc.news_pct is not None:
+                                    _np = _nc.news_pct
+                                    # PR-CADENCE lean-in (opt-in): during a premarket PR window a
+                                    # FRESH-news catalyst name is treated as AT LEAST strong-grade
+                                    # (Ross leans in when the PR drops on the half/whole hour). Reuses
+                                    # the documented STRONG grade reference — no new magic number — and
+                                    # only ever RAISES the sub-score, never penalises. Outside the
+                                    # window (or flag OFF) ⇒ _np == _nc.news_pct ⇒ byte-identical.
+                                    if _pr_window_now:
+                                        _np = max(_np, float(ROSS_NEWS_GRADE_STRONG))
+                                    _sig["news_catalyst_pct"] = _np
+                                    _sig["news_catalyst_grade"] = _nc.grade
+                                    if _pr_window_now and _np > _nc.news_pct:
+                                        _sig["news_pr_cadence_boost"] = True
+                                    _n_nc += 1
+                            except Exception:
+                                continue
+                        if _n_nc > 0:
+                            _weights = dict(_weights)
+                            _weights["news_catalyst"] = ROSS_NEWS_CATALYST_PILLAR_WEIGHT
+                except Exception:
+                    pass
+            # PRICE SWEET-SPOT TILT (default OFF ⇒ byte-identical): Ross trades mostly $3-10.
+            # The HARD $1-20 price-band gate (auto_arm) is UNTOUCHED — this is a SOFT PREFERENCE
+            # pillar that BOOSTS names in the $3-10 sweet-spot and mildly de-rates names outside
+            # it (but still within the broad band). Map each EQUITY signal's current price to a
+            # [0.5,1.0] price_band_pct sub-score and FOLD a SMALL 0.05-weight pillar onto the
+            # active weight-set (composable — score_universe self-renormalises). MEASURED: price
+            # is the weakest pillar (half the others), so it only breaks near-ties; float/RVOL/
+            # change stay primary. Equity-only (crypto price semantics differ; the band gate is
+            # equity-only too). Flag DEFAULT-OFF; OFF ⇒ no sub-score stamped, no weight folded ⇒
+            # byte-identical.
+            if bool(getattr(settings, "chili_momentum_price_sweetspot_tilt_enabled", False)):
+                try:
+                    from .ross_momentum import (
+                        ROSS_PRICE_SWEETSPOT_PILLAR_WEIGHT,
+                        price_sweetspot_subscore as _price_sweetspot_subscore,
+                    )
+
+                    _ss_min = float(getattr(settings, "chili_momentum_price_sweetspot_min", 3.0))
+                    _ss_max = float(getattr(settings, "chili_momentum_price_sweetspot_max", 10.0))
+                    _n_pb = 0
+                    for _sym, _sig in _ross_signals.items():
+                        if not isinstance(_sig, dict) or str(_sym).upper().endswith("-USD"):
+                            continue  # equities only
+                        try:
+                            _px = None
+                            for _pk in ("price", "last", "close", "last_price"):
+                                _pv = _sig.get(_pk)
+                                if _pv is not None:
+                                    try:
+                                        _px = float(_pv)
+                                        break
+                                    except (TypeError, ValueError):
+                                        continue
+                            if _px is None:
+                                continue  # fail-open: omit the pillar for this name
+                            _pb = _price_sweetspot_subscore(
+                                _px, sweet_min=_ss_min, sweet_max=_ss_max)
+                            if _pb is not None:
+                                _sig["price_band_pct"] = _pb
+                                _n_pb += 1
+                        except Exception:
+                            continue
+                    if _n_pb > 0:
+                        _weights = dict(_weights)
+                        _weights["price_band"] = ROSS_PRICE_SWEETSPOT_PILLAR_WEIGHT
                 except Exception:
                     pass
             meta["ross_scores"] = {

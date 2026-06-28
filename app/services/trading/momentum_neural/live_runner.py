@@ -15,7 +15,7 @@ import json
 import logging
 import math
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 from sqlalchemy.orm import Session
@@ -37,7 +37,13 @@ from ..autopilot_scope import (
     check_autopilot_entry_gate,
 )
 from ..governance import is_kill_switch_active
-from ..venue.protocol import NormalizedOrder, NormalizedProduct, is_fresh_enough
+from ..venue.protocol import (
+    FreshnessMeta,
+    NormalizedOrder,
+    NormalizedProduct,
+    NormalizedTicker,
+    is_fresh_enough,
+)
 from .persistence import append_trading_automation_event
 from ..decision_ledger import (
     finalize_packet_after_simulated_exit,
@@ -57,6 +63,7 @@ from .risk_policy import (
     policy_int_cap,
 )
 from .paper_execution import (
+    _classify_cadence,
     cushion_adaptive_trail_stop,
     breakeven_stop_after_partial,
     class_aware_reward_risk,
@@ -67,6 +74,7 @@ from .paper_execution import (
     pyramid_blend_on_fill,
     regime_atr_pct,
     runner_trail_stop,
+    scale_grid_levels,
     scale_out_fraction,
     scale_out_quantity,
     stop_target_prices,
@@ -93,7 +101,23 @@ from .live_fsm import (
 )
 from .session_lifecycle import is_operator_paused
 from .strategy_params import normalize_strategy_params
-from .entry_gates import _entry_extension_veto, _entry_flow_veto, breakout_failed_to_hold
+from .entry_gates import (
+    _entry_extension_veto,
+    _entry_flow_veto,
+    _l2_entry_confirm,
+    breakout_failed_to_hold,
+)
+from .entry_gates import (
+    TAPE_HOLD_VALID_WAIT_REASONS,
+    tape_confirmed_hold_trigger,
+    tape_confirms_hold,
+)
+from .entry_gates import (
+    _dip_buy_in_rth_window,
+    _l2_big_buyer_bid_starter,
+    add_into_halt_ok,
+    round_number_entry_context,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -104,6 +128,46 @@ AdapterFactory = Callable[[], Any]
 
 def _utcnow() -> datetime:
     return datetime.utcnow()
+
+
+# ── P0: per-(symbol, day) DailyContext cache (NO new per-tick fetch) ──────────────
+# The blue-sky entry trigger + the overhead-supply veto need the daily-chart context
+# (overhead supply, clear-sky room, swing/gap/rejection levels). The DailyContext is a
+# frozen dataclass that must NOT be persisted into the JSON `le` snapshot, so it lives
+# in this in-process cache (hard max size + per-day key = its TTL — a new trading day
+# evicts the prior entry). The daily bars are fetched at most ONCE per symbol per day
+# across the whole process, never on the tick path. docs/DESIGN/MOMENTUM_LANE.md
+_DAILY_CTX_CACHE: dict[str, Any] = {}
+_DAILY_CTX_CACHE_MAX = 512
+
+
+def _daily_ctx_cached(symbol: str, *, price: float | None = None) -> Any:
+    """Return the cached DailyContext for ``symbol`` on the current UTC day, computing
+    (and caching) it from a single ``1d``/``max`` OHLCV fetch on the first call of the
+    day. Bounded (``_DAILY_CTX_CACHE_MAX``) with the day baked into the key so stale
+    entries fall out as the date rolls. Fail-OPEN to ``None`` on any error (the entry
+    path then degrades to daily-blind — never blocked). Equities only (the caller gates
+    out crypto)."""
+    try:
+        _day = _utcnow().strftime("%Y%m%d")
+        _key = f"{str(symbol).upper()}|{_day}"
+        if _key in _DAILY_CTX_CACHE:
+            return _DAILY_CTX_CACHE[_key]
+        from ..market_data import fetch_ohlcv_df as _dc_fetch
+        from .daily_levels import compute_daily_context as _dc_compute
+
+        _lb = int(getattr(settings, "chili_momentum_daily_lookback_days", 20) or 20)
+        _df = _dc_fetch(symbol, interval="1d", period="max")
+        _px = float(price) if (price is not None and price > 0) else None
+        _ctx = _dc_compute(_df, lookback=_lb, price=_px, entry_context=True)
+        # bound the cache: drop the oldest-day entries when it grows past the cap.
+        if len(_DAILY_CTX_CACHE) >= _DAILY_CTX_CACHE_MAX:
+            for _k in sorted(_DAILY_CTX_CACHE.keys())[: max(1, _DAILY_CTX_CACHE_MAX // 4)]:
+                _DAILY_CTX_CACHE.pop(_k, None)
+        _DAILY_CTX_CACHE[_key] = _ctx
+        return _ctx
+    except Exception:
+        return None
 
 
 # ── Bounded momentum exit-submit retries (2026-06-07 audit) ───────────────
@@ -1085,26 +1149,98 @@ def _live_exit_submit_succeeded(
     # one-off spurious 0 can't close a real position, then reconcile to EXITED instead
     # of spinning. Family-agnostic (Robinhood + Coinbase); never fires on a None/failed
     # read (broker_zero is unset) so an API hiccup degrades to the safe retry path.
-    if result.get("broker_zero") is True and _broker_position_confirms_zero(sess):
-        le["position"] = None
-        le["last_exit_reason"] = (reason or "exit") + "_broker_zero_reconcile"
-        le.pop("pending_exit_reason", None)
-        le.pop("pending_exit_quantity", None)
-        le.pop("pending_exit_submitted_at_utc", None)
-        _commit_le(sess, le)
-        _safe_transition(db, sess, STATE_LIVE_EXITED)
-        _emit(
-            db, sess, "live_exit_reconciled_broker_zero",
-            {
-                "reason": reason,
-                "error": result.get("error"),
-                "note": (
-                    "broker-qty clamp + confirming read both 0 — phantom position; "
-                    "reconciled to EXITED, not retrying (was spinning no_remaining_quantity)"
-                ),
-            },
-        )
-        return True
+    # AREA A — BROKER-ZERO CLOSE (2026-06-25, the FCUV live_bailout loop). The
+    # broker-qty clamp sets broker_zero=True ONLY when a SUCCESSFUL broker read found
+    # the held qty <= 0 (None / a failed/exception fetch NEVER sets it — see
+    # _submit_live_market_exit @680-687). That successful read IS the confirmed-zero.
+    # The legacy second read (_broker_position_confirms_zero) does NOT handle the
+    # robinhood_agentic_mcp family (it returns False for it @933-950), so a
+    # broker-FLAT agentic bailout (FCUV sess 8791) re-confirmed False every tick,
+    # fell through to the generic failure path, and looped live_bailout FOREVER —
+    # pinning a concurrency slot on a position the broker already holds at 0.
+    # FIX (flag-gated, default-ON): trust broker_zero=True from the successful clamp
+    # read and reconcile to EXITED WITHOUT the second read. The second read only ADDS
+    # a failure dependency for a result we already confirmed. Fail-safe is preserved:
+    # broker_zero is unset on any None/failed/exception read, so an API hiccup still
+    # degrades to the safe retry path (never closes on uncertainty). flag-OFF =
+    # byte-identical legacy double-read.
+    _trust_clamp_zero = bool(
+        getattr(settings, "chili_momentum_broker_zero_trust_clamp_enabled", True)
+    )
+    # FIX B (2026-06-25, the FCUV live_bailout phantom): require N CONSECUTIVE
+    # successful broker_zero=True clamp reads before reconciling — a single spurious
+    # 0 must NEVER abandon a real position. broker_zero is set ONLY on a SUCCESSFUL
+    # clamp read (None/failed/exception never set it — _submit_live_market_exit
+    # @680-688), so any uncertainty already degrades to the safe retry path. Here we
+    # additionally count consecutive confirmations across exit pulses: a non-zero /
+    # absent broker_zero resets the streak (below), so only a STABLE confirmed-flat
+    # broker (FCUV: broker holds 0 every pulse) reaches N and closes the loop. This is
+    # what makes the bailout path satisfy the confirmed-flat reconcile (the agentic
+    # family fell through the legacy second read and looped live_bailout forever).
+    if result.get("broker_zero") is True:
+        _confirm_n = 1
+        try:
+            _confirm_n = max(1, int(getattr(settings, "chili_momentum_broker_zero_confirm_reads", 2) or 2))
+        except (TypeError, ValueError):
+            _confirm_n = 2
+        _streak = int(le.get("broker_zero_confirm_streak") or 0) + 1
+        le["broker_zero_confirm_streak"] = _streak
+        # The legacy single-read trust-clamp (flag default-ON) is preserved as the
+        # _confirm_n=1 case; the second independent read remains available for the
+        # flag-OFF (legacy double-read) path. Reconcile only once BOTH the consecutive-
+        # confirm count is met AND the trust/second-read condition holds.
+        _read_ok = _trust_clamp_zero or _broker_position_confirms_zero(sess)
+        if _streak < _confirm_n:
+            # Not yet confirmed flat enough times — stay in the exit/bailout state,
+            # arm a short retry, and re-confirm on the next pulse. NOT a failure: do
+            # not record last_exit_submit_failed (that is the spam FCUV produced).
+            le["exit_next_retry_at_utc"] = (
+                _utcnow() + timedelta(seconds=_exit_submit_backoff_seconds(int(le.get("exit_submit_attempts", 0) or 0)))
+            ).isoformat()
+            _commit_le(sess, le)
+            _emit(
+                db, sess, "live_exit_broker_zero_confirming",
+                {
+                    "reason": reason,
+                    "confirm_streak": _streak,
+                    "confirm_reads_required": _confirm_n,
+                    "note": "broker-qty clamp read 0 — confirming flat over N consecutive reads before reconcile",
+                },
+            )
+            return False
+        if _read_ok:
+            le["position"] = None
+            le["last_exit_reason"] = (reason or "exit") + "_broker_zero_reconcile"
+            le.pop("pending_exit_reason", None)
+            le.pop("pending_exit_quantity", None)
+            le.pop("pending_exit_submitted_at_utc", None)
+            le.pop("broker_zero_confirm_streak", None)
+            le["exit_submit_attempts"] = 0
+            le.pop("exit_next_retry_at_utc", None)
+            _commit_le(sess, le)
+            _safe_transition(db, sess, STATE_LIVE_EXITED)
+            _emit(
+                db, sess, "live_exit_reconciled_broker_zero",
+                {
+                    "reason": reason,
+                    "error": result.get("error"),
+                    "trusted_clamp_read": bool(_trust_clamp_zero),
+                    "confirm_streak": _streak,
+                    "confirm_reads_required": _confirm_n,
+                    "note": (
+                        "broker-qty clamp read 0 on N consecutive reads (successful read = "
+                        "confirmed flat) — phantom/already-exited position; reconciled to "
+                        "EXITED, not retrying (was spinning no_remaining_quantity / live_bailout)"
+                    ),
+                },
+            )
+            return True
+    else:
+        # Any read that is NOT a successful confirmed-zero (a real held qty, a failed
+        # fetch, or an absent broker_zero) breaks the confirmation chain — reset so a
+        # later spurious 0 cannot accumulate against stale prior confirmations.
+        if le.get("broker_zero_confirm_streak"):
+            le.pop("broker_zero_confirm_streak", None)
     failed = {
         "reason": reason,
         "result": {
@@ -1545,6 +1681,144 @@ def _scale_out_to_runner(
     return pnl
 
 
+# ── BATCH E(1) — MULTI-LEVEL SCALE-OUT GRID ────────────────────────────────────
+# A LADDER over the SAME single scale-out chokepoint: sell successive tranche
+# fractions at successive R-multiple / round-number targets, trailing the runner
+# between rungs. The grid is computed ONCE (frozen on the position) the first time
+# the position is held with the flag on; thereafter each rung advances `target_price`
+# to the next level so the existing target-trigger re-fires. NO new decrement path —
+# every tranche routes through `_apply_confirmed_live_partial_exit` + clamps to the
+# remaining held qty; the cumulative fraction is < 1.0 so a runner always remains.
+# Flag OFF => the grid is empty => the lane takes the single scale-out then trails
+# (byte-identical). docs/DESIGN/MOMENTUM_LANE.md
+
+
+def _resolve_scale_grid(pos: dict[str, Any], symbol: str | None) -> list[list[float]]:
+    """Return the frozen ladder ``[[target_px, fraction], ...]`` for this position.
+
+    Computed ONCE off the FROZEN entry + the position's initial stop (the risk
+    anchor), then stored on ``pos['scale_grid']`` so a later breakeven-stop ratchet
+    cannot re-scale the rung prices. Empty list when the flag is off or the config is
+    degenerate (the caller then falls back to the single scale-out — byte-identical)."""
+    # Flag OFF => never touch the position dict (byte-identical persisted JSON).
+    if not bool(getattr(settings, "chili_momentum_scale_grid_enabled", False)):
+        return []
+    cached = pos.get("scale_grid")
+    if isinstance(cached, list):
+        return [list(x) for x in cached if isinstance(x, (list, tuple)) and len(x) == 2]
+    try:
+        entry = float(pos.get("avg_entry_price") or 0.0)
+        # The ladder is anchored on the ORIGINAL risk: prefer the frozen entry stop, not a
+        # later breakeven-ratcheted stop, so the R levels stay fixed across rungs.
+        stop = _float_or_none(pos.get("scale_grid_anchor_stop"))
+        if stop is None:
+            stop = _float_or_none(pos.get("stop_price"))
+    except (TypeError, ValueError):
+        entry, stop = 0.0, None
+    levels = scale_grid_levels(entry, float(stop) if stop is not None else 0.0, side_long=True, symbol=symbol)
+    pos["scale_grid"] = [[float(px), float(fr)] for px, fr in levels]
+    return [list(x) for x in pos["scale_grid"]]
+
+
+def _scale_grid_active(pos: dict[str, Any], symbol: str | None) -> bool:
+    """True iff a multi-level grid is in force AND has un-fired rungs remaining."""
+    grid = _resolve_scale_grid(pos, symbol)
+    if len(grid) < 2:  # 0/1 rung => no ladder; the single scale-out path handles it
+        return False
+    idx = int(pos.get("scale_grid_idx") or 0)
+    return idx < len(grid)
+
+
+def _scale_out_grid_step(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    le: dict[str, Any],
+    filled_quantity: float,
+    entry_price: float,
+    fill_price: float,
+    reason: str,
+) -> float:
+    """Bank ONE ladder tranche through the shared partial-exit chokepoint, then either
+    advance to the NEXT rung (keep the runner, re-target, return to TRAILING) or, on the
+    LAST rung, finish like the single scale-out (breakeven + trail the final runner).
+
+    Reuses ``_apply_confirmed_live_partial_exit`` for the bookkeeping/ledger (the SAME
+    single decrement path), so this never opens a second oversell surface. INVARIANT-A:
+    the stop only ratchets to breakeven (never loosened). The remainder is always > 0
+    because the cumulative grid fraction is < 1.0 (enforced in ``scale_grid_levels``)."""
+    pnl = _apply_confirmed_live_partial_exit(
+        db,
+        sess,
+        le=le,
+        filled_quantity=filled_quantity,
+        entry_price=entry_price,
+        fill_price=fill_price,
+        reason=reason,
+    )
+    le.pop("pending_exit_is_scale_out", None)
+    pos = le.get("position")
+    if not isinstance(pos, dict):
+        return pnl
+    grid = _resolve_scale_grid(pos, sess.symbol)
+    idx = int(pos.get("scale_grid_idx") or 0) + 1  # this rung just filled
+    pos["scale_grid_idx"] = idx
+    # Move the balance stop to breakeven on the FIRST rung (Ross "adjust to entry on the
+    # balance"); ratchet-only on later rungs (INVARIANT-A — never loosened).
+    old_stop = _float_or_none(pos.get("stop_price"))
+    be_stop = breakeven_stop_after_partial(
+        float(entry_price),
+        float(old_stop if old_stop is not None else entry_price),
+        side_long=True,
+    )
+    pos["stop_price"] = be_stop
+    pos["scaled_out_at_utc"] = _utcnow().isoformat()
+    more = idx < len(grid)
+    if more:
+        # Re-target the next rung so the existing target-trigger re-fires; KEEP partial_taken
+        # FALSE (more tranches remain) and hold the runner in TRAILING between rungs.
+        next_px = float(grid[idx][0])
+        pos["target_price"] = next_px
+        pos["partial_taken"] = False  # re-arm the scale-out trigger for the next rung
+        le["position"] = pos
+        _commit_le(sess, le)
+        _safe_transition(db, sess, STATE_LIVE_TRAILING)
+        _emit(
+            db,
+            sess,
+            "live_scale_grid_tranche",
+            {
+                "reason": reason,
+                "rung": idx,
+                "of_rungs": len(grid),
+                "tranche_qty": float(filled_quantity),
+                "runner_qty": _float_or_none(pos.get("quantity")),
+                "next_target": next_px,
+                "breakeven_stop": be_stop,
+                "tranche_pnl_usd": pnl,
+            },
+        )
+    else:
+        # Last rung filled: the remainder is the final RUNNER — trail it (single-scale finish).
+        le["position"] = pos
+        _commit_le(sess, le)
+        _safe_transition(db, sess, STATE_LIVE_TRAILING)
+        _emit(
+            db,
+            sess,
+            "live_scaled_out_to_runner",
+            {
+                "reason": reason,
+                "partial_qty": float(filled_quantity),
+                "runner_qty": _float_or_none(pos.get("quantity")),
+                "breakeven_stop": be_stop,
+                "partial_pnl_usd": pnl,
+                "scale_grid_final_rung": idx,
+            },
+        )
+    return pnl
+
+
 def _fmt_limit_price_sell(p: float) -> str:
     """Penny-FLOOR for sell limits >= $1 (never ask above the intended level)."""
     if p >= 1.0:
@@ -1572,15 +1846,31 @@ def _place_scale_out_limit(
         _eq_shares = not str(sess.symbol or "").upper().endswith("-USD")
         inc = prod.base_increment if prod else (1.0 if _eq_shares else None)
         mn = prod.base_min_size if prod else (1.0 if _eq_shares else None)
+        # E(1): when a multi-level grid is in force, rest the FIRST RUNG's fraction at the
+        # first rung's price (the reactive market path takes the later rungs). The grid
+        # anchor stop is frozen on the position at entry; build the ladder off it. Flag OFF
+        # / no ladder => the single scale_out_fraction at target_px (byte-identical).
+        _rest_frac = scale_out_fraction(symbol=sess.symbol)
+        _rest_px = float(target_px)
+        try:
+            _pos = le.get("position") if isinstance(le.get("position"), dict) else {}
+            _grid = _resolve_scale_grid(_pos, sess.symbol)
+            if len(_grid) >= 2:  # an actual ladder
+                _rest_frac = float(_grid[0][1])
+                _rest_px = float(_grid[0][0])
+        except Exception:
+            _rest_frac = scale_out_fraction(symbol=sess.symbol)
+            _rest_px = float(target_px)
         scale_qty, _runner_qty, can_split = scale_out_quantity(
             current_qty=float(filled),
             original_qty=float(filled),
-            fraction=scale_out_fraction(symbol=sess.symbol),
+            fraction=_rest_frac,
             base_increment=inc,
             base_min_size=mn,
         )
         if not can_split or scale_qty <= 0:
             return
+        target_px = _rest_px
         _ext = False
         try:
             from .market_profile import market_session_now
@@ -1759,6 +2049,27 @@ def _only_transient_freshness_block(ev: dict[str, Any]) -> bool:
         if not failed:
             return False
         return all(str(c.get("id") or "") == "viability_freshness" for c in failed)
+    except Exception:
+        return False
+
+
+def _only_held_eligibility_flicker_block(ev: dict[str, Any]) -> bool:
+    """True iff the boundary-risk evaluation failed EXCLUSIVELY on the neural-viability
+    eligibility / freshness checks (``live_eligible`` and/or ``viability_freshness``) —
+    a stale/flickering snapshot, NOT a hard risk block (kill-switch, drawdown, daily-loss,
+    position cap). Used by GATE 5: an add to an ALREADY-HELD winner inherits the entry's
+    admission, so this transient flicker must not refuse it. FAIL-SAFE: any unexpected
+    shape / no failing checks ⇒ False (keep the conservative refusal). Keys on the
+    structured ``checks`` ids, never free text, so it can never match a real risk block."""
+    try:
+        checks = ev.get("checks")
+        if not isinstance(checks, list) or not checks:
+            return False
+        failed = [c for c in checks if isinstance(c, dict) and not c.get("ok", True)]
+        if not failed:
+            return False
+        _allow = {"live_eligible", "viability_freshness"}
+        return all(str(c.get("id") or "") in _allow for c in failed)
     except Exception:
         return False
 
@@ -1949,6 +2260,78 @@ def _stop_vol_floor_mult() -> float:
     except (TypeError, ValueError):
         return 0.5
     return v if v >= 0 else 0.0
+
+
+def _parse_event_times_utc(raw: str | None) -> list[datetime]:
+    """Parse the comma-separated ISO-8601 UTC event-time list (E3). Pure; skips junk.
+    Accepts a trailing 'Z' (mapped to +00:00); naive datetimes are assumed UTC."""
+    out: list[datetime] = []
+    if not raw:
+        return out
+    for tok in str(raw).split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            t = datetime.fromisoformat(tok.replace("Z", "+00:00"))
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            out.append(t.astimezone(timezone.utc))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def hard_no_trade_regime(
+    execution_family: str | None = None,
+    *,
+    symbol: str | None = None,
+    now: datetime | None = None,
+) -> tuple[bool, str]:
+    """HARD no-NEW-ENTRY regime gate (Batch E(3), ENTRIES ONLY). Returns ``(blocked, reason)``.
+
+    Two hard windows, both gated by ``chili_momentum_hard_no_trade_regime_enabled``:
+      (a) EVENT STANDDOWN — within +/- ``chili_momentum_hard_no_trade_event_window_min`` of
+          any scheduled high-impact event (FOMC/CPI) in
+          ``chili_momentum_hard_no_trade_event_times_utc`` (a small documented list / calendar
+          hook). Market-wide (applies to crypto + equity).
+      (b) HARD MIDDAY — when ``chili_momentum_hard_no_trade_midday_enabled`` is on, the SAME
+          10:30-14:30 ET ``in_midday_lull`` band as the soft de-weight (equity-only).
+
+    CRITICAL: this gates only the ARMING / entry-eval path. It is NEVER consulted on an exit,
+    stop, trail, bailout, scale-out, or the overnight dark-flatten — managing/closing an OPEN
+    position is always allowed. OFF => ``(False, 'disabled')`` (byte-identical). Pure: reads
+    only settings + the shared clock; fail-open (any error => not blocked)."""
+    if not bool(getattr(settings, "chili_momentum_hard_no_trade_regime_enabled", False)):
+        return False, "disabled"
+    ref = now or datetime.now(timezone.utc)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    try:
+        win_min = float(getattr(settings, "chili_momentum_hard_no_trade_event_window_min", 30.0) or 0.0)
+    except (TypeError, ValueError):
+        win_min = 0.0
+    if win_min > 0:
+        for ev in _parse_event_times_utc(
+            getattr(settings, "chili_momentum_hard_no_trade_event_times_utc", "")
+        ):
+            if abs((ref - ev).total_seconds()) <= win_min * 60.0:
+                return True, f"event_standdown:{ev.isoformat()}"
+    if bool(getattr(settings, "chili_momentum_hard_no_trade_midday_enabled", False)):
+        try:
+            from .market_profile import in_midday_lull
+
+            # in_midday_lull is equity-only (crypto always False). The arm-gate caller
+            # passes the lane execution family, not a symbol — only the equity lane has a
+            # midday concept, so a None/equity family evaluates the clock; crypto is exempt.
+            _is_crypto = (
+                bool(symbol) and str(symbol).upper().endswith("-USD")
+            ) or str(execution_family or "") == "coinbase_spot"
+            if not _is_crypto and in_midday_lull(symbol, now=ref):
+                return True, "hard_midday_no_entry"
+        except Exception:
+            pass
+    return False, "ok"
 
 
 def _midday_viability_bump() -> float:
@@ -2290,6 +2673,72 @@ def _breakout_bailout_window_seconds() -> float:
     return max(0.0, bars) * _entry_interval_seconds()
 
 
+def _via_atr_pct(via: Any) -> float | None:
+    """Best-effort clean intraday-range ATR%% from a viability's regime snapshot (the
+    SAME basis the entry-extension veto uses). None on any error. Pure read."""
+    try:
+        rg = getattr(via, "regime_snapshot_json", None)
+        if not isinstance(rg, dict):
+            return None
+        ap = regime_atr_pct(rg)
+        return None if ap is None else float(ap)
+    except Exception:
+        return None
+
+
+def _session_is_explosive(via: Any, *, rvol: float | None = None) -> bool:
+    """MASTER-gated explosiveness read for the recalibration carve-outs (bid-prop
+    exempt, fast-bail lock-in). Uses the clean regime ATR%% (always present on a live
+    viability) OR an optional RVOL reading. Delegates the floors + the master gate to
+    entry_gates.is_explosive_mover (one source of truth). Fail-closed: any error /
+    master OFF ⇒ False (no name treated as explosive ⇒ the protective gate stays)."""
+    try:
+        from .entry_gates import is_explosive_mover
+
+        return bool(is_explosive_mover(_via_atr_pct(via), rvol, settings))
+    except Exception:
+        return False
+
+
+def _latest_rvol(db, symbol: str) -> float | None:
+    """Best-effort latest relative-volume (volume_ratio of the most recent bar) for the
+    explosive carve-outs. Reads the SESSION-scoped micro-bar df from the densified tape
+    (no network, same resampler the micro-pullback re-load uses) and computes
+    volume_ratio via the canonical indicator core. None on thin tape / any error (the
+    caller then treats the name as non-explosive on RVOL ⇒ fail-closed). Pure read."""
+    try:
+        from ..indicator_core import compute_all_from_df as _rv_compute
+
+        _df = _build_micro_bar_df(db, symbol, bar_seconds=15)
+        if _df is None or getattr(_df, "empty", True) or len(_df) < 10:
+            return None
+        arrays = _rv_compute(_df, needed={"volume_ratio"})
+        vr = arrays.get("volume_ratio") or []
+        if not len(vr):
+            return None
+        v = vr[-1]
+        return None if v is None else float(v)
+    except Exception:
+        return None
+
+
+def _breakout_bailout_lock_in_seconds(*, explosive: bool) -> float:
+    """Lock-in floor (seconds) for the fast-bail — BELOW which a momentary sub-level
+    dip is NOT treated as a failed breakout. Master-gated: returns 0.0 (byte-identical,
+    no lock-in) unless the explosive-recalibration master flag is ON. Explosive names
+    get the (wider) explosive lock-in when configured; otherwise the base lock-in."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_explosive_recalibration_enabled", False)):
+            return 0.0
+        base = max(0.0, float(getattr(settings, "chili_momentum_breakout_bailout_lock_in_seconds", 0.0) or 0.0))
+        if explosive:
+            expl = max(0.0, float(getattr(settings, "chili_momentum_breakout_bailout_lock_in_explosive_seconds", 0.0) or 0.0))
+            return max(base, expl)
+        return base
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _held_position_keeps_exit_on_boundary_fail(state: str, has_position: Any) -> bool:
     """A held momentum position must keep its EXIT/stop management even when the
     entry-oriented boundary risk eval (viability freshness / caps / concurrency)
@@ -2299,16 +2748,183 @@ def _held_position_keeps_exit_on_boundary_fail(state: str, has_position: Any) ->
     return bool(has_position) and state in _HELD_LIVE_STATES
 
 
+def _adaptive_quote_max_age_seconds(db: Any, symbol: str, base_max_age: float) -> float:
+    """ADAPTIVE stale-quote window: scale the freshness ceiling to how fast THIS name
+    actually trades, so "stale" means old RELATIVE to its own cadence — not a fixed clock.
+    A name printing every ~20s is fresh at ~20-60s; a halted/quiet name (no recent ticks)
+    stays at the conservative base floor (correctly stale). One documented knob
+    (cadence_mult K) + safety bounds (floor = never tighter than the venue base; ceiling
+    caps it). Reads the live IQFeed trade cadence (iqfeed_trade_ticks).
+    (operator 2026-06-25: "gawin mong adaptive" — no fixed 15s magic clock.)"""
+    base = float(base_max_age or 0.0)
+    floor = max(base, float(getattr(settings, "chili_momentum_quote_freshness_floor_seconds", 15.0) or 15.0))
+    ceil = float(getattr(settings, "chili_momentum_quote_freshness_ceiling_seconds", 120.0) or 120.0)
+    k = float(getattr(settings, "chili_momentum_quote_freshness_cadence_mult", 3.0) or 3.0)
+    # FIX B1 — extended-hours-aware CEILING. Pre/post-market names trade at a much slower
+    # cadence; the regular-hours ceiling perpetually caps the cadence-scaled window so a
+    # slow-but-LIVE ext-hours mover is flagged stale and the entry trigger never gets a turn
+    # (stale_bbo peaks 16:00-19:00 ET). Raise ONLY the ceiling during extended hours; the
+    # FLOOR (the conservative window for genuinely no-tick / halted names below) is untouched,
+    # and the cadence-scaling math is unchanged — a name with no recent ticks still returns
+    # the floor. OFF => byte-identical (regular ceiling always).
+    if bool(getattr(settings, "chili_momentum_ext_hours_quote_age_enabled", True)):
+        try:
+            from .market_profile import market_session_now
+
+            if market_session_now(symbol) in ("premarket", "afterhours"):
+                _ext_ceil = float(
+                    getattr(settings, "chili_momentum_ext_hours_quote_ceiling_seconds", 300.0) or 300.0
+                )
+                if _ext_ceil > ceil:
+                    ceil = _ext_ceil
+        except Exception:
+            pass
+    if ceil < floor:
+        ceil = floor
+    try:
+        from sqlalchemy import text as _text
+        window = 120.0
+        n = db.execute(
+            _text(
+                "SELECT count(*) FROM iqfeed_trade_ticks "
+                "WHERE symbol = :s AND observed_at > now() - make_interval(secs => :w)"
+            ),
+            {"s": symbol, "w": window},
+        ).scalar() or 0
+        if int(n) <= 0:
+            return floor  # not actively trading -> conservative (halted/quiet stays stale)
+        avg_interval = window / float(int(n))
+        return float(max(floor, min(ceil, k * avg_interval)))
+    except Exception:
+        return floor
+
+
+def _refetch_bbo_secondary(symbol: str) -> tuple[Any, str] | None:
+    """FIX B2 — refetch a fresh BBO from the SECONDARY market-data chain (the documented
+    priority Massive WS -> Polygon -> Massive REST snapshot, which is the in-process
+    equivalent of the RH MCP ``get_equity_quotes`` equity leg) when the PRIMARY entry tick
+    is STALE. Returns ``(NormalizedTicker, source_label)`` or ``None`` if no source gives a
+    usable bid/ask. Each leg stamps a FRESH ``FreshnessMeta`` (the read just happened), so a
+    valid result is fresh by construction; the caller re-runs the SAME validation on it —
+    invalid books (ask<bid, non-positive) are still rejected. Cheap + fail-silent: any error
+    in a leg falls through to the next, and a total miss returns ``None`` (the stale verdict
+    stands)."""
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return None
+
+    def _mk(bid: float | None, ask: float | None, last: float | None, source: str):
+        try:
+            b = float(bid) if bid else None
+            a = float(ask) if ask else None
+        except (TypeError, ValueError):
+            b = a = None
+        if not (b and a and b > 0 and a > 0):
+            return None
+        mid = (b + a) / 2.0
+        spread_abs = a - b
+        spread_bps = (spread_abs / mid) * 10_000.0 if mid > 0 else None
+        return NormalizedTicker(
+            product_id=sym, bid=b, ask=a, mid=mid,
+            spread_abs=spread_abs, spread_bps=spread_bps,
+            last_price=(float(last) if last else None),
+            freshness=FreshnessMeta(retrieved_at_utc=datetime.now(timezone.utc)),
+            raw={"source": source},
+        ), source
+
+    # 1) Massive WebSocket (push-fresh NBBO when the feed is live in this process).
+    try:
+        from ...massive_client import get_ws_quote
+
+        ws_q = get_ws_quote(sym)
+        if ws_q is not None:
+            r = _mk(getattr(ws_q, "bid", None), getattr(ws_q, "ask", None),
+                    getattr(ws_q, "price", None), "massive_ws")
+            if r is not None:
+                return r
+    except Exception:
+        pass
+    # 2) Polygon snapshot (carries lastQuote bid/ask).
+    try:
+        from ... import polygon_client as _poly
+
+        pq = _poly.get_last_quote(sym) or {}
+        r = _mk(pq.get("bid"), pq.get("ask"), pq.get("last_price"), "polygon")
+        if r is not None:
+            return r
+    except Exception:
+        pass
+    # 3) Massive REST snapshot (the documented top-priority REST source; in-process stand-in
+    #    for the RH MCP equity-quote leg, which is not exposed as a synchronous fn here).
+    try:
+        from ...massive_client import get_last_quote as _massive_last_quote
+
+        mq = _massive_last_quote(sym) or {}
+        r = _mk(mq.get("bid"), mq.get("ask"), mq.get("last_price"), "massive_rest")
+        if r is not None:
+            return r
+    except Exception:
+        pass
+    return None
+
+
 def _quote_quality_block(
-    tick: Any, freshness: Any, max_spread_bps: float | None = None
+    tick: Any, freshness: Any, max_spread_bps: float | None = None,
+    *, symbol: str | None = None, db: Any = None,
 ) -> dict[str, Any] | None:
     meta = getattr(tick, "freshness", None) or freshness
+    # FIX B2 telemetry: set when a secondary refetch replaced a stale primary tick; stamped
+    # into whichever verdict (block or pass) the re-validated quote produces. Always bound
+    # (no local-shadow UnboundLocalError class).
+    _refetched_meta: dict[str, Any] | None = None
     if meta is not None and not is_fresh_enough(meta):
-        return {
-            "reason": "stale_bbo",
-            "age_seconds": round(float(meta.age_seconds()), 4),
-            "max_age_seconds": float(getattr(meta, "max_age_seconds", 0.0) or 0.0),
-        }
+        # The venue's FIXED base window flagged stale — re-check against the name's
+        # cadence-scaled window. PURELY ADDITIVE: only ever WIDENS (can un-block a
+        # slow-but-live name trading at its normal pace), never newly-blocks. A halted
+        # name (no recent ticks) keeps the conservative floor and stays stale.
+        _age = float(meta.age_seconds())
+        _max_age = float(getattr(meta, "max_age_seconds", 0.0) or 0.0)
+        if symbol and db is not None:
+            try:
+                _max_age = _adaptive_quote_max_age_seconds(db, str(symbol), _max_age)
+            except Exception:
+                pass
+        if _age > _max_age:
+            # FIX B2 — the PRIMARY tick is genuinely stale. Before blocking, refetch the BBO
+            # ONCE from the secondary market-data chain (Massive WS -> Polygon -> Massive REST)
+            # and re-run the SAME validation on the fresh quote below. This ONLY changes WHICH
+            # quote we validate, never an entry condition; invalid books are still rejected.
+            # OFF => byte-identical (the original stale_bbo block stands).
+            _refetched_meta: dict[str, Any] | None = None
+            if (
+                symbol
+                and bool(getattr(settings, "chili_momentum_entry_quote_refetch_enabled", True))
+            ):
+                try:
+                    _rf = _refetch_bbo_secondary(str(symbol))
+                except Exception:
+                    _rf = None
+                if _rf is not None:
+                    _rf_tick, _rf_source = _rf
+                    _rf_meta = getattr(_rf_tick, "freshness", None)
+                    # The refetched quote must itself be fresh (it was just read, so it is) —
+                    # if for any reason it is NOT, fall through to the original stale block.
+                    if _rf_meta is None or is_fresh_enough(_rf_meta):
+                        _refetched_meta = {
+                            "refetch_source": _rf_source,
+                            "refetch_age_seconds": round(
+                                float(_rf_meta.age_seconds()) if _rf_meta is not None else 0.0, 4
+                            ),
+                            "primary_age_seconds": round(_age, 4),
+                            "primary_max_age_seconds": round(_max_age, 2),
+                        }
+                        tick = _rf_tick  # validate the FRESH quote from here down
+            if _refetched_meta is None:
+                return {
+                    "reason": "stale_bbo",
+                    "age_seconds": round(_age, 4),
+                    "max_age_seconds": round(_max_age, 2),
+                }
     try:
         mid = float(getattr(tick, "mid", 0.0) or 0.0)
         bid = float(getattr(tick, "bid", 0.0) or 0.0)
@@ -2316,7 +2932,11 @@ def _quote_quality_block(
     except (TypeError, ValueError):
         return {"reason": "invalid_bbo"}
     if mid <= 0 or bid <= 0 or ask <= 0 or ask < bid:
-        return {"reason": "invalid_bbo", "bid": bid, "ask": ask, "mid": mid}
+        _inv = {"reason": "invalid_bbo", "bid": bid, "ask": ask, "mid": mid}
+        if _refetched_meta:
+            _inv.update(_refetched_meta)
+            _inv["failed_check"] = "invalid_bbo"
+        return _inv
     try:
         spread_bps = float(getattr(tick, "spread_bps", None))
     except (TypeError, ValueError):
@@ -2337,7 +2957,7 @@ def _quote_quality_block(
     except (TypeError, ValueError):
         max_spread = 12.0
     if spread_bps > max_spread:
-        return {
+        _ws = {
             "reason": "wide_bbo_spread",
             "spread_bps": round(spread_bps, 4),
             "max_spread_bps": max_spread,
@@ -2345,6 +2965,25 @@ def _quote_quality_block(
             "ask": ask,
             "mid": mid,
         }
+        if _refetched_meta:
+            _ws.update(_refetched_meta)
+            _ws["failed_check"] = "wide_bbo_spread"
+        return _ws
+    # FIX B2: a secondary refetch RESCUED a stale primary tick (the fresh quote passed all
+    # validation). Surface a no-block telemetry marker so the entry caller records that the
+    # entry seam was unblocked by a refetch (A/B), then proceed exactly as a clean pass.
+    if _refetched_meta:
+        try:
+            _log.info(
+                "[momentum_live] entry_quote_refetch_rescue symbol=%s source=%s "
+                "primary_age=%.2fs refetch_age=%.2fs",
+                str(symbol),
+                _refetched_meta.get("refetch_source"),
+                float(_refetched_meta.get("primary_age_seconds") or 0.0),
+                float(_refetched_meta.get("refetch_age_seconds") or 0.0),
+            )
+        except Exception:
+            pass
     return None
 
 
@@ -2536,6 +3175,89 @@ def _register_stale_quote_tick(db, sess, le: dict) -> None:
                 "avg_entry_price": pos.get("avg_entry_price"),
                 "stop_price": pos.get("stop_price"),
             })
+    # TIER-2 OVERNIGHT PRICE-BUS-DARK KILL: a position held OVERNIGHT into a stale book is
+    # the dangerous case — the software stop can only act on the NEXT fresh tick, so a dark
+    # bus means the held position is unprotected. When overnight trading is on AND a position
+    # is held overnight AND the quote has been stale beyond chili_momentum_overnight_max_stale_sec
+    # (0 => derive from the halt-stale threshold), emit a CRITICAL + set a flatten-intent flag
+    # the next-fresh-tick exit path honors; the runner already refuses to act on a stale book,
+    # so this never submits into the dark — it flattens on resume. New arming is gated off by
+    # is_overnight_now's safety-aware tradeability tier. Flag OFF / not overnight => no-op.
+    try:
+        if getattr(settings, "chili_momentum_overnight_trading_enabled", False):
+            from .market_profile import is_overnight_now as _is_overnight_now
+
+            pos = le.get("position")
+            if (
+                isinstance(pos, dict)
+                and float(pos.get("quantity") or 0) > 0
+                and _is_overnight_now(sess.symbol)
+            ):
+                _ovn_stale = float(getattr(settings, "chili_momentum_overnight_max_stale_sec", 0.0) or 0.0)
+                _ticks_thresh = _halt_stale_ticks_threshold()
+                # 0 => derive: the halt-stale tick threshold is the natural overnight bound.
+                _stale_streak = int(le.get("halt_stale_streak") or 0)
+                _trip = (
+                    _stale_streak >= _ticks_thresh
+                    if _ovn_stale <= 0
+                    else _stale_streak >= max(1, _ticks_thresh)
+                )
+                if _trip and not le.get("overnight_pricebus_dark_flagged"):
+                    le["overnight_pricebus_dark_flagged"] = True
+                    le["overnight_flatten_on_fresh"] = True
+                    _commit_le(sess, le)
+                    _log.critical(
+                        "[momentum_live] OVERNIGHT PRICE-BUS DARK symbol=%s session=%s qty=%s "
+                        "stale_streak=%s — no broker stop overnight; will flatten at the next "
+                        "fresh tick + arm nothing new. If the bus is reliably dark overnight, "
+                        "disable overnight trading.",
+                        sess.symbol, sess.id, pos.get("quantity"), _stale_streak,
+                    )
+                    _emit(db, sess, "overnight_pricebus_dark", {
+                        "quantity": pos.get("quantity"),
+                        "stale_streak": _stale_streak,
+                    })
+                # FIX A part (2) — PROACTIVE FLATTEN AT FIRST STALE ONSET (2026-06-25).
+                # The on-fresh flatten (overnight_flatten_on_fresh, honored in
+                # _register_fresh_quote_tick) is NOT sufficient on its own: a FULLY DARK
+                # bus delivers NO fresh tick, so the position would ride the dark naked
+                # (no software stop fires — the loss circuit/stop are quote-dependent —
+                # and RH has no overnight stop order). CONSERVATIVE: at the FIRST onset of
+                # staleness (default onset_ticks=1 = this stale tick, while we still have
+                # the last good book) request a flatten through the operator-flatten
+                # chokepoint so an exit order is submitted/resting at the broker rather
+                # than leaving the position unprotected. The flatten still routes the
+                # normal exit/cancel path (cancel scale-out -> broker-qty clamp -> place ->
+                # confirm -> reconcile) — no oversell, no orphan. Kill-switch flag OFF =>
+                # this entire block is a no-op (legacy: overnight_flatten_on_fresh set but
+                # never read; the documented naked-overnight risk).
+                if (
+                    getattr(settings, "chili_momentum_overnight_dark_flatten_enabled", False)
+                    and not le.get("overnight_dark_flatten_requested")
+                    and not le.get("operator_flatten_requested_utc")
+                ):
+                    try:
+                        _onset = max(1, int(getattr(settings, "chili_momentum_overnight_dark_flatten_onset_ticks", 1) or 1))
+                    except (TypeError, ValueError):
+                        _onset = 1
+                    if _stale_streak >= _onset:
+                        le["overnight_dark_flatten_requested"] = _utcnow().isoformat()
+                        _commit_le(sess, le)
+                        _log.critical(
+                            "[momentum_live] OVERNIGHT DARK-FLATTEN (proactive) symbol=%s "
+                            "session=%s qty=%s stale_streak=%s onset_ticks=%s — flattening at the "
+                            "last good tick (dark bus delivers no fresh tick; naked overnight is "
+                            "not allowed). Routes the operator-flatten chokepoint.",
+                            sess.symbol, sess.id, pos.get("quantity"), _stale_streak, _onset,
+                        )
+                        _emit(db, sess, "overnight_dark_flatten_requested", {
+                            "quantity": pos.get("quantity"),
+                            "stale_streak": _stale_streak,
+                            "onset_ticks": _onset,
+                            "trigger": "proactive_first_onset",
+                        })
+    except Exception:
+        pass
 
 
 def _entry_pricebook_snapshot(symbol: str) -> dict | None:
@@ -2602,6 +3324,31 @@ def _register_fresh_quote_tick(db, sess, le: dict) -> None:
         # Persist the resume marker NOW — the halt_resume_dip trigger keys its
         # entry window off it, so it must survive a process restart mid-window
         # (other le mutations ride the next commit; this one is load-bearing).
+        _commit_le(sess, le)
+    # FIX A part (1) — HONOR overnight_flatten_on_fresh (2026-06-25). The dark-bus
+    # detector (_register_stale_quote_tick) SET this flag but it was NEVER READ. On
+    # the FIRST fresh tick after an overnight dark-bus, flatten the position through
+    # the operator-flatten chokepoint (the bus is back, so the exit can fill at the
+    # resume book) rather than re-arming the trade on a book that just went dark
+    # overnight. Belt to the proactive-onset suspenders: if the bus is only briefly
+    # dark and a fresh tick DOES arrive, this closes the still-held position; if the
+    # bus stays fully dark, the proactive onset flatten already requested the exit.
+    # Kill-switch flag OFF => the flag is cleared but no flatten is requested (legacy:
+    # set-but-never-read). Request via the same operator-flatten chokepoint marker.
+    if le.get("overnight_flatten_on_fresh"):
+        le.pop("overnight_flatten_on_fresh", None)
+        if (
+            getattr(settings, "chili_momentum_overnight_dark_flatten_enabled", False)
+            and isinstance(le.get("position"), dict)
+            and float((le.get("position") or {}).get("quantity") or 0) > 0
+            and not le.get("overnight_dark_flatten_requested")
+            and not le.get("operator_flatten_requested_utc")
+        ):
+            le["overnight_dark_flatten_requested"] = _utcnow().isoformat()
+            _emit(db, sess, "overnight_dark_flatten_requested", {
+                "quantity": (le.get("position") or {}).get("quantity"),
+                "trigger": "on_fresh_after_dark",
+            })
         _commit_le(sess, le)
 
 
@@ -3074,7 +3821,9 @@ def tick_live_session(
         if _skip_spread_gate
         else _adaptive_max_spread
     )
-    quote_block = _quote_quality_block(tick, _fr, max_spread_bps=_entry_spread_ceiling)
+    quote_block = _quote_quality_block(
+        tick, _fr, max_spread_bps=_entry_spread_ceiling, symbol=sess.symbol, db=db
+    )
     # Halt tracking: a SUSTAINED stale-quote streak = suspected LULD halt; quotes
     # returning = resume (starts the entry whipsaw-cooldown). A wide-but-live quote
     # is NOT a halt signal — only staleness is.
@@ -3218,6 +3967,33 @@ def tick_live_session(
         return {"ok": True, "session_id": sess.id, "state": sess.state,
                 "operator_flatten": bool(_flatten_done)}
 
+    # ── OVERNIGHT DARK-BUS FLATTEN (2026-06-25, FIX A) ────────────────────
+    # _register_stale_quote_tick (proactive, first stale onset) and
+    # _register_fresh_quote_tick (honoring overnight_flatten_on_fresh) set
+    # overnight_dark_flatten_requested when an OVERNIGHT-held position faces a dark
+    # price-bus. Honor it HERE — quotes bound — through the SAME operator-flatten
+    # chokepoint (cancel scale-out -> broker-qty clamp -> place -> confirm ->
+    # reconcile), so there is no oversell and no orphan. This is what makes overnight
+    # SAFE: the position is never left to ride a dark bus naked (no broker stop
+    # overnight). Flag-gated at the SET sites, so flag OFF => this is unreachable
+    # (byte-identical legacy: flag set but never read). If the flatten cannot complete
+    # this pulse (e.g. still mid-dark), the request flag PERSISTS so it retries every
+    # pulse until the broker confirms flat (FIX B closes the loop on confirmed-zero).
+    if le.get("overnight_dark_flatten_requested") and sess.state in _HELD_LIVE_STATES:
+        _ovn_flat_done = _handle_kill_switch_mid_run(flatten_reason="overnight_pricebus_dark_flatten")
+        _emit(
+            db, sess,
+            "overnight_dark_flatten_executed" if _ovn_flat_done else "overnight_dark_flatten_pending",
+            {},
+        )
+        if _ovn_flat_done:
+            le.pop("overnight_dark_flatten_requested", None)
+            _commit_le(sess, le)
+            _safe_transition(db, sess, STATE_LIVE_EXITED)
+        db.flush()
+        return {"ok": True, "session_id": sess.id, "state": sess.state,
+                "overnight_dark_flatten": bool(_ovn_flat_done)}
+
     if _kill_switch_blocks_live() and sess.state in (
         STATE_LIVE_PENDING_ENTRY,
         STATE_LIVE_ENTERED,
@@ -3292,6 +4068,20 @@ def tick_live_session(
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
     if st == STATE_WATCHING_LIVE:
+        # HARD NO-TRADE REGIME (Batch E(3), ENTRIES ONLY): around scheduled high-impact
+        # events (FOMC/CPI; +/- window) — and, optionally, hard midday — HOLD this watcher
+        # (no NEW entry) for the duration. WATCHING is a PRE-POSITION state: a held position
+        # lives in ENTERED/SCALING_OUT/TRAILING/BAILOUT (handled far below), so this gate
+        # physically cannot block/delay an exit, stop, trail, bailout, scale-out, or dark-
+        # flatten. OFF => no-op (byte-identical). Fail-open (helper returns not-blocked on error).
+        if bool(getattr(settings, "chili_momentum_hard_no_trade_regime_enabled", False)):
+            _ntr_blocked, _ntr_reason = hard_no_trade_regime(
+                sess.execution_family, symbol=sess.symbol
+            )
+            if _ntr_blocked:
+                _emit(db, sess, "live_entry_wait_no_trade_regime", {"reason": _ntr_reason})
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state, "skipped": _ntr_reason}
         # MIDDAY-LULL DE-WEIGHT (project_profitability_levers): during the 10:30-14:30 ET
         # midday chop (6% live win-rate vs 29% morning; Ross sits out midday) RAISE the
         # effective viability bar so only an exceptional mover arms. SOFT (additive bump,
@@ -3408,10 +4198,32 @@ def tick_live_session(
 
                                     _fd_ok, _fd_reason, _fd_debug = flush_dip_buy_confirmation(
                                         _df_trig, entry_interval=_iv_trig, live_price=_live_px,
-                                        symbol=sess.symbol,
+                                        symbol=sess.symbol, now=None,
                                     )
                                     if _fd_ok:
                                         _trigger_ok, _trigger_reason, _pb_debug = _fd_ok, _fd_reason, _fd_debug
+                                        # GAP 5 BIG-BUYER-ON-BID starter (Warrior re-audit):
+                                        # an ENABLER overlay (NEVER a veto — it cannot block).
+                                        # When a flush-dip starter fires, read the bid-side L2
+                                        # mirror: a large stacked BUYER on the bid near a half/
+                                        # whole dollar (with the existing spread caveat) CONFIRMS
+                                        # the dip-buy starter. Surface it as a conviction
+                                        # annotation on the dip-fire (FAIL-CLOSED inside: flag
+                                        # OFF / no L2 / wide spread ⇒ None ⇒ no annotation, no
+                                        # behavior change). docs/DESIGN/MOMENTUM_LANE.md
+                                        try:
+                                            _bbp = _l2_big_buyer_bid_starter(
+                                                sess.symbol, db=db, l2_as_of=None,
+                                                price=_live_px,
+                                                atr_pct=(
+                                                    _fd_debug.get("atr_pct")
+                                                    if isinstance(_fd_debug, dict) else None
+                                                ),
+                                            )
+                                            if _bbp is not None and isinstance(_pb_debug, dict):
+                                                _pb_debug["big_buyer_bid"] = _bbp[1]
+                                        except Exception:
+                                            pass
                                 except Exception:
                                     pass
                             if not _trigger_ok:
@@ -3434,6 +4246,362 @@ def tick_live_session(
                                         _trigger_reason, _pb_debug = _vr_reason, _vr_debug
                                 except Exception:
                                     pass
+                            # BATCH B (FIX 2): HOT-TAPE WICK-RECLAIM — the extreme-volatility
+                            # variant of the VWAP-reclaim, GATED to hot/parabolic tape ONLY
+                            # (is_explosive_mover RVOL/ATR floors inside the detector; cold
+                            # tape -> never fires). Re-enter the retrace into a big upper-wick
+                            # rejection candle after a low-volume flush; stop below the wick
+                            # low. Returns the shared (ok, reason, debug) with pullback_low/
+                            # pullback_high under the IDENTICAL keys, so the structural-stop +
+                            # bailout machinery below is reused unchanged. No-op + byte-
+                            # identical when its kill-switch flag is OFF.
+                            if not _trigger_ok:
+                                try:
+                                    from .entry_gates import wick_reclaim_confirmation
+
+                                    _wr_ok, _wr_reason, _wr_debug = wick_reclaim_confirmation(
+                                        _df_trig, entry_interval=_iv_trig, live_price=_live_px,
+                                        symbol=sess.symbol,
+                                    )
+                                    if _wr_ok:
+                                        _trigger_ok, _trigger_reason, _pb_debug = _wr_ok, _wr_reason, _wr_debug
+                                except Exception:
+                                    pass
+                            # BATCH D: MICRO-PULLBACK AS PRIMARY — the 1-candle shallow flag as
+                            # an INITIAL entry (not just a post-fill re-load), GATED to HOT tape
+                            # (_is_hot_tape, like the wick-reclaim) so it does not over-fire on
+                            # slow names. A dip-family fire (runs only when nothing earlier fired);
+                            # returns the shared (ok, reason, debug) with pullback_low/high under
+                            # the IDENTICAL keys. No-op + byte-identical when its kill-switch is
+                            # OFF. docs/DESIGN/MOMENTUM_LANE.md
+                            if not _trigger_ok:
+                                try:
+                                    from .entry_gates import micro_pullback_primary_confirmation
+
+                                    _mp_ok, _mp_reason, _mp_debug = micro_pullback_primary_confirmation(
+                                        _df_trig, entry_interval=_iv_trig, live_price=_live_px,
+                                        symbol=sess.symbol, db=db,
+                                    )
+                                    if _mp_ok:
+                                        _trigger_ok, _trigger_reason, _pb_debug = _mp_ok, _mp_reason, _mp_debug
+                                except Exception:
+                                    pass
+                            # BATCH A: HOD-break + flat-top BREAKOUT triggers + setup-selector.
+                            # CHILI's ladder above is ALL dip/pullback/reclaim — a straight-up
+                            # HOD runner that never pulls back produces NO fills. These detect a
+                            # CONSOLIDATION BASE under the day high and fire the break to a new
+                            # HOD (anti-chase: a tested base, never a vertical blow-off — the
+                            # detector vetoes backside / rolled-over / over-extended). Each is
+                            # flag-gated INSIDE the detector (OFF -> no-op, byte-identical) and
+                            # returns the shared (ok, reason, debug) with pullback_low/high under
+                            # the IDENTICAL keys, so the structural-stop + bailout machinery below
+                            # is reused unchanged. SETUP-SELECTOR: when a dip-family trigger AND a
+                            # breakout BOTH fired this bar, pick the best reward:risk (not first-
+                            # clears-gates). docs/DESIGN/MOMENTUM_LANE.md
+                            try:
+                                from .entry_gates import (
+                                    TICK_ARMED_WAIT_REASONS,
+                                    hod_break_confirmation,
+                                    select_best_setup,
+                                )
+
+                                # P0: DAILY CONTEXT INTO ENTRIES. Build the DailyContext ONCE
+                                # per (symbol, day) in an in-process TTL/size-bounded cache and
+                                # feed it to the blue-sky trigger + the overhead veto so the
+                                # entry path is no longer daily-blind to overhead supply. The
+                                # daily bars are fetched at most once/day/symbol across the whole
+                                # process — NO new per-tick network fetch (the DailyContext is a
+                                # frozen dataclass and is NOT persisted into the JSON `le`
+                                # snapshot — it lives in the module cache only). Equities only
+                                # (crypto has no daily-S&R regime here). Gated on the two P0
+                                # flags: BOTH off ⇒ no fetch, _daily_ctx stays None ⇒ the entry
+                                # path is byte-identical. docs/DESIGN/MOMENTUM_LANE.md
+                                _daily_ctx = None
+                                try:
+                                    _blue_on = bool(getattr(settings, "chili_momentum_blue_sky_entry_enabled", False))
+                                    _ovh_on = bool(getattr(settings, "chili_momentum_overhead_veto_enabled", False))
+                                    if (_blue_on or _ovh_on) and not str(sess.symbol).upper().endswith("-USD"):
+                                        _daily_ctx = _daily_ctx_cached(sess.symbol, price=_live_px)
+                                except Exception:
+                                    _daily_ctx = None
+
+                                # The dip-family result so far (a FIRE is a candidate for the
+                                # selector; a WAIT is preserved as the fallback below).
+                                _dip_fire = (
+                                    (_trigger_ok, _trigger_reason, _pb_debug) if _trigger_ok else None
+                                )
+                                _breakouts: list = []
+                                for _ft in (False, True):  # HOD break, then flat-top
+                                    try:
+                                        _hb_ok, _hb_reason, _hb_dbg = hod_break_confirmation(
+                                            _df_trig, entry_interval=_iv_trig, flat_top=_ft,
+                                            live_price=_live_px, symbol=sess.symbol, db=db,
+                                        )
+                                    except Exception:
+                                        _hb_ok, _hb_reason, _hb_dbg = False, "hod_break_error", {}
+                                    if _hb_ok:
+                                        _breakouts.append((_hb_ok, _hb_reason, _hb_dbg))
+                                    elif (
+                                        _hb_reason in TICK_ARMED_WAIT_REASONS
+                                        and _hb_dbg.get("pullback_high")
+                                        and not _trigger_ok
+                                        and _trigger_reason not in TICK_ARMED_WAIT_REASONS
+                                    ):
+                                        # Surface the breakout WAIT so tick-speed dispatch fires
+                                        # the instant the live ask trades through the base level
+                                        # (the dip ladder produced only a terminal wait).
+                                        _trigger_reason, _pb_debug = _hb_reason, _hb_dbg
+
+                                # P0: BLUE-SKY BREAK — the dedicated NEW multi-period/all-time
+                                # high break with NO overhead resistance (clear sky), DISTINCT
+                                # from hod_break (high-of-DAY only). Reads the session-cached
+                                # DailyContext (NO new per-tick fetch); flag-gated INSIDE the
+                                # detector (OFF / no DailyContext -> no-op, byte-identical) and
+                                # returns the shared (ok, reason, debug) with pullback_low/high
+                                # under the IDENTICAL keys, joining the SAME candidate set so the
+                                # setup-selector picks the best R:R. docs/DESIGN/MOMENTUM_LANE.md
+                                try:
+                                    from .entry_gates import blue_sky_break_confirmation
+
+                                    _bsk_ok, _bsk_reason, _bsk_dbg = blue_sky_break_confirmation(
+                                        _df_trig, entry_interval=_iv_trig, daily_ctx=_daily_ctx,
+                                        live_price=_live_px, symbol=sess.symbol, db=db,
+                                    )
+                                    if _bsk_ok:
+                                        _breakouts.append((_bsk_ok, _bsk_reason, _bsk_dbg))
+                                    elif (
+                                        _bsk_reason in TICK_ARMED_WAIT_REASONS
+                                        and isinstance(_bsk_dbg, dict)
+                                        and _bsk_dbg.get("pullback_high")
+                                        and not _trigger_ok
+                                        and _trigger_reason not in TICK_ARMED_WAIT_REASONS
+                                    ):
+                                        # Surface the blue-sky WAIT so tick-speed dispatch fires
+                                        # the instant the ask trades through the new-high level.
+                                        _trigger_reason, _pb_debug = _bsk_reason, _bsk_dbg
+                                except Exception:
+                                    pass
+
+                                # BATCH C: ABCD (SS101 #013) + DOUBLE-BOTTOM breakout triggers.
+                                # Both need a swing-pivot scanner the lane lacked; built ATR-noise-
+                                # filtered so chop is not read as structure. Each is flag-gated INSIDE
+                                # the detector (OFF -> no-op, byte-identical) and returns the shared
+                                # (ok, reason, debug) with pullback_low/high under the IDENTICAL keys,
+                                # so the structural-stop + bailout machinery below is reused unchanged.
+                                # They join the breakout candidate set so the SAME setup-selector picks
+                                # the best R:R among dip-family + HOD/flat-top + ABCD/double-bottom.
+                                # Run AFTER the existing ladder (additive). docs/DESIGN/MOMENTUM_LANE.md
+                                try:
+                                    from .entry_gates import (
+                                        cup_and_handle_confirmation,
+                                        inverse_head_shoulders_confirmation,
+                                        ross_abcd_confirmation,
+                                        ross_double_bottom_confirmation,
+                                    )
+
+                                    for _bc_fn in (
+                                        ross_abcd_confirmation,
+                                        ross_double_bottom_confirmation,
+                                        inverse_head_shoulders_confirmation,
+                                        cup_and_handle_confirmation,
+                                    ):
+                                        try:
+                                            _bc_ok, _bc_reason, _bc_dbg = _bc_fn(
+                                                _df_trig, entry_interval=_iv_trig,
+                                                live_price=_live_px, symbol=sess.symbol, db=db,
+                                            )
+                                        except Exception:
+                                            _bc_ok, _bc_reason, _bc_dbg = False, "batch_c_error", {}
+                                        if _bc_ok:
+                                            _breakouts.append((_bc_ok, _bc_reason, _bc_dbg))
+                                        elif (
+                                            _bc_reason in TICK_ARMED_WAIT_REASONS
+                                            and isinstance(_bc_dbg, dict)
+                                            and _bc_dbg.get("pullback_high")
+                                            and not _trigger_ok
+                                            and _trigger_reason not in TICK_ARMED_WAIT_REASONS
+                                        ):
+                                            # Surface the ABCD/double-bottom WAIT so tick-speed
+                                            # dispatch fires the instant the ask trades through the
+                                            # B-high / neckline (the ladder gave only a terminal wait).
+                                            _trigger_reason, _pb_debug = _bc_reason, _bc_dbg
+                                except Exception:
+                                    pass
+
+                                # BATCH D: OPENING-RANGE BREAKOUT (ORB) + RED-TO-GREEN. ORB =
+                                # break of the first-N-min opening range (session-time-windowed,
+                                # equity-RTH only). RED-TO-GREEN = a name below the session open
+                                # reclaiming it on a bottoming-tail reversal. Both BREAKOUT-family
+                                # fires that join the SAME candidate set so the setup-selector picks
+                                # the best R:R; both flag-gated INSIDE the detector (OFF -> no-op,
+                                # byte-identical) and return the shared (ok, reason, debug) with
+                                # pullback_low/high under the IDENTICAL keys. Run AFTER the existing
+                                # ladder (additive). No lookahead (ranges/levels from completed bars;
+                                # the live tick break is the only intrabar use). docs/DESIGN/MOMENTUM_LANE.md
+                                try:
+                                    from .entry_gates import (
+                                        bottom_reversal_confirmation,
+                                        ma_vwap_pullback_confirmation,
+                                        opening_range_breakout_confirmation,
+                                        red_to_green_confirmation,
+                                    )
+
+                                    for _bd_fn in (
+                                        opening_range_breakout_confirmation,
+                                        red_to_green_confirmation,
+                                        # SS101 #019 BOTTOM REVERSAL — N consecutive reds then
+                                        # the first green close (counter-trend bounce); shares the
+                                        # red_to_green signature + the shared (ok,reason,debug)+
+                                        # pullback_high/low contract so it joins the SAME candidate
+                                        # set the setup-selector arbitrates by R:R. Flag-gated
+                                        # INSIDE the detector (default OFF -> no-op, byte-identical).
+                                        bottom_reversal_confirmation,
+                                        # SS101 #014 MOVING-AVERAGE / VWAP PULLBACK — the
+                                        # cooler-market EMA-cascade dip-buy (DEEPER than the
+                                        # shallow first-pullback, ALL-DAY unlike the morning-
+                                        # only deep-reclaim, dips TO the 9/20-EMA not VWAP):
+                                        # fire on the EMA reclaim, stop = the pullback low.
+                                        # Shares the (ok,reason,debug)+pullback_high/low
+                                        # contract so it joins the SAME candidate set the
+                                        # setup-selector arbitrates by R:R. Flag-gated INSIDE
+                                        # the detector (default OFF -> no-op, byte-identical).
+                                        ma_vwap_pullback_confirmation,
+                                    ):
+                                        try:
+                                            # now=None -> the live real clock (the runner
+                                            # is live-only; the session-window read uses the
+                                            # DST-correct market-profile open helper).
+                                            # l2_as_of=None = the LIVE default (newest
+                                            # book snapshot; read_ladder_distribution emits
+                                            # the original SQL). Threaded EXPLICITLY so the
+                                            # _l2_entry_veto inside each Batch-D gate
+                                            # (red_to_green / ORB / bottom_reversal /
+                                            # ma_vwap_pullback) reads the live book like the
+                                            # other gates — the hidden-seller / big-seller
+                                            # veto fires for these too. PRESERVES fail-open:
+                                            # no L2 data ⇒ _NULL read ⇒ veto returns None ⇒
+                                            # unchanged. Byte-identical (the gate already
+                                            # defaults l2_as_of=None).
+                                            _bd_ok, _bd_reason, _bd_dbg = _bd_fn(
+                                                _df_trig, entry_interval=_iv_trig,
+                                                live_price=_live_px, symbol=sess.symbol,
+                                                now=None, db=db, l2_as_of=None,
+                                            )
+                                        except Exception:
+                                            _bd_ok, _bd_reason, _bd_dbg = False, "batch_d_error", {}
+                                        if _bd_ok:
+                                            _breakouts.append((_bd_ok, _bd_reason, _bd_dbg))
+                                        elif (
+                                            _bd_reason in TICK_ARMED_WAIT_REASONS
+                                            and isinstance(_bd_dbg, dict)
+                                            and _bd_dbg.get("pullback_high")
+                                            and not _trigger_ok
+                                            and _trigger_reason not in TICK_ARMED_WAIT_REASONS
+                                        ):
+                                            # Surface the ORB / red-to-green WAIT so tick-speed
+                                            # dispatch fires the instant the ask trades through the
+                                            # OR-high / open level (the ladder gave only a terminal wait).
+                                            _trigger_reason, _pb_debug = _bd_reason, _bd_dbg
+                                except Exception:
+                                    pass
+
+                                # SS101 #012: BULL FLAG -- the DEEPER (50-70% retrace) 2-3
+                                # candle pullback that holds the 9-EMA, then breaks the prior
+                                # pullback swing high. DISTINCT from first_pullback (SHALLOW
+                                # only) and deep_reclaim (MORNING-only); ALL-DAY. A BREAKOUT-
+                                # family fire that joins the SAME candidate set so the setup-
+                                # selector picks the best R:R; flag-gated INSIDE the detector
+                                # (OFF -> no-op, byte-identical) and returns the shared (ok,
+                                # reason, debug) with pullback_low/high under the IDENTICAL
+                                # keys. Runs AFTER the existing ladder (additive). No lookahead
+                                # (swing high from completed bars; the live tick break is the
+                                # only intrabar use). docs/DESIGN/MOMENTUM_LANE.md
+                                try:
+                                    from .entry_gates import bull_flag_confirmation
+
+                                    # l2_as_of=None = the LIVE default (newest book snapshot).
+                                    # Threaded EXPLICITLY so the _l2_entry_veto inside
+                                    # bull_flag_confirmation reads the live book like the other
+                                    # gates. PRESERVES fail-open (no L2 data ⇒ None ⇒ unchanged);
+                                    # byte-identical (the gate already defaults l2_as_of=None).
+                                    _bf_ok, _bf_reason, _bf_dbg = bull_flag_confirmation(
+                                        _df_trig, entry_interval=_iv_trig,
+                                        live_price=_live_px, symbol=sess.symbol,
+                                        now=None, db=db, l2_as_of=None,
+                                    )
+                                    if _bf_ok:
+                                        _breakouts.append((_bf_ok, _bf_reason, _bf_dbg))
+                                    elif (
+                                        _bf_reason in TICK_ARMED_WAIT_REASONS
+                                        and isinstance(_bf_dbg, dict)
+                                        and _bf_dbg.get("pullback_high")
+                                        and not _trigger_ok
+                                        and _trigger_reason not in TICK_ARMED_WAIT_REASONS
+                                    ):
+                                        # Surface the bull-flag WAIT so tick-speed dispatch
+                                        # fires the instant the ask trades through the swing
+                                        # high (the ladder gave only a terminal wait).
+                                        _trigger_reason, _pb_debug = _bf_reason, _bf_dbg
+                                except Exception:
+                                    pass
+
+                                # GAP 1 WEDGE break + GAP 3 ABSORPTION/SNAP (Warrior re-audit):
+                                # two NEW breakout-family triggers that join the SAME candidate
+                                # set so the setup-selector arbitrates them by R:R. Each is flag-
+                                # gated INSIDE the detector (default OFF -> returns disabled before
+                                # any compute, byte-identical), carries the SAME chase-guards (tape
+                                # REQUIRED+fail-closed via tape_confirms_hold INSIDE the detector,
+                                # _hod_extension_ok + _detect_back_side + front_side_state +
+                                # _l2_entry_veto) and returns the shared (ok, reason, debug) with
+                                # pullback_low/high under the IDENTICAL keys, so the structural-stop
+                                # + bailout machinery below is reused unchanged. l2_as_of=None = the
+                                # LIVE default. docs/DESIGN/MOMENTUM_LANE.md
+                                try:
+                                    from .entry_gates import absorption_snap_entry, wedge_break_entry
+
+                                    for _wa_fn in (wedge_break_entry, absorption_snap_entry):
+                                        try:
+                                            _wa_ok, _wa_reason, _wa_dbg = _wa_fn(
+                                                _df_trig, entry_interval=_iv_trig,
+                                                live_price=_live_px, symbol=sess.symbol,
+                                                now=None, db=db, l2_as_of=None,
+                                            )
+                                        except Exception:
+                                            _wa_ok, _wa_reason, _wa_dbg = False, "wedge_absorption_error", {}
+                                        if _wa_ok:
+                                            _breakouts.append((_wa_ok, _wa_reason, _wa_dbg))
+                                        elif (
+                                            _wa_reason in TICK_ARMED_WAIT_REASONS
+                                            and isinstance(_wa_dbg, dict)
+                                            and _wa_dbg.get("pullback_high")
+                                            and not _trigger_ok
+                                            and _trigger_reason not in TICK_ARMED_WAIT_REASONS
+                                        ):
+                                            # Surface the wedge / absorption WAIT so tick-speed
+                                            # dispatch fires the instant the ask trades through the
+                                            # wedge apex / absorption level (the ladder gave only a
+                                            # terminal wait).
+                                            _trigger_reason, _pb_debug = _wa_reason, _wa_dbg
+                                except Exception:
+                                    pass
+
+                                if _breakouts:
+                                    # SETUP-SELECTOR: choose the best R:R among the dip-family fire
+                                    # (if any) and the breakout fire(s). Flag OFF -> the first fire
+                                    # wins (legacy ladder order) -> byte-identical.
+                                    if bool(getattr(settings, "chili_momentum_setup_selector_enabled", True)):
+                                        _cands = ([_dip_fire] if _dip_fire else []) + _breakouts
+                                        _sel_ok, _sel_reason, _sel_dbg = select_best_setup(
+                                            _cands, symbol=sess.symbol,
+                                            atr_pct=_pb_debug.get("atr_pct") if isinstance(_pb_debug, dict) else None,
+                                            daily_ctx=_daily_ctx,
+                                        )
+                                        _trigger_ok, _trigger_reason, _pb_debug = _sel_ok, _sel_reason, _sel_dbg
+                                    elif not _trigger_ok:
+                                        # selector OFF: take the first breakout only if no dip fire.
+                                        _trigger_ok, _trigger_reason, _pb_debug = _breakouts[0]
+                            except Exception:
+                                pass
                     except Exception:
                         _trigger_ok = False
                 if not _trigger_ok and _mode != "pullback_break":
@@ -3446,6 +4614,65 @@ def tick_live_session(
                         _trigger_ok, _trigger_reason = momentum_volume_confirmation(_df)
             except Exception:
                 _trigger_ok, _trigger_reason = False, "trigger_error_wait"
+        # BATCH B (FIX 1): STICKY BACK-SIDE BENCH. The per-tick front_side_state /
+        # _detect_back_side vetoes inside the trigger recompute backside EACH tick, so a
+        # name that rolled over midday gets RE-ARMED on the next MACD pivot — chasing a dead,
+        # rolled-over top. Ross BENCHES a name once it is on the back side for the rest of the
+        # move. Once a CONFIRMED session backside latches le["benched_backside_hod"], the name
+        # stays benched (and is NOT re-armed) until the MANDATORY UN-BENCH: a GENUINE NEW HIGH
+        # above the benched-at HOD clears the marker (a real new leg can still trade — never a
+        # permanent ban). Runs whenever the score qualifies (so the un-bench can clear even on
+        # a tick that produced no trigger); only VETOES when a trigger actually fired. Flag
+        # OFF -> the marker is never set/read -> byte-identical. Fail-OPEN (never benches on a
+        # bug). docs/STRATEGY/CC_REPORTS/2026-06-25_batch-b.md
+        if _score_ok and bool(
+            getattr(settings, "chili_momentum_sticky_backside_bench_enabled", True)
+        ):
+            try:
+                from .entry_gates import evaluate_sticky_backside_bench
+                from ..market_data import fetch_ohlcv_df
+
+                _bench_iv = str(
+                    getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m"
+                )
+                _bench_df = fetch_ohlcv_df(sess.symbol, interval=_bench_iv, period="5d")
+                _bench_px = None
+                try:
+                    if tick is not None:
+                        _bench_px = float(tick.ask or tick.mid or 0) or None
+                except Exception:
+                    _bench_px = None
+                _benched, _bench_reason, _bench_hod_out, _bench_dbg = evaluate_sticky_backside_bench(
+                    _bench_df,
+                    benched_at_hod=_float_or_none(le.get("benched_backside_hod")),
+                    live_price=_bench_px,
+                )
+                _prev_benched = le.get("benched_backside_hod") is not None
+                if _benched:
+                    le["benched_backside_hod"] = float(_bench_hod_out) if _bench_hod_out is not None else le.get("benched_backside_hod")
+                    if not _prev_benched:
+                        _emit(db, sess, "live_entry_backside_benched", {
+                            "reason": _bench_reason, "benched_at_hod": le.get("benched_backside_hod"),
+                            **_bench_dbg,
+                        })
+                    if _trigger_ok:
+                        # VETO the fired trigger — the name is benched on the back side.
+                        _prev_trigger = _trigger_reason
+                        _trigger_ok = False
+                        _trigger_reason = "backside_benched"
+                        _emit(db, sess, "live_entry_backside_bench_veto", {
+                            "blocked_trigger": _prev_trigger, "reason": _bench_reason,
+                            "benched_at_hod": le.get("benched_backside_hod"), **_bench_dbg,
+                        })
+                elif _prev_benched:
+                    # MANDATORY UN-BENCH: a genuine new high cleared the bench -> drop the
+                    # marker so the name can be armed/entered again on a fresh leg.
+                    le.pop("benched_backside_hod", None)
+                    _emit(db, sess, "live_entry_backside_unbenched", {
+                        "reason": _bench_reason, **_bench_dbg,
+                    })
+            except Exception:
+                pass  # fail-open: any error -> no bench change (never strand a name)
         # HVM101 (A): OPENING-BELL SUPPRESSION — hold a FRESH equity trigger in the
         # first ~N min after the 09:30 ET open (opening-auction whipsaw). Equity/RH
         # ONLY; premarket continuation of an already-armed runner is preserved (the
@@ -3480,14 +4707,33 @@ def tick_live_session(
             and not str(sess.symbol or "").upper().endswith("-USD")
             and bool(getattr(settings, "chili_momentum_bid_prop_confirmer_enabled", True))
         ):
-            try:
-                _bp_window = (
-                    float(getattr(settings, "chili_momentum_spread_stability_window_bars", 1.0) or 1.0)
-                    * _entry_interval_seconds()
-                )
-                _bp_ok, _bp_dbg = _bid_prop_confirms_break(db, sess.symbol, window_s=_bp_window)
-            except Exception:
-                _bp_ok, _bp_dbg = True, {"reason": "bid_prop_error_fail_open"}
+            # GATE 1 (explosive-mover recalibration): BYPASS the bid-prop deterioration
+            # confirmer for explosive names. A high-RVOL / extreme-ATR squeeze routinely
+            # steps the bid DOWN and widens the spread mid-run (liquidity imbalance, NOT
+            # weakness) — that is exactly WHEN the break is working (ILLR/WEN/BB blocked,
+            # then ran). The structural pullback-break trigger already read volume +
+            # structure cleanly; the confirmer is a RECONFIRM layer, so it must not re-veto
+            # the whole pattern on the explosive names the lane targets. MASTER-gated +
+            # sub-flag: OFF ⇒ _session_is_explosive is False ⇒ confirmer runs as today.
+            _bp_explosive_exempt = (
+                bool(getattr(settings, "chili_momentum_bid_prop_explosive_exempt", False))
+                and _session_is_explosive(via)
+            )
+            if _bp_explosive_exempt:
+                _bp_ok, _bp_dbg = True, {"reason": "bid_prop_explosive_exempt"}
+                _emit(db, sess, "live_entry_bid_prop_explosive_exempt", {
+                    "atr_pct": _via_atr_pct(via),
+                    "atr_floor": float(getattr(settings, "chili_momentum_explosive_atr_pct_floor", 0.045)),
+                })
+            else:
+                try:
+                    _bp_window = (
+                        float(getattr(settings, "chili_momentum_spread_stability_window_bars", 1.0) or 1.0)
+                        * _entry_interval_seconds()
+                    )
+                    _bp_ok, _bp_dbg = _bid_prop_confirms_break(db, sess.symbol, window_s=_bp_window)
+                except Exception:
+                    _bp_ok, _bp_dbg = True, {"reason": "bid_prop_error_fail_open"}
             if not _bp_ok:
                 _prev_reason = _trigger_reason
                 _trigger_ok = False
@@ -3506,6 +4752,13 @@ def tick_live_session(
             _mkt_open = bool(is_tradeable_now(sess.symbol))
         except Exception:
             _mkt_open = True
+        try:
+            logger.info(
+                "[momentum_live] entry_branch symbol=%s state=%s mkt_open=%s score_ok=%s trigger_ok=%s trigger_reason=%s",
+                sess.symbol, sess.state, _mkt_open, _score_ok, _trigger_ok, _trigger_reason,
+            )
+        except Exception:
+            pass
         # Halt-resume whipsaw guard: right after a suspected halt resumes, price
         # discovery is violent — sit out the cooldown (watching continues, structure
         # rebuilds with fresh bars), then enter on a clean post-resume setup.
@@ -3531,8 +4784,19 @@ def tick_live_session(
                 "deep_reclaim_dipbuy_ok", "deep_reclaim_dipbuy_tick_ok",
                 # HVM101 (C): the two new triggers carry pullback_low/high under the
                 # SAME keys, so they reuse the IDENTICAL structural-stop + breakout-or-
-                # bailout machinery.
-                "flush_dip_buy", "vwap_reclaim",
+                # bailout machinery. BATCH B (FIX 2): the hot-tape wick-reclaim carries
+                # pullback_low (= the wick/flush low) + pullback_high (= the wick high)
+                # under the SAME keys, so it reuses the same machinery.
+                "flush_dip_buy", "vwap_reclaim", "wick_reclaim",
+                # BATCH A: the HOD-break / flat-top breakouts carry pullback_low (= the
+                # consolidation low / structural stop) + pullback_high (= the break level)
+                # under the SAME keys, so the structural-stop + bailout machinery is reused.
+                "hod_break", "hod_break_tick_ok", "flat_top_break", "flat_top_break_tick_ok",
+                # BATCH C: ABCD (SS101 #013) + double-bottom carry pullback_low (= the C-low /
+                # double-bottom low = structural stop) + pullback_high (= the B-high / neckline
+                # break level) under the SAME keys, so the same machinery is reused.
+                "abcd_break", "abcd_break_tick_ok",
+                "double_bottom_break", "double_bottom_break_tick_ok",
             ) and _pb_debug.get("pullback_low"):
                 le["structural_stop_price"] = float(_pb_debug["pullback_low"])
                 # #2 Breakout-or-bailout: stash the broken pullback HIGH (the breakout
@@ -3568,6 +4832,295 @@ def tick_live_session(
         elif _score_ok and not _mkt_open:
             _emit(db, sess, "live_entry_wait_market_closed", {"symbol": sess.symbol})
         elif _score_ok:
+            # ── FIX C: TAPE-CONFIRMED-HOLD EARLY ENTRY (additive earlier-fire) ──────────
+            # The break trigger above is WAITING (e.g. waiting_for_reclaim_high) because the
+            # current bar has not yet exceeded the pullback high — choppy explosive names
+            # rarely give that clean break inside the watch window (then get reaped). Ross
+            # enters EARLIER: he buys the pullback-HOLD bounce the moment the TAPE confirms
+            # buyers, before the confirmed break. Fire NOW iff ALL hold (else fall through to
+            # the existing break-wait, byte-identical):
+            #   (1) the trigger is waiting on a VALID PULLBACK family (a real pullback that
+            #       held the 9-EMA formed — TAPE_HOLD_VALID_WAIT_REASONS);
+            #   (2) the TAPE CONFIRMS a bounce — tape_confirms_hold is REQUIRED + FAIL-CLOSED
+            #       (signed_tape_accel>0 AND tick_rate>=floor; missing/thin/stale/crypto tape
+            #       ⇒ no fire, keep the break path);
+            #   (3) price is HOLDING/turning up off the 9-EMA band + a higher low vs the
+            #       pullback low (NOT broken down) — tape_confirmed_hold_trigger;
+            #   (4) NOT benched / NOT backside / NOT below VWAP (re-checked in the struct
+            #       trigger via _detect_back_side + front_side_state; the sticky bench already
+            #       forced _trigger_reason='backside_benched' above, which is NOT a valid wait
+            #       reason, so a benched name never reaches here);
+            #   (5) ALL existing entry vetoes + the quote gate still run — this only promotes
+            #       WATCHING -> LIVE_ENTRY_CANDIDATE, which routes through the SAME
+            #       LIVE_PENDING_ENTRY veto chain (_entry_flow_veto, _entry_extension_veto,
+            #       overhead/L2 vetoes, _l2_entry_confirm, position cap, _quote_quality_block).
+            # KILL-SWITCH chili_momentum_tape_hold_entry_enabled OFF ⇒ tape_confirms_hold
+            # returns (False, ...) before any I/O ⇒ this whole block is a no-op (break-only).
+            _tape_hold_fired = False
+            try:
+                logger.info(
+                    "[momentum_live] tape_hold_gate symbol=%s reason=%s flag=%s in_valid=%s pb_low=%s benched=%s",
+                    sess.symbol, _trigger_reason,
+                    bool(getattr(settings, "chili_momentum_tape_hold_entry_enabled", False)),
+                    _trigger_reason in TAPE_HOLD_VALID_WAIT_REASONS,
+                    (_pb_debug.get("pullback_low") if isinstance(_pb_debug, dict) else None),
+                    le.get("benched_backside_hod"),
+                )
+            except Exception:
+                pass
+            if (
+                bool(getattr(settings, "chili_momentum_tape_hold_entry_enabled", False))
+                and _trigger_reason in TAPE_HOLD_VALID_WAIT_REASONS
+                and isinstance(_pb_debug, dict)
+                and _pb_debug.get("pullback_low") is not None
+                and le.get("benched_backside_hod") is None
+            ):
+                try:
+                    _th_px = None
+                    try:
+                        if tick is not None:
+                            _th_px = float(tick.ask or tick.mid or 0) or None
+                    except Exception:
+                        _th_px = None
+                    # (2) REQUIRED tape confirm — fail-CLOSED.
+                    _tape_ok, _tape_dbg = tape_confirms_hold(sess.symbol, db=db, settings=settings)
+                    try:
+                        logger.info(
+                            "[momentum_live] tape_hold_tape symbol=%s tape_ok=%s accel=%s rate=%s floor=%s n=%s reason=%s",
+                            sess.symbol, _tape_ok, _tape_dbg.get("signed_tape_accel"), _tape_dbg.get("tick_rate"),
+                            _tape_dbg.get("tick_rate_floor"), _tape_dbg.get("n_ticks"), _tape_dbg.get("reason"),
+                        )
+                    except Exception:
+                        pass
+                    if _tape_ok:
+                        # (3)+(4) structural hold + not-backside on the SAME entry-interval df.
+                        _th_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+                        from ..market_data import fetch_ohlcv_df as _th_fetch
+
+                        _th_df = _th_fetch(sess.symbol, interval=_th_iv, period="5d")
+                        _th_struct_ok, _th_reason, _th_sdbg = tape_confirmed_hold_trigger(
+                            _th_df,
+                            pullback_high=_float_or_none(_pb_debug.get("pullback_high")),
+                            pullback_low=_float_or_none(_pb_debug.get("pullback_low")),
+                            live_price=_th_px,
+                            retracement_threshold=float(
+                                getattr(settings, "chili_momentum_pullback_retracement_threshold", 0.50) or 0.50
+                            ),
+                            entry_interval=_th_iv,
+                        )
+                        try:
+                            logger.info(
+                                "[momentum_live] tape_hold_struct symbol=%s struct_ok=%s reason=%s",
+                                sess.symbol, _th_struct_ok, _th_reason,
+                            )
+                        except Exception:
+                            pass
+                        if _th_struct_ok:
+                            # Reuse the EXACT structural-stop + breakout-level stash the break
+                            # path uses (pullback_low = structural stop, pullback_high = the
+                            # breakout-or-bailout level), so sizing/placement/bailout are identical.
+                            le["structural_stop_price"] = float(_th_sdbg["pullback_low"])
+                            if _th_sdbg.get("pullback_high"):
+                                le["breakout_level_price"] = float(_th_sdbg["pullback_high"])
+                            else:
+                                le.pop("breakout_level_price", None)
+                            _l2 = _entry_pricebook_snapshot(sess.symbol)
+                            if _l2 is not None:
+                                le["entry_l2_snapshot"] = _l2
+                            else:
+                                le.pop("entry_l2_snapshot", None)
+                            le["entry_trigger_reason"] = "tape_confirmed_hold"
+                            le.pop("watch_break_level", None)
+                            _commit_le(sess, le)
+                            _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
+                            _emit(db, sess, "live_entry_tape_hold_fire", {
+                                "blocked_wait_reason": _trigger_reason,
+                                "viability_score": via.viability_score,
+                                "structural_stop": le.get("structural_stop_price"),
+                                "breakout_level": le.get("breakout_level_price"),
+                                **{k: _tape_dbg.get(k) for k in (
+                                    "signed_tape_accel", "tick_rate", "tick_rate_floor", "n_ticks")},
+                                **{k: _th_sdbg.get(k) for k in (
+                                    "ema9", "ema_wick", "cur_px", "above_vwap", "atr_pct")},
+                                "l2": _l2,
+                            })
+                            _tape_hold_fired = True
+                except Exception:
+                    _tape_hold_fired = False  # fail-safe: any error -> fall back to break-wait
+            if _tape_hold_fired:
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state}
+            # ── FIX 1: MOMENTUM-CONTINUATION ENTRY (additive new-high fire) ─────────────
+            # The break trigger above is WAITING because every existing trigger needs a
+            # PULLBACK / consolidation BASE — and the STRONGEST movers (WSHP +47% 40x RVOL
+            # viab 0.759 breaking_major, SDOT +25% 132x RVOL viab 0.768) trend STRAIGHT UP
+            # with no pullback, so they are caught + watched but NEVER enter, then reaped at
+            # 300s while the lane trades weaker pullback names. Ross BUYS the continuation:
+            # a fresh new high on a HIGH-CONVICTION, front-side, NOT-parabolic name with the
+            # TAPE confirming buyers. Fire NOW iff ALL FIVE hold (else fall through to the
+            # break-wait, byte-identical):
+            #   (1) HIGH-CONVICTION ONLY — ross_score >= floor OR RVOL >= the coiling-exempt
+            #       multiple OR daily_breaking_major (never a low-conviction/random name);
+            #   (2) NEW HIGH / HOD break — momentum_continuation_trigger (a fresh high above
+            #       the recent high, NO prior pullback / base required);
+            #   (3) TAPE CONFIRMS — REQUIRED + FAIL-CLOSED (tape_confirms_hold: signed_tape_
+            #       accel>0 AND tick_rate>=floor; no/thin/stale/selling/crypto tape ⇒ no fire);
+            #   (4) NOT PARABOLIC — the #1 chase guard (_hod_extension_ok / _entry_extension_
+            #       veto vs 9-EMA AND VWAP, inside the trigger; re-checked downstream);
+            #   (5) NOT backside / NOT below-VWAP (_detect_back_side + front_side_state inside
+            #       the trigger; the sticky bench already forced 'backside_benched' above, and
+            #       a benched name is gated below); + the structural stop + ALL downstream
+            #       LIVE_PENDING_ENTRY vetoes (_entry_flow_veto, _entry_extension_veto, L2 /
+            #       overhead, _l2_entry_confirm, position cap, _quote_quality_block) still run.
+            # KILL-SWITCH chili_momentum_momentum_continuation_entry_enabled OFF ⇒ the trigger
+            # returns (False, ..._disabled) before any compute ⇒ this whole block is a no-op
+            # (byte-identical). Runs only when the break path did NOT already fire (this is the
+            # elif _score_ok: WAIT branch) and the name is NOT benched.
+            _continuation_fired = False
+            if (
+                bool(getattr(settings, "chili_momentum_momentum_continuation_entry_enabled", False))
+                and le.get("benched_backside_hod") is None
+            ):
+                try:
+                    # (1) HIGH-CONVICTION read — ross_score / RVOL / daily_breaking_major from
+                    # the session's own persisted scanner row (execution_readiness_json.extra),
+                    # the SAME source the arm-queue ranker + viability tilt read. No new fetch.
+                    _ross_score = None
+                    _daily_breaking = False
+                    try:
+                        _ex = via.execution_readiness_json if isinstance(via.execution_readiness_json, dict) else {}
+                        _extra = (_ex.get("extra") or {}) if isinstance(_ex, dict) else {}
+                        _symu = str(sess.symbol or "").upper()
+                        _rs_map = _extra.get("ross_scores") if isinstance(_extra.get("ross_scores"), dict) else {}
+                        if _symu in _rs_map:
+                            _ross_score = float(_rs_map[_symu] or 0.0)
+                        _sig_map = _extra.get("ross_signals") if isinstance(_extra.get("ross_signals"), dict) else {}
+                        _row_sig = _sig_map.get(_symu) if isinstance(_sig_map, dict) else None
+                        if isinstance(_row_sig, dict):
+                            _daily_breaking = bool(_row_sig.get("daily_breaking_major"))
+                    except (TypeError, ValueError, AttributeError):
+                        _ross_score, _daily_breaking = None, False
+                    from .entry_gates import (
+                        compute_intraday_rvol_fallback,
+                        continuation_conviction_floors,
+                        continuation_high_conviction,
+                        momentum_continuation_trigger,
+                    )
+                    from ..market_data import fetch_ohlcv_df as _mc_fetch
+
+                    _mc_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+                    _rvol_now = _latest_rvol(db, sess.symbol)
+                    # ROW-SIGNAL PRECEDENCE: only when this name carries NO usable conviction
+                    # signal (scanner-only: ross_score None, micro-bar RVOL None, not
+                    # daily_breaking) fill the EMPTY RVOL axis from the 5m/5d frame the struct
+                    # trigger fetches anyway — fetch it ONCE here and REUSE it downstream (zero
+                    # added fetch). Kill-switch OFF ⇒ helper returns None ⇒ byte-identical.
+                    _mc_df = None
+                    # KILL-SWITCH GATE: the empty-signal RVOL-fallback (and its OHLCV fetch)
+                    # only run when chili_momentum_conviction_rvol_fallback_enabled is ON.
+                    # Flag OFF ⇒ NO fetch is hoisted here and _rvol_now stays None for
+                    # scanner-only names ⇒ byte-identical to deployed 1e2eb09 (the baseline
+                    # short-circuits via high_conviction=False below and issues no fetch).
+                    if bool(getattr(settings, "chili_momentum_conviction_rvol_fallback_enabled", False)):
+                        if _rvol_now is None and _ross_score is None and not _daily_breaking:
+                            _mc_df = _mc_fetch(sess.symbol, interval=_mc_iv, period="5d")
+                            _rvol_now = compute_intraday_rvol_fallback(
+                                _mc_df, symbol=sess.symbol, settings_obj=settings
+                            )
+                    _ross_floor, _rvol_conviction_floor = continuation_conviction_floors(settings)
+                    # THE shared conviction test — IDENTICAL definition at arm-time + entry-time.
+                    _high_conviction = continuation_high_conviction(
+                        _ross_score, _rvol_now, _daily_breaking, settings
+                    )
+                    try:
+                        logger.info(
+                            "[momentum_live] continuation_gate symbol=%s high_conv=%s ross=%s ross_floor=%s rvol=%s rvol_floor=%s breaking=%s",
+                            sess.symbol, _high_conviction, _ross_score, _ross_floor,
+                            _rvol_now, _rvol_conviction_floor, _daily_breaking,
+                        )
+                    except Exception:
+                        pass
+                    if _high_conviction:
+                        _mc_px = None
+                        try:
+                            if tick is not None:
+                                _mc_px = float(tick.ask or tick.mid or 0) or None
+                        except Exception:
+                            _mc_px = None
+                        # Reuse the frame already fetched for the fallback when present; else fetch.
+                        if _mc_df is None:
+                            _mc_df = _mc_fetch(sess.symbol, interval=_mc_iv, period="5d")
+                        # (2) NEW HIGH + (4) not parabolic + (5) not backside (inside).
+                        _mc_ok, _mc_reason, _mc_dbg = momentum_continuation_trigger(
+                            _mc_df, live_price=_mc_px, entry_interval=_mc_iv,
+                            symbol=sess.symbol, db=db, l2_as_of=None,
+                        )
+                        try:
+                            logger.info(
+                                "[momentum_live] continuation_struct symbol=%s mc_ok=%s reason=%s pb_low=%s pb_high=%s",
+                                sess.symbol, _mc_ok, _mc_reason,
+                                (_mc_dbg.get("pullback_low") if isinstance(_mc_dbg, dict) else None),
+                                (_mc_dbg.get("pullback_high") if isinstance(_mc_dbg, dict) else None),
+                            )
+                        except Exception:
+                            pass
+                        if _mc_ok and isinstance(_mc_dbg, dict) and _mc_dbg.get("pullback_low") is not None:
+                            # (3) REQUIRED tape confirm — fail-CLOSED (no/thin/stale/selling
+                            # tape ⇒ NO continuation fire; the distribution / dead-cat guard).
+                            _mc_tape_ok, _mc_tape_dbg = tape_confirms_hold(
+                                sess.symbol, db=db, settings=settings
+                            )
+                            try:
+                                logger.info(
+                                    "[momentum_live] continuation_tape symbol=%s tape_ok=%s accel=%s rate=%s floor=%s n=%s reason=%s",
+                                    sess.symbol, _mc_tape_ok,
+                                    _mc_tape_dbg.get("signed_tape_accel"), _mc_tape_dbg.get("tick_rate"),
+                                    _mc_tape_dbg.get("tick_rate_floor"), _mc_tape_dbg.get("n_ticks"),
+                                    _mc_tape_dbg.get("reason"),
+                                )
+                            except Exception:
+                                pass
+                            if _mc_tape_ok:
+                                # Reuse the EXACT structural-stop + breakout-level stash the
+                                # break path uses (pullback_low = structural stop, pullback_high
+                                # = the breakout-or-bailout level), so sizing/placement/bailout
+                                # are identical, then route through the SAME LIVE_ENTRY_CANDIDATE
+                                # -> LIVE_PENDING_ENTRY veto chain.
+                                le["structural_stop_price"] = float(_mc_dbg["pullback_low"])
+                                if _mc_dbg.get("pullback_high"):
+                                    le["breakout_level_price"] = float(_mc_dbg["pullback_high"])
+                                else:
+                                    le.pop("breakout_level_price", None)
+                                _l2 = _entry_pricebook_snapshot(sess.symbol)
+                                if _l2 is not None:
+                                    le["entry_l2_snapshot"] = _l2
+                                else:
+                                    le.pop("entry_l2_snapshot", None)
+                                le["entry_trigger_reason"] = "momentum_continuation"
+                                le.pop("watch_break_level", None)
+                                _commit_le(sess, le)
+                                _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
+                                _emit(db, sess, "live_entry_momentum_continuation_fire", {
+                                    "blocked_wait_reason": _trigger_reason,
+                                    "continuation_reason": _mc_reason,
+                                    "viability_score": via.viability_score,
+                                    "ross_score": _ross_score,
+                                    "rvol": _rvol_now,
+                                    "daily_breaking_major": _daily_breaking,
+                                    "structural_stop": le.get("structural_stop_price"),
+                                    "breakout_level": le.get("breakout_level_price"),
+                                    **{k: _mc_tape_dbg.get(k) for k in (
+                                        "signed_tape_accel", "tick_rate", "tick_rate_floor", "n_ticks")},
+                                    **{k: _mc_dbg.get(k) for k in (
+                                        "recent_high", "recent_low", "above_vwap", "atr_pct")},
+                                    "l2": _l2,
+                                })
+                                _continuation_fired = True
+                except Exception:
+                    _continuation_fired = False  # fail-safe: any error -> fall back to break-wait
+            if _continuation_fired:
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state}
             # Stash the level we're WAITING to break so the event loop can dispatch
             # a tick-speed re-evaluation the instant a live tick crosses it (the
             # tick-break path above then fires within seconds, like Ross).
@@ -4334,6 +5887,37 @@ def tick_live_session(
         _base_max_loss = policy_float_cap(
             caps, "max_loss_per_trade_usd", settings.chili_momentum_risk_max_loss_per_trade_usd
         )
+        # TIER-2 OVERNIGHT max-loss cap: overnight has NO broker-side stop, so the per-trade
+        # loss is bounded by the SOFTWARE circuit (C1/C1b every tick) sized off a TIGHTER cap
+        # = max($50 irreducible base, 0.5% of overnight buying power) — equity-relative, not a
+        # magic $50. This LOWERS _base_max_loss overnight (never raises it). Flag OFF / not
+        # overnight => unchanged (byte-identical).
+        if (
+            getattr(settings, "chili_momentum_overnight_trading_enabled", False)
+            and not str(sess.symbol or "").upper().endswith("-USD")
+        ):
+            try:
+                from .market_profile import is_overnight_now as _is_overnight_now
+
+                if _is_overnight_now(sess.symbol):
+                    _ovn_floor = float(getattr(settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0) or 50.0)
+                    _ovn_irreducible = 50.0
+                    _ovn_pct = float(getattr(settings, "chili_momentum_overnight_max_loss_pct_bp", 0.5) or 0.0)
+                    _ovn_bp = None
+                    try:
+                        from .risk_policy import _account_equity_usd as _ovn_equity
+
+                        _ovn_bp = _ovn_equity(ef)
+                    except Exception:
+                        _ovn_bp = None
+                    _ovn_cap = _ovn_irreducible
+                    if _ovn_bp and _ovn_bp > 0 and _ovn_pct > 0:
+                        _ovn_cap = max(_ovn_irreducible, float(_ovn_bp) * _ovn_pct / 100.0)
+                    if _ovn_cap > 0 and _ovn_cap < float(_base_max_loss):
+                        le["overnight_max_loss"] = {"cap_usd": round(_ovn_cap, 2), "bp_usd": _ovn_bp}
+                        _base_max_loss = _ovn_cap
+            except Exception:
+                pass
         le["streak_risk"] = _streak_meta
         # Day-cushion ladder (Ross 06-11): start the day at half risk; earn the
         # right to full and then aggressive size from TODAY's banked P&L.
@@ -4384,6 +5968,26 @@ def tick_live_session(
             _emit(db, sess, "live_entry_wait_late_window", {"window": "late"})
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state, "skipped": "late_window"}
+        # TIER-2 OVERNIGHT size reduction: a multiplier (base 0.5) on the equity-relative
+        # notional overnight — smaller size is the REAL protection against a gap through the
+        # software stop (RH has no broker stop overnight). Equities only; composes with the
+        # other size-down levers under the 3x clamp. Flag OFF / not overnight => 1.0 (no-op).
+        _overnight_mult = 1.0
+        if (
+            getattr(settings, "chili_momentum_overnight_trading_enabled", False)
+            and not str(sess.symbol or "").upper().endswith("-USD")
+        ):
+            try:
+                from .market_profile import is_overnight_now as _is_overnight_now2
+
+                if _is_overnight_now2(sess.symbol):
+                    _overnight_mult = float(
+                        getattr(settings, "chili_momentum_overnight_size_fraction", 0.5) or 1.0
+                    )
+                    if _overnight_mult != 1.0:
+                        le["overnight_size_down"] = {"mult": _overnight_mult}
+            except Exception:
+                _overnight_mult = 1.0
         # L2.2 LIQUIDITY-SCALED RISK CAP (project_profitability_levers): the biggest losers
         # are wide-spread illiquid names sized too big (QXL −$229 @119bps; the −$697 low-float
         # gap-through tail). SHRINK the risk budget as the live spread eats the name's adaptive
@@ -4437,8 +6041,63 @@ def tick_live_session(
                                                    "conf": round(float(_mm_model.get("confidence") or 0.0), 4)}
             except Exception:
                 _meta_mult = 1.0
+        # WIN-CYCLE FATIGUE YELLOW down-size (Batch E(2), ENTRIES ONLY): once today's clean-win
+        # count (this execution family) reaches the YELLOW band, size DOWN the NEW entry's risk
+        # budget by the documented fraction (the RED band is a hard arm-gate halt, not a size of
+        # 0 — an OPEN position is never de-sized). Composes with the streak/cushion/liquidity
+        # levers under the same 3x clamp. This is the ENTRY-fill sizing path; it physically
+        # cannot reach an exit. OFF / green / fail-open => 1.0 (byte-identical). Replay applies
+        # the SAME multiplier from the SAME helper => parity. docs/DESIGN/MOMENTUM_LANE.md
+        _fatigue_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_win_cycle_fatigue_enabled", False)):
+            try:
+                from .auto_arm import win_cycle_yellow_size_multiplier
+
+                _fatigue_mult, _fatigue_meta = win_cycle_yellow_size_multiplier(db, execution_family=ef)
+                if _fatigue_mult < 1.0:
+                    le["win_cycle_fatigue"] = _fatigue_meta
+            except Exception:
+                _fatigue_mult = 1.0
+        # P2 PER-SYMBOL ATTEMPT FATIGUE — YELLOW down-size (ENTRIES ONLY): the borderline last
+        # allowed attempt on a ticker that has already chopped us today is taken SMALLER (the RED
+        # over-cap attempt is vetoed at the arm-gate, not de-sized to 0 — an OPEN position is
+        # never de-sized to nothing). This is the ENTRY-fill sizing path; it physically cannot
+        # reach an exit (held states never consult fatigue). Composes with the streak/cushion/
+        # liquidity/win-cycle levers under the same 3x clamp. OFF / green / fail-open => 1.0
+        # (byte-identical). Replay applies the SAME multiplier from the SAME helper => parity.
+        _sym_fatigue_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_per_symbol_fatigue_enabled", False)):
+            try:
+                from .auto_arm import per_symbol_fatigue_size_multiplier
+
+                _sym_fatigue_mult, _sym_fatigue_meta = per_symbol_fatigue_size_multiplier(
+                    db, sess.symbol, execution_family=ef
+                )
+                if _sym_fatigue_mult < 1.0:
+                    le["per_symbol_fatigue"] = _sym_fatigue_meta
+            except Exception:
+                _sym_fatigue_mult = 1.0
+        # P3 HOT/COLD-TAPE SIZE SCALING — a BOUNDED size multiplier: size UP on hot tape, DOWN on
+        # cold, composed MULTIPLICATIVELY with the other levers under the SAME 3x clamp. The
+        # liquidity cap (max_notional above) and the equity-relative notional ceiling remain HARD
+        # ceilings — this only scales the per-trade RISK BUDGET, and compute_risk_first_quantity
+        # below still caps qty at max_notional, so the mult can NEVER push notional past any cap.
+        # OFF / fail-neutral => 1.0 (byte-identical). docs/DESIGN/MOMENTUM_LANE.md
+        _hot_cold_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_hot_cold_size_enabled", False)):
+            try:
+                from .auto_arm import hot_cold_tape_size_multiplier
+
+                _hc_rvol = _latest_rvol(db, sess.symbol)
+                _hot_cold_mult, _hc_meta = hot_cold_tape_size_multiplier(
+                    atr_pct=regime_atr_pct(_regime), rvol=_hc_rvol,
+                )
+                if _hot_cold_mult != 1.0:
+                    le["hot_cold_size"] = _hc_meta
+            except Exception:
+                _hot_cold_mult = 1.0
         _eff_max_loss = min(
-            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult),
+            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult) * float(_fatigue_mult) * float(_sym_fatigue_mult) * float(_hot_cold_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE
@@ -4595,6 +6254,22 @@ def tick_live_session(
         except Exception:
             _entry_extended = False
         le["entry_session_extended"] = bool(_entry_extended)
+        # TIER-2 OVERNIGHT signal: when the master flag is ON and the clock is in the RH
+        # overnight band, mark the entry overnight so the RH adapter routes it to
+        # ``all_day_hours`` (the 24-hour market). The name reached here only via
+        # is_tradeable_now's overnight branch, which already required 24h-eligibility — so
+        # all_day_hours is sent ONLY for proven-eligible names (the 2026-06-23 regression
+        # guard). Flag OFF / not overnight => False => extended_hours routing (byte-identical).
+        _entry_overnight = False
+        try:
+            from .market_profile import is_overnight_now
+
+            _entry_overnight = bool(
+                getattr(settings, "chili_momentum_overnight_trading_enabled", False)
+            ) and is_overnight_now(sess.symbol)
+        except Exception:
+            _entry_overnight = False
+        le["entry_session_overnight"] = bool(_entry_overnight)
         _entry_kwargs = dict(
             product_id=product_id,
             side="buy",
@@ -4605,8 +6280,23 @@ def tick_live_session(
             # ORDER-TRUTH (2026-06-11): entry limits are DAY orders, never GTC —
             # a dead session's resting GTC buy (KMRK) filled hours later into a
             # -21.9% dump. Equity adapters map this to RH 'gfd'; crypto ignores.
+            # Overnight keeps 'gfd': RH day-orders in the 24h session expire at the
+            # 24h-session boundary (acceptable; a resting overnight GTC is the KMRK risk).
             time_in_force="gfd",
         )
+        # Pass the overnight signal ONLY for the agentic RH equity rail (the only adapter
+        # whose place_*_order accepts ``overnight`` -> all_day_hours). Crypto / robin_stocks /
+        # alpaca don't take the kwarg, so they are called exactly as before (no regress).
+        # normalize_execution_family + EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP are already
+        # imported at MODULE level (top of file). A LOCAL re-import here made the name
+        # function-local for the whole of tick_live_session and broke the earlier
+        # module-level use at ~3080 with UnboundLocalError. Use the module-level names.
+        if (
+            _entry_overnight
+            and normalize_execution_family(sess.execution_family)
+            == EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP
+        ):
+            _entry_kwargs["overnight"] = True
         # MAKER-ONLY (2026-06-13): post-only so a crossing price is rejected (no
         # taker) — the ack-timeout then cancels + re-watches. Pass post_only ONLY
         # for crypto+maker (coinbase_spot supports it); the RH equity adapter does
@@ -4768,7 +6458,16 @@ def tick_live_session(
             _fv_tf = None if _fv_tf is None else float(_fv_tf)
         except Exception:
             _fv_ofi = _fv_tf = None
-        if _entry_flow_veto(_fv_ofi, _fv_tf, settings):
+        # GATE 4 (explosive-mover recalibration): on an explosive name the STRONG-tape
+        # OR-leg threshold is relaxed toward MAXIMUM selling (a thin-tape one-seller dip
+        # is not "sellers winning"). MASTER + sub-flag gated; the both-bearish AND-leg is
+        # UNCHANGED so a falling tape under a deteriorating book still vetoes. OFF / not
+        # explosive ⇒ _fv_explosive False ⇒ byte-identical veto.
+        _fv_explosive = (
+            bool(getattr(settings, "chili_momentum_entry_flow_veto_explosive_exempt", False))
+            and _session_is_explosive(via)
+        )
+        if _entry_flow_veto(_fv_ofi, _fv_tf, settings, explosive=_fv_explosive):
             _log.info(
                 "[momentum_neural] entry FLOW-VETO %s: OFI=%s trade_flow=%s — deferring buy into selling",
                 sess.symbol, _fv_ofi, _fv_tf,
@@ -4808,7 +6507,19 @@ def tick_live_session(
             _ev_entry = float(entry_limit_px) if entry_limit_px is not None else None
         except (TypeError, ValueError):
             _ev_lvl = _ev_atr = _ev_entry = None
-        if _entry_extension_veto(_ev_entry, _ev_lvl, _ev_atr, settings):
+        # GATE 3 (explosive-mover recalibration): a true outlier squeeze is high-RVOL
+        # despite a thin regime-ATR, so the clean-ATR extension cap under-leverages it.
+        # When the boost flag is ON, read the latest RVOL (cheap tape resample, no
+        # network) so the veto can widen the cap proportionally (hard-capped so a blow-off
+        # chase still vetoes). MASTER + sub-flag gated: OFF ⇒ rvol stays None ⇒ no boost,
+        # byte-identical.
+        _ev_rvol = None
+        if (
+            bool(getattr(settings, "chili_momentum_explosive_recalibration_enabled", False))
+            and bool(getattr(settings, "chili_momentum_entry_extension_rvol_boost_enabled", False))
+        ):
+            _ev_rvol = _latest_rvol(db, sess.symbol)
+        if _entry_extension_veto(_ev_entry, _ev_lvl, _ev_atr, settings, rvol=_ev_rvol):
             _ext_cap = max(
                 float(getattr(settings, "chili_momentum_entry_extension_floor_pct", 0.05)),
                 float(getattr(settings, "chili_momentum_entry_extension_atr_mult", 1.0)) * max(0.0, float(_ev_atr or 0.0)),
@@ -4832,6 +6543,64 @@ def tick_live_session(
             return {
                 "ok": True, "session_id": sess.id, "state": sess.state,
                 "skipped": "entry_extension_veto",
+            }
+        # ── GAP 2 ROUND-NUMBER ENTRY-TIMING CONTEXT (Warrior re-audit) — a CONTEXT modifier,
+        # NOT a standalone veto: prefer a break-and-HOLD OVER a whole/half-dollar round number;
+        # AVOID firing right INTO a round number from BELOW (overhead supply). It only DEFERS
+        # (stay WATCHING, re-enter on the hold-over) — the EXACT extension-veto defer pattern;
+        # it can NEVER terminalize or block an exit. ADDITIVE: flag OFF / no level / no round
+        # number nearby ⇒ permit (byte-identical). Reuses entry_limit_px + breakout_level_price
+        # + the clean regime ATR computed just above for the extension veto. ──
+        _rn_ok, _rn_reason, _rn_dbg = round_number_entry_context(
+            _ev_entry, _ev_lvl, _ev_atr,
+        )
+        if not _rn_ok:
+            _log.info(
+                "[momentum_neural] entry ROUND-NUMBER DEFER %s: entry=%s vs break=%s round=%s — into overhead, re-watching for hold-over",
+                sess.symbol, _ev_entry, _ev_lvl, _rn_dbg.get("round_number"),
+            )
+            _emit(db, sess, "live_entry_round_number_defer", {
+                "entry_price": round(_ev_entry, 6) if _ev_entry is not None else None,
+                "breakout_level": round(_ev_lvl, 6) if _ev_lvl is not None else None,
+                "reason": _rn_reason,
+                **_rn_dbg,
+            })
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            db.flush()
+            return {
+                "ok": True, "session_id": sess.id, "state": sess.state,
+                "skipped": "entry_round_number_into_overhead",
+            }
+        # ── L2 ENTRY CONFIRMER (Phase 1, DEFER-only) — docs/DESIGN/L2_PRIMARY_SIGNAL.md ──
+        # The LAST gate before submit, and it runs ONLY here (an ENTRY-only candidate that
+        # cleared the chart trigger + BOTH vetoes above): a veto ALWAYS wins, we never
+        # confirm into a vetoed book. TAPE-PRIMARY: require the executed tape to actively
+        # confirm thrust (signed_tape_accel>0 AND tick_rate>=self-relative floor; OFI/micro
+        # + rising depth-pctile secondary). CONSERVATIVE-ACTIVE: defer only on CLEAR no-tape
+        # (accel<=0 AND OFI<0). On defer → stay WATCHING_LIVE + re-enter next tick (the EXACT
+        # flow-veto/extension-veto defer pattern — the adaptive watch/reap bounds the slot, no
+        # new hold) + emit live_l2_confirm_defer as the COUNTERFACTUAL (the would-have-entered
+        # price). FAIL-OPEN: any None / thin / stale ⇒ confirm. KILL-SWITCH OFF ⇒ _l2_entry_confirm
+        # returns ("confirm", ...) BEFORE any I/O ⇒ byte-identical (no extra DB read). Held /
+        # position states never reach here, so a defer can NEVER block an exit/stop/flatten.
+        _l2c_decision, _l2c_dbg = _l2_entry_confirm(sess.symbol, db=db, le=le, settings=settings)
+        if _l2c_decision == "defer":
+            _log.info(
+                "[momentum_neural] entry L2-CONFIRM DEFER %s: accel=%s tick_rate=%s ofi=%s — re-watching for tape confirmation",
+                sess.symbol, _l2c_dbg.get("signed_tape_accel"),
+                _l2c_dbg.get("tick_rate"), _l2c_dbg.get("ofi"),
+            )
+            _emit(db, sess, "live_l2_confirm_defer", {
+                **_l2c_dbg,
+                "would_have_entered_price": (
+                    float(entry_limit_px) if entry_limit_px is not None else None
+                ),
+            })
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            db.flush()
+            return {
+                "ok": True, "session_id": sess.id, "state": sess.state,
+                "skipped": "l2_confirm_defer", "l2_confirm": _l2c_dbg,
             }
         res = adapter.place_limit_order_gtc(**_entry_kwargs)
         le["entry_submitted"] = True
@@ -4875,7 +6644,11 @@ def tick_live_session(
             try:
                 from .auto_arm import _write_entry_reject_cooldown
 
-                _write_entry_reject_cooldown(str(sess.symbol or "").upper())
+                # Pass the broker's rejection text so the 24h-eligibility negative cache can
+                # self-heal on an "untradable for 24 hour trading" reject (TIER-2 backstop).
+                _write_entry_reject_cooldown(
+                    str(sess.symbol or "").upper(), reason=str(res.get("error") or "")
+                )
             except Exception:
                 pass
             _safe_transition(db, sess, STATE_LIVE_ERROR)
@@ -4923,7 +6696,10 @@ def tick_live_session(
                 if is_scale_out:
                     # Deliberate first-target scale-out confirmed on a later tick:
                     # bank the partial, move the balance to breakeven, hold the runner.
-                    _scale_out_to_runner(
+                    # E(1): route through the grid step when a multi-level ladder is in
+                    # force (advances the rung); else the single scale-out (byte-identical).
+                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol) else _scale_out_to_runner
+                    _step(
                         db,
                         sess,
                         le=le,
@@ -4945,7 +6721,8 @@ def tick_live_session(
                     )
             elif poll.get("partial"):
                 if is_scale_out:
-                    _scale_out_to_runner(
+                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol) else _scale_out_to_runner
+                    _step(
                         db,
                         sess,
                         le=le,
@@ -5082,6 +6859,14 @@ def tick_live_session(
         # stop/target: only with a recorded breakout level (pullback_break entry, not
         # the momentum_volume fallback), only while plainly ENTERED (scaling/trailing
         # are already past target/in profit), and only inside the time window.
+        # GATE 2 (explosive-mover recalibration): the fast-bail gets a LOCK-IN floor —
+        # below it a momentary sub-level dip is NOT treated as a failed breakout (give
+        # the breakout structural room for a normal retest; FCUV +21% after a 4.5s bail).
+        # The lock-in is master-gated (0 = byte-identical) and WIDER for explosive names.
+        # CRITICAL: the structural stop + the #769 max-loss circuit are evaluated ABOVE
+        # this block (and re-run every tick), so a genuinely collapsing position still
+        # exits inside the lock-in — only the level-retest fast-bail is deferred.
+        _bb_lock_in = _breakout_bailout_lock_in_seconds(explosive=_session_is_explosive(via))
         if (
             st == STATE_LIVE_ENTERED
             and bool(getattr(settings, "chili_momentum_breakout_bailout_enabled", True))
@@ -5091,6 +6876,7 @@ def tick_live_session(
                 held_seconds=held,
                 window_seconds=_breakout_bailout_window_seconds(),
                 buffer_pct=float(getattr(settings, "chili_momentum_breakout_bailout_buffer_pct", 0.001) or 0.0),
+                lock_in_seconds=_bb_lock_in,
             )
         ):
             le["last_bailout_trigger"] = "breakout_failed_to_hold"
@@ -5102,6 +6888,7 @@ def tick_live_session(
                 "bid": bid,
                 "held_seconds": held,
                 "window_seconds": _breakout_bailout_window_seconds(),
+                "lock_in_seconds": _bb_lock_in,
             })
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
@@ -5496,6 +7283,84 @@ def tick_live_session(
                     except Exception:
                         _cooldown = False
                     _ladder = read_ladder_distribution(sess.symbol, db=db)
+                    # ── CADENCE CLASS (drives the SLOW_CHOPPER loosening below) ──
+                    # Fully flag-gated + fail-open: any error / OFF flag ⇒ _cad_loosen
+                    # stays False ⇒ the ladder is BYTE-IDENTICAL to today. All inputs
+                    # are already present at this green tick (no new I/O for the class
+                    # itself; the 5m-EMA + RVOL are the cached values fetched above).
+                    _cad = None
+                    _cad_loosen = False
+                    if bool(getattr(settings, "chili_momentum_cadence_aware_exit_enabled", True)):
+                        try:
+                            # elapsed minutes since the fill (GUARD #1 cold-start input).
+                            _cad_elapsed_min = None
+                            _opened_raw = pos.get("opened_at_utc")
+                            if _opened_raw:
+                                try:
+                                    _opened_dt = datetime.fromisoformat(str(_opened_raw))
+                                    _now_dt = _utcnow()
+                                    if _opened_dt.tzinfo is None and _now_dt.tzinfo is not None:
+                                        _now_dt = _now_dt.replace(tzinfo=None)
+                                    _cad_elapsed_min = max(
+                                        0.0, (_now_dt - _opened_dt).total_seconds() / 60.0
+                                    )
+                                except (TypeError, ValueError):
+                                    _cad_elapsed_min = None
+                            # prior peak_r (GUARD #1 cold-start input): the trade's own
+                            # risk unit (same formula the stop uses), HWM excursion.
+                            _cad_peak_r = None
+                            try:
+                                _rd = avg * max(0.003, float(_atr_pct_trail or 0.0) * float(_sm or 0.0))
+                                if _rd > 0:
+                                    _cad_peak_r = max(0.0, (float(_hwm_trail) - float(avg)) / _rd)
+                            except (TypeError, ValueError, ZeroDivisionError):
+                                _cad_peak_r = None
+                            # 5m-EMA rising vs the PREVIOUS cached EMA sample (structure
+                            # anchor). None when we have no prior sample ⇒ unknown.
+                            _cad_ema_rising = None
+                            try:
+                                _ema_prev = _float_or_none(le.get("cadence_prev_ema5m"))
+                                if _ema5 is not None and _ema_prev is not None:
+                                    _cad_ema_rising = bool(float(_ema5) > float(_ema_prev))
+                                if _ema5 is not None:
+                                    le["cadence_prev_ema5m"] = float(_ema5)
+                            except (TypeError, ValueError):
+                                _cad_ema_rising = None
+                            # RVOL accelerating vs the previous cached sample. None when
+                            # no prior sample / thin tape ⇒ unknown.
+                            _cad_rvol_accel = None
+                            try:
+                                _rvol_now = _latest_rvol(db, sess.symbol)
+                                _rvol_prev = _float_or_none(le.get("cadence_prev_rvol"))
+                                if _rvol_now is not None and _rvol_prev is not None:
+                                    _cad_rvol_accel = bool(float(_rvol_now) > float(_rvol_prev))
+                                if _rvol_now is not None:
+                                    le["cadence_prev_rvol"] = float(_rvol_now)
+                            except (TypeError, ValueError):
+                                _cad_rvol_accel = None
+                            _cad = _classify_cadence(
+                                high_water_mark=_hwm_trail,
+                                entry_price=avg,
+                                bid=bid,
+                                atr_pct=_atr_pct_trail,
+                                elapsed_minutes=_cad_elapsed_min,
+                                peak_r_prior=_cad_peak_r,
+                                ema_5m_rising=_cad_ema_rising,
+                                rvol_accelerating=_cad_rvol_accel,
+                                slow_atr_pct_threshold=float(
+                                    getattr(settings, "chili_momentum_cadence_atr_pct_slow_threshold", 0.20) or 0.20
+                                ),
+                                trigger_bar_minutes=max(
+                                    0.01,
+                                    float(getattr(settings, "chili_momentum_micropull_bar_seconds", 15) or 15) / 60.0,
+                                ),
+                            )
+                            # ONLY a SLOW_CHOPPER loosens; FAST/UNCERTAIN never do.
+                            _cad_loosen = bool(_cad.get("cls") == "SLOW_CHOPPER")
+                            _commit_le(sess, le)
+                        except Exception:
+                            _cad = None
+                            _cad_loosen = False
                     _sis = sell_into_strength_ladder(
                         high_water_mark=_hwm_trail,
                         entry_price=avg,
@@ -5510,7 +7375,32 @@ def tick_live_session(
                         prior_partial_taken=bool(pos.get("partial_taken")),
                         cooldown_active=_cooldown,
                         side_long=True,
+                        cadence_loosen=_cad_loosen,
                     )
+                    # GUARD #2 — RE-ENTRY DAMPER under SLOW_CHOPPER: a name just called a
+                    # chopper must NOT be aggressively re-loaded (the 4.6%-spread scalp→
+                    # reenter bleed). Widen/lengthen the micro-pullback re-entry cooldown
+                    # for THIS session to ~3× the base bar frame from now. Monotonic: only
+                    # ever pushes the cooldown LATER, never earlier (never enables a
+                    # re-load that wasn't already allowed). No-op when not a chopper.
+                    if _cad_loosen:
+                        try:
+                            _damp_s = 3.0 * float(
+                                getattr(settings, "chili_momentum_micropullback_reentry_cooldown_seconds", 30.0) or 30.0
+                            )
+                            _damp_until = (_utcnow() + timedelta(seconds=_damp_s)).replace(tzinfo=None)
+                            _dmp_raw = le.get("micropullback_reentry_cooldown_until_utc")
+                            _dmp_cur = None
+                            if _dmp_raw:
+                                try:
+                                    _dmp_cur = datetime.fromisoformat(str(_dmp_raw))
+                                except (TypeError, ValueError):
+                                    _dmp_cur = None
+                            if _dmp_cur is None or _damp_until > _dmp_cur:
+                                le["micropullback_reentry_cooldown_until_utc"] = _damp_until.isoformat()
+                                _commit_le(sess, le)
+                        except Exception:
+                            pass
                     if _sis.get("armed"):
                         _emit(db, sess, "live_sell_into_strength", {
                             "state": _sis.get("state"),
@@ -5532,6 +7422,11 @@ def tick_live_session(
                             "live": bool(getattr(settings, "chili_momentum_exit_ladder_live", False)),
                             "bid": bid,
                             "high_water_mark": _hwm_trail,
+                            # cadence-aware A/B telemetry (observe-first)
+                            "cadence_cls": (_cad or {}).get("cls"),
+                            "cadence_reason": (_cad or {}).get("reason"),
+                            "cadence_velocity_score": (_cad or {}).get("velocity_score"),
+                            "cadence_loosened": bool(_sis.get("cadence_loosened")),
                         })
                     # Action A: ratchet-only stop (INVARIANT A; live-on, can only help).
                     _sis_stop = _float_or_none(_sis.get("new_stop_floor"))
@@ -5799,6 +7694,61 @@ def tick_live_session(
                             iceberg_threshold=_iceberg_thresh,
                         )
                         _R0 = _decn.get("R0")
+                        # GAP 6 ADD-INTO-THE-HALT (Warrior re-audit, RISKIEST — default OFF).
+                        # When the name has a SUSPECTED HALT in progress (le["suspected_halt_
+                        # since_utc"], the lane's stale-quote halt onset) while the held
+                        # position is GREEN, this is the "add into a limit-up halt" scenario.
+                        # It is EXTRA-GUARDED + fail-CLOSED via add_into_halt_ok: ALREADY IN
+                        # PROFIT (>= min R) + limit-UP (bullish; inferred from the green
+                        # position) + structural stop intact + RTH-only. It can only ever
+                        # TIGHTEN the add (turn a would-fire into a no-fire); it NEVER loosens
+                        # an add or any veto. Flag OFF ⇒ this whole block is skipped ⇒ byte-
+                        # identical to the existing pyramid behavior. Deploy recipe: KEEP OFF
+                        # until soaked. docs/DESIGN/MOMENTUM_LANE.md
+                        if (
+                            _decn.get("fire")
+                            and bool(getattr(settings, "chili_momentum_add_into_halt_enabled", False))
+                            and le.get("suspected_halt_since_utc")
+                        ):
+                            try:
+                                _orig_stop = _float_or_none(
+                                    (le.get("entry_sizing") or {}).get("stop_price")
+                                    if isinstance(le.get("entry_sizing"), dict) else None
+                                )
+                                if _orig_stop is None:
+                                    _orig_stop = _float_or_none(le.get("pyramid_entry_stop_ref")) or float(pos["stop_price"])
+                                # limit-UP direction = a GREEN held position during the halt
+                                # (the name halted to the UPSIDE — we are in profit on it).
+                                _is_limit_up = float(bid) > float(pos["avg_entry_price"])
+                                # RTH-only (stops fire only in RTH; equity gate, crypto exempt).
+                                _halt_in_rth, _ = _dip_buy_in_rth_window(
+                                    now=_utcnow(), bar_ts=None, symbol=sess.symbol,
+                                )
+                                _ah_ok, _ah_reason, _ah_dbg = add_into_halt_ok(
+                                    avg_entry=float(pos["avg_entry_price"]),
+                                    original_stop=_orig_stop,
+                                    current_stop=float(pos["stop_price"]),
+                                    bid=float(bid),
+                                    is_limit_up_halt=bool(_is_limit_up),
+                                    in_rth=bool(_halt_in_rth),
+                                )
+                                if not _ah_ok:
+                                    # EXTRA guard refused the halt-add: turn the decision into a
+                                    # no-fire (NEVER an exit). The normal (non-halt) add path is
+                                    # untouched (this only runs when a halt is suspected).
+                                    _emit(db, sess, "live_pyramid_add_into_halt_refused", {
+                                        "reason": _ah_reason, **_ah_dbg,
+                                    })
+                                    _decn = dict(_decn)
+                                    _decn["fire"] = False
+                                else:
+                                    _emit(db, sess, "live_pyramid_add_into_halt_ok", {
+                                        "reason": _ah_reason, **_ah_dbg,
+                                    })
+                            except Exception:
+                                # fail-CLOSED: any error refuses the halt-add (never the exit).
+                                _decn = dict(_decn)
+                                _decn["fire"] = False
                         if _decn.get("fire"):
                             # GUARD #4 ADMISSION — the add is the FIRST post-entry BUY;
                             # it MUST be refused whenever a NEW entry would be refused.
@@ -5810,6 +7760,29 @@ def tick_live_session(
                             _adm_ok, _adm_ev = runner_boundary_risk_ok(
                                 db, sess, expected_move_bps=_expected_move_bps
                             )
+                            # GATE 5 (explosive-mover recalibration): the add is a BUY into
+                            # an ALREADY-HELD winner that PASSED admission at entry — a
+                            # neural-viability eligibility/freshness FLICKER (stale snapshot)
+                            # must not refuse it (3x live risk_admission_refused on held RUN).
+                            # Override ONLY when (a) master + sub-flag ON, (b) the position is
+                            # held in STATE_LIVE_TRAILING, and (c) the ONLY failing checks are
+                            # live_eligible / viability_freshness. Hard risk blocks (kill-switch,
+                            # drawdown, daily-loss, position cap) are NEVER overridden — they
+                            # fail other check ids, so _only_held_eligibility_flicker_block is
+                            # False and the add is still refused. The cushion gate + #769
+                            # max-loss circuit still bound the add. OFF ⇒ byte-identical.
+                            if (
+                                not _adm_ok
+                                and bool(getattr(settings, "chili_momentum_explosive_recalibration_enabled", False))
+                                and bool(getattr(settings, "chili_momentum_pyramid_skip_viability_recheck", False))
+                                and st == STATE_LIVE_TRAILING
+                                and _only_held_eligibility_flicker_block(_adm_ev)
+                            ):
+                                _emit(db, sess, "live_pyramid_add_eligibility_flicker_override", {
+                                    "severity": _adm_ev.get("severity"),
+                                    "errors": _adm_ev.get("errors"),
+                                })
+                                _adm_ok = True
                             if not _adm_ok:
                                 _emit(db, sess, "live_pyramid_add_blocked", {
                                     "reason": "risk_admission_refused",
@@ -5863,14 +7836,28 @@ def tick_live_session(
                                         "add_budget_usd": round(_add_budget, 2),
                                     })
                                 else:
-                                    # SUBMIT a marketable-limit BUY (mirror the entry
-                                    # submit). post_only only for crypto-maker — but this
-                                    # path is equity-only, so post_only is never set (RH
-                                    # adapter has no such kwarg). DAY tif like the entry.
+                                    # SUBMIT a marketable-limit BUY using the EXACT working
+                                    # entry order shape (the agentic-rail isError on the add
+                                    # path was the early shape bug — fixed for entries/exits,
+                                    # never back-ported here). post_only only for crypto-maker
+                                    # — this path is equity-only, so post_only is never set
+                                    # (RH adapter has no such kwarg). DAY tif ("gfd") like the
+                                    # entry; extended_hours from the SAME market_session_now
+                                    # read so the venue routes pre/after-hours adds. The
+                                    # client_order_id mirrors the ENTRY ref-id shape exactly
+                                    # (sha1-seeded, 120-char-bounded, per-attempt-unique) so the
+                                    # rail's "Reference ID must be unique" contract holds for a
+                                    # retried add too.
                                     _pyr_limit_str = _fmt_limit_price_buy(_pyr_guard_ask)
+                                    _pyr_place_n = int(le.get("pyramid_place_count", 0) or 0) + 1
+                                    le["pyramid_place_count"] = _pyr_place_n
+                                    _pyr_id_seed = (
+                                        f"{sess.id}|{sess.correlation_id or 'x'}|pyr|{_pyr_place_n}"
+                                    ).encode("utf-8")
+                                    _pyr_suffix = hashlib.sha1(_pyr_id_seed).hexdigest()[:10]
                                     _pyr_cid = (
-                                        f"chili_ml_pyr_{sess.id}_{uuid.uuid4().hex[:12]}"
-                                    )
+                                        f"chili_ml_pyr_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{_pyr_suffix}"
+                                    )[:120]
                                     try:
                                         from .market_profile import market_session_now as _pyr_sess_now
                                         _pyr_ext = _pyr_sess_now(sess.symbol) != "regular"
@@ -5896,6 +7883,7 @@ def tick_live_session(
                                         le["pyramid_confirm_ofi"] = (
                                             None if _pyr_ofi is None else float(_pyr_ofi)
                                         )
+                                        le.pop("pyramid_submit_retry_count", None)
                                         _commit_le(sess, le)
                                         _emit(db, sess, "live_pyramid_add_submitted", {
                                             "order_id": le["pyramid_order_id"],
@@ -5916,10 +7904,38 @@ def tick_live_session(
                                             "stop_at_submit": float(stop_px),
                                         })
                                     else:
-                                        _emit(db, sess, "live_pyramid_add_blocked", {
-                                            "reason": "submit_failed",
-                                            "error": _pyr_res.get("error"),
-                                        })
+                                        # BOUNDED RETRY (explosive-mover recalibration): a
+                                        # transient broker isError leaves NO order resting
+                                        # (the submit failed before acceptance), so re-attempt
+                                        # on a LATER tick (fresh per-attempt ref-id above) up to
+                                        # the configured max before giving up. No in-flight
+                                        # marker is set on failure, so the next tick re-evaluates
+                                        # the add cleanly. MASTER-gated + retry_max default 0 ⇒
+                                        # byte-identical (single block emit, as today).
+                                        _pyr_retry_max = (
+                                            int(getattr(settings, "chili_momentum_pyramid_add_submit_retry_max", 0) or 0)
+                                            if bool(getattr(settings, "chili_momentum_explosive_recalibration_enabled", False))
+                                            else 0
+                                        )
+                                        _pyr_retry_n = int(le.get("pyramid_submit_retry_count", 0) or 0)
+                                        if _pyr_retry_max > 0 and _pyr_retry_n < _pyr_retry_max:
+                                            le["pyramid_submit_retry_count"] = _pyr_retry_n + 1
+                                            _commit_le(sess, le)
+                                            _emit(db, sess, "live_pyramid_add_submit_retry", {
+                                                "error": _pyr_res.get("error"),
+                                                "retry_count": _pyr_retry_n + 1,
+                                                "retry_max": _pyr_retry_max,
+                                                "client_order_id": _pyr_cid,
+                                            })
+                                        else:
+                                            le.pop("pyramid_submit_retry_count", None)
+                                            _commit_le(sess, le)
+                                            _emit(db, sess, "live_pyramid_add_blocked", {
+                                                "reason": "submit_failed",
+                                                "error": _pyr_res.get("error"),
+                                                "retry_count": _pyr_retry_n,
+                                                "retry_max": _pyr_retry_max,
+                                            })
                 except Exception:
                     # Fail-safe: any pyramid error is swallowed so the exit path below
                     # ALWAYS runs. The add never blocks/delays/loosens an exit.
@@ -6444,7 +8460,11 @@ def tick_live_session(
                 _commit_le(sess, le)
                 _new_qty = max(0.0, _sl_filled - _already)
                 if _new_qty > 0:
-                    _scale_out_to_runner(
+                    # E(1): a resting-limit fill advances the grid rung when a ladder is
+                    # in force (the reactive market path takes the later rungs); else it
+                    # finishes the single scale-out to the runner (byte-identical).
+                    _step = _scale_out_grid_step if _scale_grid_active(pos, sess.symbol) else _scale_out_to_runner
+                    _step(
                         db, sess, le=le, filled_quantity=_new_qty,
                         entry_price=avg, fill_price=_px_f, reason="scale_out_limit",
                     )
@@ -6499,7 +8519,25 @@ def tick_live_session(
             inc = prod.base_increment if prod else (1.0 if _eq_shares else None)
             mn = prod.base_min_size if prod else (1.0 if _eq_shares else None)
             orig_qty = _float_or_none(pos.get("original_quantity")) or qty
-            frac = scale_out_fraction(symbol=sess.symbol)
+            # E(1) MULTI-LEVEL GRID: when active, this rung's fraction comes from the
+            # frozen ladder (NOT the single scale_out_fraction); on fill the grid step
+            # advances to the next rung instead of finishing. The grid is anchored on the
+            # ORIGINAL risk — freeze the entry stop the FIRST time we scale so a later
+            # breakeven ratchet can't re-scale the rung prices. Flag OFF => grid empty =>
+            # this whole branch is byte-identical (frac = scale_out_fraction, single scale).
+            _grid_active = False
+            try:
+                if pos.get("scale_grid_anchor_stop") is None and not pos.get("partial_taken"):
+                    pos["scale_grid_anchor_stop"] = float(pos.get("stop_price") or 0.0)
+                _grid_active = _scale_grid_active(pos, sess.symbol)
+            except Exception:
+                _grid_active = False
+            if _grid_active:
+                _grid = _resolve_scale_grid(pos, sess.symbol)
+                _gidx = int(pos.get("scale_grid_idx") or 0)
+                frac = float(_grid[_gidx][1]) if _gidx < len(_grid) else scale_out_fraction(symbol=sess.symbol)
+            else:
+                frac = scale_out_fraction(symbol=sess.symbol)
             scale_qty, runner_qty, can_split = scale_out_quantity(
                 current_qty=qty,
                 original_qty=orig_qty,
@@ -6541,7 +8579,9 @@ def tick_live_session(
             slip_live = float(le.get("entry_slip_bps_ref") or 6.0)
             if poll.get("filled"):
                 if scaling:
-                    _scale_out_to_runner(
+                    # E(1): a grid rung advances to the next target; the single scale
+                    # finishes to the runner. Both route through the SAME chokepoint.
+                    (_scale_out_grid_step if _grid_active else _scale_out_to_runner)(
                         db,
                         sess,
                         le=le,
@@ -6566,8 +8606,10 @@ def tick_live_session(
             if poll.get("partial"):
                 if scaling:
                     # Any portion of the scale order filling establishes the runner
-                    # + breakeven; never over-sell. Remaining intent is abandoned.
-                    _scale_out_to_runner(
+                    # + breakeven; never over-sell. Remaining intent is abandoned. A
+                    # partial grid-rung fill still advances the rung (the remaining
+                    # tranche intent is dropped — never re-sold).
+                    (_scale_out_grid_step if _grid_active else _scale_out_to_runner)(
                         db,
                         sess,
                         le=le,

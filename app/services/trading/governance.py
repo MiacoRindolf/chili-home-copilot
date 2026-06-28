@@ -890,7 +890,12 @@ def check_daily_loss_breach(
 # process-local registry that NEVER touches the global _kill_switch boolean, so
 # exits stay live and true-global halts (manual/emergency/drawdown) still freeze
 # everything. Operator 2026-06-15: "dapat ang kill switch is by broker".
-REAL_DAILY_LOSS_FAMILIES = ("robinhood_spot", "coinbase_spot")
+# robinhood_agentic_mcp is first-class (operator 2026-06-25): it is the ACTIVE equities
+# rail (a separate ~$13.6k cash account), so its realized PnL + cap must NOT collapse into
+# the drained legacy robinhood_spot (~$19) — that mis-attribution + tiny-account cap is what
+# produced the false "HALTED" on a -$4.72 agentic BLZE trade. Each rail caps off its OWN
+# account and a breach blocks only that rail. [[project_per_broker_daily_loss]]
+REAL_DAILY_LOSS_FAMILIES = ("robinhood_spot", "robinhood_agentic_mcp", "coinbase_spot")
 
 # {family: {"reason": str, "et_date": date, "realized": float, "limit": float, "set_at": datetime}}
 _per_broker_daily_loss: dict[str, dict[str, Any]] = {}
@@ -936,7 +941,7 @@ def realized_pnl_today_by_broker(
     start_utc = start_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
     end_utc = end_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
 
-    out: dict[str, float] = {"robinhood_spot": 0.0, "coinbase_spot": 0.0}
+    out: dict[str, float] = {fam: 0.0 for fam in REAL_DAILY_LOSS_FAMILIES}
 
     # (A) Autotrader Trade rows, bucketed by broker_source.
     count_manual = bool(getattr(settings, "chili_per_broker_count_manual_as_rh", False))
@@ -973,7 +978,11 @@ def realized_pnl_today_by_broker(
     if user_id is not None:
         mq = mq.filter(MomentumAutomationOutcome.user_id == user_id)
     for ef, total in mq.group_by(_TAS.execution_family).all():
-        fam = "coinbase_spot" if (ef or "").lower() == "coinbase_spot" else "robinhood_spot"
+        # Attribute each session to its OWN rail so the active agentic account's PnL is
+        # NOT mis-booked onto the drained legacy robinhood_spot (the -$4.72 BLZE false-HALT
+        # cause, 2026-06-25). _normalize_real_family keeps robinhood_agentic_mcp first-class
+        # (in REAL_DAILY_LOSS_FAMILIES) and folds unknown/blank to robinhood_spot.
+        fam = _normalize_real_family(ef)
         out[fam] += float(total or 0.0)
 
     return out
@@ -982,25 +991,29 @@ def realized_pnl_today_by_broker(
 def per_broker_daily_loss_cap_usd(family: str) -> tuple[float, str]:
     """(positive_cap_usd, source) for ONE broker's daily-loss cap.
 
-    RISK basis = the broker's UNLEVERED BUYING POWER (operator 2026-06-15: "gamitin
-    mo buying power, hindi lang cash" — but NOT the 2x-margin-inflated sizing number;
-    a Coinbase ~$2.0k buying power must not read as $3,989 = bp*2.0). So pass
-    apply_margin_multiple=False (margin multiple forced to 1.0) -> RH ~$13.4k / CB ~$2.0k.
-    pct reuses the existing chili_global_max_daily_loss_pct_of_equity knob (no new magic
-    number); conservative-wins with the optional usd cap. Fail-CLOSED to a documented
-    floor when buying power is unavailable (Hard Rule #2: never an uncapped path).
+    RISK basis = the broker's account CASH VALUE / total equity (operator 2026-06-25:
+    base the daily-loss cap on cash value, NOT buying power). For robinhood_agentic_mcp
+    that is the stable total account value (_agentic_equity_cached ~$13.6k -> 5% = ~$680);
+    for robinhood_spot / coinbase it is pf["equity"]. So pass prefer_cash_value=True, which
+    forces the stabilized total-equity path (never BP, never the 2x-margin sizing number)
+    routed through the last-good guard so a flaky read cannot collapse the cap to ~$1
+    (the documented failure mode, risk_policy.py:264-266). SIZING is unchanged (it keeps
+    apply_margin_multiple=True / buying-power basis elsewhere). pct reuses the existing
+    chili_global_max_daily_loss_pct_of_equity knob (no new magic number); conservative-wins
+    with the optional usd cap. Fail-CLOSED to a documented floor when cash value is
+    unavailable (Hard Rule #2: never an uncapped path).
     """
     from .momentum_neural.risk_policy import _account_equity_usd
 
     pct = float(getattr(settings, "chili_global_max_daily_loss_pct_of_equity", 0.0) or 0.0)
     usd_cap = float(getattr(settings, "chili_global_max_daily_loss_usd", 0.0) or 0.0)
-    eq = _account_equity_usd(family, apply_margin_multiple=False)
+    eq = _account_equity_usd(family, prefer_cash_value=True)
 
     candidates: list[tuple[float, str]] = []
     if usd_cap > 0:
         candidates.append((usd_cap, "usd"))
     if pct > 0 and eq is not None and float(eq) > 0:
-        candidates.append((pct * float(eq), "pct_buying_power"))
+        candidates.append((pct * float(eq), "pct_cash_value"))
     if not candidates:
         floor = float(getattr(settings, "chili_global_daily_loss_failsafe_usd", 300.0) or 300.0)
         return floor, "usd_failsafe"
@@ -1010,9 +1023,12 @@ def per_broker_daily_loss_cap_usd(family: str) -> tuple[float, str]:
 def _normalize_real_family(family: str | None) -> str:
     """Resolve to one of REAL_DAILY_LOSS_FAMILIES; default robinhood_spot.
 
-    We do NOT use normalize_execution_family here because its None default is
-    coinbase_spot (the very bug we are fixing); an unknown/blank broker for a
-    daily-loss cap is safer attributed to the larger equities account.
+    robinhood_agentic_mcp is preserved as its own family (it is in
+    REAL_DAILY_LOSS_FAMILIES) so the active agentic rail caps + accounts off its
+    OWN ~$13.6k account, NOT the drained legacy robinhood_spot. We do NOT rely on
+    normalize_execution_family's None default (coinbase_spot — the very bug we are
+    fixing); an unknown/blank broker for a daily-loss cap is safer attributed to the
+    larger equities account.
     """
     from .execution_family_registry import normalize_execution_family
 
@@ -1056,7 +1072,16 @@ def set_broker_daily_loss_block(family: str, *, reason: str, realized: float, li
 
 
 def is_broker_daily_loss_blocked(family: str) -> bool:
-    """True if THIS broker is sticky-blocked for today (registry read)."""
+    """True if THIS broker is sticky-blocked for today (registry read).
+
+    Consults chili_per_broker_daily_loss_enabled FIRST: when the feature is OFF the
+    gate must NOT block, even if a STALE in-memory block lingers from when it was ON
+    (2026-06-25: a stale block showed "HALTED" while the flag was already False —
+    lane_health surfaced a freeze the lane wasn't actually enforcing). Mirrors the
+    activating reader (broker_daily_loss_breached) which already early-returns on the flag.
+    """
+    if not bool(getattr(settings, "chili_per_broker_daily_loss_enabled", True)):
+        return False
     clear_stale_broker_daily_loss_blocks()
     fam = _normalize_real_family(family)
     with _per_broker_lock:

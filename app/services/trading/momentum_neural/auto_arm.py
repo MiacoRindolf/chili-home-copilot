@@ -17,6 +17,7 @@ docs/STRATEGY (auto-arm-live); see [[project_momentum_lane]].
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -49,6 +50,15 @@ _REAPABLE_PRE_ENTRY_STATES = frozenset(
 _RANK_DISPLACE_REAPABLE_STATES = frozenset(
     {STATE_ARMED_PENDING_RUNNER, STATE_QUEUED_LIVE}
 )
+
+# Per-pass {UPPER symbol -> candidate row} map, REBUILT (reassigned to a fresh dict) at the
+# start of each probe wave so the budget-bounded ``_probe_candidate`` threads can resolve a
+# name's OWN persisted high-conviction scanner signal (ross_score / RVOL /
+# daily_breaking_major) for the momentum-continuation arm-time trigger WITHOUT changing the
+# probe's 1-arg (symbol) signature (keeps the concurrent submit + the test monkeypatches
+# byte-compatible). Reassigned-per-pass (never mutated in place) so an overlapping pass can
+# only ever read a complete snapshot; a missing key ⇒ None ⇒ pullback-only (byte-identical).
+_PASS_CANDIDATE_ROWS: dict[str, Any] = {}
 
 
 def _auto_arm_user_id() -> int | None:
@@ -205,6 +215,187 @@ def _max_watch_seconds() -> int:
     return max(60, int(getattr(settings, "chili_momentum_auto_arm_max_watch_seconds", 1800)))
 
 
+def _watch_extend_seconds() -> int:
+    """The EXTENDED watch window (>= base) earned by a progressing setup."""
+    return max(
+        _max_watch_seconds(),
+        int(getattr(settings, "chili_momentum_auto_arm_watch_extend_seconds", 600) or 600),
+    )
+
+
+def _watcher_is_building(le: dict, *, base_sec: int) -> bool:
+    """Conservative BUILDING classifier for the adaptive max-watch, off signals ALREADY
+    on the session's ``momentum_live_execution`` snapshot (no new data source):
+
+    - ``watch_break_level`` set  -> a reclaim/break is actually forming (tick-armed).
+    - ``last_mid`` within ``chili_momentum_adaptive_watch_proximity_pct`` of that level
+      -> price is WORKING TOWARD the trigger (about to fire) -> BUILDING -> earn the extend.
+    - far from the level / flat -> DEAD -> reap at the base window.
+
+    No watch_break_level => NOT building (reaps at base) — this matches the legacy binary
+    (only watch_break_level sessions ever earned the extend). CONSERVATIVE no-cut-short
+    guarantee: if the level is set but ``last_mid`` is missing/garbage, we CANNOT prove the
+    name is dead, so we KEEP it (treat as building). Only a level that is set AND a valid
+    last_mid that is provably FAR from it demotes a session to the base window."""
+    if not isinstance(le, dict):
+        return False
+    level = le.get("watch_break_level")
+    if not level:
+        return False  # no forming level -> base window (legacy behavior)
+    try:
+        lvl = float(level)
+    except (TypeError, ValueError):
+        return True  # unparseable level but it was SET -> keep the slot (conservative)
+    if lvl <= 0:
+        return True
+    mid = le.get("last_mid")
+    if mid is None:
+        return True  # level set, no price yet -> never cut a forming setup short
+    try:
+        m = float(mid)
+    except (TypeError, ValueError):
+        return True
+    if m <= 0:
+        return True
+    prox_pct = float(getattr(settings, "chili_momentum_adaptive_watch_proximity_pct", 1.5) or 0.0)
+    if prox_pct <= 0.0:
+        return True  # proximity disabled -> every level-armed watcher keeps the extend
+    # Distance from the break level as a percent of the level. A long below the level by
+    # more than prox_pct is not "about to fire"; within prox_pct (or already above) is.
+    dist_pct = abs(lvl - m) / lvl * 100.0
+    return dist_pct <= prox_pct
+
+
+# ── EVENT / STRUCTURE-BASED ABANDONMENT ─────────────────────────────────────────────
+# Ross stays on a strong stock all day and works EACH pullback; he abandons when the name
+# FADES, not when a clock expires. The reaper's fixed base/extend clock dropped IVF (+66%,
+# 14 clean 2-red-pullback setups across the day) because CHILI armed it only EARLY and got
+# reaped before its setups developed. These helpers let the reaper KEEP a still-strong,
+# still-front-side pre-entry watcher past the clock — and REAP it the instant it cools/fades
+# (no slot leak), with a hard adaptive ceiling so a stuck watcher cannot watch forever.
+#
+# READ DISCIPLINE (orphan-safety + no serialization): conviction is read from a SINGLE bulk
+# viability query the reaper builds BEFORE its loop (passed in as ``conviction_idx``) — NO
+# per-session DB read inside the loop. Front-side is read from the session's OWN already-
+# loaded ``momentum_live_execution`` snapshot (zero new fetch). Both fail OPEN where required
+# so a missing signal never CUTS a keep candidate short — but a name with NO conviction
+# evidence falls through to the normal fixed-clock reap (the kept set is a strict opt-in).
+
+
+def _event_based_abandonment_enabled() -> bool:
+    """Kill-switch. OFF (default) => the reaper never calls the conviction/front-side check
+    and its loop is byte-identical to the fixed base/extend clock."""
+    return bool(getattr(settings, "chili_momentum_event_based_abandonment_enabled", False))
+
+
+def _event_based_max_extend_seconds() -> int:
+    """The HARD fallback ceiling (seconds) for a KEPT high-conviction watcher, derived
+    adaptively from the extend window by ONE documented multiple (no fixed second-count
+    clock). A watcher older than this reaps EVEN IF still high-conviction + front-side, so a
+    name that never triggers all day cannot squat a slot forever. Clamped >= the extend
+    window so the ceiling can never be tighter than the window a progressing setup already
+    earns (which would otherwise reap a building setup early)."""
+    try:
+        mult = float(getattr(settings, "chili_momentum_event_based_max_extend_mult", 3.0) or 3.0)
+    except (TypeError, ValueError):
+        mult = 3.0
+    if mult < 1.0:
+        mult = 1.0
+    return max(_watch_extend_seconds(), int(_watch_extend_seconds() * mult))
+
+
+def _session_still_high_conviction(row: Any) -> bool:
+    """True iff ``row`` (a MomentumSymbolViability for this watcher's symbol) still clears the
+    arm-queue's HIGH-CONVICTION bar — the IDENTICAL test ``_continuation_active_trigger`` uses:
+    ross_score >= chili_momentum_continuation_ross_floor, OR rvol >= the coiling-exempt extreme
+    floor (explosive_rvol_floor * coiling_exempt_rvol_mult, ~9x), OR daily_breaking_major.
+    Reads ONLY the row's OWN persisted scanner signal (no new fetch). ``row`` None / no
+    evidence => False (NOT high-conviction => falls through to the normal fixed-clock reap)."""
+    if row is None:
+        return False
+    _ross_score: float | None = None
+    try:
+        extra = (getattr(row, "execution_readiness_json", None) or {}).get("extra") or {}
+        _rs_map = extra.get("ross_scores") if isinstance(extra.get("ross_scores"), dict) else {}
+        _symu = str(getattr(row, "symbol", "") or "").upper()
+        if _symu in _rs_map:
+            _ross_score = float(_rs_map[_symu] or 0.0)
+    except (AttributeError, TypeError, ValueError):
+        _ross_score = None
+    _daily_breaking = False
+    _sig = _row_ross_signal(row)
+    if isinstance(_sig, dict):
+        _daily_breaking = bool(_sig.get("daily_breaking_major"))
+    _rvol_now = _row_rvol(row)
+    _ross_floor = float(getattr(settings, "chili_momentum_continuation_ross_floor", 0.7) or 0.7)
+    _rvol_floor = float(getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 3.0)
+    _coil_mult = float(getattr(settings, "chili_momentum_coiling_exempt_rvol_mult", 3.0) or 3.0)
+    _rvol_conviction_floor = _rvol_floor * _coil_mult
+    return bool(
+        (_ross_score is not None and _ross_score >= _ross_floor)
+        or (_rvol_now is not None and _rvol_now >= _rvol_conviction_floor)
+        or _daily_breaking
+    )
+
+
+def _session_still_front_side(le: Any) -> bool:
+    """True iff the watcher is still FRONT-SIDE per its OWN cached ``momentum_live_execution``
+    snapshot — i.e. NOT provably faded/backside. FAIL-OPEN: missing/garbage evidence => True
+    (assume front-side; never cut a keep candidate short on absent data, per the plan). Only
+    AFFIRMATIVE backside evidence demotes the watcher to reap:
+      (a) ``is_backside`` already cached True (from a prior entry-gate front_side_state run);
+      (b) ``retrace_from_hod`` cached and > the retrace veto (it has faded off the highs);
+      (c) ``last_mid`` and ``session_vwap`` both cached and last_mid below vwap (lost VWAP).
+    Reads ONLY the snapshot already loaded by the reap loop — no new fetch, no compute."""
+    if not isinstance(le, dict):
+        return True  # no snapshot -> cannot prove backside -> fail-open front-side
+    # (a) explicit cached backside flag (authoritative when present).
+    _ib = le.get("is_backside")
+    if isinstance(_ib, bool):
+        return not _ib
+    # (b) faded: retraced more than the veto of the day's up-move off the HOD.
+    _r = le.get("retrace_from_hod")
+    if _r is not None:
+        try:
+            _rf = float(_r)
+            _veto = float(getattr(settings, "chili_momentum_event_based_retrace_veto", 0.66) or 0.66)
+            if _veto > 0.0 and _rf > _veto:
+                return False  # faded -> backside -> reap
+        except (TypeError, ValueError):
+            pass  # unparseable -> ignore this axis (fail-open)
+    # (c) lost VWAP: last_mid affirmatively below the session VWAP.
+    _vwap = le.get("session_vwap")
+    _mid = le.get("last_mid")
+    if _vwap is not None and _mid is not None:
+        try:
+            _vf = float(_vwap)
+            _mf = float(_mid)
+            if _vf > 0.0 and _mf > 0.0 and _mf < _vf:
+                return False  # below VWAP -> backside -> reap
+        except (TypeError, ValueError):
+            pass  # unparseable -> ignore this axis (fail-open)
+    return True  # no affirmative backside evidence -> front-side (keep eligible)
+
+
+def _build_reap_conviction_index(db: Session) -> dict[str, Any]:
+    """Build the {UPPER symbol -> MomentumSymbolViability} index the reaper reads conviction
+    from, in a SINGLE bulk query BEFORE the reap loop (never a per-session read inside it).
+    Same fresh-eligible source the arm-queue ranks from (``_fresh_live_eligible_candidates``)
+    so a kept watcher is one the lane would STILL arm. Best variant per distinct symbol wins
+    (the list is already viability-score-desc, so first-seen is best). Fail-open to {} on any
+    error => no watcher is high-conviction => the reaper falls back to the fixed clock."""
+    try:
+        rows = _fresh_live_eligible_candidates(db, limit=_scan_limit())
+    except Exception:
+        return {}
+    idx: dict[str, Any] = {}
+    for r in rows:
+        su = str(getattr(r, "symbol", "") or "").upper()
+        if su and su not in idx:
+            idx[su] = r
+    return idx
+
+
 # Per-symbol PRE-ENTRY REAP cooldown (in-process, scheduler-local). A name reaped
 # here just held the live slot for the full watch window without firing; cooling it
 # down briefly stops it from immediately re-arming and re-occupying the single slot,
@@ -213,10 +404,47 @@ def _max_watch_seconds() -> int:
 _REAP_COOLDOWN: dict[str, datetime] = {}
 
 
+# Per-symbol arm->reap OSCILLATION counter (in-process, scheduler-local). Parallel to
+# _REAP_COOLDOWN: counts how many times a name has looped arm->reap recently so the
+# adaptive cooldown can sit a SERIAL oscillator (RENDER 88x) out progressively longer
+# than a first-time reap. (sym_upper -> (count, last_reap_at)). Same bounded-prune +
+# TTL-decay shape as _REAP_COOLDOWN — a stale entry (no reap within the decay window)
+# is dropped so a name that stopped oscillating starts fresh.
+_REAP_OSCILLATION: dict[str, tuple[int, datetime]] = {}
+
+
+def _reap_cooldown_seconds(sym_u: str, now: datetime) -> float:
+    """The effective post-reap sit-out for ``sym_u`` (UPPER), in seconds.
+
+    Flag OFF (``chili_momentum_adaptive_reap_cooldown_enabled`` false) => the FIXED
+    ``chili_momentum_reap_cooldown_sec`` base, byte-identical to the legacy behavior.
+    Flag ON => base scaled by the per-symbol oscillation count:
+    ``base * (1 + osc_count * step)`` clamped to ``max_mult * base``. A first reap
+    (osc_count 0) is EXACTLY the base; a serial oscillator sits out longer. The
+    oscillation count is read from ``_REAP_OSCILLATION`` (stamped by _write_reap_cooldown).
+    Fail-open: any missing knob falls back to the fixed base (never longer on thin data)."""
+    base = float(getattr(settings, "chili_momentum_reap_cooldown_sec", 300.0) or 0.0)
+    if base <= 0:
+        return base
+    if not bool(getattr(settings, "chili_momentum_adaptive_reap_cooldown_enabled", True)):
+        return base
+    step = float(getattr(settings, "chili_momentum_adaptive_reap_cooldown_step", 1.0) or 0.0)
+    if step <= 0.0:
+        return base
+    entry = _REAP_OSCILLATION.get(sym_u)
+    osc = int(entry[0]) if entry else 0
+    if osc <= 0:
+        return base
+    max_mult = float(getattr(settings, "chili_momentum_adaptive_reap_cooldown_max_mult", 6.0) or 1.0)
+    mult = min(1.0 + osc * step, max(1.0, max_mult))
+    return base * mult
+
+
 def _reap_cooldown_active(sym_u: str, now: datetime) -> bool:
-    """True if ``sym_u`` (upper) was reaped pre-entry within
-    ``chili_momentum_reap_cooldown_sec``. 0 disables (instant kill-switch)."""
-    cd_sec = float(getattr(settings, "chili_momentum_reap_cooldown_sec", 300.0) or 0.0)
+    """True if ``sym_u`` (upper) was reaped pre-entry within its effective cooldown
+    (fixed ``chili_momentum_reap_cooldown_sec`` when the adaptive flag is OFF; the
+    oscillation-scaled window when ON). 0 base disables (instant kill-switch)."""
+    cd_sec = _reap_cooldown_seconds(sym_u, now)
     if cd_sec <= 0:
         return False
     at = _REAP_COOLDOWN.get(sym_u)
@@ -225,16 +453,41 @@ def _reap_cooldown_active(sym_u: str, now: datetime) -> bool:
 
 def _write_reap_cooldown(sym_u: str, now: datetime) -> None:
     """Record a pre-entry reap/displacement of ``sym_u`` (UPPER) so the name sits out
-    ``chili_momentum_reap_cooldown_sec`` before it can re-arm — the oscillation damper.
+    its effective reap cooldown before it can re-arm — the oscillation damper.
     CLASS-AGNOSTIC (2026-06-17): generalized off the old '-USD'-only gate so EQUITIES are
-    damped too (the rank-displacement motivating case, UTSI, is an equity). Bounded prune."""
+    damped too (the rank-displacement motivating case, UTSI, is an equity). Bounded prune.
+
+    ADAPTIVE (2026-06-25): also bumps the per-symbol _REAP_OSCILLATION counter so a serial
+    arm->reap oscillator earns a progressively longer cooldown (see _reap_cooldown_seconds).
+    The counter DECAYS: if the last reap was longer ago than the current effective cooldown,
+    the loop is considered broken and the count resets to 1 (a fresh first reap). Writing the
+    counter unconditionally keeps the flag-OFF cooldown byte-identical — the count is only
+    READ when the adaptive flag is on, so a populated counter never changes OFF behavior."""
     if not sym_u:
         return
+    # Bump the oscillation counter BEFORE stamping the reap time, decaying a stale loop.
+    _prev = _REAP_OSCILLATION.get(sym_u)
+    if _prev is not None:
+        _prev_count, _prev_at = _prev
+        # Decay window = the effective cooldown that WAS in force for the prior count
+        # (so a name that re-loops within its own sit-out keeps climbing; one that waited
+        # out the cooldown and only later re-armed/re-reaped starts the count over).
+        _decay_sec = _reap_cooldown_seconds(sym_u, now)
+        if _decay_sec > 0 and (now - _prev_at).total_seconds() <= _decay_sec:
+            _REAP_OSCILLATION[sym_u] = (int(_prev_count) + 1, now)
+        else:
+            _REAP_OSCILLATION[sym_u] = (1, now)
+    else:
+        _REAP_OSCILLATION[sym_u] = (1, now)
     _REAP_COOLDOWN[sym_u] = now
     if len(_REAP_COOLDOWN) > 500:
         _stale = now - timedelta(hours=1)
         for _k in [k for k, v in _REAP_COOLDOWN.items() if v < _stale]:
             _REAP_COOLDOWN.pop(_k, None)
+    if len(_REAP_OSCILLATION) > 500:
+        _stale_osc = now - timedelta(hours=1)
+        for _k in [k for k, v in _REAP_OSCILLATION.items() if v[1] < _stale_osc]:
+            _REAP_OSCILLATION.pop(_k, None)
 
 
 # Per-symbol ENTRY-REJECTED cooldown (in-process, scheduler-local). A name whose LIVE
@@ -258,10 +511,14 @@ def _entry_reject_cooldown_active(sym_u: str, now: datetime) -> bool:
     return at is not None and (now - at).total_seconds() < cd_sec
 
 
-def _write_entry_reject_cooldown(sym_u: str, now: datetime | None = None) -> None:
+def _write_entry_reject_cooldown(sym_u: str, now: datetime | None = None, *, reason: str | None = None) -> None:
     """Record a broker ENTRY rejection for ``sym_u`` (UPPER) so auto-arm stops looping on
     a name the rail won't fill (leveraged-ETF suitability block, session-untradable).
-    Called best-effort from the live runner's entry-place failure path. Bounded prune."""
+    Called best-effort from the live runner's entry-place failure path. Bounded prune.
+
+    TIER-2 SELF-HEAL: if the rejection text says the name is "untradable for 24 hour
+    trading", also stamp the 24h-eligibility NEGATIVE cache so the proactive overnight gate
+    learns from the rejection (re-checked next day via the TTL)."""
     if not sym_u:
         return
     now = now or _utcnow()
@@ -270,6 +527,169 @@ def _write_entry_reject_cooldown(sym_u: str, now: datetime | None = None) -> Non
         _stale = now - timedelta(hours=2)
         for _k in [k for k, v in _ENTRY_REJECT_COOLDOWN.items() if v < _stale]:
             _ENTRY_REJECT_COOLDOWN.pop(_k, None)
+    try:
+        if reason and "untradable for 24 hour" in str(reason).lower():
+            _TRADABILITY_24H[sym_u] = (False, now)
+    except Exception:
+        pass
+
+
+# ── TIER-2: 24h-tradeability eligibility cache (proactive probe, no-spam) ──────────
+# dict[sym_upper -> (eligible: bool, checked_at)]. TTL = chili_momentum_tradability_cache_sec
+# (base 3600s — eligibility is an instrument property that changes slowly). Probed lazily:
+# only for overnight candidates that survive the cheaper gates, and only when is_overnight_now
+# (no wasted MCP calls during RTH). Mirrors _ENTRY_REJECT_COOLDOWN's bounded-prune pattern.
+_TRADABILITY_24H: dict[str, tuple[bool, datetime]] = {}
+
+
+def _tradability_cache_sec() -> float:
+    try:
+        return float(getattr(settings, "chili_momentum_tradability_cache_sec", 3600) or 3600)
+    except (TypeError, ValueError):
+        return 3600.0
+
+
+def _is_24h_eligible(symbol: str | None) -> bool:
+    """True iff ``symbol`` is a 24h-tradeable equity per the cached RH tradability probe.
+
+    Read-only against the cache (the PROBE that populates it runs in the overnight arm gate
+    so RTH callers never trigger an MCP call). FAIL-CLOSED: an unknown / stale / crypto /
+    empty symbol returns False — overnight is the higher-risk tier, so a name we cannot
+    POSITIVELY confirm is 24h-eligible is never armed overnight."""
+    sym = str(symbol or "").strip().upper()
+    if not sym or sym.endswith("-USD"):
+        return False
+    hit = _TRADABILITY_24H.get(sym)
+    if hit is None:
+        return False
+    eligible, checked_at = hit
+    if (_utcnow() - checked_at).total_seconds() > _tradability_cache_sec():
+        return False  # stale -> re-probe required (fail-closed until refreshed)
+    return bool(eligible)
+
+
+def _overnight_24h_liquid(symbol: str | None) -> bool:
+    """TIER-2 overnight 24h-LIQUID floor: the name's dollar-volume must clear
+    chili_momentum_overnight_min_dollar_volume (base max($5M, 2x the RTH $1M floor)) — a
+    thin overnight book is the gap risk, so only deep names arm overnight. Uses the same
+    snapshot_dollar_volumes source as the RTH liquidity re-rank. FAIL-CLOSED: no liquidity
+    datum -> not liquid (overnight is the higher-risk tier)."""
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return False
+    try:
+        floor = float(getattr(settings, "chili_momentum_overnight_min_dollar_volume", 5_000_000.0) or 5_000_000.0)
+    except (TypeError, ValueError):
+        floor = 5_000_000.0
+    if floor <= 0:
+        return True
+    try:
+        from .universe import snapshot_dollar_volumes
+
+        dvols = snapshot_dollar_volumes([sym])
+        dv = float(dvols.get(sym, 0.0) or 0.0)
+    except Exception:
+        return False
+    return dv >= floor
+
+
+def known_24h_eligible_symbols() -> set[str]:
+    """Symbols currently cached as POSITIVELY 24h-eligible (non-stale) — the overnight tape
+    whitelist source (nbbo_tape). Empty when nothing has been probed yet."""
+    now = _utcnow()
+    ttl = _tradability_cache_sec()
+    return {
+        s for s, (ok, at) in _TRADABILITY_24H.items()
+        if ok and (now - at).total_seconds() <= ttl
+    }
+
+
+# ── FIX D: cached Robinhood Agentic MCP adapter (perf bug-fix) ──────────────────────
+# auto_arm called RobinhoodAgenticMcpAdapter() on EVERY _probe_24h_eligibility tick. A
+# fresh instance has _tool_names=None, so the first tool resolve triggers a full 42-tool
+# MCP tools/list discovery + INFO log line — ~20/min flood + a slow tick. The adapter is a
+# thin, reusable client wrapper (pinned account frozen at construction; token/account caches
+# live on it), so a single process-wide singleton makes the SAME tradability probe with the
+# tool catalog discovered once. Thread-safe (scheduler may tick concurrently) + self-healing:
+# the cached instance is reused only while it reports is_enabled() (auth-aware, fail-closed);
+# if it goes unhealthy (token expired / re-auth needed) it is rebuilt on the next call.
+_RH_AGENTIC_ADAPTER: Any = None
+_RH_AGENTIC_ADAPTER_LOCK = threading.Lock()
+
+
+def _rh_agentic_adapter_cached() -> Any:
+    """Return the process-wide RobinhoodAgenticMcpAdapter singleton, lazily building it
+    once and reusing it across ticks (preserving its discovered tool catalog). Rebuilds the
+    instance only if the cached one is missing or reports unhealthy via is_enabled().
+    Returns None when no enabled adapter can be obtained (caller skips the probe).
+
+    Behind ``chili_momentum_cache_rh_agentic_adapter`` (default ON): set it False to restore
+    the byte-identical per-call construction (the pure perf fix is otherwise transparent —
+    same tradability probe, just not re-constructing + re-discovering the adapter)."""
+    if not bool(getattr(settings, "chili_momentum_cache_rh_agentic_adapter", True)):
+        # kill-switch: legacy per-call construction (byte-identical behavior).
+        try:
+            from ..venue.robinhood_mcp import RobinhoodAgenticMcpAdapter
+
+            adapter = RobinhoodAgenticMcpAdapter()
+            return adapter if adapter.is_enabled() else None
+        except Exception:
+            logger.debug("[auto_arm] rh agentic adapter build failed (uncached)", exc_info=True)
+            return None
+    global _RH_AGENTIC_ADAPTER
+    with _RH_AGENTIC_ADAPTER_LOCK:
+        cached = _RH_AGENTIC_ADAPTER
+        if cached is not None:
+            try:
+                if cached.is_enabled():
+                    return cached
+            except Exception:
+                pass  # unhealthy probe -> rebuild below
+            _RH_AGENTIC_ADAPTER = None  # drop the unhealthy instance
+        try:
+            from ..venue.robinhood_mcp import RobinhoodAgenticMcpAdapter
+
+            adapter = RobinhoodAgenticMcpAdapter()
+            if not adapter.is_enabled():
+                return None
+            _RH_AGENTIC_ADAPTER = adapter
+            return adapter
+        except Exception:
+            logger.debug("[auto_arm] rh agentic adapter build failed", exc_info=True)
+            return None
+
+
+def _probe_24h_eligibility(symbols: list[str]) -> None:
+    """Probe RH get_equity_tradability for the given equity symbols and refresh the cache.
+    Best-effort; only the agentic rail exposes the tool. Bounded prune.
+
+    Uses the CACHED adapter singleton (FIX D) so the 42-tool MCP discovery happens once, not
+    per tick. Same tradability probe + same fail-closed semantics as before."""
+    syms = [str(s or "").strip().upper() for s in symbols if str(s or "").strip() and not str(s).upper().endswith("-USD")]
+    # Skip names whose cache entry is still fresh — re-probe only the unknown/stale.
+    now = _utcnow()
+    ttl = _tradability_cache_sec()
+    syms = [s for s in syms if (s not in _TRADABILITY_24H) or (now - _TRADABILITY_24H[s][1]).total_seconds() > ttl]
+    if not syms:
+        return
+    try:
+        adapter = _rh_agentic_adapter_cached()
+        if adapter is None:
+            return
+        result = adapter.get_equity_tradability(syms)
+    except Exception:
+        logger.debug("[auto_arm] 24h tradability probe failed", exc_info=True)
+        return
+    for s in syms:
+        info = result.get(s) if isinstance(result, dict) else None
+        # Absent from the probe response -> treat as NOT eligible (fail-closed) but cache it
+        # so we don't re-hammer the rate-limited tool every pass.
+        eligible = bool(info.get("overnight_eligible")) if isinstance(info, dict) else False
+        _TRADABILITY_24H[s] = (eligible, now)
+    if len(_TRADABILITY_24H) > 1000:
+        _stale = now - timedelta(seconds=ttl)
+        for _k in [k for k, v in _TRADABILITY_24H.items() if v[1] < _stale]:
+            _TRADABILITY_24H.pop(_k, None)
 
 
 def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: datetime) -> int:
@@ -277,13 +697,35 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
     freeing the concurrency slot for a fresher surging candidate — Ross moves on
     when a setup never triggers. Never touches a session that holds a position.
     """
-    cutoff = now - timedelta(seconds=_max_watch_seconds())
-    extend_cutoff = now - timedelta(
-        seconds=max(
-            _max_watch_seconds(),
-            int(getattr(settings, "chili_momentum_auto_arm_watch_extend_seconds", 600) or 600),
-        )
-    )
+    base_sec = _max_watch_seconds()
+    cutoff = now - timedelta(seconds=base_sec)
+    extend_cutoff = now - timedelta(seconds=_watch_extend_seconds())
+    adaptive_watch = bool(getattr(settings, "chili_momentum_adaptive_watch_enabled", True))
+    # SYMBOL-OF-THE-DAY FOCUS TILT: the leader stays WATCHED through a transient intraday dip
+    # rather than rotating out at the base window (Ross stays ON his stock of the day). It
+    # earns the EXTENDED watch window even without a forming break level — but only to the
+    # extend cutoff (a hard upper bound, so a leader that truly dies still reaps). Computed
+    # once per pass from the fresh board; fail-open to no-focus. Flag-OFF => leader is empty
+    # => byte-identical reap behaviour.
+    _focus_leader = ""
+    if _symbol_of_day_focus_enabled():
+        try:
+            _board = _fresh_live_eligible_candidates(db, limit=_scan_limit())
+            _focus_leader = str(_identify_session_leader(_board) or "").upper()
+        except Exception:
+            _focus_leader = ""
+    # EVENT/STRUCTURE-BASED ABANDONMENT (kill-switch chili_momentum_event_based_abandonment_
+    # enabled, default OFF => byte-identical fixed clock): build the conviction index ONCE,
+    # BEFORE the reap loop, in a SINGLE bulk query (never a per-session read in the loop — that
+    # would serialize the loop + risk the cancel-races-fill window). Flag OFF => the index is
+    # empty and the event keep-check below is skipped entirely (no extra query, no behavior
+    # change). The hard ceiling cutoff is also pre-computed once.
+    _event_based = _event_based_abandonment_enabled()
+    _conviction_idx: dict[str, Any] = {}
+    _event_ceiling_cutoff = None
+    if _event_based:
+        _conviction_idx = _build_reap_conviction_index(db)
+        _event_ceiling_cutoff = now - timedelta(seconds=_event_based_max_extend_seconds())
     try:
         q = db.query(TradingAutomationSession).filter(
             TradingAutomationSession.mode == "live",
@@ -305,17 +747,69 @@ def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: date
         # (watch_break_level set = a reclaim/break is actually forming) keeps
         # its slot to the extend cutoff; a watch that never produced a level
         # is dead weight at the base cutoff (triggers fire in ~29s median).
+        #
+        # ADAPTIVE (2026-06-25, kill-switch chili_momentum_adaptive_watch_enabled):
+        # flag OFF reproduces the legacy binary EXACTLY — watch_break_level set AND
+        # within the extend cutoff => keep. Flag ON refines "earned the extend" via
+        # _watcher_is_building: a tick-armed watcher whose last_mid is APPROACHING the
+        # break level keeps the slot to the extend cutoff (it is about to fire); one whose
+        # price is provably FAR from the level is DEAD and reaps at the base cutoff.
+        # CONSERVATIVE: missing/garbage signals => building => keep (never cut short).
+        # FOCUS TILT: the symbol-of-the-day leader keeps its slot to the EXTENDED cutoff even
+        # without a forming break level — so a transient dip never rotates the stock of the
+        # day out before its setup plays out. Bounded by extend_cutoff (still reaps a dead
+        # leader). Checked first so it composes with (does not bypass) the hard upper bound.
+        if _focus_leader and str(s.symbol or "").upper() == _focus_leader and s.started_at >= extend_cutoff:
+            continue
         try:
             _snap = s.risk_snapshot_json or {}
             _le = _snap.get("momentum_live_execution") if isinstance(_snap, dict) else None
-            if (
-                isinstance(_le, dict)
-                and _le.get("watch_break_level")
-                and s.started_at >= extend_cutoff
-            ):
-                continue
+            if adaptive_watch:
+                if (
+                    isinstance(_le, dict)
+                    and _watcher_is_building(_le, base_sec=base_sec)
+                    and s.started_at >= extend_cutoff
+                ):
+                    continue
+            else:
+                if (
+                    isinstance(_le, dict)
+                    and _le.get("watch_break_level")
+                    and s.started_at >= extend_cutoff
+                ):
+                    continue
         except Exception:
             pass
+        # EVENT/STRUCTURE-BASED KEEP (flag ON only — flag OFF skips this block entirely, so
+        # the decision above is byte-identical to the fixed clock). Ross stays on a strong
+        # stock all day: a watcher that is STILL HIGH-CONVICTION (same ross_score/rvol/
+        # daily_breaking source the arm-queue reads, via the pre-built bulk index — no loop
+        # DB read) AND STILL FRONT-SIDE (not faded/backside per its OWN cached snapshot,
+        # fail-open) keeps its slot past the clock so the lane is watching when its next
+        # pullback fires. It reaps the instant it cools/fades (no slot leak), and ALWAYS
+        # reaps past the hard ceiling (a truly-stuck watcher cannot watch forever).
+        if _event_based:
+            try:
+                _su = str(s.symbol or "").upper()
+                _past_ceiling = (
+                    _event_ceiling_cutoff is not None
+                    and s.started_at is not None
+                    and s.started_at < _event_ceiling_cutoff
+                )
+                if not _past_ceiling and _session_still_high_conviction(
+                    _conviction_idx.get(_su)
+                ) and _session_still_front_side(_le):
+                    logger.info(
+                        "[auto_arm] event-based KEEP pre-entry session=%s %s state=%s "
+                        "(still high-conviction + front-side; watching for its next setup, "
+                        "Ross stays on a strong stock) — slot held",
+                        s.id, s.symbol, s.state,
+                    )
+                    continue
+            except Exception:
+                # Fail-SAFE: any error in the keep evaluation falls through to the normal
+                # fixed-clock reap below (never a leak; never blocks the authoritative cancel).
+                logger.debug("[auto_arm] event-based keep eval failed session=%s", getattr(s, "id", None), exc_info=True)
         try:
             cancel_automation_session(db, user_id=int(user_id), session_id=int(s.id))
             reaped += 1
@@ -557,6 +1051,74 @@ def _dedupe_by_symbol(rows: list[Any], *, limit: int) -> list[Any]:
     return out
 
 
+def _symbol_of_day_focus_enabled() -> bool:
+    """SYMBOL-OF-THE-DAY FOCUS (Batch F): Ross trades the ONE best mover intensely. ON
+    gives the highest-conviction explosive LEADER a guaranteed top arm slot (never starved,
+    never the rank-displacement victim) + a small focus tilt to stay armed through a transient
+    dip. OFF => the batch ranking is byte-identical to today (no leader hoist, no veto, no tilt).
+    docs/DESIGN/MOMENTUM_LANE.md [[project_momentum_lane]] [[feedback_adaptive_no_magic]]"""
+    return bool(getattr(settings, "chili_momentum_symbol_of_day_focus_enabled", True))
+
+
+def _row_ross_signal(row: Any) -> dict | None:
+    """This row's own scanner result dict from the embedded batch ``ross_signals`` (keyed
+    by UPPER symbol). The scorer's raw-pillar source — zero new network call. None when
+    absent/unparseable (the leader scorer degrades that name gracefully)."""
+    try:
+        extra = (row.execution_readiness_json or {}).get("extra") or {}
+        sig = (extra.get("ross_signals") or {}).get(str(getattr(row, "symbol", "") or "").upper())
+        return sig if isinstance(sig, dict) else None
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _identify_session_leader(rows: list[Any]) -> str | None:
+    """The symbol-of-the-day among ``rows`` (UPPER), or None. REUSES the explosive scorer:
+    builds ``{symbol: scanner_result}`` from each row's embedded ross_signals, scores the
+    batch (3-layer explosive scorer, live flag), then ``ross_momentum.identify_leader`` picks
+    the single highest-conviction floor-clearing leader. Fail-OPEN (None) on thin data / error
+    — no leader this refresh just means the lane ranks normally (never forces a weak leader)."""
+    if not _symbol_of_day_focus_enabled() or not rows:
+        return None
+    try:
+        from .ross_momentum import identify_leader, score_universe
+
+        signals: dict[str, dict] = {}
+        for r in rows:
+            su = str(getattr(r, "symbol", "") or "").upper()
+            sig = _row_ross_signal(r)
+            if su and isinstance(sig, dict):
+                signals[su] = sig
+        if not signals:
+            return None
+        scores = score_universe(signals)
+        return identify_leader(scores, signals)
+    except Exception:
+        logger.debug("[auto_arm] symbol-of-day leader id failed (fail-open)", exc_info=True)
+        return None
+
+
+def _hoist_leader(rows: list[Any], leader: str | None) -> list[Any]:
+    """Move the leader's row to the FRONT of the (already rank-ordered) candidate list so it
+    is first-in-arm-queue — its ONE guaranteed priority slot. The REST keep their normal rank
+    (the single-focus is a PRIORITY, not an exclusive lock — the lane still arms the #2/#3
+    movers right behind the leader). Stable: only the leader moves; relative order of the rest
+    is preserved. No-op when there is no leader or it is already first (byte-identical)."""
+    if not leader or not rows:
+        return rows
+    lead_u = str(leader).upper()
+    idx = next((i for i, r in enumerate(rows) if str(getattr(r, "symbol", "") or "").upper() == lead_u), None)
+    if idx is None or idx == 0:
+        return rows
+    hoisted = [rows[idx]] + rows[:idx] + rows[idx + 1:]
+    logger.info(
+        "[auto_arm] symbol-of-day focus: leader %s hoisted to the priority arm slot "
+        "(was rank #%d); remaining slots still arm by normal rank",
+        rows[idx].symbol, idx + 1,
+    )
+    return hoisted
+
+
 def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[MomentumSymbolViability]:
     """Top live-eligible candidates (distinct symbols) fresh within the LIVE risk
     gate (600s).
@@ -565,6 +1127,14 @@ def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[Momentum
     freshness <= viability_max_age, so we filter to that here to never pick a
     candidate the arm would reject. Each symbol has many variants; we fetch a
     generous slice then dedupe to the best variant per distinct symbol.
+
+    The 600s freshness gate is DELIBERATELY NOT loosened (it is the staleness
+    protection that keeps the arm off dead/stale tape). The companion fix for the
+    NEXR late-surge miss is upstream in universe.build_equity_universe's hot-mover
+    re-catch (chili_momentum_hot_mover_recatch_enabled): keeping a faded-then-
+    resurging runner IN the rescored universe means its freshness_ts stays current,
+    so it passes THIS gate naturally — the cure is to keep it fresh, not to trust
+    stale rows here.
     """
     max_age = float(getattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0)
     cutoff = datetime.utcnow() - timedelta(seconds=max_age)
@@ -658,6 +1228,13 @@ def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[Momentum
             # attacking the crypto fill/exit toxicity). Equity rows in a mixed list
             # keep ross order (their re-rank is equity-only above).
             rows = _crypto_liquidity_rerank(rows)
+    # SYMBOL-OF-THE-DAY FOCUS (Batch F): give the highest-conviction explosive LEADER the
+    # priority arm slot (first in the queue) so it is never slot-starved — the rest keep
+    # their normal rank right behind it (no over-concentration). Flag-OFF => no-op (the
+    # ordering above is returned byte-identical). Run BEFORE dedupe so the leader survives
+    # the per-symbol dedupe at the front; the displacement victim-veto protects it too.
+    if _symbol_of_day_focus_enabled() and rows:
+        rows = _hoist_leader(rows, _identify_session_leader(rows))
     return _dedupe_by_symbol(rows, limit=int(limit))
 
 
@@ -958,6 +1535,265 @@ def _symbol_loss_guards(db: Session) -> tuple[set[str], dict[str, datetime]]:
         return set(), {}
 
 
+def _win_cycle_clean_win_count(db: Session, *, execution_family: str | None = None) -> int:
+    """Count TODAY's CLEAN WINS (live, this execution family) for win-cycle fatigue (E2).
+
+    A clean win = a closed live momentum outcome with realized_pnl_usd > 0 in the current
+    UTC day. Mirrors ``_symbol_loss_guards``'s query shape (no new table, no new path).
+    Fail-open: any error returns 0 (fatigue never triggers on a query glitch — it can only
+    REDUCE/HALT new entries, so failing open just preserves current behavior). ENTRIES-ONLY:
+    the caller uses this for the YELLOW down-size + RED halt; it never touches an exit."""
+    try:
+        from ....models.trading import MomentumAutomationOutcome
+
+        day_start = _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        q = (
+            db.query(MomentumAutomationOutcome.id)
+            .filter(
+                MomentumAutomationOutcome.mode == "live",
+                MomentumAutomationOutcome.terminal_at >= day_start,
+                MomentumAutomationOutcome.realized_pnl_usd > 0,
+            )
+        )
+        if execution_family:
+            q = q.filter(MomentumAutomationOutcome.execution_family == str(execution_family))
+        return int(q.count())
+    except Exception:
+        logger.debug("[auto_arm] win-cycle win-count query failed (fail-open 0)", exc_info=True)
+        return 0
+
+
+def _win_cycle_fatigue_level(win_count: int) -> str:
+    """Map today's clean-win count to a fatigue band: 'green' | 'yellow' | 'red'.
+
+    Adaptive knobs: ``chili_momentum_win_cycle_yellow_wins`` (down-size threshold) and
+    ``chili_momentum_win_cycle_red_wins`` (hard-stop threshold; clamped >= yellow). OFF =>
+    always 'green' (no effect). ENTRIES-ONLY semantics live in the callers."""
+    if not bool(getattr(settings, "chili_momentum_win_cycle_fatigue_enabled", False)):
+        return "green"
+    try:
+        yellow = int(getattr(settings, "chili_momentum_win_cycle_yellow_wins", 4) or 4)
+        red = int(getattr(settings, "chili_momentum_win_cycle_red_wins", 7) or 7)
+    except (TypeError, ValueError):
+        return "green"
+    red = max(red, yellow)  # red threshold can never be below yellow
+    n = int(win_count or 0)
+    if n >= red:
+        return "red"
+    if n >= yellow:
+        return "yellow"
+    return "green"
+
+
+def win_cycle_yellow_size_multiplier(db: Session, *, execution_family: str | None = None) -> tuple[float, dict[str, Any]]:
+    """ENTRY-side size multiplier for win-cycle fatigue (E2) — read by the live runner at
+    entry-fill sizing. Returns ``(mult, meta)`` where mult is in (0, 1]:
+
+      * green  -> 1.0 (no effect)
+      * yellow -> ``chili_momentum_win_cycle_yellow_size_fraction`` (down-size; never zeroes)
+      * red    -> 1.0 here (the RED HALT is enforced as an arm-gate early-out, NOT a size of
+                  0 — an OPEN position never gets de-sized to nothing).
+
+    OFF / fail-open => (1.0, {}). This NEVER blocks or delays an exit; it only scales a NEW
+    entry's risk budget (composes with the streak/cushion/liquidity levers under the 3x clamp)."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_win_cycle_fatigue_enabled", False)):
+            return 1.0, {}
+        n = _win_cycle_clean_win_count(db, execution_family=execution_family)
+        level = _win_cycle_fatigue_level(n)
+        if level == "yellow":
+            frac = float(getattr(settings, "chili_momentum_win_cycle_yellow_size_fraction", 0.5) or 0.5)
+            if frac <= 0.0 or frac >= 1.0 or not (frac == frac):  # NaN guard
+                return 1.0, {}
+            return frac, {"level": "yellow", "wins": n, "mult": round(frac, 4)}
+        return 1.0, {"level": level, "wins": n}
+    except Exception:
+        return 1.0, {}
+
+
+# ── PER-SYMBOL ATTEMPT FATIGUE (P2; flag chili_momentum_per_symbol_fatigue_enabled) ──
+# Ross stops trading a symbol after N losing/failed attempts in a session — a name that has
+# already chopped you twice today is not the one to keep feeding. CHILI had only the account-
+# WIDE win-cycle fatigue (above); this adds a PER-SYMBOL entry-attempt counter that DERATES
+# (a documented size-down on the borderline 2nd attempt) then VETOES the 3rd+ live entry
+# attempt on the SAME ticker in the current session day. Reuses the win-cycle scaffolding
+# shape (a count query + a band map + a multiplier helper; same TradingAutomationSession
+# table the lane already writes, no new path).
+#
+# CRITICAL EXIT-ISOLATION INVARIANT (identical to win-cycle fatigue): this gates NEW ENTRIES
+# ONLY. It is consulted exclusively on the PRE-POSITION arming path (the auto-arm loop's
+# begin/confirm and the entry-fill size in the live runner). A HELD position NEVER consults
+# it — every exit / stop / trail / scale-out / bailout / flatten path runs in the live runner
+# and does not call these helpers, so a fatigued symbol can always be EXITED, only not
+# re-entered. The count is "attempts begun" (live sessions begun for the symbol today), so an
+# OPEN position's own session is already counted and cannot be re-blocked out of its exit.
+
+
+def _per_symbol_attempt_count(db: Session, symbol: str, *, execution_family: str | None = None) -> int:
+    """Count TODAY's LIVE ENTRY ATTEMPTS on ``symbol`` (this execution family) for per-symbol
+    fatigue (P2). An attempt = a live TradingAutomationSession begun for the symbol in the
+    current UTC day (the lane arms one live session per entry attempt). Mirrors the win-cycle
+    count's query shape (no new table/path). Fail-open: any error returns 0 (fatigue never
+    triggers on a query glitch — it can only REDUCE/VETO a NEW entry, never an exit)."""
+    try:
+        su = str(symbol or "").strip().upper()
+        if not su:
+            return 0
+        day_start = _utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        q = (
+            db.query(TradingAutomationSession.id)
+            .filter(
+                TradingAutomationSession.mode == "live",
+                TradingAutomationSession.symbol == su,
+                TradingAutomationSession.started_at >= day_start,
+            )
+        )
+        if execution_family:
+            q = q.filter(TradingAutomationSession.execution_family == str(execution_family))
+        return int(q.count())
+    except Exception:
+        logger.debug("[auto_arm] per-symbol attempt-count query failed (fail-open 0)", exc_info=True)
+        return 0
+
+
+def _per_symbol_fatigue_level(attempt_count: int) -> str:
+    """Map the per-symbol attempt count to a fatigue band: 'green' | 'yellow' | 'red'.
+
+    ONE documented adaptive knob: ``chili_momentum_per_symbol_max_attempts`` (default 3 per
+    Ross — "stop trading a symbol after ~N attempts"). The VETO fires at/above that cap (RED);
+    the attempt just BELOW it (the borderline last allowed try) is a YELLOW down-size. OFF =>
+    always 'green' (byte-identical). ENTRIES-ONLY semantics live in the callers."""
+    if not bool(getattr(settings, "chili_momentum_per_symbol_fatigue_enabled", False)):
+        return "green"
+    try:
+        max_attempts = int(getattr(settings, "chili_momentum_per_symbol_max_attempts", 3) or 3)
+    except (TypeError, ValueError):
+        return "green"
+    max_attempts = max(2, max_attempts)  # need at least one allowed attempt before a down-size + a veto
+    n = int(attempt_count or 0)
+    if n >= max_attempts:
+        return "red"      # the 3rd+ attempt (count already at the cap) — VETO a new entry
+    if n >= max_attempts - 1:
+        return "yellow"   # the borderline last allowed attempt — size DOWN
+    return "green"
+
+
+def per_symbol_fatigue_blocks_entry(db: Session, symbol: str, *, execution_family: str | None = None) -> tuple[bool, dict[str, Any]]:
+    """ENTRIES-ONLY veto for per-symbol attempt fatigue (P2). Returns ``(blocked, meta)``.
+
+    ``blocked`` is True when ``symbol`` has already reached the per-symbol attempt cap TODAY
+    (RED) — the auto-arm loop SKIPS arming a new live session for it (a missed re-entry, never
+    a blocked exit: an OPEN position's session already exists and is managed by the live runner,
+    which does not consult this). OFF / fail-open => (False, {}) (byte-identical)."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_per_symbol_fatigue_enabled", False)):
+            return False, {}
+        n = _per_symbol_attempt_count(db, symbol, execution_family=execution_family)
+        level = _per_symbol_fatigue_level(n)
+        if level == "red":
+            return True, {
+                "symbol": str(symbol or "").strip().upper(),
+                "attempts_today": n,
+                "max_attempts": int(getattr(settings, "chili_momentum_per_symbol_max_attempts", 3) or 3),
+            }
+        return False, {"level": level, "attempts_today": n}
+    except Exception:
+        return False, {}
+
+
+def per_symbol_fatigue_size_multiplier(db: Session, symbol: str, *, execution_family: str | None = None) -> tuple[float, dict[str, Any]]:
+    """ENTRY-side size multiplier for per-symbol fatigue (P2) — read by the live runner at
+    entry-fill sizing. Returns ``(mult, meta)`` in (0, 1]:
+
+      * green  -> 1.0 (no effect)
+      * yellow -> ``chili_momentum_per_symbol_yellow_size_fraction`` (the borderline last
+                  allowed attempt is taken smaller; never zeroes)
+      * red    -> 1.0 here (the RED VETO is enforced as an arm-gate skip, NOT a size of 0 — an
+                  OPEN position is never de-sized to nothing).
+
+    OFF / fail-open => (1.0, {}). NEVER blocks or delays an exit; it only scales a NEW entry's
+    risk budget (composes with the streak/cushion/liquidity/win-cycle levers under the 3x clamp)."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_per_symbol_fatigue_enabled", False)):
+            return 1.0, {}
+        n = _per_symbol_attempt_count(db, symbol, execution_family=execution_family)
+        level = _per_symbol_fatigue_level(n)
+        if level == "yellow":
+            frac = float(getattr(settings, "chili_momentum_per_symbol_yellow_size_fraction", 0.5) or 0.5)
+            if frac <= 0.0 or frac >= 1.0 or not (frac == frac):  # NaN guard
+                return 1.0, {}
+            return frac, {"level": "yellow", "attempts_today": n, "mult": round(frac, 4)}
+        return 1.0, {"level": level, "attempts_today": n}
+    except Exception:
+        return 1.0, {}
+
+
+# ── HOT/COLD-TAPE SIZE SCALING (P3; flag chili_momentum_hot_cold_size_enabled) ──
+# The hot-tape regime already GATES some entries (entry_gates._is_hot_tape gates the wick-
+# reclaim / micro-primary triggers; catalyst.hot_tape_regime flips the catalyst tilt) but it
+# never scales SIZE. Ross sizes UP into a hot, explosive tape (more, faster setups that follow
+# through) and DOWN into a slow/cold one (chop). This returns a BOUNDED size multiplier the
+# live runner composes MULTIPLICATIVELY with the streak/cushion/liquidity levers under the same
+# 3x clamp; it scales the per-trade RISK BUDGET only and can NEVER push notional past the
+# liquidity / equity-relative ceilings (those stay hard caps; the qty is capped at max_notional
+# downstream). The hot/cold read reuses the SAME explosive ATR/RVOL floors as
+# entry_gates._is_hot_tape (one source of truth for "explosive tape") — no new magic thresholds.
+
+# The TWO documented bounds: the cold floor (size-DOWN on a non-explosive tape) and the hot
+# ceiling (size-UP on an explosive one). Symmetric-ish around 1.0; the hot ceiling is kept well
+# under the 3x combined clamp so the other levers still have room. Bounded => never runaway.
+ROSS_HOT_COLD_COLD_FLOOR = 0.6   # cold tape: size DOWN to 60% of the risk budget
+ROSS_HOT_COLD_HOT_CEIL = 1.5     # hot tape: size UP to 150% of the risk budget
+
+
+def hot_cold_tape_size_multiplier(
+    *,
+    atr_pct: float | None,
+    rvol: float | None,
+) -> tuple[float, dict[str, Any]]:
+    """P3 hot/cold-tape size multiplier in [cold_floor, hot_ceil]. ``(mult, meta)``.
+
+    HOT (size UP to ``chili_momentum_hot_cold_hot_ceil``) when the name's intraday volatility
+    (ATR%) OR relative volume is at/above the lane's explosive floors — the SAME floors
+    ``entry_gates._is_hot_tape`` / ``is_explosive_mover`` use, so "hot" has one definition.
+    COLD (size DOWN to ``chili_momentum_hot_cold_cold_floor``) when BOTH are AFFIRMATIVELY below
+    the floors (a measured non-explosive tape). NEUTRAL 1.0 when neither read is available
+    (fail-neutral — never size up or down on absent data). OFF / error => (1.0, {}) (byte-
+    identical). Pure (no IO / no mutation); the caller reads atr_pct / rvol from the live regime.
+
+    Bounded by construction (the two documented bounds), so it can never exceed the existing
+    caps — it only scales the RISK BUDGET, which the downstream notional ceiling still bounds."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_hot_cold_size_enabled", False)):
+            return 1.0, {}
+        cold_floor = float(getattr(settings, "chili_momentum_hot_cold_cold_floor", ROSS_HOT_COLD_COLD_FLOOR) or ROSS_HOT_COLD_COLD_FLOOR)
+        hot_ceil = float(getattr(settings, "chili_momentum_hot_cold_hot_ceil", ROSS_HOT_COLD_HOT_CEIL) or ROSS_HOT_COLD_HOT_CEIL)
+        # sane bounds: cold floor in (0,1], hot ceil in [1, +) — clamp a misconfig.
+        cold_floor = max(0.05, min(1.0, cold_floor))
+        hot_ceil = max(1.0, hot_ceil)
+        a = None if atr_pct is None else float(atr_pct)
+        rv = None if rvol is None else float(rvol)
+        if a is None and rv is None:
+            return 1.0, {}  # fail-neutral: no read => no scaling
+        atr_floor = float(getattr(settings, "chili_momentum_explosive_atr_pct_floor", 0.045) or 0.0)
+        rvol_floor = float(getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 0.0)
+        is_hot = (a is not None and atr_floor > 0.0 and a >= atr_floor) or (
+            rv is not None and rvol_floor > 0.0 and rv >= rvol_floor
+        )
+        if is_hot:
+            return hot_ceil, {"tape": "hot", "mult": round(hot_ceil, 4), "atr_pct": a, "rvol": rv}
+        # COLD only when the available reads AFFIRMATIVELY sit below the floors (not on a single
+        # missing axis). A present axis below its floor + the other absent still reads cold (the
+        # present evidence shows non-explosive); both present + below = clearly cold.
+        _below_atr = a is None or atr_floor <= 0.0 or a < atr_floor
+        _below_rvol = rv is None or rvol_floor <= 0.0 or rv < rvol_floor
+        if _below_atr and _below_rvol:
+            return cold_floor, {"tape": "cold", "mult": round(cold_floor, 4), "atr_pct": a, "rvol": rv}
+        return 1.0, {"tape": "neutral", "atr_pct": a, "rvol": rv}
+    except Exception:
+        return 1.0, {}
+
+
 def _symbol_free(db: Session, symbol: str, user_id: int | None) -> bool:
     """Per-symbol autopilot mutex vs AutoTrader v1 (fail open on helper error)."""
     try:
@@ -971,7 +1807,139 @@ def _symbol_free(db: Session, symbol: str, user_id: int | None) -> bool:
         return True
 
 
-def _entry_trigger_fires(symbol: str) -> tuple[bool, str]:
+def _row_rvol(row: Any) -> float | None:
+    """This candidate's relative volume from its OWN persisted scanner signal
+    (``execution_readiness_json.extra.ross_signals[sym]``) — the SAME source the leader
+    scorer + viability tilt read, zero new network. Tries the canonical rvol key aliases
+    (``vol_ratio`` / ``rvol`` / ``volume_ratio``, mirroring ross_momentum). None when
+    absent/unparseable -> the conviction gate treats the name as non-explosive on RVOL
+    (fail-closed on this axis; ross_score / daily_breaking can still qualify it)."""
+    sig = _row_ross_signal(row)
+    if not isinstance(sig, dict):
+        return None
+    for _k in ("vol_ratio", "rvol", "volume_ratio"):
+        v = sig.get(_k)
+        if v is None:
+            continue
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _continuation_active_trigger(symbol: str, df_pb: Any, row: Any) -> tuple[bool, str]:
+    """Arm-time MOMENTUM-CONTINUATION active-trigger check — the STRUCTURE side that lets a
+    high-conviction straight-up runner (which never forms the pullback base the pullback
+    probe requires) ARM. REUSES the live runner's exact gate stack so the arm decision and
+    the WATCHING-tick entry decision share one definition of a continuation fire:
+
+      (0) KILL-SWITCH ``chili_momentum_momentum_continuation_entry_enabled`` — OFF returns
+          ``(False, ...)`` BEFORE any compute, so flag-off auto-arm is byte-identical
+          (pullback-only). It also short-circuits via the trigger's own disabled guard.
+      (1) HIGH-CONVICTION ONLY — ross_score>=floor OR rvol>=(explosive_rvol_floor x
+          coiling_exempt_rvol_mult, i.e. ~9x) OR daily_breaking_major, read from the row's
+          OWN persisted scanner signal (same source as the live runner's continuation gate).
+      (2)+(4)+(5) NEW HIGH + NOT PARABOLIC + NOT backside/NOT below-VWAP — the EXISTING
+          ``momentum_continuation_trigger`` on the ALREADY-FETCHED ``df_pb`` (bar-only, no
+          live_price — the probe arms a WATCH; the live runner does the tick confirm).
+      (3) TAPE REQUIRED + FAIL-CLOSED — ``tape_confirms_hold`` (no/thin/stale/selling tape
+          ⇒ NO fire); the identical chase/distribution guard the live entry carries.
+
+    NEVER raises (any error ⇒ a benign decline). Reads only; no DB mutation, no new fetch."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_momentum_continuation_entry_enabled", False)):
+            return False, "momentum_continuation_disabled"
+        if df_pb is None or getattr(df_pb, "empty", True):
+            return False, "momentum_continuation_no_data"
+
+        from .entry_gates import (
+            compute_intraday_rvol_fallback,
+            continuation_high_conviction,
+            momentum_continuation_trigger,
+            tape_confirms_hold,
+        )
+
+        # (1) HIGH-CONVICTION read from the candidate's OWN persisted scanner signal — the
+        # SAME ross_score / RVOL / daily_breaking_major source the arm-queue ranker, the
+        # viability tilt, and the live runner's continuation gate read. No new fetch.
+        _ross_score: float | None = None
+        _daily_breaking = False
+        try:
+            extra = (getattr(row, "execution_readiness_json", None) or {}).get("extra") or {}
+            _rs_map = extra.get("ross_scores") if isinstance(extra.get("ross_scores"), dict) else {}
+            _symu = str(getattr(row, "symbol", "") or "").upper()
+            if _symu in _rs_map:
+                _ross_score = float(_rs_map[_symu] or 0.0)
+        except (AttributeError, TypeError, ValueError):
+            _ross_score = None
+        _sig = _row_ross_signal(row)
+        if isinstance(_sig, dict):
+            _daily_breaking = bool(_sig.get("daily_breaking_major"))
+        _rvol_now = _row_rvol(row)
+        # ROW-SIGNAL PRECEDENCE: only when the row carries NO usable conviction signal
+        # (scanner-only name: ross_score None, RVOL None, not daily_breaking) do we fill the
+        # EMPTY RVOL axis from the ALREADY-FETCHED df_pb (intraday RVOL, zero new fetch). The
+        # ross_score / daily_breaking paths are UNCHANGED. Kill-switch OFF ⇒ fallback returns
+        # None ⇒ byte-identical. FAIL-CLOSED inside the helper. (PED: scanner-only, true 13.72x.)
+        if _rvol_now is None and _ross_score is None and not _daily_breaking:
+            _rvol_now = compute_intraday_rvol_fallback(df_pb, symbol=symbol, settings_obj=settings)
+        # THE shared conviction test — IDENTICAL definition at arm-time and entry-time.
+        _high_conviction = continuation_high_conviction(
+            _ross_score, _rvol_now, _daily_breaking, settings
+        )
+        if not _high_conviction:
+            return False, "momentum_continuation_low_conviction"
+
+        # (2)+(4)+(5) NEW HIGH + not parabolic + not backside — bar-only (no live_price).
+        _mc_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+        _mc_ok, _mc_reason, _mc_dbg = momentum_continuation_trigger(
+            df_pb, live_price=None, entry_interval=_mc_iv, symbol=symbol, db=None, l2_as_of=None
+        )
+        if not (_mc_ok and isinstance(_mc_dbg, dict) and _mc_dbg.get("pullback_low") is not None):
+            return False, str(_mc_reason or "momentum_continuation_wait")
+
+        # (3) TAPE — at ARM-time this is OPTIONAL behind the kill-switch
+        # chili_momentum_continuation_arm_skip_tape (default False = tape REQUIRED =
+        # byte-identical to deployed 1e2eb09). The continuation ARM places NO order — it
+        # only starts WATCHING, and arming is what subscribes the trade/depth bridges so
+        # tape/L2 THEN begin flowing for the symbol. A not-yet-armed scanner mover has ZERO
+        # tape (tape_hold_no_data) → the unconditional arm-time tape gate is unsatisfiable
+        # (chicken-and-egg). When the flag is True we arm on conviction(+rvol-fallback) +
+        # structure ONLY (the momentum_continuation_trigger above already enforces new-HOD +
+        # NOT-extended + NOT-backside) and skip the tape call entirely. Chase-safety is
+        # PRESERVED at the live_runner ENTRY, which still REQUIRES tape (fail-closed) before
+        # ANY order — by entry-time the now-watching symbol is subscribed and tape flows.
+        if not bool(getattr(settings, "chili_momentum_continuation_arm_skip_tape", False)):
+            # TAPE REQUIRED + FAIL-CLOSED — the identical tape gate the live entry carries.
+            # ``tape_confirms_hold`` fails CLOSED on a missing db, and the probe phase already
+            # released the pass's read transaction before this network-bound wave, so open a
+            # SHORT-LIVED read session JUST for the tape read and always close it (the #561
+            # short-lived-reader pattern — never hold a txn across the probe). A db/read error
+            # ⇒ tape unconfirmed ⇒ NO fire (fail-closed, exactly as required).
+            from ....db import SessionLocal
+
+            _tape_ok = False
+            _tdb = None
+            try:
+                _tdb = SessionLocal()
+                _tape_ok, _ = tape_confirms_hold(symbol, db=_tdb, settings=settings)
+            except Exception:
+                _tape_ok = False
+            finally:
+                if _tdb is not None:
+                    try:
+                        _tdb.close()
+                    except Exception:
+                        pass
+            if not _tape_ok:
+                return False, "momentum_continuation_tape_unconfirmed"
+        return True, "momentum_continuation"
+    except Exception:
+        return False, "momentum_continuation_error"
+
+
+def _entry_trigger_fires(symbol: str, row: Any = None) -> tuple[bool, str]:
     """Replicate the live_runner WATCHING_LIVE hybrid trigger to find a name whose
     momentum is breaking NOW (pullback-break preferred, volume fallback).
 
@@ -1012,6 +1980,19 @@ def _entry_trigger_fires(symbol: str) -> tuple[bool, str]:
                     ok, reason, _ = pullback_break_confirmation(df_pb, entry_interval=interval)
                 if ok:
                     return True, reason
+                # MOMENTUM-CONTINUATION arm-time trigger (the STRUCTURE side). A
+                # high-conviction straight-up runner (SDOT +84%) never gives the pullback
+                # base, so the pullback probe returns False -> firing=None -> the name is
+                # NEVER armed -> the continuation entry wired into the WATCHING tick never
+                # evaluates it. So: when the pullback does NOT fire, ALSO consider the SAME
+                # EXISTING momentum_continuation_trigger (new-HOD + tape-REQUIRED-fail-closed
+                # + extension veto + not-backside) on the ALREADY-FETCHED df_pb for
+                # high-conviction names only — a fire here is a real ACTIVE TRIGGER and arms.
+                # Reuses the live runner's exact guards; flag OFF => byte-identical (the
+                # helper returns (False, ...) before any compute). docs/DESIGN/MOMENTUM_LANE.md
+                _cont_ok, _cont_reason = _continuation_active_trigger(symbol, df_pb, row)
+                if _cont_ok:
+                    return True, _cont_reason
                 if mode == "pullback_break":
                     return False, reason
         if mode != "pullback_break":
@@ -1079,8 +2060,22 @@ def _candidate_freshness(symbol: str):
 
 
 def _probe_candidate(symbol: str) -> tuple[bool, str, Any]:
-    """One network-bound pass per candidate: (trigger fires?, reason, freshness)."""
-    fires, reason = _entry_trigger_fires(symbol)
+    """One network-bound pass per candidate: (trigger fires?, reason, freshness).
+
+    Signature UNCHANGED (a bare symbol string) so the concurrent submit + the existing
+    test monkeypatches stay byte-compatible. The candidate ROW (carrying the name's OWN
+    persisted high-conviction scanner signal — ross_score / RVOL / daily_breaking_major)
+    is resolved from the per-pass ``_PASS_CANDIDATE_ROWS`` map the pass populated BEFORE
+    the probe wave, then handed to ``_entry_trigger_fires`` for the momentum-continuation
+    active-trigger branch. No new fetch (the row is already loaded). Row absent ⇒ None ⇒
+    the continuation branch is simply skipped (pullback-only)."""
+    row = _PASS_CANDIDATE_ROWS.get(str(symbol or "").upper())
+    try:
+        fires, reason = _entry_trigger_fires(symbol, row)
+    except TypeError:
+        # Back-compat with a 1-arg ``_entry_trigger_fires`` (e.g. a test monkeypatch that
+        # binds only the symbol) — the continuation branch simply doesn't run there.
+        fires, reason = _entry_trigger_fires(symbol)
     return fires, reason, _candidate_freshness(symbol)
 
 
@@ -1262,13 +2257,15 @@ def _guarded_reap_for_displacement(
 
 
 def _maybe_rank_displace(
-    db: Session, *, user_id: int | None, newcomer: MomentumSymbolViability, busy_symbols: set[str]
+    db: Session, *, user_id: int | None, newcomer: MomentumSymbolViability, busy_symbols: set[str],
+    protected_symbol: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """When arm slots are full, evict the worst-ranked INERT pre-entry watcher so a higher-
     ranked NEWCOMER can arm. Ranks victims by CURRENT viability score (same source as the
     newcomer). Guards: strict score margin, min-dwell (off updated_at), reap-cooldown,
-    per-symbol in-flight veto, and a row-locked guarded reap. PARITY: returns (False, ...)
-    without mutating any row when nothing qualifies."""
+    per-symbol in-flight veto, a row-locked guarded reap, and the symbol-of-the-day LEADER
+    veto (``protected_symbol`` is never the one evicted — its focus slot is guaranteed).
+    PARITY: returns (False, ...) without mutating any row when nothing qualifies."""
     margin_floor = float(getattr(settings, "chili_momentum_rank_displacement_margin", 0.02) or 0.0)
     min_dwell = float(getattr(settings, "chili_momentum_rank_displacement_min_dwell_sec", 45.0) or 0.0)
     now = _utcnow()
@@ -1294,10 +2291,13 @@ def _maybe_rank_displace(
 
     victims.sort(key=lambda v: (_vscore(v), v.updated_at or now))  # worst (lowest score) first
     inflight = _symbols_with_inflight_entry(db, user_id=user_id)
+    _protected = str(protected_symbol or "").upper()
     for v in victims:
         vsym = str(v.symbol or "").upper()
         if not vsym or vsym == nsym:
             continue
+        if _protected and vsym == _protected:
+            continue  # symbol-of-the-day leader veto: the focus slot is never evicted
         vscore = _vscore(v)
         if nscore - vscore < margin_floor:
             continue  # newcomer must STRICTLY beat by the margin (parity no-op otherwise)
@@ -1346,6 +2346,12 @@ def _try_displacement_for_full_slots(db: Session, *, uid: int | None, out: dict[
         busy = _symbols_with_active_live_session(db, user_id=uid)
     except Exception:
         return False
+    # SYMBOL-OF-THE-DAY FOCUS: the leader is the strongest non-busy NEWCOMER to claim a
+    # freed slot (its guaranteed priority), AND the one victim that is never evicted (below).
+    # _fresh_live_eligible_candidates already hoisted the leader to cands[0], so the normal
+    # "first non-busy eligible" walk picks it first when it is not yet armed. Flag-OFF =>
+    # leader is None => byte-identical to the prior behaviour.
+    _leader = _identify_session_leader(cands) if _symbol_of_day_focus_enabled() else None
     newcomer = None
     for c in cands:
         su = str(c.symbol or "").upper()
@@ -1363,7 +2369,9 @@ def _try_displacement_for_full_slots(db: Session, *, uid: int | None, out: dict[
         break
     if newcomer is None:
         return False
-    displaced, info = _maybe_rank_displace(db, user_id=uid, newcomer=newcomer, busy_symbols=busy)
+    displaced, info = _maybe_rank_displace(
+        db, user_id=uid, newcomer=newcomer, busy_symbols=busy, protected_symbol=_leader
+    )
     if displaced:
         out["displaced"] = info
         logger.warning(
@@ -1558,6 +2566,45 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     except Exception:
         pass
 
+    # Guard 5c: WIN-CYCLE FATIGUE — RED hard-stop (Batch E(2), ENTRIES ONLY). Once today's
+    # CLEAN-WIN count (this execution family) reaches the RED threshold, STOP arming NEW
+    # entries for the session — lock in the green day instead of over-trading it back. This
+    # is the upside mirror of the profit-goal/giveback halts and uses the IDENTICAL early-out
+    # shape (skip the whole scan, report clearly). It NEVER touches an OPEN position: every
+    # exit/stop/trail/bailout/scale-out path runs in the live runner, which this guard does
+    # not gate. The YELLOW down-size is applied at entry-fill sizing in the live runner.
+    # OFF => 'green' => no-op (byte-identical). Fail-open. docs/DESIGN/MOMENTUM_LANE.md
+    try:
+        if bool(getattr(settings, "chili_momentum_win_cycle_fatigue_enabled", False)):
+            _wc_n = _win_cycle_clean_win_count(db, execution_family=_lane_execution_family())
+            if _win_cycle_fatigue_level(_wc_n) == "red":
+                out["skipped"] = "win_cycle_fatigue_red"
+                out["clean_wins_today"] = _wc_n
+                out["win_cycle_red_threshold"] = int(
+                    getattr(settings, "chili_momentum_win_cycle_red_wins", 7) or 7
+                )
+                return out
+    except Exception:
+        pass
+
+    # Guard 5d: HARD NO-TRADE REGIMES (Batch E(3), ENTRIES ONLY). A hard no-NEW-ENTRY
+    # standdown around scheduled high-impact events (FOMC/CPI; +/- a window) and an optional
+    # hard midday window. Same early-out shape as Guards 4/5; NEVER touches an OPEN position
+    # (exits/stops/trails/bailouts/scale-outs all run in the live runner, ungated by this).
+    # The clock/event helper lives in the live runner (one canonical definition the runner's
+    # own entry-eval also reads). OFF => never blocks (byte-identical). Fail-open.
+    try:
+        if bool(getattr(settings, "chili_momentum_hard_no_trade_regime_enabled", False)):
+            from .live_runner import hard_no_trade_regime
+
+            _blocked, _why = hard_no_trade_regime(_lane_execution_family())
+            if _blocked:
+                out["skipped"] = "hard_no_trade_regime"
+                out["no_trade_reason"] = _why
+                return out
+    except Exception:
+        pass
+
     # Clear expired pending arms so they do not pin a concurrency slot.
     try:
         from .automation_query import expire_stale_live_arm_sessions
@@ -1565,6 +2612,22 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         expire_stale_live_arm_sessions(db, user_id=int(uid))
     except Exception:
         pass
+
+    # AREA C — SAFE BOUNDED STALE-SESSION REAPER (2026-06-25). Runs INSIDE this
+    # auto-arm pass (NOT a parallel loop) right after the arm-pending TTL sweep:
+    # terminalize dead-but-lingering live_error / broker-flat live_bailout sessions so
+    # they stop pinning the busy-set + accumulating in the table. Broker-truth-gated +
+    # in-flight-order-gated + row-locked + fail-safe (any unknown read leaves the
+    # session alone). Kill-switch chili_momentum_stale_session_reaper_enabled.
+    try:
+        from .automation_query import reap_stale_live_sessions
+
+        _reaped = reap_stale_live_sessions(db, user_id=int(uid))
+        if _reaped.get("reaped"):
+            out["stale_sessions_reaped"] = _reaped.get("reaped")
+            logger.info("[auto_arm] stale-session reaper: %s", _reaped)
+    except Exception:
+        logger.debug("[auto_arm] stale-session reaper failed", exc_info=True)
 
     # Coinbase connect at PASS START (2026-06-12): the venue-readiness filter
     # at selection ran BEFORE the lazy _cb_connect() at the arm phase, so a
@@ -1601,6 +2664,27 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     out["crypto_illiquid_skipped"] = 0
     out["reap_cooldown_skipped"] = 0
     out["entry_reject_cooldown_skipped"] = 0
+    # TIER-2 OVERNIGHT: resolve the clock + flags ONCE per pass. When overnight trading is
+    # active, proactively probe 24h-eligibility for the equity candidates (batched <=10) so
+    # ineligible names are SKIPPED at the gate below — never order-rejected (no spam).
+    _overnight_active = False
+    try:
+        from .market_profile import is_overnight_now as _is_overnight_now
+
+        _overnight_active = bool(
+            getattr(settings, "chili_momentum_overnight_trading_enabled", False)
+        ) and _is_overnight_now("EQUITY")
+    except Exception:
+        _overnight_active = False
+    if _overnight_active:
+        out["overnight_ineligible_skipped"] = 0
+        out["overnight_illiquid_skipped"] = 0
+        try:
+            _probe_24h_eligibility(
+                [c.symbol for c in candidates if not _is_coinbase_tradeable_symbol(c.symbol)]
+            )
+        except Exception:
+            logger.debug("[auto_arm] overnight 24h-eligibility probe failed", exc_info=True)
     eligible: list[MomentumSymbolViability] = []
     for c in candidates:
         out["checked"] += 1
@@ -1637,6 +2721,18 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             if not _liq_ok:
                 out["crypto_illiquid_skipped"] = out.get("crypto_illiquid_skipped", 0) + 1
                 continue
+        # TIER-2 OVERNIGHT gate (equities only; runs BEFORE broker-ready + any order):
+        # an equity overnight must be 24h-ELIGIBLE (proactive RH tradability probe) AND
+        # 24h-LIQUID (a deeper dollar-volume floor than RTH). Ineligible/thin names are
+        # SKIPPED here — never armed, never order-rejected. is_overnight_now is the clock;
+        # _symbol_market_open already let the name through (is_tradeable_now overnight branch).
+        if _overnight_active and not _is_coinbase_tradeable_symbol(c.symbol):
+            if not _is_24h_eligible(c.symbol):
+                out["overnight_ineligible_skipped"] = out.get("overnight_ineligible_skipped", 0) + 1
+                continue
+            if not _overnight_24h_liquid(c.symbol):
+                out["overnight_illiquid_skipped"] = out.get("overnight_illiquid_skipped", 0) + 1
+                continue
         if not _venue_broker_ready_for(c.symbol, _broker_ready_cache):
             out["broker_not_ready_skipped"] += 1
             continue  # venue disconnected (e.g. RH token expired) — don't burn the single
@@ -1670,6 +2766,17 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     if eligible:
         import concurrent.futures
 
+        # Snapshot {UPPER symbol -> detached candidate row} for the probe threads so the
+        # momentum-continuation arm-time trigger can read each name's OWN persisted
+        # high-conviction signal without a new fetch. Reassign a FRESH dict (never mutate
+        # in place) so an overlapping pass only ever sees a complete map. The rows are
+        # already expunged but their loaded attrs (symbol / execution_readiness_json /
+        # viability_score) stay readable (the #561/#563 read-release pattern, same as the
+        # arm loop below). Module global so the 1-arg _probe_candidate signature is unchanged.
+        global _PASS_CANDIDATE_ROWS
+        _PASS_CANDIDATE_ROWS = {
+            str(getattr(c, "symbol", "") or "").upper(): c for c in eligible
+        }
         _workers = min(
             len(eligible),
             max(1, int(getattr(settings, "chili_momentum_auto_arm_trigger_workers", 8))),
@@ -1841,6 +2948,28 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         out["viability_score"] = round(float(chosen.viability_score or 0.0), 4)
         out["trigger"] = chosen_reason
 
+        # P2 PER-SYMBOL ATTEMPT FATIGUE (ENTRIES ONLY): veto a NEW live entry attempt once this
+        # ticker has already reached the per-symbol attempt cap TODAY (Ross: stop trading a name
+        # after ~N attempts). This is a PRE-POSITION arm-gate SKIP — it never touches a HELD
+        # position (an OPEN session is owned by the live runner, which does not consult this), so
+        # every exit/stop/scale-out/bailout stays allowed. OFF / fail-open => no skip. The YELLOW
+        # down-size for the borderline last allowed attempt is applied at entry-fill sizing in the
+        # live runner (per_symbol_fatigue_size_multiplier). docs/DESIGN/MOMENTUM_LANE.md
+        try:
+            _psf_blocked, _psf_meta = per_symbol_fatigue_blocks_entry(
+                db, chosen.symbol, execution_family=_exec_family
+            )
+            if _psf_blocked:
+                out["skipped"] = "per_symbol_fatigue"
+                out["per_symbol_fatigue"] = _psf_meta
+                logger.info(
+                    "[auto_arm] per-symbol fatigue veto %s: %s attempts today (cap %s) — skip new entry",
+                    chosen.symbol, _psf_meta.get("attempts_today"), _psf_meta.get("max_attempts"),
+                )
+                continue
+        except Exception:
+            pass
+
         begin = begin_live_arm(
             db,
             user_id=int(uid),
@@ -1920,15 +3049,64 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
                                 "[auto_arm] alpaca twin armed %s session=%s (paper endpoint)",
                                 chosen.symbol, _tb.get("session_id"),
                             )
+                        # AREA B (alpaca-twin leak): a blocked twin confirm strands the
+                        # begin-created twin session in live_arm_pending forever (it was
+                        # silently swallowed with no cancel + no log). The twin is a PAPER
+                        # session with NO broker order at the pre-entry arm stage, so the
+                        # cancel is a pure CHILI-state transition to LIVE_CANCELLED — and it
+                        # frees the slot the twin would otherwise pin. flag-OFF = legacy leak.
+                        elif bool(
+                            getattr(settings, "chili_momentum_cancel_on_confirm_block_enabled", True)
+                        ) and _tb.get("session_id"):
+                            from .automation_query import cancel_automation_session as _cancel_twin
+
+                            _cancel_twin(db, user_id=int(uid), session_id=_tb.get("session_id"))
+                            logger.info(
+                                "[auto_arm] alpaca twin confirm blocked %s session=%s err=%s — cancelled stranded arm",
+                                chosen.symbol, _tb.get("session_id"), _tc.get("error"),
+                            )
             except Exception:
                 logger.debug("[auto_arm] alpaca twin arm failed", exc_info=True)
         else:
             out["skipped"] = "confirm_blocked"
             out["confirm_error"] = confirm.get("error")
-            logger.info(
-                "[auto_arm] confirm_live_arm blocked %s: %s",
-                chosen.symbol, confirm.get("error"),
-            )
+            # AREA B — CANCEL-ON-CONFIRM-BLOCK (2026-06-25, the IQST sess-8804 leak).
+            # confirm_live_arm blocked AFTER begin_live_arm already created the session
+            # in live_arm_pending (a TOCTOU: the name flickered ineligible / risk-blocked /
+            # broker-not-ready / allocator-blocked between begin and confirm). The legacy
+            # path only logged "confirm_blocked" and moved on, STRANDING the begin-created
+            # session in live_arm_pending — pinning a concurrency slot until the TTL reaper
+            # (up to chili_momentum_auto_arm_max_watch_seconds later). RELEASE it now via
+            # cancel_automation_session: a pre-entry arm_pending session carries NO
+            # momentum_live_execution, so _oids is empty and the order-truth broker sweep is
+            # a pure no-op — the cancel is a pure CHILI-state transition to LIVE_CANCELLED
+            # (FOR UPDATE row-locked vs a concurrent runner tick; adopt-on-cancel is skipped
+            # because prev is not in LIVE_CANCELLABLE_STATES). flag-OFF = legacy leak.
+            if bool(
+                getattr(settings, "chili_momentum_cancel_on_confirm_block_enabled", True)
+            ) and begin.get("session_id"):
+                try:
+                    from .automation_query import cancel_automation_session
+
+                    _rel = cancel_automation_session(
+                        db, user_id=int(uid), session_id=begin.get("session_id")
+                    )
+                    out["confirm_block_released_session"] = begin.get("session_id")
+                    logger.info(
+                        "[auto_arm] confirm_live_arm blocked %s session=%s err=%s — cancelled stranded arm (%s)",
+                        chosen.symbol, begin.get("session_id"), confirm.get("error"),
+                        _rel.get("state") if _rel.get("ok") else _rel.get("error"),
+                    )
+                except Exception:
+                    logger.warning(
+                        "[auto_arm] confirm-block release failed %s session=%s",
+                        chosen.symbol, begin.get("session_id"), exc_info=True,
+                    )
+            else:
+                logger.info(
+                    "[auto_arm] confirm_live_arm blocked %s: %s",
+                    chosen.symbol, confirm.get("error"),
+                )
     if _armed_syms:
         out["armed_symbols"] = _armed_syms
         out.pop("skipped", None)

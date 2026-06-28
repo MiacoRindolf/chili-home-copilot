@@ -2205,15 +2205,80 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FLOAT_ROTATION_TILT_ENABLED"),
         description="Volume/float rotation sustainability tilt (>=~5x EOD): reward names rotating their float multiple times as a fuel-remaining signal.",
     )
+    # ── Ross re-audit SELECTION tilts (each kill-switched DEFAULT-OFF = byte-identical) ──
+    # Four MEASURED selection-side tilts from the 2026-06-26 Warrior-courses re-audit. Each is a
+    # minority RE-RANK that NEVER dominates the explosive RVOL/change/float core and can NEVER
+    # fabricate an entry (selection/eligibility/arming only). Default OFF ⇒ no sub-score is stamped
+    # and no pillar weight is folded ⇒ ranking is byte-identical to the deployed image.
+    chili_momentum_float_overrotation_fix_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLOAT_OVERROTATION_FIX_ENABLED"),
+        description="Ross SS101 EXHAUSTION fix: the deployed float-rotation sub-score rewards higher projected rotation MONOTONICALLY, but EXCESSIVE rotation (over-rotated, especially midday/late session) is an exhaustion NEGATIVE, not bullish. When ON, the float_rotation_pct sub-score contributes positively up to a healthy threshold, then PENALISES projected rotation above it, AND de-weights the penalty severity by how much of the morning session has elapsed (the over-rotation read is muted at the open, strongest late). MEASURED re-rank only (never a veto, equity-only). OFF ⇒ the legacy monotone sub-score is used ⇒ byte-identical.",
+    )
+    chili_momentum_float_overrotation_threshold: float = Field(
+        default=3.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLOAT_OVERROTATION_THRESHOLD"),
+        description="The ONE documented knob for the over-rotation fix: projected-rotation-at-EOD (float turns) at/below this stays bullish; ABOVE it is treated as float-exhaustion and penalised (de-rated below the saturation peak). Reference float-multiple, not a hard cutoff (the within-batch percentile still orders names). Adaptive in spirit — a generalised Ross 'healthy rotation' ceiling.",
+    )
+    chili_momentum_float_overrotation_session_minute: float = Field(
+        default=120.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLOAT_OVERROTATION_SESSION_MINUTE"),
+        description="Minutes after the regular open (09:30 ET) at which the over-rotation penalty reaches FULL strength (e.g. 120 = ~11:30, late-morning). Before this the penalty ramps in linearly from the open (early float burn is normal/bullish); at/after it the exhaustion read is fully applied. The ONE documented session-clock knob.",
+    )
+    chili_momentum_daily_200ema_room_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_200EMA_ROOM_ENABLED"),
+        description="Wire the dead-computed daily 200-SMA room (daily_levels.dist_to_sma_200_atr — signed daily-ATR units, + above / − below) as a MEASURED selection tilt: reward CLEAR room above the daily 200MA (clean sky, no overhead macro resistance), penalise names pinned to / just under the 200MA from below (buying into resistance). Folded into daily_structure_pct alongside the other daily tilts (no viability.py change). OFF ⇒ dist_to_sma_200_atr stays discarded ⇒ byte-identical.",
+    )
+    chili_momentum_daily_200ema_clear_room_atr: float = Field(
+        default=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_200EMA_CLEAR_ROOM_ATR"),
+        description="The ONE documented knob for the 200-EMA room tilt: daily-ATR units of room ABOVE the 200MA at which the name is treated as fully 'clear sky' (max reward). Pinned/below-200MA reads ramp toward the de-rate. Adaptive (ATR-relative), not a fixed $.",
+    )
+    chili_momentum_news_pr_cadence_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NEWS_PR_CADENCE_ENABLED"),
+        description="Ross PR-clock cadence: PRs drop on the top/bottom of the hour premarket (7:00/7:30/8:00/8:30 ET). When ON, a CATALYST name (present in the news set) gets a small additional selection LEAN-IN during a PR window — but ONLY in premarket hours, ET. Outside the windows the name is NEUTRAL (no boost). Requires the news-catalyst pillar to be stamping; a pure time-of-day gate on top of it. OFF ⇒ no cadence boost ⇒ byte-identical.",
+    )
+    chili_momentum_news_pr_cadence_hours: str = Field(
+        default="7:00-7:30,8:00-8:30",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NEWS_PR_CADENCE_HOURS"),
+        description="The ONE documented knob for the PR-cadence windows: comma-separated HH:MM-HH:MM ranges in ET (premarket) during which catalyst names get the cadence lean-in. Default = the top/bottom-of-hour PR drops Ross watches (7:00-7:30, 8:00-8:30).",
+    )
+    chili_momentum_price_sweetspot_tilt_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PRICE_SWEETSPOT_TILT_ENABLED"),
+        description="Ross $3-10 SWEET-SPOT preference (NOT a hard cut — the $1-20 price-band gate is untouched): a MEASURED selection tilt that BOOSTS names in the $3-10 high-conviction band and mildly de-rates names outside it but still within the broad band. Folded as a composable price_band pillar onto the active Ross weight-set (score_universe self-renormalises). OFF ⇒ no sub-score is stamped and no pillar is folded ⇒ byte-identical.",
+    )
+    chili_momentum_price_sweetspot_min: float = Field(
+        default=3.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PRICE_SWEETSPOT_MIN"),
+        description="Lower bound of the Ross high-conviction sweet-spot ($3). Names at/above this and at/below the max get the full boost; below ramps down. Documented reference, not a hard gate.",
+    )
+    chili_momentum_price_sweetspot_max: float = Field(
+        default=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PRICE_SWEETSPOT_MAX"),
+        description="Upper bound of the Ross high-conviction sweet-spot ($10). Above this (but within the $1-20 band) ramps down toward the de-rate. Documented reference, not a hard gate.",
+    )
     chili_momentum_explosive_scoring_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_SCORING_ENABLED"),
         description="3-layer EXPLOSIVE scorer for score_universe (fixes the score-compression bug where a non-explosive mega-cap out-ranked a +400%/15,000x-RVOL rocket). Replaces the compensatory linear-percentile blend with: (1) a lexicographic explosiveness TIER (batch-median multiples — non-compensatory outer sort key), (2) a magnitude-preserving log-min-max multiplicative explosive CORE (rvol_norm^0.6 * mom_norm^0.4) x bounded quality modifier from the secondary pillars, (3) raw-rvol tiebreak. Batch-relative / no magic numbers; fail-OPEN (missing rvol/change degrades to tier 0, never crashes, never vetoes — selection re-rank only). Flag OFF ⇒ byte-identical to the legacy blend.",
     )
+    chili_momentum_ross_rvol_feed_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_RVOL_FEED_ENABLED"),
+        description="FIX A: un-zero the starved ws_ignition Ross scorer. (A1) the ignition feeder threads the REAL intraday RVOL it captured from the screen snapshot into ross_signals.vol_ratio, so an igniting mover reaches the explosive CORE with rvol present instead of None. (A2) when a name genuinely has no rvol, the explosive core degrades to a BOUNDED momentum-only score (capped below a confirmed rvol+mom mover) instead of 0.0 — so the viability tilt no longer penalises every explosive mover toward the floor. SELECTION-ONLY (never touches an entry decision). OFF => byte-identical (old rvol-None -> core 0.0 path).",
+    )
     chili_momentum_squeeze_fuel_tilt_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_FUEL_TILT_ENABLED"),
         description="SQUEEZE-FUEL selection tilt (Ross SS101 #2): SOFT within-batch BOOST for squeeze-prone names (high short-interest %% + high cost-to-borrow, via Ortex) and a small DE-RATE for very-low-CTB / easy-to-borrow names (free shares, shorts attack the pop). Ortex fetch gated to top-N explosive low-float candidates + cached 12h. Equity-only; flag-off OR Ortex absent/error ⇒ byte-identical.",
+    )
+    chili_momentum_news_catalyst_weight_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NEWS_CATALYST_WEIGHT_ENABLED"),
+        description="NEWS-CATALYST selection pillar (the 🔥 on Ross's scanner — the 4th Ross pillar that was a STUB). Maps each symbol's REAL Polygon/Benzinga catalyst GRADE (the strong/weak/fake/all sets the pipeline already computes from headlines — no new fetch) to a [0,1] news_catalyst_pct sub-score and FOLDS a MEASURED 0.10-weight pillar onto the active Ross weight-set (score_universe self-renormalises). Strong (FDA/trial/M&A/beat) BOOSTS; weak (dilution/compliance) and fake (unverified/hacked-PR) DE-RATE; news a minority RE-RANK only — float/RVOL/change stay primary. GRACEFUL: a name with NO news data is NEUTRAL (pillar omitted, never penalised or rejected for lack of news). Ships DEFAULT-OFF (operator confirms the catalyst feed's live amplitude before tilting). OFF ⇒ the sub-score is never stamped and the pillar is never folded ⇒ BYTE-IDENTICAL ranking.",
     )
     chili_momentum_squeeze_fuel_top_n: int = Field(
         default=12, ge=0, le=60,
@@ -2234,6 +2299,32 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BLUE_SKY_RECENT_IPO_ENABLED"),
         description="All-time-high breakout boost gated to recent-IPO names (<2yr history) where there is no overhead supply.",
+    )
+    # ── P0: blue-sky ENTRY trigger + overhead-supply veto (daily context INTO entries) ──
+    chili_momentum_blue_sky_entry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BLUE_SKY_ENTRY_ENABLED"),
+        description="P0 dedicated ENTRY trigger: fire the break of a NEW multi-period/all-time high with NO overhead resistance (clear sky >= the room-ATR floor) + volume confirm. OFF => the entry path stays daily-blind (byte-identical: no daily context is read, no trigger fires).",
+    )
+    chili_momentum_blue_sky_entry_min_room_atr: float = Field(
+        default=1.5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BLUE_SKY_ENTRY_MIN_ROOM_ATR"),
+        description="The ONE documented knob for the blue-sky entry: the nearest overhead-supply level must sit at least this many DAILY-ATR units above the break (clear-room floor) for the trigger to fire genuine clear sky. Adaptive (ATR-relative), not a fixed $.",
+    )
+    chili_momentum_bull_flag_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BULL_FLAG_ENTRY_ENABLED"),
+        description="Ross BULL FLAG (SS101 #012) ALL-DAY entry: 1-3 green-candle impulse, then a 2-3 candle DEEPER pullback (50-70% retrace -- DEEPER than the shallow first_pullback cap, riding the 9-EMA band) that holds, then FIRE the first candle to break the prior pullback swing high. DISTINCT from first_pullback (shallow only) and deep_reclaim (morning-only). Reuses the anti-chase guards (explosive/first-pullback/backside/L2/overhead) + volume-profile (light-pull dry-up + high-vol-red distribution veto). Ship DARK (default FALSE -- NEW + never-run; operator ramps). OFF => no-op, byte-identical. docs/DESIGN/MOMENTUM_LANE.md",
+    )
+    chili_momentum_overhead_veto_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERHEAD_VETO_ENABLED"),
+        description="P0 overhead-supply veto/derate: for ANY breakout entry, if trapped supply (prior swing high / unfilled gap / red-rejection cluster) sits within the veto-ATR floor overhead, VETO the entry (don't buy into a ceiling). OFF => breakout entries stay daily-blind = byte-identical.",
+    )
+    chili_momentum_overhead_veto_atr: float = Field(
+        default=0.5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERHEAD_VETO_ATR"),
+        description="The ONE documented knob for the overhead veto: a breakout whose nearest overhead-supply level sits within this many DAILY-ATR units is vetoed (a wall the price must fight through). Adaptive (ATR-relative). A true blue-sky/clear-room break (room beyond this) passes.",
     )
     chili_momentum_reverse_split_recency_enabled: bool = Field(
         default=True,
@@ -2330,10 +2421,117 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_VWAP_RECLAIM_VOL_MULT"),
         description="VWAP-reclaim trigger: rel-volume floor on the reclaim bar (conviction, not a drift back over VWAP).",
     )
+    # ── BATCH B (FIX 1): STICKY BACK-SIDE BENCH (Ross front/back-side discipline). The
+    # per-tick front_side_state / _detect_back_side vetoes recompute backside EACH tick, so
+    # once a name rolls over midday CHILI re-arms it on every MACD pivot — chasing a dead,
+    # rolled-over top. Ross BENCHES the name for the rest of the move once it is on the back
+    # side. When ON, a CONFIRMED session backside (front_side_state.is_backside) latches a
+    # session-level bench marker so the name is NOT re-armed each tick. MANDATORY un-bench:
+    # a GENUINE NEW HIGH (live tick / completed-bar HOD above the benched-at HOD) clears the
+    # bench — a name that truly resumes a new leg CAN still trade (never a permanent ban).
+    # KILL-SWITCH: False -> the marker is never set/read -> byte-identical to today.
+    chili_momentum_sticky_backside_bench_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STICKY_BACKSIDE_BENCH_ENABLED"),
+        description="BATCH B FIX 1: once a name CONFIRMS the session back side, latch a session-level bench so it is NOT re-armed each tick (vs the per-tick recompute that chases a rolled-over top). MANDATORY fresh-HOD un-bench (a genuine new high clears the bench — never a permanent ban). KILL-SWITCH: False -> byte-identical.",
+    )
+    # ── BATCH B (FIX 2): HOT-TAPE WICK-RECLAIM entry (HVM101 #008, the extreme-volatility
+    # variant of VWAP-reclaim). In HOT/parabolic tape ONLY: a huge rejection candle (large
+    # upper wick, high range) -> immediate low-volume flush -> the next bar(s) retrace ~R of
+    # the wick on rate-of-change -> re-enter into the wick; stop below the wick low. INVALID
+    # on slow/cold recoveries (the hot-tape gate is MANDATORY: it reuses is_explosive_mover /
+    # the RVOL signals). Returns the shared (ok, reason, debug) with pullback_high/pullback_low
+    # so the runner stop/sizing machinery is reused (no new sizing path).
+    # KILL-SWITCH: False -> the trigger never fires -> byte-identical to today.
+    chili_momentum_wick_reclaim_entry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WICK_RECLAIM_ENTRY_ENABLED"),
+        description="BATCH B FIX 2: hot-tape-only wick-reclaim entry — re-enter the retrace into a big upper-wick rejection candle after a low-volume flush, on a strong, EXPLOSIVE (high RVOL/ATR) name only. Stop below the wick low; shared (ok, reason, debug). KILL-SWITCH: False -> byte-identical.",
+    )
+    # The ONE documented knob for the wick-reclaim wick-size floor: the rejection candle's
+    # UPPER wick must be at least this fraction of the bar RANGE to count as a big-wick
+    # rejection. Adaptive on TOP of this: the bar must also be an outsized-range bar relative
+    # to the name's own ATR%, so the absolute floor only guards the thin/degenerate case.
+    chili_momentum_wick_reclaim_min_wick_frac: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WICK_RECLAIM_MIN_WICK_FRAC"),
+        description="BATCH B FIX 2: minimum UPPER-wick fraction of the rejection bar's range for the wick-reclaim trigger (the one documented wick-size base; the bar must ALSO be outsized vs the name's own ATR%). Reversible via chili_momentum_wick_reclaim_entry_enabled.",
+    )
+    # The ONE documented knob for the retrace-into-the-wick depth: the reclaim must recover at
+    # least this fraction of the rejection wick (from the flush low back up toward the wick
+    # high). ~0.4 = the HVM101 ~40% retrace-on-rate-of-change. Adaptive: measured as a fraction
+    # of the wick itself (the name's own bar geometry), so it carries no fixed-price magnitude.
+    chili_momentum_wick_reclaim_min_retrace_frac: float = Field(
+        default=0.4,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WICK_RECLAIM_MIN_RETRACE_FRAC"),
+        description="BATCH B FIX 2: minimum fraction of the rejection wick the reclaim must recover (HVM101 ~40% retrace) for the wick-reclaim trigger to fire. Reversible via chili_momentum_wick_reclaim_entry_enabled.",
+    )
     chili_momentum_bid_prop_confirmer_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BID_PROP_CONFIRMER_ENABLED"),
         description="Confirm a break only when the best-bid steps up / spread tightens (bid-propping microstructure confirmer).",
+    )
+    chili_momentum_live_eligible_max_spread_bps: float = Field(
+        default=300.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_ELIGIBLE_MAX_SPREAD_BPS"),
+        description="The SINGLE documented live-eligibility spread ceiling (bps). A spread WIDER than this disqualifies a name from LIVE entry (truly toxic / broken-halted quote). At/below it the wide spread only DERATES the viability score — the explosive low-float movers the Ross lane targets (~40-90bps) stay live-eligible and are entered with marketable-limit/maker orders that cross the spread. 0 = no spread disqualification (rely on the liquidity floor). Replaces the old hard 12/25bps disqualify that silently blocked every squeeze (1,495 'Not live-eligible' entry blocks 2026-06-25).",
+    )
+    # ADAPTIVE stale-quote (stale_bbo) window — scale the freshness ceiling to the NAME's own
+    # trade cadence instead of a fixed 15s clock (operator 2026-06-25 "gawin mong adaptive").
+    # max_age = clamp(cadence_mult * avg_inter-trade-interval, floor, ceiling). A name printing
+    # every ~20s is fresh at ~60s; a halted/quiet name (no recent ticks) stays at the floor and
+    # is correctly stale. ONE documented knob (cadence_mult) + safety bounds.
+    chili_momentum_quote_freshness_cadence_mult: float = Field(
+        default=3.0,
+        ge=1.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_QUOTE_FRESHNESS_CADENCE_MULT"),
+        description="K: the adaptive stale-quote window = K x the name's avg inter-trade interval (over the last 120s of iqfeed_trade_ticks), clamped to [floor, ceiling]. The one documented knob; higher = more tolerant of slow-but-live names.",
+    )
+    chili_momentum_quote_freshness_floor_seconds: float = Field(
+        default=15.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_QUOTE_FRESHNESS_FLOOR_SECONDS"),
+        description="Lower bound on the adaptive stale-quote window (never tighter than the venue base). Fast-printing + halted/quiet names land here.",
+    )
+    chili_momentum_quote_freshness_ceiling_seconds: float = Field(
+        default=120.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_QUOTE_FRESHNESS_CEILING_SECONDS"),
+        description="Upper bound on the adaptive stale-quote window — caps how old a quote can be and still count as fresh for a slow-trading name (safety vs trading on a truly stale price).",
+    )
+    # FIX B1 — extended-hours-aware stale-quote window. Pre/post-market movers trade at a
+    # much slower cadence; the regular-hours ceiling perpetually flags them stale so the
+    # entry trigger never gets a turn (stale_bbo peaks 16:00-19:00 ET). When ON, EXTENDED
+    # HOURS raise the adaptive-window CEILING (the cadence-scaled window may now stretch
+    # further for a slow-but-LIVE name), while the conservative FLOOR for genuinely
+    # no-tick / halted names is unchanged. OFF => byte-identical (regular ceiling always).
+    chili_momentum_ext_hours_quote_age_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXT_HOURS_QUOTE_AGE_ENABLED"),
+        description="FIX B1: during pre/post-market, widen the adaptive stale-quote CEILING using the name's own inter-trade cadence so a slow-but-live extended-hours mover isn't perpetually flagged stale. Floor for halted/no-tick names is unchanged. OFF => byte-identical.",
+    )
+    chili_momentum_ext_hours_quote_ceiling_seconds: float = Field(
+        default=300.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXT_HOURS_QUOTE_CEILING_SECONDS"),
+        description="FIX B1: the adaptive stale-quote window CEILING used during extended hours (replaces the regular-hours ceiling only when ext-hours widening is enabled). Still a hard cap — a truly stale ext-hours quote past this is still stale.",
+    )
+    # FIX B2 — entry-quote secondary-source refetch. When the primary entry tick is STALE
+    # (not invalid), refetch the BBO ONCE from the documented market-data priority
+    # (Massive WS -> Polygon -> RH MCP get_equity_quotes) and re-run the SAME validation
+    # before emitting live_blocked_by_risk. Validation is NOT weakened: invalid_bbo
+    # (ask<bid, mid/bid/ask<=0) still hard-blocks; only the SOURCE of the quote changes.
+    # OFF => byte-identical (no refetch; the primary stale verdict stands).
+    chili_momentum_entry_quote_refetch_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_QUOTE_REFETCH_ENABLED"),
+        description="FIX B2: on a STALE (not invalid) entry tick, refetch the BBO once from the secondary market-data chain (Massive WS -> Polygon -> RH MCP) and re-run the same validation before blocking. invalid_bbo still hard-blocks. OFF => byte-identical.",
     )
     # BROKER-TRUTH RECONCILIATION (mig309) — TWO decoupled flags (write-then-verify-then-read):
     #
@@ -2456,6 +2654,59 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_IGNITION_MIN_PCT"),
         description="The single adaptive FLOOR knob for the WS ignition scorer: the minimum intraday move% (live price vs today's open / prev-close) for a tick to be treated as an ignition worth scoring into viability. A FLOOR / reference point, not a ceiling — the downstream Ross percentile re-rank does the real selection above it. Sized to drop dead tape while still catching the real igniters early.",
     )
+    # ── HOT-MOVER RE-CATCH + sub-$1 explosive exemption (the NEXR late-surge miss) ─
+    # ROOT CAUSE (verified live 2026-06-24): a name that FADED midday (low pos_in_range)
+    # then SURGED late ranks #51+ in build_equity_universe's freshness×move sort, is
+    # TRUNCATED out of the candidate pool (top-50 / hard-ceiling), stops getting a fresh
+    # viability row, goes stale in 10min, and is fresh-gated OUT of arming — even though
+    # it scored eligible (NEXR +106%, scored 0.580, NEVER armed; sub-$1 part of the day
+    # so price_min=1.0 also excluded it). The cure is to KEEP the genuinely-explosive
+    # name rescored (so freshness follows automatically), WITHOUT loosening the staleness
+    # gate and WITHOUT flooding the lane with penny junk.
+    # FIX (conservative, two additive guards, both flag-gated, OFF ⇒ byte-identical):
+    #  (A) GUARANTEE-INCLUDE the top hot movers (high RVOL AND big %-move AND ≥$-vol
+    #      floor) BEFORE the truncation cap, even if pos_in_range ranks them past the
+    #      cap — so a faded-then-resurging runner stays in the rescoring set. Bounded by
+    #      ONE knob (the guaranteed-slot count); the RVOL/$-vol/%-move quality bar is NOT
+    #      relaxed (no junk). The normal freshness×move ranking is unchanged — this only
+    #      ADDS the hot-mover guarantee on top.
+    #  (B) let an EXPLOSIVE sub-$1 name (same RVOL + %-move + $-vol bar) pass the
+    #      price_min floor (Ross trades sub-$1 runners; NEXR ran $0.95→$1.18). Guarded,
+    #      not a blanket floor removal — ONLY a name that clears the hot-mover bar is
+    #      exempted; ordinary sub-$1 penny tape is still dropped.
+    # Adaptive / no-magic: the RVOL + %-move bars are within-batch high-percentiles (the
+    # batch decides what "genuinely explosive" means today) clamped to documented floors;
+    # the $-vol floor reuses the profile's existing min_dollar_volume. No re-import
+    # shadowing (settings read once, lazily). See docs/DESIGN/MOMENTUM_LANE.md.
+    chili_momentum_hot_mover_recatch_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_MOVER_RECATCH_ENABLED"),
+        description="Guarantee-include the top genuinely-explosive hot movers (high RVOL AND big %-move AND ≥ the profile $-vol floor) in build_equity_universe BEFORE the top-N / hard-ceiling truncation, so a name that FADED midday then SURGED late (ranks #51+ on freshness×move, e.g. NEXR +106%) stays in the rescoring set and its viability stays fresh enough to arm. Bounded by chili_momentum_hot_mover_recatch_slots; the RVOL/$-vol/%-move quality bar is NOT relaxed (no penny-junk flood) and the normal ranking is unchanged (this only ADDS guaranteed slots on top). 0 = byte-identical to the freshness×move-ranked truncation.",
+    )
+    chili_momentum_hot_mover_recatch_slots: int = Field(
+        default=15,
+        ge=1,
+        le=100,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_MOVER_RECATCH_SLOTS"),
+        description="The ONE documented bound for the hot-mover re-catch: the max number of genuinely-explosive hot movers guaranteed into the universe ahead of the truncation cap (ranked by RVOL×move among the hot set). A small bound so a faded-then-resurging runner is re-caught without the guarantee itself becoming an unbounded second universe. Only consulted when chili_momentum_hot_mover_recatch_enabled is on.",
+    )
+    chili_momentum_hot_mover_rvol_floor: float = Field(
+        default=5.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_MOVER_RVOL_FLOOR"),
+        description="The single documented RVOL FLOOR (today share-volume ÷ prevDay share-volume) for the hot-mover quality bar — Ross's ≥5× relative-volume reference. A name must clear MAX(this floor, the batch RVOL high-percentile) AND the %-move bar AND the $-vol floor to qualify as a guaranteed hot mover or for the sub-$1 exemption. A FLOOR (the batch percentile can only lift it), so missing/degenerate prevDay volume never fabricates an explosive name (fail-closed: no usable RVOL ⇒ not a hot mover).",
+    )
+    chili_momentum_hot_mover_change_floor: float = Field(
+        default=20.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_MOVER_CHANGE_FLOOR"),
+        description="The single documented %-move FLOOR for the hot-mover quality bar — a 'genuinely explosive RIGHT NOW' threshold well above the universe's modest min_change_pct in-play floor. A name must clear MAX(this floor, the batch change high-percentile) (plus the RVOL + $-vol bars) to be guaranteed-included or sub-$1-exempted. A FLOOR; the within-batch percentile can only raise it so a quiet day can't flood the guarantee.",
+    )
+    chili_momentum_hot_mover_subdollar_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_MOVER_SUBDOLLAR_ENABLED"),
+        description="Sub-$1 exemption: let an EXPLOSIVE sub-$1 name (clears the SAME RVOL + %-move + $-vol hot-mover bar) pass the profile's price_min floor (Ross trades sub-$1 runners; NEXR ran $0.95→$1.18). Guarded, NOT a blanket floor removal — ordinary sub-$1 penny tape that fails the hot-mover bar is still dropped. Requires chili_momentum_hot_mover_recatch_enabled. 0 = the price_min floor is enforced for every name (byte-identical).",
+    )
     # ── Daily-chart context (the multi-timeframe layer Ross STARTS with) ─────────
     # Adds a 5th SELECTION pillar (daily_structure, 10% weight) from
     # daily_levels.compute_daily_context — break ABOVE a major daily level + room to
@@ -2483,11 +2734,36 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_USE_REAL_FLOAT"),
         description="Feed the low-float pillar the REAL share count (Polygon reference share_class_shares_outstanding) instead of the market_cap $-proxy; names without it use a consistent market_cap/price share-count estimate (never mixes units). Kill-switch: 0 = the pillar keeps the market_cap proxy (selection byte-identical).",
     )
+    # FLOAT BACKFILL (anti-flicker; equities). Share FLOAT is STATIC (does not change
+    # intraday), so a known value is a CONSTANT — never stale dynamic data. The scanner
+    # bridge forwards a ROTATING subset of movers per cycle, so a symbol absent from THIS
+    # tick's ross_signals never gets float-enriched and its persisted
+    # execution_readiness_json.extra.ross_signals[sym].float_shares flickers to None — which
+    # the fail-closed A-setup quality floor wrongly rejects. When the current cycle can't
+    # resolve a real float, BACKFILL from the last-known value (prior persisted
+    # momentum_symbol_viability row for the symbol). Only FILLS a missing float — NEVER
+    # overwrites a fresh real float, NEVER fabricates for a never-seen symbol (stays None =>
+    # fail-closed reject = correct). 0 = byte-identical (no backfill).
+    chili_momentum_float_persistence_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLOAT_PERSISTENCE_ENABLED"),
+        description="Backfill a missing float_shares from the last-known persisted momentum_symbol_viability row (share float is STATIC, so a known value is a constant — anti-flicker for the fail-closed A-setup quality floor). Equities only; fills missing float only, never overwrites a fresh real float, never fabricates for a never-seen symbol. 0 = byte-identical (no backfill).",
+    )
     chili_momentum_daily_lookback_days: int = Field(
         default=20,
         ge=3,
         validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_LOOKBACK_DAYS"),
         description="The ONE base structural knob for the daily-context layer: the swing-high/low window + daily-ATR period (days). Everything else derives from the daily ATR (equity-relative).",
+    )
+    # P1 SECOND-DAY / MULTI-DAY CONTINUATION CONTEXT (selection re-rank tilt; equities). Folds
+    # into the existing daily_structure sub-score (compute_daily_context, reusing the P0 daily
+    # df — no new fetch): BOOST a clean DAY-2 holding above the prior-day high/close, DERATE
+    # day-3+ (exhaustion). A re-rank tilt, never a hard gate (a day-1 news spike still scores
+    # HIGH — the CUPR guarantee). OFF => daily_structure_pct byte-identical (no boost/derate).
+    chili_momentum_second_day_context_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SECOND_DAY_CONTEXT_ENABLED"),
+        description="Kill-switch for the P1 second-day/multi-day continuation selection tilt (equities). false = no day-2 boost, no day-3+ derate; the run/level fields are still surfaced for audit but daily_structure_pct is byte-identical.",
     )
     # ── Halt awareness (Ross low-floats halt constantly: LULD circuit breakers) ──
     # A trading HALT is observable as a SUSTAINED quote freeze: the stale_bbo gate
@@ -3106,6 +3382,215 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_FLOOR_CHANGE_PCT"),
         description="E3: absolute day-change %% floor (Ross's 'never buy what isn't already moving') an equity must clear at entry to be a live setup.",
     )
+    # ── BATCH A: HOD-break / flat-top BREAKOUT entry + setup-selector (Ross gap: CHILI
+    # has ZERO breakout entries — every trigger is pullback/dip/reclaim, so a straight-up
+    # PARABOLIC HOD runner that never pulls back to the 9-EMA produces NO fills (SHPH +86%
+    # armed 8x, 0 entries). Ross buys the HOD break verbatim, SS101 #011: "buying the high
+    # of day... get in a couple cents underneath that level to anticipate the break". These
+    # detect a CONSOLIDATION/BASE under the HOD (a flag right under the high, NOT a vertical
+    # spike) and fire on the break to a new high with volume + tick-thrust confirmation.
+    # ANTI-CHASE: the break fires ONLY off a tested base; a backside / rolled-over top
+    # (front_side_state / _detect_back_side) or an over-extended vertical (the existing
+    # extension veto) is skipped. KILL-SWITCH each: OFF -> dip-only behavior byte-identical.
+    chili_momentum_hod_break_entry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOD_BREAK_ENTRY_ENABLED"),
+        description="Batch A: HOD/new-high BREAKOUT entry — detect a consolidation BASE holding a tight range just under the day high, then FIRE on the break to a new HOD with a volume spike + tick-thrust confirmation; stop below the consolidation low. ANTI-CHASE: requires the base (a tested break, never a vertical blow-off), and is vetoed on a backside/rolled-over top or an over-extended (above-9-EMA/VWAP) extension. KILL-SWITCH: False -> the trigger is never tried -> byte-identical dip-only ladder.",
+    )
+    chili_momentum_flat_top_entry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLAT_TOP_ENTRY_ENABLED"),
+        description="Batch A: FLAT-TOP consolidation breakout — a parameterization of the HOD break requiring 2-3 taps (topping tails) at a FLAT resistance level, then FIRE on the break; stop = consolidation low; whole/half-dollar round-number context from the existing grid. Same anti-chase guards as the HOD break. KILL-SWITCH: False -> the flat-top variant is never tried -> byte-identical.",
+    )
+    chili_momentum_setup_selector_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SETUP_SELECTOR_ENABLED"),
+        description="Batch A: setup-selector — when >=2 triggers (a dip-family fire AND the new breakout fire) are eligible on the SAME bar, choose the one with the best structural reward:risk (via stop_target_prices) instead of first-clears-gates. KILL-SWITCH: False -> the first trigger that fires wins (the legacy ladder order) -> byte-identical.",
+    )
+    # The ONE documented adaptive knob for the consolidation BASE width: the base is "tight"
+    # when its high-to-low range is within this multiple x the instrument's ATR (a calm name
+    # keeps a tight base, a volatile small-cap is allowed a proportionally wider one). No
+    # fixed cents — derived from ATR. A base wider than this is a sloppy chop, not a flag.
+    chili_momentum_hod_base_atr_mult: float = Field(
+        default=1.5,
+        gt=0.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOD_BASE_ATR_MULT"),
+        description="Batch A: the consolidation BASE is 'tight enough' to be a flag (not chop) when its high-low range <= this x ATR (ATR-relative, no fixed cents). The base must also hold within this fraction of the day-high band. ONE documented base knob for the HOD/flat-top consolidation detection.",
+    )
+    # Number of recent completed bars that form the consolidation base under the HOD. The
+    # ONE documented base for the base-window length (a flag is a handful of bars, not a
+    # long grind). Bounded so a degenerate config can't read the whole frame as a base.
+    chili_momentum_hod_base_bars: int = Field(
+        default=4,
+        ge=2,
+        le=12,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOD_BASE_BARS"),
+        description="Batch A: number of recent completed bars that must form the tight consolidation base just under the HOD before the break fires. ONE documented base-window knob.",
+    )
+    # ── BATCH D: opening-range breakout (ORB) + red-to-green + micro-pullback-primary ──
+    # The remaining entry gaps from the Ross course audit. ORB = break of the first-N-min
+    # opening range (a session-time-windowed breakout). RED-TO-GREEN = a name trading below
+    # the session open that reclaims the open with a bottoming-tail reversal. MICRO-PRIMARY
+    # = the 1-candle shallow-flag micro-pullback as an INITIAL entry (not just a re-load),
+    # hot-tape-gated like the wick-reclaim so it cannot over-fire on slow names. Each is
+    # independently kill-switched; OFF -> the trigger is never tried -> byte-identical.
+    chili_momentum_orb_entry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ORB_ENTRY_ENABLED"),
+        description="Batch D: OPENING-RANGE BREAKOUT — define the opening range (high/low of the first N completed bars after the session open) and FIRE on a break above the OR-high with volume confirm; entry = OR-high break, stop = OR-low. Valid ONLY within the first ~30-60 min after the open (a session-time window). No lookahead (the OR is built from COMPLETED bars only; the live tick is the only intrabar use). KILL-SWITCH: False -> the trigger is never tried -> byte-identical.",
+    )
+    chili_momentum_orb_minutes: int = Field(
+        default=5,
+        ge=1,
+        le=60,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ORB_MINUTES"),
+        description="Batch D: the ONE documented knob for the opening-range LENGTH (minutes of completed bars after the session open whose high/low define the OR). The bar count is DERIVED from this and the entry bar interval (e.g. 5 min / 1m bars = 5 bars; 5 min / 15s bars = 20 bars). Default 5 (Ross's first-5-min OR).",
+    )
+    chili_momentum_orb_window_minutes: float = Field(
+        default=60.0,
+        gt=0.0,
+        le=180.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ORB_WINDOW_MINUTES"),
+        description="Batch D: the ORB is only valid within this many minutes AFTER the session open (past it the rest of the ladder owns the tape). ONE documented session-window knob; default 60 min.",
+    )
+    chili_momentum_red_to_green_entry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RED_TO_GREEN_ENTRY_ENABLED"),
+        description="Batch D: RED-TO-GREEN — a name trading RED (below the session OPEN level) that RECLAIMS the open with a bottoming-tail/reversal bar + volume; entry = the open-level reclaim, stop = the red (session) low. Reuses the bottoming-tail + dipbuy reversal machinery. KILL-SWITCH: False -> the trigger is never tried -> byte-identical.",
+    )
+    chili_momentum_bottom_reversal_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BOTTOM_REVERSAL_ENTRY_ENABLED"),
+        description="SS101 #019 BOTTOM REVERSAL — a series of N consecutive RED candles on elevated volume, then the FIRST candle to CLOSE GREEN is the counter-trend confirmation; entry = the green-candle close (or the break above its high on live price), stop = the recent red-series low (the structural pivot). Optional doji/bottoming-tail at the low = exhaustion confirmer (recorded, never required). Reuses the backside + L2 anti-chase vetoes + the tick-break contract. DISTINCT from red_to_green (no session-open tie; enters on the green bar itself, not a reclaim), double-bottom (no two-low structure), first-pullback (counter-trend not continuation), deep-reclaim (no EMA req, all day). KILL-SWITCH: False (DEFAULT — new + never-run, ship dark) -> the trigger is never tried -> byte-identical.",
+    )
+    chili_momentum_bottom_reversal_min_red: int = Field(
+        default=2,
+        ge=2,
+        le=20,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BOTTOM_REVERSAL_MIN_RED"),
+        description="SS101 #019: minimum count of CONSECUTIVE RED candles immediately preceding the first green close before a bottom reversal can fire. ONE documented noise-defense base; Ross's floor is 2, 3-5 recommended for noise rejection.",
+    )
+    chili_momentum_bottom_reversal_volume_spike_multiple: float = Field(
+        default=1.5,
+        gt=0.0,
+        le=20.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BOTTOM_REVERSAL_VOLUME_SPIKE_MULTIPLE"),
+        description="SS101 #019: the green confirmation bar's RVOL (volume_ratio) must be at least this multiple for a real reclaim (not a dead-tape green dribble). ONE documented volume-confirm base; default 1.5x.",
+    )
+    chili_momentum_micro_pullback_primary_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MICRO_PULLBACK_PRIMARY_ENABLED"),
+        description="Batch D: MICRO-PULLBACK AS PRIMARY — fire the 1-candle shallow micro-pullback flag as an INITIAL entry (not just a post-fill re-load), GATED to HOT/explosive tape (the same _is_hot_tape RVOL/ATR floors as the wick-reclaim) so it does not over-fire on slow names. Reuses micro_pullback_reentry_detect's shelf/dip geometry; entry = the micro-break, stop = the micro-pullback low. KILL-SWITCH: False -> the trigger is never tried -> byte-identical.",
+    )
+    # ── SS101 #014: MOVING-AVERAGE / VWAP PULLBACK (cooler-market EMA-cascade dip-buy) ──
+    # NEW + never-run -> ship DARK (default False); the operator ramps it. The cooler-market
+    # grinder case the shallow first-pullback (too-shallow) and the morning-only deep-reclaim
+    # cannot address: a DEEPER all-day pull to the 9/20-EMA cascade that grinds sideways (no
+    # clean flag/ABCD), bought on the EMA reclaim. Adaptive ATR-relative geometry; one
+    # documented base per knob. docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_ma_vwap_pullback_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MA_VWAP_PULLBACK_ENABLED"),
+        description="SS101 #014: MOVING-AVERAGE / VWAP PULLBACK — after an impulse (3+ green candles) the name pulls back 2+ bars into a SIDEWAYS consolidation grinding along the moving averages (DEEPER than the shallow first-pullback allows; may touch the 9-EMA then the 20-EMA, possibly the VWAP), then FIRES on the reclaim of the 9-EMA (primary support) or, if the 9 broke, the 20-EMA (secondary); entry = the reclaimed EMA level, stop = the pullback RETRACEMENT LOW. The cooler-market grinder dip-buy that other gates fail to form (no clean flag/ABCD). Reuses the anti-chase machinery (extension guard, collapse cap, backside + L2 vetoes, overhead veto via select_best_setup). KILL-SWITCH (ship DARK): False -> the trigger is never tried -> byte-identical.",
+    )
+    chili_momentum_ma_vwap_impulse_bars: int = Field(
+        default=3,
+        ge=2,
+        le=10,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MA_VWAP_IMPULSE_BARS"),
+        description="SS101 #014: the ONE documented base for the INITIAL IMPULSE length — how many consecutive GREEN candles must precede the consolidation for the move to be a real leg up worth buying the dip of. Default 3 (Ross's '3+ green candles').",
+    )
+    chili_momentum_ma_vwap_consolidation_bars: int = Field(
+        default=2,
+        ge=2,
+        le=10,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MA_VWAP_CONSOLIDATION_BARS"),
+        description="SS101 #014: the ONE documented base for the PULLBACK/consolidation length — how many recent bars (up to the forming bar) must grind sideways near/below the moving averages before the reclaim. The pullback retracement low across these bars is the structural stop. Default 2 (Ross's '2+ bars').",
+    )
+    chili_momentum_ma_vwap_vol_mult: float = Field(
+        default=1.5,
+        gt=0.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MA_VWAP_VOL_MULT"),
+        description="SS101 #014: the ONE documented base for the ELEVATED-VOLUME floor on the EMA-reclaim bar (conviction of the bounce, not a drift back to the averages) as a multiple of the rolling average volume. Default 1.5x (shares the lane's vwap-reclaim vol-mult yardstick).",
+    )
+    # ── BATCH C: ABCD (SS101 #013) + double-bottom (swing-pivot scanner) ──────────────
+    # Lower hit-rate than the breakout/pullback families (the audit said defer) — built
+    # to COMPLETE the playbook, each independently kill-switched. The ATR pivot filter +
+    # the per-pattern hold/no-new-low conditions are how CHOP is NOT read as structure.
+    chili_momentum_abcd_entry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ABCD_ENTRY_ENABLED"),
+        description="Batch C: ABCD entry (SS101 #013) — from the ATR-filtered swing pivots, A = an impulse-up leg, B = the pullback low after A, C = a SECOND pullback low that HOLDS above the prior structure (no new low below B), then fire on D = the break above the B->C swing high with a volume confirm; entry = the B-high break level, stop = the C-low structural low (shared pullback_high/pullback_low keys). NOISE DEFENSE: the ATR pivot filter + the no-new-low hold + a _collapse_cap depth gate. KILL-SWITCH: False -> the trigger is never tried -> byte-identical.",
+    )
+    chili_momentum_double_bottom_entry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DOUBLE_BOTTOM_ENTRY_ENABLED"),
+        description="Batch C: double-bottom entry — two swing lows at ~the same support level (within an ATR-derived band), the second printing a bottoming-tail reversal and HOLDING (no new low below the first), then fire on the break above the intervening swing high; entry = the neckline break level, stop = below the double-bottom low (shared pullback_high/pullback_low keys). NOISE DEFENSE: the ATR pivot filter + the ATR-derived equal-lows band + the second-low bottoming tail. KILL-SWITCH: False -> the trigger is never tried -> byte-identical.",
+    )
+    chili_momentum_inverse_head_shoulders_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_INVERSE_HEAD_SHOULDERS_ENTRY_ENABLED"),
+        description="Batch C: inverse (inverted) head-and-shoulders entry (SS101 #017; Ross: 'I do trade the inverted head and shoulders'). From the ATR-filtered swing lows: left-shoulder low -> head (a LOWER low + recovery high) -> right-shoulder (a HIGHER-low HOLD above the head + high), neckline = the MINIMUM of the two shoulder highs. Fire on the break above the neckline with a volume confirm; entry = the neckline break level (pullback_high), stop = the HEAD low = the structural support of the pattern (pullback_low). NOISE DEFENSE: the ATR pivot filter + the head-below-both-shoulders ordering + the right-shoulder-above-head hold + a _collapse_cap depth gate on the shoulder retraces. DISTINCT from double-bottom (three pivots + shoulder-hold + neckline=min(shoulder-highs), not two equal lows). NEW + never-run: KILL-SWITCH default False -> the trigger is never tried -> byte-identical.",
+    )
+    chili_momentum_cup_and_handle_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CUP_AND_HANDLE_ENTRY_ENABLED"),
+        description="Batch C: cup-and-handle entry (SS101 #016; Ross: 'formed by a double top that then doesn't totally fail ... buy here for this breakout, using the low of the handle as support'). From the ATR-filtered swing highs: CUP = two swing HIGHS at ~the same level (within the double-bottom ATR band, applied to resistance) within ~15-20 bars (the double-top rim); HANDLE = a SHALLOW pullback (1-3 completed bars) after the second top, capped by the SAME vol-aware shallow tolerance first_pullback uses + the _collapse_cap, holding above the 9-EMA (vol-aware wick tolerance). Fire on the first NEW HIGH above the cup rim with a volume surge; entry = the cup-rim/double-top peak (pullback_high), stop = the HANDLE LOW (pullback_low — 'using the low of the handle as support'). DISTINCT from first_pullback (REQUIRES the double-top rim first, not any impulse), ABCD (2-tops+handle, not a 4-swing C-low-hold coil), double-bottom (two HIGHS at resistance, not two lows at support), deep_reclaim (ALL-DAY + shallow-only, not morning-only deeper), flat_top (rounded double-top + a SEPARATE handle phase, not one repeatedly-tested level). ANTI-CHASE (parity with wedge/hod_break — the gatekeeper's chase-safety bar): structural guards (ATR pivot filter + equal-highs band + shallow handle cap + _collapse_cap + 9-EMA hold) PLUS the four shared breakout chase-guards — NOT-BACKSIDE/NOT-BELOW-VWAP (_detect_back_side + front_side_state, fail-CLOSED on a thin frame), NOT-PARABOLIC (_hod_extension_ok vs the 9-EMA AND VWAP), L2 hidden-seller veto, and TAPE REQUIRED + FAIL-CLOSED (tape_confirms_hold gates BOTH the tick-break and completed-bar fire — depends on chili_momentum_tape_hold_entry_enabled; OFF there => cup never fires). Structural stop = the handle low. NEW + never-run: KILL-SWITCH default False -> the trigger is never tried -> byte-identical.",
+    )
+    # The ONE documented adaptive knob for the swing-pivot SCANNER WINDOW: a bar is a
+    # confirmed swing high/low when it is the local extreme over +/- this many neighbors
+    # (so the last `half_window` bars are not yet confirmable pivots). Shared by both
+    # Batch-C triggers. Bounded so a degenerate config can't read the whole frame.
+    chili_momentum_swing_pivot_half_window: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SWING_PIVOT_HALF_WINDOW"),
+        description="Batch C: swing-pivot scanner half-window — a bar is a confirmed swing high/low when it is the local extreme over +/- this many neighbor bars. The ONE documented pivot-window base knob (shared by ABCD + double-bottom).",
+    )
+    # The ONE documented adaptive knob for the ATR pivot-NOISE filter: a pivot is ignored
+    # unless its prominence (vertical move off its flanking opposite extreme within the
+    # window) is at least this fraction of ATR. THIS is the guard that stops chop being
+    # mistaken for structure — bigger = stricter (only larger swings count as pivots).
+    chili_momentum_swing_pivot_atr_noise_frac: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SWING_PIVOT_ATR_NOISE_FRAC"),
+        description="Batch C: swing-pivot ATR-noise filter — a pivot is ignored unless its prominence (vertical move off its flanking opposite extreme) is >= this fraction of ATR. THE chop-rejection knob (ATR-relative, no fixed cents); 0 disables the filter. Shared by ABCD + double-bottom.",
+    )
+    # The ONE documented adaptive knob for the double-bottom EQUAL-LOWS band: the two
+    # swing lows count as "the same support" when they are within this multiple x ATR of
+    # each other (ATR-derived, no fixed cents). Bigger = looser equal-lows tolerance.
+    chili_momentum_double_bottom_band_atr_mult: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DOUBLE_BOTTOM_BAND_ATR_MULT"),
+        description="Batch C: double-bottom equal-lows band — the two swing lows are 'at the same support' when within this multiple x ATR of each other (ATR-derived, no fixed cents). ONE documented band knob.",
+    )
+    # The ONE documented adaptive knob for the cup-and-handle CUP WIDTH: the two tops (the
+    # double-top rim) must be within this many bars of each other to read as a single cup
+    # (Ross's "~10-20 bar" double-top lookback). Bigger = a wider cup is allowed.
+    chili_momentum_cup_and_handle_lookback_bars: int = Field(
+        default=20,
+        ge=2,
+        le=120,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CUP_AND_HANDLE_LOOKBACK_BARS"),
+        description="Batch C: cup-and-handle cup-width ceiling — the two swing highs (the double-top rim) must be within this many bars of each other to read as one cup. ONE documented cup-width base knob.",
+    )
+    # The ONE documented knob for the cup-and-handle HANDLE LENGTH: the handle is the shallow
+    # pullback AFTER the second top — at most this many completed bars before the breaking bar
+    # (Ross's "1-3 bar" handle). Bigger = a longer handle is tolerated.
+    chili_momentum_cup_and_handle_max_handle_bars: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CUP_AND_HANDLE_MAX_HANDLE_BARS"),
+        description="Batch C: cup-and-handle handle length — the handle is at most this many completed bars (the shallow pullback after the second top, before the breaking bar). ONE documented handle-length base knob.",
+    )
     # E2 — CATALYST GRADING + WEAK HARD GATE. weak_catalyst_symbols() (dilution/compliance/
     # legal) existed only as a soft viability de-boost; it never gated the arm queue. Ross
     # DISTRUSTS weak catalysts (fade predictors) and favors STRONG (FDA/M&A/contract). When
@@ -3507,6 +3992,102 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_RISK_MULTIPLE"),
         description="K — the circuit fires when unrealized loss <= -(K x structural_risk) and flattens at avg - K*stop_distance. ge=1.0 so the floor can never sit looser than the structural stop.",
     )
+    # ── FULL-CLOCK WINDOW (2026-06-25): two staged tiers ─────────────────────────
+    # TIER 1 — EARLY PREMARKET (low risk, DEFAULT-ON). Adaptive pre-entry-window unlock:
+    # the entry window opens at the FIRST-MOVER tape time once >=N spread-clean names move
+    # >=5% in a fresh M-min window, instead of waiting for the fixed premarket_start clock.
+    # Same extended session, same names, same size, same broker routing — only removes the
+    # selection lag (FCUV ignited 04:23 ET but CHILI watched it at 07:00). Companion sampler-
+    # pull guarantees the tape reaches the 04:00 exchange-open floor so it is warm to drive
+    # the unlock. Flag OFF = byte-identical (fixed premarket_start clock + lead-derived data open).
+    chili_momentum_early_premarket_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EARLY_PREMARKET_ENABLED"),
+        description="Tier 1: adaptive pre-premarket-start entry unlock (tape-derived first-mover time) + pull the NBBO sampler open to the 04:00 ET exchange-extended-open floor. Low-risk (same session/names/size/routing). false = fixed-clock premarket_start + lead-derived data open (byte-identical).",
+    )
+    chili_momentum_early_premarket_min_movers: int = Field(
+        default=3,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EARLY_PREMARKET_MIN_MOVERS"),
+        description="Distinct spread-clean tape movers (>= the 5% _MIN_ABS_CHANGE_PCT floor, freshness <30s) within the lookback window required to UNLOCK the early-premarket entry window. Mitigates a false unlock on stale/garbage tape.",
+    )
+    chili_momentum_early_premarket_window_min: int = Field(
+        default=5,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EARLY_PREMARKET_WINDOW_MIN"),
+        description="Lookback minutes for the early-premarket unlock test (move% reuses the existing 5% NBBO-tape floor; row freshness reuses 30s).",
+    )
+    # TIER 2 — OVERNIGHT / 24H (higher risk, GATED, operator flips after review). NOTE
+    # (conflict with the no-dark-flags norm): this is the ONE justified default-OFF flag —
+    # it changes broker routing (RH all_day_hours), carries irreducible overnight gap risk
+    # (no broker-side stop), and has no quant cohort yet. Operator flips after reviewing the
+    # overnight-safety design. Flag OFF = extended_hours routing only, no overnight (today).
+    chili_momentum_overnight_trading_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_TRADING_ENABLED"),
+        description="Tier 2 MASTER gate: allow overnight/24h arming+entry for 24h-ELIGIBLE, 24h-LIQUID names (RH all_day_hours routing). DEFAULT FALSE (higher risk: no broker stop overnight, thin books). false = no overnight, extended_hours routing only.",
+    )
+    chili_momentum_overnight_tape_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_TAPE_ENABLED"),
+        description="Tier 2: sample the NBBO tape overnight for the 24h-eligible whitelist only (bounds DB growth). DEFAULT FALSE. false = overnight arming falls back to the last extended-hours tape row + a live quote probe.",
+    )
+    chili_momentum_overnight_size_fraction: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_SIZE_FRACTION"),
+        description="Overnight risk-size multiplier on the equity-relative notional (composes with the other size-down levers under the 3x clamp). Adaptive, no fixed $. 1.0 = no reduction.",
+    )
+    chili_momentum_overnight_max_loss_pct_bp: float = Field(
+        default=0.5,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_MAX_LOSS_PCT_BP"),
+        description="Overnight per-trade max-loss cap basis = max($50 irreducible base, this % of overnight buying power) — equity-relative, feeds caps.max_loss_per_trade_usd overnight. 0 = use the irreducible $50 base only.",
+    )
+    chili_momentum_overnight_min_dollar_volume: float = Field(
+        default=5_000_000.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_MIN_DOLLAR_VOLUME"),
+        description="Overnight 24h-LIQUID floor (dollar-volume) = max($5M, 2x the RTH $1M floor). Thin overnight books are the gap risk, so only deep names arm overnight.",
+    )
+    chili_momentum_overnight_max_stale_sec: float = Field(
+        default=0.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_MAX_STALE_SEC"),
+        description="Price-bus-dark trigger (seconds): if a position is held overnight and the quote is stale longer than this, emit critical + attempt a flatten at the next fresh tick + arm nothing new. 0 = derive from the halt-stale threshold (chili_momentum_halt_stale_ticks x tick cadence).",
+    )
+    # OVERNIGHT DARK-BUS-SAFE FLATTEN (2026-06-25, FIX A — the GATE for overnight ON).
+    # Adversarial finding: overnight_flatten_on_fresh was SET on a dark overnight book
+    # but NEVER READ, and the per-trade loss circuit / stop fire ONLY on a fresh quote
+    # (halt_stale_streak==0). So a fully DARK overnight price-bus (no ticks) left an
+    # overnight position NAKED — no software stop fired and RH has no overnight stop;
+    # a gap-down on resume filled THROUGH any intended stop. This flag turns on the
+    # dark-bus-safe flatten: (1) honor overnight_flatten_on_fresh on the next fresh
+    # tick, AND (2) PROACTIVELY flatten at the FIRST onset of stale/dark on an
+    # overnight-held position (flatten at the last good tick while we still can — a
+    # dark bus delivers NO fresh tick, so on-fresh alone is insufficient). Both route
+    # through the existing operator-flatten chokepoint (cancel/clamp/place/confirm/
+    # reconcile) — no oversell, no orphan. CONSERVATIVE PRINCIPLE: an overnight
+    # position that cannot be protected by a working software-stop is FLATTENED, not
+    # held naked. DEFAULT FALSE = current behavior (flag set, never read; no flatten).
+    chili_momentum_overnight_dark_flatten_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_DARK_FLATTEN_ENABLED"),
+        description="FIX A: flatten an OVERNIGHT-held position on price-bus-dark — proactively at the FIRST stale onset (last good tick) AND on the next fresh tick (honor overnight_flatten_on_fresh) — via the operator-flatten chokepoint. The dark-bus-safe gate for enabling overnight trading. false = legacy (flag set, never read; naked overnight risk).",
+    )
+    chili_momentum_overnight_dark_flatten_onset_ticks: int = Field(
+        default=1,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_OVERNIGHT_DARK_FLATTEN_ONSET_TICKS"),
+        description="FIX A proactive cutoff: stale-tick streak at which an overnight-held position is flattened at the last good tick (1 = first stale onset = most conservative; raise to tolerate brief overnight quote gaps before flattening).",
+    )
+    chili_momentum_tradability_cache_sec: int = Field(
+        default=3600,
+        ge=0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TRADABILITY_CACHE_SEC"),
+        description="TTL of the get_equity_tradability 24h-eligibility cache (eligibility is an instrument property that changes slowly — re-checked hourly + next day).",
+    )
     # MIDDAY-LULL ENTRY DE-WEIGHT (2026-06-17, project_profitability_levers): raise the
     # EFFECTIVE entry viability bar for NEW equity entries during the EXISTING schedule_window_now
     # "midday" window (10:30-14:30 ET) — live data: midday win-rate 1/17 = 6% vs morning 7/24 =
@@ -3568,6 +4149,139 @@ class Settings(BaseSettings):
         ge=1,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RUN_R_BREAKER_MIN_HISTORY"),
         description="Minimum closed-fill history before the breaker can trigger; below this it fails OPEN (bump 0).",
+    )
+    # ── BATCH E ─ management/discipline gaps (each kill-switched; OFF = byte-identical) ──
+    #
+    # E(1) MULTI-LEVEL SCALE-OUT GRID. Extends the single first-scale into a LADDER: sell
+    # successive tranche fractions at successive R-multiple/round-number targets, trail the
+    # remainder above breakeven. Routes through the EXISTING single scale-out chokepoint
+    # (_apply_confirmed_live_partial_exit + the scale_limit_order_id interlock) — NO new
+    # decrement path; each tranche clamps to the remaining held qty (scale_out_quantity); the
+    # SUM of fractions is < 1.0 so a runner always remains. INVARIANT-A (ratchet stop) is
+    # preserved (breakeven move unchanged). OFF => the lane takes ONE scale-out then trails
+    # (today's behavior, byte-identical). docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_scale_grid_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SCALE_GRID_ENABLED"),
+        description="Kill-switch for the multi-level scale-out grid (E1). false = single first-scale then trail (byte-identical).",
+    )
+    chili_momentum_scale_grid_fractions: str = Field(
+        default="0.5,0.25",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SCALE_GRID_FRACTIONS"),
+        description="ONE documented base: comma-separated tranche fractions of the ORIGINAL position sold at successive ladder targets (1R, 2R, ...). The runner = 1 - sum; the SUM is clamped < 1.0 so a runner always remains (no oversell, never strand 0 shares). e.g. '0.5,0.25' -> half at 1R, quarter at 2R, quarter runs.",
+    )
+    chili_momentum_scale_grid_r_multiples: str = Field(
+        default="1.0,2.0",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SCALE_GRID_R_MULTIPLES"),
+        description="Comma-separated R-multiples for the ladder targets (reward = R x stop-distance). Paired positionally with the fractions; a round number above entry that sits below the next R level pulls that tranche IN (Ross sells into the level where sellers stack). Adaptive: levels are R-multiples / the existing round-number grid, no fixed $.",
+    )
+    # E(2) WIN-CYCLE FATIGUE (entries-only). Tracks today's CLEAN WINS (live, per execution
+    # family). After a YELLOW count of wins, NEW entries size DOWN by a fraction (mirrors the
+    # streak/cushion size-down multipliers — composes under the same 3x clamp); after a RED
+    # count, NEW entries are HALTED for the session (mirrors the profit-goal cap early-out).
+    # ENTRIES ONLY — never blocks/delays an exit, stop, trail, bailout, scale-out, or dark-
+    # flatten on an OPEN position. Adaptive: counts are derived from realized wins; the YELLOW
+    # down-size never zeroes (preserves the explosive tail). OFF => no count, no down-size,
+    # no halt (byte-identical). docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_win_cycle_fatigue_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WIN_CYCLE_FATIGUE_ENABLED"),
+        description="Kill-switch for win-cycle fatigue (E2, entries-only). false = no win count, no YELLOW down-size, no RED halt (byte-identical).",
+    )
+    chili_momentum_win_cycle_yellow_wins: int = Field(
+        default=4,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WIN_CYCLE_YELLOW_WINS"),
+        description="ONE documented knob: clean wins today (per family) at/above which NEW entries size DOWN (YELLOW). Below it, no effect.",
+    )
+    chili_momentum_win_cycle_red_wins: int = Field(
+        default=7,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WIN_CYCLE_RED_WINS"),
+        description="Clean wins today (per family) at/above which NEW entries HALT for the session (RED) — lock in the green day. Exits/management unaffected. >= yellow_wins (clamped up if misconfigured).",
+    )
+    chili_momentum_win_cycle_yellow_size_fraction: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WIN_CYCLE_YELLOW_SIZE_FRACTION"),
+        description="YELLOW down-size multiplier on the per-trade risk budget (composes with the streak/cushion/liquidity levers under the 3x clamp). Never zeroes (>0) so an exceptional setup still takes a (smaller) position.",
+    )
+    # ── P2 PER-SYMBOL ATTEMPT FATIGUE (entries-only). A per-session per-symbol live entry-
+    # attempt counter: DERATE the borderline last allowed attempt (YELLOW down-size) then VETO
+    # the Nth+ attempt on the SAME ticker today (Ross: stop trading a symbol after ~N tries).
+    # ENTRIES ONLY — held positions NEVER consult it; every exit/stop/scale-out/bailout stays
+    # allowed (the veto is a pre-position arm-gate skip; the down-size is at entry-fill sizing).
+    # OFF => no count, no down-size, no veto (byte-identical). docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_per_symbol_fatigue_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PER_SYMBOL_FATIGUE_ENABLED"),
+        description="Kill-switch for per-symbol attempt fatigue (P2, entries-only). false = no per-symbol attempt count, no YELLOW down-size, no RED veto (byte-identical).",
+    )
+    chili_momentum_per_symbol_max_attempts: int = Field(
+        default=3,
+        ge=2,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PER_SYMBOL_MAX_ATTEMPTS"),
+        description="ONE documented knob (default 3 per Ross): live entry attempts on the SAME ticker today at/above which a NEW entry is VETOED (RED). The attempt just below it is a YELLOW down-size. Clamped >= 2 (one allowed attempt before a down-size + a veto).",
+    )
+    chili_momentum_per_symbol_yellow_size_fraction: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PER_SYMBOL_YELLOW_SIZE_FRACTION"),
+        description="YELLOW per-symbol down-size multiplier on the per-trade risk budget for the borderline last allowed attempt (composes with the streak/cushion/liquidity/win-cycle levers under the 3x clamp). Never zeroes (>0).",
+    )
+    # ── P3 HOT/COLD-TAPE SIZE SCALING (entries-only sizing). A bounded size multiplier composed
+    # MULTIPLICATIVELY with the streak/cushion/liquidity levers under the same 3x clamp: size UP
+    # on a hot/explosive tape, DOWN on a cold one. Scales the per-trade RISK BUDGET only — the
+    # liquidity cap + equity-relative notional ceiling stay HARD caps (qty is capped at
+    # max_notional downstream), so this can never push notional past any cap. The hot/cold read
+    # reuses the SAME explosive ATR/RVOL floors entry_gates._is_hot_tape uses (no new magic).
+    # OFF / fail-neutral => 1.0 (byte-identical). docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_hot_cold_size_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_COLD_SIZE_ENABLED"),
+        description="Kill-switch for hot/cold-tape size scaling (P3, entry sizing only). false = size multiplier is always 1.0 (byte-identical). Bounded [cold_floor, hot_ceil]; never exceeds the liquidity/equity caps.",
+    )
+    chili_momentum_hot_cold_cold_floor: float = Field(
+        default=0.6,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_COLD_COLD_FLOOR"),
+        description="One documented bound: the size multiplier on a COLD (non-explosive) tape — size DOWN to this fraction of the risk budget. In (0,1].",
+    )
+    chili_momentum_hot_cold_hot_ceil: float = Field(
+        default=1.5,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_COLD_HOT_CEIL"),
+        description="One documented bound: the size multiplier on a HOT (explosive) tape — size UP to this fraction of the risk budget. >= 1.0; kept well under the 3x combined clamp so the other levers retain room.",
+    )
+    # E(3) HARD NO-TRADE REGIMES (entries-only). A hard no-NEW-ENTRY standdown window around
+    # scheduled high-impact events (FOMC/CPI), and an OPTIONAL hard midday no-entry window
+    # (default OFF — the existing SOFT midday de-weight stays in charge unless this hard flag
+    # is on). ENTRIES ONLY — never blocks/delays an exit, stop, trail, bailout, scale-out, or
+    # dark-flatten on an OPEN position. OFF => no hard standdown (byte-identical; the soft
+    # midday de-weight is untouched). docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_hard_no_trade_regime_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HARD_NO_TRADE_REGIME_ENABLED"),
+        description="Kill-switch for hard no-trade regimes (E3, entries-only). false = no event standdown, no hard midday window (byte-identical).",
+    )
+    chili_momentum_hard_no_trade_event_times_utc: str = Field(
+        default="",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HARD_NO_TRADE_EVENT_TIMES_UTC"),
+        description="Comma-separated ISO-8601 UTC datetimes of scheduled high-impact events (FOMC/CPI), e.g. '2026-06-18T18:00:00Z,2026-07-15T12:30:00Z'. A small documented list; a calendar hook can populate it. Empty = no event standdown.",
+    )
+    chili_momentum_hard_no_trade_event_window_min: float = Field(
+        default=30.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HARD_NO_TRADE_EVENT_WINDOW_MIN"),
+        description="ONE documented knob: minutes BEFORE and AFTER each scheduled event during which NEW entries are halted (+/- window). Exits/management unaffected.",
+    )
+    chili_momentum_hard_no_trade_midday_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HARD_NO_TRADE_MIDDAY_ENABLED"),
+        description="Optional HARD midday no-NEW-ENTRY window (reuses the SAME 10:30-14:30 ET in_midday_lull band as the soft de-weight). Default OFF: the soft de-weight stays in charge. Equity-only; exits/management unaffected.",
     )
     # L2.2 LIQUIDITY-SCALED RISK CAP (project_profitability_levers): shrink per-trade RISK
     # as the live spread eats the name's adaptive tolerance — wide-spread/illiquid names
@@ -3791,6 +4505,28 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_ADAPTIVE_EQUITY_ENABLED"),
         description="Run the adaptive exit (v1 exhaustion lock + v2 sell-into-strength) for EQUITY positions, not just crypto. Equity L2 from iqfeed. Default ON; the size-moving sell stays gated by exit_ladder_live. OFF = equity byte-identical (parity / rollback).",
     )
+    # ── Cadence-aware exit (v2 modulation) ───────────────────────────────────────
+    # Make the v2 sell-into-strength ladder CADENCE-AWARE: when the runner has gone
+    # quiet (a SLOW chopper — low velocity, 5m-EMA not rising, RVOL not accelerating)
+    # LOOSEN the distribution gate so the existing ladder banks the small first
+    # increment EARLIER at the stall, instead of waiting for the full distribution
+    # confluence that a dead chopper may never print. A FAST runner is NEVER touched
+    # (only SLOW choppers loosen; the [0.35,0.65] uncertainty band + the cold-start
+    # guard both default to FAST/normal). The continuation veto is NEVER loosened, the
+    # ratchet-only stop is preserved, and floors clamp the loosening. OFF ⇒ the ladder
+    # is byte-identical to its pre-cadence behaviour (parity kill-switch / rollback).
+    chili_momentum_cadence_aware_exit_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CADENCE_AWARE_EXIT_ENABLED"),
+        description="Master gate / kill-switch for the cadence-aware sell-into-strength modulation. ON = a SLOW_CHOPPER cadence class loosens the v2 ladder's distribution gate (fires earlier at the stall) while a FAST/UNCERTAIN class leaves the gate byte-identical to today. The continuation veto, the INVARIANT-A ratchet, and the single-chokepoint partial path are unchanged regardless. OFF = the ladder is byte-identical to its pre-cadence behaviour (no modulation ever), the only safe rollback.",
+    )
+    chili_momentum_cadence_atr_pct_slow_threshold: float = Field(
+        default=0.20,
+        ge=0.01,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CADENCE_ATR_PCT_SLOW_THRESHOLD"),
+        description="The ONE irreducible cadence knob: a runner is velocity-SLOW when its realized velocity (price move since entry per minute held, as a fraction of price) falls below this fraction of the trade's own entry ATR%/minute. Everything else in the cadence classifier (trend via 5m-EMA rising, RVOL acceleration, the [0.35,0.65] uncertainty band, the cold-start gate) derives from signals already present at the tick — no other magic numbers. Lower = harder to call SLOW (more runners stay FAST/normal).",
+    )
     # ── L2-aware anti-shake-out (LOSS side) ──────────────────────────────────
     # OPG-USD was shaken out at a dip VALLEY (trail_stop -41bps) then recovered +
     # re-armed 6 min later. The existing >=1s flicker guard catches a single bad
@@ -3856,6 +4592,110 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BREAKOUT_BAILOUT_BUFFER_PCT"),
         description="Small wick buffer below the breakout level before fast-bailing (0.001 = 10 bps).",
+    )
+    # ── EXPLOSIVE-MOVER RECALIBRATION (master) ─────────────────────────────────
+    # Ross small-caps step the bid DOWN / widen the spread mid-squeeze and dip-test
+    # the broken level within seconds — exactly when the breakout is WORKING, not
+    # failing. The conservative gates read that backwards and cut winners at b/e
+    # (FCUV +21% after a 4.5s fast-bail; ILLR/WEN +bid_prop blocks then ran). This
+    # MASTER kill-switch gates ONLY the explosive-aware carve-outs below; with it
+    # OFF (default) every sub-feature is a no-op and the lane is BYTE-IDENTICAL.
+    # The protections it relaxes (buy-into-selling veto, failed-breakout bail) STAY
+    # binding for genuinely failing / falling-momentum names — these only widen the
+    # thresholds for the high-RVOL / extreme-ATR regime the lane explicitly targets.
+    # Risk-first sizing + the #769 max-loss circuit + the cushion-funded pyramid are
+    # untouched (they bound the downside regardless).
+    chili_momentum_explosive_recalibration_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_RECALIBRATION_ENABLED"),
+        description="MASTER kill-switch for the explosive-mover recalibration (bid-prop exempt, fast-bail lock-in, extension/flow RVOL carve-outs, pyramid eligibility-flicker skip). OFF (default) => every carve-out is a no-op, lane byte-identical.",
+    )
+    chili_momentum_explosive_atr_pct_floor: float = Field(
+        default=0.045,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_ATR_PCT_FLOOR"),
+        description="ATR%% at/above which a name is treated as EXPLOSIVE for the recalibration carve-outs (top of the normal regime; regime_atr_pct basis). Sub-master flag gates whether it is read at all.",
+    )
+    chili_momentum_explosive_rvol_floor: float = Field(
+        default=3.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_RVOL_FLOOR"),
+        description="Relative-volume (vol_ratio) at/above which a name is treated as EXPLOSIVE for the recalibration carve-outs when an RVOL reading is available (OR-ed with the ATR floor).",
+    )
+    # COILING-SQUEEZE exemption (2026-06-26): an EXTREME-RVOL name (>= mult x rvol_floor)
+    # clears the Ross CHANGE floor even at a modest %-change — accumulation/coil before the
+    # pop (SDOT: 65x RVOL, 744K float, +4.4%, wrongly benched by the 10% change floor though
+    # Ross was trading it). Selection-only; rvol_floor still applies; entry vetoes still guard.
+    chili_momentum_coiling_squeeze_exempt_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_COILING_SQUEEZE_EXEMPT_ENABLED"),
+        description="Allow an extreme-RVOL (coiling) name to clear the Ross change floor even at a modest %-change.",
+    )
+    chili_momentum_coiling_exempt_rvol_mult: float = Field(
+        default=3.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_COILING_EXEMPT_RVOL_MULT"),
+        description="RVOL multiple of the rvol_floor at/above which the coiling-squeeze change-floor exemption applies (default 3x5x = 15x).",
+    )
+    # GATE 1 — bid-prop confirmer explosive exemption.
+    chili_momentum_bid_prop_explosive_exempt: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BID_PROP_EXPLOSIVE_EXEMPT"),
+        description="When ON (and master ON), BYPASS the bid-prop deterioration confirmer for explosive names (ATR%% >= floor OR RVOL >= floor): a squeeze legitimately steps the bid down / widens the spread; the structural pullback-break trigger already read volume+structure. OFF => no-op.",
+    )
+    # GATE 2 — fast-bail lock-in window (give the breakout structural room).
+    chili_momentum_breakout_bailout_lock_in_seconds: float = Field(
+        default=0.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BREAKOUT_BAILOUT_LOCK_IN_SECONDS"),
+        description="Seconds after entry fill during which the fast-bail CANNOT fire (give the breakout time to stabilize through a normal retest). 0 (default) => no lock-in, byte-identical. Master flag must also be ON.",
+    )
+    chili_momentum_breakout_bailout_lock_in_explosive_seconds: float = Field(
+        default=0.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BREAKOUT_BAILOUT_LOCK_IN_EXPLOSIVE_SECONDS"),
+        description="Lock-in seconds for EXPLOSIVE names (ATR%% >= floor OR RVOL >= floor) — wider than the base lock-in (a violent squeeze dip-tests the level later). 0 (default) => falls back to the base lock-in. Master flag must also be ON.",
+    )
+    # GATE 3 — entry-extension RVOL boost (more chase room for a true squeeze).
+    chili_momentum_entry_extension_rvol_boost_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_EXTENSION_RVOL_BOOST_ENABLED"),
+        description="When ON (and master ON), BOOST the entry-extension cap for high-RVOL outlier squeezes by min(boost_max, boost_per * max(0, rvol - rvol_floor)). OFF => no boost, byte-identical extension veto.",
+    )
+    chili_momentum_entry_extension_rvol_boost_per: float = Field(
+        default=0.05,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_EXTENSION_RVOL_BOOST_PER"),
+        description="Extension-cap boost added per 1.0 of RVOL above the explosive RVOL floor (e.g. 0.05 => +5pp per extra 1x rvol).",
+    )
+    chili_momentum_entry_extension_rvol_boost_max: float = Field(
+        default=0.15,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_EXTENSION_RVOL_BOOST_MAX"),
+        description="Hard ceiling on the RVOL extension-cap boost (caps the chase room even on extreme RVOL so a +33%% blow-off chase still vetoes).",
+    )
+    # GATE 4 — entry flow-veto strong-leg relaxation for explosive names.
+    chili_momentum_entry_flow_veto_explosive_exempt: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FLOW_VETO_EXPLOSIVE_EXEMPT"),
+        description="When ON (and master ON), RAISE the strong-tape OR-leg threshold for explosive names (ATR%% >= floor OR RVOL >= floor) from trade_flow_strong to trade_flow_strong_explosive so a thin-tape one-seller dip does not veto — MAXIMUM selling (<= explosive thr) still vetoes, and the both-bearish AND-leg is unchanged. OFF => no-op.",
+    )
+    chili_momentum_entry_flow_veto_trade_flow_strong_explosive: float = Field(
+        default=-0.85,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FLOW_VETO_TRADE_FLOW_STRONG_EXPLOSIVE"),
+        description="Strong-tape OR-leg threshold for EXPLOSIVE names (only used when the flow-veto explosive exemption is ON): a thin-tape low-float vetoes only on near-maximum selling, not merely strong selling. The both-bearish AND-leg is unchanged so a mixed-flow break still vetoes.",
+    )
+    # GATE 5 (pyramid) — skip the neural-viability re-check on an ALREADY-HELD winner.
+    chili_momentum_pyramid_skip_viability_recheck: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PYRAMID_SKIP_VIABILITY_RECHECK"),
+        description="When ON (and master ON), an add to an ALREADY-HELD winner (STATE_LIVE_TRAILING) is NOT refused for an eligibility/freshness flicker (live_eligible / viability_freshness) — the entry already passed admission and the cushion gate + max-loss circuit still bound the add. Kill-switch / drawdown / daily-loss / position-cap blocks are NEVER skipped. OFF => legacy re-check, byte-identical.",
+    )
+    chili_momentum_pyramid_add_submit_retry_max: int = Field(
+        default=0,
+        ge=0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PYRAMID_ADD_SUBMIT_RETRY_MAX"),
+        description="Max times a transient pyramid add-order submit failure (broker isError) is re-attempted on a later tick before giving up. 0 (default) => no retry, byte-identical (a single failed submit emits pyramid_add_blocked as today). Master flag must also be ON.",
     )
     chili_momentum_order_notional_guard_bps: float = Field(
         default=25.0,
@@ -4588,6 +5428,105 @@ class Settings(BaseSettings):
         ge=60,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_WATCH_EXTEND_SECONDS"),
     )
+    # ADAPTIVE MAX-WATCH (2026-06-25, operator "gawin mong adaptive — no magic wall clock"):
+    # the effective watch deadline adapts to whether the watcher is BUILDING a setup or
+    # DEAD, derived from signals ALREADY on the session snapshot (no new data source):
+    # a tick-armed session (watch_break_level set) whose last_mid is APPROACHING the break
+    # level (within proximity_pct, conservatively close) earns the EXTEND window (it is
+    # about to fire — keep the slot); a flat/oscillating watch with no level or price far
+    # from the level reaps at the BASE window (free the slot fast for a fresher mover).
+    # Refines the existing binary (watch_break_level + within extend_cutoff) with a
+    # proximity classifier. CONSERVATIVE: any missing signal -> treat as BUILDING (keep the
+    # slot — never cut a genuinely-building setup short). FLAG OFF => byte-identical to the
+    # current fixed base/extend binary. ONE documented base knob (proximity_pct) + the
+    # existing base/extend windows as the floor/ceiling clamp.
+    chili_momentum_adaptive_watch_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_WATCH_ENABLED"),
+        description="Kill-switch for the adaptive max-watch deadline. OFF => the exact current fixed base/extend binary (byte-identical). ON => a tick-armed watcher whose price is approaching its break level earns the extend window; one far from the level reaps at the base window.",
+    )
+    chili_momentum_adaptive_watch_proximity_pct: float = Field(
+        default=1.5,
+        ge=0.0,
+        le=50.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_WATCH_PROXIMITY_PCT"),
+        description="The ONE base knob: a tick-armed watcher counts as BUILDING (earns the extend window) when last_mid is within this percent of its watch_break_level. Wider => more watchers earn the extend (more conservative, keeps more slots). Tuned so a typical near-break name reproduces ~the current extend behavior.",
+    )
+    # EVENT / STRUCTURE-BASED ABANDONMENT (2026-06-26, operator: "Ross stays on a strong
+    # stock all day — kill the fixed wall-clock"). ROOT (IVF +66%, 14 clean 2-red-pullback
+    # setups across the day; CHILI armed it only EARLY, got reaped at the base window, and
+    # never watched it during its 14 setups). The FIX: before reaping a stale pre-entry
+    # watcher, ask whether the NAME is still worth watching, not whether a clock expired:
+    #   * KEEP (do NOT reap) if it is STILL HIGH-CONVICTION (ross_score>=floor OR rvol>=the
+    #     coiling-exempt extreme floor OR daily_breaking_major — the SAME conviction the
+    #     arm-queue/continuation gate read) AND STILL FRONT-SIDE (not faded/backside/below
+    #     VWAP per the cached snapshot). Such a name is still setting up; keep its slot so the
+    #     lane is watching when its next pullback fires.
+    #   * REAP (exactly as today) the instant it FADES / goes backside / cools out of high
+    #     conviction — so a cooled name never leaks its slot.
+    # HARD FALLBACK CEILING: even a kept session reaps past an absolute max
+    # (chili_momentum_event_based_max_extend_seconds) so a truly-stuck watcher cannot watch
+    # forever. Conviction is read from a SINGLE bulk viability query built BEFORE the reap
+    # loop (no per-session fetch in the loop); front-side is read from the session's OWN
+    # cached snapshot (fail-open to front-side when absent — never veto a keep candidate
+    # short on missing data). FLAG OFF => the reap loop is byte-identical to the fixed
+    # base/extend clock (no conviction/front-side check runs at all).
+    chili_momentum_event_based_abandonment_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EVENT_BASED_ABANDONMENT_ENABLED"),
+        description="Kill-switch for event/structure-based abandonment of pre-entry watchers. OFF (default) => the exact current fixed base/extend reap clock (byte-identical). ON => a still-high-conviction, still-front-side mover keeps its watch slot past the clock (Ross stays on a strong stock all day) until it fades/cools or hits the hard ceiling; a faded/cooled name reaps exactly as today.",
+    )
+    # The hard fallback ceiling for a KEPT (high-conviction, front-side) watcher, derived
+    # ADAPTIVELY from the extend window (ONE documented multiple — no scattered magic clock):
+    # ceiling = chili_momentum_event_based_max_extend_mult * chili_momentum_auto_arm_watch_extend_seconds.
+    # A watcher that has watched longer than this absolute max reaps EVEN IF still high-
+    # conviction + front-side, so a name that never triggers all day cannot squat a slot
+    # forever. Default mult 3.0 over the 600s extend => 1800s (30min) ceiling; raise to let a
+    # strong leader ride longer, lower to recycle slots sooner.
+    chili_momentum_event_based_max_extend_mult: float = Field(
+        default=3.0,
+        ge=1.0,
+        le=24.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EVENT_BASED_MAX_EXTEND_MULT"),
+        description="Adaptive hard-ceiling multiple over the extend window: a kept high-conviction watcher reaps once it has watched longer than this * chili_momentum_auto_arm_watch_extend_seconds, even if still high-conviction + front-side. Caps a truly-stuck session. ONE documented knob (no fixed second-count); derived from the extend window so it scales with it.",
+    )
+    # Backside detection for the front-side keep gate: a kept watcher is demoted to REAP when
+    # the cached snapshot shows it has retraced MORE than this fraction of its day's up-move
+    # from the high-of-day (Ross's "it faded — move on"). Mirrors front_side_state's
+    # retrace_veto so the reaper's faded test matches the entry gate's. Only applied when the
+    # snapshot AFFIRMATIVELY carries the retrace/HOD evidence; absent => fail-open front-side.
+    chili_momentum_event_based_retrace_veto: float = Field(
+        default=0.66,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EVENT_BASED_RETRACE_VETO"),
+        description="Faded-backside threshold for the keep gate: a kept watcher reaps when its cached snapshot shows retrace_from_hod > this fraction of the day's up-move. Mirrors front_side_state.retrace_veto. Only applied when the snapshot carries the evidence (else fail-open front-side).",
+    )
+    # ADAPTIVE REAP-COOLDOWN (2026-06-25): scale the post-reap sit-out by the per-symbol
+    # OSCILLATION COUNT (how many arm->reap loops the name has churned recently). A first
+    # reap = the short base; a serial oscillator (RENDER looped 88x) = a long cooldown,
+    # clamped. cooldown = base * (1 + osc_count * step), capped at max_mult * base. Reuses
+    # the in-process _REAP_COOLDOWN dict pattern (a parallel _REAP_OSCILLATION counter with
+    # the same bounded-prune + TTL decay). FLAG OFF => the exact fixed base (byte-identical).
+    chili_momentum_adaptive_reap_cooldown_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_REAP_COOLDOWN_ENABLED"),
+        description="Kill-switch for the oscillation-scaled reap cooldown. OFF => the fixed chili_momentum_reap_cooldown_sec for every reap (byte-identical). ON => a serial arm->reap oscillator sits out progressively longer (clamped).",
+    )
+    chili_momentum_adaptive_reap_cooldown_step: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_REAP_COOLDOWN_STEP"),
+        description="Per-oscillation multiplier increment: cooldown = base * (1 + osc_count * step). osc_count is the number of recent arm->reap loops for the symbol (0 on the first reap => exactly the base). Higher => serial oscillators are damped harder.",
+    )
+    chili_momentum_adaptive_reap_cooldown_max_mult: float = Field(
+        default=6.0,
+        ge=1.0,
+        le=50.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_REAP_COOLDOWN_MAX_MULT"),
+        description="Hard cap on the oscillation multiplier so a runaway loop can never freeze a name indefinitely: cooldown <= max_mult * base.",
+    )
     # Post-reap cooldown (seconds): after a name is reaped pre-entry (watched the
     # full window without firing), sit it out this long before it can re-arm, so
     # the same non-firing name (RENDER/WLD looped 88x/56x/24h) stops hogging the
@@ -4623,6 +5562,19 @@ class Settings(BaseSettings):
     chili_momentum_rank_displacement_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RANK_DISPLACEMENT_ENABLED"),
+    )
+    # SYMBOL-OF-THE-DAY FOCUS (Batch F): Ross trades the ONE best mover INTENSELY rather than
+    # spreading thin. ON identifies the highest-conviction explosive LEADER each refresh
+    # (reuses the 3-layer explosive scorer — ross_momentum.identify_leader: top (tier, score,
+    # %-move×RVOL) among names clearing the hard floors) and gives it ONE guaranteed priority
+    # slot: hoisted to first-in-arm-queue, never the rank-displacement victim, and granted the
+    # EXTENDED watch window so a transient dip does not rotate the stock of the day out. NOT an
+    # exclusive lock — the REMAINING slots still arm the #2/#3 movers by normal rank (no over-
+    # concentration). OFF => the batch ranking / displacement / reap are byte-identical to today.
+    # docs/DESIGN/MOMENTUM_LANE.md [[project_momentum_lane]] [[feedback_adaptive_no_magic]]
+    chili_momentum_symbol_of_day_focus_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SYMBOL_OF_DAY_FOCUS_ENABLED"),
     )
     # The ONE adaptive base knob: minimum CURRENT-viability-score gap a newcomer must
     # STRICTLY exceed over the worst inert victim to displace it (hysteresis). Derived
@@ -4791,6 +5743,184 @@ class Settings(BaseSettings):
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_EXTENSION_FLOOR_PCT"),
         description="Entry-extension veto: minimum allowed extension above the breakout level (fraction, e.g. 0.10 = 10%) regardless of ATR — a calm name still gets at least this room. Recalibrated 06-24 0.05->0.10: the high-ATR binding constraint that vetoes RUN(+19.9%)/PLSM(+33.8%) is K*0.12=0.12 (K=1.0, regime_atr clamp ceiling 0.12), governed by K NOT the floor, so raising the floor to 0.10 keeps RUN/PLSM vetoed across the full vol range while ALLOWING a calm +9.9% break-and-go (cap = max(0.10, 1.0*atr)). The cap is max(this, K*atr_pct).",
+    )
+    # ── L2 ENTRY CONFIRMER (Phase 1, DEFER-only) ─────────────────────────────────
+    # docs/DESIGN/L2_PRIMARY_SIGNAL.md — graduate L2/T&S from veto→CONFIRMER. AFTER the
+    # chart trigger fires AND AFTER both existing vetoes (_l2_entry_veto + _entry_flow_veto)
+    # pass, require the TAPE to actively confirm thrust before the buy submits. TAPE-PRIMARY:
+    # confirm needs signed_tape_accel>0 (back-half aggressor-signed buy volume > front-half,
+    # same Lee-Ready as _aggressor_imbalance) AND tick_rate>=its self-relative floor; OFI
+    # (>=threshold OR micro_edge>0) + a RISING depth-imbalance percentile are SECONDARY
+    # agreement confirmers. CONSERVATIVE-ACTIVE: DEFER only on CLEAR no-confirmation
+    # (signed_tape_accel<=0 AND OFI<0); otherwise confirm. On defer → stay WATCHING_LIVE +
+    # re-enter next tick (MIRRORS the flow-veto defer; the adaptive watch/reap bounds the
+    # slot — no new hold) + emit live_l2_confirm_defer as the COUNTERFACTUAL. ENTRY-ONLY
+    # (never blocks an exit/stop/flatten — held states never call it). FAIL-OPEN: any helper
+    # None / n_snaps<3 / empty-tape / stale snapshot ⇒ CONFIRM (never defer on bad data).
+    # OFF (default) ⇒ return confirm BEFORE any I/O ⇒ byte-identical (will be ENABLED in env).
+    chili_momentum_l2_confirm_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_ENABLED"),
+        description="Phase-1 L2 entry CONFIRMER (DEFER-only): after the chart trigger + both existing vetoes pass, require the executed tape to confirm thrust (signed_tape_accel>0 AND tick_rate>=self-relative floor; OFI/micro + rising depth-pctile secondary) before submitting the buy. DEFER only on CLEAR no-tape (accel<=0 AND OFI<0); fail-open (confirm) on any missing/stale/thin data; entry-only (never blocks exits). false = return confirm before any I/O, byte-identical.",
+    )
+    # Self-relative tick-rate floor PERCENTILE within the symbol's own recent tape window:
+    # the back-half ticks/sec must sit at/above this percentile of the per-half tick rates
+    # for the tape to count as ACTIVELY accelerating (not a dead, thinning book). Adaptive /
+    # no magic absolute rate — it is a percentile of the name's OWN recent activity. 0.0
+    # (permissive) ⇒ any nonzero back-half rate clears the floor (the conservative-active
+    # start: tune UP only if the live counterfactual shows it catches losers). The ONE
+    # documented base knob; everything else is self-relative.
+    chili_momentum_l2_confirm_tick_rate_floor_pctile: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_TICK_RATE_FLOOR_PCTILE"),
+        description="L2 confirmer: self-relative tick-rate floor percentile within the symbol's own recent tape window (back-half ticks/sec must sit at/above this percentile of the per-half rates). Adaptive (no absolute magic rate). 0.0 = permissive (any nonzero back-half rate clears). Only consulted when chili_momentum_l2_confirm_enabled is on.",
+    )
+    # Recent tape window (seconds) the confirmer splits in half to compute signed_tape_accel
+    # + tick_rate. Defaults to the same 15s short-horizon window the OFI/flow readers use so
+    # the tape and book signals are time-aligned. Lookahead-free (trailing now()/as_of).
+    chili_momentum_l2_confirm_window_s: float = Field(
+        default=15.0,
+        gt=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_WINDOW_S"),
+        description="L2 confirmer: recent tape window (seconds), split in half for signed_tape_accel + tick_rate. Aligned to the OFI/flow short-horizon window. Only consulted when chili_momentum_l2_confirm_enabled is on.",
+    )
+    # Staleness ceiling (seconds): if the newest L2 ladder snapshot is older than this the
+    # book is treated as stale ⇒ FAIL-OPEN (confirm), never defer on a frozen feed. The
+    # equity depth bridge writes at ~2s cadence, so 10s tolerates a few missed pulses while
+    # still catching a dead feed.
+    chili_momentum_l2_confirm_max_snapshot_age_s: float = Field(
+        default=10.0,
+        gt=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_MAX_SNAPSHOT_AGE_S"),
+        description="L2 confirmer: staleness ceiling (seconds) on the newest L2 ladder snapshot; older ⇒ fail-open (confirm), never defer on a frozen feed. Only consulted when chili_momentum_l2_confirm_enabled is on.",
+    )
+    # ── FIX C: TAPE-CONFIRMED-HOLD EARLY ENTRY ──────────────────────────────────────
+    # Graduate the L2 confirmer from a defer-gate to a TRIGGER. Armed pullback sessions wait
+    # for a price-BREAK (waiting_for_reclaim_high) that choppy explosive names never give
+    # inside the 300s watch window before they are reaped — so the lane sits FLAT through the
+    # move. Ross enters EARLIER: he buys the pullback-HOLD bounce the moment the TAPE confirms
+    # buyers, BEFORE the confirmed break. When ON, the live runner fires the marketable-LIMIT
+    # entry on a VALID, tape-confirmed, non-backside pullback HOLD (close holding the 9-EMA +
+    # a higher low vs the pullback low) WITHOUT requiring close > pullback_high. The tape
+    # confirm is REQUIRED + FAIL-CLOSED (no/thin/stale tape ⇒ no early fire, keep the break
+    # path); ALL existing entry vetoes + the quote gate still run (the early fire only promotes
+    # WATCHING -> LIVE_ENTRY_CANDIDATE, which routes through the full LIVE_PENDING_ENTRY veto
+    # chain), so it CANNOT fire on an extended/faded/rolled-over name. OFF (default) = the
+    # confirmer is never even probed in this path ⇒ byte-identical break-only behaviour.
+    chili_momentum_tape_hold_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TAPE_HOLD_ENTRY_ENABLED"),
+        description="FIX C: enter the pullback-HOLD bounce when the TAPE confirms buyers (signed_tape_accel>0 AND tick_rate>=self-relative floor) on a VALID, non-backside pullback that is holding the 9-EMA with a higher low — BEFORE the confirmed break (Ross enters earlier than the break). Tape-confirm is REQUIRED + fail-closed (no/thin/stale tape ⇒ no early fire, fall back to the existing break trigger). All existing entry vetoes + the quote gate still run downstream; does NOT touch evaluate_sticky_backside_bench. false (default) = byte-identical break-only.",
+    )
+    # ── FIX 1: MOMENTUM-CONTINUATION ENTRY (catch the straight-up runners) ───────────
+    chili_momentum_momentum_continuation_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MOMENTUM_CONTINUATION_ENTRY_ENABLED"),
+        description="FIX 1: enter the continuation (a fresh NEW HIGH, NO prior pullback/base required) on a HIGH-CONVICTION mover that trends STRAIGHT UP and so never triggers the pullback/base entries (WSHP +47% 40x RVOL, SDOT +25% 132x RVOL — caught + watched but reaped at 300s, never entered). Fires ONLY when ALL hold: (1) high-conviction (ross_score >= chili_momentum_continuation_ross_floor OR RVOL >= explosive_rvol_floor x coiling_exempt_rvol_mult OR daily_breaking_major); (2) momentum_continuation_trigger new-high break; (3) tape_confirms_hold REQUIRED + fail-closed (no/thin/stale/selling/crypto tape ⇒ no fire); (4) NOT parabolic (_hod_extension_ok / _entry_extension_veto vs 9-EMA AND VWAP); (5) NOT backside / NOT below-VWAP (_detect_back_side + front_side_state) + a structural stop + ALL downstream LIVE_PENDING_ENTRY vetoes. Skipped for benched names. false (default) = byte-identical (the trigger returns disabled before any compute).",
+    )
+    chili_momentum_continuation_ross_floor: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CONTINUATION_ROSS_FLOOR"),
+        description="FIX 1: the ross_score (Ross momentum quality, [0,1]) at/above which a name is high-conviction enough for the momentum-continuation new-high entry (one of three OR-ed conviction gates with the coiling-exempt RVOL multiple and daily_breaking_major). Only consulted when chili_momentum_momentum_continuation_entry_enabled is ON.",
+    )
+    chili_momentum_conviction_rvol_fallback_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CONVICTION_RVOL_FALLBACK_ENABLED"),
+        description="FIX 1b: when a momentum-continuation candidate's OWN persisted scanner signal is EMPTY (no ross_score, no RVOL, not daily_breaking_major — a SCANNER-only name the ignition enricher never scored, e.g. PED +25% AT HOD with a true 13.72x intraday RVOL), COMPUTE intraday relative volume from the ALREADY-FETCHED 5m/5d OHLCV frame (today's cumulative session volume / the trailing average of prior complete sessions) and admit as high-conviction iff it is >= chili_momentum_explosive_rvol_floor x chili_momentum_coiling_exempt_rvol_mult (~9x). ZERO new fetch (reuses the frame the continuation trigger already holds). Shared helper => arm-time (auto_arm) and entry-time (live_runner) stay identical. FAIL-CLOSED: if RVOL cannot be computed reliably (no Volume column, < 2 sessions, NaN/zero average) the name stays low-conviction (never admit a genuinely low-RVOL name — this is the chase-safety). Row signal precedence is preserved: the fallback ONLY fills the empty case; ross_score>=floor and daily_breaking_major paths are unchanged. false (default) = byte-identical (empty-signal names remain low_conviction exactly as deployed 1e2eb09).",
+    )
+    chili_momentum_continuation_arm_skip_tape: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CONTINUATION_ARM_SKIP_TAPE"),
+        description="ARM-TIME TAPE GATE KILL-SWITCH: in auto_arm._continuation_active_trigger the continuation ARM places NO order — it only starts WATCHING, and arming is what subscribes the trade/depth bridges so tape (iqfeed_trade_ticks) THEN begins flowing for the symbol. A fresh scanner mover (e.g. PED RVOL 13.72x, +25% AT HOD) has ZERO tape before it is armed (tape_hold_no_data), so the unconditional arm-time tape_confirms_hold gate is UNSATISFIABLE → arm never fires → chicken-and-egg (the only thing that bootstraps tape is the arm). default False = tape REQUIRED at arm-time = byte-identical to deployed 1e2eb09. True = arm on conviction(+rvol-fallback) + STRUCTURE ONLY (momentum_continuation_trigger still enforces new-HOD + NOT-extended + NOT-backside) and SKIP the arm-time tape call; the strict tape gate STAYS at the live_runner ENTRY (which places the order) — by entry-time the now-watching symbol is subscribed and tape flows, so NO order is EVER placed without tape confirmation. Does NOT weaken structure/extension/backside/conviction; ONLY the arm-time tape call becomes optional.",
+    )
+    # ── FIX 2: EMPTY-SIGNAL DE-RANK (push no-momentum-signal names below real movers) ──
+    chili_momentum_no_signal_derank_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NO_SIGNAL_DERANK_ENABLED"),
+        description="FIX 2: when the batch scored SOME names but THIS symbol has NO ross_score (empty/missing momentum signal — GALT/PYXS/ANGI sit eligible at base ~0.6 via fail-open and GALT was ENTERED over the real movers), apply a viability DE-RANK penalty so any scored real mover (base + tilt ~0.7+) outranks it for the slots. DE-RANK, not hard-exclude (it still trades if nothing better is up). A scored real mover (symbol IN ross_scores) is NEVER touched. false (default) = byte-identical.",
+    )
+    chili_momentum_no_signal_derank_fraction: float = Field(
+        default=1.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NO_SIGNAL_DERANK_FRACTION"),
+        description="FIX 2: the de-rank penalty is ROSS_QUALITY_VIABILITY_TILT x 0.5 x this fraction (the SAME tilt magnitude the scored names use — adaptive, not a scattered magic number; default 1.0 -> a 0.10 viability penalty that pushes an empty-signal name clearly below a scored mover). Only consulted when chili_momentum_no_signal_derank_enabled is ON.",
+    )
+    # ── WARRIOR RE-AUDIT (2026-06-26): 6 ENTRY-trigger gaps, all default OFF = byte-identical.
+    # Each new trigger carries the SAME chase-guards (tape REQUIRED+fail-closed, extension
+    # veto, NOT-backside / NOT-below-VWAP, a structural stop) and routes through the IDENTICAL
+    # LIVE_ENTRY_CANDIDATE -> LIVE_PENDING_ENTRY veto chain. No existing veto is weakened. ──
+    chili_momentum_wedge_break_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WEDGE_BREAK_ENTRY_ENABLED"),
+        description="GAP 1: enter a CONVERGING-WEDGE break — 3+ taps on a DESCENDING upper trendline AND an ASCENDING lower trendline coiling to an apex, fire on the body/wick breaking OUT of the wedge at the apex with tape; stop = back INTO the wedge (the apex-low). A falling/descending wedge (downward upper line) is the stronger bull setup; a rising/ascending wedge (both lines rising) is lower-odds and is SKIPPED (never fires). Carries the SAME chase-guards as momentum_continuation_trigger: tape REQUIRED via the live_runner tape_confirms_hold call, _hod_extension_ok (NOT parabolic) + _detect_back_side + front_side_state (NOT backside / NOT below-VWAP) + _l2_entry_veto, joins the SAME setup-selector candidate set + the downstream LIVE_PENDING_ENTRY vetoes. false (default) = the trigger returns disabled before any compute = byte-identical.",
+    )
+    chili_momentum_round_number_entry_timing_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROUND_NUMBER_ENTRY_TIMING_ENABLED"),
+        description="GAP 2: a CONTEXT modifier (NOT a veto on its own — it only DEFERS, identical to the extension veto, and re-enters on a hold over the level) on the existing breakout entries: prefer a break-and-HOLD OVER a whole/half-dollar round number; avoid firing right INTO a round number from BELOW (overhead supply). When the marketable entry sits just BELOW a round number AND the breakout level has NOT yet cleared+held it, defer (stay WATCHING). ADDITIVE: OFF / no level / no round number nearby ⇒ no effect, byte-identical.",
+    )
+    chili_momentum_absorption_snap_entry_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ABSORPTION_SNAP_ENTRY_ENABLED"),
+        description="GAP 3: an L2/tape LONG trigger — a large resting SELLER on the ask being ABSORBED (eaten, the ask-wall refilled repeatedly but price HOLDS just under it on buy-side OFI) then the SNAP when the wall CLEARS (price ticks through the absorption level on accelerating buy flow). Reuses read_ladder_distribution (OFI / micro_edge / ask_build) + the bar structure; stop = back below the absorption level. Carries the SAME chase-guards (tape REQUIRED via the live_runner tape_confirms_hold call, _hod_extension_ok + _detect_back_side + front_side_state + the downstream vetoes), joins the SAME setup-selector candidate set. false (default) = returns disabled before any compute = byte-identical.",
+    )
+    chili_momentum_dip_buy_rth_only_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_BUY_RTH_ONLY_ENABLED"),
+        description="GAP 4 (bug fix): the flush-dip / deep-reclaim DIP-BUY only works 09:30-16:00 ET because stops fire then (there are NO stops premarket, so a premarket dip-buy that breaks down cannot be exited at the stop). flush_dip_buy_confirmation has an unused now param + no clock check, and _evaluate_deep_reclaim's morning-only gate is SKIPPED when bar_ts is None (it leaks premarket). When ON, the flush-dip gate requires the current bar (now param, else df.index[-1]) to be inside the RTH window [chili_momentum_dip_buy_rth_start_hour, chili_momentum_dip_buy_rth_end_hour) ET; outside ⇒ no fire. EQUITY-ONLY (crypto is 24/7 and exempt). ADDITIVE: OFF / crypto / no usable clock ⇒ no gate, byte-identical.",
+    )
+    chili_momentum_dip_buy_rth_start_hour: float = Field(
+        default=9.5,
+        ge=0.0,
+        le=24.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_BUY_RTH_START_HOUR"),
+        description="GAP 4: RTH window START as ET hours-of-day (9.5 = 09:30). Only consulted when chili_momentum_dip_buy_rth_only_enabled is ON.",
+    )
+    chili_momentum_dip_buy_rth_end_hour: float = Field(
+        default=16.0,
+        ge=0.0,
+        le=24.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DIP_BUY_RTH_END_HOUR"),
+        description="GAP 4: RTH window END as ET hours-of-day (16.0 = 16:00). The window is half-open [start, end). Only consulted when chili_momentum_dip_buy_rth_only_enabled is ON.",
+    )
+    chili_momentum_big_buyer_bid_starter_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BIG_BUYER_BID_STARTER_ENABLED"),
+        description="GAP 5: the BID-side MIRROR of _l2_entry_veto (which vetoes on a big SELLER / hidden seller) — a large stacked BUYER on the bid (depth-imbalance percentile at/ABOVE chili_momentum_big_buyer_bid_pctile_ceiling, a TREND of accumulation in its own window) near a whole/half dollar PERMITS / confirms a dip-buy starter. Keeps the existing SPREAD caveat (a wide bid-ask spread still blocks — never arm a starter on an illiquid book). It is an ENABLER (a positive confirmation overlay), never a veto: it cannot block any existing entry. Reuses read_ladder_distribution; FAIL-CLOSED (returns None / no permit on missing/stale/wide-spread L2). false (default) = never consulted = byte-identical.",
+    )
+    chili_momentum_big_buyer_bid_pctile_ceiling: float = Field(
+        default=0.85,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BIG_BUYER_BID_PCTILE_CEILING"),
+        description="GAP 5: depth-imbalance percentile at/ABOVE which the NEWEST book is treated as a big resting BID wall (accumulation trend) → permit/confirm the dip-buy starter. Self-relative to the symbol's own recent window (mirror of chili_momentum_entry_l2_bigseller_pctile_floor). Only consulted when chili_momentum_big_buyer_bid_starter_enabled is on.",
+    )
+    chili_momentum_big_buyer_bid_max_spread_bps: float = Field(
+        default=80.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BIG_BUYER_BID_MAX_SPREAD_BPS"),
+        description="GAP 5: the SPREAD caveat — a bid-ask spread (bps) at/above this BLOCKS the big-buyer-on-bid permit (a wide spread = illiquid book, never arm a starter there). Only consulted when chili_momentum_big_buyer_bid_starter_enabled is on.",
+    )
+    chili_momentum_add_into_halt_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADD_INTO_HALT_ENABLED"),
+        description="GAP 6 (RISKIEST — KEEP OFF UNTIL SOAKED): permit a SMALL pyramid ADD while the name is HALTED LIMIT-UP, gated by EVERY extra condition (fail-CLOSED on any miss): (1) ALREADY IN PROFIT on the name (bid > avg_entry by chili_momentum_add_into_halt_min_profit_r of the entry risk), (2) the halt is LIMIT-UP / bullish (resume side is up — read from the halt state), (3) the add is SMALL (the existing pyramid sizing + chili_momentum_pyramid_max_adds cap already bound it; this gate adds NO new size), (4) the ORIGINAL STRUCTURAL STOP is intact (unchanged since entry), (5) RTH-only. It NEVER adds if underwater. ROUTES through the SAME pyramid_add_decision + risk_evaluator admission as a normal add (kill-switch, daily-loss registry, governance). false (default) = the halt-add path is never entered = byte-identical to the existing pyramid behavior. Deploy recipe: KEEP OFF until soaked.",
+    )
+    chili_momentum_add_into_halt_min_profit_r: float = Field(
+        default=1.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADD_INTO_HALT_MIN_PROFIT_R"),
+        description="GAP 6: the minimum open profit (in units of the entry's structural risk R = avg_entry - original_stop) required before an add-into-halt is permitted. 1.0 = at least +1R in the green. Only consulted when chili_momentum_add_into_halt_enabled is ON.",
+    )
+    # ── FIX D: cache the Robinhood Agentic MCP adapter (perf bug-fix) ────────────────
+    chili_momentum_cache_rh_agentic_adapter: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CACHE_RH_AGENTIC_ADAPTER"),
+        description="FIX D: reuse a process-wide RobinhoodAgenticMcpAdapter singleton in auto_arm's 24h-tradability probe instead of constructing a fresh one per tick (which re-ran the 42-tool MCP discovery ~20/min and slowed the tick). Thread-safe + self-healing (rebuilt only when the cached instance reports unhealthy via is_enabled()). Same tradability probe — pure perf. false = legacy per-call construction (byte-identical).",
     )
     # ── L2 microstructure (crypto full-book persistence + OFI/micro-price tilt) ──
     # Cadence to drain the warmed Coinbase WS full-book ring into fast_orderbook
@@ -4987,6 +6117,87 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_EQUITY_ONLY"),
     )
+    # ── SESSION-HYGIENE / CRYPTO-SEGREGATION (2026-06-25) ──────────────────────
+    # All four default-ON; each flag-OFF restores byte-identical legacy behavior.
+    #
+    # (A) BROKER-ZERO CLOSE: when the exit broker-qty clamp SUCCESSFULLY reads the
+    # held quantity at 0 (broker_zero=True is set ONLY on a successful read in
+    # _submit_live_market_exit — never on None/exception), trust that confirmed-zero
+    # and reconcile the session to LIVE_EXITED WITHOUT a second independent broker
+    # read. The second read (_broker_position_confirms_zero) does not handle the
+    # robinhood_agentic_mcp family (returns False), so a broker-FLAT agentic bailout
+    # (FCUV sess 8791) looped live_bailout forever, pinning the slot. broker_zero is
+    # already a confirmed-zero from a successful read; re-confirming only ADDS a
+    # failure dependency. false = require the second read (legacy, byte-identical).
+    chili_momentum_broker_zero_trust_clamp_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BROKER_ZERO_TRUST_CLAMP_ENABLED"),
+        description="Trust a successful broker-qty-clamp zero (broker_zero=True) to reconcile to LIVE_EXITED without a second broker read. false = legacy double-read.",
+    )
+    # (A2) BROKER-ZERO CONFIRM-READS (2026-06-25, FIX B — the FCUV bailout phantom).
+    # FCUV sess 8791 sat in live_bailout emitting live_exit_submit_failed +
+    # live_exit_qty_clamped_to_broker(broker_qty=0) 98x in 20min and NEVER reconciled
+    # (the bailout exit loop did not satisfy the confirmed-flat reconcile because the
+    # robinhood_agentic_mcp family fell through the trust-clamp + the second-read
+    # _broker_position_confirms_zero returns False for it). HARD REQUIREMENT: the
+    # broker-zero reconcile must fire ONLY on a CONFIRMED-flat read — broker_zero=True
+    # seen on N CONSECUTIVE exit pulses, NOT a single spurious 0 — so a one-off API
+    # blip can never abandon a real position. The clamp read is per-pulse; this counts
+    # consecutive confirmations (le["broker_zero_confirm_streak"]) and only reconciles
+    # at N. 1 = single confirmed read (legacy trust-clamp behavior); 2 = belt-and-
+    # suspenders (default). The streak resets on any non-zero / failed / None read.
+    chili_momentum_broker_zero_confirm_reads: int = Field(
+        default=2,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BROKER_ZERO_CONFIRM_READS"),
+        description="FIX B: number of CONSECUTIVE successful broker_zero=True clamp reads required before the bailout/exit path reconciles to LIVE_EXITED (guards against a single spurious 0 abandoning a real position). 1 = single confirmed read; 2 = default belt-and-suspenders.",
+    )
+    # (B) CANCEL-ON-CONFIRM-BLOCK: when confirm_live_arm is BLOCKED after
+    # begin_live_arm already created the session in live_arm_pending (a TOCTOU:
+    # no_longer_eligible / risk_blocked / broker_not_ready / allocator_blocked), the
+    # begin-created session is stranded in live_arm_pending — pinning a concurrency
+    # slot (IQST sess 8804, 70+min). Release it via cancel_automation_session: a
+    # pre-entry arm_pending session has NO broker order (no momentum_live_execution),
+    # so the cancel is a pure CHILI-state transition to LIVE_CANCELLED. Covers BOTH
+    # the primary RH arm and the alpaca paper-twin. false = legacy leak (TTL-reaped).
+    chili_momentum_cancel_on_confirm_block_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CANCEL_ON_CONFIRM_BLOCK_ENABLED"),
+        description="Cancel the begin-created live_arm_pending session when confirm_live_arm is blocked. false = leave it for the TTL reaper (legacy).",
+    )
+    # (C) STALE-SESSION REAPER: a SAFE BOUNDED sweep (runs inside the existing
+    # auto-arm pass, NOT a parallel loop) that terminalizes dead-but-lingering
+    # sessions: (1) live_error past the TTL, (2) live_bailout past the TTL whose
+    # broker position is CONFIRMED 0. NEVER closes a session with a real broker
+    # position or in-flight order — every close requires a SUCCESSFUL broker-flat
+    # read (fail-safe: any unknown/failed read leaves the session ALONE). arm_pending
+    # is already handled by expire_stale_live_arm_sessions. false = no reaper (legacy).
+    chili_momentum_stale_session_reaper_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STALE_SESSION_REAPER_ENABLED"),
+        description="Bounded broker-truth-gated reaper for stale live_error / broker-flat live_bailout sessions. false = no reaper (legacy).",
+    )
+    # TTL (seconds) before a stale live_error / live_bailout session is eligible for
+    # the reaper. Adaptive floor on the max-watch setting (no new magic number) so a
+    # genuinely-active exit/error window is never reaped mid-flight. Default 2h.
+    chili_momentum_stale_session_reaper_ttl_seconds: float = Field(
+        default=7200.0,
+        ge=300.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STALE_SESSION_REAPER_TTL_SECONDS"),
+    )
+    # (D) CRYPTO VIABILITY GATE: when the lane is NOT trading crypto (crypto_only is
+    # False AND there is no positive crypto live-arm intent), STOP scoring "-USD"
+    # symbols into momentum_symbol_viability — they pollute the equity scoring pool
+    # while never being armable (the auto_arm candidate query already excludes them).
+    # Gate sits at the single persistence chokepoint (persist_neural_momentum_tick),
+    # downstream of all scoring, so equity scoring is byte-identical. false = score
+    # all symbols (legacy). When crypto IS re-enabled (crypto_only or crypto_live_arm),
+    # the gate self-disables and crypto scoring resumes untouched.
+    chili_momentum_crypto_viability_gate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CRYPTO_VIABILITY_GATE_ENABLED"),
+        description="Skip persisting -USD viability rows when crypto is not traded. false = persist all symbols (legacy).",
+    )
     # Liquidity-bias selection (ON): among the price-band-passed Ross small-caps,
     # prefer high-dollar-volume (tighter-spread, FILLABLE) names so triggers convert
     # to fills — the live spread gate blocks wide-spread entries, so a trigger on an
@@ -5018,6 +6229,46 @@ class Settings(BaseSettings):
     chili_momentum_exclude_leveraged_etfs: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXCLUDE_LEVERAGED_ETFS"),
+    )
+    # A-SETUP QUALITY FLOOR (2026-06-26): the 'puro talo' root — the lane had NO
+    # quality floor, so it armed/traded ANYTHING that fired a trigger -> B/C junk and
+    # small losses all day (9 round-trips, all ~-$65 losers). Live proof: AREC (float
+    # 107M, rvol 5.9, +12.9% — LARGE float, MODEST mover) armed+lost then re-armed;
+    # CODI (float=None, rvol 0, +0%) queued on a bare pullback shape. The real A-setups
+    # are LOW-FLOAT EXPLOSIVE names (UPC 648K/+227%, SDOT 744K/+84%, WSHP ~11M/+47%) —
+    # Ross trades those ONLY and sits out the junk. This is a LIVE-eligibility quality
+    # floor that can ONLY RESTRICT (set live_eligible False; never newly True). A name
+    # is LIVE-tradeable ONLY if ALL hold: (1) LOW FLOAT (float_shares <= the ceiling —
+    # THE primary discriminator: AREC 107M FAILS, UPC/SDOT/WSHP PASS), (2) real RVOL >=
+    # the explosive-rvol floor, (3) meaningful change >= the change floor, and (4)
+    # FLOAT-CONFIRMED: FAIL-CLOSED when float is missing/None/0 (CODI) — cannot confirm
+    # low-float => not an A-setup => reject (also cleanly rejects empty-signal scanner
+    # names). PAPER eligibility is UNCHANGED. Default-OFF -> byte-identical loose
+    # eligibility. Kill-switch CHILI_MOMENTUM_A_SETUP_QUALITY_FLOOR_ENABLED.
+    chili_momentum_a_setup_quality_floor_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_A_SETUP_QUALITY_FLOOR_ENABLED"),
+        description="LIVE-eligibility A-setup quality floor for the Ross momentum lane: a name is live-tradeable only if low-float (<= ceiling) AND real-RVOL AND meaningful-change AND float-confirmed (fail-closed on missing float). RESTRICT-only; paper unchanged. OFF = byte-identical.",
+    )
+    # ONE documented float ceiling (the primary A-setup discriminator). 20M rejects the
+    # AREC-class large floats (107M) while passing every real low-float squeeze the lane
+    # exists to trade (UPC 648K / SDOT 744K / WSHP ~11M). A FLOOR/reference, not magic:
+    # raise it via env if the universe shifts. The B-zone ceiling below is a stricter
+    # OPTIONAL second tier (names above the primary ceiling but below the B-zone are NOT
+    # admitted by this gate — it only restricts — they remain rejected; the B-zone is
+    # reserved for a future graded-quality consumer and is documented here as the one
+    # adaptive knob, not scattered).
+    chili_momentum_a_setup_quality_floor_float_ceiling_shares: float = Field(
+        default=20_000_000.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_A_SETUP_QUALITY_FLOOR_FLOAT_CEILING_SHARES"),
+        description="Max float_shares for an A-setup LIVE name (~20M): rejects AREC-class 107M, passes UPC/SDOT/WSHP. ONE documented ceiling.",
+    )
+    chili_momentum_a_setup_quality_floor_change_pct_min: float = Field(
+        default=10.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_A_SETUP_QUALITY_FLOOR_CHANGE_PCT_MIN"),
+        description="Min absolute day-change %% for an A-setup LIVE name; aligned with the Ross change floor (~10%%). CODI (0%%) rejected.",
     )
     # FIX B (2026-06-23): QUALITY SLOT-PRIORITY TIER in the arm queue. The
     # multiplicative ETF down-weight above leaks (a fresh-ross ETF at ×0.5 still
