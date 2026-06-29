@@ -363,6 +363,91 @@ def _daily_ctx_cached(symbol: str, *, price: float | None = None) -> Any:
         return None
 
 
+# ── REGIME-ADAPTIVE FRONT-SIDE STRENGTH DISTRIBUTION (kill the fixed 0.25/0.75) ──
+# The front-side size-tilt ramp used to take s_lo/s_hi/defer from the function defaults
+# (0.25/0.75/0.15) — FIXED magic numbers that ignore the regime. The strength score is
+# ALREADY self-normalized per name (Kaufman-ER spine + saturating sigmoids), so the
+# CROSS-NAME distribution of recently-computed scores reflects the CURRENT regime: hot
+# tape ⇒ scores cluster HIGH, cold tape ⇒ LOW. We keep a small, BOUNDED, TTL'd rolling
+# cache of the most-recent strength scores (cross-name) and, once warm, derive the ramp
+# anchors as the p25/p75/p15 of that live distribution — the operator's "percentile-
+# within-batch" pattern. The cache obeys the repo convention (CLAUDE.md: "Caches must
+# have hard max size + TTL"): a hard sample cap + a per-sample timestamp TTL, both ONE
+# documented base each (FLOORS, not scattered caps).
+#
+#   * Window   : last _FRONTSIDE_DIST_MAX samples (256) OR last _FRONTSIDE_DIST_TTL_S
+#                seconds (30 min) — whichever binds first. Documented base = both.
+#   * Warm-up  : need >= _FRONTSIDE_DIST_MIN_K (30) fresh samples before adapting; below
+#                that we return None ⇒ the caller keeps the documented base 0.25/0.75/0.15
+#                (COLD-START byte-identical to today).
+#   * Cost     : O(window) append + one sorted-slice quantile; no fetch, never blocks.
+#   * size_floor stays the ONE documented SAFETY-FLOOR (not derived here) — the irreducible
+#     base the no-magic rule explicitly permits.
+_FRONTSIDE_DIST: "list[tuple[float, float]]" = []  # (monotonic_ts, strength)
+_FRONTSIDE_DIST_MAX = 256          # hard max samples (the cache size cap)
+_FRONTSIDE_DIST_TTL_S = 30 * 60.0  # 30 min per-sample TTL (the regime window)
+_FRONTSIDE_DIST_MIN_K = 30         # warm-up floor before the ramp adapts
+
+
+def _frontside_dist_note(strength: float, *, now: float | None = None) -> None:
+    """Append a freshly-computed cross-name front-side ``strength`` into the bounded,
+    TTL'd rolling distribution. Pure in-memory; never blocks, never fetches. Evicts
+    TTL-expired samples and enforces the hard max size. Non-finite / out-of-range inputs
+    are dropped (the score is [0,1] by construction). Fail-silent (a cache hiccup must
+    never touch the entry path)."""
+    try:
+        import time as _time
+
+        s = float(strength)
+        if not math.isfinite(s):
+            return
+        _now = float(now) if now is not None else _time.monotonic()
+        _FRONTSIDE_DIST.append((_now, s))
+        # TTL eviction: drop samples older than the regime window.
+        _cut = _now - _FRONTSIDE_DIST_TTL_S
+        if _FRONTSIDE_DIST and _FRONTSIDE_DIST[0][0] < _cut:
+            _kept = [t for t in _FRONTSIDE_DIST if t[0] >= _cut]
+            _FRONTSIDE_DIST[:] = _kept
+        # Hard max-size eviction: keep the most-recent _FRONTSIDE_DIST_MAX.
+        if len(_FRONTSIDE_DIST) > _FRONTSIDE_DIST_MAX:
+            del _FRONTSIDE_DIST[: len(_FRONTSIDE_DIST) - _FRONTSIDE_DIST_MAX]
+    except Exception:
+        return
+
+
+def _frontside_adaptive_thresholds(
+    *, now: float | None = None,
+) -> "tuple[float, float, float, int] | None":
+    """Return ``(s_lo, s_hi, defer_below, n_fresh)`` = (p25, p75, p15) of the FRESH
+    rolling front-side strength distribution + the warm sample count, or ``None`` when
+    the cache is cold (< _FRONTSIDE_DIST_MIN_K fresh samples) so the caller falls back
+    to the documented base (0.25/0.75/0.15 — byte-identical to today). O(window): one
+    TTL filter + a single sorted-slice quantile (``statistics.quantiles``). Fail-CLOSED
+    to ``None`` (⇒ base) on any error — adapting must never throw onto the entry path."""
+    try:
+        import time as _time
+        import statistics as _stats
+
+        _now = float(now) if now is not None else _time.monotonic()
+        _cut = _now - _FRONTSIDE_DIST_TTL_S
+        fresh = [s for (t, s) in _FRONTSIDE_DIST if t >= _cut and math.isfinite(s)]
+        if len(fresh) < _FRONTSIDE_DIST_MIN_K:
+            return None
+        # statistics.quantiles(n=100) -> 99 cut points; index i is the (i+1)-th percentile.
+        qs = _stats.quantiles(fresh, n=100, method="inclusive")
+        p15 = float(qs[14])  # 15th percentile
+        p25 = float(qs[24])  # 25th percentile
+        p75 = float(qs[74])  # 75th percentile
+        # Guard the ramp monotonicity (lo < hi) — degenerate (all-equal) dist ⇒ base.
+        if not (math.isfinite(p15) and math.isfinite(p25) and math.isfinite(p75)):
+            return None
+        if not (p25 < p75):
+            return None
+        return p25, p75, p15, len(fresh)
+    except Exception:
+        return None
+
+
 # ── Bounded momentum exit-submit retries (2026-06-07 audit) ───────────────
 # A wedged exit (an unsellable-dust residual, a stale balance, a transient
 # broker error) used to re-submit the flatten order on EVERY pulse — session
@@ -8337,10 +8422,31 @@ def tick_live_session(
                     ofi_slope=_fs_ofi_slope,
                     signed_tape=_fs_tape,
                 )
+                # REGIME-ADAPTIVE RAMP ANCHORS (kill the fixed 0.25/0.75 magic): record this
+                # freshly-computed strength into the bounded TTL'd cross-name distribution, then
+                # — once >= K fresh samples are warm — derive s_lo/s_hi/defer = p25/p75/p15 of
+                # the LIVE regime distribution (hot tape ⇒ ramp shifts up; cold ⇒ down). COLD /
+                # insufficient samples / degenerate dist ⇒ None ⇒ the documented base 0.25/0.75/
+                # 0.15 (byte-identical to today). size_floor STAYS the one documented safety-base.
+                if _fs_score is not None:
+                    _frontside_dist_note(float(_fs_score))
+                _fs_defer_base = float(getattr(settings, "chili_momentum_frontside_defer_pctile", 0.15) or 0.0)
+                _fs_s_lo, _fs_s_hi, _fs_defer_below = 0.25, 0.75, _fs_defer_base
+                _fs_warm = False
+                _fs_n_samples = 0
+                _fs_adapt = _frontside_adaptive_thresholds()
+                if _fs_adapt is not None:
+                    _fs_s_lo, _fs_s_hi, _fs_adapt_defer, _fs_n_samples = _fs_adapt
+                    # Honor the operator knob: defer disabled (pctile 0) stays disabled even
+                    # when warm; otherwise the regime p15 replaces the fixed 0.15.
+                    _fs_defer_below = (_fs_adapt_defer if _fs_defer_base > 0.0 else 0.0)
+                    _fs_warm = True
                 _frontside_mult, _fs_defer, _fs_detail = _fs_tilt(
                     _fs_score,
                     size_floor=float(getattr(settings, "chili_momentum_frontside_size_floor", 0.25) or 0.25),
-                    defer_below=float(getattr(settings, "chili_momentum_frontside_defer_pctile", 0.15) or 0.0),
+                    s_lo=_fs_s_lo,
+                    s_hi=_fs_s_hi,
+                    defer_below=_fs_defer_below,
                     stale_tape=bool(_fs_stale),
                     enabled=True,
                 )
@@ -8356,14 +8462,26 @@ def tick_live_session(
                         "day_range_pos": _fs_range_pos,
                         "er_bars": (len(_fs_closes) if isinstance(_fs_closes, list) else 0),
                         "stale_tape": bool(_fs_stale),
+                        # REGIME-ADAPTIVE ramp anchors actually in force this tick.
+                        "adaptive_warm": bool(_fs_warm),
+                        "adaptive_n": int(_fs_n_samples),
+                        "s_lo": round(float(_fs_s_lo), 4),
+                        "s_hi": round(float(_fs_s_hi), 4),
+                        "defer_below": round(float(_fs_defer_below), 4),
                         **(_fs_detail if isinstance(_fs_detail, dict) else {}),
                     }
                 _log.info(
-                    "[momentum_neural] frontside size-tilt sym=%s strength=%s mult=%s defer=%s base_max_loss=%s detail=%s",
+                    "[momentum_neural] frontside size-tilt sym=%s strength=%s mult=%s defer=%s "
+                    "adaptive=%s n=%s s_lo=%s s_hi=%s defer_below=%s base_max_loss=%s detail=%s",
                     sess.symbol,
                     (None if _fs_score is None else round(float(_fs_score), 4)),
                     round(float(_frontside_mult), 4),
                     bool(_fs_defer),
+                    bool(_fs_warm),
+                    int(_fs_n_samples),
+                    round(float(_fs_s_lo), 4),
+                    round(float(_fs_s_hi), 4),
+                    round(float(_fs_defer_below), 4),
                     round(float(_base_max_loss), 4),
                     _fs_detail,
                 )
