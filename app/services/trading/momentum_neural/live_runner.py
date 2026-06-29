@@ -8269,10 +8269,16 @@ def tick_live_session(
         # Inputs are the SAME live OFI/tape reads the squeeze/kelly levers already perform on
         # THIS entry path (one _live_flow_slope read = ofi_level+ofi_slope; one _live_trade_flow
         # = signed tape) — NO new network/db fetch. The ER-spine closes / vwap-dist / day-range
-        # are not cleanly available here without a fetch, so they pass None and the score's
-        # weight-renormalized mean uses the present microstructure terms (fail-OPEN: no
-        # informative term ⇒ strength None ⇒ mult 1.0). The flow read returning None (thin/stale
-        # tape) is threaded as stale_tape ⇒ mult 1.0. Flag OFF ⇒ mult 1.0 (byte-identical). The
+        # are derived from the ALREADY-FETCHED `_entry_df` (the 15m/5d frame this pre-entry tick
+        # pulled once at the top for the spread gate, reused below for the range target), run
+        # through the SAME canonical `_today_session_frame(...) -> front_side_state(...)` the
+        # entry-gate backside vetoes use — a PURE, side-effect-free read (no new network/db
+        # fetch, correct symbol, ET-today-anchored so the session VWAP/range are right). The ER
+        # spine takes the today-session closes; vwap_dist_sigma / day_range_pos come from that
+        # same FrontSideState. Any missing leg (no _entry_df, thin/degenerate frame, error) ⇒
+        # that term is simply ABSENT and the score's weight-renormalized mean uses whatever
+        # remains (fail-OPEN: no informative term ⇒ strength None ⇒ mult 1.0). The flow read
+        # returning None (thin/stale tape) is threaded as stale_tape ⇒ mult 1.0. Flag OFF ⇒ mult 1.0 (byte-identical). The
         # `defer` flag is ADVISORY for v1 (logged only — no new re-poll loop, to avoid starving
         # the fast premarket window). docs/DESIGN/MOMENTUM_LANE.md
         _frontside_mult = 1.0
@@ -8298,7 +8304,35 @@ def tick_live_session(
                     _fs_tape = None if _fs_tape is None else float(_fs_tape)
                 except Exception:
                     _fs_tape = None
+                # ER-SPINE inputs from the ALREADY-FETCHED `_entry_df` (no new fetch): run the
+                # 15m/5d frame through the SAME canonical today-slice + front_side_state the entry
+                # gates use, so the session VWAP/range anchor on ET-today and the closes feed the
+                # Kaufman ER. Pure / fail-OPEN: missing _entry_df / thin frame / any error ⇒ all
+                # three stay None (those terms simply drop out of the weight-renormalized mean).
+                _fs_closes = None
+                _fs_vwap_dist = None
+                _fs_range_pos = None
+                try:
+                    if _entry_df is not None and not getattr(_entry_df, "empty", True):
+                        from .entry_gates import _today_session_frame as _fs_today_frame
+                        from .ross_momentum import front_side_state as _fs_state_fn
+                        _fs_sess_df = _fs_today_frame(_entry_df)
+                        _fs_state = _fs_state_fn(_fs_sess_df)
+                        _fs_vwap_dist = _float_or_none(getattr(_fs_state, "vwap_dist_sigma", None))
+                        _fs_range_pos = _float_or_none(getattr(_fs_state, "day_range_pos", None))
+                        try:
+                            _fs_closes = [
+                                float(c)
+                                for c in _fs_sess_df["Close"].astype(float).tolist()[-12:]
+                            ]
+                        except Exception:
+                            _fs_closes = None
+                except Exception:
+                    _fs_closes = _fs_vwap_dist = _fs_range_pos = None
                 _fs_score = _fs_strength(
+                    closes=_fs_closes,
+                    vwap_dist_sigma=_fs_vwap_dist,
+                    day_range_pos=_fs_range_pos,
                     ofi_level=_fs_ofi_level,
                     ofi_slope=_fs_ofi_slope,
                     signed_tape=_fs_tape,
@@ -8318,6 +8352,9 @@ def tick_live_session(
                         "ofi_level": _fs_ofi_level,
                         "ofi_slope": _fs_ofi_slope,
                         "signed_tape": _fs_tape,
+                        "vwap_dist_sigma": _fs_vwap_dist,
+                        "day_range_pos": _fs_range_pos,
+                        "er_bars": (len(_fs_closes) if isinstance(_fs_closes, list) else 0),
                         "stale_tape": bool(_fs_stale),
                         **(_fs_detail if isinstance(_fs_detail, dict) else {}),
                     }

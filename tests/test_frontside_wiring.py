@@ -56,6 +56,9 @@ def _base_shares() -> float:
 def _tilted_shares(
     *,
     enabled: bool,
+    closes=None,
+    vwap_dist_sigma=None,
+    day_range_pos=None,
     ofi_level=None,
     ofi_slope=None,
     signed_tape=None,
@@ -70,6 +73,9 @@ def _tilted_shares(
     defer = False
     if enabled:
         strength = front_side_strength_score(
+            closes=closes,
+            vwap_dist_sigma=vwap_dist_sigma,
+            day_range_pos=day_range_pos,
             ofi_level=ofi_level,
             ofi_slope=ofi_slope,
             signed_tape=signed_tape,
@@ -189,3 +195,70 @@ def test_weakest_admitted_still_trades_at_floor():
     )
     assert mult >= FRONTSIDE_SIZE_FLOOR - 1e-9
     assert qty > 0
+
+
+# ── ER-SPINE PARTICIPATION (the closes/vwap-dist/range inputs now threaded from _entry_df) ──
+# These pin that the Kaufman-ER spine (the w0.34 top term) actually MOVES the strength score
+# once the live wiring feeds it the today-session closes — a clean one-way push must out-score
+# chop given IDENTICAL microstructure. And that adding the ER inputs NEVER breaks the flag-off
+# / stale fail-open (still mult 1.0, byte-identical), since absence of a term can only drop out.
+
+# A clean one-way push: closes rise monotonically -> |net| == Σ|Δ| -> Kaufman ER == 1.0.
+_PUSH_CLOSES = [10.0, 10.2, 10.4, 10.6, 10.8, 11.0, 11.2, 11.4]
+# Chop / round-trip over the SAME span: large path, ~zero net -> Kaufman ER ~ 0.
+_CHOP_CLOSES = [10.0, 11.4, 10.0, 11.4, 10.0, 11.4, 10.0, 11.4]
+
+
+def test_er_spine_participates_push_beats_chop():
+    # Same neutral microstructure for both; only the closes differ. The ER term (the spine)
+    # must lift the clean-push strength STRICTLY above the chop strength -> push sizes LARGER.
+    micro = dict(ofi_level=0.0, ofi_slope=0.0, signed_tape=0.0)
+    s_push = front_side_strength_score(closes=_PUSH_CLOSES, **micro)
+    s_chop = front_side_strength_score(closes=_CHOP_CLOSES, **micro)
+    assert s_push is not None and s_chop is not None
+    # The ER term IS contributing: a clean push out-scores chop by a real margin.
+    assert s_push > s_chop + 1e-6
+
+    base = _base_shares()
+    qty_push, mult_push, _sp, _dp = _tilted_shares(enabled=True, closes=_PUSH_CLOSES, **micro)
+    qty_chop, mult_chop, _sc, _dc = _tilted_shares(enabled=True, closes=_CHOP_CLOSES, **micro)
+    # Both are size-DOWN-only (<= base); the stronger push is sized >= the chop.
+    assert qty_push <= base + 1e-9 and qty_chop <= base + 1e-9
+    assert mult_push >= mult_chop - 1e-9
+    assert qty_push >= qty_chop
+
+
+def test_er_spine_lifts_score_vs_micro_only():
+    # Adding a clean-push ER term to weak microstructure RAISES the strength (the spine pulls
+    # the weight-renormalized mean up). Confirms the threaded closes actually enter the blend.
+    micro = dict(ofi_level=-0.5, ofi_slope=0.0, signed_tape=0.0)
+    s_micro_only = front_side_strength_score(**micro)
+    s_with_er = front_side_strength_score(closes=_PUSH_CLOSES, **micro)
+    assert s_micro_only is not None and s_with_er is not None
+    assert s_with_er > s_micro_only + 1e-6
+
+
+def test_er_inputs_present_flag_off_still_byte_identical():
+    # Flag OFF -> the block never runs -> mult 1.0 -> byte-identical, EVEN with ER inputs present.
+    base = _base_shares()
+    qty, mult, strength, defer = _tilted_shares(
+        enabled=False, closes=_PUSH_CLOSES, vwap_dist_sigma=2.0, day_range_pos=0.9,
+        ofi_level=1.0, ofi_slope=1.0, signed_tape=1.0,
+    )
+    assert mult == 1.0
+    assert strength is None
+    assert defer is False
+    assert qty == pytest.approx(base)
+
+
+def test_er_inputs_present_stale_tape_fails_open():
+    # Stale tape -> fail-OPEN mult 1.0 byte-identical even when the ER spine would have scored
+    # the name weak (a chop frame). stale != weak: no shrink on a stale read.
+    base = _base_shares()
+    qty, mult, _strength, defer = _tilted_shares(
+        enabled=True, closes=_CHOP_CLOSES, vwap_dist_sigma=-2.0, day_range_pos=0.1,
+        ofi_level=-1.0, ofi_slope=-1.0, signed_tape=-1.0, stale_tape=True,
+    )
+    assert mult == 1.0
+    assert defer is False
+    assert qty == pytest.approx(base)
