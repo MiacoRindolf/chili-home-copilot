@@ -251,6 +251,11 @@ def score_viability(
 
     paper_eligible = True
     live_eligible = True
+    # RISK-BOUNDED size-down marker (LEVER-1 extreme-vol relax AND the thin-spread
+    # squeeze carve-out both set this True). Initialized ONCE here — above the spread
+    # block (line ~296) — so the thin-spread carve-out's assignment isn't clobbered by
+    # a later re-init. Plumbed to the ViabilityResult field + the live_runner size-down.
+    _extreme_vol_risk_bounded = False
 
     # Ross lane = low-float small-cap COMMON stock. HARD-VETO leveraged/inverse ETPs
     # (SOXS/SQQQ/SOXL + the Tradr/Defiance/T-REX "2X Short XXX" single-stock wave that
@@ -295,8 +300,81 @@ def score_viability(
             warnings.append("Elevated spread — caution for live scalps")
         _max_spread_bps = float(getattr(settings, "chili_momentum_live_eligible_max_spread_bps", 0.0) or 0.0)
         if _max_spread_bps > 0.0 and spread_bps > _max_spread_bps:
-            warnings.append(f"Spread {spread_bps:.0f}bps exceeds live ceiling {_max_spread_bps:.0f}bps — untradeable")
-            live_eligible = False
+            # THIN/TOXIC-SPREAD SQUEEZE CARVE-OUT (default ON; flag-off => byte-identical
+            # binary decline). A genuine TOP squeeze-fuel + high-RVOL mover is the exact
+            # name the lane exists to trade; the marketable-LIMIT entry + notional guard +
+            # risk-first sizing already bound the toxic-fill downside the zero-fills fix
+            # solved. So instead of a flat decline at _max_spread_bps, raise the ceiling
+            # EM/squeeze-percentile-scaled for ONLY the top-percentile squeeze names, and
+            # mark them for RISK-BOUNDED size-down (reuses the LEVER-1 extreme_vol path).
+            # ORDINARY names keep the flat decline (zero-fills protection intact).
+            _thin_ok = False
+            if (
+                bool(getattr(settings, "chili_momentum_thin_spread_squeeze_lane_enabled", True))
+                and "-USD" not in str(symbol or "").upper()
+            ):
+                try:
+                    _rsig_th = (
+                        feats.meta.get("ross_signals")
+                        if isinstance(getattr(feats, "meta", None), dict)
+                        else None
+                    )
+                    _sig_th = _rsig_th.get(symbol) if isinstance(_rsig_th, dict) else None
+                    if isinstance(_sig_th, dict) and _sig_th:
+                        from .ross_momentum import (
+                            _extract_pillars,
+                            _first_float,
+                            _to_float,
+                            below_explosive_floor,
+                        )
+
+                        _rvol_th, _, _, _ = _extract_pillars(_sig_th)
+                        _sq_rank_th = _to_float(_sig_th.get("squeeze_fuel_rank_pct"))
+                        _rvol_floor_th = float(
+                            getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 3.0
+                        )
+                        _sq_top_th = float(
+                            getattr(settings, "chili_momentum_thin_spread_squeeze_top_pctl", 0.80) or 0.80
+                        )
+                        # TRIPLE gate (all from REAL batch data, no magic absolute): top
+                        # within-batch squeeze percentile + present RVOL at/above the explosive
+                        # floor + the lane's own affirmative explosiveness (not below the floor).
+                        _rvol_ok_th = _rvol_th is not None and _rvol_th >= _rvol_floor_th
+                        _sq_ok_th = _sq_rank_th is not None and _sq_rank_th >= _sq_top_th
+                        if _rvol_ok_th and _sq_ok_th and not below_explosive_floor(_sig_th):
+                            # EM/squeeze-scaled ceiling: base ceiling * (1 + slope*squeeze_excess),
+                            # hard-capped by the abs broken-quote ceiling. squeeze_excess in [0,1]
+                            # is how far past the top percentile this name sits, so only the most
+                            # squeeze-prone names get the widest tolerance — no flat relax.
+                            _slope_th = float(
+                                getattr(settings, "chili_momentum_thin_spread_ceiling_squeeze_slope", 1.0) or 0.0
+                            )
+                            _abs_cap_th = float(
+                                getattr(settings, "chili_momentum_risk_max_spread_bps_abs_cap", 1500.0) or 1500.0
+                            )
+                            _excess_th = max(0.0, min(1.0, (float(_sq_rank_th) - _sq_top_th) / max(1e-6, 1.0 - _sq_top_th)))
+                            _ceil_th = _max_spread_bps * (1.0 + max(0.0, _slope_th) * _excess_th)
+                            # HARD broken-quote backstop. The squeeze formula's OWN maximum is
+                            # base*(1+slope) (@rank=1.0); the abs broken-quote cap is a FLOOR for
+                            # that backstop, never a clip BELOW the documented adaptive range — so
+                            # in this branch where the abs_cap == the base live ceiling (300bps)
+                            # the carve-out is not silently neutralized. A spread beyond the
+                            # formula max (a genuine broken/halted book) still declines.
+                            _formula_max_th = _max_spread_bps * (1.0 + max(0.0, _slope_th))
+                            _ceil_th = min(_ceil_th, max(_max_spread_bps, _abs_cap_th, _formula_max_th))
+                            if spread_bps <= _ceil_th:
+                                _thin_ok = True
+                                _extreme_vol_risk_bounded = True
+                                warnings.append(
+                                    f"Thin-spread squeeze carve-out: {spread_bps:.0f}bps within "
+                                    f"squeeze ceiling {_ceil_th:.0f}bps (sq_rank={_sq_rank_th:.2f}, "
+                                    f"rvol={_rvol_th:g}) — LIVE with risk-bounded sizing"
+                                )
+                except (TypeError, ValueError, AttributeError, ImportError):
+                    _thin_ok = False
+            if not _thin_ok:
+                warnings.append(f"Spread {spread_bps:.0f}bps exceeds live ceiling {_max_spread_bps:.0f}bps — untradeable")
+                live_eligible = False
 
     if slip_bps is not None and slip_bps > 15:
         base -= 0.06
@@ -324,7 +402,8 @@ def score_viability(
         getattr(settings, "chili_momentum_live_eligible_allow_extreme_explosive", True)
     )
     _is_genuine_explosive = False
-    _extreme_vol_risk_bounded = False
+    # NOTE: _extreme_vol_risk_bounded is initialized once near the top (after
+    # live_eligible) so the thin-spread carve-out (above) is not clobbered here.
     if _allow_extreme_explosive and "-USD" not in str(symbol or "").upper():
         try:
             _rsig_x = (

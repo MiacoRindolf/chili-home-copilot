@@ -2295,6 +2295,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_FUEL_TOP_N"),
         description="Credit-frugality gate: only the top-N explosive low-float candidates (by Ross score, after the explosive floor) get an Ortex short-mechanics fetch. Keeps the Trader plan (1,000 credits/mo, 1 req/s) within budget. 0 ⇒ no fetch.",
     )
+    chili_momentum_squeeze_quality_floor_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_QUALITY_FLOOR_ENABLED"),
+        description="SQUEEZE-FUEL ADAPTIVE QUALITY-FLOOR (crowded-tape sympathy-name rank hold). In the explosive scorer the continuous score is core*(0.5+0.5*quality_blend); the news-catalyst (P1) and squeeze_fuel pillars BOTH live inside the bounded quality_blend, so a catalyst-LESS but high-RVOL, fillable, strongly squeeze-fueled SYMPATHY name (e.g. NPT — 119M sh, no own news) gets demoted out of the armed top-N when its P1 reads weak/zero, because strong squeeze fuel is just averaged into the same ±50%% modifier and cannot lift it back. When ON, a name in the TOP squeeze-fuel percentile of the batch FLOORS its quality modifier (ramp 0.80->1.0 pctl => floor up to 0.90; a FLOOR via max(), never an additive boost), so a strong squeeze + fillability HOLDS the name in the armed set despite a weak/zero P1 — P1-absence alone no longer demotes a high-RVOL fillable squeezer. Bounded (< the 1.0 ceiling; the RVOL+momentum core still dominates ordering), adaptive (the name's OWN within-batch squeeze percentile — no magic SI/CTB cutoff), selection-only re-rank (never a veto, never an entry/exit change). Below the tail / no squeeze data / flag OFF ⇒ floor 0.0 ⇒ BYTE-IDENTICAL explosive ordering.",
+    )
     # ── P4 SQUEEZE-SCORE DEEPENING — ENTRY size-up + EXIT squeeze-aware-hold ──
     # Extend the SAME squeeze_fuel score (already a SELECTION tilt) to two downstream uses, each
     # driven SOLELY by the name's OWN within-batch squeeze PERCENTILE (squeeze_fuel_rank_pct). One
@@ -2762,6 +2767,36 @@ class Settings(BaseSettings):
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXTREME_VOL_RISK_BOUNDED_FRACTION"),
         description="LEVER 1 risk-bounded size-down: per-trade risk-budget multiplier for an extreme-vol genuine mover admitted live (default 0.5 = half-risk). Composes under the same 3x clamp + hard max_notional ceiling as the other size-down levers; never a veto. ONE documented base.",
+    )
+    # ── THIN/TOXIC-SPREAD SQUEEZE CARVE-OUT (2026-06-29) ──────────────────────
+    # A genuine TOP squeeze-fuel + high-RVOL mover at a ~4.6% (460bps) spread is a
+    # FALSE decline at the 300bps live-eligibility ceiling (viability.py): the
+    # marketable-LIMIT entry + notional guard + risk-first sizing already bound the
+    # toxic-fill downside the zero-fills fix solved. These flags convert the BINARY
+    # 300bps decline into a bounded SIZE-DOWN admission for ONLY the top within-batch
+    # squeeze-percentile high-RVOL names: raise the ceiling EM/squeeze-scaled, mark
+    # them extreme_vol_risk_bounded (reuses the LEVER-1 size-down), and clamp the
+    # per-trade dollar loss to a HARD fraction of the normal base. ORDINARY names keep
+    # the flat decline (zero-fills protection). flag OFF ⇒ byte-identical.
+    chili_momentum_thin_spread_squeeze_lane_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_THIN_SPREAD_SQUEEZE_LANE_ENABLED"),
+        description="Master kill-switch for the thin/toxic-spread squeeze carve-out: convert the binary 300bps live-eligibility decline into a bounded EM/squeeze-percentile-scaled SIZE-DOWN admission for ONLY top-squeeze high-RVOL names. OFF ⇒ byte-identical binary decline + no hard loss cap. Equity-only.",
+    )
+    chili_momentum_thin_spread_squeeze_top_pctl: float = Field(
+        default=0.80, ge=0.0, le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_THIN_SPREAD_SQUEEZE_TOP_PCTL"),
+        description="Within-batch squeeze_fuel_rank_pct floor for the carve-out (matches the existing squeeze entry size-up top_pctl). A name must sit at/above this within-batch squeeze percentile (AND clear the explosive RVOL floor AND the explosiveness floor) before its toxic-spread ceiling is widened. Adaptive — no magic SI/CTB cutoff.",
+    )
+    chili_momentum_thin_spread_ceiling_squeeze_slope: float = Field(
+        default=1.0, ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_THIN_SPREAD_CEILING_SQUEEZE_SLOPE"),
+        description="Slope of the squeeze-scaled spread ceiling: admitted_ceiling = live_eligible_max_spread_bps * (1 + slope*squeeze_excess), squeeze_excess = clamp((sq_rank-top_pctl)/(1-top_pctl),0,1). At top_pctl excess=0 ⇒ base ceiling (no relax); at rank=1.0 ⇒ base*(1+slope). Hard-capped by the abs broken-quote ceiling (1500bps).",
+    )
+    chili_momentum_thin_spread_hard_loss_fraction: float = Field(
+        default=0.5, ge=0.0, le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_THIN_SPREAD_HARD_LOSS_FRACTION"),
+        description="HARD per-trade dollar-loss cap for a carve-out-admitted wide-spread trade, as a fraction of the normal base max-loss-per-trade (default 0.5 = half). Applied as a min()-only clamp on _eff_max_loss ON TOP of the extreme_vol size-down; never raises risk, never vetoes. The #769 max-loss circuit + structural stop + daily breaker are untouched.",
     )
     # ADAPTIVE stale-quote (stale_bbo) window — scale the freshness ceiling to the NAME's own
     # trade cadence instead of a fixed 15s clock (operator 2026-06-25 "gawin mong adaptive").
@@ -6162,6 +6197,32 @@ class Settings(BaseSettings):
         default=8.0, ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RUNAWAY_CROSS_ASK_BAND_BPS"),
         description="FIX B: the live ask must exceed our resting limit by more than this many bps (vol-widened by chase_move_ratio, hard-capped at the live spread cap) before escalating to a marketable cross — debounces single-tick offer jitter. Inert while runaway_cross_enabled=False.",
+    )
+    # ── VERTICAL HALT-RESUME FILL AGGRESSION (2026-06-29) ─────────────────────
+    # On a fast vertical halt-resume print (INHD/UPC-style) the ASK gaps 5-15% on
+    # the resume tick, blowing past the 3% cumulative repeg ceiling
+    # (_entry_repeg_price) in ONE tick -> the cross is abandoned ('past_cumulative_
+    # ceiling') -> the move is missed. This flag RAISES the cumulative chase ceiling
+    # ONLY for a CONFIRMED-THRUST halt-resume vertical (recent halt-resume + tape
+    # thrust + squeeze fuel + RVOL confluence), from the base abs-cap up toward a
+    # HARD per-name max-chase, scaled by the confluence strength. Recoverable: the
+    # repeg re-sizes risk-first at the chased price, so dollar-risk stays pinned at
+    # _eff_max_loss and the #769 max-loss circuit still caps the trade. flag OFF ⇒
+    # byte-identical (ceiling = the 300bps abs_cap as today).
+    chili_momentum_vertical_chase_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VERTICAL_CHASE_ENABLED"),
+        description="Master switch for the confirmed-thrust halt-resume vertical chase-ceiling raise. False = the cumulative repeg ceiling stays at the abs_cap (byte-identical parity). Equity-only, halt-resume-gated.",
+    )
+    chili_momentum_vertical_chase_max_bps: float = Field(
+        default=800.0, ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VERTICAL_CHASE_MAX_BPS"),
+        description="HARD ceiling (bps over the original limit) the confirmed-thrust vertical chase may reach. The ONE documented cap on vertical aggression (default 800bps=8%). The repeg re-sizes risk-first so dollar-risk is unchanged; this caps adverse-selection on a wrong chase. Inert while vertical_chase_enabled=False.",
+    )
+    chili_momentum_vertical_chase_min_confluence: float = Field(
+        default=0.5, ge=0.0, le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VERTICAL_CHASE_MIN_CONFLUENCE"),
+        description="Minimum confirmed-thrust confluence in [0,1] (tape-thrust AND squeeze-fuel AND RVOL, halt-resume-gated) before any raise above the abs_cap is granted. Below this the ceiling stays at the abs_cap. Adaptive: the raise scales linearly from abs_cap@this to max_bps@1.0.",
     )
     chili_momentum_risk_max_position_size_base: float = Field(
         default=1_000_000.0,

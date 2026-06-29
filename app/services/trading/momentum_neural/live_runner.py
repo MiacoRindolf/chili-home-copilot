@@ -2429,7 +2429,8 @@ def _ask_advanced_past_limit(
 
 
 def _entry_repeg_price(
-    *, original_limit_px: float, live_ask: float, expected_move_bps: float | None
+    *, original_limit_px: float, live_ask: float, expected_move_bps: float | None,
+    vertical_confluence: float | None = None,
 ) -> float | None:
     """Bounded marketable RE-PEG price for a left-behind entry chase. Returns a new buy
     limit (a guarded live ask, so marketable) capped by a CUMULATIVE ceiling =
@@ -2444,11 +2445,99 @@ def _entry_repeg_price(
             return None
     except (TypeError, ValueError):
         return None
-    ceiling = original_limit_px * (1.0 + _adaptive_live_max_spread_bps(expected_move_bps) / 10_000.0)
+    # Cumulative ceiling = the abs-cap by default; on a CONFIRMED-THRUST halt-resume
+    # vertical (vertical_confluence supplied + flag on) it is adaptively raised toward
+    # the HARD vertical_chase_max_bps so a fast resume gap actually fills. Risk-first
+    # re-sizing at the chased price keeps dollar-risk pinned (recoverable).
+    ceiling = original_limit_px * (
+        1.0 + _vertical_chase_ceiling_bps(
+            expected_move_bps=expected_move_bps, confluence=vertical_confluence
+        ) / 10_000.0
+    )
     if live_ask > ceiling:
         return None  # ran past the cumulative spread budget -> do not chase
     new_px = live_ask * _adaptive_notional_guard_multiplier(expected_move_bps=expected_move_bps)
     return min(new_px, ceiling)
+
+
+def _vertical_chase_ceiling_bps(
+    *, expected_move_bps: float | None, confluence: float | None
+) -> float:
+    """Adaptive cumulative-chase ceiling (bps over the ORIGINAL entry limit) for a
+    CONFIRMED-THRUST halt-resume vertical. Returns the BASE abs-cap (today's behavior,
+    parity) unless the master flag is on AND a real thrust confluence in [0,1] clears
+    the documented floor; then it scales LINEARLY from the abs-cap (@min_confluence) up
+    to a HARD ``vertical_chase_max_bps`` (@confluence=1.0). The raise NEVER exceeds the
+    hard max, and a wrong chase is recoverable because the repeg re-sizes risk-first at
+    the chased price (dollar-risk pinned at _eff_max_loss + the #769 circuit). Pure +
+    side-effect-free. flag OFF / no confluence / confluence < floor ⇒ the abs-cap."""
+    base_cap = _adaptive_live_max_spread_bps(expected_move_bps)
+    try:
+        if not bool(getattr(settings, "chili_momentum_vertical_chase_enabled", True)):
+            return base_cap
+        if confluence is None or not math.isfinite(float(confluence)):
+            return base_cap
+        c = max(0.0, min(1.0, float(confluence)))
+        floor = float(getattr(settings, "chili_momentum_vertical_chase_min_confluence", 0.5) or 0.0)
+        if c < floor:
+            return base_cap
+        hard_max = float(getattr(settings, "chili_momentum_vertical_chase_max_bps", 800.0) or 0.0)
+        if hard_max <= base_cap:
+            return base_cap
+        span = 1.0 - floor
+        frac = 1.0 if span <= 0 else (c - floor) / span
+        raised = base_cap + frac * (hard_max - base_cap)
+        return max(base_cap, min(raised, hard_max))
+    except (TypeError, ValueError):
+        return base_cap
+
+
+def _vertical_thrust_confluence(
+    *, halt_resume_active: bool, tape_thrust_ok: bool | None,
+    squeeze_pct: float | None, rvol: float | None,
+) -> float | None:
+    """Confirmed-thrust confluence in [0,1] for the vertical chase. Returns None
+    (⇒ no raise, parity) UNLESS this is a recent halt-resume AND the tape is
+    explicitly thrusting (fail-closed: tape None/False ⇒ None). squeeze_pct (centered
+    at 0.5) and RVOL (vs the explosive floor) each add a bounded share. Pure."""
+    try:
+        if not halt_resume_active:
+            return None
+        if tape_thrust_ok is not True:
+            return None  # fail-closed: no thrust confirmation ⇒ no raise
+        score = 0.5  # halt-resume + confirmed tape is the floor of confidence
+        if squeeze_pct is not None and math.isfinite(float(squeeze_pct)):
+            score += max(0.0, min(0.25, (float(squeeze_pct) - 0.5) * 0.5))
+        rvol_floor = float(getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 3.0)
+        if rvol is not None and math.isfinite(float(rvol)) and float(rvol) > rvol_floor:
+            score += min(0.25, (float(rvol) - rvol_floor) * 0.05)
+        return max(0.0, min(1.0, score))
+    except (TypeError, ValueError):
+        return None
+
+
+def _entry_client_order_id(
+    *, session_id: Any, correlation_id: str | None,
+    trade_cycles: int, stopout_cycles: int, place_n: int,
+) -> str:
+    """Deterministic, recycle-UNIQUE entry client_order_id.
+
+    The broker rejects a duplicate Reference ID (409 'must be unique'). The per-session
+    ``entry_place_count`` (place_n) alone is NOT enough because it is CLEARED on recycle
+    (it lives in _RECYCLE_ENTRY_STATE_KEYS) — so after a stop-out + recycle, the #1
+    re-entry lever's first place restarts at place_n=1 and produces the SAME cid as the
+    very first entry → collision (CTNT sid 9763, 2026-06-29). We fold the PERSISTENT
+    recycle counters (``trade_cycles`` / ``stopout_cycles``, deliberately KEPT across a
+    recycle) into the seed so each recycle's attempts get a distinct namespace.
+
+    IDEMPOTENT by construction: a true RETRY of the SAME place attempt — same recycle
+    cycle (same trade_cycles/stopout_cycles) and same place_n — yields the SAME cid, so a
+    benign double-submit still de-dupes at the broker. Two consecutive re-entries on a
+    recycled session differ because trade_cycles advanced. Pure + side-effect-free."""
+    _corr = str(correlation_id or "x")
+    _seed = f"{session_id}|{_corr}|entry|c{int(trade_cycles)}s{int(stopout_cycles)}|{int(place_n)}".encode("utf-8")
+    _suffix = hashlib.sha1(_seed).hexdigest()[:10]
+    return f"chili_ml_e_{session_id}_{_corr[:8]}_{_suffix}"[:120]
 
 
 def _adaptive_notional_guard_multiplier(*, expected_move_bps: float | None) -> float:
@@ -3926,6 +4015,8 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "entry_stop_model",
     "entry_dollar_vol",
     "entry_expected_move_bps",
+    "entry_squeeze_pct",
+    "entry_rvol",
     "entry_realized_high",
     "entry_day_range_pct",
     "entry_notional_guard",
@@ -6894,10 +6985,22 @@ def tick_live_session(
                             # past the ceiling, escalating would only cancel+abandon (worse
                             # than letting the rest-backstop / re-watch handle it). Fail-
                             # closed: only promote when _entry_repeg_price yields a usable px.
+                            # CONFIRMED-THRUST halt-resume vertical: if this is a recent
+                            # halt-resume AND the tape is thrusting past our limit (the very
+                            # push that triggered FIX-B, _fixb_ask_adv), supply a confluence
+                            # so the cumulative ceiling raises toward the HARD vertical cap and
+                            # the resume gap actually fills. Else None ⇒ abs-cap (parity).
+                            _vc = _vertical_thrust_confluence(
+                                halt_resume_active=_halt_resume_cooldown_active(le),
+                                tape_thrust_ok=_fixb_ask_adv,
+                                squeeze_pct=le.get("entry_squeeze_pct"),
+                                rvol=le.get("entry_rvol"),
+                            )
                             _fixb_rp = _entry_repeg_price(
                                 original_limit_px=float(le.get("entry_original_limit_px") or _lim_px or 0.0),
                                 live_ask=float(_pask),
                                 expected_move_bps=(float(_emb) if _emb else None),
+                                vertical_confluence=_vc,
                             )
                             if _fixb_rp and _fixb_rp > _lim_px:
                                 _emit(db, sess, "entry_runaway_cross_triggered", {
@@ -7129,8 +7232,16 @@ def tick_live_session(
                                     # place the replacement below (old order definitively gone).
                                 _rp_pn = int(le.get("entry_place_count", 0) or 0) + 1
                                 le["entry_place_count"] = _rp_pn
-                                _rp_seed = f"{sess.id}|{sess.correlation_id or 'x'}|entry|{_rp_pn}".encode("utf-8")
-                                _rp_cid = f"chili_ml_e_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{hashlib.sha1(_rp_seed).hexdigest()[:10]}"[:120]
+                                # Same recycle-unique cid shape as the first entry (fold the
+                                # persistent trade_cycles/stopout_cycles) so an inline re-peg
+                                # after a recycle cannot collide with a prior cycle's cid.
+                                _rp_cid = _entry_client_order_id(
+                                    session_id=sess.id,
+                                    correlation_id=sess.correlation_id,
+                                    trade_cycles=int(le.get("trade_cycles") or 0),
+                                    stopout_cycles=int(le.get("stopout_cycles") or 0),
+                                    place_n=_rp_pn,
+                                )
                                 _rp_res = _governed_place(
                                     adapter, adapter.place_limit_order_gtc, sess=sess,
                                     product_id=product_id,
@@ -8080,6 +8191,38 @@ def tick_live_session(
             float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
+        # THIN/TOXIC-SPREAD HARD PER-TRADE LOSS CAP (default ON; OFF / not-thin => no-op,
+        # byte-identical). When the name was admitted via the viability thin-spread squeeze
+        # carve-out (it carries the extreme_vol_risk_bounded marker AND its live spread is
+        # wide), clamp the per-trade dollar risk to a HARD fraction of the normal base so a
+        # wrong vertical chase / wide-spread fill is small + recoverable. This is the worst-
+        # case backstop on TOP of the extreme_vol size-down already in _eff_max_loss; it can
+        # ONLY shrink (min()), never raise, and never vetoes. The #769 max-loss circuit +
+        # structural/vol-floored stop + daily-loss breaker are untouched.
+        if bool(getattr(settings, "chili_momentum_thin_spread_squeeze_lane_enabled", True)):
+            try:
+                _ts_marker = bool(_evx.get("extreme_vol_risk_bounded")) if isinstance(_evx, dict) else False
+                _ts_wide = (
+                    spread_bps_live is not None
+                    and float(spread_bps_live) > float(
+                        getattr(settings, "chili_momentum_live_eligible_max_spread_bps", 300.0) or 300.0
+                    )
+                )
+                if _ts_marker and _ts_wide:
+                    _ts_frac = float(
+                        getattr(settings, "chili_momentum_thin_spread_hard_loss_fraction", 0.5) or 0.5
+                    )
+                    _ts_frac = max(0.05, min(1.0, _ts_frac))
+                    _ts_cap = float(_base_max_loss) * _ts_frac
+                    if _ts_cap < float(_eff_max_loss):
+                        _eff_max_loss = _ts_cap
+                        le["thin_spread_hard_loss_cap"] = {
+                            "cap_usd": round(_ts_cap, 2),
+                            "fraction": _ts_frac,
+                            "spread_bps": round(float(spread_bps_live), 2),
+                        }
+            except Exception:
+                pass
         # ADAPTIVE SPREAD-COST VETO/DERATE (2026-06-27, DEFAULT OFF ⇒ byte-identical):
         # judge the live entry spread RELATIVE to (a) the name's OWN recent typical spread
         # distribution (rolling p50/p75/p90 over momentum_nbbo_spread_tape) and (b) the
@@ -8318,9 +8461,18 @@ def tick_live_session(
         # _commit_le after the place. Format/length byte-identical (robin_stocks ignores ref_id).
         _entry_place_n = int(le.get("entry_place_count", 0) or 0) + 1
         le["entry_place_count"] = _entry_place_n
-        _entry_id_seed = f"{sess.id}|{sess.correlation_id or 'x'}|entry|{_entry_place_n}".encode("utf-8")
-        _entry_suffix = hashlib.sha1(_entry_id_seed).hexdigest()[:10]
-        cid = f"chili_ml_e_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{_entry_suffix}"[:120]
+        # Fold the PERSISTENT recycle counters (trade_cycles/stopout_cycles, kept across a
+        # recycle) into the seed so a #1-lever re-entry after a stop-out cannot collide with
+        # the first entry's cid (CTNT sid 9763 409 'Reference ID must be unique', 2026-06-29):
+        # entry_place_count is RESET on recycle, so place_n=1 alone repeats. Same-attempt
+        # retry (same cycle + same place_n) still reuses the SAME cid (idempotent).
+        cid = _entry_client_order_id(
+            session_id=sess.id,
+            correlation_id=sess.correlation_id,
+            trade_cycles=int(le.get("trade_cycles") or 0),
+            stopout_cycles=int(le.get("stopout_cycles") or 0),
+            place_n=_entry_place_n,
+        )
         # Pre-market / after-hours entries must be flagged so the venue routes them
         # (Alpaca: limit + DAY tif + extended_hours; RH: extended_hours_override). In
         # the regular session this is False and the order stays a plain marketable GTC.
@@ -8956,6 +9108,28 @@ def tick_live_session(
             pass
         # stash the name's expected-move so the chase ceiling can vol-widen at cancel time
         le["entry_expected_move_bps"] = (None if _expected_move_bps is None else float(_expected_move_bps))
+        # Stamp the thrust-confluence inputs for the vertical chase ceiling (read by
+        # _vertical_thrust_confluence on a later FIX-B escalation tick). Best-effort,
+        # fail-soft: absent ⇒ the confluence falls back to the halt+tape floor (0.5).
+        # Source = the name's OWN persisted within-batch squeeze percentile + the raw
+        # RVOL pillar from the SAME scanner row the arm-queue ranker reads (no new fetch).
+        try:
+            le["entry_squeeze_pct"] = _session_squeeze_rank_pct(sess, sess.symbol)
+        except Exception:
+            le.setdefault("entry_squeeze_pct", None)
+        try:
+            from .ross_momentum import _extract_pillars as _vex_pillars
+            _vex = sess.execution_readiness_json if isinstance(sess.execution_readiness_json, dict) else {}
+            _vex_extra = (_vex.get("extra") or {}) if isinstance(_vex, dict) else {}
+            _vex_sigmap = _vex_extra.get("ross_signals") if isinstance(_vex_extra.get("ross_signals"), dict) else {}
+            _vex_row = _vex_sigmap.get(str(sess.symbol or "").upper()) if isinstance(_vex_sigmap, dict) else None
+            if isinstance(_vex_row, dict) and _vex_row:
+                _vex_rvol, _, _, _ = _vex_pillars(_vex_row)
+                le["entry_rvol"] = (float(_vex_rvol) if _vex_rvol is not None else None)
+            else:
+                le.setdefault("entry_rvol", None)
+        except Exception:
+            le.setdefault("entry_rvol", None)
         le["entry_client_order_id"] = res.get("client_order_id") or cid
         le["entry_order_id"] = res.get("order_id")
         # History: the ack-timeout may wipe the ACTIVE pointer later, but this id is
