@@ -6407,6 +6407,22 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_REQUIRE_LIVE_ELIGIBLE"),
     )
+    # Live-eligibility TOCTOU recency grace (2026-06-29 UPC +500% miss). When ON, a
+    # live_eligible=False FLICKER at the entry instant is downgraded to a warn iff the
+    # session was live-eligible at arm/confirm within the grace window AND there is live
+    # forward momentum — so a transient re-scoring flicker can't terminally veto a
+    # just-confirmed active mover. OFF => byte-identical (block on any flicker). Only
+    # relaxes on positive evidence; never touches the drawdown/kill-switch/max-loss blocks.
+    chili_momentum_live_eligible_recency_grace_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_ELIGIBLE_RECENCY_GRACE_ENABLED"),
+    )
+    chili_momentum_live_eligible_recency_grace_seconds: float = Field(
+        default=90.0,
+        ge=1.0,
+        le=900.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_ELIGIBLE_RECENCY_GRACE_SECONDS"),
+    )
     chili_momentum_risk_require_fresh_viability: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_REQUIRE_FRESH_VIABILITY"),

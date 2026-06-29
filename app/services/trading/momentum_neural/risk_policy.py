@@ -1641,6 +1641,18 @@ class MomentumAutomationRiskPolicy:
     stale_market_data_max_age_sec: float = 30.0
     require_live_eligible_for_live: bool = True
     require_fresh_viability: bool = True
+    # Live-eligibility TOCTOU recency grace (2026-06-29 UPC +500% miss). On a fast/thin
+    # premarket vertical the neural re-scoring can FLICKER live_eligible False at the exact
+    # entry instant even though the name armed+confirmed live-eligible seconds earlier. When
+    # the session was live-eligible at ARM/CONFIRM within this grace window AND there is live
+    # forward momentum, the eligibility block is DOWNGRADED to a warn so a transient flicker
+    # cannot terminally veto a just-confirmed active mover. The grace ONLY relaxes on positive
+    # evidence (recent eligibility + forward momentum); a name never live-eligible, or whose
+    # ineligibility is older than the window, still BLOCKS. ONE documented base (seconds);
+    # flag OFF => byte-identical (no downgrade). Composes with — never widens — the separate
+    # freshness check, and never touches the drawdown / kill-switch / max-loss hard blocks.
+    live_eligible_recency_grace_enabled: bool = True
+    live_eligible_recency_grace_seconds: float = 90.0
     require_strict_coinbase_freshness: bool = False
     disable_live_if_governance_inhibit: bool = True
     block_paper_when_kill_switch: bool = False
@@ -1676,6 +1688,12 @@ class MomentumAutomationRiskPolicy:
             ),
             require_live_eligible_for_live=bool(getattr(s, "chili_momentum_risk_require_live_eligible", True)),
             require_fresh_viability=bool(getattr(s, "chili_momentum_risk_require_fresh_viability", True)),
+            live_eligible_recency_grace_enabled=bool(
+                getattr(s, "chili_momentum_live_eligible_recency_grace_enabled", True)
+            ),
+            live_eligible_recency_grace_seconds=float(
+                getattr(s, "chili_momentum_live_eligible_recency_grace_seconds", 90.0)
+            ),
             require_strict_coinbase_freshness=bool(
                 getattr(s, "chili_momentum_risk_require_strict_coinbase_freshness", False)
             ),

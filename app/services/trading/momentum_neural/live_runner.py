@@ -2256,14 +2256,73 @@ def _safe_transition(db: Session, sess: TradingAutomationSession, new_state: str
         emit_feedback_after_terminal_transition(db, sess)
 
 
+def _arm_time_live_eligible_anchor(sess: TradingAutomationSession) -> str | None:
+    """Read the session's arm/confirm-time live-eligibility anchor (ISO-8601 UTC) for the
+    recency-grace (UPC +500% TOCTOU miss). ``confirm_live_arm`` stamps it on the snapshot
+    when the session was provably live-eligible at confirm. FAIL-SAFE: absent / non-string
+    ⇒ None ⇒ no grace ⇒ today's BLOCK. Prefers the live-exec block (the runner may refresh
+    it whenever live-eligibility is observed True) then the top-level confirm stamp."""
+    try:
+        snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
+        le = snap.get(KEY_LIVE_EXEC) if isinstance(snap.get(KEY_LIVE_EXEC), dict) else {}
+        for raw in (le.get("live_eligible_at_utc"), snap.get("live_eligible_at_utc")):
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+    except Exception:
+        return None
+    return None
+
+
+def _live_forward_momentum(db: Session, sess: TradingAutomationSession) -> bool | None:
+    """Live FORWARD-MOMENTUM read for the eligibility recency-grace: True when the tape is
+    being fed UP right now (signed aggressor OFI level > 0 OR OFI slope rising). Reuses the
+    SAME ``_live_flow_slope`` read LEVER 2B / the maturity-widen use — no new datum, no new
+    fetch path. Returns None on thin / stale / crypto tape (``_live_flow_slope`` ⇒ None) so
+    the grace stays conservative (None ⇒ not-True ⇒ BLOCK held)."""
+    try:
+        from .pipeline import _live_flow_slope as _lfs_grace
+
+        fs = _lfs_grace(sess.symbol, db=db)
+        if not isinstance(fs, dict):
+            return None
+        lvl = fs.get("ofi_level")
+        slp = fs.get("ofi_slope")
+        rising = False
+        if lvl is not None:
+            try:
+                rising = rising or float(lvl) > 0.0
+            except (TypeError, ValueError):
+                pass
+        if slp is not None:
+            try:
+                rising = rising or float(slp) > 0.0
+            except (TypeError, ValueError):
+                pass
+        return bool(rising)
+    except Exception:
+        return None
+
+
 def runner_boundary_risk_ok(
     db: Session,
     sess: TradingAutomationSession,
     *,
     expected_move_bps: float | None = None,
+    apply_eligibility_grace: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
     if sess.user_id is None:
         return False, {"reason": "no_user"}
+    # Live-eligibility RECENCY-GRACE evidence (UPC +500% TOCTOU miss). Only the ENTRY gate
+    # opts in (apply_eligibility_grace=True); scale-in adds inherit the entry admission and
+    # keep their own held-flicker tolerance. The evaluator stays byte-identical when neither
+    # is supplied (and when the grace flag is OFF). The OFI read is best-effort and the
+    # anchor is fail-safe — absent evidence ⇒ today's block.
+    _recent_elig: str | None = None
+    _fwd_mom: bool | None = None
+    if apply_eligibility_grace:
+        _recent_elig = _arm_time_live_eligible_anchor(sess)
+        if _recent_elig is not None:
+            _fwd_mom = _live_forward_momentum(db, sess)
     ev = evaluate_proposed_momentum_automation(
         db,
         user_id=int(sess.user_id),
@@ -2273,6 +2332,8 @@ def runner_boundary_risk_ok(
         execution_family=normalize_execution_family(sess.execution_family),
         exclude_session_id=int(sess.id),
         expected_move_bps=expected_move_bps,
+        recent_live_eligible_at_utc=_recent_elig,
+        live_forward_momentum=_fwd_mom,
     )
     return bool(ev.get("allowed", False)), ev
 
@@ -5104,7 +5165,9 @@ def tick_live_session(
     bid = float(tick.bid or mid)
     ask = float(tick.ask or mid)
 
-    ok_b, ev = runner_boundary_risk_ok(db, sess, expected_move_bps=_expected_move_bps)
+    ok_b, ev = runner_boundary_risk_ok(
+        db, sess, expected_move_bps=_expected_move_bps, apply_eligibility_grace=True
+    )
     if not ok_b:
         _emit(
             db,
