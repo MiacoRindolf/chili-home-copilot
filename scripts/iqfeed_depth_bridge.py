@@ -53,6 +53,18 @@ STICKY_RESUBSCRIBE = os.environ.get("CHILI_IQFEED_STICKY_RESUBSCRIBE", "1") != "
 DEPTH_LEVELS = 5
 STALE_VENUE_ROW_S = 900.0  # drop venue levels not refreshed in 15min (overnight ghosts)
 
+# BROADEN COVERAGE (2026-06-29, the 6/390 L2-starvation fix): the bridge used to watch ONLY the
+# live-session names (~6) -> OFI/micro-price/L2-confirm/exit-ladder no-opped on ~98% of the universe.
+# Mirror the trade bridge: also watch the fresh ELIGIBLE-MOVER universe (ranked by viability_score)
+# so depth exists DURING candidate eval + entry, not just after arming. The L2 watch cap is
+# SELF-DISCOVERED (start at HARD_MAX, HALVE on an IQFeed symbol-limit signal, floored at FLOOR) —
+# no need to know the plan's L2 limit up front (the rail-governor pattern). L2 is ~3 subscriptions
+# per name (the WOR/WPL/w trio) so FLOOR/HARD_MAX are set below the L1 trade bridge's. One documented
+# base (DEPTH_WATCH_FLOOR); the cap is adaptive. HARD_MAX=0 reverts to session-only (byte-identical).
+ELIGIBLE_FRESH_S = float(os.environ.get("CHILI_IQFEED_DEPTH_ELIGIBLE_FRESH_SECONDS", "1800") or 1800)
+DEPTH_WATCH_FLOOR = int(os.environ.get("CHILI_IQFEED_DEPTH_WATCH_FLOOR", "48") or 48)   # the ONE documented base
+DEPTH_WATCH_HARD_MAX = int(os.environ.get("CHILI_IQFEED_DEPTH_WATCH_MAX", "128") or 128)
+
 engine = sa.create_engine(DB_URL, pool_pre_ping=True)
 
 DDL = """
@@ -113,6 +125,8 @@ watched: set[str] = set()
 sock_lock = threading.Lock()
 sock: socket.socket | None = None
 running = True
+_max_watch = DEPTH_WATCH_HARD_MAX   # adaptive L2 watch cap; halved on an IQFeed symbol-limit signal, floored at DEPTH_WATCH_FLOOR
+_limit_hit = False                  # set by the reader thread when IQFeed signals a depth-symbol limit
 
 
 def _send(cmd: str) -> None:
@@ -136,8 +150,30 @@ def _live_symbols() -> set[str]:
         return set()
 
 
+def _eligible_symbols(limit: int) -> list[str]:
+    """The fresh ELIGIBLE-MOVER universe ranked by explosiveness (viability_score), up to ``limit``,
+    most-explosive first — the names being evaluated for entry, so OFI/micro-price/L2 signals have
+    depth DURING eval, not only after arming. Mirrors the trade bridge. Empty outside market hours."""
+    if limit <= 0:
+        return []
+    try:
+        with engine.connect() as c:
+            rows = c.execute(sa.text(
+                "SELECT symbol FROM ("
+                "  SELECT DISTINCT ON (symbol) symbol, viability_score FROM momentum_symbol_viability "
+                "  WHERE symbol NOT LIKE '%-USD' AND (live_eligible OR paper_eligible) "
+                "    AND freshness_ts > (now() at time zone 'utc') - make_interval(secs => :fresh) "
+                "  ORDER BY symbol, freshness_ts DESC"
+                ") q ORDER BY viability_score DESC NULLS LAST LIMIT :lim"
+            ), {"fresh": ELIGIBLE_FRESH_S, "lim": int(limit)}).fetchall()
+        return [str(r[0]).upper() for r in rows]
+    except Exception as e:
+        log.warning("eligible query failed: %s", e)
+        return []
+
+
 def reader() -> None:
-    global running
+    global running, _limit_hit
     buf = b""
     frames = 0
     while running:
@@ -168,12 +204,16 @@ def reader() -> None:
                     except (ValueError, IndexError):
                         pass
             elif line.startswith("S,") or line[0] in ("n", "E"):
-                log.info("feed: %s", line[:160])
+                if any(k in line.upper() for k in ("SYMBOL LIMIT", "MAX SYMBOL", "LIMIT REACHED", "TOO MANY SYMBOL")):
+                    _limit_hit = True   # adaptive cap: the writer halves the depth watch-set on this signal
+                    log.warning("IQFeed depth symbol-limit signal: %s", line[:160])
+                else:
+                    log.info("feed: %s", line[:160])
     running = False
 
 
 def writer(forced_syms: set[str], deadline: float | None) -> None:
-    global running
+    global running, _max_watch, _limit_hit
     last_refresh = 0.0
     last_prune = 0.0
     ins = sa.text(
@@ -195,7 +235,22 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
                 log.debug("retention prune failed: %s", e)
             last_prune = time.monotonic()
         if time.monotonic() - last_refresh >= REFRESH_S:
-            target = forced_syms or _live_symbols()
+            # adaptive L2 watch cap: self-discover the plan's depth-symbol limit (halve on an IQFeed
+            # symbol-limit signal, floored) — mirror the trade bridge, no magic up-front limit.
+            if _limit_hit:
+                _max_watch = max(DEPTH_WATCH_FLOOR, _max_watch // 2)
+                _limit_hit = False
+                log.warning("depth watch cap halved -> %d (IQFeed L2 symbol-limit)", _max_watch)
+            # ALWAYS watch the live-session names (held positions need exit L2 — they must never go
+            # dark); fill the rest of the budget with the most-explosive ELIGIBLE movers so depth
+            # exists DURING candidate eval, not only after arming.
+            if forced_syms:
+                sticky = forced_syms
+                target = forced_syms
+            else:
+                sticky = _live_symbols()
+                elig = set(_eligible_symbols(max(0, _max_watch - len(sticky))))
+                target = sticky | elig
             fresh = target - watched
             for sym in fresh:
                 # all three dialects like the validated probe: MBO (WOR), price-level
@@ -206,15 +261,14 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
                 _send(f"w{sym}")
                 watched.add(sym)
                 log.info("watching depth: %s", sym)
-            # STICKY RE-SUBSCRIBE (LION dead-L2 fix): re-send the depth subscription for
-            # every live-session name each refresh (not just first-seen) so a silent
-            # IQFeed per-symbol drop self-heals. Held positions are few; the re-send is
-            # idempotent (venue-book deduped). Also surface a held name whose book has
-            # gone empty (a silent drop being healed) so we can SEE the gap.
-            if STICKY_RESUBSCRIBE and target:
+            # STICKY RE-SUBSCRIBE (LION dead-L2 fix): re-send the depth subscription for every
+            # live-SESSION name each refresh (not just first-seen) so a silent IQFeed per-symbol
+            # drop self-heals — a held position's exit must not go blind. The broader eligible set
+            # uses first-seen-only (no re-subscribe storm / extra budget pressure on non-held names).
+            if STICKY_RESUBSCRIBE and sticky:
                 with books_lock:
-                    _dark = [s for s in target if s not in books or books[s].snapshot() is None]
-                for sym in (target - fresh):
+                    _dark = [s for s in sticky if s not in books or books[s].snapshot() is None]
+                for sym in (sticky - fresh):
                     _send(f"WOR,{sym}")
                     _send(f"WPL,{sym}")
                     _send(f"w{sym}")
