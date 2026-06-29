@@ -360,7 +360,13 @@ def _live_eligible_recency_grace_active(
       * there is live FORWARD MOMENTUM (``live_forward_momentum`` is True — signed-tape accel>0
         / OFI / price rising, computed by the runner).
     FAIL-SAFE: a missing/unparseable anchor, an out-of-window anchor, or absent/false momentum
-    => ``active=False`` (keep today's BLOCK). Pure + side-effect-free."""
+    => ``active=False`` (keep today's BLOCK). Pure + side-effect-free.
+
+    NOTE on the anchor: it is PINNED to the arm/confirm instant and is NEVER refreshed at
+    runtime (only ``operator_actions.confirm_live_arm`` writes it; the runner does not re-stamp
+    it when live-eligibility is later observed True). This is deliberate and the SAFER
+    behavior — a fixed anchor means the grace window cannot creep, so a slow (> window)
+    arm-to-entry setup ages out and reverts to the conservative BLOCK."""
     detail: dict[str, Any] = {
         "grace_enabled": bool(policy.live_eligible_recency_grace_enabled),
         "grace_window_s": float(policy.live_eligible_recency_grace_seconds),

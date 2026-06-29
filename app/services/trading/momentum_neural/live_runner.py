@@ -2260,8 +2260,17 @@ def _arm_time_live_eligible_anchor(sess: TradingAutomationSession) -> str | None
     """Read the session's arm/confirm-time live-eligibility anchor (ISO-8601 UTC) for the
     recency-grace (UPC +500% TOCTOU miss). ``confirm_live_arm`` stamps it on the snapshot
     when the session was provably live-eligible at confirm. FAIL-SAFE: absent / non-string
-    ⇒ None ⇒ no grace ⇒ today's BLOCK. Prefers the live-exec block (the runner may refresh
-    it whenever live-eligibility is observed True) then the top-level confirm stamp."""
+    ⇒ None ⇒ no grace ⇒ today's BLOCK.
+
+    The anchor is PINNED to the arm/confirm instant and is NEVER refreshed at runtime: only
+    ``operator_actions.confirm_live_arm`` writes the top-level ``live_eligible_at_utc`` stamp,
+    and no runner path re-stamps it when live-eligibility is later observed True. (The nested
+    ``le['live_eligible_at_utc']`` read below is therefore a dead branch — kept only as a
+    defensive fall-through; nothing populates it.) This pinning is DELIBERATE and the SAFER
+    behavior: because the anchor cannot move, the recency-grace window cannot creep — a slow
+    (> window) arm-to-entry setup ages out of the window and safely reverts to the
+    conservative BLOCK rather than holding the grace open indefinitely. The read prefers the
+    (currently-unwritten) live-exec block, then the authoritative top-level confirm stamp."""
     try:
         snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
         le = snap.get(KEY_LIVE_EXEC) if isinstance(snap.get(KEY_LIVE_EXEC), dict) else {}
@@ -2275,10 +2284,15 @@ def _arm_time_live_eligible_anchor(sess: TradingAutomationSession) -> str | None
 
 def _live_forward_momentum(db: Session, sess: TradingAutomationSession) -> bool | None:
     """Live FORWARD-MOMENTUM read for the eligibility recency-grace: True when the tape is
-    being fed UP right now (signed aggressor OFI level > 0 OR OFI slope rising). Reuses the
-    SAME ``_live_flow_slope`` read LEVER 2B / the maturity-widen use — no new datum, no new
-    fetch path. Returns None on thin / stale / crypto tape (``_live_flow_slope`` ⇒ None) so
-    the grace stays conservative (None ⇒ not-True ⇒ BLOCK held)."""
+    being fed UP right now per the codebase's CANONICAL RIDE definition — signed aggressor
+    OFI level > 0 AND OFI slope >= 0 (see ``paper_execution.velocity_persistence_ride_lock``
+    RIDE: ``level > 0 ∧ slope >= 0``). This is the AND (both legs agree) semantics, NOT the
+    looser OR: an OR let a transient dead-cat up-bucket in a sharp selloff (level<=0 but a
+    one-bar slope>0, or vice-versa) flip momentum True and grant the grace on a falling
+    tape. Reuses the SAME ``_live_flow_slope`` read (LEVER 2B / the maturity-widen use) — no
+    new datum, no new fetch path. Returns None on thin / stale / crypto tape
+    (``_live_flow_slope`` ⇒ None) OR when EITHER OFI leg is missing, so the grace stays
+    conservative (None ⇒ not-True ⇒ BLOCK held)."""
     try:
         from .pipeline import _live_flow_slope as _lfs_grace
 
@@ -2287,18 +2301,15 @@ def _live_forward_momentum(db: Session, sess: TradingAutomationSession) -> bool 
             return None
         lvl = fs.get("ofi_level")
         slp = fs.get("ofi_slope")
-        rising = False
-        if lvl is not None:
-            try:
-                rising = rising or float(lvl) > 0.0
-            except (TypeError, ValueError):
-                pass
-        if slp is not None:
-            try:
-                rising = rising or float(slp) > 0.0
-            except (TypeError, ValueError):
-                pass
-        return bool(rising)
+        # CANONICAL RIDE: BOTH legs must be present and agree (level > 0 AND slope >= 0).
+        # A missing leg ⇒ None (conservative; the grace stays blocked) — we can't confirm
+        # the tape is being fed up on a single available leg.
+        if lvl is None or slp is None:
+            return None
+        try:
+            return bool(float(lvl) > 0.0 and float(slp) >= 0.0)
+        except (TypeError, ValueError):
+            return None
     except Exception:
         return None
 
@@ -8246,12 +8257,87 @@ def tick_live_session(
                     le["kelly_conviction_size"] = _kc_meta
             except Exception:
                 _kelly_conviction_mult = 1.0
+        # ADAPTIVE FRONT-SIDE STRENGTH SIZE-TILT (the successor to the killed binary E1
+        # backside veto; project_adaptive_frontside_strength). A CONTINUOUS strength score
+        # in [0,1] (Kaufman-ER spine + the live OFI level/SLOPE + signed tape, weight-
+        # renormalized over PRESENT terms) maps to a SIZE-TILT multiplier in [size_floor,1.0]
+        # — a VWAP-reclaim-turning-up scores HIGH (full size, the E1-killed winner), a
+        # falling-knife scores LOW (down-sized, NOT vetoed). SIZE-DOWN ONLY (mult<=1.0 by
+        # construction; never sizes up). It composes multiplicatively under the SAME 3x clamp +
+        # hard max_notional ceiling below, so it can ONLY shrink the per-trade RISK BUDGET; the
+        # #769 max-loss circuit + structural/vol-floored stop + daily-loss breaker are untouched.
+        # Inputs are the SAME live OFI/tape reads the squeeze/kelly levers already perform on
+        # THIS entry path (one _live_flow_slope read = ofi_level+ofi_slope; one _live_trade_flow
+        # = signed tape) — NO new network/db fetch. The ER-spine closes / vwap-dist / day-range
+        # are not cleanly available here without a fetch, so they pass None and the score's
+        # weight-renormalized mean uses the present microstructure terms (fail-OPEN: no
+        # informative term ⇒ strength None ⇒ mult 1.0). The flow read returning None (thin/stale
+        # tape) is threaded as stale_tape ⇒ mult 1.0. Flag OFF ⇒ mult 1.0 (byte-identical). The
+        # `defer` flag is ADVISORY for v1 (logged only — no new re-poll loop, to avoid starving
+        # the fast premarket window). docs/DESIGN/MOMENTUM_LANE.md
+        _frontside_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_frontside_adaptive_enabled", True)):
+            try:
+                from .ross_momentum import (
+                    front_side_size_tilt as _fs_tilt,
+                    front_side_strength_score as _fs_strength,
+                )
+                from .pipeline import (
+                    _live_flow_slope as _fs_flow_reader,
+                    _live_trade_flow as _fs_tape_reader,
+                )
+
+                # Reuse the SAME live order-flow read the recency-grace / RIDE-LOCK levers use
+                # (no new fetch). None ⇒ thin/stale/crypto tape ⇒ stale_tape ⇒ fail-open mult 1.0.
+                _fs_flow = _fs_flow_reader(sess.symbol, db=db)
+                _fs_stale = not isinstance(_fs_flow, dict)
+                _fs_ofi_level = _float_or_none(_fs_flow.get("ofi_level")) if isinstance(_fs_flow, dict) else None
+                _fs_ofi_slope = _float_or_none(_fs_flow.get("ofi_slope")) if isinstance(_fs_flow, dict) else None
+                try:
+                    _fs_tape = _fs_tape_reader(sess.symbol, db=db)
+                    _fs_tape = None if _fs_tape is None else float(_fs_tape)
+                except Exception:
+                    _fs_tape = None
+                _fs_score = _fs_strength(
+                    ofi_level=_fs_ofi_level,
+                    ofi_slope=_fs_ofi_slope,
+                    signed_tape=_fs_tape,
+                )
+                _frontside_mult, _fs_defer, _fs_detail = _fs_tilt(
+                    _fs_score,
+                    size_floor=float(getattr(settings, "chili_momentum_frontside_size_floor", 0.25) or 0.25),
+                    defer_below=float(getattr(settings, "chili_momentum_frontside_defer_pctile", 0.15) or 0.0),
+                    stale_tape=bool(_fs_stale),
+                    enabled=True,
+                )
+                if _frontside_mult < 1.0 or _fs_defer:
+                    le["frontside_size_tilt"] = {
+                        "strength": (None if _fs_score is None else round(float(_fs_score), 4)),
+                        "mult": round(float(_frontside_mult), 4),
+                        "defer": bool(_fs_defer),
+                        "ofi_level": _fs_ofi_level,
+                        "ofi_slope": _fs_ofi_slope,
+                        "signed_tape": _fs_tape,
+                        "stale_tape": bool(_fs_stale),
+                        **(_fs_detail if isinstance(_fs_detail, dict) else {}),
+                    }
+                _log.info(
+                    "[momentum_neural] frontside size-tilt sym=%s strength=%s mult=%s defer=%s base_max_loss=%s detail=%s",
+                    sess.symbol,
+                    (None if _fs_score is None else round(float(_fs_score), 4)),
+                    round(float(_frontside_mult), 4),
+                    bool(_fs_defer),
+                    round(float(_base_max_loss), 4),
+                    _fs_detail,
+                )
+            except Exception:
+                _frontside_mult = 1.0  # fail-OPEN: a tilt error never blocks/shrinks the fill
         # LOW-7: sanitize EACH per-factor multiplier (fail-NEUTRAL to 1.0 on NaN/inf/negative)
         # as it enters the product so a single poisoned helper can never NaN-out or sign-flip the
         # whole budget and silently kill the fill. The 3x clamp + max_notional ceiling below are
         # unchanged; a valid product is byte-identical.
         _eff_max_loss = min(
-            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult),
+            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # THIN/TOXIC-SPREAD HARD PER-TRADE LOSS CAP (default ON; OFF / not-thin => no-op,
