@@ -4062,6 +4062,34 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_BACKSIDE_VETO_ENABLED"),
         description="E1: veto an entry when the SESSION-anchored front_side_state reads backside (post-peak/declining lifecycle). Fail-open on unknown/thin data. KILL-SWITCH: False -> byte-identical. KILLED 2026-06-25, proven net-negative: replay showed this blunt session-level veto over-vetoed valid below-VWAP RECLAIM winners (-$78/7d), so it is killed live (env=0). Code default flipped True->False to match the live kill and remove the branch-divergence hazard (an env-less deploy must NOT silently re-enable a proven-negative veto). The finer-grained below-VWAP lifecycle is instead enforced per-setup via front_side_state inside each entry gate (cup/wedge/bull_flag/ma_vwap/etc.), not by this global blunt veto.",
     )
+    # ADAPTIVE FRONT-SIDE STRENGTH (the continuous successor to the killed binary E1 backside
+    # veto). Instead of a hard below-VWAP/extended cut, a CONTINUOUS strength score (Kaufman
+    # Efficiency-Ratio spine + VWAP-dist / day-range / OFI level+slope / signed-tape) maps to an
+    # entry SIZE-TILT multiplier in [size_floor, 1.0] + a soft, non-terminal defer — never a hard
+    # veto. A clean first-push (high ER, rising OFI) sizes FULL; a falling-knife sizes DOWN to the
+    # floor / soft-defers; the below-VWAP-RECLAIM winner E1 over-vetoed scores HIGH and gets full
+    # size. ON by default (no-dark-flags); flag OFF or stale tape ⇒ mult 1.0, defer off ⇒
+    # byte-identical. The score is pure; the caller supplies live OFI/tape + own-distribution
+    # percentiles, so there is no cross-name magic. size_floor is the ONE documented base.
+    chili_momentum_frontside_adaptive_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FRONTSIDE_ADAPTIVE_ENABLED"),
+        description="Adaptive front-side strength: map a continuous ER-spine strength score to an entry SIZE-TILT mult [size_floor,1.0] + soft defer (NEVER a hard veto; the successor to the killed binary E1 backside veto). OFF or stale tape ⇒ mult 1.0, defer off ⇒ byte-identical. Default ON.",
+    )
+    chili_momentum_frontside_size_floor: float = Field(
+        default=0.25,
+        ge=0.05,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FRONTSIDE_SIZE_FLOOR"),
+        description="The minimum entry SIZE-TILT multiplier the weakest admitted front-side still trades (never 0 ⇒ no hard veto; meta-labeling-as-sizing). ONE documented base. Default 0.25, band [0.05,1.0].",
+    )
+    chili_momentum_frontside_defer_pctile: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=0.5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FRONTSIDE_DEFER_PCTILE"),
+        description="Own-distribution strength percentile below which the entry SOFT-DEFERS (non-terminal re-poll, bounded) instead of admitting at the floor. Default 0.15 (p15). 0 ⇒ defer disabled. Band [0,0.5].",
+    )
     # E3 — EXPLOSIVE-FLOOR HARD GATE. Selection ranks by within-batch PERCENTILE, so on a
     # dull tape the best-of-a-dull-batch ranks #1 and arms a non-explosive name. Ross's
     # stated floors (RVOL >= ~5x AND day-change >= ~10%) are absolute, not relative. When

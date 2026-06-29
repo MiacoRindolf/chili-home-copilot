@@ -1355,6 +1355,210 @@ def front_side_state(
     )
 
 
+# ── ADAPTIVE FRONT-SIDE STRENGTH (ER-spine size-tilt; replaces the binary backside) ──
+# WHY: the prior front-side read is a BINARY backside/penalty cut — it answered "is this
+# below VWAP / extended?" with a hard veto-shaped signal. The killed E1 backside-veto
+# (2026-06-25, net-negative) over-vetoed valid below-VWAP-RECLAIM winners: a name that
+# fades under VWAP, consolidates, then RECLAIMS on volume is FRONT side, but a binary
+# below-VWAP test rejects it at the worst moment. This replaces the binary cut with a
+# CONTINUOUS strength score (Kaufman Efficiency-Ratio spine + VWAP-dist / range-pos / OFI
+# level+slope / signed-tape terms) mapped to an entry SIZE-TILT multiplier in
+# [SIZE_FLOOR, 1.0] + a soft, non-terminal DEFER — never a hard veto. A clean first-push
+# (high ER, rising OFI) sizes FULL; a falling-knife (low ER, OFI rolling over) sizes DOWN
+# to the floor or soft-defers, then admits small if it persists. The reclaim-turning-up
+# case E1 killed scores HIGH (vwap_dist crossing >0 + ofi_slope>0) and gets full size.
+# Kill-switched (default ON); flag OFF or stale tape ⇒ mult 1.0, defer off ⇒ byte-identical.
+# Pure / side-effect-free; the caller supplies the live OFI/tape reads + the own-distribution
+# percentile thresholds (s_lo/s_hi/defer) so there is no cross-name magic.
+
+# ONE documented base each (the only absolute reference points; floors, not ceilings).
+FRONTSIDE_SIZE_FLOOR = 0.25          # the weakest admitted front-side still trades 1/4 size
+                                     # (never 0 ⇒ no hard veto). The meta-labeling-as-sizing
+                                     # pattern: a secondary signal SIZES, never vetoes.
+FRONTSIDE_ER_WINDOW = 8              # bars over which the Kaufman Efficiency Ratio is measured
+                                     # (a short intraday push horizon). Floor, adaptive above.
+
+
+def kaufman_efficiency_ratio(closes, *, window: int = FRONTSIDE_ER_WINDOW) -> float | None:
+    """Kaufman Efficiency Ratio over the last ``window`` closes: ``|net change| / Σ|bar Δ|``,
+    bounded [0, 1]. ~1 = a clean one-way push (efficient trend); ~0 = chop / a falling-knife
+    round-trip. The directionless-MAGNITUDE spine of the strength score — self-normalizing,
+    so it needs no per-name scale. Returns None on insufficient / degenerate data (the caller
+    fails OPEN). Pure."""
+    try:
+        xs = [float(c) for c in (closes or []) if c is not None and math.isfinite(float(c))]
+    except (TypeError, ValueError):
+        return None
+    w = int(window) if (isinstance(window, (int, float)) and window and window >= 2) else FRONTSIDE_ER_WINDOW
+    if len(xs) < 2:
+        return None
+    seg = xs[-w:] if len(xs) > w else xs
+    if len(seg) < 2:
+        return None
+    net = abs(seg[-1] - seg[0])
+    path = sum(abs(seg[i] - seg[i - 1]) for i in range(1, len(seg)))
+    if not (path > 0):
+        return None
+    er = net / path
+    if not math.isfinite(er):
+        return None
+    return max(0.0, min(1.0, er))
+
+
+def _sig01(x: float | None, *, scale: float = 1.0) -> float:
+    """Saturating 0..1 sigmoid of a signed input (caps extension; a reclaim crossing up
+    flips it >0.5). Neutral 0.5 on missing input. Pure."""
+    if x is None:
+        return 0.5
+    try:
+        v = float(x) / max(1e-9, float(scale))
+    except (TypeError, ValueError):
+        return 0.5
+    if not math.isfinite(v):
+        return 0.5
+    return 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, v))))
+
+
+def _clamp01(x: float | None) -> float | None:
+    if x is None:
+        return None
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(v):
+        return None
+    return max(0.0, min(1.0, v))
+
+
+# Spine-heavy weights (ONE documented set; ER + OFI-slope earn the top weights). The
+# present terms' weights are renormalized so a missing term never silently shrinks the
+# score — the score is the weighted MEAN of whatever terms are present.
+_FRONTSIDE_WEIGHTS: dict[str, float] = {
+    "er": 0.34,            # E Kaufman ER — the spine
+    "vwap_dist": 0.16,     # A signed VWAP distance (saturating; reclaim crosses up)
+    "range_pos": 0.10,     # G where in the day-range (front of the move)
+    "ofi_level": 0.12,     # micro confirm: real buyers (not a hollow wick)
+    "ofi_slope": 0.18,     # the front-side TURN detector
+    "tape": 0.10,          # Lee-Ready signed tape thrust
+}
+
+
+def front_side_strength_score(
+    *,
+    closes=None,
+    vwap_dist_sigma: float | None = None,
+    day_range_pos: float | None = None,
+    ofi_level: float | None = None,
+    ofi_slope: float | None = None,
+    signed_tape: float | None = None,
+    er_window: int = FRONTSIDE_ER_WINDOW,
+) -> float | None:
+    """CONTINUOUS front-side strength in [0, 1] (replaces the binary backside cut). A blend,
+    spine = Kaufman Efficiency Ratio, of the terms already computed live: signed VWAP distance
+    (saturating ⇒ a reclaim crossing up scores HIGH, exactly the E1-killed winner), day-range
+    position, OFI level + SLOPE (the turn detector), and the Lee-Ready signed tape thrust. The
+    score is the weight-renormalized MEAN of whatever terms are PRESENT, so a missing datum
+    neither zeros nor inflates it. Returns None when NO informative term is present (the caller
+    fails OPEN to full size — stale != weak). Pure / deterministic.
+
+    A falling-knife (CTNT) lands LOW by construction: below-VWAP-falling ⇒ vwap term <0.5; chop
+    / round-trip ⇒ ER low; OFI slope<=0 ⇒ ofi_slope & ofi_level low. A VWAP-reclaim-turning-up
+    lands HIGH (vwap crossing >0 + ofi_slope>0) — full size, not a veto."""
+    terms: list[tuple[str, float]] = []
+    er = kaufman_efficiency_ratio(closes, window=er_window) if closes is not None else None
+    if er is not None:
+        terms.append(("er", er))
+    if vwap_dist_sigma is not None:
+        terms.append(("vwap_dist", _sig01(vwap_dist_sigma, scale=2.0)))
+    rp = _clamp01(day_range_pos)
+    if rp is not None:
+        terms.append(("range_pos", rp))
+    if ofi_level is not None:
+        terms.append(("ofi_level", _sig01(ofi_level, scale=1.0)))
+    if ofi_slope is not None:
+        terms.append(("ofi_slope", _sig01(ofi_slope, scale=0.5)))
+    if signed_tape is not None:
+        terms.append(("tape", _sig01(signed_tape, scale=1.0)))
+    if not terms:
+        return None
+    wsum = sum(_FRONTSIDE_WEIGHTS.get(k, 0.0) for k, _ in terms)
+    if not (wsum > 0):
+        return None
+    s = sum(_FRONTSIDE_WEIGHTS.get(k, 0.0) * v for k, v in terms) / wsum
+    if not math.isfinite(s):
+        return None
+    return max(0.0, min(1.0, s))
+
+
+def _smoothstep(x: float, lo: float, hi: float) -> float:
+    """Smooth 0..1 ramp (Hermite) over [lo, hi]; flat outside. Pure."""
+    if not (hi > lo):
+        return 1.0 if x >= hi else 0.0
+    t = max(0.0, min(1.0, (x - lo) / (hi - lo)))
+    return t * t * (3.0 - 2.0 * t)
+
+
+def front_side_size_tilt(
+    strength: float | None,
+    *,
+    size_floor: float = FRONTSIDE_SIZE_FLOOR,
+    s_lo: float = 0.25,
+    s_hi: float = 0.75,
+    defer_below: float | None = 0.15,
+    stale_tape: bool = False,
+    enabled: bool = True,
+) -> tuple[float, bool, dict]:
+    """Map a continuous front-side ``strength`` to an entry SIZE-TILT (multiplier in
+    [``size_floor``, 1.0]) + a soft, NON-TERMINAL ``defer`` flag. Never a hard veto: the
+    worst outcome is ``size_floor`` (1/4 size) or a bounded re-poll. ``s_lo``/``s_hi`` are
+    the name's OWN-distribution percentiles (p25/p75) and ``defer_below`` its p15 — supplied
+    by the caller so there is no cross-name magic. The smoothstep gives a full→floor ramp,
+    not a cliff. Returns ``(mult, defer, detail)``.
+
+    FAIL-OPEN: ``enabled`` False, ``stale_tape`` True, or ``strength`` None ⇒ mult 1.0,
+    defer False (byte-identical to today's full-size path — a cold/missing tape must NEVER
+    block an entry; stale != weak). Pure / deterministic."""
+    detail: dict = {
+        "enabled": bool(enabled),
+        "stale_tape": bool(stale_tape),
+        "strength": (None if strength is None else round(float(strength), 4)),
+        "size_floor": float(size_floor),
+    }
+    if (not enabled) or stale_tape or strength is None:
+        detail["mult"] = 1.0
+        detail["defer"] = False
+        detail["reason"] = ("disabled" if not enabled else "stale_tape" if stale_tape else "no_strength")
+        return 1.0, False, detail
+    try:
+        s = float(strength)
+        floor = max(0.0, min(1.0, float(size_floor)))
+        lo = float(s_lo)
+        hi = float(s_hi)
+    except (TypeError, ValueError):
+        detail["mult"] = 1.0
+        detail["defer"] = False
+        detail["reason"] = "bad_input"
+        return 1.0, False, detail
+    if not math.isfinite(s):
+        detail["mult"] = 1.0
+        detail["defer"] = False
+        detail["reason"] = "bad_input"
+        return 1.0, False, detail
+    mult = floor + (1.0 - floor) * _smoothstep(s, lo, hi)
+    mult = max(floor, min(1.0, mult))
+    defer = False
+    if defer_below is not None:
+        try:
+            defer = bool(s < float(defer_below))
+        except (TypeError, ValueError):
+            defer = False
+    detail["mult"] = round(mult, 4)
+    detail["defer"] = bool(defer)
+    detail["reason"] = "tilt"
+    return mult, bool(defer), detail
+
+
 # ── The Curl (HVM101): rounding-bottom continuation, as a pure SCORING signal ──
 # Ross's "The Curl" (HVM101) = a rounding-bottom CONTINUATION off a gap-fade or a
 # mid-trend pop-fade: the name dips, the selling decelerates, a base rounds out, and
