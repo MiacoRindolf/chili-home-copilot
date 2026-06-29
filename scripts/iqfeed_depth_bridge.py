@@ -24,6 +24,7 @@ Usage: python scripts/iqfeed_depth_bridge.py [--seconds N] [SYM ...]
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import socket
@@ -77,8 +78,11 @@ CREATE TABLE IF NOT EXISTS iqfeed_depth_snapshots (
     bid5_size DOUBLE PRECISION, ask5_size DOUBLE PRECISION,
     imbalance5 DOUBLE PRECISION,
     venues INT,
+    bids_json JSONB, asks_json JSONB,
     source VARCHAR(24) NOT NULL DEFAULT 'iqfeed_l2'
 );
+ALTER TABLE iqfeed_depth_snapshots ADD COLUMN IF NOT EXISTS bids_json JSONB;
+ALTER TABLE iqfeed_depth_snapshots ADD COLUMN IF NOT EXISTS asks_json JSONB;
 CREATE INDEX IF NOT EXISTS ix_iqfeed_depth_sym_at ON iqfeed_depth_snapshots (symbol, observed_at DESC);
 """
 
@@ -110,12 +114,20 @@ class Book:
         b5 = sum(sz for _, sz in bids[:DEPTH_LEVELS])
         a5 = sum(sz for _, sz in asks[:DEPTH_LEVELS])
         tot = b5 + a5
+        # P3: persist the per-PRICE ladder (top DEPTH_LEVELS per side), mirroring the
+        # crypto fast_orderbook shape [[px, sz], ...] (best-first), so the app-side
+        # multi-level OFI reader gets a real book instead of just the 5-level
+        # aggregate. Rounded to keep JSONB compact; the aggregate fields above are
+        # left UNCHANGED so every existing level-1 consumer is byte-identical.
+        bids_json = [[round(px, 6), round(sz, 4)] for px, sz in bids[:DEPTH_LEVELS]]
+        asks_json = [[round(px, 6), round(sz, 4)] for px, sz in asks[:DEPTH_LEVELS]]
         return {
             "bid_top": bids[0][0], "ask_top": asks[0][0],
             "bid_top_size": bids[0][1], "ask_top_size": asks[0][1],
             "bid5_size": b5, "ask5_size": a5,
             "imbalance5": round((b5 - a5) / tot, 4) if tot > 0 else None,
             "venues": len({v for (v, _s) in self.levels}),
+            "bids_json": bids_json, "asks_json": asks_json,
         }
 
 
@@ -218,8 +230,10 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
     last_prune = 0.0
     ins = sa.text(
         "INSERT INTO iqfeed_depth_snapshots (symbol, observed_at, bid_top, ask_top, "
-        "bid_top_size, ask_top_size, bid5_size, ask5_size, imbalance5, venues) "
-        "VALUES (:sym, :at, :bt, :at2, :bts, :ats, :b5, :a5, :imb, :v)"
+        "bid_top_size, ask_top_size, bid5_size, ask5_size, imbalance5, venues, "
+        "bids_json, asks_json) "
+        "VALUES (:sym, :at, :bt, :at2, :bts, :ats, :b5, :a5, :imb, :v, "
+        "CAST(:bids AS JSONB), CAST(:asks AS JSONB))"
     )
     while running and (deadline is None or time.monotonic() < deadline):
         time.sleep(SNAP_INTERVAL_S)
@@ -292,7 +306,9 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
             rows.append({"sym": sym, "at": now, "bt": snap["bid_top"], "at2": snap["ask_top"],
                          "bts": snap["bid_top_size"], "ats": snap["ask_top_size"],
                          "b5": snap["bid5_size"], "a5": snap["ask5_size"],
-                         "imb": snap["imbalance5"], "v": snap["venues"]})
+                         "imb": snap["imbalance5"], "v": snap["venues"],
+                         "bids": json.dumps(snap["bids_json"]),
+                         "asks": json.dumps(snap["asks_json"])})
         if rows:
             try:
                 with engine.begin() as c:
