@@ -524,6 +524,11 @@ def persist_neural_momentum_tick(
             "default_exit_logic": row.get("default_exit_logic"),
             "regime_fit": row.get("regime_fit"),
             "freshness_hint": row.get("freshness_hint"),
+            # LEVER 1: persist the risk-bounded marker so the live_runner sizing path
+            # (and operator readouts) can size an extreme-vol / missing-rvol genuine
+            # mover DOWN. Absent / False => byte-identical (the lever is OFF or the name
+            # is a normal-vol fully-confirmed mover).
+            "extreme_vol_risk_bounded": bool(row.get("extreme_vol_risk_bounded", False)),
         }
         evidence_window: dict[str, Any] = {"note": "phase2_placeholder"}
 

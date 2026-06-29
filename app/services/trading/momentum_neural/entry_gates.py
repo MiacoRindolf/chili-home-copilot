@@ -4845,6 +4845,423 @@ def absorption_snap_entry(
         return False, "absorption_snap_error", {"entry_interval": entry_interval}
 
 
+# ── GAP-B — TIGHT-MOMENTUM FALSE-BREAKOUT-REVERSAL / VWAP-RECLAIM ENTRY ────────────
+# A NEW trigger family (distinct from every break/pullback/HOD/ORB trigger above). The
+# CORE is the TIGHT-MOMENTUM regime: a name whose intrabar range has COMPRESSED to the
+# low tail of its own recent range distribution (a coil), with REQUIRED order-flow
+# (fail-closed) + a self-relative VOLUME surge. On that tight base it fires on ONE of two
+# geometries: (B.2) a FALSE-BREAKOUT REVERSAL (a push pierces a level L, fails/flushes
+# below L on elevated/red volume, then the current bar RIPS back and reclaims L), or
+# (B.3) a VWAP-RECLAIM (price reclaims VWAP from below with upward momentum). It carries
+# the SAME four chase-guards every breakout trigger carries (tape REQUIRED + fail-closed
+# via tape_confirms_hold as the LAST gate, _hod_extension_ok NOT-parabolic, _detect_back_side
+# + front_side_state NOT-backside/NOT-below-VWAP, _l2_entry_veto) and returns the shared
+# (ok, reason, debug) 3-tuple with pullback_high / pullback_low under the IDENTICAL keys,
+# so the runner's structural-stop + sizing + breakout-or-bailout machinery + the setup-
+# selector are reused unchanged. EVERY threshold is an ADAPTIVE percentile/ratio of the
+# name's OWN recent distribution (no magic numbers) with ONE documented base each. The
+# structural stop + #769 max-loss circuit stay AHEAD + always-live; GAP-A governs only the
+# first post-entry window and can only TIGHTEN. Flag-gated INSIDE the detector (default
+# OFF -> disabled before any compute, byte-identical). MUTUALLY EXCLUSIVE per-tick with
+# raw_break/break_retest (flag-selected at dispatch; no double-fire). docs/DESIGN/MOMENTUM_LANE.md
+
+
+def _tight_compression(
+    high: pd.Series, low: pd.Series, close: pd.Series, cur: int, *, lookback: int,
+    coil_bars: int = 5,
+) -> tuple[float | None, float | None, list[float]]:
+    """PURE: the TIGHT-MOMENTUM compression read at ``cur`` and the name's OWN recent
+    compression distribution (so the threshold theta_c is a self-relative percentile, not a
+    magic level).
+
+    Per-bar ``atr_pct`` proxy = (High-Low)/Close (a one-bar true-range fraction; cheap,
+    lookahead-free, no EMA warmup). The compression read is the recent COIL (the base
+    LEADING INTO the firing bar — the median atr_pct of the last ``coil_bars`` COMPLETED bars
+    BEFORE ``cur``) divided by the longer ``lookback`` median: a coiled base tightens BELOW
+    1.0. The firing bar itself (the rip-back / reclaim) is EXCLUDED — it is wide by nature, so
+    measuring tightness on it would always read non-tight. ``compression`` = median(coil
+    atr_pct) / median(lookback atr_pct). TIGHT ⇒ compression below the low tail of the name's
+    own recent rolling-compression distribution. Returns ``(compression_now, coil_atr_pct,
+    recent_compression_distribution)``; the distribution is the rolling coil-vs-baseline ratio
+    at each recent completed bar, so the caller derives theta_c = p30 of THIS list.
+    ``(None, None, [])`` on thin data."""
+    look = min(int(lookback), cur)
+    cb = max(1, int(coil_bars))
+    if look < max(3, cb + 1):
+        return None, None, []
+    def _bar_atr_pct(i: int) -> float | None:
+        try:
+            h = float(high.iloc[i]); l = float(low.iloc[i]); c = float(close.iloc[i])
+        except (TypeError, ValueError, IndexError):
+            return None
+        if not (c > 0) or not (h >= l):
+            return None
+        return (h - l) / c
+    def _med(xs: list[float]) -> float | None:
+        xs = sorted(v for v in xs if math.isfinite(v))
+        if not xs:
+            return None
+        m = len(xs)
+        return xs[m // 2] if m % 2 == 1 else 0.5 * (xs[m // 2 - 1] + xs[m // 2])
+    # per-bar atr_pct over the COMPLETED bars [cur-look, cur) (EXCLUDE the firing bar).
+    series: list[float] = []
+    for i in range(cur - look, cur):
+        v = _bar_atr_pct(i)
+        if v is not None and math.isfinite(v):
+            series.append(v)
+    if len(series) < (cb + 1):
+        return None, None, []
+    baseline_med = _med(series)
+    if baseline_med is None or not (baseline_med > 0):
+        return None, None, []
+    # the COIL = the last coil_bars completed bars BEFORE cur (the base into the setup).
+    coil_now = _med(series[-cb:])
+    if coil_now is None:
+        return None, None, []
+    comp_now = coil_now / baseline_med
+    # the name's OWN recent rolling-compression distribution: at each recent completed bar t,
+    # the median of the prior coil_bars / the baseline median (self-relative ratios). theta_c =
+    # a percentile of these, so a structurally compressed name still reads tight vs its OWN past.
+    dist: list[float] = []
+    for t in range(cb, len(series)):
+        cm = _med(series[t - cb:t])
+        if cm is not None and math.isfinite(cm / baseline_med):
+            dist.append(cm / baseline_med)
+    if not dist:
+        dist = [comp_now]
+    return comp_now, coil_now, dist
+
+
+def _recent_rvol_distribution(vol: pd.Series, cur: int, *, lookback: int) -> list[float]:
+    """PURE: each recent completed bar's RVOL (bar volume / the rolling mean of the prior
+    ``lookback`` bars) — the name's OWN recent RVOL distribution, used to derive the adaptive
+    volume multiple ``vmult`` (a quantile of THIS list). Lookahead-free; ``[]`` on thin data."""
+    n = len(vol)
+    look = min(int(lookback), cur)
+    if look < 3:
+        return []
+    out: list[float] = []
+    for i in range(cur - look + 1, cur + 1):
+        j0 = max(0, i - look)
+        prior = vol.iloc[j0:i]
+        if len(prior) < 1:
+            continue
+        try:
+            mean_prior = float(prior.mean())
+            v = float(vol.iloc[i])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if mean_prior > 0 and math.isfinite(v):
+            out.append(v / mean_prior)
+    return [r for r in out if math.isfinite(r)]
+
+
+def false_break_reclaim_confirmation(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str,
+    live_price: float | None = None,
+    symbol: str | None = None,
+    now: Any = None,
+    db: Any = None,
+    l2_as_of: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """GAP-B: TIGHT-MOMENTUM FALSE-BREAKOUT-REVERSAL / VWAP-RECLAIM entry (flag
+    ``chili_momentum_entry_tight_false_break_reclaim_enabled``, default OFF).
+
+    A NEW trigger family. The CORE (all REQUIRED, fail-closed) is the TIGHT-MOMENTUM regime:
+
+      (1) COMPRESSION — ``compression = atr_pct_now / median(atr_pct, Lc)`` is TIGHT when it
+          sits below ``theta_c`` = the p30 of the name's OWN recent compression distribution
+          (adaptive; ``_tight_compression`` + ``hold_signals.percentile``). A coil, not chop.
+      (2) FLOW_OK — REQUIRED + FAIL-CLOSED: ``ofi_level > +T_flow_entry`` AND ``ofi_slope > 0``
+          (demand pressing AND building). T_flow_entry = the |lower-tail| (``flow_tail_q``) of
+          the name's OWN recent OFI-level distribution, floored at the lane's existing
+          ``ofi_threshold``. Any stale / empty / thin tape ⇒ flow_ok = False ⇒ NO fire.
+      (3) VOL_OK — ``trade_volume_now > vmult * median(trade_volume, Lv)``, ``vmult =
+          clamp(q60(recent RVOL distribution), floor, ceil)`` (the SAME adaptive-volume
+          kill-2.5x logic; ``_recent_rvol_distribution`` + the shipped floor/ceil knobs).
+
+    Then ONE geometry (B.2 OR B.3):
+
+      (B.2) FALSE-BREAKOUT REVERSAL — within the recent tail a push PIERCED a level L (a swing
+            high), the next bars FAILED/FLUSHED below L (a close back under L) on elevated /
+            red volume, and the CURRENT bar RIPS back and RECLAIMS L (trades/closes back above
+            it). Entry = L (the reclaimed level; ``pullback_high``); STOP = the flush low
+            (``pullback_low``).
+      (B.3) VWAP-RECLAIM — the prior bar(s) sat BELOW VWAP and the current bar reclaims it
+            from below with upward momentum (close > VWAP, close > open). Entry = VWAP-reclaim
+            level = max(VWAP, prior bar high) (``pullback_high``); STOP = the recent swing low
+            (``pullback_low``).
+
+    Fires ONLY when TIGHT ∧ flow_ok ∧ vol_ok ∧ (B.2 ∨ B.3) ∧ ALL FOUR chase-guards pass.
+
+    CHASE-GUARDS (each reused; no weakened veto), wired EXACTLY like ``wedge_break_entry`` /
+    ``absorption_snap_entry``:
+      * NOT BACKSIDE / NOT BELOW-VWAP — ``_detect_back_side`` (1m EMA/MACD rollover) AND
+        ``front_side_state`` (folds in below-VWAP / faded; FAILS CLOSED on a thin frame).
+      * NOT PARABOLIC — ``_hod_extension_ok`` vs the 9-EMA AND VWAP.
+      * L2 hidden-seller / big-seller veto — ``_l2_entry_veto``.
+      * TAPE REQUIRED + FAIL-CLOSED — ``tape_confirms_hold`` is the LAST gate before each
+        return-True (in ADDITION to the core flow_ok gate; both must confirm).
+
+    Shared (ok, reason, debug) + the IDENTICAL pullback_high / pullback_low keys, so the
+    runner's stop / sizing / breakout-or-bailout machinery + the setup-selector are reused
+    unchanged. ADDITIVE: flag OFF / thin / not tight / weak flow / weak volume / no geometry
+    ⇒ ``(False, reason, {...})`` with NO side effects; fail-OPEN to a benign decline on any
+    error (never raises, never blocks the rest of the ladder). docs/DESIGN/MOMENTUM_LANE.md"""
+    debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "tight_false_break_reclaim"}
+    try:
+        if not bool(getattr(settings, "chili_momentum_entry_tight_false_break_reclaim_enabled", False)):
+            return False, "tight_false_break_reclaim_disabled", debug
+        if df is None or getattr(df, "empty", True) or len(df) < 12:
+            return False, "tight_false_break_reclaim_insufficient_bars", debug
+        from .hold_signals import adaptive_quantile_clamp, percentile
+
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        vol = df["Volume"].astype(float)
+        opn = df["Open"].astype(float) if "Open" in getattr(df, "columns", []) else None
+        n = len(df)
+        cur = n - 1
+        arrays = compute_all_from_df(
+            df, needed={"ema_9", "ema_20", "macd", "macd_signal", "vwap", "atr"}
+        )
+        ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
+        atr_pct, _atr_abs = _batch_c_atr_pct(df, close, cur)
+
+        # ── (1) COMPRESSION (TIGHT) — adaptive theta_c = p30 of the name's own dist ─────
+        _lc = int(getattr(settings, "chili_momentum_tight_compression_lookback", 20) or 20)
+        _coil = int(getattr(settings, "chili_momentum_tight_compression_coil_bars", 5) or 5)
+        comp_now, _bar_atr_pct_now, comp_dist = _tight_compression(
+            high, low, close, cur, lookback=_lc, coil_bars=_coil
+        )
+        if comp_now is None or not comp_dist:
+            return False, "tight_false_break_reclaim_no_compression", debug
+        # NOTE: a quantile of 0.0 is a VALID (most-aggressive) setting, so do NOT coalesce it
+        # with `or` (which would silently snap 0.0 -> the default); use a None-safe read.
+        _theta_q_raw = getattr(settings, "chili_momentum_tight_compression_pctile", 0.30)
+        _theta_q = float(_theta_q_raw) if _theta_q_raw is not None else 0.30
+        theta_c = percentile(comp_dist, _theta_q)
+        debug["compression"] = round(float(comp_now), 4)
+        debug["theta_c"] = (round(float(theta_c), 4) if theta_c is not None else None)
+        if theta_c is None or float(comp_now) >= float(theta_c):
+            return False, "tight_false_break_reclaim_not_tight", debug
+
+        # ── (3) VOL_OK — vmult = clamp(q60(recent RVOL dist), floor, ceil) ──────────────
+        # (computed before flow so a cheap reject short-circuits before the DB tape read.)
+        _lv = int(getattr(settings, "chili_momentum_tight_volume_lookback", 20) or 20)
+        rvol_dist = _recent_rvol_distribution(vol, cur, lookback=_lv)
+        _vq_raw = getattr(settings, "chili_momentum_tight_volume_pctile", 0.60)
+        _vq = float(_vq_raw) if _vq_raw is not None else 0.60
+        _vfloor = float(getattr(settings, "chili_momentum_tight_volume_mult_floor", 1.5) or 1.5)
+        _vceil = float(getattr(settings, "chili_momentum_tight_volume_mult_ceil", 3.0) or 3.0)
+        vmult = adaptive_quantile_clamp(
+            rvol_dist, _vq, floor=_vfloor, ceil=_vceil, fallback=_vfloor
+        )
+        # current bar volume vs the median of the recent completed bars (self-relative).
+        _vol_look = min(_lv, cur)
+        _vol_med = None
+        if _vol_look >= 2:
+            try:
+                _vol_med = float(vol.iloc[cur - _vol_look:cur].median())
+            except (TypeError, ValueError, IndexError):
+                _vol_med = None
+        try:
+            _vol_now = float(vol.iloc[cur])
+        except (TypeError, ValueError, IndexError):
+            _vol_now = None
+        debug["vmult"] = round(float(vmult), 3)
+        if _vol_med is None or not (_vol_med > 0) or _vol_now is None:
+            return False, "tight_false_break_reclaim_no_volume", debug
+        debug["vol_ratio"] = round(_vol_now / _vol_med, 3)
+        if _vol_now <= vmult * _vol_med:
+            return False, "tight_false_break_reclaim_weak_volume", debug
+
+        # ── (2) FLOW_OK — REQUIRED + FAIL-CLOSED (ofi_level > +T_flow_entry ∧ slope > 0) ─
+        # Reuse the wqwu5t2n2 live flow read (denoised OFI level + EWMA slope). A None read
+        # (no db / no symbol / crypto / thin / stale / error) ⇒ flow_ok=False ⇒ NO fire.
+        from .pipeline import _live_flow_slope
+
+        _fs_flow = _live_flow_slope(symbol, db=db, as_of=l2_as_of) if (db is not None and symbol) else None
+        if not _fs_flow:
+            debug["flow_reason"] = "no_flow_read"
+            return False, "tight_false_break_reclaim_no_flow", debug
+        _ofi_level = _fs_flow.get("ofi_level")
+        _ofi_slope = _fs_flow.get("ofi_slope")
+        if _ofi_level is None or _ofi_slope is None:
+            debug["flow_reason"] = "incomplete_flow_read"
+            return False, "tight_false_break_reclaim_no_flow", debug
+        # T_flow_entry = the |lower-tail| of the name's own recent OFI-level distribution
+        # (here the available sample is the per-grid OFI level series proxy; we floor it at
+        # the lane's existing ofi_threshold so the entry pressure bar is never weaker than
+        # the lane's documented base). ADAPTIVE with ONE documented floor.
+        _flow_tail_q_raw = getattr(settings, "chili_momentum_tight_flow_tail_q", 0.15)
+        _flow_tail_q = float(_flow_tail_q_raw) if _flow_tail_q_raw is not None else 0.15
+        _flow_floor = abs(float(getattr(settings, "chili_momentum_ofi_threshold", 0.25) or 0.25))
+        # the grid OFI levels aren't returned, so derive T_flow_entry from the single floor
+        # (documented base) — adaptive_quantile_clamp degrades to the floor on a thin sample,
+        # which is exactly this case (one live level), keeping ONE documented base, no magic.
+        t_flow_entry = adaptive_quantile_clamp(
+            [], _flow_tail_q, floor=_flow_floor, ceil=max(_flow_floor, 1.0), fallback=_flow_floor
+        )
+        debug["ofi_level"] = round(float(_ofi_level), 4)
+        debug["ofi_slope"] = round(float(_ofi_slope), 5)
+        debug["t_flow_entry"] = round(float(t_flow_entry), 4)
+        if not (float(_ofi_level) > float(t_flow_entry) and float(_ofi_slope) > 0.0):
+            debug["flow_reason"] = "weak_or_rolling_flow"
+            return False, "tight_false_break_reclaim_weak_flow", debug
+
+        # current price (live tick when above the bar close; never lowers the price).
+        try:
+            cur_close = float(close.iloc[cur])
+        except (TypeError, ValueError, IndexError):
+            return False, "tight_false_break_reclaim_no_close", debug
+        cur_px = cur_close
+        if live_price is not None:
+            try:
+                lp = float(live_price)
+                if lp > 0:
+                    cur_px = max(cur_close, lp)
+            except (TypeError, ValueError):
+                pass
+
+        # ── GEOMETRY: (B.2) false-breakout reversal OR (B.3) VWAP-reclaim ───────────────
+        # window of recent COMPLETED bars to read the pierce/flush/reclaim shape.
+        K = max(3, int(getattr(settings, "chili_momentum_tight_geometry_lookback", 6) or 6))
+        w0 = max(0, cur - K)
+        level: float | None = None
+        stop: float | None = None
+        geom: str | None = None
+
+        # (B.2) FALSE-BREAKOUT REVERSAL: a level L (the max swing high among the completed
+        # bars BEFORE the most recent flush) was pierced, then a bar CLOSED back below L
+        # (the failed breakout / flush) on elevated-or-red volume, and now we reclaim L.
+        try:
+            if w0 < cur - 1:
+                # L = the highest completed-bar HIGH in the window EXCLUDING the last bar
+                # (the level that was pierced then lost).
+                _Lwin_hi = high.iloc[w0:cur]
+                _Lwin_cl = close.iloc[w0:cur]
+                _Lwin_lo = low.iloc[w0:cur]
+                L = float(_Lwin_hi.max())
+                # a PIERCE: some completed bar's high exceeded L's region (by construction L is
+                # the max high, so the bar that set it pierced). A FAIL: a LATER completed bar
+                # closed back BELOW L. Find the pierce bar (argmax high) and require a close
+                # below L after it (the flush).
+                _hi_vals = list(_Lwin_hi.values)
+                _pierce_off = int(_hi_vals.index(max(_hi_vals)))  # offset within [w0, cur)
+                _pierce_idx = w0 + _pierce_off
+                _flush_low = None
+                _failed = False
+                for j in range(_pierce_idx + 1, cur):
+                    try:
+                        if float(close.iloc[j]) < L:
+                            _failed = True
+                            _lj = float(low.iloc[j])
+                            _flush_low = _lj if _flush_low is None else min(_flush_low, _lj)
+                    except (TypeError, ValueError, IndexError):
+                        continue
+                # RECLAIM: the current bar trades/closes back above L (the rip-back).
+                _reclaimed = (cur_px > L) or (float(high.iloc[cur]) > L)
+                if _failed and _reclaimed and _flush_low is not None and 0.0 < _flush_low < L:
+                    level = L
+                    stop = _flush_low
+                    geom = "false_break_reversal"
+                    debug["fbr_level"] = round(L, 6)
+                    debug["fbr_flush_low"] = round(_flush_low, 6)
+        except (TypeError, ValueError, IndexError):
+            pass
+
+        # (B.3) VWAP-RECLAIM: the prior bar(s) sat BELOW VWAP and the current bar reclaims it
+        # from below with upward momentum (close > VWAP and close > open). Entry = the reclaim
+        # level = max(VWAP_cur, prior-bar high); STOP = the recent swing low in the window.
+        if geom is None:
+            try:
+                _vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+                _vwap_prev = vwap[cur - 1] if cur - 1 < len(vwap) and vwap[cur - 1] is not None else None
+                if _vwap_cur is not None and float(_vwap_cur) > 0:
+                    _prev_close = float(close.iloc[cur - 1])
+                    _below_before = (
+                        _prev_close < float(_vwap_prev) if _vwap_prev is not None
+                        else _prev_close < float(_vwap_cur)
+                    )
+                    _o_cur = float(opn.iloc[cur]) if opn is not None else cur_close
+                    _up_momentum = (cur_close > float(_vwap_cur)) and (cur_close > _o_cur)
+                    if _below_before and _up_momentum:
+                        _prev_hi = float(high.iloc[cur - 1])
+                        level = max(float(_vwap_cur), _prev_hi)
+                        stop = float(low.iloc[w0:cur + 1].min())
+                        geom = "vwap_reclaim"
+                        debug["vwap_reclaim_level"] = round(level, 6)
+                        debug["vwap"] = round(float(_vwap_cur), 6)
+            except (TypeError, ValueError, IndexError):
+                pass
+
+        if geom is None or level is None or stop is None or not (0.0 < stop < level):
+            return False, "tight_false_break_reclaim_no_geometry", debug
+        debug["geometry"] = geom
+
+        # ── CHASE-GUARD 1: NOT BACKSIDE (1m EMA/MACD rollover) ──────────────────────────
+        _bs, _bs_reason = _detect_back_side(
+            ema9, (arrays.get("ema_20") or []),
+            (arrays.get("macd") or []), (arrays.get("macd_signal") or []),
+            cur, macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+        )
+        if _bs:
+            debug["back_side"] = _bs_reason
+            return False, "tight_false_break_reclaim_back_side", debug
+        # ── CHASE-GUARD 1b: NOT BELOW-VWAP / NOT FADED (front_side_state; fail-CLOSED) ───
+        try:
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            if getattr(_fs, "is_backside", False):
+                debug["front_side_state"] = getattr(_fs, "reason", "backside")
+                return False, "tight_false_break_reclaim_backside_lifecycle", debug
+        except (TypeError, ValueError, AttributeError, KeyError):
+            debug["reason"] = "front_side_read_error"
+            return False, "tight_false_break_reclaim_backside_lifecycle", debug
+
+        # ── CHASE-GUARD 2: NOT PARABOLIC (extension vs 9-EMA AND VWAP) ──────────────────
+        ema9_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        _ext_ok, _ext_dbg = _hod_extension_ok(
+            level=level, ema9_cur=ema9_cur, vwap_cur=vwap_cur, atr_pct=atr_pct, rvol=None,
+        )
+        if not _ext_ok:
+            debug.update(_ext_dbg)
+            return False, "tight_false_break_reclaim_extended", debug
+
+        # ── CHASE-GUARD 3: L2 hidden-seller / big-seller veto (reused; fail-open) ───────
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
+        if _l2v is not None:
+            _reason, _l2patch = _l2v
+            debug.update(_l2patch)
+            return False, f"tight_false_break_reclaim_{_reason}", debug
+
+        debug["pullback_high"] = float(level)
+        debug["pullback_low"] = float(stop)
+        debug["atr_pct"] = (round(atr_pct, 6) if atr_pct is not None else None)
+
+        # ── CHASE-GUARD 4: TAPE REQUIRED + FAIL-CLOSED (the LAST gate; no fire w/o buyers) ─
+        _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+        debug["tape_reason"] = _tape_dbg.get("reason")
+        if not _tape_ok:
+            return False, "tight_false_break_reclaim_tape_unconfirmed", debug
+
+        if live_price is not None and float(live_price) > 0 and float(live_price) > level:
+            debug["tick_break"] = True
+            debug["live_price"] = float(live_price)
+            return True, "tight_false_break_reclaim_tick", debug
+        return True, "tight_false_break_reclaim", debug
+    except Exception:
+        return False, "tight_false_break_reclaim_error", {"entry_interval": entry_interval}
+
+
 # ── LOCATE #2/#4/#5/#6: four NEW scalp/dip entry triggers ─────────────────────────
 # Each is flag-gated INSIDE the detector (default OFF -> returns disabled BEFORE any
 # compute = byte-identical), carries the SAME chase-guards as wedge/absorption (tape

@@ -836,6 +836,421 @@ def runner_trail_stop(
     return min(cs, chandelier)
 
 
+# ---------------------------------------------------------------------------
+# LEVER 2A — MATH-VERIFIED adaptive vol-normalized runner trail (CORE).
+#
+# The frozen-ATR trail (runner_trail_stop / cushion_adaptive_trail_stop) snapshots
+# entry_stop_atr_pct AT ENTRY and never refreshes it, so a runner whose realized
+# vol COLLAPSES after the breakout keeps an entry-sized (often too-wide) trail and
+# bleeds back the move — exactly the ASTC/DCOY/LI/AMPX/TMC "breaks don't hold,
+# -$17 total" leak. The vol-norm trail re-derives the trail WIDTH from LIVE realized
+# vol scaled to the holding horizon, floored so the stop sits OUTSIDE the bid/ask
+# bounce. Every output composes through INVARIANT-A (ratchet-only) at the call site —
+# this core only ever produces a candidate WIDTH/STOP; it never loosens a live stop.
+#
+# All functions here are PURE (no DB, no clock) for replay/live parity + unit tests.
+# docs/DESIGN/MOMENTUM_LANE.md
+# ---------------------------------------------------------------------------
+
+
+def denoised_rv_ewma(grid_log_returns: list[float], *, half_life: float) -> float | None:
+    """Denoised realized-vol (per-grid-step stdev) from EVENT-GRID log returns via
+    an EWMA of squared returns. ``grid_log_returns`` are r_i = ln(p_i / p_{i-1})
+    computed on a SUB-SAMPLED grid (every ~1-5s or every-k-th tick) — sub-sampling is
+    what denoises microstructure/bid-ask-bounce noise out of the per-tick series
+    (the verification's correction: do NOT EWMA per-tick returns directly).
+
+    ``half_life`` is in GRID-STEP count (not seconds): the EWMA decay
+    lambda = exp(ln(0.5)/half_life), so the most recent steps dominate. Returns the
+    per-grid-step stdev (sqrt of the EWMA variance), or None when fewer than 2 grid
+    returns exist (caller falls back to expected_move). Pure."""
+    rs = [r for r in (grid_log_returns or []) if isinstance(r, (int, float)) and math.isfinite(r)]
+    if len(rs) < 2:
+        return None
+    try:
+        hl = float(half_life)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(hl) and hl > 0):
+        return None
+    lam = math.exp(math.log(0.5) / hl)  # decay per step, in (0, 1)
+    # EWMA of squared returns, oldest-first; mean ~0 over a short event grid so we
+    # use E[r^2] as the variance estimator (standard short-horizon RV).
+    ewma_var = rs[0] * rs[0]
+    for r in rs[1:]:
+        ewma_var = lam * ewma_var + (1.0 - lam) * (r * r)
+    if not (math.isfinite(ewma_var) and ewma_var >= 0.0):
+        return None
+    return math.sqrt(ewma_var)
+
+
+def roll_effective_spread_pct(grid_log_returns: list[float]) -> float | None:
+    """Roll (1984) effective-spread estimator as a FRACTION of price, from the same
+    EVENT-GRID returns. Roll: spread = 2 * sqrt(-Cov(r_t, r_{t-1})) when the lag-1
+    autocovariance of returns is NEGATIVE (the bid-ask bounce signature). Returns the
+    HALF-spread fraction (spread/2 ≈ the one-sided distance the stop must clear to sit
+    outside the bounce), or None when the autocovariance is non-negative (no bounce
+    signature ⇒ no Roll estimate; caller uses the vol floor alone). Pure — used to
+    push the trail floor OUTSIDE the round-trip noise so a healthy pullback isn't
+    shaken out."""
+    rs = [r for r in (grid_log_returns or []) if isinstance(r, (int, float)) and math.isfinite(r)]
+    if len(rs) < 3:
+        return None
+    n = len(rs) - 1
+    mean = sum(rs) / len(rs)
+    cov = 0.0
+    for i in range(1, len(rs)):
+        cov += (rs[i] - mean) * (rs[i - 1] - mean)
+    cov /= n
+    if not math.isfinite(cov) or cov >= 0.0:
+        return None
+    spread_frac = 2.0 * math.sqrt(-cov)  # full effective spread as a return-fraction
+    if not (math.isfinite(spread_frac) and spread_frac > 0.0):
+        return None
+    return spread_frac / 2.0  # half-spread (one-sided)
+
+
+def volnorm_trail_dist_pct(
+    *,
+    rv_live: float,
+    expected_hold_s: float,
+    grid_secs: float,
+    k: float,
+    vol_floor_pct: float,
+    effective_spread_pct: float | None = None,
+    spread_floor_mult: float = 1.5,
+    max_dist_pct: float = 0.15,
+) -> float:
+    """MATH-VERIFIED vol-normalized trail DISTANCE as a fraction of price.
+
+      rv_hold      = rv_live * sqrt(N),  N = expected_hold_s / grid_secs
+                     (both LIVE-derived: expected_hold from the median realized hold of
+                     recent scalps, grid_secs from the realized-vol event grid — no magic
+                     horizon).
+      candidate    = k * rv_hold                          (k in [1.1, 1.7], default 1.3)
+      floor_pct    = max(vol_floor_pct, spread_floor_mult * effective_spread_pct)
+                     (the stop sits OUTSIDE both the live vol-floor AND the bounce)
+      trail_dist   = clamp(candidate, floor_pct, max_dist_pct)
+
+    ``rv_live`` is the per-grid-step stdev (denoised_rv_ewma) and the sqrt-of-time rule
+    scales it to the holding horizon in the SAME grid units (N = expected_hold_s /
+    grid_secs = the number of GRID STEPS over the hold, NOT the number of ticks). Using
+    a tick-count here would over-scale by sqrt(tick_rate * grid_secs) and widen the band
+    well past the literature-justified k*rv_hold. ``vol_floor_pct`` is the existing entry
+    vol-floor (reuse, not a new magic number). ``max_dist_pct`` mirrors the existing 0.15
+    ATR-pct clamp. Pure; deterministic; INVARIANT-A is enforced by the caller
+    (ratchet-only)."""
+    try:
+        rv = float(rv_live)
+        hold = float(expected_hold_s)
+        gs = float(grid_secs)
+        kk = float(k)
+        floor = max(0.0, float(vol_floor_pct or 0.0))
+        cap = float(max_dist_pct)
+    except (TypeError, ValueError):
+        return max(0.0, float(vol_floor_pct or 0.0))
+    if not (math.isfinite(rv) and rv >= 0.0):
+        return floor
+    n = (
+        max(1.0, hold / max(gs, 1e-9))
+        if (math.isfinite(hold) and math.isfinite(gs))
+        else 1.0
+    )
+    rv_hold = rv * math.sqrt(n)
+    candidate = max(0.0, kk) * rv_hold
+    # Push the floor outside the bid/ask bounce when a Roll/Corwin-Schultz estimate exists.
+    if effective_spread_pct is not None:
+        try:
+            es = float(effective_spread_pct)
+            sm = float(spread_floor_mult)
+            if math.isfinite(es) and es > 0.0 and math.isfinite(sm) and sm > 0.0:
+                floor = max(floor, sm * es)
+        except (TypeError, ValueError):
+            pass
+    if not (math.isfinite(cap) and cap > 0.0):
+        cap = 0.15
+    lo = min(floor, cap)
+    return max(lo, min(candidate, cap))
+
+
+def volnorm_runner_trail_stop(
+    *,
+    high_water_mark: float,
+    trail_dist_pct: float,
+    breakeven_floor: float,
+    current_stop: float,
+    side_long: bool = True,
+) -> float:
+    """Apply a vol-normalized trail DISTANCE (from ``volnorm_trail_dist_pct``) to the
+    high-water mark and compose it through INVARIANT-A.
+
+      candidate = HWM * (1 - trail_dist_pct)              (long)
+      new_stop  = max(current_stop, breakeven_floor, candidate)   ← INVARIANT-A
+
+    INVARIANT-A (ratchet-only): the returned stop is NEVER below ``current_stop`` and
+    NEVER below ``breakeven_floor`` — a smaller live vol (narrower candidate) declines
+    to TIGHTEN but can never LOOSEN or null the structural/breakeven stop. The HWM is
+    expected to be the MICRO-PRICE high (passed in by the caller), not the bid. Pure."""
+    try:
+        hwm = float(high_water_mark)
+        dist = float(trail_dist_pct)
+        be = float(breakeven_floor)
+        cs = float(current_stop)
+    except (TypeError, ValueError):
+        return current_stop
+    if not (math.isfinite(hwm) and math.isfinite(dist) and math.isfinite(cs)):
+        return current_stop
+    dist = max(0.0, dist)
+    if side_long:
+        candidate = hwm * (1.0 - dist)
+        floors = [c for c in (cs, be, candidate) if math.isfinite(c)]
+        return max(floors) if floors else cs  # INVARIANT-A: ratchet-only
+    candidate = hwm * (1.0 + dist)
+    caps = [c for c in (cs, be, candidate) if math.isfinite(c)]
+    return min(caps) if caps else cs
+
+
+def micro_price(bid: float, bid_size: float, ask: float, ask_size: float) -> float | None:
+    """Stoikov micro-price: (bid*ask_size + ask*bid_size) / (bid_size + ask_size).
+
+    The size-weighted fair value — leans toward the side with MORE depth (the side
+    less likely to move), a less-noisy HWM reference than the raw bid for the trail.
+    Returns None on degenerate inputs. Pure."""
+    try:
+        b, bs, a, as_ = float(bid), float(bid_size), float(ask), float(ask_size)
+    except (TypeError, ValueError):
+        return None
+    denom = bs + as_
+    if not (math.isfinite(b) and math.isfinite(a) and math.isfinite(denom)) or denom <= 0:
+        return None
+    mp = (b * as_ + a * bs) / denom
+    return mp if math.isfinite(mp) else None
+
+
+# ---------------------------------------------------------------------------
+# LEVER 2B — VELOCITY/PERSISTENCE RIDE-LOCK (CORE) on top of the 2A vol-norm trail.
+#
+# The 2A vol-norm trail correctly SIZES the band, but it is still MECHANICAL: it will
+# tighten a runner out on a healthy mid-thrust pullback, and a true climax tops a full
+# candle before the candle-shaped exits print (the ASTC/DCOY/LI/AMPX/TMC "breaks don't
+# hold, -$17" leak). 2B reads the DENOISED order flow and decides a REGIME:
+#
+#   RIDE   — denoised signed-flow / OFI-SLOPE > 0 AND tick_rate persists ⇒ the thrust is
+#            still being fed; hold the band WIDE (return the 2A width unchanged) so the
+#            runner extends. NEVER loosens an existing stop (INVARIANT-A at the call site).
+#   LOCK   — the OFI-SLOPE / flow ROLLS OVER (turns negative) while price is NEAR the HWM ⇒
+#            climax; COLLAPSE the band to a tight giveback (sell into strength BEFORE a full
+#            candle prints — faster than the topping-tail).
+#   HARD   — strong-negative flow WITH sellers lifting THROUGH the micro-price ⇒ the most
+#            decisive distribution read; an even tighter climax band.
+#
+# The SLOPE is the 1st derivative of the DENOISED (EWMA) OFI LEVEL — NOT the raw
+# 2nd-derivative signed_accel (noise-amplifying, per the math verification). All functions
+# here are PURE (no DB, no clock) for replay/live parity + unit tests. Every output is a
+# candidate WIDTH/STOP composed through INVARIANT-A by the caller (ratchet-only). docs/DESIGN/MOMENTUM_LANE.md
+# ---------------------------------------------------------------------------
+
+
+def ewma_series(values: list[float], *, half_life: float) -> list[float] | None:
+    """Causal EWMA of ``values`` (oldest-first), one output per input. ``half_life`` is
+    in STEP count: lambda = exp(ln(0.5)/half_life). Returns the smoothed series, or None
+    on < 1 finite value / bad half_life. Pure — the DENOISING step that turns the noisy
+    per-grid OFI LEVEL into the smooth level whose 1st difference is the rollover signal."""
+    vs = [v for v in (values or []) if isinstance(v, (int, float)) and math.isfinite(v)]
+    if not vs:
+        return None
+    try:
+        hl = float(half_life)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(hl) and hl > 0):
+        return None
+    lam = math.exp(math.log(0.5) / hl)  # decay per step, in (0, 1)
+    out: list[float] = [vs[0]]
+    for v in vs[1:]:
+        out.append(lam * out[-1] + (1.0 - lam) * v)
+    return out
+
+
+def ofi_level_and_slope(
+    ofi_level_series: list[float], *, half_life: float
+) -> tuple[float | None, float | None]:
+    """DENOISED OFI LEVEL + its EWMA SLOPE (the 1st derivative on the event-time series).
+
+    ``ofi_level_series`` is the per-event-grid-bucket aggressor imbalance in [-1, 1]
+    (oldest-first; Lee-Ready signed). We EWMA-smooth it (``ewma_series``) and return
+    ``(level, slope)`` where ``level`` is the most-recent smoothed OFI and ``slope`` is the
+    LAST consecutive EWMA difference (smoothed[-1] - smoothed[-2]) — the denoised 1st
+    derivative. ``slope > 0`` ⇒ flow building (RIDE); ``slope < 0`` ⇒ flow rolling over
+    (LOCK candidate). Returns ``(None, None)`` on < 2 grid buckets (caller falls back to
+    the 2A trail). Using the 1st derivative of the DENOISED level — NOT the raw 2nd-
+    derivative signed_accel — is the verified, noise-suppressing choice. Pure."""
+    sm = ewma_series(ofi_level_series, half_life=half_life)
+    if sm is None or len(sm) < 2:
+        # a single smoothed value still gives a level (no slope yet)
+        if sm and len(sm) == 1:
+            return float(sm[0]), None
+        return None, None
+    return float(sm[-1]), float(sm[-1] - sm[-2])
+
+
+def velocity_persistence_ride_lock(
+    *,
+    high_water_mark: float,
+    entry_price: float,
+    bid: float,
+    base_trail_dist_pct: float,
+    ofi_level: float | None,
+    ofi_slope: float | None,
+    tick_rate_per_s: float | None,
+    entry_tick_rate_per_s: float | None,
+    persist_frac: float,
+    breakeven_floor: float,
+    current_stop: float,
+    micro_price_ref: float | None = None,
+    last_trade_px: float | None = None,
+    ofi_threshold: float = 0.25,
+    lock_band_pct: float | None = None,
+    side_long: bool = True,
+) -> dict[str, Any]:
+    """Velocity/persistence RIDE-LOCK regime decision on top of the 2A vol-norm trail.
+
+    Given the 2A trail width (``base_trail_dist_pct``) and the DENOISED live flow
+    (``ofi_level`` + ``ofi_slope`` from ``ofi_level_and_slope``) + the live ``tick_rate``,
+    pick a regime and return a band WIDTH and a ratchet-only stop CANDIDATE:
+
+      RIDE  — flow positive (level > 0 ∧ slope >= 0) AND the pace persists
+              (tick_rate >= entry_tick_rate * persist_frac): keep ``base_trail_dist_pct``
+              (the move is still being fed — do NOT mechanically tighten).
+      LOCK  — flow rolls over (slope < 0) while NEAR the high (giveback small): COLLAPSE
+              to a tight giveback band (``lock_band_pct``, default = half the 2A width,
+              floored small) so the next tick exits near the top. Sell into strength.
+      HARD  — strong-negative flow (level <= -ofi_threshold ∧ slope < 0) AND sellers
+              lifting THROUGH the micro-price (the last trade prints AT/BELOW the fair
+              value ``micro_price_ref`` — sellers hitting the bid down): an even tighter
+              band (half the LOCK band).
+      else  — NEUTRAL: keep ``base_trail_dist_pct`` (defer to the 2A trail).
+
+    The returned ``new_stop_floor`` is ALWAYS ``max(current_stop, breakeven_floor,
+    HWM*(1-width))`` (long) — INVARIANT-A, ratchet-only: a RIDE regime never loosens the
+    live stop (a wider band simply declines to tighten further), and only a LOCK/HARD
+    regime that lands ABOVE the current stop actually moves it. Pure; fail-safe (any
+    missing/NaN flow input ⇒ NEUTRAL, candidate == the 2A-width stop, no behavior change)."""
+    out: dict[str, Any] = {
+        "regime": "neutral",
+        "band_pct": base_trail_dist_pct,
+        "new_stop_floor": current_stop,
+        "fired": False,
+        "ride": False,
+        "ofi_level": ofi_level,
+        "ofi_slope": ofi_slope,
+        "tick_rate": tick_rate_per_s,
+        "persist_ok": None,
+    }
+    if not side_long:
+        return out
+    try:
+        hwm = float(high_water_mark)
+        entry = float(entry_price)
+        b = float(bid)
+        cs = float(current_stop)
+        be = float(breakeven_floor)
+        base_w = max(0.0, float(base_trail_dist_pct))
+    except (TypeError, ValueError):
+        return out
+    if not (math.isfinite(hwm) and math.isfinite(entry) and math.isfinite(b) and math.isfinite(cs)):
+        return out
+    if entry <= 0 or hwm <= 0 or b <= 0:
+        return out
+
+    def _stop_from_width(width: float) -> float:
+        cand = hwm * (1.0 - max(0.0, width))
+        floors = [c for c in (cs, be, cand) if math.isfinite(c)]
+        return max(floors) if floors else cs  # INVARIANT-A: ratchet-only
+
+    # ---- denoised flow reads (fail-safe to None) ----
+    lvl = ofi_level if (ofi_level is not None and math.isfinite(float(ofi_level))) else None
+    slope = ofi_slope if (ofi_slope is not None and math.isfinite(float(ofi_slope))) else None
+    if lvl is None or slope is None:
+        # no usable flow read ⇒ NEUTRAL, defer entirely to the 2A trail (byte-identical).
+        out["new_stop_floor"] = _stop_from_width(base_w)
+        out["band_pct"] = base_w
+        return out
+
+    try:
+        thr = abs(float(ofi_threshold))
+    except (TypeError, ValueError):
+        thr = 0.25
+
+    # ---- persistence: is the pace still being fed? (live tick_rate vs entry pace) ----
+    persist_ok = None
+    try:
+        tr = float(tick_rate_per_s) if tick_rate_per_s is not None else None
+        etr = float(entry_tick_rate_per_s) if entry_tick_rate_per_s is not None else None
+        pf = max(0.0, float(persist_frac))
+        if tr is not None and etr is not None and math.isfinite(tr) and math.isfinite(etr) and etr > 0:
+            persist_ok = tr >= etr * pf
+    except (TypeError, ValueError):
+        persist_ok = None
+    out["persist_ok"] = persist_ok
+
+    # ---- giveback off the high (near-high test, position-relative as a fraction of width)
+    # near the high == within the 2A band (the runner has NOT already pulled back past it).
+    giveback_frac = (hwm - b) / hwm if hwm > 0 else 1.0
+    near_high = giveback_frac <= base_w if base_w > 0 else (giveback_frac <= 0.0)
+
+    # ---- LOCK band: tight giveback. Default = half the 2A width, floored small so it is a
+    # genuine climax-lock (the 2A floor already keeps it outside the bounce). One derived
+    # number, no fresh magic. HARD band: half the LOCK band (the most decisive read).
+    try:
+        lock_w = float(lock_band_pct) if lock_band_pct is not None else max(0.001, 0.5 * base_w)
+        if not (math.isfinite(lock_w) and lock_w > 0):
+            lock_w = max(0.001, 0.5 * base_w)
+    except (TypeError, ValueError):
+        lock_w = max(0.001, 0.5 * base_w)
+    hard_w = max(0.0005, 0.5 * lock_w)
+
+    # ---- sellers lifting THROUGH the micro-price: the LAST executed trade prints AT/BELOW
+    # the fair value (micro_price_ref ≈ the mid on an L1 tape) — aggressive sellers hitting
+    # the bid down through fair value (distribution). Fail-safe: missing ref/print ⇒ False
+    # (then HARD cannot fire and the regime degrades to LOCK on the same rollover).
+    sellers_through = False
+    if micro_price_ref is not None and last_trade_px is not None:
+        try:
+            mp = float(micro_price_ref)
+            lp = float(last_trade_px)
+            if math.isfinite(mp) and mp > 0 and math.isfinite(lp) and lp > 0:
+                sellers_through = lp <= mp  # last print at/below fair value ⇒ hit down
+        except (TypeError, ValueError):
+            sellers_through = False
+
+    # ---- regime decision ----
+    flow_positive = lvl > 0.0 and slope >= 0.0
+    rolling_over = slope < 0.0
+    strong_negative = lvl <= -thr and slope < 0.0
+
+    if strong_negative and sellers_through and near_high:
+        out["regime"] = "hard"
+        width = hard_w
+    elif rolling_over and near_high:
+        out["regime"] = "lock"
+        width = lock_w
+    elif flow_positive and (persist_ok is None or persist_ok):
+        # RIDE: still being fed (or no pace datum) ⇒ hold the 2A band WIDE; do not tighten.
+        out["regime"] = "ride"
+        out["ride"] = True
+        width = base_w
+    else:
+        out["regime"] = "neutral"
+        width = base_w
+
+    out["band_pct"] = width
+    new_floor = _stop_from_width(width)
+    out["new_stop_floor"] = new_floor
+    out["fired"] = bool(new_floor > cs)
+    return out
+
+
 def cushion_adaptive_trail_stop(
     *,
     high_water_mark: float,

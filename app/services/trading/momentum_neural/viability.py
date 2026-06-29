@@ -32,6 +32,12 @@ class ViabilityResult:
     regime_fit: str
     rationale: str
     warnings: tuple[str, ...]
+    # LEVER 1 win-win: True when this name is admitted LIVE despite extreme-vol /
+    # missing-rvol ONLY because it is a GENUINE explosive Ross-class mover — it must
+    # then be sized RISK-BOUNDED (the live_runner extreme-vol size-down lever reads
+    # this so the worst-case loss is bounded the same as a normal trade). Default
+    # False everywhere else (byte-identical when the lever is OFF or N/A).
+    extreme_vol_risk_bounded: bool = False
 
     def to_public_dict(self) -> dict:
         return {
@@ -45,6 +51,7 @@ class ViabilityResult:
             "regime_fit": self.regime_fit,
             "rationale": self.rationale,
             "warnings": list(self.warnings),
+            "extreme_vol_risk_bounded": self.extreme_vol_risk_bounded,
         }
 
 
@@ -303,8 +310,107 @@ def score_viability(
         live_eligible = False
         warnings.append("Product not tradable / metadata missing")
 
+    # LEVER 1 — WIN-WIN gate predicate. Compute ONCE: is this a GENUINE explosive
+    # Ross-class mover that is also tradable and within the live spread ceiling? It
+    # reuses the lane's EXISTING explosiveness floor (ross_momentum.below_explosive_floor
+    # — low-float + change, FAIL-OPEN on absent rvol, same fields _extract_pillars reads)
+    # and the SAME product_tradable + win-win spread cap already evaluated above. EQUITY
+    # only (crypto 24h RVOL/change semantics differ). Used by (a) the extreme-vol relax
+    # and (b) the A-setup None-rvol fail-open below. Absent signal / crypto / any error =>
+    # _is_genuine_explosive stays False => byte-identical. The win-win INVARIANT lives
+    # here: a name AFFIRMATIVELY below the floor, untradeable, or with a toxic spread can
+    # NEVER set this True, so it is still gated.
+    _allow_extreme_explosive = bool(
+        getattr(settings, "chili_momentum_live_eligible_allow_extreme_explosive", True)
+    )
+    _is_genuine_explosive = False
+    _extreme_vol_risk_bounded = False
+    if _allow_extreme_explosive and "-USD" not in str(symbol or "").upper():
+        try:
+            _rsig_x = (
+                feats.meta.get("ross_signals")
+                if isinstance(getattr(feats, "meta", None), dict)
+                else None
+            )
+            _sig_x = _rsig_x.get(symbol) if isinstance(_rsig_x, dict) else None
+            if isinstance(_sig_x, dict) and _sig_x:
+                from .ross_momentum import (
+                    _extract_pillars,
+                    _first_float,
+                    below_explosive_floor,
+                )
+
+                _spread_ok = True
+                _max_sp = float(
+                    getattr(settings, "chili_momentum_live_eligible_max_spread_bps", 0.0) or 0.0
+                )
+                if _max_sp > 0.0 and spread_bps is not None and spread_bps > _max_sp:
+                    _spread_ok = False  # toxic/broken spread — never a win-win mover
+                # AFFIRMATIVE explosiveness confirmation (does NOT depend on the
+                # default-OFF A-setup quality floor). below_explosive_floor() FAILS OPEN
+                # on absent rvol/change (ross_momentum.py:598-600) and never checks float,
+                # so a non-empty-but-junk signal (e.g. {'price': 1.0} with no float / no
+                # rvol / no change) would otherwise clear it and be admitted LIVE on the
+                # extreme-vol relax path. Require at least ONE datum that AFFIRMATIVELY
+                # shows the name is explosive: float-confirmed low float (<= the A-setup
+                # float ceiling), OR a present rvol at/above the explosive floor, OR a
+                # present change at/above the change floor. A name with no such datum is a
+                # selection-quality reject — _is_genuine_explosive stays False and the
+                # prior blanket extreme-vol block applies (byte-identical when the signal
+                # carries no explosiveness data).
+                _rvol_x, _chg_x, _liq_x, _ = _extract_pillars(_sig_x)
+                _float_x = _first_float(_sig_x, "float_shares")
+                _float_ceil_x = float(
+                    getattr(
+                        settings,
+                        "chili_momentum_a_setup_quality_floor_float_ceiling_shares",
+                        20_000_000.0,
+                    )
+                    or 20_000_000.0
+                )
+                _rvol_floor_x = float(
+                    getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 3.0
+                )
+                _chg_floor_x = float(
+                    getattr(
+                        settings,
+                        "chili_momentum_a_setup_quality_floor_change_pct_min",
+                        10.0,
+                    )
+                    or 10.0
+                )
+                _affirm_explosive = (
+                    (
+                        _float_x is not None
+                        and _float_x > 0
+                        and (_float_ceil_x <= 0 or _float_x <= _float_ceil_x)
+                    )
+                    or (_rvol_x is not None and _rvol_x >= _rvol_floor_x)
+                    or (_chg_x is not None and _chg_x >= _chg_floor_x)
+                )
+                if (
+                    feats.product_tradable is not False
+                    and _spread_ok
+                    and _affirm_explosive
+                    and not below_explosive_floor(_sig_x)
+                ):
+                    _is_genuine_explosive = True
+        except (TypeError, ValueError, AttributeError):
+            _is_genuine_explosive = False
+
     if ctx.vol_regime == VolatilityRegime.extreme:
-        live_eligible = False
+        # LEVER 1: a GENUINE explosive Ross-class mover (clears the floor + tradable +
+        # spread-OK) is NOT blanket-blocked on extreme-vol ALONE — it stays live-eligible
+        # but is flagged for RISK-BOUNDED sizing (live_runner sizes it DOWN so worst-case
+        # loss is bounded the same as a normal trade). A non-genuine extreme-vol name is
+        # STILL blocked. Flag OFF / not-genuine => the prior blanket block (byte-identical).
+        if _is_genuine_explosive:
+            _extreme_vol_risk_bounded = True
+            warnings.append(
+                "Extreme vol on a genuine explosive mover — LIVE with risk-bounded sizing"
+            )
+        else:
+            live_eligible = False
 
     # Ross gap #3: absolute explosiveness FLOOR (videos 01/05/17/29/36). The pipeline
     # marked the EQUITY symbols whose raw RVOL/change fall below Ross's hard floors
@@ -383,12 +489,40 @@ def score_viability(
                 # (1) LOW FLOAT — the primary discriminator (AREC 107M fails).
                 elif _ceil > 0 and _float_a > _ceil:
                     _reason = f"float {_float_a:,.0f} > ceiling {_ceil:,.0f}"
-                # (2) real RVOL.
-                elif _rvol_a is None or _rvol_a < _rvol_min:
-                    _reason = f"rvol {_rvol_a if _rvol_a is not None else 'none'} < {_rvol_min:g}"
+                # (2) RVOL. LEVER 1 win-win: distinguish AFFIRMATIVELY-LOW rvol (a real
+                # non-mover -> reject) from a MERELY-MISSING rvol datum (None). The old
+                # code failed CLOSED on None, blanket-blocking the day-monster (UPC live
+                # 2026-06-29: float=563K low-float OK, change=+10% OK, but rvol=None ->
+                # 1,520 rejects, $0 vs Ross +$35k). Align with the lane's own
+                # below_explosive_floor, which FAILS OPEN on absent rvol (benches a name
+                # only on data that AFFIRMATIVELY shows it is NOT explosive). When the
+                # name is otherwise a genuine mover (float-confirmed low-float + change
+                # already cleared above), a MISSING rvol no longer rejects — it is admitted
+                # RISK-BOUNDED (sized DOWN, same as the extreme-vol path) so the missing
+                # confirmation never costs more than a normal trade. An affirmatively-low
+                # rvol (present and < floor) STILL rejects. Flag OFF => the prior
+                # fail-CLOSED-on-None is byte-identical.
+                elif _rvol_a is not None and _rvol_a < _rvol_min:
+                    _reason = f"rvol {_rvol_a:g} < {_rvol_min:g}"
+                elif _rvol_a is None and not (
+                    _allow_extreme_explosive and _is_genuine_explosive
+                ):
+                    _reason = "rvol none"
                 # (3) meaningful change/move (absolute — magnitude is what matters).
                 elif _chg_a is None or abs(_chg_a) < _chg_min:
                     _reason = f"change {_chg_a if _chg_a is not None else 'none'} < {_chg_min:g}%"
+                # MISSING-rvol genuine mover admitted -> risk-bounded sizing (size DOWN).
+                if (
+                    _reason is None
+                    and _rvol_a is None
+                    and _allow_extreme_explosive
+                    and _is_genuine_explosive
+                ):
+                    _extreme_vol_risk_bounded = True
+                    warnings.append(
+                        "A-setup floor: rvol datum missing on a genuine mover — "
+                        "LIVE with risk-bounded sizing"
+                    )
                 if _reason is not None:
                     live_eligible = False
                     warnings.append(f"Below A-setup quality floor ({_reason}) — not a live setup")
@@ -710,15 +844,20 @@ def score_viability(
         f"fee_to_target={fee_ratio} drift={drift} imb={imb} tape_z={tape_z}"
     )
 
+    _final_live_eligible = live_eligible and viability >= 0.42
     return ViabilityResult(
         symbol=symbol,
         family_id=family.family_id,
         family_version=family.version,
         viability=viability,
         paper_eligible=paper_eligible,
-        live_eligible=live_eligible and viability >= 0.42,
+        live_eligible=_final_live_eligible,
         freshness_hint="mesh_tick",
         regime_fit=regime_fit,
         rationale=rationale,
         warnings=tuple(warnings),
+        # LEVER 1: only meaningful when the name actually stays LIVE-eligible (a
+        # blocked name needs no sizing signal). Keeps the field a clean "this LIVE
+        # entry must be risk-bounded" marker for the live_runner size-down lever.
+        extreme_vol_risk_bounded=bool(_extreme_vol_risk_bounded and _final_live_eligible),
     )

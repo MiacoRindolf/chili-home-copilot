@@ -2663,6 +2663,42 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_ELIGIBLE_MAX_SPREAD_BPS"),
         description="The SINGLE documented live-eligibility spread ceiling (bps). A spread WIDER than this disqualifies a name from LIVE entry (truly toxic / broken-halted quote). At/below it the wide spread only DERATES the viability score — the explosive low-float movers the Ross lane targets (~40-90bps) stay live-eligible and are entered with marketable-limit/maker orders that cross the spread. 0 = no spread disqualification (rely on the liquidity floor). Replaces the old hard 12/25bps disqualify that silently blocked every squeeze (1,495 'Not live-eligible' entry blocks 2026-06-25).",
     )
+    # LEVER 1 — LIVE-ELIGIBILITY WIN-WIN. The day-monster (UPC +476%, Ross +$35k) scored
+    # CHILI's #1 (0.755) but live_eligible=FALSE blocked it -> $0. Two leaks blanket-block a
+    # GENUINE explosive Ross-class mover from LIVE while it is exactly what the lane exists to
+    # trade: (a) the vol_regime==extreme blanket block, and (b) the A-setup quality floor
+    # failing CLOSED when the rvol DATUM is merely MISSING (None) rather than affirmatively
+    # low (UPC live: float=563K low-float OK, change=+10% OK, but rvol=None -> 1,520 rejects
+    # 2026-06-29). When ON (default True): a name that clears the lane's EXISTING explosiveness
+    # floor (below_explosive_floor — low-float + change, fail-open on absent rvol) AND is
+    # product_tradable AND has a spread within the win-win ceiling stays LIVE-eligible on
+    # extreme-vol/missing-rvol ALONE, and is flagged for RISK-BOUNDED sizing (the live_runner
+    # extreme-vol size-down lever sizes it DOWN so worst-case loss is bounded the SAME as a
+    # normal trade — the max-loss circuit #769 + structural/vol-floored stop + risk-first qty
+    # are reused, no new sizing invented). THE WIN-WIN INVARIANT: a name that is extreme-vol
+    # but NOT a genuine explosive mover (affirmatively below the explosiveness floor, OR
+    # untradeable, OR toxic spread > ceiling, OR missing/zero float) is STILL gated. OFF =>
+    # the prior blanket extreme-vol block + None-rvol fail-closed are byte-identical.
+    chili_momentum_live_eligible_allow_extreme_explosive: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_ELIGIBLE_ALLOW_EXTREME_EXPLOSIVE"),
+        description="LEVER 1 win-win: keep a GENUINE explosive Ross-class mover (clears the existing below_explosive_floor low-float+change floor, product_tradable, spread within the live ceiling) LIVE-eligible even on extreme-vol or a merely-MISSING rvol datum, and mark it for RISK-BOUNDED size-down (worst-case loss bounded the same as a normal trade via the reused max-loss circuit + vol-floored/structural stop + risk-first qty). A name that is NOT a genuine mover (affirmatively below the floor, untradeable, toxic spread, or unconfirmed float) is STILL gated. OFF = byte-identical (prior extreme-vol blanket block + None-rvol fail-closed).",
+    )
+    # LEVER 1 — the extreme-vol RISK-BOUNDED size-down fraction. When an extreme-vol genuine
+    # mover is admitted live (above), its per-trade risk budget is multiplied by this fraction
+    # so the worst-case dollar loss is bounded as conservatively as (or tighter than) a normal
+    # trade despite the wider vol. ONE documented adaptive base (0.5 = half-risk, the same
+    # conservative end the lane already uses for ask-heavy/overnight size-downs); composes
+    # multiplicatively under the SAME 3x clamp + hard max_notional ceiling as every other
+    # size-down lever, so it can NEVER push notional past any cap and is NEVER a veto. The
+    # max-loss circuit, structural/vol-floored stop, and daily-loss breaker are untouched.
+    chili_momentum_extreme_vol_risk_bounded_fraction: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXTREME_VOL_RISK_BOUNDED_FRACTION"),
+        description="LEVER 1 risk-bounded size-down: per-trade risk-budget multiplier for an extreme-vol genuine mover admitted live (default 0.5 = half-risk). Composes under the same 3x clamp + hard max_notional ceiling as the other size-down levers; never a veto. ONE documented base.",
+    )
     # ADAPTIVE stale-quote (stale_bbo) window — scale the freshness ceiling to the NAME's own
     # trade cadence instead of a fixed 15s clock (operator 2026-06-25 "gawin mong adaptive").
     # max_age = clamp(cadence_mult * avg_inter-trade-interval, floor, ceiling). A name printing
@@ -4320,6 +4356,99 @@ class Settings(BaseSettings):
         ge=50.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_TRAIL_CEILING_BPS"),
     )
+    # LEVER 2A — MATH-VERIFIED adaptive vol-normalized runner trail. The frozen-ATR trail
+    # snapshots entry_stop_atr_pct AT ENTRY and never refreshes it, so a runner whose realized
+    # vol collapses after the breakout keeps an entry-sized (too-wide) trail and bleeds the move
+    # back (the live ASTC/DCOY/LI/AMPX/TMC "breaks don't hold, -$17" leak). When ON (default True):
+    # the runner-trail WIDTH is re-derived from LIVE tape realized vol scaled to the holding
+    # horizon (rv_hold = rv_live*sqrt(N), trail = clamp(k*rv_hold, floor, 0.15)), floored OUTSIDE
+    # the bid/ask bounce (Roll effective spread) so a healthy pullback isn't shaken out, and
+    # applied to the MICRO-PRICE high-water mark. INVARIANT-A is preserved: new_stop = max(current,
+    # breakeven, candidate) — ratchet-only, NEVER loosens/nulls the structural or breakeven stop;
+    # the structural stop, breakeven-after-partial, max-loss circuit #769, and the climax exits
+    # (tape_accel_reversal / ofi_exhaustion_lock) are all untouched. OFF (or a thin tape that yields
+    # < 2 grid returns) ⇒ the frozen-ATR width path is byte-identical.
+    chili_momentum_volnorm_trail_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VOLNORM_TRAIL_ENABLED"),
+        description="LEVER 2A: re-derive the runner-trail WIDTH from LIVE tape realized vol scaled to the holding horizon (vs the frozen entry ATR), floored outside the bid/ask bounce, on the micro-price HWM. Ratchet-only (INVARIANT-A) — never loosens the structural/breakeven stop. OFF or thin tape ⇒ frozen-ATR width byte-identical.",
+    )
+    # LEVER 2A — the trail tightness multiplier k on rv_hold. ONE documented base (1.3); literature
+    # range [1.1, 1.7] (k<1 would put the stop inside the holding-horizon vol band → whipsaw; k too
+    # high gives back too much). Clamped to the [1.1, 1.7] band. The trail width is k*rv_hold,
+    # clamped between the live vol-floor (reused) and the existing 0.15 ceiling.
+    chili_momentum_volnorm_trail_k: float = Field(
+        default=1.3,
+        ge=1.1,
+        le=1.7,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VOLNORM_TRAIL_K"),
+        description="LEVER 2A tightness multiplier k on rv_hold (trail_dist = clamp(k*rv_hold, floor, 0.15)). Default 1.3, band [1.1,1.7].",
+    )
+    # LEVER 2A — the realized-vol tape lookback (seconds). Longer than the 15s OFI window so the
+    # EWMA has enough event-grid steps; the EWMA half-life is derived as window/(2*grid).
+    chili_momentum_volnorm_trail_window_s: float = Field(
+        default=90.0,
+        ge=15.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VOLNORM_TRAIL_WINDOW_S"),
+        description="LEVER 2A realized-vol tape lookback (s). EWMA half-life derived as window/(2*grid_secs). Default 90s.",
+    )
+    # LEVER 2A — the event-time sub-sample grid (seconds). Sub-sampling raw ticks to a ~1-5s grid is
+    # the DENOISING step (collapses bid-ask-bounce micro-noise out of the per-tick return series).
+    chili_momentum_volnorm_trail_grid_secs: float = Field(
+        default=2.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VOLNORM_TRAIL_GRID_SECS"),
+        description="LEVER 2A event-time sub-sample grid (s) for denoising the realized-vol return series. Default 2.0; 0 = per-tick (no sub-sample).",
+    )
+    # LEVER 2B — VELOCITY/PERSISTENCE RIDE-LOCK on top of the 2A vol-norm trail. The live
+    # entries that DO fire (ASTC/DCOY/LI/AMPX/TMC, 8 round-trips, -$17) bail because the
+    # breaks do not HOLD: the 2A trail is correctly-sized but still mechanical, so a runner
+    # gets tightened out on a healthy mid-thrust pullback, and a true climax tops a full
+    # candle before the candle-shaped exits print. 2B reads the DENOISED order flow (OFI
+    # LEVEL + its EWMA SLOPE = the 1st derivative on the event-time series — NOT the raw
+    # 2nd-derivative signed_accel, which is noise-amplifying per the math verification) plus
+    # the tick_rate, and modulates the trail band by REGIME:
+    #   RIDE  — while signed-flow/OFI-slope > 0 AND tick_rate >= entry_tick_rate*persist_frac,
+    #           the runner is in a PERSISTENT thrust: hold the 2A band WIDE (do NOT mechanically
+    #           tighten) so the move extends. (Never loosens an EXISTING stop — INVARIANT-A.)
+    #   LOCK  — when the OFI-slope/flow ROLLS OVER (turns negative) NEAR the HWM, COLLAPSE the
+    #           band to a tight giveback: sell into strength at the climax, BEFORE a full bar
+    #           prints (faster than the topping-tail candle exits).
+    #   HARD  — strong-negative flow WITH sellers lifting through the micro-price ⇒ a tighter
+    #           climax-lock still (the most decisive distribution read).
+    # ALL ratchet-only (INVARIANT-A: the returned stop can only TIGHTEN, never loosen/null the
+    # structural, breakeven, vol-norm, or climax-exit stop — it composes via max() at the call
+    # site exactly like ofi_exhaustion_lock / tape_accel_reversal_exit). Buy/sell aggressor
+    # classification reuses the EXISTING Lee-Ready tick/quote rule (_aggressor_imbalance). The
+    # max-loss circuit #769, structural stop, breakeven, and daily-loss breaker are UNTOUCHED.
+    # OFF (or thin/missing tape) ⇒ the 2A vol-norm trail alone, byte-identical.
+    chili_momentum_velocity_persistence_exit_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VELOCITY_PERSISTENCE_EXIT_ENABLED"),
+        description="LEVER 2B: velocity/persistence RIDE-LOCK on the 2A vol-norm trail using DENOISED OFI level + EWMA SLOPE (1st derivative) + tick_rate. RIDE holds the band wide while flow persists; LOCK collapses it to a tight giveback when flow rolls over near the HWM (sell into strength before a full candle prints); HARD-EXIT on strong-negative flow + sellers lifting through micro-price. Ratchet-only (INVARIANT-A); never loosens any stop or removes a protection gate. OFF or thin tape ⇒ 2A trail alone, byte-identical.",
+    )
+    # LEVER 2B — persistence fraction: the runner stays in RIDE only while the LIVE tick_rate
+    # holds at >= entry_tick_rate * persist_frac (the thrust is still being fed). ONE documented
+    # seed (0.6 = the move's pace may ebb to 60% of the entry pace and still be "persistent";
+    # below it the thrust is fading ⇒ the band reverts to the 2A mechanical width). A/B-tunable;
+    # clamped [0.1, 1.0]. Reuses the entry tick_rate the tape already computes (no new datum).
+    chili_momentum_velocity_persist_frac: float = Field(
+        default=0.6,
+        ge=0.1,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VELOCITY_PERSIST_FRAC"),
+        description="LEVER 2B persistence fraction: stay in RIDE while live tick_rate >= entry_tick_rate*persist_frac. Default 0.6, band [0.1,1.0]. A/B-tunable seed.",
+    )
+    # LEVER 2B — the OFI-slope EWMA half-life (in event-GRID steps). The denoised OFI LEVEL is
+    # the per-grid-bucket aggressor imbalance; its EWMA SLOPE (consecutive-EWMA difference) is the
+    # rollover signal. ONE documented seed (4.0 grid steps ≈ the recent ~window/2 dominates at the
+    # 2A grid); shorter ⇒ snappier/noisier rollover, longer ⇒ smoother/laggier. Clamped >= 1.0.
+    chili_momentum_velocity_ofi_slope_half_life: float = Field(
+        default=4.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VELOCITY_OFI_SLOPE_HALF_LIFE"),
+        description="LEVER 2B OFI-slope EWMA half-life in event-grid steps (the rollover signal is the EWMA-OFI-level 1st derivative). Default 4.0; >=1.0. A/B-tunable seed.",
+    )
     # Paper quote sanity (2026-06-12 ROBO: a failed quote fetch fabricated a
     # $100 placeholder that "filled" a $0.022 token's exit at $99.84 = +$555k of
     # fiction): a mid that jumps beyond this fraction vs the session's own last
@@ -5468,6 +5597,170 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BREAKOUT_BAILOUT_BUFFER_PCT"),
         description="Small wick buffer below the breakout level before fast-bailing (0.001 = 10 bps).",
+    )
+    # ── GAP-A — SMART POST-ENTRY HOLD (vol-adaptive fast-bail band) ─────────────
+    # The deployed fast-bail (breakout_failed_to_hold) cuts the instant the bid dips a
+    # FIXED 0.001 (10bps) below the broken level — far inside the lane's explosive,
+    # wide-spread low-float names' OWN microstructure noise, so it bails working winners
+    # at b/e (FCUV +21% after a 4.5s bail). GAP-A replaces that fixed wick buffer with a
+    # VOL-ADAPTIVE band on the name's live realized vol scaled to the holding horizon, and
+    # gates the actual CUT on order-flow + a volume-confirmed breach + an adaptive
+    # time-floor. It governs ONLY the first post-entry window and can only TIGHTEN
+    # (INVARIANT-A): the structural stop + the #769 max-loss circuit are evaluated AHEAD of
+    # and independently from this gate (every tick), so a genuinely collapsing position
+    # still exits regardless. OFF (default) ⇒ the fixed-0.001-buffer path is BYTE-IDENTICAL.
+    # Dimensional note (the exit reviewer's correction, applied identically): rv_live is the
+    # PER-GRID-STEP stdev, so band_frac = k*rv_live*sqrt(N), N = expected_hold_s/grid_secs
+    # (GRID STEPS), NOT tick_rate*hold (a tick count).
+    chili_momentum_smart_hold_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SMART_HOLD_ENABLED"),
+        description="GAP-A: replace the fixed 0.001 fast-bail wick buffer with a vol-adaptive hold band + flow/volume/time-floor CUT gating, governing only the first post-entry window (INVARIANT-A: only tightens; structural stop + #769 circuit run ahead, always). OFF (default) ⇒ fixed-0.001-buffer path byte-identical.",
+    )
+    # GAP-A — the band tightness multiplier (in ATR/stdev-equivalents). ONE documented base
+    # (1.2); applied as k = k_atr * sqrt(pi/2) (=1.2533, the mean-abs→stdev half-width
+    # conversion matching the vol-norm exit's band geometry). band_frac = k*rv_live*sqrt(N),
+    # clamped between 0 and the existing 0.15 ATR-pct ceiling. A/B-tunable seed; band [0.5, 3.0].
+    chili_momentum_smart_hold_k_atr: float = Field(
+        default=1.2,
+        ge=0.5,
+        le=3.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SMART_HOLD_K_ATR"),
+        description="GAP-A vol-adaptive hold-band tightness (band_frac = k_atr*sqrt(pi/2)*rv_live*sqrt(N), N in GRID STEPS). Default 1.2, band [0.5,3.0]. A/B-tunable seed.",
+    )
+    # GAP-A — T_flow / S_flow: the negative-flow CUT thresholds, ADAPTIVE as the |lower-tail|
+    # of the name's OWN recent OFI level / slope distribution (calibration recipe: T_flow =
+    # |q(level, flow_tail_q)|, S_flow = |q(slope, flow_tail_q)|). ONE documented base each used
+    # as the FLOOR when the live distribution is too thin to estimate (never a hard ceiling):
+    # the absolute OFI threshold the lane already uses (0.25) for level, and 0 for the slope
+    # (any sustained roll-over). flow_tail_q is the single documented tail quantile (0.15).
+    chili_momentum_smart_hold_flow_tail_q: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=0.5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SMART_HOLD_FLOW_TAIL_Q"),
+        description="GAP-A lower-tail quantile of the name's own recent OFI level/slope used to derive T_flow/S_flow (the decisive negative-flow CUT thresholds). Default 0.15.",
+    )
+    chili_momentum_smart_hold_t_flow_floor: float = Field(
+        default=0.25,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SMART_HOLD_T_FLOW_FLOOR"),
+        description="GAP-A T_flow FLOOR (min |negative OFI level| to count as decisive distribution) when the live OFI distribution is too thin to estimate. Default 0.25 (the lane's existing ofi_threshold).",
+    )
+    chili_momentum_smart_hold_s_flow_floor: float = Field(
+        default=0.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SMART_HOLD_S_FLOW_FLOOR"),
+        description="GAP-A S_flow FLOOR (min |negative OFI slope| to count as rolling-over) when the live distribution is too thin to estimate. Default 0.0 (any sustained roll-over).",
+    )
+    # GAP-A — rho: the persistence fraction for the tick_rate pace test (hold while live
+    # tick_rate > rho*tick_rate_ref). ONE documented base (0.6), shared geometry with the
+    # 2B velocity persist_frac. Band [0.1, 1.0]. tick_rate_ref = the entry tick_rate.
+    chili_momentum_smart_hold_rho: float = Field(
+        default=0.6,
+        ge=0.1,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SMART_HOLD_RHO"),
+        description="GAP-A persistence fraction rho: hold while live tick_rate > rho*entry_tick_rate. Default 0.6, band [0.1,1.0].",
+    )
+    # GAP-A — the adaptive TIME-FLOOR quantile: suppress the fast-bail while held_seconds is
+    # below the q(time_floor_q) of the name's own recent break-resolution times. ONE documented
+    # quantile base (0.25 = q25). Fallback when <N samples = 2*bar_seconds (a structural
+    # retest of the broken level typically resolves within ~2 bars). Band [0.0, 0.5].
+    chili_momentum_smart_hold_time_floor_q: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=0.5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SMART_HOLD_TIME_FLOOR_Q"),
+        description="GAP-A time-floor quantile (q25): suppress the fast-bail while held_seconds < q(this) of recent break-resolution times. Default 0.25; fallback 2*bar_seconds when <min_samples.",
+    )
+    chili_momentum_smart_hold_time_floor_min_samples: int = Field(
+        default=5,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SMART_HOLD_TIME_FLOOR_MIN_SAMPLES"),
+        description="GAP-A minimum recent break-resolution samples before the adaptive time-floor is trusted; below this the fallback (2*bar_seconds) is used. Default 5.",
+    )
+    # ── GAP-B — TIGHT-MOMENTUM FALSE-BREAK-REVERSAL / VWAP-RECLAIM ENTRY ─────────
+    # A NEW entry trigger family (false_break_reclaim_confirmation): on a COMPRESSED
+    # (coiled) tape with REQUIRED order-flow + a self-relative volume surge, fire on a
+    # false-breakout REVERSAL (pierce L -> fail/flush below L -> rip back & reclaim L) OR
+    # a VWAP-reclaim from below. Carries the SAME four chase-guards every breakout trigger
+    # carries (tape REQUIRED+fail-closed, _hod_extension_ok, backside + front_side_state,
+    # _l2_entry_veto). Every threshold is an ADAPTIVE percentile/ratio of the name's OWN
+    # recent distribution with ONE documented base each (NO magic). The structural stop +
+    # #769 max-loss circuit stay ahead + always-live; GAP-A governs only the first post-
+    # entry window. OFF (default) ⇒ the detector returns disabled before any compute ⇒
+    # BYTE-IDENTICAL. Mutually exclusive per-tick with raw_break/break_retest at dispatch.
+    chili_momentum_entry_tight_false_break_reclaim_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_TIGHT_FALSE_BREAK_RECLAIM_ENABLED"),
+        description="GAP-B: enable the TIGHT-MOMENTUM false-breakout-reversal / VWAP-reclaim entry trigger family. OFF (default) ⇒ detector disabled before any compute, byte-identical.",
+    )
+    # GAP-B compression: TIGHT when compression = atr_pct_now/median(atr_pct, Lc) sits below
+    # theta_c = the p(pctile) of the name's OWN recent compression distribution. ONE base each.
+    chili_momentum_tight_compression_lookback: int = Field(
+        default=20,
+        ge=3,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TIGHT_COMPRESSION_LOOKBACK"),
+        description="GAP-B compression lookback Lc (bars) for the per-bar atr_pct baseline median. Default 20.",
+    )
+    chili_momentum_tight_compression_pctile: float = Field(
+        default=0.30,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TIGHT_COMPRESSION_PCTILE"),
+        description="GAP-B theta_c quantile: TIGHT when compression < p(this) of the name's own recent compression distribution. Default 0.30 (p30).",
+    )
+    chili_momentum_tight_compression_coil_bars: int = Field(
+        default=5,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TIGHT_COMPRESSION_COIL_BARS"),
+        description="GAP-B coil width (bars) — the recent base leading INTO the firing bar whose MEDIAN atr_pct is compared to the Lc baseline median (the firing bar excluded; a median over >=5 bars is robust to the 1-2 wider pierce/flush bars of the false-break event). Default 5.",
+    )
+    # GAP-B volume: vol_ok when bar volume > vmult*median(vol, Lv); vmult = clamp(q(pctile)
+    # of the recent RVOL distribution, floor, ceil) — the SAME adaptive-volume kill-2.5x shape.
+    chili_momentum_tight_volume_lookback: int = Field(
+        default=20,
+        ge=3,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TIGHT_VOLUME_LOOKBACK"),
+        description="GAP-B volume lookback Lv (bars) for the recent RVOL distribution + the volume median. Default 20.",
+    )
+    chili_momentum_tight_volume_pctile: float = Field(
+        default=0.60,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TIGHT_VOLUME_PCTILE"),
+        description="GAP-B volume multiple quantile: vmult = clamp(q(this) of recent RVOL dist, floor, ceil). Default 0.60 (q60).",
+    )
+    chili_momentum_tight_volume_mult_floor: float = Field(
+        default=1.5,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TIGHT_VOLUME_MULT_FLOOR"),
+        description="GAP-B vmult FLOOR (and thin-sample fallback) — the documented base volume multiple. Default 1.5.",
+    )
+    chili_momentum_tight_volume_mult_ceil: float = Field(
+        default=3.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TIGHT_VOLUME_MULT_CEIL"),
+        description="GAP-B vmult CEIL (caps how high the adaptive volume multiple can climb). Default 3.0.",
+    )
+    # GAP-B flow: flow_ok REQUIRED + FAIL-CLOSED (ofi_level > +T_flow_entry AND ofi_slope > 0).
+    # T_flow_entry = |lower-tail (flow_tail_q)| of the name's own OFI level dist, floored at the
+    # lane's existing chili_momentum_ofi_threshold (ONE documented base).
+    chili_momentum_tight_flow_tail_q: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=0.5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TIGHT_FLOW_TAIL_Q"),
+        description="GAP-B flow tail quantile for T_flow_entry (the entry OFI-level pressure floor). Default 0.15; floored at chili_momentum_ofi_threshold.",
+    )
+    # GAP-B geometry window: how many recent COMPLETED bars define the pierce/flush/reclaim
+    # (B.2) and the VWAP-reclaim (B.3) shapes. Default 6.
+    chili_momentum_tight_geometry_lookback: int = Field(
+        default=6,
+        ge=3,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TIGHT_GEOMETRY_LOOKBACK"),
+        description="GAP-B geometry lookback K (bars) for the false-break-reversal pierce/flush level + the VWAP-reclaim swing low. Default 6.",
     )
     # ── EXPLOSIVE-MOVER RECALIBRATION (master) ─────────────────────────────────
     # Ross small-caps step the bid DOWN / widen the spread mid-squeeze and dip-test
