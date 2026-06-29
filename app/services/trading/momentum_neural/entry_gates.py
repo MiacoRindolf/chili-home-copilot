@@ -3171,6 +3171,66 @@ def evaluate_sticky_backside_bench(
                     return False, "front_side_live_new_high", None, debug
             except (TypeError, ValueError, KeyError):
                 pass
+        # ── FIX D: BELOW-VWAP RECLAIM-FROM-BELOW EXCEPTION ──────────────────────────────
+        # The w0av0u3qy replay showed this below_vwap bench ATE the SDOT/ILLR early pushes
+        # (44x/14x) — names that dipped below VWAP for a tick but were RECLAIMING it from
+        # below with upward momentum. Do NOT latch a below_vwap bench when the name is
+        # actively reclaiming: current price has crossed BACK to/above VWAP (within the
+        # existing vwap_hold_buffer tolerance) AND is RISING vs the prior bar (positive
+        # reclaim direction). A name still FALLING below VWAP (price below VWAP-buffer, or
+        # not rising) STAYS benched — the genuine-backside fade veto is untouched. ONLY the
+        # below_vwap reason qualifies (already_faded / chasing_top still latch). Flag OFF ->
+        # this whole block is skipped -> below_vwap latches exactly as before (byte-identical).
+        if _reason == "below_vwap" and bool(
+            getattr(settings, "chili_momentum_backside_vwap_reclaim_enabled", True)
+        ):
+            try:
+                _vwap = getattr(_fs, "session_vwap", None)
+                # current price: live tick over the completed close when present.
+                _closes = _sess["Close"].astype(float)
+                _last_close = float(_closes.iloc[-1])
+                _cur_px = _last_close
+                if live_price is not None:
+                    try:
+                        _lp = float(live_price)
+                        if _lp > 0:
+                            _cur_px = _lp
+                    except (TypeError, ValueError):
+                        pass
+                _prior_close = float(_closes.iloc[-2]) if len(_closes) >= 2 else None
+                if _vwap is not None and float(_vwap) > 0 and _prior_close is not None:
+                    _vwap = float(_vwap)
+                    _buf = 0.0
+                    try:
+                        _buf = max(0.0, float(getattr(
+                            settings, "chili_momentum_entry_vwap_hold_buffer", 0.0) or 0.0))
+                    except (TypeError, ValueError):
+                        _buf = 0.0
+                    # RECLAIM-from-below: price has crossed back to/above VWAP (within the
+                    # below-VWAP hold tolerance) AND is rising vs the prior bar. The buffer
+                    # is the SAME tolerance the entry vwap-hold gate uses (one documented
+                    # base) — a price at >= VWAP*(1-buf) counts as reclaiming the level.
+                    _reclaimed = _cur_px >= _vwap * (1.0 - _buf)
+                    _rising = _cur_px > _prior_close
+                    if _reclaimed and _rising:
+                        debug["vwap_reclaim_exception"] = {
+                            "cur_px": round(_cur_px, 6),
+                            "session_vwap": round(_vwap, 6),
+                            "prior_close": round(_prior_close, 6),
+                            "vwap_hold_buffer": round(_buf, 6),
+                        }
+                        # NOT benched — the name is reclaiming VWAP from below. Downstream
+                        # chase-guards + tape-required + structural stop + max-loss circuit
+                        # all still gate the entry; this only declines to LATCH the bench.
+                        return False, "front_side_vwap_reclaim", None, debug
+                    debug["vwap_reclaim_declined"] = {
+                        "cur_px": round(_cur_px, 6),
+                        "session_vwap": round(_vwap, 6),
+                        "reclaimed": bool(_reclaimed),
+                        "rising": bool(_rising),
+                    }
+            except (TypeError, ValueError, AttributeError, KeyError, IndexError):
+                pass  # any error -> fall through to the normal below_vwap latch (safe)
         # CONFIRMED backside -> LATCH the bench at the current session HOD (the anchor the
         # un-bench compares against). below_vwap / already_faded / a rolled-over chasing_top.
         debug["latched"] = _reason
@@ -6487,6 +6547,77 @@ def pullback_break_confirmation(
             ok_t, _explosive_raw_break = True, True
             debug["explosive_raw_break"] = True
 
+    # FIX C(1): EXPLOSIVE RAW FIRST-PUSH. The escape above only rescues a break that ALREADY
+    # printed and ran without a retest (``waiting_for_retest``). But the require_retest ladder also
+    # strands the EXPLOSIVE tier ONE step earlier — at ``waiting_for_break`` — because the stable
+    # retest level is anchored ``retest_lookback_bars`` back, so the first completed-bar break of
+    # the (nearer) raw pullback high is NOT yet a "break" of that older level. For a genuinely
+    # explosive low-float runner (NVCT/FISN/SKYQ class in the w0av0u3qy study) the retest never
+    # comes; the name simply runs. Ross's asymmetric rule takes the RAW first break on the
+    # STRONGEST setups. When this flag is ON and the name is, BY THE TAPE, clearly explosive (the
+    # SAME _explosive_raw_break_escape gate: RVOL >= adaptive explosive floor AND tape-confirmed
+    # aggressive buying — TAPE REQUIRED + FAIL-CLOSED), re-evaluate the trigger as a RAW first break
+    # (the require_retest=False semantics for THIS tier only) so it fires the instant a COMPLETED
+    # bar crosses the (nearer) pullback high. Crucially this is NOT a chase: it only sets ok_t +
+    # adopts the raw-break pb_high/pb_low, then runs the SAME 4 chase-guards every other fire runs
+    # (backside EMA/MACD + front_side_state + VWAP-hold, extension/verticality, structural stop, and
+    # — via the _explosive_raw_break weak-prior set below — the RAISED runaway volume floor +
+    # fail-CLOSED sustained volume). Flag OFF ⇒ skipped ⇒ BYTE-IDENTICAL. docs/DESIGN/MOMENTUM_LANE.md
+    _explosive_raw_first_push = False
+    if (
+        not ok_t
+        and require_retest
+        and reason_t == "waiting_for_break"
+        and bool(getattr(settings, "chili_momentum_explosive_raw_break_enabled", True))
+    ):
+        # Trigger-bar RVOL (the SAME self-relative vol_ratio the explosive-floor gate uses).
+        _rfp_vr = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
+        if _rfp_vr is None:
+            _rfp_w = vol.tail(21)
+            _rfp_avg = float(_rfp_w.iloc[:-1].mean()) if len(_rfp_w) > 1 else float(vol.iloc[-1])
+            _rfp_vr = (float(vol.iloc[-1]) / _rfp_avg) if _rfp_avg > 0 else 0.0
+        try:
+            _rfp_floor = float(getattr(settings, "chili_momentum_explosive_floor_rvol", 5.0) or 5.0)
+        except (TypeError, ValueError):
+            _rfp_floor = 5.0
+        # TAPE REQUIRED + FAIL-CLOSED — reuse the EXACT explosive-tape gate the retest escape uses,
+        # so the first-push tier can never fire blind (no tape ⇒ no escape ⇒ retest discipline holds).
+        _rfp_escape, _rfp_escape_dbg = _explosive_raw_break_escape(
+            symbol,
+            vol_ratio=_rfp_vr,
+            explosive_rvol_floor=_rfp_floor,
+            db=db,
+            l2_as_of=l2_as_of,
+            debug=debug,
+        )
+        debug.update(_rfp_escape_dbg)
+        if _rfp_escape:
+            # Re-evaluate as the RAW first break (require_retest=False semantics for THIS tier only):
+            # fires ``raw_break`` the instant the current COMPLETED bar's high crosses the nearer
+            # pullback high, with NO retest wait.
+            _rfp_ok, _rfp_reason, _rfp_pbh, _rfp_pbl, _rfp_dbg = _evaluate_raw_break(
+                high, low, ema9, cur,
+                entry_interval=entry_interval,
+                max_pullback_bars=max_pullback_bars,
+                retracement_threshold=retracement_threshold,
+                atr_pct=atr_pct,
+            )
+            if _rfp_ok and _rfp_pbh is not None and _rfp_pbl is not None:
+                # Adopt the raw-break levels; treat as the explosive raw-break weak-prior set so the
+                # RAISED runaway volume floor + fail-CLOSED sustained-volume apply downstream.
+                ok_t = True
+                _explosive_raw_first_push = True
+                _explosive_raw_break = True
+                pb_high, pb_low = _rfp_pbh, _rfp_pbl
+                debug.update(_rfp_dbg)
+                debug["pullback_high"] = float(_rfp_pbh)
+                debug["pullback_low"] = float(_rfp_pbl)
+                debug["explosive_raw_first_push"] = True
+            else:
+                # Tape said explosive but the completed bar has not crossed the raw pullback high
+                # yet — leave the wait reason intact (the tick-break block below can still arm).
+                debug["explosive_raw_first_push_armed"] = True
+
     # TICK-BREAK (Ross-speed entry): the structure is valid on COMPLETED bars but
     # the break hasn't printed on a CLOSED bar yet — and the LIVE tick is already
     # trading through the level. Ross enters on that tick ("first candle to make a
@@ -6776,6 +6907,53 @@ def pullback_break_confirmation(
         if (_runaway or _explosive_raw_break or _deep_reclaim or _late_pullback)
         else float(volume_spike_multiple)
     )
+    # FIX C(2): RVOL-RELATIVE break-volume floor (kills the fixed 1.5x/2.0x magic). The fixed floor
+    # above held a +400%-RVOL explosive name to the SAME trigger-bar relative-volume bar as a +20%
+    # name — the w0av0u3qy study saw break_low_volume reject 529 explosive breaks. When the flag is
+    # ON, scale the floor DOWN as the name's OWN trigger-bar RVOL rises above the explosive floor:
+    # a name running R x the explosive RVOL floor needs only floor x clamp(explosive_floor/R, ratio,
+    # 1.0). At ratio=0.25 a name >=4x the explosive floor needs only 25% of the base bar; a name AT
+    # the floor still needs the full base; the floor NEVER drops below a documented absolute minimum
+    # (a hyper-explosive name still needs a real green volume bar, not a one-lot poke). Self-relative,
+    # no magic share count. Flag OFF ⇒ _vol_floor unchanged ⇒ byte-identical. docs/DESIGN/MOMENTUM_LANE.md
+    if (
+        not _tick_break
+        and bool(getattr(settings, "chili_momentum_break_volume_rvol_relative", True))
+        and vol_ratio is not None
+    ):
+        try:
+            _bv_ratio = float(getattr(settings, "chili_momentum_break_volume_rvol_ratio", 0.25) or 0.25)
+        except (TypeError, ValueError):
+            _bv_ratio = 0.25
+        _bv_ratio = max(0.0, min(1.0, _bv_ratio))
+        try:
+            _bv_min = float(getattr(settings, "chili_momentum_break_volume_rvol_min_floor", 1.0) or 0.0)
+        except (TypeError, ValueError):
+            _bv_min = 1.0
+        try:
+            _bv_explosive_floor = float(getattr(settings, "chili_momentum_explosive_floor_rvol", 5.0) or 0.0)
+        except (TypeError, ValueError):
+            _bv_explosive_floor = 5.0
+        # Scale factor in [ratio, 1.0]: 1.0 when the name is AT/below the explosive floor (no relief),
+        # shrinking toward `ratio` as the name's RVOL exceeds it. clamp keeps it bounded both ways.
+        if _bv_explosive_floor > 0 and float(vol_ratio) > 0:
+            _bv_scale = _bv_explosive_floor / float(vol_ratio)
+        else:
+            _bv_scale = 1.0
+        _bv_scale = max(_bv_ratio, min(1.0, _bv_scale))
+        _bv_relaxed = max(_bv_min, _vol_floor * _bv_scale)
+        # Only ever RELAX (never tighten) the per-bar floor — a misconfigured min/ratio must not
+        # raise the bar above the fixed multiple the operator already accepted.
+        if _bv_relaxed < _vol_floor:
+            debug["break_volume_rvol_relative"] = {
+                "base_floor": round(_vol_floor, 3),
+                "rvol": round(float(vol_ratio), 3),
+                "explosive_floor": round(_bv_explosive_floor, 3),
+                "scale": round(_bv_scale, 4),
+                "min_floor": round(_bv_min, 3),
+                "effective_floor": round(_bv_relaxed, 3),
+            }
+            _vol_floor = _bv_relaxed
     if not _tick_break and vol_ratio < _vol_floor:
         return False, "break_low_volume", debug
 
@@ -6807,8 +6985,63 @@ def pullback_break_confirmation(
     if require_break_candle and not _tick_break:
         from .candles import is_strong_bull_break_candle
 
+        # ADAPTIVE close-position floor (gate-audit fix): the FIXED 0.50 close-pos
+        # over-rejected explosive FIRST-pushes (Ross buys the first strong push even
+        # when the 1m candle isn't textbook-strong). When the flag is ON and THIS break
+        # is explosive (trigger-bar RVOL >= the SAME E3 explosive floor used above),
+        # float the requirement DOWN from 0.50 toward the relaxed floor as RVOL exceeds
+        # the floor — RVOL-DERIVED, no new magic threshold. Ordinary tape (RVOL below
+        # the floor, or unknown) keeps the textbook 0.50; a genuinely weak/doji break
+        # still blocks below the relaxed floor even at high RVOL (doji rejection
+        # preserved). Flag OFF ⇒ _close_pos == break_candle_min_close_pos AND the upper-
+        # wick cap stays at its 0.50 default ⇒ byte-identical.
+        #
+        # NOTE on the upper-wick cap: for a GREEN break bar (the only bar this gate lets
+        # through — red is rejected outright) is_strong_bull_break_candle's upper-wick
+        # fraction is identically (1 - close_pos), so the default max_upper_wick_frac=0.50
+        # would re-impose the very 0.50 floor we are relaxing. So the relaxed path floats
+        # the wick cap UP in lockstep to (1 - effective_close_pos), keeping the two
+        # conditions equivalent; the non-relaxed/flag-off path leaves it at the 0.50
+        # default (byte-identical).
+        _close_pos = float(break_candle_min_close_pos)
+        _max_upper_wick = 0.50  # is_strong_bull_break_candle's documented default
+        if bool(
+            getattr(settings, "chili_momentum_break_candle_adaptive_close_pos_enabled", False)
+        ):
+            _adapt_floor_rvol = float(
+                getattr(settings, "chili_momentum_explosive_floor_rvol", 5.0) or 0.0
+            )
+            if (
+                _adapt_floor_rvol > 0
+                and vol_ratio is not None
+                and float(vol_ratio) >= _adapt_floor_rvol
+            ):
+                _relaxed = float(
+                    getattr(settings, "chili_momentum_break_candle_adaptive_close_pos_floor", 0.30)
+                    or 0.0
+                )
+                # Only relax DOWNWARD (a relaxed floor mistakenly set above the textbook
+                # 0.50 must never TIGHTEN the gate — keep the smaller of the two).
+                if _relaxed < _close_pos:
+                    # Over-floor excess in [0,1]: 0 AT the floor -> textbook 0.50;
+                    # 1 at RVOL = 2x the floor (and beyond) -> the relaxed floor.
+                    _excess = (float(vol_ratio) - _adapt_floor_rvol) / _adapt_floor_rvol
+                    _excess = max(0.0, min(1.0, _excess))
+                    _close_pos = _close_pos - _excess * (_close_pos - _relaxed)
+                    # Float the wick cap up in lockstep (never below the 0.50 default, so a
+                    # relaxed bar can never be held to a STRICTER wick than the textbook gate).
+                    _max_upper_wick = max(0.50, 1.0 - _close_pos)
+                    debug["break_candle_adaptive_close_pos"] = {
+                        "rvol": round(float(vol_ratio), 2),
+                        "rvol_floor": round(_adapt_floor_rvol, 2),
+                        "relaxed_floor": round(_relaxed, 4),
+                        "effective_min_close_pos": round(_close_pos, 4),
+                        "effective_max_upper_wick_frac": round(_max_upper_wick, 4),
+                    }
+
         if not is_strong_bull_break_candle(
-            cur_o, cur_h, cur_l, cur_c, min_close_pos=float(break_candle_min_close_pos)
+            cur_o, cur_h, cur_l, cur_c,
+            min_close_pos=_close_pos, max_upper_wick_frac=_max_upper_wick,
         ):
             debug["break_candle"] = {"o": cur_o, "h": cur_h, "l": cur_l, "c": cur_c}
             return False, "weak_break_candle", debug
@@ -6863,7 +7096,15 @@ def pullback_break_confirmation(
         _vert_mult = float(getattr(settings, "chili_momentum_entry_verticality_atr_mult", 1.5) or 0.0)
     except (TypeError, ValueError):
         _vert_mult = 1.5
-    if _vert_mult > 0:
+    # SD-1 (cold-frame fail-OPEN): when atr_pct is None (ATR array not warm on a
+    # cold/short frame), the cap below collapses to the 0.5% punitive floor, which
+    # over-rejects valid low-float Ross names that normally breathe >0.5% per bar.
+    # When the flag is ON (default True) we SKIP the verticality veto entirely on a
+    # cold frame (fail-OPEN — we cannot tell a chase from a normal breath without
+    # ATR). The veto stays FULLY active whenever atr_pct IS known. Flag OFF ⇒ the
+    # exact 0.5%-floor behaviour below (byte-identical).
+    _vert_skip_cold = bool(getattr(settings, "chili_momentum_verticality_skip_on_cold_atr", True))
+    if _vert_mult > 0 and not (_vert_skip_cold and atr_pct is None):
         _e9 = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
         if _e9 is not None and float(_e9) > 0:
             _px_v = float(live_price) if (_tick_break and live_price) else cur_c
@@ -6883,6 +7124,10 @@ def pullback_break_confirmation(
     # aggressive early entry vs the legacy ladder), bar-fired or tick-fired.
     if debug.get("pattern") == "first_pullback":
         return True, ("first_pullback_tick_ok" if _tick_break else "first_pullback_ok"), debug
+    # FIX C(1): the explosive RAW FIRST-PUSH gets its OWN observable reason (distinct from the
+    # waiting_for_retest escape) so the live A/B can attribute the first-push tier separately.
+    if _explosive_raw_first_push:
+        return True, ("explosive_raw_first_push_tick_ok" if _tick_break else "explosive_raw_first_push_ok"), debug
     # The adaptive-retest explosive RAW-BREAK escape gets its OWN observable reason (so the replay
     # A/B can attribute it vs the runaway rescue and the plain break-retest).
     if _explosive_raw_break:

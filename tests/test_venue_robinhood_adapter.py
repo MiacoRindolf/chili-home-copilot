@@ -137,6 +137,90 @@ def test_get_best_bid_ask_returns_none_on_empty(mock_conn, mock_quotes, monkeypa
     assert tick is None
 
 
+# ── IQFeed-L1-first BBO (chili_momentum_entry_gate_iqfeed_bbo_first) ────────
+
+
+def test_iqfeed_l1_ticker_short_circuits_when_flag_off(monkeypatch):
+    """KILL-SWITCH: flag OFF => the helper returns None BEFORE any DB touch, so
+    get_best_bid_ask keeps its Massive-WS-first behavior byte-identical."""
+    from app.config import settings
+    from app.services.trading.venue import robinhood_spot
+
+    monkeypatch.setattr(
+        settings, "chili_momentum_entry_gate_iqfeed_bbo_first", False, raising=False
+    )
+
+    # If the flag short-circuits first, SessionLocal must never be constructed.
+    def _boom(*a, **k):  # pragma: no cover - asserts it is NOT called
+        raise AssertionError("SessionLocal should not be touched when flag is OFF")
+
+    monkeypatch.setattr("app.db.SessionLocal", _boom, raising=False)
+    assert robinhood_spot._iqfeed_l1_ticker("AAPL") is None
+
+
+@patch("robin_stocks.robinhood.stocks.get_quotes")
+@patch("app.services.broker_service.is_connected", return_value=True)
+def test_get_best_bid_ask_uses_iqfeed_first_when_fresh(mock_conn, mock_quotes, monkeypatch):
+    """Flag ON + a FRESH iqfeed_l1 quote => that quote is returned FIRST; the RH REST
+    leg (mock_quotes) is never consulted (would return a DIFFERENT price if it were)."""
+    from datetime import datetime, timezone
+
+    from app.config import settings
+    from app.services.trading.venue import robinhood_spot
+    from app.services.trading.venue.protocol import FreshnessMeta
+
+    monkeypatch.setattr(settings, "chili_robinhood_spot_adapter_enabled", True, raising=False)
+    monkeypatch.setattr(
+        settings, "chili_momentum_entry_gate_iqfeed_bbo_first", True, raising=False
+    )
+    # RH REST would give a clearly different book — proves we did NOT fall through.
+    mock_quotes.return_value = [_mock_quote(bid=99.0, ask=99.5, last=99.2)]
+
+    iq_tick = NormalizedTicker(
+        product_id="AAPL", bid=150.0, ask=150.10, mid=150.05,
+        spread_abs=0.10, spread_bps=6.66, last_price=150.05,
+        freshness=FreshnessMeta(
+            retrieved_at_utc=datetime.now(timezone.utc),
+            provider_time_utc=datetime.now(timezone.utc),
+        ),
+        raw={"source": "iqfeed_l1"},
+    )
+    monkeypatch.setattr(
+        robinhood_spot,
+        "_iqfeed_l1_ticker",
+        lambda t: (iq_tick, iq_tick.freshness),
+        raising=True,
+    )
+
+    adapter = RobinhoodSpotAdapter()
+    tick, _ = adapter.get_best_bid_ask("AAPL")
+    assert tick is not None
+    assert tick.bid == 150.0 and tick.ask == 150.10  # IQFeed, not the 99.x RH book
+    assert tick.raw.get("source") == "iqfeed_l1"
+    mock_quotes.assert_not_called()
+
+
+@patch("robin_stocks.robinhood.stocks.get_quotes")
+@patch("app.services.broker_service.is_connected", return_value=True)
+def test_get_best_bid_ask_falls_through_when_iqfeed_absent(mock_conn, mock_quotes, monkeypatch):
+    """Flag ON but no fresh iqfeed_l1 row (helper -> None) => falls through to the
+    existing chain; RH REST quote is used. Fail-OPEN: IQFeed only ADDS a first source."""
+    from app.config import settings
+    from app.services.trading.venue import robinhood_spot
+
+    monkeypatch.setattr(settings, "chili_robinhood_spot_adapter_enabled", True, raising=False)
+    monkeypatch.setattr(
+        settings, "chili_momentum_entry_gate_iqfeed_bbo_first", True, raising=False
+    )
+    monkeypatch.setattr(robinhood_spot, "_iqfeed_l1_ticker", lambda t: None, raising=True)
+    mock_quotes.return_value = [_mock_quote(bid=150.0, ask=150.10, last=150.05)]
+
+    adapter = RobinhoodSpotAdapter()
+    tick, _ = adapter.get_best_bid_ask("AAPL")
+    assert tick is not None
+    assert tick.bid == 150.0 and tick.ask == 150.10
+
+
 @patch("app.services.broker_service.place_buy_order")
 @patch("app.services.broker_service.is_connected", return_value=True)
 def test_place_market_order_buy(mock_conn, mock_buy, monkeypatch):

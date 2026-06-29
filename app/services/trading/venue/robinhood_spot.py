@@ -257,6 +257,108 @@ def _freshness_provider_time(meta: FreshnessMeta | None) -> datetime | None:
     return getattr(meta, "provider_time_utc", None) if meta is not None else None
 
 
+def _iqfeed_l1_ticker(
+    ticker: str,
+) -> tuple[Optional[NormalizedTicker], FreshnessMeta] | None:
+    """IQFeed-L1-first BBO read (gated by chili_momentum_entry_gate_iqfeed_bbo_first).
+
+    The iqfeed_trade_bridge mirrors tick-level IQFeed L1 into momentum_nbbo_spread_tape with
+    source='iqfeed_l1' (d473331). This reads the FRESHEST such row for ``ticker`` and returns a
+    NormalizedTicker stamped with the row's true observed_at as provider time — so downstream
+    is_fresh_enough / stale_bbo see the real quote age, not insert-time. RECENCY-GATED here by the
+    same adaptive floor as the stale-quote window (chili_momentum_quote_freshness_floor_seconds,
+    one documented base): a row older than the floor returns ``None`` so the caller falls through to
+    Massive WS -> robin_stocks -> Legend. Returns ``None`` on absent/stale/error (fail-OPEN to the
+    existing chain — this only ADDS a fresher first source, never removes a fallback). Best-effort,
+    never raises."""
+    from ....config import settings
+
+    if not bool(getattr(settings, "chili_momentum_entry_gate_iqfeed_bbo_first", True)):
+        return None
+    sym = (ticker or "").strip().upper()
+    if not sym:
+        return None
+    floor_s = float(
+        getattr(settings, "chili_momentum_quote_freshness_floor_seconds", 15.0) or 15.0
+    )
+    try:
+        from sqlalchemy import text as _text
+
+        from ....db import SessionLocal
+    except Exception:
+        return None
+    db = SessionLocal()
+    try:
+        row = db.execute(
+            _text(
+                "SELECT bid, ask, mid, observed_at "
+                "FROM momentum_nbbo_spread_tape "
+                "WHERE symbol = :s AND source = 'iqfeed_l1' "
+                "  AND observed_at > (now() at time zone 'utc') - make_interval(secs => :w) "
+                "ORDER BY observed_at DESC LIMIT 1"
+            ),
+            {"s": sym, "w": floor_s},
+        ).fetchone()
+    except Exception:
+        return None
+    finally:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            db.close()
+        except Exception:
+            pass
+    if row is None:
+        return None
+    try:
+        bid = float(row[0]) if row[0] is not None else None
+        ask = float(row[1]) if row[1] is not None else None
+    except (TypeError, ValueError):
+        return None
+    if not (bid and ask and bid > 0 and ask > 0 and ask >= bid):
+        return None  # invalid book -> fall through (do NOT fabricate a quote)
+    observed_at = row[3]
+    # The tape stores observed_at as UTC (naive in TIMESTAMP cols, aware in TIMESTAMPTZ); coerce
+    # to aware-UTC so FreshnessMeta age math is correct. This is the IQFeed print time (real age).
+    prov: datetime | None
+    try:
+        if isinstance(observed_at, datetime):
+            prov = (
+                observed_at.replace(tzinfo=timezone.utc)
+                if observed_at.tzinfo is None
+                else observed_at.astimezone(timezone.utc)
+            )
+        else:
+            prov = None
+    except Exception:
+        prov = None
+    fresh = _now_freshness(provider_time_utc=prov)
+    mid = float(row[2]) if row[2] is not None else (bid + ask) / 2.0
+    spread_abs = ask - bid
+    spread_bps = (spread_abs / mid) * 10_000.0 if mid > 0 else None
+    return (
+        NormalizedTicker(
+            product_id=sym,
+            bid=bid,
+            ask=ask,
+            mid=mid,
+            spread_abs=spread_abs,
+            spread_bps=spread_bps,
+            last_price=mid,
+            last_size=None,
+            bid_size=None,
+            ask_size=None,
+            base_volume_24h=None,
+            quote_volume_24h=None,
+            freshness=fresh,
+            raw={"source": "iqfeed_l1"},
+        ),
+        fresh,
+    )
+
+
 def _normalize_rh_order(od: dict[str, Any]) -> NormalizedOrder:
     """Map a Robinhood order dict to NormalizedOrder."""
     from ...broker_service import map_rh_status
@@ -429,6 +531,20 @@ class RobinhoodSpotAdapter(VenueAdapter):
             except Exception as e:
                 logger.warning("[rh_adapter] get_best_bid_ask crypto(%s) failed: %s", ticker, e)
                 return None, fresh
+
+        # IQFeed-L1-FIRST (chili_momentum_entry_gate_iqfeed_bbo_first, default ON). The
+        # iqfeed_trade_bridge mirrors tick-level IQFeed L1 into momentum_nbbo_spread_tape
+        # (source='iqfeed_l1') at ~1-2s freshness on real movers; the entry gate read it as the
+        # FRESHEST source so wide-spread names stop false-blocking on stale_bbo against a 10-270s
+        # WS quote. Recency-gated to the adaptive freshness floor inside the helper; absent/stale/
+        # invalid -> None -> fall through to the Massive-WS-first chain below (byte-identical when
+        # the flag is OFF, since the helper short-circuits to None).
+        try:
+            _iq = _iqfeed_l1_ticker(ticker)
+        except Exception:
+            _iq = None
+        if _iq is not None:
+            return _iq
 
         # Real-time NBBO from the Massive WebSocket when the feed is live in this
         # process — beats the REST round-trip AND its quote cache. get_ws_quote

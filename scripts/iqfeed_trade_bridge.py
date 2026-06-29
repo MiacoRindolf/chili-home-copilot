@@ -27,7 +27,14 @@ import socket
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, time as _dtime, timedelta, timezone
+
+try:  # stdlib tz DB (3.9+); used to anchor the IQFeed time-of-day to US/Eastern
+    from zoneinfo import ZoneInfo
+
+    _ET = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover - zoneinfo always present on 3.11, defensive only
+    _ET = None
 
 import sqlalchemy as sa
 
@@ -83,11 +90,55 @@ INS = sa.text(
 # Mirror each valid-quote tick into the tape (source='iqfeed_l1') so the gate uses the freshest
 # available quote. Default ON; IQFEED_WRITE_NBBO_TAPE=0 reverts.
 WRITE_NBBO_TAPE = os.environ.get("IQFEED_WRITE_NBBO_TAPE", "1").strip().lower() not in ("0", "false", "no")
+# OBSERVED_AT TRUTH (default ON): stamp observed_at with the IQFeed Most-Recent-Trade-Time
+# (the actual print time, in US/Eastern) converted to UTC — NOT host wall-clock at insert. On
+# an IQFeed reconnect the feed replays a BURST of buffered OLD ticks; stamping those with now()
+# made stale ticks read as 1-2s-fresh, so the entry gate's stale_bbo freshness check trusted
+# minutes-old quotes. Anchoring to the real trade time means a buffered-replay tick correctly
+# ages out. Falls back to now() when the trade-time is unparseable. IQFEED_OBSERVED_AT_TRADE_TIME=0
+# reverts to the host-clock behavior (byte-identical to pre-fix). Stored naive-UTC like before.
+OBSERVED_AT_TRADE_TIME = (
+    os.environ.get("IQFEED_OBSERVED_AT_TRADE_TIME", "1").strip().lower() not in ("0", "false", "no")
+)
 NBBO_INS = sa.text(
     "INSERT INTO momentum_nbbo_spread_tape "
     "(symbol, observed_at, bid, ask, mid, spread_bps, day_volume, source) "
     "VALUES (:sym, :at, :bid, :ask, :mid, :spread_bps, NULL, 'iqfeed_l1')"
 )
+
+def _trade_time_to_naive_utc(last_t: str, now_utc: datetime) -> datetime | None:
+    """Convert an IQFeed Most-Recent-Trade-Time field into a NAIVE-UTC datetime (matching the
+    table's TIMESTAMP-without-tz, UTC-stored convention). IQFeed's default 6.2 layout sends the
+    trade time as a US/Eastern *time-of-day* ('HH:MM:SS' or 'HH:MM:SS.ffffff') with NO date, so
+    we anchor it to TODAY in ET. Handles the midnight-rollover edge (a tick whose ET time-of-day
+    is far in the future of the current ET time-of-day belongs to the prior ET day). Returns None
+    when unparseable / no tz DB so the caller falls back to host wall-clock.
+    (operator: data truth — a reconnect burst of OLD ticks must NOT read as fresh.)"""
+    if _ET is None:
+        return None
+    s = (last_t or "").strip()
+    if not s:
+        return None
+    tod: _dtime | None = None
+    for fmt in ("%H:%M:%S.%f", "%H:%M:%S", "%H:%M"):
+        try:
+            tod = datetime.strptime(s, fmt).time()
+            break
+        except ValueError:
+            continue
+    if tod is None:
+        return None
+    try:
+        now_et = now_utc.astimezone(_ET)
+        cand = datetime.combine(now_et.date(), tod, tzinfo=_ET)
+        # Rollover guard: if the parsed time-of-day is meaningfully AHEAD of the current ET
+        # time-of-day it must be from yesterday's ET session (e.g. 23:59 print read at 00:01).
+        if cand - now_et > timedelta(hours=1):
+            cand = cand - timedelta(days=1)
+        return cand.astimezone(timezone.utc).replace(tzinfo=None)
+    except Exception:
+        return None
+
 
 _pending: list[dict] = []
 _pending_lock = threading.Lock()
@@ -164,7 +215,13 @@ def _parse_l1(line: str) -> None:
         bid = float(p[L1_BID]) if p[L1_BID].strip() else None
         ask = float(p[L1_ASK]) if p[L1_ASK].strip() else None
         _last_trade[sym] = last_t
-        row = {"sym": sym, "at": datetime.now(timezone.utc).replace(tzinfo=None),
+        _now_utc = datetime.now(timezone.utc)
+        _at = _now_utc.replace(tzinfo=None)
+        if OBSERVED_AT_TRADE_TIME:
+            _tt = _trade_time_to_naive_utc(last_t, _now_utc)
+            if _tt is not None:
+                _at = _tt
+        row = {"sym": sym, "at": _at,
                "px": px, "sz": sz, "bid": bid, "ask": ask}
         with _pending_lock:
             _pending.append(row)

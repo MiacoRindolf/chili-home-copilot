@@ -2382,6 +2382,45 @@ def _entry_chase_ceiling_px(*, limit_px: float, expected_move_bps: float | None)
     return limit_px * (1.0 + tol_bps / 10_000.0)
 
 
+def _ask_advanced_past_limit(
+    *, ask: float | None, limit_px: float, expected_move_bps: float | None
+) -> bool:
+    """FIX B — fast-push detector. True when the live ASK has advanced ABOVE our
+    resting buy limit by MORE than an adaptive band — i.e. the offer ran away and a
+    resting marketable limit is no longer marketable (the order won't fill until
+    price comes back). This is the EARLY signal of a vertical push that the existing
+    bid-based ``entry_limit_left_behind`` misses (the bid lags the ask up).
+
+    The band = ONE documented base (``..._runaway_cross_ask_band_bps``), widened by
+    a fraction of the name's expected per-bar move (reuses ``chase_move_ratio`` so
+    explosive names get proportionally more rope before we churn a cancel+replace),
+    HARD-CAPPED at the same adaptive live spread cap the chase ceiling uses (the
+    detector can never tolerate more drift than the risk budget). Debounces single-
+    tick offer jitter. The eventual cross price is STILL bounded separately by
+    ``_entry_repeg_price``'s cumulative ceiling. Pure + side-effect-free.
+
+    Returns False on any invalid input (fail-closed: no escalation)."""
+    try:
+        if ask is None or limit_px <= 0 or ask <= 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    try:
+        base_bps = float(getattr(settings, "chili_momentum_runaway_cross_ask_band_bps", 8.0) or 0.0)
+    except (TypeError, ValueError):
+        base_bps = 8.0
+    if base_bps < 0:
+        base_bps = 0.0
+    try:
+        ratio = float(getattr(settings, "chili_momentum_entry_chase_move_ratio", 0.25) or 0.0)
+    except (TypeError, ValueError):
+        ratio = 0.0
+    band_bps = max(base_bps, (expected_move_bps or 0.0) * ratio)
+    band_bps = min(band_bps, _adaptive_live_max_spread_bps(expected_move_bps))
+    threshold = limit_px * (1.0 + band_bps / 10_000.0)
+    return ask > threshold
+
+
 def _entry_repeg_price(
     *, original_limit_px: float, live_ask: float, expected_move_bps: float | None
 ) -> float | None:
@@ -2454,11 +2493,95 @@ def _expected_move_bps_from_ohlcv(df: Any) -> float | None:
         return None
 
 
-def _adaptive_live_max_spread_bps(expected_move_bps: float | None) -> float:
+def _conservative_em_fallback_bps(df: Any, price: float | None) -> float | None:
+    """FIX A — CONSERVATIVE expected-move (bps) for a cold/thin frame, derived from
+    the name's OWN data the stop already trusts. Used ONLY when the primary
+    ``_expected_move_bps_from_ohlcv`` returns None (frame too thin to ATR) so the
+    adaptive spread cap scales instead of collapsing to the 12bps floor.
+
+    Two conservative tiers, in order of preference:
+      1. RELAXED realized range — the SAME true-range basis the stop's expected-move
+         uses, but tolerating as few as 2 bars (vs the primary's 5-bar floor), then
+         SHRUNK by ``..._fallback_shrink`` (default 0.5). Shrinking guarantees this is
+         an UNDER-estimate of the move on a thin, noisy sample -> we never loosen the
+         cap more than a confident full-frame estimate would.
+      2. PRICE-TIER floor — when there are literally no usable candles, ascribe a
+         conservative per-bar move scaled UP for lower-priced names (which structurally
+         carry wider bps spreads at the same dollar tick). A sub-$5 name gets the full
+         ``..._price_tier_bps`` (default 150); it tapers to 0 by ~$20 so liquid
+         higher-priced names keep the tight floor (no free loosening).
+
+    Pure + side-effect-free. Returns None when neither tier yields a finite positive
+    value (the caller then keeps the existing collapse-to-floor behavior)."""
+    try:
+        shrink = float(getattr(settings, "chili_momentum_spread_cap_em_fallback_shrink", 0.5) or 0.0)
+    except (TypeError, ValueError):
+        shrink = 0.5
+    if not math.isfinite(shrink) or shrink < 0:
+        shrink = 0.0
+    # Tier 1: relaxed realized range (>=2 bars) on the same true-range basis as the stop.
+    try:
+        if df is not None and not getattr(df, "empty", True) and len(df) >= 2:
+            import pandas as pd
+
+            high = df["High"].astype(float)
+            low = df["Low"].astype(float)
+            close = df["Close"].astype(float)
+            prev_close = close.shift(1)
+            true_range = pd.concat(
+                [(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()],
+                axis=1,
+            ).max(axis=1).dropna()
+            if len(true_range) >= 1:
+                n = min(14, len(true_range))
+                atr = float(true_range.tail(n).mean())
+                last_close = float(close.iloc[-1])
+                if math.isfinite(atr) and atr > 0 and last_close > 0:
+                    em = (atr / last_close) * 10_000.0 * shrink
+                    if math.isfinite(em) and em > 0:
+                        return em
+    except Exception:
+        pass
+    # Tier 2: price-tier floor (no usable candles at all).
+    try:
+        tier_bps = float(getattr(settings, "chili_momentum_spread_cap_em_fallback_price_tier_bps", 150.0) or 0.0)
+    except (TypeError, ValueError):
+        tier_bps = 150.0
+    if tier_bps <= 0 or not math.isfinite(tier_bps):
+        return None
+    try:
+        px = float(price) if price is not None else None
+    except (TypeError, ValueError):
+        px = None
+    if px is None or not math.isfinite(px) or px <= 0:
+        return None
+    # Linear taper: full tier at <= $5, zero at >= $20. Lower-priced low-floats keep
+    # the floor; liquid higher-priced names get no loosening from this tier.
+    if px <= 5.0:
+        scale = 1.0
+    elif px >= 20.0:
+        scale = 0.0
+    else:
+        scale = (20.0 - px) / 15.0
+    em = tier_bps * scale
+    return em if (math.isfinite(em) and em > 0) else None
+
+
+def _adaptive_live_max_spread_bps(
+    expected_move_bps: float | None, *, fallback_em_bps: float | None = None
+) -> float:
     """Live spread cap, volatility-relative: ``max(base_floor, ratio x expected
     move)``. Reuses the shared, tested policy helper so the runner BBO gate and
     the pre-entry risk evaluator agree on the same adaptive tolerance. Reads the
-    documented base floor + ratio knobs from settings (no inline magic)."""
+    documented base floor + ratio knobs from settings (no inline magic).
+
+    FIX A: when ``expected_move_bps`` is None (cold/thin frame) AND the flag
+    ``chili_momentum_spread_cap_em_fallback_enabled`` is on, ``fallback_em_bps`` (a
+    CONSERVATIVE name-own-data estimate from ``_conservative_em_fallback_bps``) is
+    substituted so the cap scales instead of collapsing to the 12bps floor. The
+    fallback is an under-estimate and the abs_cap still hard-caps, so a toxic wide
+    spread on a genuinely small-move name STILL blocks (win-win invariant). When the
+    flag is off OR no fallback is supplied, behavior is byte-identical to before."""
     from .risk_policy import adaptive_max_spread_bps
 
     try:
@@ -2476,7 +2599,14 @@ def _adaptive_live_max_spread_bps(expected_move_bps: float | None) -> float:
         abs_cap = 300.0 if raw_cap is None else float(raw_cap)
     except (TypeError, ValueError):
         abs_cap = 300.0
-    return adaptive_max_spread_bps(base, expected_move_bps, ratio, abs_cap_bps=abs_cap)
+    em = expected_move_bps
+    if (
+        em is None
+        and fallback_em_bps is not None
+        and bool(getattr(settings, "chili_momentum_spread_cap_em_fallback_enabled", True))
+    ):
+        em = fallback_em_bps
+    return adaptive_max_spread_bps(base, em, ratio, abs_cap_bps=abs_cap)
 
 
 def _live_entry_quote_gate_applies(sess: TradingAutomationSession, le: dict[str, Any]) -> bool:
@@ -2499,6 +2629,21 @@ def _stop_vol_floor_mult() -> float:
     except (TypeError, ValueError):
         return 0.5
     return v if v >= 0 else 0.0
+
+
+def _require_live_atr_mode() -> str:
+    """WT-1 3-state knob: 'off' | 'observe' (default) | 'enforce'.
+
+    Resolves the thin-frame stop-fallback guard mode. On a frame too thin to compute
+    a LIVE expected-move, the stop-ATR sizing falls back to the regime DEFAULT (~1.5%%)
+    — a noise-tight stop on a low-float that gaps THROUGH it (the -$697 tail). 'observe'
+    is byte-identical to today (only emits a counter); 'enforce' abstains (no-data ->
+    no-trade). Unknown/garbage values fail to the safe-but-byte-identical 'observe'."""
+    try:
+        v = str(getattr(settings, "chili_momentum_require_live_atr_for_entry", "observe") or "observe").strip().lower()
+    except (TypeError, ValueError):
+        return "observe"
+    return v if v in ("off", "observe", "enforce") else "observe"
 
 
 def _parse_event_times_utc(raw: str | None) -> list[datetime]:
@@ -3327,6 +3472,34 @@ def _quote_quality_block(
                         }
                         tick = _rf_tick  # validate the FRESH quote from here down
             if _refetched_meta is None:
+                # LOG-ONLY diagnostics (FIX A): classify WHY this is a stale_bbo so the
+                # operator can tell freshness vs IQFeed-L1 COVERAGE. The source tells us
+                # whether the freshest available quote came from the tick-level IQFeed L1
+                # mirror (source='iqfeed_l1', ~1-2s) or a slower fallback (massive_ws / RH,
+                # 10-270s). A stale block on a NON-iqfeed source = missing L1 coverage on
+                # this name (the #1 killer's coverage face); a stale block ON iqfeed = a
+                # real age-breach (truly no recent print -> suspected halt). NO behavior
+                # change — the stale_bbo block stands exactly as before.
+                if bool(getattr(settings, "chili_momentum_quote_block_diagnostics", True)):
+                    try:
+                        _src = None
+                        _raw = getattr(tick, "raw", None)
+                        if isinstance(_raw, dict):
+                            _src = _raw.get("source")
+                        _from_iqfeed = (_src == "iqfeed_l1")
+                        _log.info(
+                            "[momentum_live] quote_block_diag symbol=%s reason=stale_bbo "
+                            "kind=%s source=%s age_seconds=%.2f max_age_seconds=%.2f "
+                            "iqfeed_l1_covered=%s",
+                            str(symbol),
+                            "real_age_breach" if _from_iqfeed else "missing_iqfeed_l1_coverage",
+                            _src,
+                            _age,
+                            _max_age,
+                            _from_iqfeed,
+                        )
+                    except Exception:
+                        pass
                 return {
                     "reason": "stale_bbo",
                     "age_seconds": round(_age, 4),
@@ -3375,6 +3548,27 @@ def _quote_quality_block(
         if _refetched_meta:
             _ws.update(_refetched_meta)
             _ws["failed_check"] = "wide_bbo_spread"
+        # LOG-ONLY diagnostics (FIX A): a wide-spread block is the THIRD face of the #1
+        # killer (freshness / coverage / spread). Emit a structured line so the operator
+        # can read how often the spread cap (now adaptive) is the binding constraint and
+        # by how much the live spread exceeds it. NO behavior change.
+        if bool(getattr(settings, "chili_momentum_quote_block_diagnostics", True)):
+            try:
+                _src = None
+                _raw = getattr(tick, "raw", None)
+                if isinstance(_raw, dict):
+                    _src = _raw.get("source")
+                _log.info(
+                    "[momentum_live] quote_block_diag symbol=%s reason=wide_bbo_spread "
+                    "source=%s spread_bps=%.2f max_spread_bps=%.2f over_by_bps=%.2f",
+                    str(symbol),
+                    _src,
+                    spread_bps,
+                    max_spread,
+                    spread_bps - max_spread,
+                )
+            except Exception:
+                pass
         return _ws
     # FIX B2: a secondary refetch RESCUED a stale primary tick (the fresh quote passed all
     # validation). Surface a no-block telemetry marker so the entry caller records that the
@@ -4509,13 +4703,37 @@ def tick_live_session(
         except Exception:
             _entry_df = None
         _expected_move_bps = _expected_move_bps_from_ohlcv(_entry_df)
-        _adaptive_max_spread = _adaptive_live_max_spread_bps(_expected_move_bps)
+        # FIX A: when the frame is too cold/thin to ATR (expected_move_bps None) — the
+        # low-float case where the cap would collapse to the 12bps floor and block — derive
+        # a CONSERVATIVE name-own-data fallback so the cap scales appropriately. Flag-gated
+        # inside _adaptive_live_max_spread_bps; the win-win invariant (under-estimate +
+        # abs_cap + small-move names still block) holds.
+        _em_fallback_bps: float | None = None
+        if _expected_move_bps is None and bool(
+            getattr(settings, "chili_momentum_spread_cap_em_fallback_enabled", True)
+        ):
+            try:
+                _em_fallback_bps = _conservative_em_fallback_bps(_entry_df, float(tick.mid))
+            except Exception:
+                _em_fallback_bps = None
+        _adaptive_max_spread = _adaptive_live_max_spread_bps(
+            _expected_move_bps, fallback_em_bps=_em_fallback_bps
+        )
+        # Structured A/B counterfactual: the operator can read how often the cold-frame
+        # fallback engaged and how much it raised the cap above the collapse-floor.
+        _collapse_floor = _adaptive_live_max_spread_bps(_expected_move_bps)
         _log.info(
-            "[momentum_live] adaptive_spread symbol=%s state=%s expected_move_bps=%s max_spread_bps=%.2f",
+            "[momentum_live] adaptive_spread symbol=%s state=%s expected_move_bps=%s "
+            "em_fallback_bps=%s max_spread_bps=%.2f collapse_floor_bps=%.2f "
+            "em_fallback_engaged=%s cap_delta_bps=%.2f",
             sess.symbol,
             sess.state,
             None if _expected_move_bps is None else round(_expected_move_bps, 2),
+            None if _em_fallback_bps is None else round(_em_fallback_bps, 2),
             _adaptive_max_spread,
+            _collapse_floor,
+            bool(_expected_move_bps is None and _em_fallback_bps is not None),
+            round(_adaptive_max_spread - _collapse_floor, 2),
         )
 
     # SKIP-FOR-LIMITS (operator 2026-06-23): the momentum entry is a marketable LIMIT whose
@@ -5434,6 +5652,19 @@ def tick_live_session(
                     _emit(db, sess, "live_entry_backside_unbenched", {
                         "reason": _bench_reason, **_bench_dbg,
                     })
+                elif _bench_reason == "front_side_vwap_reclaim":
+                    # FIX D COUNTERFACTUAL: the below-VWAP bench WOULD have latched here, but
+                    # the name is RECLAIMING VWAP from below -> NOT benched. Emit a structured
+                    # counter so the operator can read the FIX-D un-bench rate + the trigger
+                    # that was preserved (vs the old behaviour that ate SDOT/ILLR) and flip
+                    # chili_momentum_backside_vwap_reclaim_enabled off if net-negative. This is
+                    # a SAVE, not an entry: every downstream chase-guard still gates the fill.
+                    _emit(db, sess, "live_entry_backside_vwap_reclaim_exception", {
+                        "fix": "D",
+                        "preserved_trigger": (_trigger_reason if _trigger_ok else None),
+                        "trigger_ok": bool(_trigger_ok),
+                        **_bench_dbg,
+                    })
             except Exception:
                 pass  # fail-open: any error -> no bench change (never strand a name)
         # GAP 1 + GAP 2 (Warrior re-audit) — HALT-CHAIN RISK GATE + RESUMPTION SIZE
@@ -5689,6 +5920,16 @@ def tick_live_session(
                 "sub_vwap_trap", "sub_vwap_trap_tick",
                 "pulling_away_roc", "pulling_away_roc_tick",
                 "premarket_pivot_macd", "premarket_pivot_macd_tick",
+                # FIX C(1) BACKSTOP: the explosive RAW first-push / raw-break escapes and the
+                # first-pullback fire all carry pullback_low (= the raw/pullback structural stop)
+                # + pullback_high (= the break level) under the SAME debug keys (entry_gates.py
+                # populates them via _evaluate_raw_break), so they MUST reuse the structural-stop
+                # + breakout-or-bailout machinery. Omitting them silently dropped the structural
+                # stop on the default-ON first-push path -> noise-tight vol-floored ATR stop on
+                # exactly the gappy low-float names the -$697 tail came from.
+                "explosive_raw_first_push_ok", "explosive_raw_first_push_tick_ok",
+                "explosive_raw_break_ok", "explosive_raw_break_tick_ok",
+                "first_pullback_ok", "first_pullback_tick_ok",
             ) and _pb_debug.get("pullback_low"):
                 le["structural_stop_price"] = float(_pb_debug["pullback_low"])
                 # #2 Breakout-or-bailout: stash the broken pullback HIGH (the breakout
@@ -6362,6 +6603,79 @@ def tick_live_session(
                             interval_s=_entry_interval_seconds(),
                             chase_ceiling_px=_chase_ceiling,
                         )
+                        # ── FIX B — AGGRESSIVE REPEG/CROSS ON FAST PUSHES ───────────
+                        # The bid-based cancel reasons above MISS the most Ross-like
+                        # entry: a fast vertical where the ASK climbs THROUGH our
+                        # resting limit first (we stop being marketable) while the bid
+                        # lags below the chase ceiling — the order then sits unfilled
+                        # until the ~2-bar rest-backstop fires, after the move is gone
+                        # (SKYQ 56 submitted / 0 filled, test w0av0u3qy). When FIX B is
+                        # enabled AND the bid-based reasons did NOT already fire a HARDER
+                        # reason (stop-breach / bid-left-behind / bar-backstop are all
+                        # respected — we only fill the None gap) AND the live ask has
+                        # advanced past our limit by more than the adaptive band, PROMOTE
+                        # the reason to `entry_limit_left_behind` so it flows through the
+                        # EXACT SAME repeg machinery below (cancel-before-replace phantom-2x
+                        # guard, cumulative-spread ceiling, risk-first resize, max_repegs,
+                        # equity gate, fresh-quote gate). The cross is bounded by
+                        # _entry_repeg_price's cumulative ceiling, so R:R can't erode.
+                        # Counterfactual emit (always, even when it can't act) so the
+                        # operator reads the submit/fill-rate delta and can flip OFF.
+                        _fixb_on = bool(getattr(settings, "chili_momentum_runaway_cross_enabled", True))
+                        _fixb_eligible_equity = not str(sess.symbol or "").upper().endswith("-USD")
+                        _fixb_ask_adv = _ask_advanced_past_limit(
+                            ask=_pask,
+                            limit_px=_lim_px,
+                            expected_move_bps=(float(_emb) if _emb else None),
+                        )
+                        if (
+                            _fixb_on
+                            and _cancel_why is None
+                            and _fixb_eligible_equity
+                            and _fixb_ask_adv
+                            and bool(getattr(settings, "chili_momentum_entry_chase_enabled", True))
+                            and int(le.get("entry_repeg_count", 0) or 0)
+                                < int(getattr(settings, "chili_momentum_entry_max_repegs", 3) or 0)
+                            and _pfr is not None and is_fresh_enough(_pfr)
+                        ):
+                            # Confirm the cross is actually reachable within the cumulative
+                            # budget BEFORE committing to a cancel — if the ask already ran
+                            # past the ceiling, escalating would only cancel+abandon (worse
+                            # than letting the rest-backstop / re-watch handle it). Fail-
+                            # closed: only promote when _entry_repeg_price yields a usable px.
+                            _fixb_rp = _entry_repeg_price(
+                                original_limit_px=float(le.get("entry_original_limit_px") or _lim_px or 0.0),
+                                live_ask=float(_pask),
+                                expected_move_bps=(float(_emb) if _emb else None),
+                            )
+                            if _fixb_rp and _fixb_rp > _lim_px:
+                                _emit(db, sess, "entry_runaway_cross_triggered", {
+                                    "fix": "B", "bid": _pbid, "ask": _pask,
+                                    "limit": _lim_px or None,
+                                    "chase_ceiling": _chase_ceiling,
+                                    "repeg_target": _fixb_rp,
+                                    "repeg_count": int(le.get("entry_repeg_count", 0) or 0),
+                                })
+                                _cancel_why = "entry_limit_left_behind"
+                            else:
+                                # Ask advanced but the cross would exceed the cumulative
+                                # spread budget — log the counterfactual, do NOT escalate
+                                # (the move left for good; the existing re-watch handles it).
+                                _emit(db, sess, "entry_runaway_cross_skipped", {
+                                    "fix": "B", "reason": "past_cumulative_ceiling",
+                                    "bid": _pbid, "ask": _pask, "limit": _lim_px or None,
+                                })
+                        elif _fixb_on and _cancel_why is None and _fixb_ask_adv:
+                            # Eligible signal but a hard precondition blocked the escalation
+                            # (crypto / repeg budget exhausted / stale quote). Counterfactual
+                            # so the operator can see how often FIX B WOULD have fired.
+                            _emit(db, sess, "entry_runaway_cross_blocked", {
+                                "fix": "B",
+                                "equity": _fixb_eligible_equity,
+                                "repeg_count": int(le.get("entry_repeg_count", 0) or 0),
+                                "fresh": bool(_pfr is not None and is_fresh_enough(_pfr)),
+                                "bid": _pbid, "ask": _pask, "limit": _lim_px or None,
+                            })
                         if _cancel_why is not None:
                             # RACE GUARD: the order may have FILLED between the 10s
                             # ack timeout and this (<=30s-cadence) tick — illiquid
@@ -6640,6 +6954,24 @@ def tick_live_session(
                                     interval_s=_entry_interval_seconds(),
                                     chase_ceiling_px=_chase_ceiling2,
                                 )
+                                # FIX B continuation: a SUSTAINED vertical can keep the
+                                # ask climbing through each fresh limit while the bid
+                                # still lags below the chase ceiling. Keep the within-tick
+                                # loop running on the ask-advance signal too (same adaptive
+                                # band, same equity/freshness/repeg-budget bounds already
+                                # re-evaluated by the while-guard; cross still capped by
+                                # _entry_repeg_price). Never overrides a HARDER bid reason
+                                # (stop-breach / bid-left-behind) — only fills the None gap.
+                                if (
+                                    _cancel_why is None
+                                    and bool(getattr(settings, "chili_momentum_runaway_cross_enabled", True))
+                                    and _ask_advanced_past_limit(
+                                        ask=_rp_ask,
+                                        limit_px=_lim_px,
+                                        expected_move_bps=(float(_emb) if _emb else None),
+                                    )
+                                ):
+                                    _cancel_why = "entry_limit_left_behind"
                             if _rp_did:
                                 if _rp_iters > 1:
                                     _log.info(
@@ -6912,6 +7244,48 @@ def tick_live_session(
         # when ATR/inputs are unusable. (docs/DESIGN/MOMENTUM_LANE.md)
         _regime = via.regime_snapshot_json if isinstance(via.regime_snapshot_json, dict) else {}
         _stop_atr_mult = float(params.get("stop_atr_mult") or 0.60)
+        # WT-1 (thin-frame stop fallback — SAFETY): when the 15m frame is too thin to
+        # compute a LIVE expected-move (_expected_move_bps is None) AND there is no
+        # structural pullback-low stop, the stop-ATR below collapses to the regime
+        # DEFAULT (~1.5%%) — a noise-tight stop on a low-float that gaps 5-9%% THROUGH it
+        # (the -$697 MTEN/SDOT/CCTG/CAST tail). 3-state knob:
+        #   off     -> no-op (size off the regime fallback, byte-identical).
+        #   observe -> DEFAULT: byte-identical (still trades); emit the [momentum_wt1]
+        #              would_abstain counter so the operator reads intraday firing freq.
+        #   enforce -> ABSTAIN (no-data -> no-trade), re-watch (the freshness re-score may
+        #              warm the frame) — mirrors the _enforce_ross_price_band fail-safe.
+        # A real structural stop means the stop is NOT a blind regime guess, so the guard
+        # only fires when BOTH the live expected-move is missing and no structural stop
+        # exists. (docs/DESIGN/MOMENTUM_LANE.md)
+        _wt1_mode = _require_live_atr_mode()
+        if _wt1_mode != "off" and _expected_move_bps is None:
+            try:
+                _wt1_struct_stop = float(le.get("structural_stop_price") or 0.0)
+            except (TypeError, ValueError):
+                _wt1_struct_stop = 0.0
+            if _wt1_struct_stop <= 0.0:
+                _wt1_blob = {
+                    "reason": "thin_frame_no_live_atr",
+                    "mode": _wt1_mode,
+                    "symbol": sess.symbol,
+                    "regime_atr_pct_fallback": round(float(regime_atr_pct(_regime) or 0.0), 6),
+                    "would_abstain": True,
+                }
+                _log.warning(
+                    "[momentum_wt1] would_abstain=1 mode=%s symbol=%s regime_atr_pct_fallback=%.6f",
+                    _wt1_mode, sess.symbol, float(regime_atr_pct(_regime) or 0.0),
+                )
+                _emit(db, sess, "live_wt1_thin_frame", _wt1_blob)
+                if _wt1_mode == "enforce":
+                    le["wt1_abstain"] = _wt1_blob
+                    _commit_le(sess, le)
+                    if sess.state in (
+                        STATE_LIVE_ENTRY_CANDIDATE, STATE_LIVE_PENDING_ENTRY
+                    ) and not le.get("entry_submitted"):
+                        _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                    db.flush()
+                    return {"ok": True, "blocked": True, "reason": "thin_frame_no_live_atr"}
+                # observe: fall through (byte-identical), counter already emitted.
         # Vol-floored stop ATR-pct: never tighter than vol_floor_mult x the live
         # expected-move, so the stop sits OUTSIDE the intraday noise (the KAIO
         # shake-out fix). Frozen in le and reused at the post-fill stop so sizing

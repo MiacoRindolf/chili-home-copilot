@@ -1684,6 +1684,77 @@ def get_recent_news_items(*, limit: int = 200, max_age_min: int = 120) -> list[t
     return out
 
 
+def get_per_ticker_news_items(
+    tickers, *, per_ticker_limit: int = 5, max_age_min: int = 120, max_tickers: int = 40
+) -> list[tuple[str, str]]:
+    """FIX E: ``(ticker, title)`` pairs for the IN-PLAY movers, queried PER TICKER instead of
+    off the global ``/v2/reference/news`` firehose.
+
+    The global firehose (``get_recent_news_items``) is sorted by ``published_utc desc`` and
+    capped at ``limit`` (~200) items — on a busy tape the low-float micro-caps Ross trades get
+    BURIED under higher-volume large-cap news and never appear, even when Polygon DOES carry a
+    fresh headline for them (verified: ILLR/NXTT/NVCT/SDOT/SKYQ each have per-ticker news the
+    firehose omitted). Querying ``/v2/reference/news?ticker=<T>`` for the names the lane is
+    actually arming surfaces that coverage. FRESHNESS is still enforced (``max_age_min``) so a
+    stale headline never tags — that residual lag is a provider constraint, not a code gap.
+
+    Bounded to ``max_tickers`` per pass (one HTTP call each; the lane's in-play set is small).
+    De-dupes to the freshest headline per ticker. Each source is independently fail-open: a
+    miss / absent plan / error on one ticker never zeroes the others. Returns ``[]`` when the
+    plan lacks news access. docs/STRATEGY/CC_REPORTS — FIX E catalyst-tagging repair."""
+    syms: list[str] = []
+    seen_in: set[str] = set()
+    for t in (tickers or []):
+        tt = str(t or "").upper().strip()
+        # equities only — crypto (-USD) never has reference news
+        if not tt or tt.endswith("-USD") or tt == "__AGGREGATE__" or tt in seen_in:
+            continue
+        seen_in.add(tt)
+        syms.append(tt)
+        if len(syms) >= max(1, int(max_tickers)):
+            break
+    if not syms:
+        return []
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(1, int(max_age_min)))
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for tk in syms:
+        cache_key = f"massive:per_ticker_news:{tk}:{int(max_age_min)}"
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            for pair in cached:
+                if pair[0] not in seen:
+                    seen.add(pair[0])
+                    out.append((pair[0], pair[1]))
+            continue
+        url = f"{_base()}/v2/reference/news"
+        data = _get(url, {
+            "ticker": tk, "limit": str(int(per_ticker_limit)),
+            "order": "desc", "sort": "published_utc",
+        })
+        rows: list[tuple[str, str]] = []
+        if data is not _NOT_FOUND and data:
+            for item in data.get("results", []):
+                ts = item.get("published_utc")
+                if ts:
+                    try:
+                        if datetime.fromisoformat(str(ts).replace("Z", "+00:00")) < cutoff:
+                            continue  # stale -> not a fresh catalyst
+                    except (TypeError, ValueError):
+                        pass  # unparseable -> keep (fail-open on freshness)
+                title = str(item.get("title") or "").strip()
+                rows.append((tk, title))
+                break  # freshest fresh headline per ticker is enough to TAG it
+        _cache_set(cache_key, rows)
+        for pair in rows:
+            if pair[0] not in seen:
+                seen.add(pair[0])
+                out.append((pair[0], pair[1]))
+    return out
+
+
 # Sector (SIC) is STATIC per ticker — a dedicated process-lifetime cache (re-warms on a
 # restart) so the theme/sympathy clusterer never re-fetches. ``None`` = looked up, absent.
 _SECTOR_CACHE: dict[str, str | None] = {}

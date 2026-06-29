@@ -2573,6 +2573,26 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_STICKY_BACKSIDE_BENCH_ENABLED"),
         description="BATCH B FIX 1: once a name CONFIRMS the session back side, latch a session-level bench so it is NOT re-armed each tick (vs the per-tick recompute that chases a rolled-over top). MANDATORY fresh-HOD un-bench (a genuine new high clears the bench — never a permanent ban). KILL-SWITCH: False -> byte-identical.",
     )
+    # ── FIX D: BACKSIDE VWAP-RECLAIM EXCEPTION ──────────────────────────────────────────
+    # The decisive w0av0u3qy replay showed the below-VWAP backside bench ATE the SDOT (44x)
+    # and ILLR (14x) early pushes — names that DIPPED below VWAP for a tick but were RECLAIMING
+    # it from below with upward momentum (exactly the reclaims the killed E1 backside-veto used
+    # to over-veto). A genuine-backside FADE (a name still FALLING away below VWAP) must STAY
+    # benched; only an active RECLAIM-from-below is un-benched. The exception applies ONLY when
+    # the bench reason is `below_vwap` (not already_faded / chasing_top) and the current price
+    # has crossed BACK above VWAP (within the existing chili_momentum_entry_vwap_hold_buffer
+    # tolerance) AND is rising vs the prior bar (positive reclaim direction). Every downstream
+    # capital-protection gate still runs (max-loss circuit, structural stop, the 4 chase-guards,
+    # the per-tick tape-required/extension vetoes). Heavily instrumented (live_entry_backside_
+    # vwap_reclaim_exception counterfactual) so the operator can read the un-bench rate + PnL
+    # delta and flip off if net-negative. KILL-SWITCH: False -> byte-identical (the exception is
+    # never evaluated, the below_vwap bench latches exactly as before). Default ON per operator
+    # style with all backstops intact.
+    chili_momentum_backside_vwap_reclaim_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BACKSIDE_VWAP_RECLAIM_ENABLED"),
+        description="FIX D: exception to the below-VWAP backside bench — do NOT bench a name that is RECLAIMING VWAP from below with upward momentum (price back above VWAP within chili_momentum_entry_vwap_hold_buffer AND rising vs the prior bar). A name still FALLING below VWAP stays benched. Reuses the existing vwap_hold_buffer (one documented base). KILL-SWITCH: False -> byte-identical (the below_vwap bench latches as before).",
+    )
     # ── BATCH B (FIX 2): HOT-TAPE WICK-RECLAIM entry (HVM101 #008, the extreme-volatility
     # variant of VWAP-reclaim). In HOT/parabolic tape ONLY: a huge rejection candle (large
     # upper wick, high range) -> immediate low-volume flush -> the next bar(s) retrace ~R of
@@ -2694,6 +2714,19 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_QUOTE_REFETCH_ENABLED"),
         description="FIX B2: on a STALE (not invalid) entry tick, refetch the BBO once from the secondary market-data chain (Massive WS -> Polygon -> RH MCP) and re-run the same validation before blocking. invalid_bbo still hard-blocks. OFF => byte-identical.",
+    )
+    # IQFEED-L1-FIRST BBO (d473331 lineage: "wire IQFeed into the entry gate"). The bridge already
+    # MIRRORS tick-level IQFeed L1 into momentum_nbbo_spread_tape (source='iqfeed_l1') — this flag is
+    # the READ side: the equity get_best_bid_ask reads the FRESHEST iqfeed_l1 tape row FIRST (recency-
+    # gated by the same adaptive floor as the stale-quote window), and only falls through to Massive WS
+    # -> robin_stocks -> Legend when that row is absent or older than the floor. IQFeed L1 prints
+    # 1-2s-fresh @ 100s+ ticks/min on real movers, vs the WS quote that lagged 10-270s and false-blocked
+    # wide-spread names on stale_bbo. Default ON (fixes over-rejection; reversible). KILL-SWITCH: False =>
+    # current Massive-WS-first behavior, byte-identical (the IQFeed read is never attempted).
+    chili_momentum_entry_gate_iqfeed_bbo_first: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_GATE_IQFEED_BBO_FIRST"),
+        description="IQFeed-L1-first BBO: equity get_best_bid_ask reads the freshest momentum_nbbo_spread_tape source='iqfeed_l1' row FIRST (recency-gated by chili_momentum_quote_freshness_floor_seconds), falling through to Massive WS -> robin_stocks -> Legend when absent/stale. OFF => Massive-first, byte-identical.",
     )
     # BROKER-TRUTH RECONCILIATION (mig309) — TWO decoupled flags (write-then-verify-then-read):
     #
@@ -3062,6 +3095,68 @@ class Settings(BaseSettings):
     chili_momentum_event_theme_keywords: str = Field(
         default="",
         validation_alias=AliasChoices("CHILI_MOMENTUM_EVENT_THEME_KEYWORDS"),
+    )
+    # AUTO HOT-THEME detector: the tape rotates themes faster than the operator can re-type
+    # the event-theme list (FDA-day biotech cluster, crypto-treasury PR run, tariff sympathy
+    # wave). When ON, theme_catalyst_symbols UNIONS the operator-set keywords with the
+    # catalyst keywords recurring across the recent BIG movers (read off the SAME deployed
+    # strong/weak keyword machinery + the gainers feed), so a NEW name carrying a hot-theme
+    # keyword inherits the theme boost without operator action. The operator-set keywords are
+    # ALWAYS honored (auto only ADDS). Selection tilt only; fail-open (no movers/feed => no
+    # auto theme). KILL-SWITCH: False -> operator-set-only, byte-identical. (catalyst.py)
+    chili_momentum_auto_theme_detection_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_THEME_DETECTION_ENABLED"),
+        description="Auto-detect HOT catalyst themes from recent big movers and union them into the event-theme boost. Operator-set keywords always honored; selection tilt only; fail-open. KILL-SWITCH: False -> operator-set-only, byte-identical.",
+    )
+    # AUTO HOT-THEME documented bases (override only to tune; defaults match catalyst.py).
+    # Recurrence: a keyword in >= this many recent big movers is a real theme (2 = leader +
+    # >=1 peer; one hot name is noise). Window: rolling freshness (minutes) for the movers +
+    # their headlines (defaults to the news-catalyst freshness window; own knob so a theme can
+    # run wider than a single fill). Big-mover floor: the explosive %% gain a mover must clear
+    # to vote (defaults to the HOT-tape LULD-scale move pct — the floor the lane already trusts).
+    chili_momentum_auto_theme_recurrence_min: int = Field(
+        default=2,
+        ge=2,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_THEME_RECURRENCE_MIN"),
+        description="Auto hot-theme: a catalyst keyword must recur across >= this many recent big movers to count as HOT (2 = leader + >=1 peer).",
+    )
+    chili_momentum_auto_theme_window_min: int = Field(
+        default=120,
+        ge=15,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_THEME_WINDOW_MIN"),
+        description="Auto hot-theme: rolling freshness window (minutes) for the recent big movers + their headlines. Default 120 = the news-catalyst freshness window.",
+    )
+    chili_momentum_auto_theme_big_mover_pct: float = Field(
+        default=30.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_THEME_BIG_MOVER_PCT"),
+        description="Auto hot-theme: a mover must clear this %% day-gain to vote for a hot theme. Default 30 = the HOT-tape LULD-scale 'big move' floor.",
+    )
+    # ── FIX E: PER-TICKER catalyst-news pass for the IN-PLAY movers ─────────────────────
+    # Root cause (decisive w0av0u3qy probe in the LIVE container): 0/11 Ross names were
+    # catalyst/theme-tagged because the catalyst accessors read the GLOBAL Polygon news
+    # firehose (/v2/reference/news sorted desc, limit ~200) — on a busy tape the low-float
+    # micro-caps Ross trades get BURIED under large-cap news and never appear, even when
+    # Polygon DOES carry a fresh headline for them (verified per-ticker: ILLR/NXTT/NVCT/SDOT/
+    # SKYQ each have news the firehose omitted; FISN genuinely has none). This adds a PER-
+    # TICKER news pass for the names the lane is ACTUALLY arming and UNIONS the fresh hits into
+    # the catalyst set, so a real catalyst on a low-float actually tags. Selection TILT only
+    # (rides the existing catalyst path); never a gate, never a penalty; freshness still
+    # enforced (a stale headline never tags — that residual provider lag is the honest feed
+    # constraint, NOT a code bug). Bounded per pass. KILL-SWITCH: False -> firehose-only,
+    # byte-identical. Default ON per operator style; the catalyst tilt is additive so a
+    # mis-tag can only mildly boost rank, never bypass a capital-protection gate.
+    chili_momentum_catalyst_tagging_repair_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_TAGGING_REPAIR_ENABLED"),
+        description="FIX E: query Polygon news PER IN-PLAY-MOVER ticker (not just the global firehose) and UNION the fresh hits into the catalyst/strong/weak/fake/theme sets, so a low-float Ross mover with a real catalyst actually gets tagged (the firehose buries micro-caps under large-cap news). Freshness still enforced. Selection tilt only; fail-open. KILL-SWITCH: False -> firehose-only, byte-identical.",
+    )
+    chili_momentum_catalyst_repair_max_tickers: int = Field(
+        default=40,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_REPAIR_MAX_TICKERS"),
+        description="FIX E: max in-play mover tickers to run the per-ticker catalyst-news pass on per viability pass (one HTTP call each; the lane's in-play set is small). The one documented bound.",
     )
     # E7: THEME / SYMPATHY detector (the 1000%-mover lever). When a LEADER squeezes on a
     # catalyst, same-THEME names run too (STI->ASTC). Complements the SIC-sector sympathy
@@ -4450,6 +4545,73 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_BREAK_CANDLE_MIN_CLOSE_POS"),
         description="Break bar must close at least this fraction up its range (0.5 = upper half).",
     )
+    # ADAPTIVE break-candle close-position floor (gate-audit fix: the FIXED 0.50 close-pos
+    # over-rejected explosive FIRST-pushes — 53%% of weak_break_candle blocks ran +3%%, and
+    # SKYQ/FRTT/WEN/HELP/BOLD ran but never filled). Ross buys the FIRST strong push even when
+    # the 1m candle isn't textbook-strong. When ON, an EXPLOSIVE break (trigger-bar RVOL >= the
+    # existing E3 explosive floor, chili_momentum_explosive_floor_rvol) RELAXES the close-pos
+    # requirement, floating it DOWN from 0.50 toward the relaxed floor below as RVOL exceeds the
+    # E3 floor. Ordinary tape (RVOL < the explosive floor, or unknown) keeps the textbook 0.50;
+    # a genuinely weak/doji break STILL blocks below the relaxed floor even at high RVOL.
+    # Relaxation is RVOL-DERIVED (vs the SAME E3 floor — no new magic threshold); the relaxed
+    # floor is the ONE documented base. DEFAULT OFF — this is a skip-tick gate whose evidence is
+    # confounded by the full stack, so it must be A/B'd on the recorded-fills replay before going
+    # live. KILL-SWITCH: False -> the fixed 0.50 gate, byte-identical. (entry_gates.py weak_break_candle)
+    chili_momentum_break_candle_adaptive_close_pos_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BREAK_CANDLE_ADAPTIVE_CLOSE_POS_ENABLED"),
+        description="Adaptive break-candle close-pos: when ON, an explosive break (RVOL >= chili_momentum_explosive_floor_rvol) relaxes the close-pos requirement DOWN from 0.50 toward the relaxed floor; ordinary tape keeps 0.50. DEFAULT OFF (A/B on replay first). KILL-SWITCH: False -> fixed 0.50, byte-identical.",
+    )
+    chili_momentum_break_candle_adaptive_close_pos_floor: float = Field(
+        default=0.30,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BREAK_CANDLE_ADAPTIVE_CLOSE_POS_FLOOR"),
+        description="Adaptive break-candle close-pos: the relaxed floor an EXPLOSIVE break can decay the close-pos requirement toward (from 0.50). The ONE documented relaxed-floor base; below it a break still blocks (doji rejection preserved). Reached at RVOL = 2x the E3 explosive floor.",
+    )
+    # SD-1 (verticality cold-frame fail-OPEN): the entry verticality veto caps the
+    # allowed extension above EMA9 at atr_pct x the verticality mult. On a COLD/short
+    # frame the ATR isn't warm, so atr_pct is None and the cap collapses to its 0.5%%
+    # punitive floor — which over-rejects valid low-float Ross names that normally
+    # breathe >0.5%% per bar. When ON (default True) the verticality veto is SKIPPED
+    # entirely on a cold frame (fail-OPEN — without ATR we cannot tell a chase from a
+    # normal breath). The veto stays FULLY active whenever atr_pct IS known. KILL-SWITCH:
+    # False -> the current 0.5%%-floor cold-frame behaviour, byte-identical. (entry_gates.py)
+    chili_momentum_verticality_skip_on_cold_atr: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VERTICALITY_SKIP_ON_COLD_ATR"),
+        description="Verticality veto SKIPS on a cold frame (atr_pct None) instead of applying the punitive 0.5%% floor that over-rejects low-float Ross names. Veto stays fully active when atr_pct is known. KILL-SWITCH: False -> 0.5%%-floor behaviour, byte-identical.",
+    )
+    # NaN-bar drop: a single transient NaN/zero/inverted OHLC bar made the whole-frame
+    # integrity verdict reject the entire 5-day frame and blank an otherwise healthy
+    # name. When ON (default True) clean_ohlcv drops the INDIVIDUAL bad bars (NaN on any
+    # of O/H/L/C, Close<=0, or High<Low) BEFORE the integrity verdict runs. A mostly-bad
+    # frame (>50%% bad bars) is real corruption and STILL falls through to the whole-frame
+    # reject. KILL-SWITCH: False -> the prior whole-frame reject, byte-identical. (data_quality.py / market_data.py)
+    chili_momentum_clean_drop_bad_bars: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CLEAN_DROP_BAD_BARS"),
+        description="Drop INDIVIDUAL malformed OHLC bars before the integrity verdict so one transient NaN/zero bar does not reject a whole healthy frame. Mostly-bad frames (>50%%) still get the whole-frame reject. KILL-SWITCH: False -> whole-frame reject, byte-identical.",
+    )
+    # WT-1 (thin-frame stop fallback — SAFETY): on a frame too thin to compute a live
+    # expected-move, the stop-ATR sizing falls back to the regime DEFAULT (~1.5%%) — a
+    # noise-tight stop on a low-float that gaps 5-9%% THROUGH it (the -$697 tail of
+    # MTEN/SDOT/CCTG/CAST). This is a 3-STATE knob on whether to require a LIVE
+    # expected-move before taking the entry:
+    #   "off"     -> no-op, byte-identical to today (sizes off the regime fallback).
+    #   "observe" -> DEFAULT. Byte-identical behaviour (still trades), but EMIT a
+    #                structured counter [momentum_wt1] would_abstain=... so the operator
+    #                can read the intraday firing frequency before enforcing.
+    #   "enforce" -> ABSTAIN: a thin frame (no live expected_move) -> no-trade, mirroring
+    #                the _enforce_ross_price_band no-data-no-trade fail-safe. (Capital
+    #                protection: the stop would otherwise be a blind regime-default guess.)
+    # Default "observe" => no behaviour change at the open, just measurable. The wider-stop
+    # variant is deferred; enforce is the safe terminal state. (live_runner.py / paper_execution.py)
+    chili_momentum_require_live_atr_for_entry: str = Field(
+        default="observe",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REQUIRE_LIVE_ATR_FOR_ENTRY"),
+        description="3-state thin-frame stop guard: 'off' (no-op, byte-identical, sizes off regime ATR fallback) | 'observe' (DEFAULT: byte-identical + emit [momentum_wt1] would_abstain counter) | 'enforce' (ABSTAIN when no live expected_move — no-data-no-trade fail-safe vs a noise-tight regime-default stop on a gappy low-float). Default observe => no behaviour change, measurable.",
+    )
     chili_momentum_entry_require_vwap_hold: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_REQUIRE_VWAP_HOLD"),
@@ -5237,6 +5399,57 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_RAW_BREAK_THRUST_FRAC"),
         description="ADAPTIVE-RETEST: strong-thrust fraction for the explosive raw-break escape — the back-half aggressor-buy acceleration must clear this fraction of back-half buy volume (when exposed) else a strictly-rising tape is required. Higher = stricter.",
     )
+    # FIX C(1) — EXPLOSIVE RAW FIRST-PUSH (Ross's asymmetric rule, extended to the bar BEFORE a
+    # retest can even form). The existing chili_momentum_pullback_raw_break_when_explosive escape
+    # only rescues a break that ALREADY printed and then ran without offering a retest
+    # (``waiting_for_retest``). But the decisive w0av0u3qy study showed CHILI was still stranded at
+    # ``waiting_for_break`` on the EXPLOSIVE tier — the retest ladder forces a wait even before the
+    # first completed-bar break, so a vertical low-float runner (NVCT/FISN/SKYQ class) never arms.
+    # When this flag is ON (default True) and require_retest is forcing a ``waiting_for_break`` wait
+    # on a CLEARLY EXPLOSIVE name (RVOL >= the SAME adaptive explosive floor AND tape-confirmed
+    # aggressive buying via the SAME _explosive_raw_break_escape gate — TAPE REQUIRED + FAIL-CLOSED),
+    # re-evaluate the trigger as a RAW first break (require_retest=False semantics for THIS tier
+    # only) so it fires the instant a completed bar crosses the pullback high. It is NOT a chase: the
+    # SAME 4 chase-guards every other fire runs (tape-required-fail-closed, extension/verticality,
+    # backside EMA/MACD + front_side_state + VWAP-hold, structural stop) + the RAISED runaway volume
+    # floor + fail-CLOSED sustained-volume all run downstream UNCHANGED. Default-ON per operator
+    # style (backstops intact); KILL-SWITCH False ⇒ this whole block is skipped ⇒ BYTE-IDENTICAL to
+    # the require_retest ladder. Heavily instrumented (debug["explosive_raw_first_push"] + the
+    # raw_break_* tape patch) for the live A/B. docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_explosive_raw_break_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_RAW_BREAK_ENABLED"),
+        description="FIX C(1): when require_retest is True and an EXPLOSIVE name is stranded at waiting_for_break, re-evaluate as a tape-confirmed RAW first break (require_retest=False for the explosive tier only). All 4 chase-guards still run. Default ON; flag-OFF is byte-identical.",
+    )
+    # FIX C(2) — RVOL-RELATIVE break-volume floor (kills the fixed 1.5x/2.0x magic on the
+    # break_low_volume gate). The fixed volume_spike_multiple / runaway_min_volume_spike held a
+    # +400%-RVOL explosive name to the SAME trigger-bar relative-volume bar as a +20% name — so the
+    # w0av0u3qy study saw break_low_volume reject 529 explosive breaks. When this flag is ON (default
+    # True) the per-bar break-volume floor SCALES DOWN as the name's own day-RVOL rises: a name whose
+    # rel-vol is R x the explosive floor needs only floor / (R-relative ratio) on the trigger bar.
+    # The base ratio chili_momentum_break_volume_rvol_ratio is the ONE documented knob; the floor
+    # NEVER drops below a documented absolute minimum (a hyper-explosive name still needs a real
+    # green volume bar, not a one-lot poke). The RAISED runaway/deep-reclaim/late-pullback floor is
+    # the relative ceiling for the weaker-prior set (those still demand MORE). Self-relative, no magic
+    # share count. KILL-SWITCH False ⇒ the EXACT fixed multiple below (byte-identical).
+    chili_momentum_break_volume_rvol_relative: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BREAK_VOLUME_RVOL_RELATIVE"),
+        description="FIX C(2): RVOL-relative break-volume floor — a higher-RVOL name clears a LOWER trigger-bar relative-volume bar (kills the fixed 1.5x/2.0x). Default ON; flag-OFF is the fixed multiple (byte-identical).",
+    )
+    chili_momentum_break_volume_rvol_ratio: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BREAK_VOLUME_RVOL_RATIO"),
+        description="FIX C(2): the ONE documented base. The RVOL-relative break-volume floor = base_floor x clamp(explosive_floor_rvol / day_rvol, ratio, 1.0). At ratio=0.25 a name running >=4x the explosive RVOL floor needs only 25% of the base trigger-bar volume bar; a name AT the floor still needs the full base.",
+    )
+    chili_momentum_break_volume_rvol_min_floor: float = Field(
+        default=1.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BREAK_VOLUME_RVOL_MIN_FLOOR"),
+        description="FIX C(2): absolute minimum trigger-bar relative-volume the RVOL-relative floor can scale down to (a hyper-explosive name still needs a real green volume bar, not a one-lot poke). Default 1.0 = at-or-above the trailing average.",
+    )
     # #2 Breakout-or-bailout fast exit (Ross flat-top): if the broken level fails to
     # hold shortly after entry, cut at market — well inside the structural stop.
     chili_momentum_breakout_bailout_enabled: bool = Field(
@@ -5481,6 +5694,39 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_MAX_REPEGS"),
         description="Max cancel-and-replace re-pegs per entry before falling back to cancel+re-watch. Bounds the chase so a runaway can't loop forever. 0 = no re-peg even with chase_enabled (parity).",
     )
+    # ── FIX B — AGGRESSIVE REPEG/CROSS ON FAST PUSHES (2026-06-29) ───────────────
+    # The decisive test (w0av0u3qy, db=chili): SKYQ 56 submitted / 0 filled. Root
+    # cause = the existing repeg only fires on `entry_limit_left_behind` (the BID
+    # ABOVE our limit). On a fast vertical push the ASK climbs THROUGH our resting
+    # limit first (we stop being marketable, the offer ran away) while the bid lags
+    # below the chase ceiling — so the order sits unfilled until the rest-backstop
+    # (~2 bars / 120s) cancels it, after the move is gone. FIX B adds an EARLIER,
+    # EVENT-DRIVEN escalation: when the order is submitted-but-unfilled AND the live
+    # ASK has advanced past our resting limit by more than a small adaptive band
+    # (the move is pushing up THROUGH us, the most Ross-like names), cancel+replace
+    # UP to a fresh marketable cross IMMEDIATELY — re-using the SAME repeg machinery
+    # (cumulative-spread ceiling, risk-first resize, cancel-before-replace phantom-2x
+    # guard, max_repegs counter, equity gate, fresh-quote gate). It NEVER chases past
+    # the cumulative chase ceiling (_entry_repeg_price caps at the original limit's
+    # adaptive spread budget), so 2:1 R:R against the fixed structural stop is intact.
+    # false ⇒ byte-identical to FIX-A behavior (only bid-left-behind triggers a repeg).
+    chili_momentum_runaway_cross_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RUNAWAY_CROSS_ENABLED"),
+        description="FIX B master switch. True (default) = also escalate to a marketable cross when the live ASK advances past our resting entry limit on a fast push (not only when the BID crosses). False = parity (bid-left-behind is the only repeg trigger).",
+    )
+    # The ask must advance past our resting limit by MORE than this adaptive band
+    # before FIX B escalates — so a single-tick jitter at the offer doesn't churn a
+    # cancel+replace. ONE documented base (bps), widened by a fraction of the name's
+    # expected per-bar move (reuses chase_move_ratio so explosive names get more
+    # rope), and HARD-CAPPED at the same adaptive live spread cap the chase ceiling
+    # uses (the escalation can never tolerate more drift than the risk budget). The
+    # actual cross price is STILL bounded by _entry_repeg_price's cumulative ceiling.
+    chili_momentum_runaway_cross_ask_band_bps: float = Field(
+        default=8.0, ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RUNAWAY_CROSS_ASK_BAND_BPS"),
+        description="FIX B: the live ask must exceed our resting limit by more than this many bps (vol-widened by chase_move_ratio, hard-capped at the live spread cap) before escalating to a marketable cross — debounces single-tick offer jitter. Inert while runaway_cross_enabled=False.",
+    )
     chili_momentum_risk_max_position_size_base: float = Field(
         default=1_000_000.0,
         ge=0.0,
@@ -5530,6 +5776,52 @@ class Settings(BaseSettings):
     chili_momentum_skip_spread_gate_for_limit_entry: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SKIP_SPREAD_GATE_FOR_LIMIT_ENTRY"),
+    )
+    # FIX A — adaptive spread-cap robustness (the stale_bbo/wide_bbo #1-killer fix).
+    # The live spread cap scales with the name's expected move (win-win): explosive
+    # names tolerate proportionally more spread, quiet names keep the tight floor.
+    # DEFECT: when the 15m frame is too cold/thin to compute an ATR-based expected
+    # move (exactly the low-float names Ross trades pre-momentum), expected_move_bps
+    # is None and the cap COLLAPSES to the 12bps mega-cap floor — blocking the very
+    # movers we want. When True, derive a CONSERVATIVE adaptive fallback expected-move
+    # from the name's OWN data (relaxed realized 15m range on as few as 2 bars, shrunk
+    # by the factor below; else a price-tier floor) so the cap scales appropriately
+    # instead of collapsing. WIN-WIN INVARIANT PRESERVED: the fallback is deliberately
+    # an UNDER-estimate of the move (never over-allows), the abs_cap still hard-caps,
+    # and a toxic wide spread on a genuinely small-move name STILL blocks. 0 / False =
+    # the current collapse-to-floor behavior, byte-identical.
+    chili_momentum_spread_cap_em_fallback_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_CAP_EM_FALLBACK_ENABLED"),
+    )
+    # Conservative shrink applied to the fallback expected-move so the spread cap is
+    # never loosened on the basis of a thin, noisy estimate (under-allow, never over).
+    # One documented knob; 0.5 = trust half the relaxed realized-range as the move.
+    chili_momentum_spread_cap_em_fallback_shrink: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_CAP_EM_FALLBACK_SHRINK"),
+    )
+    # Price-tier floor for the fallback when even a relaxed realized-range is
+    # unavailable (truly no candles). Lower-priced low-floats structurally carry
+    # wider bps spreads at the same dollar tick; this is the conservative expected
+    # per-bar move (bps) we ascribe to a sub-$5 name so its cap doesn't collapse to
+    # 12bps. Capped by the abs_cap regardless. One documented base; reference is a
+    # FLOOR not a ceiling.
+    chili_momentum_spread_cap_em_fallback_price_tier_bps: float = Field(
+        default=150.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_CAP_EM_FALLBACK_PRICE_TIER_BPS"),
+    )
+    # LOG-ONLY diagnostics for the #1 quote-quality killer: when True, _quote_quality_block
+    # classifies a stale_bbo as a REAL age-breach (a quote row exists but is old) vs a
+    # MISSING row (no IQFeed L1 coverage at all) and logs the distinction, plus emits a
+    # structured line on every wide_bbo_spread block. NO behavior change — purely so the
+    # operator can tell whether the killer is freshness, coverage, or spread.
+    chili_momentum_quote_block_diagnostics: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_QUOTE_BLOCK_DIAGNOSTICS"),
     )
     chili_momentum_risk_max_estimated_slippage_bps: float = Field(
         default=18.0,

@@ -1392,10 +1392,11 @@ def run_momentum_neural_tick(
     except Exception:
         pass
 
+    _cat: set[str] = set()
     try:
         from .catalyst import all_catalyst_symbols
 
-        _cat = all_catalyst_symbols()
+        _cat = all_catalyst_symbols() or set()
         if _cat:
             # MUST be a list, not a set: meta flows into the brain_node_states
             # local_state JSONB and a set is not JSON-serializable ("Object of type
@@ -1403,7 +1404,7 @@ def run_momentum_neural_tick(
             # write and leave every symbol stale. (regression guard for #528)
             meta["catalyst_symbols"] = sorted(_cat)
     except Exception:
-        pass
+        _cat = set()
 
     # E2: STRONG-catalyst boost set (FDA/trial/partnership/contract/M&A/beat headlines Ross
     # FAVORS). Same once-per-pass best-effort fetch as the weak set; JSON-safe sorted list.
@@ -1475,6 +1476,7 @@ def run_momentum_neural_tick(
     # now SIGN-REFINED: a recent reverse split with fresh REAL news + low post-split float (SS101
     # squeeze) and an at/above-market private placement are REMOVED from the de-boost. Any
     # context absent / flag OFF -> bare keyword classification (byte-identical). JSON-safe list.
+    _weak: set[str] = set()
     try:
         from .catalyst import weak_catalyst_symbols
 
@@ -1483,11 +1485,11 @@ def run_momentum_neural_tick(
             floats=_floats or None,
             strong_news_symbols=_strong or None,
             private_placement_at_or_above_market=_pp_bullish or None,
-        )
+        ) or set()
         if _weak:
             meta["weak_catalyst_symbols"] = sorted(_weak)
     except Exception:
-        pass
+        _weak = set()
 
     # SS101 low-float-squeeze BOOST: the recent-reverse-split names that EARNED the de-boost
     # exemption are folded into the STRONG set so the EXISTING catalyst grade delta carries the
@@ -1513,12 +1515,56 @@ def run_momentum_neural_tick(
     # FAKE-catalyst credibility set (Ross AS101/HVM101): UNVERIFIED / hacked-PR / unsolicited-
     # buyout / rumor / pump headlines Ross DISTRUSTS (they round-trip fully). Same once-per-pass
     # best-effort fetch; JSON-safe sorted list. Empty / absent feed / flag OFF -> no-op.
+    _fake: set[str] = set()
     try:
         from .catalyst import fake_catalyst_symbols
 
-        _fake = fake_catalyst_symbols()
+        _fake = fake_catalyst_symbols() or set()
         if _fake:
             meta["fake_catalyst_symbols"] = sorted(_fake)
+    except Exception:
+        _fake = set()
+
+    # ── FIX E: PER-TICKER catalyst-news repair for the IN-PLAY movers ───────────────────
+    # The firehose sets above (all/strong/weak/fake) bury low-float micro-caps under large-cap
+    # news (decisive w0av0u3qy probe: 0/11 Ross names tagged). Run a PER-TICKER fresh-news pass
+    # over the names the lane is actually arming (the equity ross_signals keys) and UNION the
+    # graded hits into every catalyst set, so a real catalyst on a low-float actually tags. The
+    # per-ticker tags ADD to (never remove from) the firehose tags. Selection tilt only; freshness
+    # still enforced inside the accessor (a stale headline never tags — the honest feed-lag
+    # constraint). Flag OFF / no movers / absent feed -> no change (firehose-only, byte-identical).
+    try:
+        if bool(getattr(settings, "chili_momentum_catalyst_tagging_repair_enabled", True)) and _eq_movers:
+            from .catalyst import per_ticker_catalyst_tags
+
+            _pt_all, _pt_strong, _pt_weak, _pt_fake = per_ticker_catalyst_tags(_eq_movers)
+            if _pt_all or _pt_strong or _pt_weak or _pt_fake:
+                # union the per-ticker tags into the in-memory sets the downstream tilt reads
+                # (_cat/_strong/_weak/_fake are all initialized to set() above -> safe).
+                _cat = set(_cat) | _pt_all
+                _strong = set(_strong) | _pt_strong
+                _weak = set(_weak) | _pt_weak
+                _fake = set(_fake) | _pt_fake
+                # re-stamp the JSON-safe meta sets (sorted lists) so the persisted viability
+                # explain/regime context carries the repaired tags for A/B + the auto-theme path
+                if _cat:
+                    meta["catalyst_symbols"] = sorted(_cat)
+                if _strong:
+                    meta["strong_catalyst_symbols"] = sorted(_strong)
+                if _weak:
+                    meta["weak_catalyst_symbols"] = sorted(_weak)
+                if _fake:
+                    meta["fake_catalyst_symbols"] = sorted(_fake)
+                # COUNTERFACTUAL for live A/B: which names the per-ticker pass tagged that the
+                # firehose did NOT (the operator reads tag-rate + downstream PnL delta, flips
+                # chili_momentum_catalyst_tagging_repair_enabled off if net-negative).
+                meta["catalyst_repair_fix_e"] = {
+                    "per_ticker_tagged": sorted(_pt_all),
+                    "strong": sorted(_pt_strong),
+                    "weak": sorted(_pt_weak),
+                    "fake": sorted(_pt_fake),
+                    "n_movers_scanned": len(_eq_movers),
+                }
     except Exception:
         pass
 
