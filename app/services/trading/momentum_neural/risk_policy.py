@@ -1216,6 +1216,88 @@ def catalyst_conviction_size_multiplier(
         return 1.0, {"reason": "error_fail_neutral", "conviction_mult": 1.0}
 
 
+def _kelly_fraction_from_conviction(conviction: float) -> float:
+    """HALF-KELLY bet fraction from a [0,1] conviction percentile (no hardcoded win-rate).
+
+    Kelly: f* = edge/odds = p - (1-p)/b. Even-money proxy (b=1) => f* = 2p-1. We use the
+    BLENDED triple-confluence percentile as the win-probability proxy p. Full Kelly is
+    over-aggressive (operator warned: sizing up before proven expectancy is risky) => HALF
+    Kelly: f = 0.5*max(0, 2p-1). p<=0.5 => 0 (no size-up); p=1 => 0.5. Bounded [0,0.5]."""
+    try:
+        p = float(conviction)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(p):
+        return 0.0
+    p = max(0.0, min(1.0, p))
+    return 0.5 * max(0.0, 2.0 * p - 1.0)
+
+
+def triple_confluence_kelly_multiplier(
+    *,
+    squeeze_pct: float | None,
+    ofi: float | None,
+    news_grade_rank: int | None,
+) -> tuple[float, dict[str, Any]]:
+    """FRACTIONAL-KELLY TRIPLE-CONFLUENCE size-up multiplier (NOT a hard live-block).
+
+    Sizes UP — and ONLY up — when ALL THREE pillars AGREE: SQUEEZE squeeze_pct>0.5, OFI
+    ofi>0, NEWS news_grade_rank>0. Any leg missing/sub-neutral => 1.0 (fail-open). All agree:
+      c=clamp((w_sq*sq_lift+w_ofi*ofi_lift+w_news*news_lift)/sum_w,0,1); f_half=0.5*max(0,2c-1)
+      mult=clamp(1.0+gain*f_half,1.0,max_multiplier)
+    sq_lift=(squeeze_pct-0.5)/0.5; ofi_lift=ofi; news_lift=1.0. max_multiplier (default 1.5,
+    clamped [1,2]) is the ONE documented HALF-KELLY ceiling; the #769 circuit still bounds the
+    realized worst case. Composes under the runner's min(.., base*3.0) clamp + hard notional
+    ceiling + the unchanged #769 circuit. NEVER a veto/shrink (>=1.0). Flag OFF / leg missing /
+    error => (1.0, ...). Pure; settings only. [momentum_neural] kelly-conviction."""
+    if not bool(getattr(settings, "chili_momentum_kelly_conviction_enabled", True)):
+        return 1.0, {"reason": "disabled", "kelly_mult": 1.0}
+    try:
+        sq = None if squeeze_pct is None else float(squeeze_pct)
+        of = None if ofi is None else float(ofi)
+        nr = 0 if news_grade_rank is None else int(news_grade_rank)
+        sq_ok = sq is not None and math.isfinite(sq) and sq > 0.5
+        ofi_ok = of is not None and math.isfinite(of) and of > 0.0
+        news_ok = nr > 0
+        if not (sq_ok and ofi_ok and news_ok):
+            return 1.0, {"kelly_mult": 1.0, "reason": "confluence_incomplete",
+                         "squeeze_ok": bool(sq_ok), "ofi_ok": bool(ofi_ok), "news_ok": bool(news_ok)}
+        sq_lift = max(0.0, min(1.0, (sq - 0.5) / 0.5))
+        ofi_lift = max(0.0, min(1.0, of))
+        news_lift = 1.0
+        def _w(name: str, default: float) -> float:
+            raw = getattr(settings, name, default)
+            try:
+                v = float(raw if raw is not None else default)
+            except (TypeError, ValueError):
+                return default
+            return v if (math.isfinite(v) and v >= 0) else default
+        w_sq = _w("chili_momentum_kelly_conviction_w_squeeze", 0.4)
+        w_ofi = _w("chili_momentum_kelly_conviction_w_ofi", 0.4)
+        w_news = _w("chili_momentum_kelly_conviction_w_news", 0.2)
+        wsum = w_sq + w_ofi + w_news
+        if wsum <= 0:
+            return 1.0, {"kelly_mult": 1.0, "reason": "weights_disabled"}
+        conviction = max(0.0, min(1.0, (w_sq*sq_lift + w_ofi*ofi_lift + w_news*news_lift) / wsum))
+        f_half = _kelly_fraction_from_conviction(conviction)
+        _gain_raw = getattr(settings, "chili_momentum_kelly_conviction_gain", 1.0)
+        kelly_gain = float(_gain_raw if _gain_raw is not None else 1.0)
+        if not math.isfinite(kelly_gain) or kelly_gain < 0:
+            kelly_gain = 1.0
+        _max_raw = getattr(settings, "chili_momentum_kelly_conviction_max_multiplier", 1.5)
+        max_mult = float(_max_raw if _max_raw is not None else 1.5)
+        if not math.isfinite(max_mult) or max_mult < 1.0:
+            max_mult = 1.0
+        mult = max(1.0, min(max_mult, 1.0 + kelly_gain * f_half))
+        return mult, {"kelly_mult": round(mult, 4), "conviction": round(conviction, 4),
+                      "kelly_fraction_half": round(f_half, 4), "squeeze_pct": round(sq, 4),
+                      "ofi": round(of, 4), "news_grade_rank": nr,
+                      "weights": {"squeeze": w_sq, "ofi": w_ofi, "news": w_news},
+                      "max_multiplier": max_mult, "gain": kelly_gain}
+    except Exception:
+        return 1.0, {"reason": "error_fail_neutral", "kelly_mult": 1.0}
+
+
 def compute_risk_first_quantity(
     *,
     entry_price: float,

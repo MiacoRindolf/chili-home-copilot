@@ -294,6 +294,128 @@ ROSS_SQUEEZE_CTB_HARD = 10.0          # 10% annual borrow = hard-to-borrow
 ROSS_SQUEEZE_CTB_SATURATION = 100.0   # 100%+ = extreme (CTB leg caps)
 ROSS_SQUEEZE_CTB_EASY = 1.0           # at/below this annual % = essentially free shares (de-rate)
 
+# ── P4 SQUEEZE-SCORE DEEPENING (ENTRY size-up + EXIT squeeze-aware-hold) ──
+# The squeeze_fuel sub-score (si_pct_free_float + cost_to_borrow) already RE-RANKS selection
+# (the tilt). P4 extends the SAME score to two new, downstream uses driven SOLELY by the name's
+# OWN within-batch squeeze PERCENTILE (``squeeze_fuel_rank_pct`` — the fraction of the live batch
+# at-or-below this name's raw squeeze score). No magic absolute SI/CTB cutoffs: the live bar floats
+# with whatever short mechanics are actually in the batch. Each lever has ONE documented base each.
+#
+# (1) ENTRY SIZE-UP: a name in the TOP squeeze percentile (>= ENTRY_TOP_PCTL) whose tape AGREES
+#     (live OFI > 0) and whose news AGREES (strong-catalyst member) scales the per-trade RISK
+#     BUDGET up by a bounded, percentile-driven multiplier in [1.0, ENTRY_MAX_MULT]. It composes
+#     under the SAME 3x clamp + hard max_notional ceiling + max-loss circuit as every other size
+#     lever, so it can NEVER push notional past any cap and is NEVER a veto.
+# (2) EXIT BAND-WIDEN: a name in the EXTREME squeeze tail (>= EXIT_TAIL_PCTL) WIDENS the smart-hold
+#     / volnorm RIDE candidate band by a bounded, percentile-driven factor in [1.0, EXIT_MAX_WIDEN]
+#     so a fueled name runs further. INVARIANT-A SAFE: the factor widens the CANDIDATE band BEFORE
+#     placement (a wider band = a LOWER trail candidate = it simply declines to ratchet as hard); the
+#     band never loosens a PLACED stop (the trail composes through max(current_stop, be, candidate)).
+ROSS_SQUEEZE_ENTRY_TOP_PCTL = 0.80    # entry size-up arms only in the top squeeze quintile of the batch
+ROSS_SQUEEZE_ENTRY_MAX_MULT = 1.50    # bounded UPWARD risk-budget multiplier at rank_pct == 1.0
+ROSS_SQUEEZE_EXIT_TAIL_PCTL = 0.90    # exit band-widen arms only in the extreme top decile of the batch
+ROSS_SQUEEZE_EXIT_MAX_WIDEN = 1.50    # bounded RIDE-band widen factor at rank_pct == 1.0
+
+
+def _ramp_above(rank_pct: float | None, floor: float, max_out: float) -> float:
+    """Percentile-driven bounded ramp in [1.0, ``max_out``].
+
+    Returns 1.0 (neutral, no-op) below ``floor`` and ramps LINEARLY to ``max_out`` as the
+    within-batch ``rank_pct`` goes ``floor`` -> 1.0. The ONLY inputs are the name's OWN
+    within-batch percentile and the ONE documented floor + ONE documented cap — no magic
+    absolute. Fail-NEUTRAL to 1.0 on any missing / degenerate input (never a shrink, never a
+    veto). Pure / side-effect-free.
+    """
+    rp = _to_float(rank_pct)
+    if rp is None:
+        return 1.0
+    try:
+        lo = float(floor)
+        hi = float(max_out)
+    except (TypeError, ValueError):
+        return 1.0
+    if not (0.0 <= lo < 1.0) or hi <= 1.0:
+        return 1.0
+    if rp <= lo:
+        return 1.0
+    frac = max(0.0, min(1.0, (rp - lo) / (1.0 - lo)))
+    out = 1.0 + (hi - 1.0) * frac
+    return max(1.0, min(hi, out))
+
+
+def squeeze_entry_size_multiplier(
+    squeeze_rank_pct: float | None,
+    *,
+    ofi: float | None,
+    news_agrees: bool,
+    top_pctl: float = ROSS_SQUEEZE_ENTRY_TOP_PCTL,
+    max_mult: float = ROSS_SQUEEZE_ENTRY_MAX_MULT,
+) -> tuple[float, dict]:
+    """P4(1) — bounded UPWARD risk-budget multiplier for a TOP-percentile squeeze name whose
+    tape AND news agree. Returns ``(mult, meta)`` with ``mult`` in [1.0, ``max_mult``].
+
+    Arms ONLY when ALL three confirm (triple-gate, every gate from REAL data — no magic):
+      * ``squeeze_rank_pct`` (the name's OWN within-batch squeeze percentile) >= ``top_pctl``,
+      * live ``ofi`` > 0 (order-flow buyers stepping in — the squeeze is ACTIVELY firing), and
+      * ``news_agrees`` (the name is a strong-catalyst member — Ross's 🔥 confirms the fuel).
+    The magnitude is percentile-driven: it ramps 1.0 -> ``max_mult`` as the rank goes top_pctl -> 1.0,
+    so only the MOST squeeze-prone, tape-confirmed, news-backed names get the FULL up-size. Any gate
+    failing ⇒ 1.0 (neutral — the existing risk budget is untouched, byte-identical). Pure.
+    """
+    rp = _to_float(squeeze_rank_pct)
+    of = _to_float(ofi)
+    armed = (
+        rp is not None and rp >= float(top_pctl)
+        and of is not None and of > 0.0
+        and bool(news_agrees)
+    )
+    if not armed:
+        return 1.0, {
+            "armed": False,
+            "rank_pct": (round(rp, 4) if rp is not None else None),
+            "ofi": (round(of, 4) if of is not None else None),
+            "news_agrees": bool(news_agrees),
+            "top_pctl": float(top_pctl),
+        }
+    mult = _ramp_above(rp, float(top_pctl), float(max_mult))
+    return mult, {
+        "armed": True,
+        "rank_pct": round(rp, 4),
+        "ofi": round(of, 4),
+        "news_agrees": True,
+        "mult": round(mult, 4),
+        "top_pctl": float(top_pctl),
+        "max_mult": float(max_mult),
+    }
+
+
+def squeeze_exit_band_widen(
+    squeeze_rank_pct: float | None,
+    *,
+    tail_pctl: float = ROSS_SQUEEZE_EXIT_TAIL_PCTL,
+    max_widen: float = ROSS_SQUEEZE_EXIT_MAX_WIDEN,
+) -> tuple[float, dict]:
+    """P4(2) — bounded RIDE-band WIDEN factor for an EXTREME-tail squeeze name. Returns
+    ``(factor, meta)`` with ``factor`` in [1.0, ``max_widen``].
+
+    Arms ONLY when ``squeeze_rank_pct`` (the name's OWN within-batch squeeze percentile) is in the
+    EXTREME tail (>= ``tail_pctl``); the magnitude ramps 1.0 -> ``max_widen`` as the rank goes
+    tail_pctl -> 1.0. The caller multiplies the smart-hold / volnorm trail ``k`` by this factor to
+    WIDEN the CANDIDATE band BEFORE placement so a fueled name runs further. INVARIANT-A SAFE: a
+    wider band lowers the trail CANDIDATE, which composes through ``max(current_stop, be, candidate)``
+    — it can only decline to ratchet as hard, NEVER loosen a placed stop. Below the tail ⇒ 1.0
+    (neutral — the band is byte-identical). Pure.
+    """
+    rp = _to_float(squeeze_rank_pct)
+    factor = _ramp_above(rp, float(tail_pctl), float(max_widen))
+    return factor, {
+        "armed": bool(factor > 1.0),
+        "rank_pct": (round(rp, 4) if rp is not None else None),
+        "factor": round(factor, 4),
+        "tail_pctl": float(tail_pctl),
+        "max_widen": float(max_widen),
+    }
+
 # ATTENTION-LEADERSHIP variant (opt-in via chili_momentum_attention_leadership_enabled):
 # the 2026-06-22 Ross study's TRUE winner/loser separator. Position (pos-in-range, VWAP
 # extension) does NOT separate — NXTS-winner and QXL-loser both break to new highs near

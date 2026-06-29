@@ -115,8 +115,29 @@ def _live_book_imbalance(symbol: str, db: Any = None) -> float | None:
         return None
 
 
+def _cks_event(p1: float, q1: float, p0: float, q0: float, *, is_bid: bool) -> float:
+    """Cont-Kukanov-Stoikov single-side OFI event for ONE price level between two
+    consecutive book states. Bid contributes +new size if its price ROSE, -old
+    size if it fell, the size delta if unchanged; the ask is the mirror (a rising
+    ask = supply lifting = +demand; a falling ask = -old size). Sign convention
+    matches the legacy level-1 loop exactly so level-1 is unchanged."""
+    if is_bid:
+        if p1 > p0:
+            return q1
+        if p1 < p0:
+            return -q0
+        return q1 - q0
+    # ask side: price retreating UP (p1>p0) = buying pressure -> +new size
+    if p1 > p0:
+        return q1
+    if p1 < p0:
+        return -q0
+    return q1 - q0
+
+
 def _compute_ofi_micro(
     seq: list[tuple[float, float, float, float]],
+    ladder_seq: "list[tuple[list, list]] | None" = None,
 ) -> tuple[float | None, float | None]:
     """OFI (normalized net directional flow in [-1, 1]) + micro-price edge (bps)
     from a time-ordered sequence of ``(bid_px, bid_sz, ask_px, ask_sz)`` best
@@ -139,21 +160,48 @@ def _compute_ofi_micro(
         micro_edge = round((micro - mid) / mid * 10000.0, 2)
     if len(seq) < 2:
         return None, micro_edge
+
+    # ── MULTI-LEVEL OFI (Cont-Kukanov-Stoikov, P3) ────────────────────────────
+    # When the per-price ladder is present AND the flag is on, sum the per-level
+    # OFI events across the top-N levels of each side, depth-decay weighted by
+    # w_m = 1/m (harmonic: level-1 dominant, deeper levels contribute less; NOT a
+    # magic cutoff). gross uses the SAME weights so the result stays normalized in
+    # [-1, 1] and dimensionless. Fail-OPEN: any ladder pair that is missing/empty
+    # for either book state falls back to that step's level-1 events, so a
+    # partially-populated ladder never zeroes the signal. Flag OFF, or ladder
+    # absent -> skip this block entirely -> the level-1 path below is byte-identical.
+    use_ml = bool(getattr(settings, "chili_momentum_l2_multilevel_ofi_enabled", True))
+    if use_ml and ladder_seq and len(ladder_seq) == len(seq) and len(ladder_seq) >= 2:
+        ofi_ml = 0.0
+        gross_ml = 0.0
+        ok = False
+        for (b0, a0), (b1, a1) in zip(ladder_seq, ladder_seq[1:]):
+            try:
+                depth = min(len(b0), len(b1), len(a0), len(a1))
+            except TypeError:
+                depth = 0
+            if depth <= 0:
+                continue
+            ok = True
+            for m in range(depth):
+                w = 1.0 / (m + 1.0)  # harmonic depth decay; level-1 weight = 1.0
+                eb = _cks_event(float(b1[m][0]), float(b1[m][1]),
+                                float(b0[m][0]), float(b0[m][1]), is_bid=True)
+                ea = _cks_event(float(a1[m][0]), float(a1[m][1]),
+                                float(a0[m][0]), float(a0[m][1]), is_bid=False)
+                ofi_ml += w * (eb - ea)
+                gross_ml += w * (abs(eb) + abs(ea))
+        if ok:
+            if gross_ml <= 0:
+                return 0.0, micro_edge
+            return round(max(-1.0, min(1.0, ofi_ml / gross_ml)), 4), micro_edge
+
+    # ── LEVEL-1 OFI (legacy path; unchanged) ──────────────────────────────────
     ofi = 0.0
     gross = 0.0
     for (pb0, qb0, pa0, qa0), (pb1, qb1, pa1, qa1) in zip(seq, seq[1:]):
-        if pb1 > pb0:
-            eb = qb1
-        elif pb1 < pb0:
-            eb = -qb0
-        else:
-            eb = qb1 - qb0
-        if pa1 < pa0:
-            ea = qa1
-        elif pa1 > pa0:
-            ea = -qa0
-        else:
-            ea = qa1 - qa0
+        eb = _cks_event(pb1, qb1, pb0, qb0, is_bid=True)
+        ea = _cks_event(pa1, qa1, pa0, qa0, is_bid=False)
         ofi += eb - ea
         gross += abs(eb) + abs(ea)
     if gross <= 0:
@@ -253,7 +301,7 @@ def _live_ofi_microprice(
 
             if as_of is None:
                 _q = (
-                    "SELECT bid_top, bid_top_size, ask_top, ask_top_size "
+                    "SELECT bid_top, bid_top_size, ask_top, ask_top_size, bids_json, asks_json "
                     "FROM iqfeed_depth_snapshots "
                     "WHERE symbol = :s AND observed_at > "
                     "(now() at time zone 'utc') - make_interval(secs => :w) "
@@ -262,7 +310,7 @@ def _live_ofi_microprice(
                 _p = {"s": s, "w": window}
             else:
                 _q = (
-                    "SELECT bid_top, bid_top_size, ask_top, ask_top_size "
+                    "SELECT bid_top, bid_top_size, ask_top, ask_top_size, bids_json, asks_json "
                     "FROM iqfeed_depth_snapshots "
                     "WHERE symbol = :s AND observed_at > :as_of - make_interval(secs => :w) "
                     "AND observed_at <= :as_of ORDER BY observed_at ASC"
@@ -274,7 +322,16 @@ def _live_ofi_microprice(
                 for r in rows
                 if None not in (r[0], r[1], r[2], r[3])
             ]
-            return _compute_ofi_micro(seq)
+            # P3: per-price ladder aligned 1:1 with seq (only rows that survived the
+            # level-1 filter contribute). A row whose ladder is NULL/empty yields
+            # ([], []) -> that step fails open to level-1 inside _compute_ofi_micro.
+            ladder_seq = [
+                (r[4] if isinstance(r[4], list) else [],
+                 r[5] if isinstance(r[5], list) else [])
+                for r in rows
+                if None not in (r[0], r[1], r[2], r[3])
+            ]
+            return _compute_ofi_micro(seq, ladder_seq=ladder_seq)
     except Exception:
         return None, None
     return None, None
@@ -1388,6 +1445,28 @@ def run_momentum_neural_tick(
                         if _n_sf > 0:
                             _weights = dict(_weights)
                             _weights["squeeze_fuel"] = ROSS_SQUEEZE_FUEL_PILLAR_WEIGHT
+                            # P4 DEEPENING: stamp the WITHIN-BATCH PERCENTILE of each name's OWN
+                            # raw squeeze_fuel_pct so the downstream entry size-up + exit band-widen
+                            # levers (squeeze_entry_size_multiplier / squeeze_exit_band_widen) have a
+                            # no-magic, batch-adaptive axis (the live bar floats with the batch). This
+                            # rank rides through ross_signals -> execution_readiness_json.extra exactly
+                            # like the raw sub-score. Equity-only (only -USD-excluded names were fetched).
+                            try:
+                                from .ross_momentum import _percentile_rank as _sf_pctl
+                                _sf_vals = sorted(
+                                    float(_ross_signals[_s]["squeeze_fuel_pct"])
+                                    for _s in _ross_signals
+                                    if isinstance(_ross_signals.get(_s), dict)
+                                    and _ross_signals[_s].get("squeeze_fuel_pct") is not None
+                                )
+                                for _s in _ross_signals:
+                                    _ss = _ross_signals.get(_s)
+                                    if isinstance(_ss, dict) and _ss.get("squeeze_fuel_pct") is not None:
+                                        _ss["squeeze_fuel_rank_pct"] = round(
+                                            _sf_pctl(float(_ss["squeeze_fuel_pct"]), _sf_vals), 4
+                                        )
+                            except Exception:
+                                pass
                 except Exception:
                     pass
             # NEWS-CATALYST TILT (default OFF => byte-identical): the 🔥 pillar Ross weights

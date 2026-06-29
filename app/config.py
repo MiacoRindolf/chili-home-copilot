@@ -2295,6 +2295,40 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_FUEL_TOP_N"),
         description="Credit-frugality gate: only the top-N explosive low-float candidates (by Ross score, after the explosive floor) get an Ortex short-mechanics fetch. Keeps the Trader plan (1,000 credits/mo, 1 req/s) within budget. 0 ⇒ no fetch.",
     )
+    # ── P4 SQUEEZE-SCORE DEEPENING — ENTRY size-up + EXIT squeeze-aware-hold ──
+    # Extend the SAME squeeze_fuel score (already a SELECTION tilt) to two downstream uses, each
+    # driven SOLELY by the name's OWN within-batch squeeze PERCENTILE (squeeze_fuel_rank_pct). One
+    # documented base each; default ON (no dark flags) and OFF / un-armed ⇒ BYTE-IDENTICAL.
+    chili_momentum_squeeze_entry_sizeup_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_ENTRY_SIZEUP_ENABLED"),
+        description="P4(1) ENTRY SIZE-UP: a name in the TOP within-batch squeeze percentile (its OWN squeeze_fuel_rank_pct, from Ortex SI%+CTB) whose tape AGREES (live OFI>0) AND whose news AGREES (strong-catalyst member) scales the per-trade RISK BUDGET UP by a bounded percentile-driven multiplier in [1.0, max_mult]. Composes under the SAME 3x clamp + hard max_notional ceiling + max-loss circuit (NEVER past any cap, NEVER a veto). Equity-only (crypto has no borrow data ⇒ no rank ⇒ 1.0). OFF / any gate failing ⇒ 1.0 byte-identical.",
+    )
+    chili_momentum_squeeze_entry_top_pctl: float = Field(
+        default=0.80, ge=0.0, le=0.999,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_ENTRY_TOP_PCTL"),
+        description="P4(1): the within-batch squeeze percentile FLOOR at/above which the entry size-up arms (0.80 = top quintile). The multiplier ramps 1.0->max_mult as rank goes this floor->1.0. The ONE documented base for the entry lever.",
+    )
+    chili_momentum_squeeze_entry_max_mult: float = Field(
+        default=1.50, ge=1.0, le=3.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_ENTRY_MAX_MULT"),
+        description="P4(1): the BOUNDED upper cap of the entry risk-budget multiplier (reached only at squeeze rank == 1.0 with tape + news agreeing). The ONE documented cap; the 3x combined clamp + max_notional ceiling still bound it.",
+    )
+    chili_momentum_squeeze_exit_hold_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_EXIT_HOLD_ENABLED"),
+        description="P4(2) SQUEEZE-AWARE HOLD: a name in the EXTREME within-batch squeeze tail WIDENS the smart-hold / volnorm RIDE candidate band (raise the trail k by a bounded percentile factor) so a fueled runner extends further. INVARIANT-A SAFE — widens the CANDIDATE band BEFORE placement; a wider band only lowers the trail candidate (composed through max(stop, be, candidate)), NEVER loosens a placed stop. OFF / below the tail ⇒ 1.0 byte-identical.",
+    )
+    chili_momentum_squeeze_exit_tail_pctl: float = Field(
+        default=0.90, ge=0.0, le=0.999,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_EXIT_TAIL_PCTL"),
+        description="P4(2): the within-batch squeeze percentile FLOOR at/above which the exit band-widen arms (0.90 = extreme top decile). The widen factor ramps 1.0->max_widen as rank goes this floor->1.0. The ONE documented base for the exit lever.",
+    )
+    chili_momentum_squeeze_exit_max_widen: float = Field(
+        default=1.50, ge=1.0, le=3.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_EXIT_MAX_WIDEN"),
+        description="P4(2): the BOUNDED upper cap of the RIDE-band widen factor (reached only at squeeze rank == 1.0). The ONE documented cap; the trail's own vol-floor + max_dist clamp + INVARIANT-A still bound the resulting stop.",
+    )
     chili_momentum_gap_geometry_tilt_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_GAP_GEOMETRY_TILT_ENABLED"),
@@ -2440,6 +2474,36 @@ class Settings(BaseSettings):
         default=1.5, ge=1.0, le=2.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_CONVICTION_MAX_MULTIPLIER"),
         description="The hard ceiling on the catalyst-conviction size multiplier (a catalyst can never size the lane above this). Conservative default 1.5; clamped 1.0..2.0 so it stays well under the runner's 3x combined-multiplier ceiling.",
+    )
+    chili_momentum_kelly_conviction_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_KELLY_CONVICTION_ENABLED"),
+        description="P5 — FRACTIONAL-KELLY TRIPLE-CONFLUENCE SIZE-UP: when squeeze-fuel AND OFI AND a STRONG news catalyst ALL agree, scale the per-trade risk basis UP by a bounded HALF-KELLY multiplier off the blended conviction percentile (no magic win-rate). Composes into the runner's 3x ceiling + hard notional ceiling + the unchanged #769 max-loss circuit. NEVER a veto/shrink (>=1.0). Default ON (no dark flags); OFF / any-leg-missing / error => 1.0 (byte-identical).",
+    )
+    chili_momentum_kelly_conviction_max_multiplier: float = Field(
+        default=1.5, ge=1.0, le=2.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_KELLY_CONVICTION_MAX_MULTIPLIER"),
+        description="The ONE documented cap — the HALF-KELLY ceiling on the triple-confluence size-up. Conservative default 1.5; stays under the runner's 3x clamp, and the #769 circuit still bounds the realized worst case. Clamped 1.0..2.0.",
+    )
+    chili_momentum_kelly_conviction_gain: float = Field(
+        default=1.0, ge=0.0, le=5.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_KELLY_CONVICTION_GAIN"),
+        description="Linear gain mapping the half-Kelly fraction f_half in [0,0.5] onto the multiplier span: mult = clamp(1 + gain*f_half, 1.0, max_multiplier). Bounded by max_multiplier regardless.",
+    )
+    chili_momentum_kelly_conviction_w_squeeze: float = Field(
+        default=0.4, ge=0.0, le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_KELLY_CONVICTION_W_SQUEEZE"),
+        description="Weight of the squeeze-fuel pillar in the blended conviction percentile (normalized by the weight sum).",
+    )
+    chili_momentum_kelly_conviction_w_ofi: float = Field(
+        default=0.4, ge=0.0, le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_KELLY_CONVICTION_W_OFI"),
+        description="Weight of the OFI pillar in the blended conviction percentile (normalized by the weight sum).",
+    )
+    chili_momentum_kelly_conviction_w_news: float = Field(
+        default=0.2, ge=0.0, le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_KELLY_CONVICTION_W_NEWS"),
+        description="Weight of the news-catalyst pillar in the blended conviction percentile (normalized by the weight sum). News is the binary permission gate.",
     )
     # ── ADDITIVE ITEM 4: PROCESS-OVER-PROFITS SCORE (logged rule-adherence) ──────────
     # DEFAULT OFF. A LOGGED-ONLY rule-adherence score (entered-on-trigger / honored-stop /
@@ -7243,6 +7307,11 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_L2_CONFIRM_ENABLED"),
         description="Phase-1 L2 entry CONFIRMER (DEFER-only): after the chart trigger + both existing vetoes pass, require the executed tape to confirm thrust (signed_tape_accel>0 AND tick_rate>=self-relative floor; OFI/micro + rising depth-pctile secondary) before submitting the buy. DEFER only on CLEAR no-tape (accel<=0 AND OFI<0); fail-open (confirm) on any missing/stale/thin data; entry-only (never blocks exits). false = return confirm before any I/O, byte-identical.",
+    )
+    chili_momentum_l2_multilevel_ofi_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_L2_MULTILEVEL_OFI_ENABLED"),
+        description="P3 — multi-level OFI (make equity L2 real). ON: when the per-price ladder (iqfeed_depth_snapshots.bids_json/asks_json, written by the depth bridge) is present, _compute_ofi_micro sums the Cont-Kukanov-Stoikov per-level OFI events across the top-N levels per side, harmonic depth-decay weighted (w_m=1/(m+1)) and normalized by gross flow (dimensionless, [-1,1], no magic depth constant). OFF, OR ladder absent/NULL ⇒ the multi-level block is skipped before any ladder iteration and the legacy level-1 OFI runs — byte-identical to pre-P3.",
     )
     # Self-relative tick-rate floor PERCENTILE within the symbol's own recent tape window:
     # the back-half ticks/sec must sit at/above this percentile of the per-half tick rates

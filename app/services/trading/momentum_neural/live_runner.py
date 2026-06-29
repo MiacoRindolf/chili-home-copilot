@@ -3124,6 +3124,46 @@ def _session_is_explosive(via: Any, *, rvol: float | None = None) -> bool:
         return False
 
 
+def _session_squeeze_rank_pct(via: Any, symbol: str) -> float | None:
+    """P4 — the session's OWN within-batch squeeze percentile (``squeeze_fuel_rank_pct``), read
+    from its persisted scanner row (execution_readiness_json.extra.ross_signals[SYM]) — the SAME
+    source the arm-queue ranker + entry size-up read, no new fetch. Returns the [0,1] rank or
+    ``None`` (no squeeze data for the name ⇒ the exit band-widen is a no-op, byte-identical). Pure."""
+    try:
+        _ex = via.execution_readiness_json if isinstance(via.execution_readiness_json, dict) else {}
+        _extra = (_ex.get("extra") or {}) if isinstance(_ex, dict) else {}
+        _sig_map = _extra.get("ross_signals") if isinstance(_extra.get("ross_signals"), dict) else {}
+        _row = _sig_map.get(str(symbol or "").upper()) if isinstance(_sig_map, dict) else None
+        if isinstance(_row, dict):
+            return _float_or_none(_row.get("squeeze_fuel_rank_pct"))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return None
+
+
+def _squeeze_exit_band_widen_factor(via: Any, symbol: str) -> float:
+    """P4(2) — the bounded RIDE-band WIDEN factor in [1.0, max_widen] for this session, driven by
+    its OWN within-batch squeeze percentile (extreme-tail only). 1.0 (no-op, byte-identical) when
+    the flag is OFF, no squeeze data, or the name is below the extreme tail. INVARIANT-A SAFE: the
+    caller multiplies the smart-hold / volnorm trail ``k`` by this BEFORE band placement (a wider
+    candidate band lowers the trail candidate, which composes through max(stop, be, candidate) —
+    never loosens a placed stop). Fail-neutral to 1.0."""
+    if not bool(getattr(settings, "chili_momentum_squeeze_exit_hold_enabled", True)):
+        return 1.0
+    try:
+        from .ross_momentum import squeeze_exit_band_widen as _sq_widen
+
+        _rank = _session_squeeze_rank_pct(via, symbol)
+        _factor, _ = _sq_widen(
+            _rank,
+            tail_pctl=float(getattr(settings, "chili_momentum_squeeze_exit_tail_pctl", 0.90) or 0.90),
+            max_widen=float(getattr(settings, "chili_momentum_squeeze_exit_max_widen", 1.50) or 1.50),
+        )
+        return _safe_mult(_factor)
+    except Exception:
+        return 1.0
+
+
 def _latest_rvol(db, symbol: str) -> float | None:
     """Best-effort latest relative-volume (volume_ratio of the most recent bar) for the
     explosive carve-outs. Reads the SESSION-scoped micro-bar df from the densified tape
@@ -7903,12 +7943,96 @@ def tick_live_session(
                         }
             except Exception:
                 _extreme_vol_mult = 1.0
+        # P4(1) SQUEEZE-FUEL ENTRY SIZE-UP (default ON; OFF / un-armed ⇒ 1.0 byte-identical):
+        # a name in the TOP within-batch squeeze percentile (its OWN squeeze_fuel_rank_pct, stamped
+        # by the pipeline from Ortex SI%+CTB) whose tape AGREES (live OFI > 0) AND whose news AGREES
+        # (strong-catalyst member) scales the per-trade RISK BUDGET UP by a bounded, PERCENTILE-driven
+        # multiplier in [1.0, max_mult] — only the most squeeze-prone, tape-confirmed, news-backed
+        # names get the FULL up-size. Triple-gated from REAL data (no magic absolute SI/CTB cutoff:
+        # the rank floats with the batch). Composes multiplicatively under the SAME min(..., base*3.0)
+        # clamp + hard max_notional ceiling below, so it can NEVER push notional past any cap and is
+        # NEVER a veto; the max-loss circuit + structural stop + daily-loss breaker are untouched.
+        # Equity-only (crypto has no borrow data ⇒ no rank stamped ⇒ 1.0). Fail-neutral to 1.0.
+        _squeeze_size_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_squeeze_entry_sizeup_enabled", True)):
+            try:
+                from .ross_momentum import squeeze_entry_size_multiplier as _sq_size
+
+                _sq_extra = (ex_live.get("extra") or {}) if isinstance(ex_live, dict) else {}
+                _sq_symu = str(sess.symbol or "").upper()
+                _sq_sig = ((_sq_extra.get("ross_signals") or {}) if isinstance(_sq_extra.get("ross_signals"), dict) else {}).get(_sq_symu)
+                _sq_rank = _float_or_none(_sq_sig.get("squeeze_fuel_rank_pct")) if isinstance(_sq_sig, dict) else None
+                if _sq_rank is not None:
+                    # Live OFI (tape agreement) — FRESH from the in-process flow feed, the SAME
+                    # source the entry flow-veto reads (NOT the stale batch exec_json).
+                    _sq_ofi = None
+                    try:
+                        from .pipeline import _live_ofi_microprice as _sq_ofi_fn
+                        _sq_ofi, _ = _sq_ofi_fn(sess.symbol, db=db)
+                        _sq_ofi = None if _sq_ofi is None else float(_sq_ofi)
+                    except Exception:
+                        _sq_ofi = None
+                    # News agreement — strong-catalyst membership (persisted from meta into extra).
+                    _sq_strong = _sq_extra.get("strong_catalyst_symbols")
+                    _sq_news = bool(_sq_strong and _sq_symu in {str(x).upper() for x in _sq_strong})
+                    _squeeze_size_mult, _sq_meta = _sq_size(
+                        _sq_rank, ofi=_sq_ofi, news_agrees=_sq_news,
+                        top_pctl=float(getattr(settings, "chili_momentum_squeeze_entry_top_pctl", 0.80) or 0.80),
+                        max_mult=float(getattr(settings, "chili_momentum_squeeze_entry_max_mult", 1.50) or 1.50),
+                    )
+                    if _squeeze_size_mult > 1.0:
+                        le["squeeze_fuel_size_up"] = _sq_meta
+            except Exception:
+                _squeeze_size_mult = 1.0
+        # FRACTIONAL-KELLY TRIPLE-CONFLUENCE SIZE-UP (P5): size UP — and ONLY up — when
+        # squeeze-fuel AND OFI AND a STRONG news catalyst ALL agree at THIS entry instant. A
+        # HALF-KELLY bet off the blended conviction percentile (no magic win-rate). Composes
+        # under the SAME min(.., base*3.0) clamp + hard max_notional ceiling below (never past
+        # any cap), NEVER a veto. The #769 max-loss circuit (every tick downstream) still bounds
+        # the realized worst case on the resulting qty. Equity-only; flag default ON; any missing
+        # leg / OFF / error => 1.0 (byte-identical). Reads are cached/fail-open (no new vendor).
+        _kelly_conviction_mult = 1.0
+        if (
+            bool(getattr(settings, "chili_momentum_kelly_conviction_enabled", True))
+            and not str(sess.symbol or "").upper().endswith("-USD")  # equity-only signals
+        ):
+            try:
+                from .risk_policy import triple_confluence_kelly_multiplier
+                from .pipeline import _live_ofi_microprice as _kc_ofi_reader
+                _kc_ofi, _ = _kc_ofi_reader(sess.symbol, db=db)
+                _kc_sq = None
+                try:
+                    from .ross_momentum import squeeze_fuel_signal as _kc_sf
+                    from .short_mechanics import get_short_mechanics as _kc_mech
+                    _km = _kc_mech(sess.symbol) or {}
+                    if _km:
+                        _kc_sig = _kc_sf(
+                            _km.get("short_interest_pct"), _km.get("cost_to_borrow"),
+                            utilization=_km.get("utilization"),
+                            is_easy_to_borrow=_km.get("is_easy_to_borrow"),
+                        )
+                        _kc_sq = _kc_sig.squeeze_pct
+                except Exception:
+                    _kc_sq = None
+                _kc_rank = 0
+                try:
+                    from .catalyst import catalyst_grade_rank as _kc_grade
+                    _kc_rank = int(_kc_grade(sess.symbol))
+                except Exception:
+                    _kc_rank = 0
+                _kelly_conviction_mult, _kc_meta = triple_confluence_kelly_multiplier(
+                    squeeze_pct=_kc_sq, ofi=_kc_ofi, news_grade_rank=_kc_rank,
+                )
+                if _kelly_conviction_mult > 1.0:
+                    le["kelly_conviction_size"] = _kc_meta
+            except Exception:
+                _kelly_conviction_mult = 1.0
         # LOW-7: sanitize EACH per-factor multiplier (fail-NEUTRAL to 1.0 on NaN/inf/negative)
         # as it enters the product so a single poisoned helper can never NaN-out or sign-flip the
         # whole budget and silently kill the fill. The 3x clamp + max_notional ceiling below are
         # unchanged; a valid product is byte-identical.
         _eff_max_loss = min(
-            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult),
+            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # ADAPTIVE SPREAD-COST VETO/DERATE (2026-06-27, DEFAULT OFF ⇒ byte-identical):
@@ -9140,6 +9264,14 @@ def tick_live_session(
                 )
                 _k_atr = float(getattr(settings, "chili_momentum_smart_hold_k_atr", 1.2) or 1.2)
                 _k = _k_atr * 1.2533  # mean-abs→stdev half-width (sqrt(pi/2))
+                # P4(2) SQUEEZE-AWARE HOLD: an EXTREME-tail squeeze name WIDENS the candidate band
+                # (k up by a bounded percentile factor) so the fueled runner extends. INVARIANT-A
+                # SAFE — this widens the CANDIDATE band BEFORE smart_hold_decision derives the hold
+                # floor; the decision never loosens a PLACED stop. Factor 1.0 ⇒ byte-identical.
+                _sq_widen_sh = _squeeze_exit_band_widen_factor(via, sess.symbol)
+                if _sq_widen_sh > 1.0:
+                    _k = _k * _sq_widen_sh
+                    le["squeeze_fuel_hold_widen"] = {"factor": round(_sq_widen_sh, 4), "k": round(_k, 5)}
                 if _sh_rv is not None and _sh_rv.get("rv_step") is not None:
                     _sh_hold = _recent_scalp_median_hold_s(db, int(sess.user_id))
                     if _sh_hold is None or _sh_hold <= 0:
@@ -9667,6 +9799,15 @@ def tick_live_session(
                     _rv = _live_realized_vol(sess.symbol, db=db)
                     if _rv is not None and _rv.get("rv_step") is not None:
                         _k = float(getattr(settings, "chili_momentum_volnorm_trail_k", 1.3) or 1.3)
+                        # P4(2) SQUEEZE-AWARE HOLD: an EXTREME-tail squeeze name WIDENS the volnorm
+                        # RIDE band (raise the trail k by a bounded percentile factor) so a fueled
+                        # runner extends further before the vol-norm trail tightens. INVARIANT-A SAFE
+                        # — a WIDER band lowers the trail CANDIDATE, which volnorm_runner_trail_stop
+                        # composes through max(current_stop, be, candidate): it can only decline to
+                        # ratchet as hard, NEVER loosen the placed stop. Factor 1.0 ⇒ byte-identical.
+                        _sq_widen_vn = _squeeze_exit_band_widen_factor(via, sess.symbol)
+                        if _sq_widen_vn > 1.0:
+                            _k = _k * _sq_widen_vn
                         # Live-derived holding horizon: median realized hold of recent scalps,
                         # falling back to this session's own elapsed hold (no magic horizon).
                         _hold_s = _recent_scalp_median_hold_s(db, int(sess.user_id))
