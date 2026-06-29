@@ -3951,6 +3951,49 @@ class Settings(BaseSettings):
         lt=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SCALE_OUT_FRACTION"),
     )
+    # DESIGN #3 — ADAPTIVE PROFIT TARGETS. A fixed 2:1 first target caps a +400% low-float
+    # monster at 2R when its realized intraday room (ATR-to-HOD) is 6-10R, and the fixed 0.5
+    # scale-out dumps half the runner too early on a high-vol name. Make BOTH adaptive to the
+    # name's OWN realized intraday range (percentile/range-derived, no magic absolute):
+    #   * first-target R:R lifts toward the proven HOD room in R-units (room_capture * room_R),
+    #     clamped [base_rr, rr_cap]; self-corrects vs a wider vol-floored stop (room_R has risk
+    #     in the denominator).
+    #   * scale-out fraction tilts SMALLER (bigger runner) when realized vol is high, LARGER
+    #     when it compresses; centered at the median so a typical name is byte-identical.
+    # Flag-off OR no realized_high OR median vol ⇒ every path returns the base ⇒ byte-identical.
+    chili_momentum_adaptive_target_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_TARGET_ENABLED"),
+        description="DESIGN #3 master kill-switch (adaptive first-target R:R + vol-aware scale-out). OFF ⇒ adaptive_first_target_reward_risk and the scale-out tilt are byte-identical no-ops.",
+    )
+    chili_momentum_adaptive_target_room_capture: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_TARGET_ROOM_CAPTURE"),
+        description="DESIGN #3 ONE documented base: fraction of the name's realized HOD room (in R) the FIRST target aims at. rr_eff = clamp(max(base_rr, capture*room_R), base_rr, rr_cap). 0.5 = aim at half the proven travel.",
+    )
+    chili_momentum_adaptive_target_rr_cap: float = Field(
+        default=6.0,
+        ge=2.0,
+        le=20.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_TARGET_RR_CAP"),
+        description="DESIGN #3 upper bound on the adaptive first-target R:R so a vertical blow-off can't push the target absurdly far. Clamped up to the base floor internally so it can never sit below base_rr.",
+    )
+    chili_momentum_adaptive_scale_vol_tilt: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_SCALE_VOL_TILT"),
+        description="DESIGN #3 ONE documented base: magnitude of the scale-out vol tilt. frac_eff = base_frac * (1 - tilt*(vol_pctl-0.5)*2). At vol_pctl=1.0 (max vol) the fraction is cut by `tilt`.",
+    )
+    chili_momentum_adaptive_scale_vol_ref_pct: float = Field(
+        default=0.05,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_SCALE_VOL_REF_PCT"),
+        description="DESIGN #3 reference intraday range (Ross ~5% small-cap opening range) at which realized vol maps to the median percentile (0.5). Promotes the existing hardcoded 0.05 to ONE named knob.",
+    )
     # Shake-out fix: the stop must clear at least this fraction of the live 15m
     # expected-move so it sits OUTSIDE intraday noise (KAIO: 72bps stop / 400bps
     # move got shaken out, then hit target). Risk-first sizing trims qty to keep
@@ -4446,7 +4489,43 @@ class Settings(BaseSettings):
         ge=1.1,
         le=1.7,
         validation_alias=AliasChoices("CHILI_MOMENTUM_VOLNORM_TRAIL_K"),
-        description="LEVER 2A tightness multiplier k on rv_hold (trail_dist = clamp(k*rv_hold, floor, 0.15)). Default 1.3, band [1.1,1.7].",
+        description="LEVER 2A tightness multiplier k on rv_hold (trail_dist = clamp(k*rv_hold, floor, max_dist)). Default 1.3, band [1.1,1.7]. This is the BASE width; DESIGN#2 widens it ADAPTIVELY toward the chandelier-literature optimum via the maturity factor below.",
+    )
+    # DESIGN#2 — ADAPTIVE TRAIL-WIDTH MATURITY WIDEN. The 2A base k (1.3 = ~1.3-sigma over the
+    # holding horizon) trails too TIGHT vs the chandelier-ATR literature (profit factor peaks
+    # near ~3x ATR; ~2x over-tightens and shakes runners out — the ~40%-of-MFE-capture leak).
+    # Rather than a flat magic 3x, widen the EFFECTIVE k by a bounded factor in [1.0, max_widen]
+    # driven by TWO real live signals (no magic absolute): the live realized-vol regime
+    # (rv_step vs the entry vol-floor) AND move MATURITY (the OFI level/slope already computed by
+    # _live_flow_slope) — WIDE early in a fresh, fed trend (OFI level>0 ∧ slope>=0), decaying to
+    # 1.0 as flow rolls over so the existing RIDE-LOCK LOCK/HARD bands tighten unimpeded.
+    # INVARIANT-A SAFE: a wider band only LOWERS the trail candidate, composed through
+    # max(stop, breakeven, candidate) — it can only decline to ratchet as hard, NEVER loosens a
+    # placed stop. OFF / thin flow ⇒ factor 1.0 ⇒ byte-identical.
+    chili_momentum_volnorm_trail_maturity_widen_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VOLNORM_TRAIL_MATURITY_WIDEN_ENABLED"),
+        description="DESIGN#2: widen the 2A trail k ADAPTIVELY (vol-regime x move-maturity, [1.0,max_widen]) toward the chandelier ~3x optimum early in a fresh trend, decaying to 1.0 near exhaustion. Ratchet-only (INVARIANT-A). OFF or thin flow ⇒ byte-identical.",
+    )
+    # DESIGN#2 — the maturity widen CEILING (one documented cap). Effective k reaches
+    # base_k * max_widen at its widest: 1.3 * 2.0 = 2.6 (within the chandelier 2-3x optimum band,
+    # short of the 3x exhaustion edge). Clamped [1.0, 3.0].
+    chili_momentum_volnorm_trail_maturity_max_widen: float = Field(
+        default=2.0,
+        ge=1.0,
+        le=3.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VOLNORM_TRAIL_MATURITY_MAX_WIDEN"),
+        description="DESIGN#2 maturity widen ceiling on the 2A k. Effective k tops out at base_k*max_widen (1.3*2.0=2.6, inside the chandelier 2-3x optimum band). Default 2.0, band [1.0,3.0].",
+    )
+    # DESIGN#2 — the trail-distance CEILING as a fraction of price (was the hard-coded 0.15 in
+    # volnorm_trail_dist_pct). Raised to a knob so the WIDENED band is actually reachable; the
+    # widened candidate is still clamped here so a vol spike can't run the trail unbounded.
+    chili_momentum_volnorm_trail_max_dist_pct: float = Field(
+        default=0.20,
+        ge=0.05,
+        le=0.40,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VOLNORM_TRAIL_MAX_DIST_PCT"),
+        description="DESIGN#2 trail-distance ceiling (fraction of price) for the 2A vol-norm trail. Was a hard 0.15; raised to 0.20 so the maturity-widened band is reachable. Clamped [0.05,0.40].",
     )
     # LEVER 2A — the realized-vol tape lookback (seconds). Longer than the 15s OFI window so the
     # EWMA has enough event-grid steps; the EWMA half-life is derived as window/(2*grid).
@@ -6200,6 +6279,53 @@ class Settings(BaseSettings):
         default=300,
         ge=0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_COOLDOWN_AFTER_STOPOUT_SECONDS"),
+    )
+    # TASK#8 — ADAPTIVE AFTER-EXIT COOLDOWN. The fixed 300s above is the documented BASE/floor;
+    # scale it by the exit REASON (a clean profit/target exit => a SHORT re-scalp window so a
+    # winner can be re-entered on the next micro-pullback — the TNMG case; a stop-out => full
+    # base, sit out the chop) AND by the name's realized vol (entry_stop_atr_pct). The loss-side
+    # reason_mult is pinned 1.0 so an adaptive cooldown is NEVER shorter than the base on a loss.
+    # OFF ⇒ byte-identical (uses the fixed base verbatim).
+    chili_momentum_adaptive_reentry_cooldown_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_REENTRY_COOLDOWN_ENABLED"),
+        description="TASK#8: scale the fixed after-exit cooldown by exit-reason (profit => short re-scalp; loss => full base) and realized vol. OFF ⇒ byte-identical fixed base.",
+    )
+    chili_momentum_reentry_profit_cooldown_factor: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_PROFIT_COOLDOWN_FACTOR"),
+        description="TASK#8: multiplier on the base cooldown after a CLEAN profit/target exit so a winner can be re-scalped quickly (the TNMG re-enter-after-the-pop case). 0.25 => ~75s on a 300s base.",
+    )
+    chili_momentum_reentry_cooldown_vol_ref_atr_pct: float = Field(
+        default=0.03,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_COOLDOWN_VOL_REF_ATR_PCT"),
+        description="TASK#8: reference ATR% for the vol-scaling of the re-entry cooldown (the ONE documented base; vol_mult = clamp(entry_stop_atr_pct / ref, 1/span, span)). A 3% ATR name sits at vol_mult 1.0.",
+    )
+    chili_momentum_reentry_cooldown_vol_span: float = Field(
+        default=1.5,
+        ge=1.0,
+        le=5.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_COOLDOWN_VOL_SPAN"),
+        description="TASK#8: symmetric clamp span for the cooldown vol multiplier: vol_mult is bounded to [1/span, span] so a very high- or low-ATR name never explodes or zeroes the cooldown.",
+    )
+    # TASK#8 — BOUNDED RE-ENTRY AFTER STOP-OUT. After this many LOSS recycles for a name the
+    # session terminalizes (FINISHED) instead of re-arming to WATCHING — a chopper cannot bleed
+    # via unlimited re-arms. Profit recycles are free (never counted). OFF ⇒ unlimited (legacy).
+    chili_momentum_reentry_after_stop_bound_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_AFTER_STOP_BOUND_ENABLED"),
+        description="TASK#8: kill-switch for the bounded re-entry-after-stop-out cap. True => after max_stopout_reentries LOSS recycles the session terminalizes. OFF ⇒ byte-identical unlimited recycle.",
+    )
+    chili_momentum_max_stopout_reentries: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_STOPOUT_REENTRIES"),
+        description="TASK#8: per-name/per-session cap on re-entries permitted after a STOP-OUT/loss. Only loss recycles count; profit recycles are unbounded. ge 1, le 10.",
     )
     chili_momentum_risk_cooldown_after_cancel_seconds: int = Field(
         default=60,

@@ -1472,6 +1472,100 @@ def max_loss_circuit_decision(
     }
 
 
+def adaptive_reentry_cooldown_seconds(
+    *,
+    base_seconds: int,
+    last_exit_reason: str | None,
+    last_exit_return_bps: float | None,
+    entry_stop_atr_pct: float | None,
+    profit_factor: float = 0.25,
+    vol_ref_atr_pct: float = 0.03,
+    vol_span: float = 1.5,
+) -> tuple[int, dict[str, Any]]:
+    """Adaptive after-exit cooldown (pure, zero-I/O). Replaces the FIXED magic
+    `chili_momentum_risk_cooldown_after_stopout_seconds` with a regime/vol- and
+    exit-reason-scaled value. ONE documented base (`base_seconds`, the env floor);
+    everything else is derived, no scattered magic.
+
+    Two adaptive factors, multiplied onto the base:
+      * reason_mult: a clean PROFIT/target exit (return_bps > 0 OR reason in the
+        profit set) -> `profit_factor` (a SHORT cooldown so a winner can be
+        re-scalped immediately — the TNMG re-enter-after-the-pop case). A stop-out
+        / loss -> 1.0 (the full base cooldown — sit out the chop).
+      * vol_mult: scale by the name's realized vol relative to a reference. A
+        higher-ATR name needs a LONGER pause to let the next structure form;
+        clamp to [1/vol_span, vol_span] so it never explodes or vanishes.
+          vol_mult = clamp((atr_pct / vol_ref_atr_pct), 1/vol_span, vol_span)
+
+    Returns (seconds:int >= 0, debug). Fail-NEUTRAL: any unusable input falls back
+    to `base_seconds` (never a shorter-than-base loss-side cooldown). The result is
+    floored at 0 and never raises. docs/DESIGN/MOMENTUM_LANE.md"""
+    dbg: dict[str, Any] = {}
+    try:
+        base = max(0, int(base_seconds or 0))
+    except (TypeError, ValueError):
+        base = 0
+    # reason_mult — profit/target => short re-arm; stop/loss => full base.
+    _profit_reasons = {"target", "first_target", "scale_out", "trail", "runner_target", "profit"}
+    is_profit = False
+    try:
+        rb = float(last_exit_return_bps) if last_exit_return_bps is not None else None
+        if rb is not None and rb > 0:
+            is_profit = True
+    except (TypeError, ValueError):
+        rb = None
+    _reason = (str(last_exit_reason or "").strip().lower())
+    if any(p in _reason for p in _profit_reasons):
+        is_profit = True
+    reason_mult = float(profit_factor) if is_profit else 1.0
+    # vol_mult — clamp(atr_pct / vol_ref, 1/span, span); higher vol => longer.
+    vol_mult = 1.0
+    try:
+        ap = float(entry_stop_atr_pct) if entry_stop_atr_pct is not None else None
+        ref = float(vol_ref_atr_pct)
+        span = float(vol_span)
+        if ap is not None and math.isfinite(ap) and ap > 0 and ref > 0 and span >= 1.0:
+            raw = ap / ref
+            vol_mult = max(1.0 / span, min(span, raw))
+    except (TypeError, ValueError):
+        vol_mult = 1.0
+    secs = int(round(base * reason_mult * vol_mult))
+    secs = max(0, secs)
+    dbg.update(
+        base_seconds=base, reason_mult=reason_mult, vol_mult=round(vol_mult, 4),
+        is_profit=is_profit, last_exit_reason=_reason, secs=secs,
+    )
+    return secs, dbg
+
+
+def reentry_after_stop_allowed(
+    *,
+    enabled: bool,
+    stopout_cycles: int,
+    max_stopout_reentries: int,
+) -> tuple[bool, str]:
+    """Pure bound on RE-ENTRIES after a STOP-OUT for a single session/name (no I/O).
+
+    `stopout_cycles` is the count of prior LOSS recycles for this name today (not
+    profit recycles — those are free to re-scalp). When it reaches
+    `max_stopout_reentries` the session must TERMINALIZE (FINISHED) instead of
+    recycling to WATCHING, so a chopper cannot bleed via unlimited re-arms. Flag OFF
+    => always allowed (byte-identical legacy unlimited recycle).
+    Returns (allowed, reason)."""
+    if not enabled:
+        return True, "flag_off"
+    try:
+        c = int(stopout_cycles or 0)
+        m = int(max_stopout_reentries or 0)
+    except (TypeError, ValueError):
+        return True, "bad_basis_fail_open"
+    if m <= 0:
+        return True, "uncapped"
+    if c >= m:
+        return False, "max_stopout_reentries_reached"
+    return True, "allowed"
+
+
 def liquidity_capped_notional(
     equity_notional_cap: float, dollar_volume: float | None, *, fraction: float | None = None
 ) -> float:

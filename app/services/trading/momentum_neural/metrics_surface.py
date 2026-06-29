@@ -235,3 +235,17 @@ def challenge_metrics_summary(
         "window": window,
         "execution_family": execution_family,
     }
+
+
+# multi_scalp monitor: surface the live scale-in / re-entry tally for the cockpit.
+# Reads ONLY le keys already maintained by the pyramid + micropullback + recycle
+# paths (pyramid_add_count, micropullback_reentry_count, stopout_cycles,
+# trade_cycles) — no new state, no I/O beyond the le it is handed.
+def multi_scalp_summary(le: dict) -> dict:
+    le = le if isinstance(le, dict) else {}
+    return {
+        "pyramid_adds": int(le.get("pyramid_add_count") or 0),
+        "micropullback_reloads": int(le.get("micropullback_reentry_count") or 0),
+        "stopout_reentries": int(le.get("stopout_cycles") or 0),
+        "trade_cycles": int(le.get("trade_cycles") or 0),
+    }

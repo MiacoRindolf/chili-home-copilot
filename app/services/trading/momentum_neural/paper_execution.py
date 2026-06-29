@@ -238,6 +238,7 @@ def stop_target_prices(
     stop_atr_mult: float = 0.60,
     target_atr_mult: float = 0.90,  # legacy; superseded by reward_risk below
     reward_risk: float | None = None,
+    realized_high: float | None = None,
 ) -> tuple[float, float]:
     """ATR-scaled STOP + a reward:risk-anchored TARGET (Ross-style, >= 2:1).
 
@@ -258,6 +259,15 @@ def stop_target_prices(
         rr = 2.0
     if side_long:
         stop = entry * (1.0 - max(0.003, atr_pct * float(stop_atr_mult)))
+        # DESIGN #3: lift the R:R toward the name's realized HOD room (in R), capped.
+        # No-op (rr unchanged) when flag-off / no realized_high / no proven room.
+        rr, _adaptive_meta = adaptive_first_target_reward_risk(
+            base_reward_risk=rr,
+            entry=entry,
+            stop=stop,
+            realized_high=realized_high,
+            side_long=True,
+        )
         rr_target = entry + rr * (entry - stop)  # reward = rr x risk(stop distance)
         # Gap #2: pull the FIRST-scale target in to the next round number above entry when
         # one sits between 1R and the R:R target — Ross sells half into the level where
@@ -310,7 +320,96 @@ def class_aware_reward_risk(symbol: str | None = None) -> float:
     return g
 
 
-def scale_out_fraction(default: float = 0.5, symbol: str | None = None) -> float:
+# ── DESIGN #3: ADAPTIVE PROFIT TARGET (realized-range-aware R:R) ──────────────
+# A fixed 2:1 caps a +400% low-float monster at 2R when its realized intraday
+# room (ATR-to-HOD) is 6-10R. Lift the first-target R:R toward the name's OWN
+# realized headroom-in-R, bounded by ONE documented cap above the base floor.
+# SELF-CORRECTING vs the vol-floored stop (literature: a wider/vol-floored stop
+# implies a lower optimal take-profit): room_R = headroom / stop_distance, so a
+# wider stop GROWS the denominator and SHRINKS room_R -> rr_eff falls with no
+# extra term. The base R:R (class_aware_reward_risk) stays the FLOOR; we only
+# ever RAISE the target, never below the floor. Pure; parity-testable.
+
+
+def adaptive_first_target_reward_risk(
+    *,
+    base_reward_risk: float,
+    entry: float,
+    stop: float,
+    realized_high: float | None,
+    side_long: bool = True,
+) -> tuple[float, dict[str, Any]]:
+    """Effective first-target R:R = clamp(max(base, room_R_capture * room_R), base, rr_cap).
+
+    ``room_R`` is the name's realized HEADROOM expressed in R-units:
+    ``room_R = max(0, realized_high - entry) / (entry - stop)`` — the ACTUAL
+    distance to the session high the name has already proven it can travel,
+    divided by the placed stop distance (so it is R-normalized and self-scales
+    against a wider vol-floored stop). ``realized_high`` is the recent session
+    high (HOD proxy from the entry 15m frame); when it is None / <= entry (no
+    proven room) the result is the base R:R (byte-identical). ``room_R_capture``
+    (the ONE documented base, default 0.5) is the fraction of the realized room
+    we aim the first target at — a partial of the proven travel, not the whole
+    leg (the RUNNER captures the tail above). The cap
+    (chili_momentum_adaptive_target_rr_cap) bounds run-away on a vertical
+    blow-off. Long-only; shorts / bad inputs / flag-off -> base. Pure."""
+    meta: dict[str, Any] = {"adaptive": False, "base_rr": float(base_reward_risk)}
+    if not side_long or not adaptive_target_enabled():
+        return float(base_reward_risk), meta
+    try:
+        e = float(entry)
+        s = float(stop)
+        base = float(base_reward_risk)
+    except (TypeError, ValueError):
+        return float(base_reward_risk), meta
+    risk = e - s
+    if not (math.isfinite(e) and math.isfinite(s) and math.isfinite(base)) or risk <= 0 or base <= 0:
+        return base, meta
+    rh = None
+    try:
+        if realized_high is not None and math.isfinite(float(realized_high)):
+            rh = float(realized_high)
+    except (TypeError, ValueError):
+        rh = None
+    if rh is None or rh <= e:
+        return base, meta  # no proven headroom -> base (byte-identical)
+    room_r = (rh - e) / risk
+    try:
+        cap = float(getattr(settings, "chili_momentum_adaptive_target_rr_cap", 6.0) or 6.0)
+        capture = float(getattr(settings, "chili_momentum_adaptive_target_room_capture", 0.5) or 0.5)
+    except (TypeError, ValueError):
+        cap, capture = 6.0, 0.5
+    if not (math.isfinite(cap) and cap > 0):
+        cap = 6.0
+    cap = max(base, cap)  # the cap can never sit below the documented floor
+    if not (math.isfinite(capture) and capture > 0):
+        capture = 0.5
+    rr_eff = max(base, capture * room_r)
+    rr_eff = max(base, min(rr_eff, cap))
+    if not math.isfinite(rr_eff) or rr_eff <= 0:
+        return base, meta
+    meta = {
+        "adaptive": rr_eff > base + 1e-9,
+        "base_rr": base,
+        "room_r": round(room_r, 4),
+        "capture": capture,
+        "rr_eff": round(rr_eff, 4),
+        "rr_cap": cap,
+        "realized_high": rh,
+    }
+    return float(rr_eff), meta
+
+
+def adaptive_target_enabled() -> bool:
+    return bool(getattr(settings, "chili_momentum_adaptive_target_enabled", True))
+
+
+def scale_out_fraction(
+    default: float = 0.5,
+    symbol: str | None = None,
+    *,
+    vol_pctl: float | None = None,
+) -> float:
     """Fraction of the ORIGINAL position sold into the first target.
 
     Ross "sell 1/2 into strength" (up to 0.75 on the micro-pullback). ONE
@@ -335,6 +434,21 @@ def scale_out_fraction(default: float = 0.5, symbol: str | None = None) -> float
                 pass
     if not math.isfinite(v):
         v = default
+    # DESIGN #3: tilt the partial by the name's realized-vol percentile within the
+    # batch — sell LESS into the first target when realized vol is HIGH (keep a
+    # bigger runner for the tail) and MORE when vol compresses. Centered at the
+    # median (0.5) so a typical-vol name is byte-identical; the tilt magnitude is
+    # ONE documented base (chili_momentum_adaptive_scale_vol_tilt). Flag-gated.
+    if vol_pctl is not None and adaptive_target_enabled():
+        try:
+            p = float(vol_pctl)
+            tilt = float(getattr(settings, "chili_momentum_adaptive_scale_vol_tilt", 0.5) or 0.0)
+            if math.isfinite(p) and math.isfinite(tilt) and tilt > 0.0:
+                p = max(0.0, min(1.0, p))
+                # p>0.5 (high vol) -> reduce v; p<0.5 (low vol) -> raise v.
+                v = v * (1.0 - tilt * (p - 0.5) * 2.0)
+        except (TypeError, ValueError):
+            pass
     return max(0.05, min(0.95, v))
 
 
@@ -971,6 +1085,68 @@ def volnorm_trail_dist_pct(
         cap = 0.15
     lo = min(floor, cap)
     return max(lo, min(candidate, cap))
+
+
+def trail_width_maturity_factor(
+    *,
+    rv_live: float | None,
+    vol_floor_pct: float | None,
+    ofi_level: float | None,
+    ofi_slope: float | None,
+    max_widen: float = 2.0,
+    vol_regime_pivot: float = 1.0,
+) -> float:
+    """DESIGN#2 — adaptive WIDEN factor in [1.0, ``max_widen``] applied to the 2A trail
+    ``k`` so a FRESH, vol-rich runner trails near the chandelier-literature optimum
+    (PF peaks ~3x ATR; 2x over-tightens) while a MATURING/exhausting runner decays back
+    to 1.0 so the existing RIDE-LOCK LOCK/HARD bands tighten unimpeded.
+
+    Two REAL signals, both already computed live (no new datum, no magic absolute):
+      vol_regime = rv_live / max(vol_floor_pct, eps) — how energetic the LIVE tape is vs
+                   the entry vol-floor. >pivot ⇒ vol-rich (room to run); <=pivot ⇒ calm.
+      maturity   = fresh trend (ofi_level > 0 ∧ ofi_slope >= 0) ⇒ flow still being fed
+                   ⇒ permit the widen; slope rolling over (< 0) ⇒ exhaustion ⇒ factor
+                   DECAYS to 1.0 (let LOCK/HARD do the tightening).
+
+    factor = 1.0 + (max_widen - 1.0) * vol_gate * maturity_gate
+      vol_gate      = clamp((vol_regime - vol_regime_pivot) / vol_regime_pivot, 0, 1)
+      maturity_gate = 1.0 if (ofi_level>0 ∧ ofi_slope>=0); 0.0 if ofi_slope<0; 0.5 if
+                      flow read missing/flat (neutral half-widen, fail-toward-mild).
+
+    Fail-NEUTRAL to 1.0 on any missing/degenerate input. Pure; deterministic; INVARIANT-A
+    is enforced by the caller (a wider band only lowers the candidate, composed via max())."""
+    try:
+        mw = float(max_widen)
+        piv = float(vol_regime_pivot)
+    except (TypeError, ValueError):
+        return 1.0
+    if not (math.isfinite(mw) and mw > 1.0) or not (math.isfinite(piv) and piv > 0.0):
+        return 1.0
+    try:
+        rv = float(rv_live)
+        vf = float(vol_floor_pct)
+    except (TypeError, ValueError):
+        return 1.0
+    if not (math.isfinite(rv) and rv >= 0.0 and math.isfinite(vf) and vf > 0.0):
+        return 1.0
+    vol_regime = rv / vf
+    if not math.isfinite(vol_regime):
+        return 1.0
+    vol_gate = max(0.0, min(1.0, (vol_regime - piv) / piv))
+    lvl = ofi_level if (ofi_level is not None and math.isfinite(float(ofi_level))) else None
+    slp = ofi_slope if (ofi_slope is not None and math.isfinite(float(ofi_slope))) else None
+    if lvl is None or slp is None:
+        maturity_gate = 0.5
+    elif float(slp) < 0.0:
+        maturity_gate = 0.0
+    elif float(lvl) > 0.0 and float(slp) >= 0.0:
+        maturity_gate = 1.0
+    else:
+        maturity_gate = 0.5
+    factor = 1.0 + (mw - 1.0) * vol_gate * maturity_gate
+    if not math.isfinite(factor):
+        return 1.0
+    return max(1.0, min(mw, factor))
 
 
 def volnorm_runner_trail_stop(

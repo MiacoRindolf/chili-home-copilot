@@ -61,6 +61,8 @@ from .risk_policy import (
     max_loss_circuit_decision,
     policy_float_cap,
     policy_int_cap,
+    adaptive_reentry_cooldown_seconds,
+    reentry_after_stop_allowed,
 )
 from .paper_execution import (
     _classify_cadence,
@@ -1894,7 +1896,7 @@ def _scale_out_to_runner(
         )
         pos["stop_price"] = be_stop
         pos["scaled_out_at_utc"] = _utcnow().isoformat()
-        pos["scale_out_fraction"] = scale_out_fraction(symbol=sess.symbol)
+        pos["scale_out_fraction"] = scale_out_fraction(symbol=sess.symbol, vol_pctl=_adaptive_scale_vol_pctl(le))
         # Measured-move winner-management (flag-gated, default OFF): FREEZE the
         # name's first impulse leg at the first-target scale-out — the breakout high
         # so far (HWM) is the impulse high, entry the leg base. The runner-loop trail
@@ -2094,7 +2096,7 @@ def _place_scale_out_limit(
         # first rung's price (the reactive market path takes the later rungs). The grid
         # anchor stop is frozen on the position at entry; build the ladder off it. Flag OFF
         # / no ladder => the single scale_out_fraction at target_px (byte-identical).
-        _rest_frac = scale_out_fraction(symbol=sess.symbol)
+        _rest_frac = scale_out_fraction(symbol=sess.symbol, vol_pctl=_adaptive_scale_vol_pctl(le))
         _rest_px = float(target_px)
         try:
             _pos = le.get("position") if isinstance(le.get("position"), dict) else {}
@@ -2103,7 +2105,7 @@ def _place_scale_out_limit(
                 _rest_frac = float(_grid[0][1])
                 _rest_px = float(_grid[0][0])
         except Exception:
-            _rest_frac = scale_out_fraction(symbol=sess.symbol)
+            _rest_frac = scale_out_fraction(symbol=sess.symbol, vol_pctl=_adaptive_scale_vol_pctl(le))
             _rest_px = float(target_px)
         scale_qty, _runner_qty, can_split = scale_out_quantity(
             current_qty=float(filled),
@@ -3124,6 +3126,31 @@ def _session_is_explosive(via: Any, *, rvol: float | None = None) -> bool:
         return False
 
 
+def _adaptive_scale_vol_pctl(le: dict) -> float | None:
+    """DESIGN #3 — the name's realized intraday-vol percentile in [0,1] for the
+    vol-aware scale-out tilt, derived from the stashed entry_day_range_pct mapped
+    through the documented reference range (chili_momentum_adaptive_scale_vol_ref_pct,
+    the Ross ~5% small-cap opening range — the SAME 0.05 reference the opening-bell
+    widen uses). Returns None (no tilt, byte-identical) when the day-range
+    was not stashed. p>0.5 => higher-than-reference vol => smaller partial / bigger
+    runner. Pure read off `le`; fail-neutral."""
+    if not isinstance(le, dict):
+        return None
+    dr = _float_or_none(le.get("entry_day_range_pct"))
+    if dr is None or dr <= 0:
+        return None
+    try:
+        ref = float(getattr(settings, "chili_momentum_adaptive_scale_vol_ref_pct", 0.05) or 0.05)
+    except (TypeError, ValueError):
+        ref = 0.05
+    if not math.isfinite(ref) or ref <= 0:
+        ref = 0.05
+    # Map range -> [0,1] with the reference at the median: range==ref -> 0.5,
+    # range==2*ref -> 1.0, range->0 -> 0.0. Bounded, no batch fetch needed.
+    p = 0.5 * (dr / ref)
+    return max(0.0, min(1.0, p))
+
+
 def _session_squeeze_rank_pct(via: Any, symbol: str) -> float | None:
     """P4 — the session's OWN within-batch squeeze percentile (``squeeze_fuel_rank_pct``), read
     from its persisted scanner row (execution_readiness_json.extra.ross_signals[SYM]) — the SAME
@@ -3899,6 +3926,8 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "entry_stop_model",
     "entry_dollar_vol",
     "entry_expected_move_bps",
+    "entry_realized_high",
+    "entry_day_range_pct",
     "entry_notional_guard",
     "entry_slip_bps_ref",
     "entry_spread_bps_at_decision",
@@ -6647,6 +6676,7 @@ def tick_live_session(
                     stop_atr_mult=_stop_atr_mult,
                     target_atr_mult=float(params["target_atr_mult"]),
                     reward_risk=class_aware_reward_risk(sess.symbol),
+                    realized_high=_float_or_none(le.get("entry_realized_high")),
                 )
                 le["position"]["stop_price"] = stop_px
                 le["position"]["target_price"] = target_px
@@ -7529,6 +7559,21 @@ def tick_live_session(
         )
         le["entry_stop_atr_pct"] = _eff_atr_pct
         le["entry_stop_model"] = _stop_model
+        # DESIGN #3: stash the realized intraday HEADROOM (session high) + day-range so
+        # the first-target R:R can adapt to the name's OWN proven travel at fill time,
+        # and the scale-out fraction can tilt by realized vol. Reuses the 15m _entry_df
+        # already fetched for the adaptive spread gate (no new I/O). Best-effort; absent
+        # data leaves the keys unset -> adaptive helpers fall back to base (byte-identical).
+        try:
+            if _entry_df is not None and not getattr(_entry_df, "empty", True) and len(_entry_df) >= 2:
+                _rh = float(_entry_df["High"].astype(float).max())
+                _rl = float(_entry_df["Low"].astype(float).min())
+                if math.isfinite(_rh) and _rh > 0:
+                    le["entry_realized_high"] = _rh
+                if math.isfinite(_rh) and math.isfinite(_rl) and _rl > 0 and _rh > _rl:
+                    le["entry_day_range_pct"] = (_rh - _rl) / _rl
+        except Exception:
+            pass
         if _stop_model == "structural_pullback":
             le["structural_stop_atr_pct"] = round(_eff_atr_pct, 6)
         # LEVER 2B — snapshot the ENTRY tape PACE (ticks/sec) so the runner-time
@@ -9808,6 +9853,30 @@ def tick_live_session(
                         _sq_widen_vn = _squeeze_exit_band_widen_factor(via, sess.symbol)
                         if _sq_widen_vn > 1.0:
                             _k = _k * _sq_widen_vn
+                        # DESIGN#2 ADAPTIVE TRAIL-WIDTH MATURITY WIDEN: a fresh, vol-rich runner
+                        # trails toward the chandelier-literature optimum (PF peaks ~3x ATR; 2x
+                        # over-tightens) by widening the 2A k; a maturing/exhausting runner (OFI
+                        # slope rolling over) decays the factor to 1.0 so the existing RIDE-LOCK
+                        # LOCK/HARD bands tighten unimpeded. INVARIANT-A SAFE — a wider band only
+                        # LOWERS the candidate, composed through max(stop, be, candidate) below;
+                        # never loosens a placed stop. Flag OFF / thin flow ⇒ factor 1.0 ⇒ byte-
+                        # identical. The OFI read is the SAME _live_flow_slope LEVER 2B uses.
+                        if bool(getattr(settings, "chili_momentum_volnorm_trail_maturity_widen_enabled", True)):
+                            try:
+                                from .pipeline import _live_flow_slope as _lfs_mat
+                                from .paper_execution import trail_width_maturity_factor as _twmf
+                                _fs_mat = _lfs_mat(sess.symbol, db=db) or {}
+                                _mat_factor = _twmf(
+                                    rv_live=float(_rv["rv_step"]),
+                                    vol_floor_pct=max(0.0, _atr_pct_trail * _sm),
+                                    ofi_level=_fs_mat.get("ofi_level"),
+                                    ofi_slope=_fs_mat.get("ofi_slope"),
+                                    max_widen=float(getattr(settings, "chili_momentum_volnorm_trail_maturity_max_widen", 2.0) or 2.0),
+                                )
+                                if _mat_factor > 1.0:
+                                    _k = _k * _mat_factor
+                            except Exception:
+                                pass
                         # Live-derived holding horizon: median realized hold of recent scalps,
                         # falling back to this session's own elapsed hold (no magic horizon).
                         _hold_s = _recent_scalp_median_hold_s(db, int(sess.user_id))
@@ -9835,6 +9904,7 @@ def tick_live_session(
                             k=_k,
                             vol_floor_pct=_vol_floor_pct,
                             effective_spread_pct=_rv.get("eff_spread_pct"),
+                            max_dist_pct=float(getattr(settings, "chili_momentum_volnorm_trail_max_dist_pct", 0.15) or 0.15),
                         )
                         _vn_stop = volnorm_runner_trail_stop(
                             high_water_mark=_hwm_vn,
@@ -11737,9 +11807,9 @@ def tick_live_session(
             if _grid_active:
                 _grid = _resolve_scale_grid(pos, sess.symbol)
                 _gidx = int(pos.get("scale_grid_idx") or 0)
-                frac = float(_grid[_gidx][1]) if _gidx < len(_grid) else scale_out_fraction(symbol=sess.symbol)
+                frac = float(_grid[_gidx][1]) if _gidx < len(_grid) else scale_out_fraction(symbol=sess.symbol, vol_pctl=_adaptive_scale_vol_pctl(le))
             else:
-                frac = scale_out_fraction(symbol=sess.symbol)
+                frac = scale_out_fraction(symbol=sess.symbol, vol_pctl=_adaptive_scale_vol_pctl(le))
             scale_qty, runner_qty, can_split = scale_out_quantity(
                 current_qty=qty,
                 original_qty=orig_qty,
@@ -11858,11 +11928,39 @@ def tick_live_session(
             "cooldown_after_stopout_seconds",
             settings.chili_momentum_risk_cooldown_after_stopout_seconds,
         )
-        until = _utcnow() + timedelta(seconds=max(0, cd_sec))
+        # ADAPTIVE RE-ENTRY COOLDOWN (kill the magic fixed 300s): scale the base by
+        # the exit reason (a clean PROFIT/target exit => a SHORT re-scalp window so a
+        # runner can be re-entered on the next micro-pullback — the TNMG case; a
+        # STOP-OUT => the full base, sit out the chop) AND by the name's realized vol
+        # (entry_stop_atr_pct, persisted across recycle). OFF => byte-identical (uses
+        # cd_sec verbatim). The loss-side reason_mult is pinned 1.0 so an adaptive
+        # cooldown is NEVER shorter than the base on a loss.
+        _cd_dbg = None
+        if bool(getattr(settings, "chili_momentum_adaptive_reentry_cooldown_enabled", True)):
+            cd_sec, _cd_dbg = adaptive_reentry_cooldown_seconds(
+                base_seconds=int(cd_sec),
+                last_exit_reason=le.get("last_exit_reason"),
+                last_exit_return_bps=_float_or_none(le.get("last_exit_return_bps")),
+                entry_stop_atr_pct=_float_or_none(le.get("entry_stop_atr_pct")),
+                profit_factor=float(getattr(settings, "chili_momentum_reentry_profit_cooldown_factor", 0.25) or 0.25),
+                vol_ref_atr_pct=float(getattr(settings, "chili_momentum_reentry_cooldown_vol_ref_atr_pct", 0.03) or 0.03),
+                vol_span=float(getattr(settings, "chili_momentum_reentry_cooldown_vol_span", 1.5) or 1.5),
+            )
+        # Track WHETHER this exit was a stop-out/loss (for the bounded re-entry cap
+        # in COOLDOWN). A profit/target recycle is free; only loss recycles count.
+        _rb = _float_or_none(le.get("last_exit_return_bps"))
+        _was_loss = bool(_rb is not None and _rb <= 0)
+        le["last_recycle_was_stopout"] = _was_loss
+        until = _utcnow() + timedelta(seconds=max(0, int(cd_sec)))
         le["cooldown_until_utc"] = until.isoformat()
         _safe_transition(db, sess, STATE_LIVE_COOLDOWN)
         _commit_le(sess, le)
-        _emit(db, sess, "live_cooldown_started", {"until_utc": le["cooldown_until_utc"]})
+        _emit(db, sess, "live_cooldown_started", {
+            "until_utc": le["cooldown_until_utc"],
+            "cooldown_seconds": int(cd_sec),
+            "adaptive": _cd_dbg,
+            "was_stopout": _was_loss,
+        })
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -11875,6 +11973,27 @@ def tick_live_session(
         if _utcnow() >= until:
             le.pop("cooldown_until_utc", None)
             le["trade_cycles"] = int(le.get("trade_cycles") or 0) + 1
+            # Count LOSS recycles separately (a profit recycle is a free re-scalp).
+            if bool(le.pop("last_recycle_was_stopout", False)):
+                le["stopout_cycles"] = int(le.get("stopout_cycles") or 0) + 1
+            # BOUNDED RE-ENTRY AFTER STOP-OUT: a chopper must not re-arm forever. When
+            # the loss-recycle count hits the cap, TERMINALIZE (FINISHED) instead of
+            # recycling to WATCHING. Flag OFF => unlimited (byte-identical legacy).
+            _re_ok, _re_reason = reentry_after_stop_allowed(
+                enabled=bool(getattr(settings, "chili_momentum_reentry_after_stop_bound_enabled", True)),
+                stopout_cycles=int(le.get("stopout_cycles") or 0),
+                max_stopout_reentries=int(getattr(settings, "chili_momentum_max_stopout_reentries", 3) or 3),
+            )
+            if not _re_ok:
+                _commit_le(sess, le)
+                _safe_transition(db, sess, STATE_LIVE_FINISHED)
+                _emit(db, sess, "live_reentry_capped", {
+                    "reason": _re_reason,
+                    "stopout_cycles": int(le.get("stopout_cycles") or 0),
+                    "trade_cycles": le["trade_cycles"],
+                })
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state}
             # RECYCLE ENTRY-STATE RESET (2026-06-27 duplicate-fill root cause): clear the
             # PRIOR trade's entry-order / position lifecycle state so the recycled watcher
             # starts CLEAN — without this it re-polls / re-adopts its OWN already-filled
