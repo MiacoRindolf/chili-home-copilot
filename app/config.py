@@ -5209,6 +5209,34 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_RUNAWAY_MIN_VOLUME_SPIKE"),
         description="Raised volume-spike floor for a runaway (no-retest) entry — more conviction than a normal break.",
     )
+    # ADAPTIVE-RETEST explosive RAW-BREAK escape (Ross's asymmetric rule: raw break on the
+    # STRONGEST setups, retest on the rest). When require_retest is True and a break RAN with no
+    # pullback (waiting_for_retest), this converts the wait into a raw-break FIRE *only* when the
+    # break is, BY THE TAPE, clearly EXPLOSIVE (RVOL >= explosive_floor x mult AND signed-tape
+    # thrust confirms the ask is being eaten). TAPE REQUIRED + FAIL-CLOSED; runs ALL 4 chase-guards
+    # on the raw-break path. DEFAULT OFF: this loosens the retest discipline on a live ENTRY path,
+    # so it ships dark for the operator to flip after live observation (per the analysis, the
+    # latent over-gate is already backstopped by allow_runaway_break, so this is incremental, not
+    # required — default-OFF is the safe default and flag-OFF is byte-identical).
+    chili_momentum_pullback_raw_break_when_explosive: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_RAW_BREAK_WHEN_EXPLOSIVE"),
+        description="ADAPTIVE-RETEST: when require_retest is True, allow a GUARDED raw-break entry (instead of waiting_for_retest) on a clearly EXPLOSIVE break (RVOL>=explosive_floor x mult AND tape-confirmed thrust). Default OFF (touches live retest discipline); flag-OFF is byte-identical.",
+    )
+    chili_momentum_pullback_raw_break_rvol_mult: float = Field(
+        default=1.0,
+        ge=1.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_RAW_BREAK_RVOL_MULT"),
+        description="ADAPTIVE-RETEST: the explosive raw-break RVOL floor = chili_momentum_explosive_floor_rvol x this multiplier (>=1.0 = AT the explosive floor; raise to demand a stronger surge). The ONE documented base for the explosive raw-break escape.",
+    )
+    chili_momentum_pullback_raw_break_thrust_frac: float = Field(
+        default=0.50,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_RAW_BREAK_THRUST_FRAC"),
+        description="ADAPTIVE-RETEST: strong-thrust fraction for the explosive raw-break escape — the back-half aggressor-buy acceleration must clear this fraction of back-half buy volume (when exposed) else a strictly-rising tape is required. Higher = stricter.",
+    )
     # #2 Breakout-or-bailout fast exit (Ross flat-top): if the broken level fails to
     # hold shortly after entry, cut at market — well inside the structural stop.
     chili_momentum_breakout_bailout_enabled: bool = Field(

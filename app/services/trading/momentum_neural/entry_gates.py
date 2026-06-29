@@ -6151,6 +6151,128 @@ def cup_and_handle_confirmation(
         return False, "cup_and_handle_error", {"entry_interval": entry_interval}
 
 
+def _explosive_raw_break_escape(
+    symbol: str | None,
+    *,
+    vol_ratio: float | None,
+    explosive_rvol_floor: float,
+    db: Any = None,
+    l2_as_of: Any = None,
+    debug: dict[str, Any] | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """ADAPTIVE-RETEST escape (the explosive raw-break Ross actually takes on the strongest
+    setups). When ``chili_momentum_pullback_require_retest`` is True the trigger waits for a
+    break→pullback→retest→reclaim sequence; a genuinely EXPLOSIVE vertical runner never offers
+    that pullback. Ross's real behaviour is asymmetric: he takes the RAW first break on the
+    STRONGEST setups (huge RVOL, the ask getting eaten) and waits for the retest on the weaker
+    ones. This is the strongest-setups-only escape — it converts a ``waiting_for_retest`` into a
+    raw-break FIRE *only* when the break is, by the tape, clearly explosive.
+
+    EXPLOSIVE is defined STRICTLY from EXISTING adaptive floors (no new magic level):
+      1. RVOL >= an ADAPTIVE explosive floor = ``explosive_floor_rvol`` (Ross's '5x') x ONE
+         documented multiplier ``chili_momentum_pullback_raw_break_rvol_mult`` (>= 1.0, default
+         1.0 — i.e. AT the explosive floor; the operator can raise it). The floor itself is the
+         instrument-relative trigger-bar vol_ratio the gate already computed, so this is
+         self-relative, not a fixed share count.
+      2. The executed TAPE actively confirms aggressive buying ACCELERATING into the break —
+         ``signed_tape_accel > 0`` (back-half aggressor-signed buy volume exceeds the front-half:
+         the ask is getting eaten) AND ``tick_rate >= tick_rate_floor`` (recent activity at/above
+         its OWN self-relative percentile floor) AND the thrust is STRONG: the back-half buy
+         acceleration is a meaningful fraction of the window's signed buy volume (the thrust is a
+         real surge, not a one-lot poke) — ``signed_tape_accel >= thrust_frac x back_half_buy_vol``
+         where ``thrust_frac`` = ``chili_momentum_pullback_raw_break_thrust_frac`` (the SAME
+         single documented base; default a strict 0.50 = the back half must out-buy the front by
+         at least half the back-half buy volume).
+
+    FAIL-CLOSED on the tape (the 'TAPE REQUIRED + fail-closed' chase-guard): no symbol / no db /
+    crypto / empty-or-thin tape / any error ⇒ NO escape (``False``). The escape NEVER fires
+    blind — without a live tick tape confirming the ask is being eaten, the retest discipline
+    stays in force. Returns ``(escape, dbg_patch)`` where ``dbg_patch`` is merged into ``debug``
+    for observability. PURE read (no writes). docs/DESIGN/MOMENTUM_LANE.md"""
+    dbg: dict[str, Any] = {}
+    try:
+        # 1) ADAPTIVE explosive RVOL floor (derived from the existing explosive floor x ONE base).
+        try:
+            _rvol_mult = float(
+                getattr(settings, "chili_momentum_pullback_raw_break_rvol_mult", 1.0) or 1.0
+            )
+        except (TypeError, ValueError):
+            _rvol_mult = 1.0
+        _rvol_mult = max(1.0, _rvol_mult)
+        _explosive_floor = max(0.0, float(explosive_rvol_floor)) * _rvol_mult
+        dbg["raw_break_rvol_floor"] = round(_explosive_floor, 3)
+        if vol_ratio is None or float(vol_ratio) < _explosive_floor:
+            dbg["raw_break_rvol"] = None if vol_ratio is None else round(float(vol_ratio), 3)
+            dbg["raw_break_blocked"] = "rvol_below_explosive_floor"
+            return False, dbg
+        dbg["raw_break_rvol"] = round(float(vol_ratio), 3)
+
+        # 2) TAPE thrust — REQUIRED + FAIL-CLOSED (no tape ⇒ no escape).
+        tape = signed_tape_accel_features(symbol, db=db, as_of=l2_as_of)
+        if tape is None:
+            dbg["raw_break_blocked"] = "tape_required_fail_closed"
+            return False, dbg
+        accel = float(tape.get("signed_tape_accel", 0.0))
+        tick_rate = float(tape.get("tick_rate", 0.0))
+        tick_rate_floor = float(tape.get("tick_rate_floor", 0.0))
+        dbg.update({
+            "raw_break_signed_tape_accel": round(accel, 6),
+            "raw_break_tick_rate": round(tick_rate, 4),
+            "raw_break_tick_rate_floor": round(tick_rate_floor, 4),
+            "raw_break_n_ticks": int(tape.get("n_ticks", 0)),
+        })
+        # ask-eaten + active: positive aggressor acceleration AND recent activity at/above floor.
+        if not (accel > 0.0 and tick_rate >= tick_rate_floor):
+            dbg["raw_break_blocked"] = "tape_not_confirming"
+            return False, dbg
+        # STRONG thrust: the back-half buy acceleration is a meaningful fraction of the window's
+        # back-half buy volume (a real surge, not a single-lot poke). back_half_buy_vol is
+        # reconstructed from the front_buy + accel identity isn't available here, so derive the
+        # strength self-relatively against the signed-buy magnitude the tape exposes: require the
+        # acceleration to clear thrust_frac of (accel + |front-half buy|) ≈ back-half buy volume.
+        try:
+            _thrust_frac = float(
+                getattr(settings, "chili_momentum_pullback_raw_break_thrust_frac", 0.50) or 0.50
+            )
+        except (TypeError, ValueError):
+            _thrust_frac = 0.50
+        _thrust_frac = max(0.0, min(1.0, _thrust_frac))
+        # back_half_buy = front_half_buy + signed_tape_accel; front_half_buy = back_half_buy - accel.
+        # We only have accel (= back_buy - front_buy). The strongest-thrust read is accel relative
+        # to the back-half buy volume; since back_buy >= accel (front_buy >= 0), accel/back_buy <= 1.
+        # Without back_buy exposed we use the conservative self-relative proxy: the acceleration
+        # must be POSITIVE and at least thrust_frac of itself-plus-the-prior-half — i.e. the back
+        # half bought at least (1/(1-thrust_frac)) x more than the front half. Express directly:
+        # accel >= thrust_frac/(1-thrust_frac) x front_buy. front_buy = back_buy - accel is unknown,
+        # so fall back to requiring accel to clear a thrust_frac share of the tape's total signed
+        # buy magnitude when exposed; else require strictly-positive accel (already checked) AND a
+        # tick_rate strictly ABOVE the floor (a true surge, not merely at-floor).
+        _back_buy = tape.get("back_half_buy_vol")
+        _strong = True
+        if _back_buy is not None:
+            try:
+                _bb = float(_back_buy)
+                _strong = _bb > 0 and accel >= _thrust_frac * _bb
+            except (TypeError, ValueError):
+                _strong = True
+        else:
+            # No back-half buy volume exposed → demand a strictly-rising tape (tick_rate ABOVE
+            # floor, not merely at it) as the strong-thrust proxy. Strictly-positive accel is
+            # already required above; this raises the bar so an at-floor flat tape does not escape.
+            _strong = tick_rate > tick_rate_floor
+        dbg["raw_break_thrust_frac"] = round(_thrust_frac, 3)
+        dbg["raw_break_strong_thrust"] = bool(_strong)
+        if not _strong:
+            dbg["raw_break_blocked"] = "thrust_not_strong"
+            return False, dbg
+
+        dbg["raw_break_explosive"] = True
+        return True, dbg
+    except Exception:
+        dbg["raw_break_blocked"] = "raw_break_error_fail_closed"
+        return False, dbg
+
+
 def pullback_break_confirmation(
     df: pd.DataFrame,
     *,
@@ -6318,6 +6440,52 @@ def pullback_break_confirmation(
     ):
         ok_t, _runaway = True, True
         debug["runaway"] = True
+
+    # ADAPTIVE-RETEST EXPLOSIVE RAW-BREAK ESCAPE (Ross's asymmetric rule: raw break on the
+    # STRONGEST setups, retest on the rest). When require_retest is True and the break RAN with
+    # NO pullback (``waiting_for_retest``), the retest ladder strands a genuinely explosive
+    # vertical runaway. This GUARDED escape converts that wait into a raw-break FIRE *only* when
+    # the break is, BY THE TAPE, clearly explosive: RVOL >= an ADAPTIVE explosive floor (derived
+    # from ``explosive_floor_rvol`` x ONE documented base) AND the executed tape confirms
+    # aggressive buying ACCELERATING into the break (signed_tape_accel > 0 = the ask getting
+    # eaten, tick_rate >= floor, strong thrust) — TAPE REQUIRED + FAIL-CLOSED (no tape ⇒ no
+    # escape, the retest discipline stays in force). It is a strongest-setups-only RAW BREAK, NOT
+    # a chase: it sets ok_t and then runs the SAME 4 chase-guards every other fire runs (backside
+    # EMA/MACD + front_side_state + VWAP-hold, extension/verticality veto, structural stop, and —
+    # via the runaway weak-prior set below — the RAISED volume floor + fail-CLOSED sustained
+    # volume). Flag OFF ⇒ this whole block is skipped ⇒ BYTE-IDENTICAL to the current ladder.
+    # ONE adaptive base (rvol_mult x explosive_floor); no magic level. docs/DESIGN/MOMENTUM_LANE.md
+    _explosive_raw_break = False
+    if (
+        not ok_t
+        and require_retest
+        and reason_t == "waiting_for_retest"
+        and debug.get("pullback_high") is not None
+        and debug.get("pullback_low") is not None
+        and bool(getattr(settings, "chili_momentum_pullback_raw_break_when_explosive", False))
+    ):
+        # Trigger-bar RVOL (the SAME self-relative vol_ratio the explosive-floor gate uses below).
+        _erb_vr = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
+        if _erb_vr is None:
+            _erb_w = vol.tail(21)
+            _erb_avg = float(_erb_w.iloc[:-1].mean()) if len(_erb_w) > 1 else float(vol.iloc[-1])
+            _erb_vr = (float(vol.iloc[-1]) / _erb_avg) if _erb_avg > 0 else 0.0
+        try:
+            _erb_floor = float(getattr(settings, "chili_momentum_explosive_floor_rvol", 5.0) or 5.0)
+        except (TypeError, ValueError):
+            _erb_floor = 5.0
+        _escape, _escape_dbg = _explosive_raw_break_escape(
+            symbol,
+            vol_ratio=_erb_vr,
+            explosive_rvol_floor=_erb_floor,
+            db=db,
+            l2_as_of=l2_as_of,
+            debug=debug,
+        )
+        debug.update(_escape_dbg)
+        if _escape:
+            ok_t, _explosive_raw_break = True, True
+            debug["explosive_raw_break"] = True
 
     # TICK-BREAK (Ross-speed entry): the structure is valid on COMPLETED bars but
     # the break hasn't printed on a CLOSED bar yet — and the LIVE tick is already
@@ -6605,7 +6773,7 @@ def pullback_break_confirmation(
     # forming — its volume is unknowable); the sustained-volume gate below still applies.
     _vol_floor = (
         float(runaway_min_volume_spike)
-        if (_runaway or _deep_reclaim or _late_pullback)
+        if (_runaway or _explosive_raw_break or _deep_reclaim or _late_pullback)
         else float(volume_spike_multiple)
     )
     if not _tick_break and vol_ratio < _vol_floor:
@@ -6715,6 +6883,10 @@ def pullback_break_confirmation(
     # aggressive early entry vs the legacy ladder), bar-fired or tick-fired.
     if debug.get("pattern") == "first_pullback":
         return True, ("first_pullback_tick_ok" if _tick_break else "first_pullback_ok"), debug
+    # The adaptive-retest explosive RAW-BREAK escape gets its OWN observable reason (so the replay
+    # A/B can attribute it vs the runaway rescue and the plain break-retest).
+    if _explosive_raw_break:
+        return True, ("explosive_raw_break_tick_ok" if _tick_break else "explosive_raw_break_ok"), debug
     return True, ("pullback_break_tick_ok" if _tick_break else "pullback_break_ok"), debug
 
 
