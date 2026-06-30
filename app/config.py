@@ -5518,6 +5518,67 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_MAX_DIP_PCT"),
         description="Shallow-dip cap: the micro-pullback dip from the local bounce-high must be <= this fraction (a deep rollover is NOT a micro-pullback). Adaptive convention; keep small.",
     )
+    # ── ROSS BUY-THE-DIP / PULLBACK ADD (the operator ask). The #772 pyramid + the
+    # micro-pullback re-load both add on CONTINUATION (UP/new-HOD, dip-and-curl). Ross
+    # ALSO buys the controlled PULLBACK to support (a higher-low / breakout shelf / VWAP)
+    # in an INTACT uptrend — sized conservatively, the add's stop just below the higher-low.
+    # FALLING-KNIFE-GUARDED by the just-shipped front-side strength (front_side_strength_score
+    # >= an adaptive floor) + OFI-not-collapsing + above-VWAP-or-reclaiming + higher-low. A
+    # SEPARATE sub-branch in the held-position tick path with its OWN predicate
+    # (pullback_add_decision), OWN counter (pullback_add_count), OWN in-flight marker
+    # (pullback_add_order_id), OWN cooldown. ADDITIVE: composes with — never double-fires
+    # with — the UP-pyramid / micro-pullback (it refuses when EITHER has an add in flight).
+    # Re-loads route through pyramid_blend_on_fill + pyramid_risk_anchor_usd VERBATIM so the
+    # #769 max-loss circuit keeps re-basing to the STARTER R0. EQUITY-FIRST (crypto deferred).
+    # Default ON (no dark flags); flag OFF ⇒ byte-identical (no pullback-add). This is an ADD
+    # lever (more position on a healthy dip), NEVER a veto. docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_pullback_add_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_ENABLED"),
+        description="Kill-switch for the Ross BUY-THE-DIP pullback ADD (add on a controlled pullback to support in an intact uptrend). false = byte-identical (no pullback-add, no pos mutation, no emit, no broker call). Default ON.",
+    )
+    chili_momentum_pullback_add_max: int = Field(
+        default=2,
+        ge=1,
+        le=4,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_MAX"),
+        description="Per-name/per-session cap on pullback-adds (bounds total pullback-add risk = max * risk_fraction * R0). Separate counter from the UP-pyramid for clean attribution. Documented small N.",
+    )
+    chili_momentum_pullback_add_cooldown_seconds: float = Field(
+        default=30.0,
+        ge=0.0,
+        le=600.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_COOLDOWN_SECONDS"),
+        description="Cooldown between pullback-adds. PINNED to >= 2 * micropull_bar_seconds (min 30s @ 15s bars) so one wiggle cannot fire two adds before the structure re-forms.",
+    )
+    chili_momentum_pullback_add_risk_fraction: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_RISK_FRACTION"),
+        description="rho: each pullback-add's structural risk as a fraction of the STARTER R0 (Ross sizes the pullback-add conservatively; <=1 keeps the add inside the banked cushion). Sized via compute_risk_first_quantity, never a hardcoded block. The add size is structurally <= the initial entry (R-funded off R0).",
+    )
+    chili_momentum_pullback_add_depth_lo_frac: float = Field(
+        default=0.20,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_DEPTH_LO_FRAC"),
+        description="Lower edge of the CONTROLLED pullback-depth band: the dip from the HWM must be >= this fraction of the move's range (a 1-tick wiggle is NOT a pullback-buy). ONE documented FLOOR; range-relative (no fixed-price magic). Default 0.20.",
+    )
+    chili_momentum_pullback_add_depth_hi_frac: float = Field(
+        default=0.62,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_DEPTH_HI_FRAC"),
+        description="Upper edge of the CONTROLLED pullback-depth band: the dip from the HWM must be <= this fraction of the move's range (a deeper retrace is a rollover, not a healthy dip). A Fibonacci-0.618 retrace ceiling; range-relative. Default 0.62.",
+    )
+    chili_momentum_pullback_add_strength_floor: float = Field(
+        default=0.50,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_STRENGTH_FLOOR"),
+        description="⭐ FALLING-KNIFE GUARD base: the minimum front_side_strength_score for the uptrend to count as INTACT before a pullback-add. ONE documented base (the neutral 0.50 midpoint = a FLOOR); when the regime-adaptive p25 (the entry-side s_lo) is warm and HIGHER, the caller uses that instead. front_side_strength None ⇒ fail-CLOSED (no add). Default 0.50.",
+    )
     # EVENT-DRIVEN TICK EXIT (Lever B-2, 2026-06-16): a held crypto trailing position
     # whose order flow rolls over (OFI < thr) wakes the exit runner on the WS tick —
     # up to 15s sooner than the poll (Ross "eject the moment the ask thickens"). A

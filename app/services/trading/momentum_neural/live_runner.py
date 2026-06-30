@@ -77,6 +77,7 @@ from .paper_execution import (
     measured_move_exit_enabled,
     measured_move_scale_exit_decision,
     ofi_exhaustion_lock,
+    pullback_add_decision,
     pyramid_add_decision,
     pyramid_blend_on_fill,
     regime_atr_pct,
@@ -4502,6 +4503,17 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "micropullback_last_shelf",
     "micropullback_pending_dip_low",
     "micropullback_prev_stop",
+    # ── Ross buy-the-dip / pullback add leg ──
+    "pullback_add_order_id",
+    "pullback_add_limit_px",
+    "pullback_add_count",
+    "pullback_add_cooldown_until_utc",
+    "pullback_add_pending_R0",
+    "pullback_add_pending_low",
+    "pullback_add_last_low",
+    "pullback_add_prev_stop",
+    "pullback_add_confirm_strength",
+    "pullback_add_confirm_ofi",
     # ── stop / breach / max-loss circuit / excursion markers ──
     "structural_stop_price",
     "structural_stop_atr_pct",
@@ -12344,6 +12356,484 @@ def tick_live_session(
                     # Fail-safe: any re-load error is swallowed so the exit path below
                     # ALWAYS runs. The re-load NEVER blocks/delays/loosens an exit.
                     _log.debug("[momentum_live] micro-pullback re-entry block error", exc_info=True)
+
+            # ── ROSS BUY-THE-DIP / PULLBACK ADD (the operator ask) ───────────────
+            # The #772 pyramid + the micro-pullback re-load both add on CONTINUATION
+            # (UP/new-HOD, dip-and-curl). Ross ALSO buys the controlled PULLBACK to
+            # SUPPORT (a higher-low / breakout shelf / VWAP) in an INTACT uptrend. This
+            # is the THIRD, distinct add sub-branch: OWN predicate (pullback_add_decision),
+            # OWN counter (pullback_add_count), OWN kill-switch, OWN in-flight marker
+            # (pullback_add_order_id), OWN cooldown. The ⭐ FALLING-KNIFE GUARD is the
+            # JUST-shipped front-side strength (front_side_strength_score >= an adaptive
+            # floor) + OFI-not-collapsing + above-VWAP-or-reclaiming + higher-low — if ANY
+            # fail it is a knife, not a dip, and NO add fires (bias toward not adding).
+            #
+            # COMPOSES with the other two: it REFUSES whenever the UP-pyramid OR the micro-
+            # pullback has an add in flight (never two adds on one tick). Re-loads route
+            # through pyramid_blend_on_fill + pyramid_risk_anchor_usd VERBATIM so the #769
+            # max-loss circuit re-bases to the STARTER R0 (worst-case pullback-add risk =
+            # max * fraction * R0 on top of the starter). EQUITY-FIRST (crypto deferred).
+            # ADDITIVE: flag OFF ⇒ the whole block is a no-op (byte-identical: no add, no
+            # pos mutation, no emit, no broker call). Two phases (resolve-in-flight, trigger-
+            # new), both FALL THROUGH so the stop-breach/exit block below ALWAYS runs this
+            # tick. The entire block is in a try/except that swallows to the fall-through —
+            # a pullback-add NEVER blocks, delays, or loosens an exit. SESSION-SCOPED 15s
+            # micro-bar frame from _build_micro_bar_df (NOT the 5d fetch_ohlcv_df) for the
+            # structure read; the front-side strength reuses the SAME live OFI/tape reads.
+            # This is an ADD lever, NEVER a veto. (docs/DESIGN/MOMENTUM_LANE.md)
+            if bool(getattr(settings, "chili_momentum_pullback_add_enabled", True)):
+                try:
+                    # PHASE 1 — resolve an IN-FLIGHT pullback-add order (mirror the pyramid
+                    # adopt). Blend ONLY on a CONFIRMED fill via the SHARED helper; the
+                    # circuit re-bases to the STARTER R0 (pyramid_risk_anchor_usd). While an
+                    # order is in flight PHASE 2 cannot submit a second (idempotency).
+                    _pba_oid = le.get("pullback_add_order_id")
+                    if _pba_oid:
+                        _pbno, _ = adapter.get_order(str(_pba_oid))
+                        if _pbno is not None and not _order_open(_pbno):
+                            _pba_filled = float(getattr(_pbno, "filled_size", 0) or 0)
+                            if _pba_filled > 0:
+                                _qa_f = _pba_filled
+                                _Pa_f = float(
+                                    getattr(_pbno, "average_filled_price", 0) or 0
+                                ) or float(le.get("pullback_add_limit_px") or ask)
+                                _q0p = float(pos["quantity"])
+                                _a0p = float(pos["avg_entry_price"])
+                                _R0p = _float_or_none(le.get("pullback_add_pending_R0"))
+                                _prev_stop_p = float(pos["stop_price"])
+                                _blend_p = pyramid_blend_on_fill(
+                                    q0=_q0p, a0=_a0p, qa_f=_qa_f, Pa_f=_Pa_f,
+                                    stop_px=_prev_stop_p,
+                                    original_quantity=_float_or_none(pos.get("original_quantity")),
+                                )
+                                _q1p = _blend_p["q1"]
+                                _a1p = _blend_p["a1"]
+                                _s1p = _blend_p["s1"]  # INVARIANT-A: tighten-only (asserted)
+                                pos["avg_entry_price"] = _a1p
+                                pos["quantity"] = _q1p
+                                pos["original_quantity"] = _blend_p["original_quantity"]
+                                pos["notional_usd"] = _q1p * _a1p
+                                pos["stop_price"] = _s1p
+                                stop_px = _s1p
+                                # Re-base the max-loss circuit to the STARTER R0 (GUARD #1),
+                                # VERBATIM with the pyramid add — adds NEVER inflate the
+                                # per-trade loss budget.
+                                if _R0p is not None and _R0p > 0:
+                                    le["pyramid_risk_anchor_usd"] = _R0p
+                                le["pullback_add_count"] = int(le.get("pullback_add_count") or 0) + 1
+                                _add_fee_p = _order_total_fees_usd(_pbno) or 0.0
+                                if _add_fee_p > 0.0:
+                                    le["entry_fee_usd_unbooked"] = (
+                                        float(le.get("entry_fee_usd_unbooked") or 0.0) + _add_fee_p
+                                    )
+                                # RATCHET the higher-low reference to THIS pullback's low so
+                                # the NEXT pullback-add must make a HIGHER low than this one.
+                                _pba_low = _float_or_none(le.get("pullback_add_pending_low"))
+                                if _pba_low is not None and _pba_low > 0:
+                                    le["pullback_add_last_low"] = _pba_low
+                                from datetime import timezone as _tz_p
+                                _cool_s_p = max(
+                                    float(getattr(settings, "chili_momentum_pullback_add_cooldown_seconds", 30.0) or 30.0),
+                                    2.0 * float(getattr(settings, "chili_momentum_micropull_bar_seconds", 15) or 15),
+                                )
+                                le["pullback_add_cooldown_until_utc"] = (
+                                    datetime.now(_tz_p.utc) + timedelta(seconds=_cool_s_p)
+                                ).replace(tzinfo=None).isoformat()
+                                le.pop("pullback_add_order_id", None)
+                                le.pop("pullback_add_limit_px", None)
+                                le.pop("pullback_add_pending_R0", None)
+                                le.pop("pullback_add_pending_low", None)
+                                le["position"] = pos
+                                _commit_le(sess, le)
+                                _emit(db, sess, "live_pullback_add_fill", {
+                                    "add_qty": _qa_f, "add_price": _Pa_f,
+                                    "q0": _q0p, "a0": _a0p, "q1": _q1p, "a1": _a1p,
+                                    "old_stop": float(le.get("pullback_add_prev_stop") or _s1p),
+                                    "new_stop": _s1p, "R0": _R0p,
+                                    "add_count": le["pullback_add_count"],
+                                    "higher_low": le.get("pullback_add_last_low"),
+                                    "strength": le.get("pullback_add_confirm_strength"),
+                                    "ofi": le.get("pullback_add_confirm_ofi"),
+                                })
+                                le.pop("pullback_add_prev_stop", None)
+                                le.pop("pullback_add_confirm_strength", None)
+                                le.pop("pullback_add_confirm_ofi", None)
+                            else:
+                                # Terminal with NO fill — clear the in-flight marker (a
+                                # future tick may try again). No pos mutation.
+                                le.pop("pullback_add_order_id", None)
+                                le.pop("pullback_add_limit_px", None)
+                                le.pop("pullback_add_pending_R0", None)
+                                le.pop("pullback_add_pending_low", None)
+                                le.pop("pullback_add_prev_stop", None)
+                                le.pop("pullback_add_confirm_strength", None)
+                                le.pop("pullback_add_confirm_ofi", None)
+                                _commit_le(sess, le)
+
+                    # PHASE 2 — TRIGGER a new pullback-add (only if none in flight + under
+                    # cap + cooldown elapsed + NO other add in flight). EQUITY-FIRST.
+                    _is_equity_pba = not str(sess.symbol or "").upper().endswith("-USD")
+                    _max_pba = int(getattr(settings, "chili_momentum_pullback_add_max", 2) or 2)
+                    _other_add_in_flight = bool(
+                        le.get("pyramid_order_id") or le.get("micropullback_reentry_order_id")
+                    )
+                    if (
+                        st == STATE_LIVE_TRAILING
+                        and not le.get("pullback_add_order_id")
+                    ):
+                        # STARTER structural risk R0 = d0 * q0 (the frozen entry stop_distance
+                        # * the starter qty), funded off the full starter so a post-partial
+                        # runner still sizes the add off the original R.
+                        _es_p = le.get("entry_sizing") if isinstance(le.get("entry_sizing"), dict) else {}
+                        _d0_p = _float_or_none(_es_p.get("stop_distance"))
+                        if _d0_p is None or _d0_p <= 0:
+                            _d0_p = max(0.0, float(avg) - float(pos["stop_price"])) or None
+                        _q0_p = (
+                            _float_or_none(pos.get("original_quantity"))
+                            or _float_or_none(pos.get("quantity"))
+                            or 0.0
+                        )
+                        _a0_p = float(pos["avg_entry_price"])
+                        # COOLDOWN.
+                        _cool_active_p = False
+                        _cool_raw_p = le.get("pullback_add_cooldown_until_utc")
+                        if _cool_raw_p:
+                            try:
+                                _cool_active_p = datetime.utcnow() < datetime.fromisoformat(str(_cool_raw_p))
+                            except (TypeError, ValueError):
+                                _cool_active_p = False
+                        # Anti-Ross midday lull (parity with the pyramid add).
+                        _lull_p = False
+                        try:
+                            from .market_profile import in_midday_lull as _pba_lull
+                            _lull_p = bool(_pba_lull(sess.symbol))
+                        except Exception:
+                            _lull_p = False
+                        # SUPPORT zone + higher-low structure on the SESSION-scoped 15s micro-
+                        # bar frame (NOT the 5d frame). The ratcheting SUPPORT shelf = max(
+                        # starter entry, breakout level, last pullback-add's higher-low); the
+                        # detector finds the recent bounce-high → dip-low that holds the shelf.
+                        _shelf_p = _a0_p
+                        _bk_p = _float_or_none(le.get("breakout_level_price"))
+                        if _bk_p is not None and _bk_p > _shelf_p:
+                            _shelf_p = _bk_p
+                        _last_low_p = _float_or_none(le.get("pullback_add_last_low"))
+                        if _last_low_p is not None and _last_low_p > _shelf_p:
+                            _shelf_p = _last_low_p
+                        _bar_s_p = int(getattr(settings, "chili_momentum_micropull_bar_seconds", 15) or 15)
+                        _df_pba = _build_micro_bar_df(db, sess.symbol, bar_seconds=_bar_s_p)
+                        # Structure read (reuse the micro-pullback detector for the higher-low
+                        # dip-and-bounce geometry; the depth BAND + the front-side knife guard
+                        # are applied by pullback_add_decision below). Use a generous dip cap
+                        # here so the detector returns the geometry; the controlled-depth BAND
+                        # (lo/hi frac of the move range) is the real depth gate in the predicate.
+                        _pb_low = None
+                        _bounce_high = None
+                        _bounced_p = False
+                        try:
+                            from .entry_gates import micro_pullback_reentry_detect as _pba_detect
+                            from .candles import bounce_curl_from_df as _pba_curl
+                            _det_p = _pba_detect(
+                                _df_pba, shelf=_shelf_p,
+                                max_dip_pct=float(
+                                    getattr(settings, "chili_momentum_pullback_add_depth_hi_frac", 0.62) or 0.62
+                                ),
+                            )
+                            _pb_low = _float_or_none(_det_p.get("dip_low"))
+                            _bounce_high = _float_or_none(_det_p.get("bounce_high"))
+                            # BOUNCE confirm: the detector fired (higher-low dip held the shelf
+                            # + the last bar curled up) AND the per-bar curl shape is green.
+                            _bounced_p = bool(_det_p.get("fire")) and bool(_pba_curl(_df_pba))
+                        except Exception:
+                            _pb_low = _bounce_high = None
+                            _bounced_p = False
+                        # The HWM (move top) + the move range (HWM - the day/session low proxy)
+                        # for the controlled-depth band. high_water_mark is the position HWM;
+                        # the move base = the starter entry (a conservative range floor that
+                        # makes depth_frac a fraction of the BANKED move, never inflated).
+                        _hwm_p = _float_or_none(pos.get("high_water_mark")) or float(bid)
+                        _move_base_p = min(_a0_p, _shelf_p)
+                        _move_range_p = (_hwm_p - _move_base_p) if (_hwm_p and _move_base_p) else None
+                        # The PRIOR higher-low = the ratcheting shelf (the level the new dip
+                        # must print a HIGHER low than). The starter entry / breakout / last
+                        # add's low — whichever is highest — is what "higher low" is measured
+                        # against, so each pullback-add steps the structure UP.
+                        _prior_low_p = _shelf_p
+                        # ⭐ FALLING-KNIFE GUARD — front-side strength (the JUST-shipped score),
+                        # OFI level+slope, and above-VWAP-or-reclaiming, computed on the SAME
+                        # canonical today-session frame + live OFI/tape reads the ENTRY-side
+                        # size-tilt uses (one source of truth). FAIL-CLOSED: any missing leg ⇒
+                        # the strength/OFI stays None ⇒ pullback_add_decision refuses the add.
+                        _fs_score_p = None
+                        _fs_ofi_lvl_p = None
+                        _fs_ofi_slp_p = None
+                        _above_vwap_p = False
+                        try:
+                            from .ross_momentum import (
+                                front_side_state as _pba_state_fn,
+                                front_side_strength_score as _pba_strength_fn,
+                            )
+                            from .entry_gates import _today_session_frame as _pba_today_frame
+                            from .pipeline import (
+                                _live_flow_slope as _pba_flow_fn,
+                                _live_trade_flow as _pba_tape_fn,
+                            )
+                            # Live order-flow (the SAME reads the entry-side tilt + the RIDE
+                            # lock use). None ⇒ stale/crypto ⇒ the OFI guard fails closed.
+                            _pba_flow = _pba_flow_fn(sess.symbol, db=db)
+                            if isinstance(_pba_flow, dict):
+                                _fs_ofi_lvl_p = _float_or_none(_pba_flow.get("ofi_level"))
+                                _fs_ofi_slp_p = _float_or_none(_pba_flow.get("ofi_slope"))
+                            try:
+                                _pba_tape = _pba_tape_fn(sess.symbol, db=db)
+                                _pba_tape = None if _pba_tape is None else float(_pba_tape)
+                            except Exception:
+                                _pba_tape = None
+                            # The today-session frame for the ER spine + VWAP read. Prefer the
+                            # 5d/15m fetch (the canonical session anchor) so the VWAP/range
+                            # match the entry-gate read; fall back to the micro-bar frame.
+                            _pba_sess_df = None
+                            try:
+                                _pba_fetch = _replay_aware_fetch_ohlcv_df
+                                _pba_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+                                _pba_raw = _pba_fetch(sess.symbol, interval=_pba_iv, period="5d")
+                                if _pba_raw is not None and not getattr(_pba_raw, "empty", True):
+                                    _pba_sess_df = _pba_today_frame(_pba_raw)
+                            except Exception:
+                                _pba_sess_df = None
+                            if _pba_sess_df is None or getattr(_pba_sess_df, "empty", True):
+                                _pba_sess_df = _df_pba
+                            _fs_closes_p = None
+                            _fs_vwap_dist_p = None
+                            _fs_range_pos_p = None
+                            if _pba_sess_df is not None and not getattr(_pba_sess_df, "empty", True):
+                                _pba_state = _pba_state_fn(_pba_sess_df)
+                                _fs_vwap_dist_p = _float_or_none(getattr(_pba_state, "vwap_dist_sigma", None))
+                                _fs_range_pos_p = _float_or_none(getattr(_pba_state, "day_range_pos", None))
+                                # above-VWAP OR cleanly RECLAIMING (vwap_dist turning >= 0 / the
+                                # state's above_vwap flag). below-VWAP-falling ⇒ knife ⇒ refuse.
+                                _above_vwap_p = bool(getattr(_pba_state, "above_vwap", False)) or (
+                                    _fs_vwap_dist_p is not None and _fs_vwap_dist_p >= 0.0
+                                )
+                                try:
+                                    _fs_closes_p = [
+                                        float(c)
+                                        for c in _pba_sess_df["Close"].astype(float).tolist()[-12:]
+                                    ]
+                                except Exception:
+                                    _fs_closes_p = None
+                            _fs_score_p = _pba_strength_fn(
+                                closes=_fs_closes_p,
+                                vwap_dist_sigma=_fs_vwap_dist_p,
+                                day_range_pos=_fs_range_pos_p,
+                                ofi_level=_fs_ofi_lvl_p,
+                                ofi_slope=_fs_ofi_slp_p,
+                                signed_tape=_pba_tape,
+                            )
+                        except Exception:
+                            _fs_score_p = None
+                            _fs_ofi_lvl_p = _fs_ofi_slp_p = None
+                            _above_vwap_p = False
+                        # The STRENGTH FLOOR — the documented base, raised to the regime-
+                        # adaptive p25 (the entry-side s_lo) when that distribution is WARM and
+                        # higher (so the knife guard tracks the live regime, not a fixed magic).
+                        _strength_floor_p = float(
+                            getattr(settings, "chili_momentum_pullback_add_strength_floor", 0.50) or 0.50
+                        )
+                        try:
+                            _fs_adapt_p = _frontside_adaptive_thresholds()
+                            if _fs_adapt_p is not None:
+                                _adapt_lo_p = float(_fs_adapt_p[0])
+                                if math.isfinite(_adapt_lo_p) and _adapt_lo_p > _strength_floor_p:
+                                    _strength_floor_p = _adapt_lo_p
+                        except Exception:
+                            pass
+                        # SHARED pure predicate — the falling-knife-guarded BUY-THE-DIP gate.
+                        _decn_p = pullback_add_decision(
+                            enabled=True,  # outer block already gated on the flag
+                            is_equity=_is_equity_pba,
+                            add_count=int(le.get("pullback_add_count") or 0),
+                            max_adds=_max_pba,
+                            in_flight=bool(le.get("pullback_add_order_id")),
+                            other_add_in_flight=_other_add_in_flight,
+                            a0=_a0_p,
+                            q0=_q0_p,
+                            d0=_d0_p,
+                            bid=float(bid),
+                            stop_px=float(stop_px),
+                            high_water_mark=_hwm_p,
+                            support_level=_shelf_p,
+                            pullback_low=_pb_low,
+                            prior_pullback_low=_prior_low_p,
+                            move_range=_move_range_p,
+                            pullback_depth_lo_frac=float(
+                                getattr(settings, "chili_momentum_pullback_add_depth_lo_frac", 0.20) or 0.20
+                            ),
+                            pullback_depth_hi_frac=float(
+                                getattr(settings, "chili_momentum_pullback_add_depth_hi_frac", 0.62) or 0.62
+                            ),
+                            bounced=_bounced_p,
+                            front_side_strength=_fs_score_p,
+                            strength_floor=_strength_floor_p,
+                            above_vwap_or_reclaiming=_above_vwap_p,
+                            ofi_level=_fs_ofi_lvl_p,
+                            ofi_slope=_fs_ofi_slp_p,
+                            midday_lull=_lull_p,
+                            cooldown_active=_cool_active_p,
+                        )
+                        _R0_p = _decn_p.get("R0")
+                        if not _decn_p.get("fire"):
+                            # Emit only on the INFORMATIVE near-misses (a fired-detector that a
+                            # guard then refused), not the silent common "no geometry" case.
+                            if _bounced_p and _decn_p.get("reason") not in (
+                                "no_support_structure", "no_move_range", "no_bounce",
+                            ):
+                                _emit(db, sess, "live_pullback_add_vetoed", {
+                                    "reason": _decn_p.get("reason"),
+                                    "strength": (None if _fs_score_p is None else round(float(_fs_score_p), 4)),
+                                    "strength_floor": round(float(_strength_floor_p), 4),
+                                    "ofi_level": _fs_ofi_lvl_p,
+                                    "ofi_slope": _fs_ofi_slp_p,
+                                    "above_vwap": bool(_above_vwap_p),
+                                    "pullback_low": _pb_low,
+                                    "prior_low": _prior_low_p,
+                                    "depth_frac": _decn_p.get("pullback_depth_frac"),
+                                })
+                        elif not (_R0_p and _R0_p > 0):
+                            _emit(db, sess, "live_pullback_add_vetoed", {"reason": "bad_R0"})
+                        else:
+                            # GUARD #4 ADMISSION — the add is a post-entry BUY; refuse it
+                            # whenever a NEW entry would be refused (kill-switch, per-broker +
+                            # global daily-loss, drawdown, position cap, aggregate crypto risk).
+                            # ABORT THE ADD on refusal — NEVER the exit.
+                            _adm_ok_p, _adm_ev_p = runner_boundary_risk_ok(
+                                db, sess, expected_move_bps=_expected_move_bps
+                            )
+                            if not _adm_ok_p:
+                                _emit(db, sess, "live_pullback_add_vetoed", {
+                                    "reason": "risk_admission",
+                                    "severity": _adm_ev_p.get("severity"),
+                                    "errors": _adm_ev_p.get("errors"),
+                                })
+                            else:
+                                # SIZE via the SAME machinery as the pyramid add: the add's
+                                # risk budget = rho * R0 (conservative — Ross sizes the
+                                # pullback-add small), at the guarded ask, liquidity-capped on
+                                # $-vol, equity-relative notional ceiling. The add's stop sits
+                                # just below the pullback's higher-low (_decn_p["add_stop"]);
+                                # the risk-first sizer keys off the frozen entry ATR so the
+                                # combined position's worst-case stays bounded by R0 (the #769
+                                # circuit re-bases to R0 on the blend).
+                                _rho_p = float(
+                                    getattr(settings, "chili_momentum_pullback_add_risk_fraction", 0.5) or 0.5
+                                )
+                                _budget_p = _rho_p * _R0_p
+                                _pba_ask = float(ask) if (ask and float(ask) > 0) else float(bid)
+                                _pba_guard_ask = _pba_ask * _adaptive_notional_guard_multiplier(
+                                    expected_move_bps=_expected_move_bps
+                                )
+                                _inc_p = prod.base_increment if prod else 1.0
+                                _mn_p = prod.base_min_size if prod else 1.0
+                                _atr_p = _float_or_none(le.get("entry_stop_atr_pct")) or 0.0
+                                _ceil_p = equity_relative_notional_cap(
+                                    policy_float_cap(
+                                        caps, "max_notional_per_trade_usd",
+                                        settings.chili_momentum_risk_max_notional_per_trade_usd,
+                                    ),
+                                    normalize_execution_family(sess.execution_family),
+                                )
+                                try:
+                                    from .universe import snapshot_dollar_volumes as _pba_dvol_fn
+                                    _pba_dvol = (_pba_dvol_fn([sess.symbol]) or {}).get(
+                                        str(sess.symbol or "").strip().upper()
+                                    )
+                                except Exception:
+                                    _pba_dvol = None
+                                _ceil_p = liquidity_capped_notional(_ceil_p, _pba_dvol)
+                                # The add can never be LARGER than the starter (Ross sizes the
+                                # pullback-add conservatively): cap the notional ceiling at the
+                                # starter's notional so qty_add <= q0 even if the budget allowed
+                                # more (rho<=1 already keeps the R bounded; this bounds the SHARE
+                                # count too).
+                                _starter_notional_p = _q0_p * _a0_p
+                                if _starter_notional_p > 0:
+                                    _ceil_p = min(_ceil_p, _starter_notional_p)
+                                _qa_p, _qa_meta_p = compute_risk_first_quantity(
+                                    entry_price=_pba_guard_ask,
+                                    atr_pct=_atr_p,
+                                    max_loss_usd=_budget_p,
+                                    max_notional_ceiling_usd=_ceil_p,
+                                    base_increment=_inc_p,
+                                    base_min_size=_mn_p,
+                                    stop_atr_mult=float(params.get("stop_atr_mult") or 0.60),
+                                )
+                                if not _qa_p or _qa_p <= 0:
+                                    _emit(db, sess, "live_pullback_add_vetoed", {
+                                        "reason": "size_zero",
+                                        "detail": _qa_meta_p.get("reason"),
+                                        "budget_usd": round(_budget_p, 2),
+                                    })
+                                else:
+                                    _pba_limit_str = _fmt_limit_price_buy(_pba_guard_ask)
+                                    _pba_cid = (
+                                        f"chili_ml_pba_{sess.id}_{uuid.uuid4().hex[:12]}"
+                                    )
+                                    try:
+                                        from .market_profile import market_session_now as _pba_sess_now
+                                        _pba_ext = _pba_sess_now(sess.symbol) != "regular"
+                                    except Exception:
+                                        _pba_ext = False
+                                    _pba_res = adapter.place_limit_order_gtc(
+                                        product_id=product_id,
+                                        side="buy",
+                                        base_size=_fmt_base_size(_qa_p),
+                                        limit_price=_pba_limit_str,
+                                        client_order_id=_pba_cid,
+                                        extended_hours=_pba_ext,
+                                        time_in_force="gfd",
+                                    ) or {}
+                                    if _pba_res.get("ok") and _pba_res.get("order_id"):
+                                        le["pullback_add_order_id"] = str(_pba_res["order_id"])
+                                        le["pullback_add_limit_px"] = float(_pba_guard_ask)
+                                        le["pullback_add_pending_R0"] = float(_R0_p)
+                                        le["pullback_add_prev_stop"] = float(stop_px)
+                                        le["pullback_add_pending_low"] = _float_or_none(_decn_p.get("add_stop"))
+                                        le["pullback_add_confirm_strength"] = (
+                                            None if _fs_score_p is None else round(float(_fs_score_p), 4)
+                                        )
+                                        le["pullback_add_confirm_ofi"] = _fs_ofi_lvl_p
+                                        _commit_le(sess, le)
+                                        _emit(db, sess, "live_pullback_add_fired", {
+                                            "order_id": le["pullback_add_order_id"],
+                                            "client_order_id": _pba_cid,
+                                            "add_qty": float(_qa_p),
+                                            "limit_price": _pba_limit_str,
+                                            "R0": float(_R0_p), "rho": _rho_p,
+                                            "budget_usd": round(_budget_p, 2),
+                                            "add_count": int(le.get("pullback_add_count") or 0),
+                                            "support": _shelf_p,
+                                            "pullback_low": _pb_low,
+                                            "bounce_high": _bounce_high,
+                                            "depth_frac": (
+                                                round(float(_decn_p["pullback_depth_frac"]), 4)
+                                                if _decn_p.get("pullback_depth_frac") is not None else None
+                                            ),
+                                            "strength": (None if _fs_score_p is None else round(float(_fs_score_p), 4)),
+                                            "strength_floor": round(float(_strength_floor_p), 4),
+                                            "ofi_level": _fs_ofi_lvl_p,
+                                            "ofi_slope": _fs_ofi_slp_p,
+                                            "above_vwap": bool(_above_vwap_p),
+                                            "stop_at_submit": float(stop_px),
+                                        })
+                                    else:
+                                        _emit(db, sess, "live_pullback_add_vetoed", {
+                                            "reason": "submit_failed",
+                                            "error": _pba_res.get("error"),
+                                        })
+                except Exception:
+                    # Fail-safe: any pullback-add error is swallowed so the exit path below
+                    # ALWAYS runs. The pullback-add NEVER blocks/delays/loosens an exit.
+                    _log.debug("[momentum_live] pullback-add block error", exc_info=True)
 
         if bid > stop_px and le.pop("stop_breach_pending_utc", None) is not None:
             # breach -> recovery between reads = flicker dodged; clear the marker
