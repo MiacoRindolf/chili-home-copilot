@@ -14,6 +14,17 @@ verbatim (sim-clock seam, OHLCV seam, equity seam, mock broker, eligibility repl
 
 ---
 
+> **CORRECTION (2026-06-30, follow-up fidelity pass):** This report's MODE-2 table shows the
+> grace-OFF arm ending at `live_pending_entry`. That `live_pending_entry` is the harness's OWN
+> **grace-isolation** path (a SUBSTITUTED trigger-passing frame), **not** the real session 9505
+> trace. The REAL session 9505 never reached `live_pending_entry`: its recorded events are only
+> `live_arm_requested → live_arm_confirmed → live_blocked_by_risk` and its final state is
+> `live_error` — it blocked at the `queued_live` boundary `live_eligible` gate at the first runner
+> tick, before `watching_live`. No UPC session on 06-29 reached pending-entry at all (the real
+> entry trigger genuinely did not fire). See
+> `docs/STRATEGY/CC_REPORTS/2026-06-30_replay-v3-fidelity-r1-tierA-trigger.md` (PART 3) for the
+> recorded-events root cause. The grace A/B conclusion below is unchanged and correct.
+
 ## TL;DR — VERDICT: **UPC-FILLS-IN-REPLAY** (grace ON) ✅
 
 | Arm (grace-isolation mode) | grace | Outcome | Final FSM state | Entry fill |

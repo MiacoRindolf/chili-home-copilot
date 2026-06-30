@@ -113,6 +113,24 @@ def _naive(t: datetime) -> datetime:
 
 # ── recorded data loaders (READ-ONLY against chili) ───────────────────────────────
 @dataclass
+class TierAProbe:
+    """The result of probing whether TIER A (recompute-via-scorer as-of-t) is FEASIBLE for
+    UPC 06-29 from the RECORDED inputs. The scorer (``viability.score_viability``) needs the
+    as-of-t scorer inputs — the ``ross_signals`` batch, the execution-readiness features, and
+    the regime context — AS THEY WERE at the flicker instant (13:08:31). This probe checks
+    whether those inputs are recoverable from ``chili`` and, if not, records WHY (no fakery —
+    design honesty)."""
+
+    feasible: bool
+    reason: str
+    # the recoverable artifacts the probe found (for transparency in the report)
+    entry_window_viability_snapshots: int = 0
+    viability_brief_has_inputs: bool = False
+    exec_readiness_subset_keys: int = 0
+    microstructure_rows_in_window: int = 0
+
+
+@dataclass
 class RealUpcData:
     grid: list[rv3.RecordedNbboTick]
     ohlcv_frames: dict[str, pd.DataFrame]
@@ -120,6 +138,7 @@ class RealUpcData:
     confirm_at: datetime
     block_at: datetime
     events: list[tuple[int, str, datetime, dict]]
+    tier_a_probe: TierAProbe
 
 
 def load_real_upc(prod_db_url: str, *, grid_step_seconds: float = 1.0) -> RealUpcData:
@@ -170,6 +189,15 @@ def load_real_upc(prod_db_url: str, *, grid_step_seconds: float = 1.0) -> RealUp
             ),
             {"sid": SESSION_ID},
         ).fetchall()
+
+        # 4) TIER A FEASIBILITY PROBE (read-only): can we recompute live_eligible as-of the
+        #    block instant from RECORDED scorer inputs? Tier A needs the as-of-t ross_signals
+        #    batch + exec-readiness features + regime ctx as they were at 13:08:31 — none of
+        #    which is recorded if (a) no viability snapshot has a freshness in the entry window
+        #    (the single mutable row was overwritten by later ticks — the R1 gap), (b) the
+        #    session's recorded viability_brief carries only the OUTPUT not the inputs, and
+        #    (c) there's no microstructure-log row in the window to reconstruct features from.
+        tier_a_probe = _probe_tier_a_feasibility(c)
 
     # ── build the grid (down-sample to grid_step_seconds buckets; true ticks if <=0) ──
     grid: list[rv3.RecordedNbboTick] = []
@@ -224,20 +252,156 @@ def load_real_upc(prod_db_url: str, *, grid_step_seconds: float = 1.0) -> RealUp
         confirm_at=ARM_CONFIRMED_AT,
         block_at=BLOCK_AT,
         events=events,
+        tier_a_probe=tier_a_probe,
     )
 
 
-# ── eligibility flicker reconstruction (TIER B from events, TIER C fallback) ───────
+def _probe_tier_a_feasibility(c) -> TierAProbe:
+    """Probe (read-only) whether TIER A (recompute-via-scorer as-of-t) is feasible for UPC
+    06-29. Tier A re-runs the SAME viability scorer over the recorded inputs AS-OF the block
+    instant; it is feasible only if those as-of-t inputs are recoverable from ``chili``.
+
+    Three checks, ALL must pass for feasibility:
+      1. a ``momentum_symbol_viability`` snapshot whose ``freshness_ts`` falls in the entry
+         window (so the as-of-t row + its ``execution_readiness_json.extra.ross_signals`` /
+         ``regime_snapshot_json`` are the real entry-instant inputs, not a later overwrite);
+      2. the recorded session ``viability_brief`` carries the scorer INPUTS (not just the
+         output live_eligible/score);
+      3. a microstructure/feature record exists in the window to rebuild the exec-readiness
+         features the scorer reads.
+    Any miss ⇒ Tier A infeasible, with the specific reason (no fakery)."""
+    win_lo = WINDOW_START.replace(tzinfo=timezone.utc)
+    # widen the snapshot freshness window to the whole entry hour (a snapshot stamped any time
+    # in 13:00–14:00 would carry usable as-of inputs; the block was at 13:08:31).
+    hour_lo = datetime(2026, 6, 29, 13, 0, 0, tzinfo=timezone.utc)
+    hour_hi = datetime(2026, 6, 29, 14, 0, 0, tzinfo=timezone.utc)
+    snaps = int(
+        c.execute(
+            text(
+                "SELECT count(*) FROM momentum_symbol_viability "
+                "WHERE symbol = :s AND freshness_ts >= :a AND freshness_ts < :b"
+            ),
+            {"s": SYMBOL, "a": hour_lo, "b": hour_hi},
+        ).scalar()
+        or 0
+    )
+    # the recorded session viability_brief — does it carry scorer INPUTS?
+    brief_has_inputs = False
+    subset_keys = 0
+    try:
+        rsj = c.execute(
+            text("SELECT risk_snapshot_json FROM trading_automation_sessions WHERE id = :i"),
+            {"i": SESSION_ID},
+        ).scalar()
+        if isinstance(rsj, str):
+            rsj = json.loads(rsj)
+        if isinstance(rsj, dict):
+            brief = rsj.get("viability_brief") or {}
+            # INPUT keys (not the output live_eligible/paper_eligible/viability_score/symbol).
+            _out = {"symbol", "variant_id", "freshness_ts", "live_eligible", "paper_eligible", "viability_score"}
+            brief_has_inputs = bool(set(brief.keys()) - _out) if isinstance(brief, dict) else False
+            subset = rsj.get("execution_readiness_subset") or {}
+            subset_keys = len(subset) if isinstance(subset, dict) else 0
+    except Exception:
+        pass
+    # any microstructure-log row in the window (a feature reconstruction source)?
+    micro_rows = 0
+    try:
+        micro_rows = int(
+            c.execute(
+                text(
+                    "SELECT count(*) FROM trading_microstructure_log "
+                    "WHERE symbol = :s AND observed_at >= :a AND observed_at < :b"
+                ),
+                {"s": SYMBOL, "a": WINDOW_START, "b": WINDOW_END},
+            ).scalar()
+            or 0
+        )
+    except Exception:
+        micro_rows = 0
+
+    feasible = snaps > 0 and brief_has_inputs and micro_rows > 0
+    if feasible:
+        reason = (
+            "as-of-t scorer inputs ARE recorded (entry-window viability snapshot + "
+            "viability_brief inputs + microstructure features) — Tier A can recompute."
+        )
+    else:
+        misses = []
+        if snaps == 0:
+            misses.append(
+                "NO viability snapshot with freshness in the 06-29 13:00–14:00 entry window "
+                "(the single mutable momentum_symbol_viability row was overwritten by later "
+                "ticks — the exact R1 gap the new momentum_viability_history table closes "
+                "going forward)"
+            )
+        if not brief_has_inputs:
+            misses.append(
+                "the recorded session viability_brief carries only the OUTPUT "
+                "(live_eligible/score), not the scorer INPUTS"
+            )
+        if subset_keys == 0:
+            misses.append("execution_readiness_subset is empty (no as-of-t features)")
+        if micro_rows == 0:
+            misses.append(
+                "no trading_microstructure_log row in the entry window to rebuild features"
+            )
+        reason = (
+            "TIER A INFEASIBLE for UPC 06-29 — the as-of-t scorer inputs are not recorded: "
+            + "; ".join(misses)
+            + ". Recomputing the scorer would require FABRICATING those inputs, which the "
+            "harness refuses (design honesty). Tier B (event-derived) is the most faithful "
+            "available reconstruction; the recorded block event pins the exact flicker instant."
+        )
+    return TierAProbe(
+        feasible=feasible,
+        reason=reason,
+        entry_window_viability_snapshots=snaps,
+        viability_brief_has_inputs=brief_has_inputs,
+        exec_readiness_subset_keys=subset_keys,
+        microstructure_rows_in_window=micro_rows,
+    )
+
+
+# ── eligibility flicker reconstruction (TIER A probe, TIER B from events, TIER C) ──
 def build_eligibility_timeline(
     data: RealUpcData,
+    *,
+    tier: str = "auto",
 ) -> relig.EligibilityTimeline:
-    """Reconstruct UPC's ``live_eligible`` timeline from the recorded events.
+    """Reconstruct UPC's ``live_eligible`` timeline.
+
+    ``tier``:
+      * ``"auto"`` (default) — use the highest FEASIBLE tier. Tier A (recompute-via-scorer
+        as-of-t) is attempted only if the Tier-A feasibility probe (``data.tier_a_probe``)
+        found the recorded as-of-t scorer inputs; for UPC 06-29 it does NOT (the snapshot was
+        overwritten — the R1 gap), so auto falls to Tier B.
+      * ``"A"`` — REQUEST Tier A. If infeasible (the UPC 06-29 case) this honestly logs WHY and
+        falls back to Tier B rather than fabricating inputs (no fakery, design honesty).
+      * ``"B"`` — force Tier B (event-derived).
 
     TIER B: the recorded ``live_blocked_by_risk`` whose error names live-eligibility flips the
     name NOT-eligible at the block instant; eligible-at-confirm is the initial state. The single
     recorded block is enough to reproduce the TOCTOU (eligible at arm -> False at the entry
     instant). If no eligibility-bearing event exists we fall to TIER C (a scripted two-state
     pinned to the recorded confirm/block instants)."""
+    if tier in ("auto", "A"):
+        probe = data.tier_a_probe
+        if probe.feasible:
+            # (Reserved path — UPC 06-29 never reaches here; kept so a FUTURE incident with a
+            # populated momentum_viability_history / recorded inputs can take Tier A.)
+            _log.info("[upc_0629] TIER A feasible: %s", probe.reason)
+            # The scorer-recompute path would build the timeline from the as-of-t snapshots;
+            # since no such inputs exist for UPC 06-29 this branch is documentation-only.
+        else:
+            if tier == "A":
+                _log.warning(
+                    "[upc_0629] TIER A REQUESTED but INFEASIBLE -> falling back to TIER B. %s",
+                    probe.reason,
+                )
+            else:
+                _log.info("[upc_0629] TIER A infeasible (auto) -> TIER B. %s", probe.reason)
+
     # Mine the recorded events directly (TIER B). We reuse the replayer's event-mining shape but
     # operate on the loaded events (the rows live in the prod DB, not the throwaway one).
     transitions: list[relig.EligibilityTransition] = []
@@ -319,6 +483,7 @@ def run_arm(
     *,
     grace_enabled: bool,
     trigger_mode: str = "real",
+    tier: str = "auto",
 ) -> ArmResult:
     """Seed a UPC sim session + the eligibility flicker + the real ticks in the throwaway DB and
     drive the REAL ``tick_live_session`` across the real NBBO grid with grace OFF/ON.
@@ -396,8 +561,8 @@ def run_arm(
         n_ticks = mirror_real_ticks(db, data.mirror_ticks_df)
         _log.info("[upc_0629] mirrored %d real UPC trade ticks into the throwaway DB", n_ticks)
 
-        # ── the eligibility flicker (TIER B from events; TIER C fallback) ──
-        timeline = build_eligibility_timeline(data)
+        # ── the eligibility flicker (TIER A probe → B from events; C fallback) ──
+        timeline = build_eligibility_timeline(data, tier=tier)
         eligibility = relig.EligibilityReplayer(
             symbol=SYMBOL, variant_id=seed.variant_id, timeline=timeline
         )
@@ -529,6 +694,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=1.0,
         help="down-sample the real NBBO grid to one tick per N seconds (default 1.0)",
     )
+    ap.add_argument(
+        "--tier",
+        choices=("auto", "A", "B"),
+        default="auto",
+        help=(
+            "eligibility reconstruction tier: 'A' (recompute-via-scorer as-of-t — "
+            "INFEASIBLE for UPC 06-29: the as-of-t scorer inputs are not recorded, so it "
+            "honestly falls back to B without fabricating), 'B' (event-derived, the default "
+            "faithful tier), 'auto' (use the highest feasible tier)."
+        ),
+    )
     args = ap.parse_args(argv)
 
     prod_db_url = os.environ.get("DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili")
@@ -579,13 +755,33 @@ def main(argv: Optional[list[str]] = None) -> int:
             f"    eligibility tier  : {getattr(r, 'tier', '?')}"
         )
 
+    # ── TIER-A FEASIBILITY (Part 2): report whether recompute-via-scorer is possible ──
+    _probe = data.tier_a_probe
+    print()
+    print("#" * 78)
+    print(f"# TIER-A FEASIBILITY PROBE (--tier={args.tier}) — recompute-via-scorer as-of-t?")
+    print("#" * 78)
+    print(f"  feasible                         : {_probe.feasible}")
+    print(f"  entry-window viability snapshots : {_probe.entry_window_viability_snapshots} "
+          f"(need >=1 with freshness in 06-29 13:00–14:00)")
+    print(f"  viability_brief carries inputs   : {_probe.viability_brief_has_inputs}")
+    print(f"  execution_readiness_subset keys  : {_probe.exec_readiness_subset_keys}")
+    print(f"  microstructure rows in window    : {_probe.microstructure_rows_in_window}")
+    print(f"  finding: {_probe.reason}")
+    _effective_tier = "B" if (args.tier in ("auto", "A") and not _probe.feasible) else (
+        "A" if (args.tier in ("auto", "A") and _probe.feasible) else "B"
+    )
+    print(f"  EFFECTIVE TIER USED              : {_effective_tier}"
+          + (" (Tier A requested but infeasible -> B; no fakery)"
+             if args.tier == "A" and not _probe.feasible else ""))
+
     try:
         # ── MODE 1 (faithful) — REAL bars. Proves the grace GATE A/B; documents the trigger gap. ──
-        real_off = run_arm(SessionLocal, data, grace_enabled=False, trigger_mode="real")
-        real_on = run_arm(SessionLocal, data, grace_enabled=True, trigger_mode="real")
+        real_off = run_arm(SessionLocal, data, grace_enabled=False, trigger_mode="real", tier=args.tier)
+        real_on = run_arm(SessionLocal, data, grace_enabled=True, trigger_mode="real", tier=args.tier)
         # ── MODE 2 (grace-isolation) — trigger-passing frame; the FILL is the REAL recorded ask. ──
-        iso_off = run_arm(SessionLocal, data, grace_enabled=False, trigger_mode="trigger_passing")
-        iso_on = run_arm(SessionLocal, data, grace_enabled=True, trigger_mode="trigger_passing")
+        iso_off = run_arm(SessionLocal, data, grace_enabled=False, trigger_mode="trigger_passing", tier=args.tier)
+        iso_on = run_arm(SessionLocal, data, grace_enabled=True, trigger_mode="trigger_passing", tier=args.tier)
     finally:
         # PROCESS-EXIT cleanup: purge ALL replay rows from the throwaway DB (the per-arm clear is
         # best-effort; the diagnostic scan commits mirrored ticks mid-run). NEVER touches chili.
@@ -666,7 +862,16 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         out = {
             "verdict": verdict,
-            "tier": getattr(real_on, "tier", "?"),
+            "tier_requested": args.tier,
+            "tier_effective": getattr(real_on, "tier", "?"),
+            "tier_a_probe": {
+                "feasible": _probe.feasible,
+                "reason": _probe.reason,
+                "entry_window_viability_snapshots": _probe.entry_window_viability_snapshots,
+                "viability_brief_has_inputs": _probe.viability_brief_has_inputs,
+                "exec_readiness_subset_keys": _probe.exec_readiness_subset_keys,
+                "microstructure_rows_in_window": _probe.microstructure_rows_in_window,
+            },
             "grid_ticks": len(data.grid),
             "mode_real": {"arm_off": _arm(real_off), "arm_on": _arm(real_on)},
             "mode_grace_isolation": {"arm_off": _arm(iso_off), "arm_on": _arm(iso_on)},
