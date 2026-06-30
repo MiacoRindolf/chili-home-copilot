@@ -254,20 +254,76 @@ def validate_ohlcv_integrity(
     return report
 
 
+# NaN-bar drop (SD adjacent): the smallest fraction of a frame that may be
+# individually-bad-and-droppable before we treat the whole frame as genuinely
+# corrupt and let the integrity verdict reject it wholesale. A single transient
+# NaN/zero bar in a 5-day frame is ~0.07% of the bars — drop it and keep the
+# healthy name; a frame that is mostly bad (>50%) is real corruption and falls
+# through to the whole-frame reject. This 0.5 is the one documented base.
+_DROP_BAD_BARS_MAX_BAD_FRACTION = 0.5
+
+
+def drop_bad_bars(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop INDIVIDUAL malformed OHLC bars so one transient NaN/zero/inverted
+    bar does not poison the whole-frame integrity verdict and blank a healthy
+    name.
+
+    Drops a bar when any of: Open/High/Low/Close is NaN, Close <= 0, or
+    High < Low. Volume is intentionally NOT a drop reason here — zero-volume
+    handling stays with ``filter_zero_volume`` (which exempts index series).
+
+    Guard: if MORE than ``_DROP_BAD_BARS_MAX_BAD_FRACTION`` of the bars are bad,
+    the frame is genuinely corrupt (not one transient bar), so we leave it
+    UNCHANGED and let ``validate_ohlcv_integrity`` reject it wholesale. This
+    preserves the genuine-corruption whole-frame reject.
+    """
+    if df.empty:
+        return df
+    cols = [c for c in ("Open", "High", "Low", "Close") if c in df.columns]
+    if not cols:
+        return df
+    ohlc = df[cols].apply(pd.to_numeric, errors="coerce")
+    good = ohlc.notna().all(axis=1)
+    if "Close" in df.columns:
+        good &= ohlc["Close"] > 0
+    if "High" in df.columns and "Low" in df.columns:
+        good &= ohlc["High"] >= ohlc["Low"]
+    bad = int((~good).sum())
+    if bad == 0:
+        return df
+    if bad >= len(df) * _DROP_BAD_BARS_MAX_BAD_FRACTION:
+        # Mostly-bad frame: real corruption — leave it for the whole-frame reject.
+        return df
+    logger.debug(
+        "[data_quality] Dropped %d/%d individually-bad OHLC bars", bad, len(df)
+    )
+    return df[good].copy()
+
+
 def clean_ohlcv(
     df: pd.DataFrame,
     *,
     z_threshold: float = 5.0,
     symbol: str | None = None,
+    drop_bad_bars_enabled: bool = False,
 ) -> pd.DataFrame:
     """Apply all quality filters in sequence. Safe for indicator computation.
 
     Round-21 FIX (2026-04-30): pass ``symbol`` to ``filter_zero_volume`` so
     index tickers (^VIX, ^GSPC, ...) keep their bars. Without ``symbol``
     the filter falls back to old blanket-drop behavior (safe for stocks).
+
+    NaN-bar drop (flag-gated, default OFF at this layer; ON at the live
+    ``_finalize_ohlcv_df`` call site via ``chili_momentum_clean_drop_bad_bars``):
+    when ``drop_bad_bars_enabled`` is True, individual malformed bars are
+    dropped BEFORE the integrity verdict so one transient NaN/zero bar does not
+    reject the whole frame. Flag OFF ⇒ the exact prior filter sequence
+    (byte-identical).
     """
     if df.empty:
         return df
+    if drop_bad_bars_enabled:
+        df = drop_bad_bars(df)
     df = filter_zero_volume(df, symbol=symbol)
     df = filter_bad_prints(df, z_threshold=z_threshold)
     return df

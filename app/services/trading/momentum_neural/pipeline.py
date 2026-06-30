@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -114,8 +115,29 @@ def _live_book_imbalance(symbol: str, db: Any = None) -> float | None:
         return None
 
 
+def _cks_event(p1: float, q1: float, p0: float, q0: float, *, is_bid: bool) -> float:
+    """Cont-Kukanov-Stoikov single-side OFI event for ONE price level between two
+    consecutive book states. Bid contributes +new size if its price ROSE, -old
+    size if it fell, the size delta if unchanged; the ask is the mirror (a rising
+    ask = supply lifting = +demand; a falling ask = -old size). Sign convention
+    matches the legacy level-1 loop exactly so level-1 is unchanged."""
+    if is_bid:
+        if p1 > p0:
+            return q1
+        if p1 < p0:
+            return -q0
+        return q1 - q0
+    # ask side: price retreating UP (p1>p0) = buying pressure -> +new size
+    if p1 > p0:
+        return q1
+    if p1 < p0:
+        return -q0
+    return q1 - q0
+
+
 def _compute_ofi_micro(
     seq: list[tuple[float, float, float, float]],
+    ladder_seq: "list[tuple[list, list]] | None" = None,
 ) -> tuple[float | None, float | None]:
     """OFI (normalized net directional flow in [-1, 1]) + micro-price edge (bps)
     from a time-ordered sequence of ``(bid_px, bid_sz, ask_px, ask_sz)`` best
@@ -138,21 +160,48 @@ def _compute_ofi_micro(
         micro_edge = round((micro - mid) / mid * 10000.0, 2)
     if len(seq) < 2:
         return None, micro_edge
+
+    # ── MULTI-LEVEL OFI (Cont-Kukanov-Stoikov, P3) ────────────────────────────
+    # When the per-price ladder is present AND the flag is on, sum the per-level
+    # OFI events across the top-N levels of each side, depth-decay weighted by
+    # w_m = 1/m (harmonic: level-1 dominant, deeper levels contribute less; NOT a
+    # magic cutoff). gross uses the SAME weights so the result stays normalized in
+    # [-1, 1] and dimensionless. Fail-OPEN: any ladder pair that is missing/empty
+    # for either book state falls back to that step's level-1 events, so a
+    # partially-populated ladder never zeroes the signal. Flag OFF, or ladder
+    # absent -> skip this block entirely -> the level-1 path below is byte-identical.
+    use_ml = bool(getattr(settings, "chili_momentum_l2_multilevel_ofi_enabled", True))
+    if use_ml and ladder_seq and len(ladder_seq) == len(seq) and len(ladder_seq) >= 2:
+        ofi_ml = 0.0
+        gross_ml = 0.0
+        ok = False
+        for (b0, a0), (b1, a1) in zip(ladder_seq, ladder_seq[1:]):
+            try:
+                depth = min(len(b0), len(b1), len(a0), len(a1))
+            except TypeError:
+                depth = 0
+            if depth <= 0:
+                continue
+            ok = True
+            for m in range(depth):
+                w = 1.0 / (m + 1.0)  # harmonic depth decay; level-1 weight = 1.0
+                eb = _cks_event(float(b1[m][0]), float(b1[m][1]),
+                                float(b0[m][0]), float(b0[m][1]), is_bid=True)
+                ea = _cks_event(float(a1[m][0]), float(a1[m][1]),
+                                float(a0[m][0]), float(a0[m][1]), is_bid=False)
+                ofi_ml += w * (eb - ea)
+                gross_ml += w * (abs(eb) + abs(ea))
+        if ok:
+            if gross_ml <= 0:
+                return 0.0, micro_edge
+            return round(max(-1.0, min(1.0, ofi_ml / gross_ml)), 4), micro_edge
+
+    # ── LEVEL-1 OFI (legacy path; unchanged) ──────────────────────────────────
     ofi = 0.0
     gross = 0.0
     for (pb0, qb0, pa0, qa0), (pb1, qb1, pa1, qa1) in zip(seq, seq[1:]):
-        if pb1 > pb0:
-            eb = qb1
-        elif pb1 < pb0:
-            eb = -qb0
-        else:
-            eb = qb1 - qb0
-        if pa1 < pa0:
-            ea = qa1
-        elif pa1 > pa0:
-            ea = -qa0
-        else:
-            ea = qa1 - qa0
+        eb = _cks_event(pb1, qb1, pb0, qb0, is_bid=True)
+        ea = _cks_event(pa1, qa1, pa0, qa0, is_bid=False)
         ofi += eb - ea
         gross += abs(eb) + abs(ea)
     if gross <= 0:
@@ -252,7 +301,7 @@ def _live_ofi_microprice(
 
             if as_of is None:
                 _q = (
-                    "SELECT bid_top, bid_top_size, ask_top, ask_top_size "
+                    "SELECT bid_top, bid_top_size, ask_top, ask_top_size, bids_json, asks_json "
                     "FROM iqfeed_depth_snapshots "
                     "WHERE symbol = :s AND observed_at > "
                     "(now() at time zone 'utc') - make_interval(secs => :w) "
@@ -261,7 +310,7 @@ def _live_ofi_microprice(
                 _p = {"s": s, "w": window}
             else:
                 _q = (
-                    "SELECT bid_top, bid_top_size, ask_top, ask_top_size "
+                    "SELECT bid_top, bid_top_size, ask_top, ask_top_size, bids_json, asks_json "
                     "FROM iqfeed_depth_snapshots "
                     "WHERE symbol = :s AND observed_at > :as_of - make_interval(secs => :w) "
                     "AND observed_at <= :as_of ORDER BY observed_at ASC"
@@ -273,7 +322,16 @@ def _live_ofi_microprice(
                 for r in rows
                 if None not in (r[0], r[1], r[2], r[3])
             ]
-            return _compute_ofi_micro(seq)
+            # P3: per-price ladder aligned 1:1 with seq (only rows that survived the
+            # level-1 filter contribute). A row whose ladder is NULL/empty yields
+            # ([], []) -> that step fails open to level-1 inside _compute_ofi_micro.
+            ladder_seq = [
+                (r[4] if isinstance(r[4], list) else [],
+                 r[5] if isinstance(r[5], list) else [])
+                for r in rows
+                if None not in (r[0], r[1], r[2], r[3])
+            ]
+            return _compute_ofi_micro(seq, ladder_seq=ladder_seq)
     except Exception:
         return None, None
     return None, None
@@ -384,6 +442,352 @@ def _aggressor_imbalance(rows) -> float | None:
     if total <= 0:
         return None
     return float(max(-1.0, min(1.0, signed / total)))
+
+
+def _event_grid_log_returns(
+    rows, *, grid_secs: float
+) -> tuple[list[float], float, dict]:
+    """Pure: sub-sample oldest-first ``(price, observed_at)`` trade ticks onto a
+    ~``grid_secs`` EVENT-TIME grid, then return the grid log-returns r_i =
+    ln(p_i / p_{i-1}), the observed TICK RATE (ticks/sec over the window span), and a
+    debug dict. Sub-sampling to a coarse grid is the denoising step (collapses the
+    bid-ask-bounce micro-noise the per-tick series carries) — one grid sample per
+    bucket (the LAST price in each bucket). ``grid_secs <= 0`` ⇒ every tick is its own
+    grid point (no sub-sample). Separated for lookahead-free unit testing (no DB)."""
+    pts: list[tuple[float, float]] = []  # (epoch_secs, price)
+    for r in rows or []:
+        try:
+            px = float(r[0])
+        except (TypeError, ValueError):
+            continue
+        ts = r[1]
+        try:
+            epoch = ts.timestamp() if hasattr(ts, "timestamp") else float(ts)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if px <= 0 or not math.isfinite(px) or not math.isfinite(epoch):
+            continue
+        pts.append((epoch, px))
+    if len(pts) < 2:
+        return [], 0.0, {"n_ticks": len(pts), "n_grid": 0}
+    span = max(1e-9, pts[-1][0] - pts[0][0])
+    tick_rate = len(pts) / span
+    try:
+        gs = float(grid_secs)
+    except (TypeError, ValueError):
+        gs = 0.0
+    if gs > 0:
+        grid: list[float] = []
+        bucket_start = pts[0][0]
+        last_px = pts[0][1]
+        for epoch, px in pts:
+            if epoch - bucket_start >= gs:
+                grid.append(last_px)
+                bucket_start = epoch
+            last_px = px
+        grid.append(last_px)  # close the final bucket
+        prices = grid
+    else:
+        prices = [p for _, p in pts]
+    returns: list[float] = []
+    for i in range(1, len(prices)):
+        p0, p1 = prices[i - 1], prices[i]
+        if p0 > 0 and p1 > 0:
+            r = math.log(p1 / p0)
+            if math.isfinite(r):
+                returns.append(r)
+    return returns, float(tick_rate), {"n_ticks": len(pts), "n_grid": len(prices), "span_s": span}
+
+
+def _live_realized_vol(
+    symbol: str,
+    db: Any = None,
+    *,
+    as_of: "datetime | None" = None,
+    grid_secs: float | None = None,
+) -> dict | None:
+    """LIVE denoised realized-vol read for the vol-norm runner trail (LEVER 2A).
+
+    Equity: sub-samples ``iqfeed_trade_ticks`` (price/observed_at) over the short OFI
+    window onto a ~``grid_secs`` event grid, computes grid log-returns, and returns the
+    inputs the pure trail-width math (``paper_execution.volnorm_trail_dist_pct``)
+    needs::
+
+        {"rv_step": per-grid-step stdev (EWMA),    # paper_execution.denoised_rv_ewma
+         "tick_rate": ticks/sec over the window,
+         "eff_spread_pct": Roll half-spread frac or None,
+         "grid_secs": the grid bucket used,
+         "n_ticks", "n_grid"}
+
+    Returns ``None`` when the tape is thin (< 2 grid returns) ⇒ the caller falls back to
+    the frozen expected_move width. Crypto (``-USD``) currently returns None (no equity
+    tape) — the trail there stays on the existing path. Mirrors the OFI-window read
+    pattern exactly (same window knob, same as_of replay semantics)."""
+    from .paper_execution import denoised_rv_ewma, roll_effective_spread_pct
+
+    s = (symbol or "").strip().upper()
+    if not s or s.endswith("-USD"):
+        return None
+    try:
+        window = float(getattr(settings, "chili_crypto_l2_ofi_window_s", 15.0) or 15.0)
+    except (TypeError, ValueError):
+        window = 15.0
+    # Vol-norm trail wants a longer realized-vol lookback than the 15s OFI window so the
+    # EWMA has enough grid steps; reuse the documented trail window knob (default 90s).
+    try:
+        rv_window = float(getattr(settings, "chili_momentum_volnorm_trail_window_s", 90.0) or 90.0)
+    except (TypeError, ValueError):
+        rv_window = 90.0
+    window = max(window, rv_window)
+    if grid_secs is None:
+        try:
+            grid_secs = float(getattr(settings, "chili_momentum_volnorm_trail_grid_secs", 2.0) or 2.0)
+        except (TypeError, ValueError):
+            grid_secs = 2.0
+    if db is None:
+        return None
+    try:
+        from sqlalchemy import text as _sql
+
+        if as_of is None:
+            q = ("SELECT price, observed_at FROM iqfeed_trade_ticks WHERE symbol = :s AND "
+                 "observed_at > (now() at time zone 'utc') - make_interval(secs => :w) "
+                 "ORDER BY observed_at ASC")
+            p = {"s": s, "w": window}
+        else:
+            _ao = as_of.replace(tzinfo=None) if getattr(as_of, "tzinfo", None) is not None else as_of
+            q = ("SELECT price, observed_at FROM iqfeed_trade_ticks WHERE symbol = :s AND "
+                 "observed_at > :as_of - make_interval(secs => :w) AND observed_at <= :as_of "
+                 "ORDER BY observed_at ASC")
+            p = {"s": s, "w": window, "as_of": _ao}
+        rows = db.execute(_sql(q), p).fetchall()
+    except Exception:
+        return None
+    returns, tick_rate, dbg = _event_grid_log_returns(rows, grid_secs=grid_secs)
+    if len(returns) < 2:
+        return None
+    # EWMA half-life in GRID-STEP count: half the window's worth of grid steps so the
+    # most recent ~window/2 dominates (derived from the window, not a fresh magic number).
+    half_life = max(2.0, (window / max(grid_secs, 1e-9)) / 2.0)
+    rv_step = denoised_rv_ewma(returns, half_life=half_life)
+    if rv_step is None:
+        return None
+    return {
+        "rv_step": float(rv_step),
+        "tick_rate": float(tick_rate),
+        "eff_spread_pct": roll_effective_spread_pct(returns),
+        "grid_secs": float(grid_secs),
+        "n_ticks": int(dbg.get("n_ticks", 0)),
+        "n_grid": int(dbg.get("n_grid", 0)),
+    }
+
+
+def _event_grid_aggressor_flow(
+    rows, *, grid_secs: float
+) -> tuple[list[float], float, dict]:
+    """Pure (LEVER 2B): from oldest-first ``(price, size, bid, ask, observed_at)`` trade
+    ticks, classify every trade's aggressor sign with the SAME Lee-Ready quote/tick rule
+    as ``_aggressor_imbalance`` (px>=ask buy / px<=bid sell / else mid-split; tick-rule
+    fallback carries the prior sign on a zero-tick), bucket the SIGNED volume onto a
+    ~``grid_secs`` event grid, and return the per-bucket OFI LEVEL series
+    (Σ(sign·size)/Σ(size) within each bucket, in [-1,1]) + the observed tick_rate
+    (ticks/sec over the span) + a debug dict. Sub-sampling to the grid is the denoising
+    step (one OFI level per bucket); the EWMA SLOPE of THIS series (computed downstream by
+    ``ofi_level_and_slope``) is the rollover signal. ``grid_secs <= 0`` ⇒ one bucket per
+    tick. Separated for lookahead-free unit testing (no DB)."""
+    parsed: list[tuple[float, int, float]] = []  # (epoch, signed_size, size)
+    prev_px = None
+    last_sign = 0
+    for r in rows or []:
+        try:
+            px = float(r[0])
+            sz = float(r[1])
+        except (TypeError, ValueError):
+            continue
+        if px <= 0 or sz <= 0 or not math.isfinite(px) or not math.isfinite(sz):
+            continue
+        ts = r[4] if len(r) > 4 else None
+        try:
+            epoch = ts.timestamp() if hasattr(ts, "timestamp") else float(ts)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(epoch):
+            continue
+        bid, ask = (r[2] if len(r) > 2 else None), (r[3] if len(r) > 3 else None)
+        sign = 0
+        if bid is not None and ask is not None:
+            try:
+                fb, fa = float(bid), float(ask)
+            except (TypeError, ValueError):
+                fb = fa = 0.0
+            if fa > fb > 0:
+                mid = (fa + fb) / 2.0
+                if px >= fa:
+                    sign = 1
+                elif px <= fb:
+                    sign = -1
+                elif px > mid:
+                    sign = 1
+                elif px < mid:
+                    sign = -1
+        if sign == 0:  # tick-rule fallback (zero-tick / first trade carries prior sign)
+            if prev_px is not None and px != prev_px:
+                sign = 1 if px > prev_px else -1
+            else:
+                sign = last_sign
+        prev_px = px
+        if sign != 0:
+            last_sign = sign
+        parsed.append((epoch, sign * sz, sz))
+    if len(parsed) < 2:
+        return [], 0.0, {"n_ticks": len(parsed), "n_grid": 0}
+    span = max(1e-9, parsed[-1][0] - parsed[0][0])
+    tick_rate = len(parsed) / span
+    try:
+        gs = float(grid_secs)
+    except (TypeError, ValueError):
+        gs = 0.0
+    levels: list[float] = []
+    if gs > 0:
+        bucket_start = parsed[0][0]
+        b_signed = 0.0
+        b_total = 0.0
+        for epoch, signed_sz, sz in parsed:
+            if epoch - bucket_start >= gs and b_total > 0:
+                levels.append(max(-1.0, min(1.0, b_signed / b_total)))
+                bucket_start = epoch
+                b_signed = 0.0
+                b_total = 0.0
+            b_signed += signed_sz
+            b_total += sz
+        if b_total > 0:
+            levels.append(max(-1.0, min(1.0, b_signed / b_total)))
+    else:
+        for _, signed_sz, sz in parsed:
+            levels.append(max(-1.0, min(1.0, signed_sz / sz)) if sz > 0 else 0.0)
+    return levels, float(tick_rate), {"n_ticks": len(parsed), "n_grid": len(levels), "span_s": span}
+
+
+def _live_flow_slope(
+    symbol: str,
+    db: Any = None,
+    *,
+    as_of: "datetime | None" = None,
+    grid_secs: float | None = None,
+) -> dict | None:
+    """LIVE denoised order-flow read for the velocity/persistence RIDE-LOCK (LEVER 2B).
+
+    Equity: reads ``iqfeed_trade_ticks`` (price/size/bid/ask/observed_at) over the same
+    short OFI window the other exits use, buckets the Lee-Ready signed flow onto the
+    ~``grid_secs`` event grid (``_event_grid_aggressor_flow``), and returns the inputs the
+    pure RIDE-LOCK math (``paper_execution.ofi_level_and_slope`` +
+    ``velocity_persistence_ride_lock``) needs::
+
+        {"ofi_level": denoised EWMA OFI level (most recent),
+         "ofi_slope": EWMA-OFI 1st-derivative (slope; <0 = rollover),
+         "tick_rate": ticks/sec over the window,
+         "last_price": last executed trade price,           # HARD sellers-through test
+         "mid": last (bid+ask)/2 = the L1 fair-value ref,   # micro-price proxy (no L1 sizes)
+         "grid_secs", "n_ticks", "n_grid"}
+
+    Returns ``None`` when the tape is thin (< 2 grid buckets) OR STALE (newest print older
+    than one event-grid step ``grid_secs`` — an explicit latest-tick-age gate so a silent
+    tape that still has buckets inside the trailing window cannot yield a flow read) ⇒ the
+    caller falls back to the 2A vol-norm trail (byte-identical). Crypto (``-USD``) returns None (no equity tape) — the
+    RIDE-LOCK there stays off and the existing path is unchanged. Mirrors the OFI-window read
+    pattern (same window knob, same as_of replay semantics)."""
+    from .paper_execution import ofi_level_and_slope
+
+    s = (symbol or "").strip().upper()
+    if not s or s.endswith("-USD"):
+        return None
+    try:
+        window = float(getattr(settings, "chili_crypto_l2_ofi_window_s", 15.0) or 15.0)
+    except (TypeError, ValueError):
+        window = 15.0
+    if grid_secs is None:
+        try:
+            grid_secs = float(getattr(settings, "chili_momentum_volnorm_trail_grid_secs", 2.0) or 2.0)
+        except (TypeError, ValueError):
+            grid_secs = 2.0
+    try:
+        half_life = float(getattr(settings, "chili_momentum_velocity_ofi_slope_half_life", 4.0) or 4.0)
+    except (TypeError, ValueError):
+        half_life = 4.0
+    half_life = max(1.0, half_life)
+    if db is None:
+        return None
+    try:
+        from sqlalchemy import text as _sql
+
+        if as_of is None:
+            q = ("SELECT price, size, bid, ask, observed_at FROM iqfeed_trade_ticks WHERE symbol = :s AND "
+                 "observed_at > (now() at time zone 'utc') - make_interval(secs => :w) "
+                 "ORDER BY observed_at ASC")
+            p = {"s": s, "w": window}
+        else:
+            _ao = as_of.replace(tzinfo=None) if getattr(as_of, "tzinfo", None) is not None else as_of
+            q = ("SELECT price, size, bid, ask, observed_at FROM iqfeed_trade_ticks WHERE symbol = :s AND "
+                 "observed_at > :as_of - make_interval(secs => :w) AND observed_at <= :as_of "
+                 "ORDER BY observed_at ASC")
+            p = {"s": s, "w": window, "as_of": _ao}
+        rows = db.execute(_sql(q), p).fetchall()
+    except Exception:
+        return None
+    # EXPLICIT latest-tick-age gate (fail-closed on a frozen tape). The rolling-window
+    # query (observed_at > ref - window) only bounds the OLDEST tick; a tape that went
+    # silent can still carry >= 2 grid buckets inside the trailing window (e.g. last print
+    # ~one window old) and would yield a NON-None, possibly POSITIVE flow read — letting
+    # GAP-B / GAP-A's decisive_flow_cut fire on an effectively FROZEN tape. We require the
+    # NEWEST print to be no older than ONE event-grid step (``grid_secs``): no fresh
+    # aggressor flow within a single grid bucket ⇒ the grid-based flow read is stale ⇒
+    # return None ⇒ the caller falls back to the 2A vol-norm trail (byte-identical). The
+    # bound is the SAME adaptive grid knob the flow is bucketed on (no magic number; falls
+    # back to the window only if the grid is per-tick/0). Age ref matches the query's
+    # ``now`` semantics: ``as_of`` for replay, else UTC now (both UTC-naive).
+    try:
+        if rows and rows[-1][4] is not None:
+            _ref = (as_of.replace(tzinfo=None) if (as_of is not None and getattr(as_of, "tzinfo", None) is not None) else as_of) \
+                if as_of is not None else datetime.utcnow()
+            _last_at = rows[-1][4]
+            if getattr(_last_at, "tzinfo", None) is not None:
+                _last_at = _last_at.replace(tzinfo=None)
+            _max_age = grid_secs if grid_secs and grid_secs > 0 else window
+            if (_ref - _last_at).total_seconds() > _max_age:
+                return None
+    except (TypeError, ValueError, IndexError):
+        return None
+    levels, tick_rate, dbg = _event_grid_aggressor_flow(rows, grid_secs=grid_secs)
+    if len(levels) < 2:
+        return None
+    level, slope = ofi_level_and_slope(levels, half_life=half_life)
+    if level is None:
+        return None
+    # latest L1 + last print (for the HARD-exit "sellers lifting through the fair value"
+    # test). iqfeed_trade_ticks carries no L1 SIZES, so the micro-price degenerates to the
+    # mid — used as the fair-value reference; the last trade price vs the mid is the
+    # sellers-through read (last print at/below the mid ⇒ sellers hitting the bid down).
+    last_price = mid = None
+    try:
+        if rows:
+            lr = rows[-1]
+            last_price = float(lr[0]) if lr[0] is not None else None
+            _lb = float(lr[2]) if lr[2] is not None else None
+            _la = float(lr[3]) if lr[3] is not None else None
+            if _lb is not None and _la is not None and _la > _lb > 0:
+                mid = (_lb + _la) / 2.0
+    except (TypeError, ValueError, IndexError):
+        last_price = mid = None
+    return {
+        "ofi_level": float(level),
+        "ofi_slope": (float(slope) if slope is not None else None),
+        "tick_rate": float(tick_rate),
+        "last_price": last_price,
+        "mid": mid,
+        "grid_secs": float(grid_secs),
+        "n_ticks": int(dbg.get("n_ticks", 0)),
+        "n_grid": int(dbg.get("n_grid", 0)),
+    }
 
 
 @dataclass(frozen=True)
@@ -1041,6 +1445,28 @@ def run_momentum_neural_tick(
                         if _n_sf > 0:
                             _weights = dict(_weights)
                             _weights["squeeze_fuel"] = ROSS_SQUEEZE_FUEL_PILLAR_WEIGHT
+                            # P4 DEEPENING: stamp the WITHIN-BATCH PERCENTILE of each name's OWN
+                            # raw squeeze_fuel_pct so the downstream entry size-up + exit band-widen
+                            # levers (squeeze_entry_size_multiplier / squeeze_exit_band_widen) have a
+                            # no-magic, batch-adaptive axis (the live bar floats with the batch). This
+                            # rank rides through ross_signals -> execution_readiness_json.extra exactly
+                            # like the raw sub-score. Equity-only (only -USD-excluded names were fetched).
+                            try:
+                                from .ross_momentum import _percentile_rank as _sf_pctl
+                                _sf_vals = sorted(
+                                    float(_ross_signals[_s]["squeeze_fuel_pct"])
+                                    for _s in _ross_signals
+                                    if isinstance(_ross_signals.get(_s), dict)
+                                    and _ross_signals[_s].get("squeeze_fuel_pct") is not None
+                                )
+                                for _s in _ross_signals:
+                                    _ss = _ross_signals.get(_s)
+                                    if isinstance(_ss, dict) and _ss.get("squeeze_fuel_pct") is not None:
+                                        _ss["squeeze_fuel_rank_pct"] = round(
+                                            _sf_pctl(float(_ss["squeeze_fuel_pct"]), _sf_vals), 4
+                                        )
+                            except Exception:
+                                pass
                 except Exception:
                     pass
             # NEWS-CATALYST TILT (default OFF => byte-identical): the 🔥 pillar Ross weights
@@ -1171,6 +1597,64 @@ def run_momentum_neural_tick(
                     if _n_pb > 0:
                         _weights = dict(_weights)
                         _weights["price_band"] = ROSS_PRICE_SWEETSPOT_PILLAR_WEIGHT
+                except Exception:
+                    pass
+            # OVERHEAD-SUPPLY CEILING SELECTION TILT (default OFF ⇒ byte-identical): de-weight a
+            # name climbing toward a prior huge-VOLUME doji / round-trip overhead level from below
+            # (trapped supply ahead — Ross "don't buy into resistance"). REUSES the SAME daily
+            # context the daily-structure pillar already fetched: overhead_supply_atr(ctx, entry)
+            # gives the daily-ATR room UP to the nearest ceiling, which the [0,1] sub-score maps
+            # (clear sky ⇒ 1.0, pinned at the level ⇒ 0.0). A composable 0.10-weight pillar folded
+            # onto the active weight-set (score_universe self-renormalises). DISTINCT from the
+            # entry-side overhead VETO (a hard pre-fill gate) — this only RE-RANKS selection, it can
+            # never block a fill or remove a name from the pool. Equity-only (crypto has no daily
+            # overhead-supply structure). Flag DEFAULT-OFF; OFF ⇒ no sub-score stamped, no weight
+            # folded ⇒ byte-identical ranking.
+            if bool(getattr(settings, "chili_momentum_overhead_supply_tilt_enabled", False)):
+                try:
+                    from .daily_levels import (
+                        compute_daily_context as _ohs_compute_daily_context,
+                        overhead_supply_atr as _ohs_overhead_supply_atr,
+                    )
+                    from ..market_data import fetch_ohlcv_df as _ohs_fetch_daily
+                    from .ross_momentum import (
+                        ROSS_OVERHEAD_SUPPLY_CLEAR_ROOM_ATR,
+                        ROSS_OVERHEAD_SUPPLY_PILLAR_WEIGHT,
+                        overhead_supply_subscore as _overhead_supply_subscore,
+                    )
+
+                    _ohs_lb = int(getattr(settings, "chili_momentum_daily_lookback_days", 20) or 20)
+                    _ohs_clear = float(getattr(
+                        settings, "chili_momentum_overhead_supply_clear_room_atr",
+                        ROSS_OVERHEAD_SUPPLY_CLEAR_ROOM_ATR))
+                    _n_oh = 0
+                    for _sym, _sig in _ross_signals.items():
+                        if not isinstance(_sig, dict) or "-USD" in str(_sym):
+                            continue  # equities only (crypto has no daily overhead structure)
+                        try:
+                            _px = None
+                            for _pk in ("price", "last", "close", "last_price"):
+                                _pv = _sig.get(_pk)
+                                if _pv is not None:
+                                    try:
+                                        _px = float(_pv)
+                                        break
+                                    except (TypeError, ValueError):
+                                        continue
+                            if _px is None or _px <= 0:
+                                continue  # fail-open: omit the pillar for this name
+                            _ddf2 = _ohs_fetch_daily(_sym, interval="1d", period="1y")
+                            _dctx2 = _ohs_compute_daily_context(_ddf2, lookback=_ohs_lb, price=_px)
+                            _room = _ohs_overhead_supply_atr(_dctx2, entry=_px)
+                            _oh = _overhead_supply_subscore(_room, clear_room_atr=_ohs_clear)
+                            if _oh is not None:
+                                _sig["overhead_supply_pct"] = _oh
+                                _n_oh += 1
+                        except Exception:
+                            continue
+                    if _n_oh > 0:
+                        _weights = dict(_weights)
+                        _weights["overhead_supply"] = ROSS_OVERHEAD_SUPPLY_PILLAR_WEIGHT
                 except Exception:
                     pass
             meta["ross_scores"] = {
@@ -1334,10 +1818,11 @@ def run_momentum_neural_tick(
     except Exception:
         pass
 
+    _cat: set[str] = set()
     try:
         from .catalyst import all_catalyst_symbols
 
-        _cat = all_catalyst_symbols()
+        _cat = all_catalyst_symbols() or set()
         if _cat:
             # MUST be a list, not a set: meta flows into the brain_node_states
             # local_state JSONB and a set is not JSON-serializable ("Object of type
@@ -1345,7 +1830,7 @@ def run_momentum_neural_tick(
             # write and leave every symbol stale. (regression guard for #528)
             meta["catalyst_symbols"] = sorted(_cat)
     except Exception:
-        pass
+        _cat = set()
 
     # E2: STRONG-catalyst boost set (FDA/trial/partnership/contract/M&A/beat headlines Ross
     # FAVORS). Same once-per-pass best-effort fetch as the weak set; JSON-safe sorted list.
@@ -1417,6 +1902,7 @@ def run_momentum_neural_tick(
     # now SIGN-REFINED: a recent reverse split with fresh REAL news + low post-split float (SS101
     # squeeze) and an at/above-market private placement are REMOVED from the de-boost. Any
     # context absent / flag OFF -> bare keyword classification (byte-identical). JSON-safe list.
+    _weak: set[str] = set()
     try:
         from .catalyst import weak_catalyst_symbols
 
@@ -1425,11 +1911,11 @@ def run_momentum_neural_tick(
             floats=_floats or None,
             strong_news_symbols=_strong or None,
             private_placement_at_or_above_market=_pp_bullish or None,
-        )
+        ) or set()
         if _weak:
             meta["weak_catalyst_symbols"] = sorted(_weak)
     except Exception:
-        pass
+        _weak = set()
 
     # SS101 low-float-squeeze BOOST: the recent-reverse-split names that EARNED the de-boost
     # exemption are folded into the STRONG set so the EXISTING catalyst grade delta carries the
@@ -1455,12 +1941,56 @@ def run_momentum_neural_tick(
     # FAKE-catalyst credibility set (Ross AS101/HVM101): UNVERIFIED / hacked-PR / unsolicited-
     # buyout / rumor / pump headlines Ross DISTRUSTS (they round-trip fully). Same once-per-pass
     # best-effort fetch; JSON-safe sorted list. Empty / absent feed / flag OFF -> no-op.
+    _fake: set[str] = set()
     try:
         from .catalyst import fake_catalyst_symbols
 
-        _fake = fake_catalyst_symbols()
+        _fake = fake_catalyst_symbols() or set()
         if _fake:
             meta["fake_catalyst_symbols"] = sorted(_fake)
+    except Exception:
+        _fake = set()
+
+    # ── FIX E: PER-TICKER catalyst-news repair for the IN-PLAY movers ───────────────────
+    # The firehose sets above (all/strong/weak/fake) bury low-float micro-caps under large-cap
+    # news (decisive w0av0u3qy probe: 0/11 Ross names tagged). Run a PER-TICKER fresh-news pass
+    # over the names the lane is actually arming (the equity ross_signals keys) and UNION the
+    # graded hits into every catalyst set, so a real catalyst on a low-float actually tags. The
+    # per-ticker tags ADD to (never remove from) the firehose tags. Selection tilt only; freshness
+    # still enforced inside the accessor (a stale headline never tags — the honest feed-lag
+    # constraint). Flag OFF / no movers / absent feed -> no change (firehose-only, byte-identical).
+    try:
+        if bool(getattr(settings, "chili_momentum_catalyst_tagging_repair_enabled", True)) and _eq_movers:
+            from .catalyst import per_ticker_catalyst_tags
+
+            _pt_all, _pt_strong, _pt_weak, _pt_fake = per_ticker_catalyst_tags(_eq_movers)
+            if _pt_all or _pt_strong or _pt_weak or _pt_fake:
+                # union the per-ticker tags into the in-memory sets the downstream tilt reads
+                # (_cat/_strong/_weak/_fake are all initialized to set() above -> safe).
+                _cat = set(_cat) | _pt_all
+                _strong = set(_strong) | _pt_strong
+                _weak = set(_weak) | _pt_weak
+                _fake = set(_fake) | _pt_fake
+                # re-stamp the JSON-safe meta sets (sorted lists) so the persisted viability
+                # explain/regime context carries the repaired tags for A/B + the auto-theme path
+                if _cat:
+                    meta["catalyst_symbols"] = sorted(_cat)
+                if _strong:
+                    meta["strong_catalyst_symbols"] = sorted(_strong)
+                if _weak:
+                    meta["weak_catalyst_symbols"] = sorted(_weak)
+                if _fake:
+                    meta["fake_catalyst_symbols"] = sorted(_fake)
+                # COUNTERFACTUAL for live A/B: which names the per-ticker pass tagged that the
+                # firehose did NOT (the operator reads tag-rate + downstream PnL delta, flips
+                # chili_momentum_catalyst_tagging_repair_enabled off if net-negative).
+                meta["catalyst_repair_fix_e"] = {
+                    "per_ticker_tagged": sorted(_pt_all),
+                    "strong": sorted(_pt_strong),
+                    "weak": sorted(_pt_weak),
+                    "fake": sorted(_pt_fake),
+                    "n_movers_scanned": len(_eq_movers),
+                }
     except Exception:
         pass
 

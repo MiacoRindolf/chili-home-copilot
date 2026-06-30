@@ -418,6 +418,133 @@ def _persist_kill_switch_state(active: bool, reason: str | None) -> bool:
         return False
 
 
+# ── GAP 1: Rule-break -> NO-TRADE-NEXT-DAY lockout (PSY101 Mod 10 operant) ──
+# When a hard discipline rule is broken TODAY (a global daily-loss breach, the daily-
+# trade-count budget exceeded, or a max-loss circuit fire), arm a lockout that blocks
+# LIVE ARMING for the NEXT ET trading session, then auto-clears once that session's ET
+# day rolls past (never permanent). Persisted in trading_risk_state with a distinct
+# regime so it is fully separate from the kill-switch rows (regime='kill_switch'); reuses
+# the same table + SessionLocal idiom as _persist_kill_switch_state. RISK-REDUCING ONLY:
+# the only consumer (auto_arm) can ONLY skip live arming on a set lockout — it never
+# permits a trade that was otherwise blocked and never changes sizing. Flag OFF (default)
+# => set_* is a no-op AND check_* returns (False, ...) => byte-identical.
+_NEXTDAY_LOCKOUT_REGIME = "rulebreak_nextday_lockout"
+
+
+def _et_date_today_and_tomorrow():
+    """(today_et_date, tomorrow_et_date) on the US/Eastern calendar (naive dates)."""
+    from datetime import timezone as _tz
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    today = datetime.utcnow().replace(tzinfo=_tz.utc).astimezone(et).date()
+    return today, today + timedelta(days=1)
+
+
+def set_next_day_trading_lockout(reason: str = "rule_break") -> bool:
+    """Arm a NEXT-day live-arming lockout (GAP 1). Persists to trading_risk_state.
+
+    Idempotent: writes at most once per (lockout ET day, reason) — a second identical
+    breach on the same day does not re-insert. The lockout's effective day is TOMORROW
+    ET (so today's remaining session is governed by the kill switch / per-broker caps,
+    NOT this lockout). Flag OFF (default) => no-op, returns False. Best-effort: a DB
+    failure is swallowed (the kill switch already halts today; this is the NEXT-day belt).
+    """
+    if not bool(getattr(settings, "chili_momentum_rulebreak_nextday_lockout_enabled", False)):
+        return False
+    try:
+        _today, lock_day = _et_date_today_and_tomorrow()
+        from ...db import SessionLocal
+
+        sess = SessionLocal()
+        try:
+            existing = sess.execute(text(
+                "SELECT 1 FROM trading_risk_state "
+                "WHERE regime = :regime AND breaker_tripped = TRUE "
+                "AND breaker_reason = :reason "
+                "AND (snapshot_date AT TIME ZONE 'UTC')::date >= :lock_day "
+                "LIMIT 1"
+            ), {"regime": _NEXTDAY_LOCKOUT_REGIME, "reason": reason or "rule_break",
+                "lock_day": lock_day}).fetchone()
+            if existing:
+                return True  # already armed for that lockout day + reason
+            sess.execute(text(
+                "INSERT INTO trading_risk_state (user_id, snapshot_date, breaker_tripped, breaker_reason, regime, capital) "
+                "VALUES (:uid, :lock_day, TRUE, :reason, :regime, 0) "
+            ), {"uid": None, "lock_day": lock_day, "reason": reason or "rule_break",
+                "regime": _NEXTDAY_LOCKOUT_REGIME})
+            sess.commit()
+            logger.warning(
+                "[governance] NEXT-DAY trading lockout armed for ET %s (reason=%s)",
+                lock_day, reason,
+            )
+            return True
+        finally:
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            sess.close()
+    except Exception:
+        logger.debug("[governance] Failed to arm next-day trading lockout", exc_info=True)
+        return False
+
+
+def check_next_day_trading_lockout() -> tuple[bool, dict[str, Any]]:
+    """Is live arming locked out for TODAY's ET session by a prior rule-break? (GAP 1)
+
+    Returns ``(is_locked, meta)``. Reads the most-recent armed lockout row and compares
+    its effective ET day to TODAY ET: a lockout effective for TODAY (or a still-pending
+    future day that has arrived) => locked. A lockout whose day has ROLLED PAST is stale
+    => it AUTO-CLEARS (returns not-locked); the row is left in place as an audit trail
+    (a past-dated row can never re-lock because the day comparison is strict). Flag OFF
+    (default) or any error => ``(False, ...)`` so the caller arms exactly as today
+    (byte-identical / fail-OPEN — a lockout must never be invented from a bad read).
+    """
+    if not bool(getattr(settings, "chili_momentum_rulebreak_nextday_lockout_enabled", False)):
+        return False, {"locked": False, "reason": "disabled"}
+    try:
+        today_et, _tomorrow = _et_date_today_and_tomorrow()
+        from ...db import SessionLocal
+
+        sess = SessionLocal()
+        try:
+            row = sess.execute(text(
+                "SELECT (snapshot_date AT TIME ZONE 'UTC')::date, breaker_reason "
+                "FROM trading_risk_state "
+                "WHERE regime = :regime AND breaker_tripped = TRUE "
+                "ORDER BY snapshot_date DESC, id DESC LIMIT 1"
+            ), {"regime": _NEXTDAY_LOCKOUT_REGIME}).fetchone()
+            if not row:
+                return False, {"locked": False, "reason": "no_lockout_armed"}
+            lock_day = row[0]
+            lock_reason = row[1] or ""
+            # Locked iff today is ON the lockout's effective day (a strict day-roll past
+            # auto-clears; an armed future day only bites once it arrives == today).
+            if lock_day is not None and today_et == lock_day:
+                return True, {
+                    "locked": True,
+                    "reason": "rulebreak_nextday_lockout",
+                    "lock_day": str(lock_day),
+                    "rule_break_reason": lock_reason,
+                }
+            return False, {
+                "locked": False,
+                "reason": "lockout_stale_or_future",
+                "lock_day": str(lock_day),
+                "today_et": str(today_et),
+            }
+        finally:
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            sess.close()
+    except Exception:
+        logger.debug("[governance] next-day lockout check skipped (fail-open)", exc_info=True)
+        return False, {"locked": False, "reason": "error_fail_open"}
+
+
 def restore_kill_switch_from_db() -> None:
     """Restore kill-switch state from DB on startup."""
     global _kill_switch, _kill_switch_reason, _kill_switch_set_at, _kill_switch_db_error, _kill_switch_db_persisted, _kill_switch_db_fail_closed_active
@@ -868,6 +995,13 @@ def check_daily_loss_breach(
             limit_usd,
             source,
         )
+        # GAP 1: a daily-loss breach is a broken discipline rule — arm the NEXT-day
+        # lockout (no-op unless the flag is on). Best-effort; never affects the breach
+        # result. The kill switch already halts TODAY; this is the next-session belt.
+        try:
+            set_next_day_trading_lockout("daily_loss_breach")
+        except Exception:
+            logger.debug("[governance] next-day lockout arm (daily-loss) skipped", exc_info=True)
 
     return {
         "breached": bool(breached),

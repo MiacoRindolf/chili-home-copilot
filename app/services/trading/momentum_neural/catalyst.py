@@ -24,9 +24,13 @@ logger = logging.getLogger(__name__)
 _NY_TZ = ZoneInfo("America/New_York")
 
 # ONE documented knob: the premarket PR-cadence windows (top/bottom of the hour) Ross
-# watches for press releases. Comma-separated HH:MM-HH:MM ranges in ET. Default = the
-# 7:00/7:30/8:00/8:30 drops. Used by ``pr_cadence_active`` (cadence tilt, default OFF).
-PR_CADENCE_HOURS_DEFAULT = "7:00-7:30,8:00-8:30"
+# watches for press releases. Comma-separated HH:MM-HH:MM ranges in ET. Default now
+# covers the TOP + BOTTOM of EVERY hour across the full premarket (4:00-9:30 ET) — each
+# window spans the :00 top-of-hour drop through the :35-:45 bottom-of-hour drop (GAP 0
+# re-audit: the old 7:00-7:30,8:00-8:30 default under-filled the clock). Kept identical to
+# the config Field default so the in-code fallback matches settings. Used by
+# ``pr_cadence_active`` (cadence tilt, default OFF).
+PR_CADENCE_HOURS_DEFAULT = "4:00-4:45,5:00-5:45,6:00-6:45,7:00-7:50,8:00-8:50,9:25-9:35"
 # Premarket window bound (minutes-of-day ET). A PR-cadence lean-in is premarket-only —
 # the regular-session open (09:30 ET) ends the premarket PR-drop regime. Fixed exchange
 # fact, named once here (not a tunable knob).
@@ -180,16 +184,190 @@ def catalyst_score(symbol: str, catalyst_symbols: set[str] | None) -> float:
     return 1.0 if _norm(symbol) in catalyst_symbols else 0.5
 
 
+# AUTO HOT-THEME detector (Ross "what is the tape rewarding TODAY"): the operator-set
+# event-theme keywords are a manual override for a KNOWN window (SpaceX IPO). But the
+# tape rotates themes faster than the operator can re-type the list — an FDA-day biotech
+# cluster, a crypto-treasury PR run, a tariff-headline sympathy wave. This auto-detector
+# answers "which CATALYST keywords are HOT right now?" by reading the SAME deployed
+# strong/weak keyword machinery off the recent BIG MOVERS' fresh headlines: a keyword that
+# recurs across >= a small recurrence threshold of the window's big movers is a live theme.
+# theme_catalyst_symbols() then UNIONS these with the operator-set keywords so a NEW name
+# carrying a hot-theme keyword inherits the theme boost — without the operator touching the
+# list. Selection TILT only (rides the existing theme path); no risk/execution change.
+# Kill-switch chili_momentum_auto_theme_detection_enabled (flag-off => operator-set-only,
+# byte-identical). Adaptive + fail-open: no movers / no feed => empty auto set.
+#
+# ONE documented base each (overridable; no buried magic):
+#   * the rolling freshness WINDOW for "recent" movers+news (minutes; reuses the news
+#     freshness knob's scale, own knob so a theme window can run wider than a fill window),
+#   * the big-mover GAIN floor (reuses the HOT-tape LULD-scale move pct — the same
+#     "explosive" floor the lane already trusts; a percentile is unnecessary when the
+#     gainers feed already ranks by % change),
+#   * the RECURRENCE threshold (a keyword in >= N movers; default 2 = leader + 1 peer,
+#     mirroring the theme_detector min-cluster — one hot name is noise, two is a theme).
+AUTO_HOT_THEME_RECURRENCE_MIN = 2
+
+
+# GENERIC catalyst tokens that the GRADER tolerates (it scores ONE named ticker, so a generic
+# word on that name is harmless) but the THEME path must NOT auto-detect: the theme path fans a
+# hot keyword OUT to EVERY fresh-news ticker matching it (get_theme_news_tickers scans ~200
+# items' title+description) and exempts them ALL from the hot-tape neutralization. These tokens
+# are common substrings that co-occur on many big movers BY CHANCE in an earnings-season /
+# momentum tape (e.g. two top-20 gainers both printing "beats" makes "beats" a false HOT theme),
+# which would re-exempt a broad swath of GENERIC-news names and defeat the hot-tape inversion
+# (Ross 06-10: the inversion favors no-news foreign small caps + NEUTRALIZES generic news). They
+# stay in the grader's _STRONG_CATALYST_KEYWORDS (correct there) and are excluded ONLY here.
+_AUTO_THEME_GENERIC_TOKENS = frozenset({"beats", "partnership", "offering"})
+
+
+def _auto_theme_keyword_vocab() -> tuple[str, ...]:
+    """The catalyst keyword vocabulary the detector matches against a mover's headline: the
+    SPECIFIC / strong themeable phrases (FDA/trial/M&A/contract) — a SUBSET of the grader's
+    _STRONG_CATALYST_KEYWORDS, minus the generic tokens in _AUTO_THEME_GENERIC_TOKENS. The WEAK
+    list is INTENTIONALLY excluded: its members are generic substrings ('offering', 'default',
+    'investigation', 'compliance with') that co-occur on many movers by chance, so feeding them
+    to the fan-out theme path would re-exempt a broad swath of generic-news names and defeat the
+    hot-tape inversion. Reuse, not a new vocabulary; only the over-generic tokens are dropped.
+    (Computed at call time — the keyword lists are defined later in this module.)"""
+    return tuple(k for k in _STRONG_CATALYST_KEYWORDS if k not in _AUTO_THEME_GENERIC_TOKENS)
+
+
+def _auto_hot_theme_recurrence_min() -> int:
+    """How many recent big movers must share a catalyst keyword for it to count as HOT.
+    One documented base; default 2 (leader + >=1 peer). Floored at 2 (one name is noise)."""
+    try:
+        v = int(getattr(settings, "chili_momentum_auto_theme_recurrence_min", AUTO_HOT_THEME_RECURRENCE_MIN))
+    except (TypeError, ValueError):
+        return AUTO_HOT_THEME_RECURRENCE_MIN
+    return max(2, min(v, 20))
+
+
+def _auto_hot_theme_window_min() -> int:
+    """Rolling freshness window (minutes) for the recent big movers + their headlines. One
+    documented base; defaults to the news-catalyst freshness window so the two stay aligned,
+    own knob so a theme can run wider than a single fill's freshness. Bounded [15, 1440]."""
+    try:
+        v = int(getattr(settings, "chili_momentum_auto_theme_window_min", _news_catalyst_max_age_min()))
+    except (TypeError, ValueError):
+        return _news_catalyst_max_age_min()
+    return max(15, min(v, 1440))
+
+
+def _auto_hot_theme_big_mover_floor_pct() -> float:
+    """The explosive GAIN floor a recent mover must clear to vote for a hot theme. Reuses the
+    HOT-tape LULD-scale move pct (the floor the lane already calls 'big'); own knob so the
+    theme detector can be tuned independently. Floored at 0."""
+    try:
+        v = float(getattr(settings, "chili_momentum_auto_theme_big_mover_pct", HOT_TAPE_BIG_MOVE_PCT))
+    except (TypeError, ValueError):
+        return HOT_TAPE_BIG_MOVE_PCT
+    return max(0.0, v)
+
+
+def _recent_big_movers() -> set[str]:
+    """Normalized tickers of the recent BIG movers (top gainers clearing the explosive gain
+    floor) — the population the hot-theme detector samples. Reads the lane's existing gainers
+    snapshot (``get_top_movers('gainers')``, the SAME feed screen_top_gainers uses); a mover's
+    ``todaysChangePerc`` must clear ``_auto_hot_theme_big_mover_floor_pct``. Fail-open to an
+    empty set (no feed / no movers => no auto theme => operator-set-only)."""
+    floor = _auto_hot_theme_big_mover_floor_pct()
+    try:
+        from ...massive_client import get_top_movers
+
+        movers = get_top_movers("gainers") or []
+    except Exception:
+        logger.debug("[catalyst] recent-big-movers fetch failed; no auto theme this pass", exc_info=True)
+        return set()
+    out: set[str] = set()
+    for m in movers:
+        if not isinstance(m, dict):
+            continue
+        tk = str(m.get("ticker") or "").upper().strip()
+        if not tk:
+            continue
+        try:
+            chg = float(m.get("todaysChangePerc") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if chg >= floor:
+            out.add(_norm(tk))
+    return out
+
+
+def _extract_theme_keywords(title: str) -> set[str]:
+    """Catalyst keywords present in a headline, via the EXISTING strong/weak keyword match
+    machinery (reuse — the same substrings ``_is_strong_catalyst`` / ``_is_weak_catalyst``
+    test). Returns the set of vocabulary phrases the title contains. Pure; lower-cased."""
+    t = str(title or "").lower()
+    if not t:
+        return set()
+    return {kw for kw in _auto_theme_keyword_vocab() if kw in t}
+
+
+def auto_hot_themes() -> set[str]:
+    """The set of catalyst keywords that are HOT right now (auto-detected).
+
+    A keyword is HOT when it appears in the fresh headlines of >= the recurrence threshold of
+    the window's recent BIG movers — i.e. the tape is rewarding that catalyst theme TODAY.
+    Built entirely from machinery the lane already deploys: the recent gainers feed
+    (``get_top_movers``), the fresh-news ``(ticker, title)`` pairs (``get_recent_news_items``),
+    and the strong/weak catalyst keyword lists (``_extract_theme_keywords``). No new feed.
+
+    Flag-gated by ``chili_momentum_auto_theme_detection_enabled`` (OFF => empty set, so the
+    caller stays operator-set-only / byte-identical). Fail-open: no movers, no news, or any
+    fetch error => empty set (the manual operator keywords remain the sole theme source).
+    [momentum_neural] auto-hot-theme detector."""
+    if not bool(getattr(settings, "chili_momentum_auto_theme_detection_enabled", False)):
+        return set()
+    movers = _recent_big_movers()
+    if not movers:
+        return set()
+    try:
+        from ...massive_client import get_recent_news_items
+
+        items = get_recent_news_items(max_age_min=_auto_hot_theme_window_min()) or []
+    except Exception:
+        logger.debug("[catalyst] auto-hot-theme news fetch failed; no auto theme this pass", exc_info=True)
+        return set()
+    # Count distinct big movers carrying each keyword (a name votes once per keyword).
+    movers_per_kw: dict[str, set[str]] = {}
+    for tk, title in items:
+        sym = _norm(tk)
+        if sym not in movers:
+            continue  # only the recent BIG movers vote for a theme (genuine co-movement)
+        for kw in _extract_theme_keywords(title):
+            movers_per_kw.setdefault(kw, set()).add(sym)
+    recur = _auto_hot_theme_recurrence_min()
+    hot = {kw for kw, syms in movers_per_kw.items() if len(syms) >= recur}
+    if hot:
+        logger.debug("[catalyst] auto-hot-themes detected %s (recurrence>=%d, movers=%d)", sorted(hot), recur, len(movers))
+    return hot
+
+
 def theme_catalyst_symbols() -> set[str]:
-    """Tickers in the ACTIVE EVENT THEME (keyword-driven, operator-set window).
+    """Tickers in the ACTIVE EVENT THEME (keyword-driven; operator-set UNION auto-detected hot).
 
     ``chili_momentum_event_theme_keywords`` (comma-separated; empty = no theme)
     names the day's dominant narrative — e.g. "space,satellite,rocket,orbit,
     launch,aerospace,spacex" for the SpaceX IPO window. Theme names keep their
     catalyst boost even in a HOT tape (the inversion neutralizes only GENERIC
-    news — Ross expects the event-theme headlines to perform). Fail-open."""
+    news — Ross expects the event-theme headlines to perform). Fail-open.
+
+    AUTO HOT-THEME union (chili_momentum_auto_theme_detection_enabled): when ON, the
+    operator-set keywords are UNIONED with ``auto_hot_themes()`` (catalyst keywords
+    recurring across the recent big movers) so a NEW name carrying a hot-theme keyword
+    gets the theme boost without the operator re-typing the list. The OPERATOR-set keywords
+    are ALWAYS included (auto only ADDS). Flag-OFF => operator-set-only, byte-identical."""
     raw = str(getattr(settings, "chili_momentum_event_theme_keywords", "") or "")
     kws = [k.strip() for k in raw.split(",") if k.strip()]
+    # Auto-detected hot themes are unioned in (operator-set always honored; auto only adds).
+    auto = auto_hot_themes()  # empty set when the flag is OFF (byte-identical operator path)
+    if auto:
+        seen = {k.lower() for k in kws}
+        for k in auto:
+            if k and k.lower() not in seen:
+                seen.add(k.lower())
+                kws.append(k)
     if not kws:
         return set()
     try:
@@ -519,6 +697,60 @@ def strong_catalyst_symbols() -> set[str]:
         return set()
 
 
+# ── FIX E: PER-TICKER catalyst-news repair for the IN-PLAY movers ───────────────────────
+# The global-firehose accessors (all/strong/weak — get_recent_news_items) bury low-float
+# micro-caps under large-cap news, so a Ross mover with a real catalyst goes UNTAGGED (0/11
+# in the w0av0u3qy probe). This pass queries Polygon news PER IN-PLAY-MOVER ticker (surfacing
+# coverage the firehose omits, verified per-ticker) and grades the fresh hits with the SAME
+# strong/weak/fake classifiers, so the existing catalyst tilt/grade machinery picks them up
+# unchanged. Flag-OFF / no tickers / absent feed -> empty sets (firehose-only, byte-identical).
+def per_ticker_catalyst_tags(
+    tickers,
+) -> tuple[set[str], set[str], set[str], set[str]]:
+    """``(all_tagged, strong, weak, fake)`` normalized-ticker sets from a PER-TICKER fresh-news
+    pass over the IN-PLAY movers. Each tagged name carried a FRESH (within the catalyst
+    freshness window) Polygon headline that the global firehose missed; the title is graded
+    by the same ``_is_strong_catalyst`` / ``_is_weak_catalyst`` / ``_is_fake_catalyst`` the
+    firehose path uses. ``all_tagged`` is every in-play name with ANY fresh headline (the
+    binary present/absent the catalyst_viability_delta boost keys on).
+
+    KILL-SWITCH ``chili_momentum_catalyst_tagging_repair_enabled`` OFF -> all-empty (the
+    caller's firehose-only behaviour is byte-identical). Fail-open: any error -> all-empty
+    (a feed miss never strips the firehose tags the caller already has)."""
+    if not bool(getattr(settings, "chili_momentum_catalyst_tagging_repair_enabled", True)):
+        return set(), set(), set(), set()
+    try:
+        from ...massive_client import get_per_ticker_news_items
+
+        try:
+            max_t = int(getattr(settings, "chili_momentum_catalyst_repair_max_tickers", 40) or 40)
+        except (TypeError, ValueError):
+            max_t = 40
+        items = get_per_ticker_news_items(
+            tickers, max_age_min=_news_catalyst_max_age_min(), max_tickers=max(1, max_t)
+        ) or []
+    except Exception:
+        logger.debug("[catalyst] per-ticker tagging repair fetch failed", exc_info=True)
+        return set(), set(), set(), set()
+    all_t: set[str] = set()
+    strong: set[str] = set()
+    weak: set[str] = set()
+    fake: set[str] = set()
+    for tk, title in items:
+        sym = _norm(tk)
+        all_t.add(sym)  # ANY fresh headline = a present catalyst (binary boost)
+        if _is_strong_catalyst(title):
+            strong.add(sym)
+        if _is_weak_catalyst(title):
+            weak.add(sym)
+        if _is_fake_catalyst(title):
+            fake.add(sym)
+    if all_t:
+        logger.debug("[catalyst] FIX E per-ticker tagged %d in-play movers (strong=%d weak=%d fake=%d)",
+                     len(all_t), len(strong), len(weak), len(fake))
+    return all_t, strong, weak, fake
+
+
 # FAKE-CATALYST credibility guard (Ross AS101/HVM101: he DISTRUSTS unverified / hacked-PR /
 # unsolicited-buyout / rumor headlines — they round-trip FULLY to the pre-move price with no
 # clean re-entry, so a fill on one is a likely fade-trap). This is a DIFFERENT angle from the
@@ -564,6 +796,59 @@ def fake_catalyst_symbols() -> set[str]:
     except Exception:
         logger.debug("[catalyst] fake-catalyst grade fetch failed", exc_info=True)
         return set()
+
+
+# CATALYST-CONVICTION grade rank (Ross E2): a single integer "how trusted is this catalyst"
+# rank read off the SAME deployed strong/weak/fake news accessors the lane already uses (no new
+# feed). Used by the catalyst_conviction_size_multiplier to graduate to bigger size ONLY on a
+# real, credible catalyst. Dominance mirrors the selection grader: WEAK and FAKE both SUPPRESS
+# the strong boost (a diluting / rumored / hacked "strong" headline earns NO conviction rank),
+# so only a clean STRONG catalyst ranks > 0. Crypto / no news / absent feed => 0 (neutral).
+_CATALYST_GRADE_RANK_STRONG = 3
+
+
+def catalyst_grade_rank(
+    symbol: str,
+    *,
+    strong_symbols: set[str] | None = None,
+    weak_symbols: set[str] | None = None,
+    fake_symbols: set[str] | None = None,
+) -> int:
+    """Integer conviction rank for the DEPLOYED catalyst grade of ``symbol``.
+
+      * STRONG (FDA/trial/M&A/contract/beat), NOT also weak and NOT also fake
+            -> ``_CATALYST_GRADE_RANK_STRONG`` (3)  [the only positive rank]
+      * WEAK / FAKE / MEDIUM / no headline / crypto / absent feed -> 0 (neutral)
+
+    Weak DOMINATES (a name that is both diluting and 'partnering' is a dilution fade) and FAKE
+    DOMINATES (a rumored / hacked / unsolicited "strong" headline is a credibility trap) — both
+    suppress the strong rank to 0, mirroring ``catalyst_grade_selection_delta``. The fake
+    suppression is gated by ``chili_momentum_fake_catalyst_guard_enabled`` (default ON) so the
+    grade source stays consistent with selection. Pure + fail-open: any unreadable symbol /
+    absent set yields 0 (no conviction boost — a missing feed never invents conviction).
+
+    Sets are passed in by the caller (so the news fetch is done once upstream); when omitted
+    they are fetched fresh here from the same accessors. [momentum_neural] catalyst-conviction."""
+    try:
+        if "-USD" in str(symbol or "").upper():
+            return 0
+        sym = _norm(symbol)
+        strong = strong_catalyst_symbols() if strong_symbols is None else strong_symbols
+        weak = weak_catalyst_symbols() if weak_symbols is None else weak_symbols
+        fake = fake_catalyst_symbols() if fake_symbols is None else fake_symbols
+        if not strong or sym not in strong:
+            return 0
+        # Weak suppresses strong (always); fake suppresses strong only when the guard is ON.
+        if weak and sym in weak:
+            return 0
+        if fake and sym in fake and bool(
+            getattr(settings, "chili_momentum_fake_catalyst_guard_enabled", True)
+        ):
+            return 0
+        return _CATALYST_GRADE_RANK_STRONG
+    except Exception:
+        logger.debug("[catalyst] grade-rank fetch failed", exc_info=True)
+        return 0
 
 
 def fake_catalyst_viability_delta(symbol: str, fake_symbols: set[str] | None) -> float:

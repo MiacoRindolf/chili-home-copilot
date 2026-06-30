@@ -205,6 +205,74 @@ def count_inflight_entry_orders(
     return n
 
 
+def sum_inflight_entry_risk_usd(
+    db: Session,
+    *,
+    user_id: int,
+    per_trade_fallback_usd: float,
+    crypto_only: Optional[bool] = None,
+    exclude_session_id: Optional[int] = None,
+) -> float:
+    """In-flight (submitted-but-not-yet-held) entry $-at-risk for the dollar budget.
+
+    Mirrors :func:`count_inflight_entry_orders`'s SAME born-but-not-held set
+    (``state == live_pending_entry`` AND ``entry_submitted`` set AND no ``position``
+    yet) but sums the ACTUAL per-order risk the live runner persists onto each
+    session at submit time (``le['entry_inflight_risk_usd']`` = that order's real
+    shape-aware ``(entry-stop)*qty``, which already reflects the per-trade
+    multiplier). A flat ``count * per_trade_fallback`` under-charges a burst of
+    HIGH-multiplier entries; reading the persisted per-order risk makes the
+    in-flight charge multiplier-aware.
+
+    CONSERVATIVE FALLBACK: when a sibling has no persisted (positive, finite)
+    ``entry_inflight_risk_usd`` (a pre-submit race, or a session written by an
+    older image), charge the positive flat ``per_trade_fallback_usd`` estimate
+    instead — never $0 (an under-estimate would let a fill-burst slip dollars past
+    the ceiling; an over-estimate is the safe side). Same advisory-lock atomicity
+    contract as the count: the caller evaluates this INSIDE the per-(user,lane)
+    lock so each serialized submitter sees the prior one's committed risk."""
+    q = db.query(TradingAutomationSession).filter(
+        TradingAutomationSession.user_id == int(user_id),
+        TradingAutomationSession.mode == "live",
+        TradingAutomationSession.state == STATE_LIVE_PENDING_ENTRY,
+        TradingAutomationSession.execution_family != "alpaca_spot",
+    )
+    if crypto_only is True:
+        q = q.filter(TradingAutomationSession.symbol.like("%-USD"))
+    elif crypto_only is False:
+        q = q.filter(~TradingAutomationSession.symbol.like("%-USD"))
+    if exclude_session_id is not None:
+        q = q.filter(TradingAutomationSession.id != int(exclude_session_id))
+    try:
+        fallback = float(per_trade_fallback_usd)
+    except (TypeError, ValueError):
+        fallback = 0.0
+    if not (fallback > 0):
+        fallback = 0.0
+    total = 0.0
+    try:
+        rows = q.all()
+    except Exception:
+        return 0.0
+    for s in rows:
+        try:
+            snap = s.risk_snapshot_json or {}
+            le = snap.get("momentum_live_execution") if isinstance(snap, dict) else None
+            if not (isinstance(le, dict) and le.get("entry_submitted") and not le.get("position")):
+                continue
+            try:
+                persisted = float(le.get("entry_inflight_risk_usd") or 0.0)
+            except (TypeError, ValueError):
+                persisted = 0.0
+            # Persisted real risk when present + sane; else the positive flat estimate.
+            total += persisted if persisted > 0 else fallback
+        except (TypeError, ValueError, AttributeError):
+            # An un-inspectable sibling still carries real risk — charge the floor.
+            total += fallback
+            continue
+    return total
+
+
 def aggregate_open_crypto_risk_usd(db: Session, *, user_id: int) -> tuple[float, list[dict[str, Any]]]:
     """Crypto mirror of :func:`aggregate_open_risk_usd` (which is equity-only —
     it filters OUT ``-USD``). Sum of entry-to-stop $ at-risk across OPEN live
@@ -256,6 +324,69 @@ def _viability_age_seconds(via: MomentumSymbolViability) -> float:
     if ts.tzinfo:
         ts = ts.replace(tzinfo=None)
     return max(0.0, (_utcnow() - ts).total_seconds())
+
+
+def _recent_eligible_age_seconds(recent_live_eligible_at_utc: Optional[str]) -> Optional[float]:
+    """Age (seconds) of the arm/confirm-time live-eligibility anchor, or None if it is
+    absent / unparseable. Pure + side-effect-free. FAIL-SAFE: any parse error returns
+    None so the caller keeps its conservative BLOCK (the recency grace only relaxes on a
+    positively-parsed, in-window anchor — never on a missing or garbage timestamp)."""
+    raw = (recent_live_eligible_at_utc or "").strip()
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if ts.tzinfo:
+        ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+    age = (_utcnow() - ts).total_seconds()
+    # A future-dated anchor (clock skew) is treated as age 0 (still "recent"); a sane
+    # positive age flows through to the window comparison.
+    return max(0.0, age)
+
+
+def _live_eligible_recency_grace_active(
+    *,
+    policy: MomentumAutomationRiskPolicy,
+    recent_live_eligible_at_utc: Optional[str],
+    live_forward_momentum: Optional[bool],
+) -> tuple[bool, dict[str, Any]]:
+    """Decide whether a live_eligible=False FLICKER at the entry instant qualifies for the
+    adaptive recency grace. Returns ``(active, detail)``. ``active`` is True ONLY when ALL of:
+      * the grace flag is ON (flag OFF => byte-identical: never active);
+      * the session was live-eligible at ARM/CONFIRM within ``live_eligible_recency_grace_seconds``
+        (the anchor parses AND its age <= the window — ONE documented base);
+      * there is live FORWARD MOMENTUM (``live_forward_momentum`` is True — signed-tape accel>0
+        / OFI / price rising, computed by the runner).
+    FAIL-SAFE: a missing/unparseable anchor, an out-of-window anchor, or absent/false momentum
+    => ``active=False`` (keep today's BLOCK). Pure + side-effect-free.
+
+    NOTE on the anchor: it is PINNED to the arm/confirm instant and is NEVER refreshed at
+    runtime (only ``operator_actions.confirm_live_arm`` writes it; the runner does not re-stamp
+    it when live-eligibility is later observed True). This is deliberate and the SAFER
+    behavior — a fixed anchor means the grace window cannot creep, so a slow (> window)
+    arm-to-entry setup ages out and reverts to the conservative BLOCK."""
+    detail: dict[str, Any] = {
+        "grace_enabled": bool(policy.live_eligible_recency_grace_enabled),
+        "grace_window_s": float(policy.live_eligible_recency_grace_seconds),
+        "recent_eligible_age_s": None,
+        "recent_eligible_within_window": False,
+        "live_forward_momentum": (None if live_forward_momentum is None else bool(live_forward_momentum)),
+    }
+    if not policy.live_eligible_recency_grace_enabled:
+        return False, detail
+    age = _recent_eligible_age_seconds(recent_live_eligible_at_utc)
+    if age is None:
+        return False, detail
+    detail["recent_eligible_age_s"] = round(age, 3)
+    within = age <= float(policy.live_eligible_recency_grace_seconds)
+    detail["recent_eligible_within_window"] = bool(within)
+    if not within:
+        return False, detail
+    if not bool(live_forward_momentum):
+        return False, detail
+    return True, detail
 
 
 def _readiness_numbers(exec_json: dict[str, Any]) -> dict[str, Any]:
@@ -469,12 +600,25 @@ def evaluate_proposed_momentum_automation(
     execution_family: str = "coinbase_spot",
     exclude_session_id: Optional[int] = None,
     expected_move_bps: Optional[float] = None,
+    recent_live_eligible_at_utc: Optional[str] = None,
+    live_forward_momentum: Optional[bool] = None,
 ) -> dict[str, Any]:
     """
     Server-side risk gate for operator flows (paper draft, live arm, confirm).
 
     Returns stable dict: allowed, severity, checks, warnings, errors, governance_state, ...
     Archived/expired/cancelled sessions do not count toward concurrency (query filter).
+
+    ``recent_live_eligible_at_utc`` / ``live_forward_momentum`` carry the live-eligibility
+    RECENCY-GRACE evidence (2026-06-29 UPC +500% miss). The runner passes the session's
+    arm/confirm-time eligibility anchor (an ISO-8601 UTC string proving the name WAS
+    live-eligible at arm/confirm) and a positive forward-momentum read (signed-tape accel > 0
+    / OFI / price rising). When ``via.live_eligible`` flickers False at the entry instant but
+    BOTH (a) the anchor is within the grace window AND (b) forward momentum is present, the
+    eligibility block is DOWNGRADED to a warn — a transient re-scoring flicker cannot terminally
+    veto a just-confirmed active mover. FAIL-SAFE: a missing/unparseable anchor or absent
+    momentum keeps today's BLOCK (the grace only relaxes on positive evidence, never widens
+    risk blindly). Both default ``None`` so non-runner callers are byte-identical.
     """
     policy = MomentumAutomationRiskPolicy.from_settings()
     sym = symbol.strip().upper()
@@ -696,14 +840,46 @@ def evaluate_proposed_momentum_automation(
                 )
             ok_le = bool(via.live_eligible)
             if policy.require_live_eligible_for_live:
-                checks.append(
-                    _check(
-                        "live_eligible",
-                        ok_le,
-                        severity="block" if not ok_le else "ok",
-                        message="Live eligible" if ok_le else "Not live-eligible per neural viability.",
+                if ok_le:
+                    checks.append(
+                        _check("live_eligible", True, severity="ok", message="Live eligible")
                     )
-                )
+                else:
+                    # TOCTOU recency grace: a fast/thin premarket vertical can FLICKER
+                    # live_eligible False at the exact entry instant even though the name
+                    # armed+confirmed live-eligible seconds earlier (UPC +500%, 2026-06-29).
+                    # If the session was live-eligible at arm/confirm within the grace window
+                    # AND live forward momentum is present, DOWNGRADE the terminal block to a
+                    # warn so a transient flicker can't veto a just-confirmed active mover.
+                    # FAIL-SAFE: no recent-eligible evidence / no momentum => keep the block.
+                    grace_active, grace_detail = _live_eligible_recency_grace_active(
+                        policy=policy,
+                        recent_live_eligible_at_utc=recent_live_eligible_at_utc,
+                        live_forward_momentum=live_forward_momentum,
+                    )
+                    if grace_active:
+                        checks.append(
+                            _check(
+                                "live_eligible",
+                                True,
+                                severity="warn",
+                                message=(
+                                    "Live-eligibility FLICKER tolerated by recency grace "
+                                    "(recent-eligible at arm/confirm + live forward momentum)."
+                                ),
+                                detail=grace_detail,
+                            )
+                        )
+                    else:
+                        checks.append(
+                            _check(
+                                "live_eligible",
+                                False,
+                                severity="block",
+                                message="Not live-eligible per neural viability.",
+                                detail=grace_detail,
+                            )
+                        )
             else:
                 checks.append(
                     _check(

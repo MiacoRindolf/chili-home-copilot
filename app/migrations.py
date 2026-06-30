@@ -20921,6 +20921,34 @@ def _migration_309_momentum_broker_truth_label(conn) -> None:
     )
 
 
+def _migration_310_iqfeed_depth_ladder_jsonb(conn) -> None:
+    """P3 — make equity L2 REAL: persist the per-PRICE depth ladder.
+
+    The IQFeed depth bridge used to collapse its per-venue book to the
+    bid5/ask5/imbalance5 aggregate and DISCARD the per-price levels, so the
+    app-side OFI reader (_compute_ofi_micro) could only ever see level-1 for
+    equities. Add two JSONB columns holding the top-N [[px, sz], ...] ladder
+    per side, best-first, mirroring the crypto fast_orderbook shape so ONE
+    multi-level reader serves both asset classes.
+
+    Additive + idempotent (ADD COLUMN IF NOT EXISTS). No backfill: the bridge
+    writes these going forward; historical rows keep NULL ladders and the
+    reader fails OPEN to the existing level-1 (bid_top/ask_top) sequence.
+    """
+    conn.execute(text(
+        "ALTER TABLE iqfeed_depth_snapshots ADD COLUMN IF NOT EXISTS bids_json JSONB"
+    ))
+    conn.execute(text(
+        "ALTER TABLE iqfeed_depth_snapshots ADD COLUMN IF NOT EXISTS asks_json JSONB"
+    ))
+    conn.commit()
+    logger.info(
+        "[mig310] ensured iqfeed_depth_snapshots.bids_json/asks_json (per-price L2 "
+        "ladder, crypto fast_orderbook shape) — multi-level OFI source; reader "
+        "fail-open to level-1 when NULL"
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -21301,6 +21329,8 @@ MIGRATIONS = [
      _migration_308_momentum_fill_outcomes),
     ("309_momentum_broker_truth_label",
      _migration_309_momentum_broker_truth_label),
+    ("310_iqfeed_depth_ladder_jsonb",
+     _migration_310_iqfeed_depth_ladder_jsonb),
 ]
 
 

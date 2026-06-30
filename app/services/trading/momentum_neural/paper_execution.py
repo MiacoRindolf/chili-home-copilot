@@ -238,6 +238,7 @@ def stop_target_prices(
     stop_atr_mult: float = 0.60,
     target_atr_mult: float = 0.90,  # legacy; superseded by reward_risk below
     reward_risk: float | None = None,
+    realized_high: float | None = None,
 ) -> tuple[float, float]:
     """ATR-scaled STOP + a reward:risk-anchored TARGET (Ross-style, >= 2:1).
 
@@ -258,6 +259,15 @@ def stop_target_prices(
         rr = 2.0
     if side_long:
         stop = entry * (1.0 - max(0.003, atr_pct * float(stop_atr_mult)))
+        # DESIGN #3: lift the R:R toward the name's realized HOD room (in R), capped.
+        # No-op (rr unchanged) when flag-off / no realized_high / no proven room.
+        rr, _adaptive_meta = adaptive_first_target_reward_risk(
+            base_reward_risk=rr,
+            entry=entry,
+            stop=stop,
+            realized_high=realized_high,
+            side_long=True,
+        )
         rr_target = entry + rr * (entry - stop)  # reward = rr x risk(stop distance)
         # Gap #2: pull the FIRST-scale target in to the next round number above entry when
         # one sits between 1R and the R:R target — Ross sells half into the level where
@@ -310,7 +320,96 @@ def class_aware_reward_risk(symbol: str | None = None) -> float:
     return g
 
 
-def scale_out_fraction(default: float = 0.5, symbol: str | None = None) -> float:
+# ── DESIGN #3: ADAPTIVE PROFIT TARGET (realized-range-aware R:R) ──────────────
+# A fixed 2:1 caps a +400% low-float monster at 2R when its realized intraday
+# room (ATR-to-HOD) is 6-10R. Lift the first-target R:R toward the name's OWN
+# realized headroom-in-R, bounded by ONE documented cap above the base floor.
+# SELF-CORRECTING vs the vol-floored stop (literature: a wider/vol-floored stop
+# implies a lower optimal take-profit): room_R = headroom / stop_distance, so a
+# wider stop GROWS the denominator and SHRINKS room_R -> rr_eff falls with no
+# extra term. The base R:R (class_aware_reward_risk) stays the FLOOR; we only
+# ever RAISE the target, never below the floor. Pure; parity-testable.
+
+
+def adaptive_first_target_reward_risk(
+    *,
+    base_reward_risk: float,
+    entry: float,
+    stop: float,
+    realized_high: float | None,
+    side_long: bool = True,
+) -> tuple[float, dict[str, Any]]:
+    """Effective first-target R:R = clamp(max(base, room_R_capture * room_R), base, rr_cap).
+
+    ``room_R`` is the name's realized HEADROOM expressed in R-units:
+    ``room_R = max(0, realized_high - entry) / (entry - stop)`` — the ACTUAL
+    distance to the session high the name has already proven it can travel,
+    divided by the placed stop distance (so it is R-normalized and self-scales
+    against a wider vol-floored stop). ``realized_high`` is the recent session
+    high (HOD proxy from the entry 15m frame); when it is None / <= entry (no
+    proven room) the result is the base R:R (byte-identical). ``room_R_capture``
+    (the ONE documented base, default 0.5) is the fraction of the realized room
+    we aim the first target at — a partial of the proven travel, not the whole
+    leg (the RUNNER captures the tail above). The cap
+    (chili_momentum_adaptive_target_rr_cap) bounds run-away on a vertical
+    blow-off. Long-only; shorts / bad inputs / flag-off -> base. Pure."""
+    meta: dict[str, Any] = {"adaptive": False, "base_rr": float(base_reward_risk)}
+    if not side_long or not adaptive_target_enabled():
+        return float(base_reward_risk), meta
+    try:
+        e = float(entry)
+        s = float(stop)
+        base = float(base_reward_risk)
+    except (TypeError, ValueError):
+        return float(base_reward_risk), meta
+    risk = e - s
+    if not (math.isfinite(e) and math.isfinite(s) and math.isfinite(base)) or risk <= 0 or base <= 0:
+        return base, meta
+    rh = None
+    try:
+        if realized_high is not None and math.isfinite(float(realized_high)):
+            rh = float(realized_high)
+    except (TypeError, ValueError):
+        rh = None
+    if rh is None or rh <= e:
+        return base, meta  # no proven headroom -> base (byte-identical)
+    room_r = (rh - e) / risk
+    try:
+        cap = float(getattr(settings, "chili_momentum_adaptive_target_rr_cap", 6.0) or 6.0)
+        capture = float(getattr(settings, "chili_momentum_adaptive_target_room_capture", 0.5) or 0.5)
+    except (TypeError, ValueError):
+        cap, capture = 6.0, 0.5
+    if not (math.isfinite(cap) and cap > 0):
+        cap = 6.0
+    cap = max(base, cap)  # the cap can never sit below the documented floor
+    if not (math.isfinite(capture) and capture > 0):
+        capture = 0.5
+    rr_eff = max(base, capture * room_r)
+    rr_eff = max(base, min(rr_eff, cap))
+    if not math.isfinite(rr_eff) or rr_eff <= 0:
+        return base, meta
+    meta = {
+        "adaptive": rr_eff > base + 1e-9,
+        "base_rr": base,
+        "room_r": round(room_r, 4),
+        "capture": capture,
+        "rr_eff": round(rr_eff, 4),
+        "rr_cap": cap,
+        "realized_high": rh,
+    }
+    return float(rr_eff), meta
+
+
+def adaptive_target_enabled() -> bool:
+    return bool(getattr(settings, "chili_momentum_adaptive_target_enabled", True))
+
+
+def scale_out_fraction(
+    default: float = 0.5,
+    symbol: str | None = None,
+    *,
+    vol_pctl: float | None = None,
+) -> float:
     """Fraction of the ORIGINAL position sold into the first target.
 
     Ross "sell 1/2 into strength" (up to 0.75 on the micro-pullback). ONE
@@ -335,6 +434,21 @@ def scale_out_fraction(default: float = 0.5, symbol: str | None = None) -> float
                 pass
     if not math.isfinite(v):
         v = default
+    # DESIGN #3: tilt the partial by the name's realized-vol percentile within the
+    # batch — sell LESS into the first target when realized vol is HIGH (keep a
+    # bigger runner for the tail) and MORE when vol compresses. Centered at the
+    # median (0.5) so a typical-vol name is byte-identical; the tilt magnitude is
+    # ONE documented base (chili_momentum_adaptive_scale_vol_tilt). Flag-gated.
+    if vol_pctl is not None and adaptive_target_enabled():
+        try:
+            p = float(vol_pctl)
+            tilt = float(getattr(settings, "chili_momentum_adaptive_scale_vol_tilt", 0.5) or 0.0)
+            if math.isfinite(p) and math.isfinite(tilt) and tilt > 0.0:
+                p = max(0.0, min(1.0, p))
+                # p>0.5 (high vol) -> reduce v; p<0.5 (low vol) -> raise v.
+                v = v * (1.0 - tilt * (p - 0.5) * 2.0)
+        except (TypeError, ValueError):
+            pass
     return max(0.05, min(0.95, v))
 
 
@@ -546,6 +660,103 @@ def iceberg_seller_score(ask_series: list[tuple[float, float]] | None) -> float 
     return refill / (price_adv_bps + 1.0)
 
 
+def discrete_pullback_add_trigger(
+    closes: list[float] | None,
+    *,
+    ema: list[float] | None = None,
+    vwap: float | None = None,
+    live_price: float | None = None,
+    ema_band: float = 0.003,
+) -> tuple[bool, dict[str, Any]]:
+    """Fresh DISCRETE higher-low bounce off the rising EMA/VWAP (GAP 3 add trigger; pure).
+
+    Returns ``(fired, debug)``. ``fired=True`` ONLY when a distinct pullback-and-bounce
+    sub-pattern is present in the recent bar window — i.e. the lane EARNED a NEW entry-shaped
+    setup, not merely continuous green:
+
+      (1) a recent DIP toward/just under the (rising) EMA — a local pullback low in the window
+          sat within ``ema_band`` of the EMA (or below it), AND
+      (2) a HIGHER LOW — the pullback low is ABOVE the prior pullback low (the dip held), AND
+      (3) a BOUNCE — the current price has turned back UP off that low and is back at/above the
+          EMA (close >= ema*(1-ema_band)), AND
+      (4) the EMA is RISING over the window (trend intact), AND (when ``vwap`` given) price is
+          at/above VWAP (Ross never adds below VWAP).
+
+    The live tick (when ABOVE the last close) is used as the current price so a fast turn is
+    seen sub-bar; it can only make the check STRICTER, never manufacture a bounce. PROTECTIVE /
+    FAIL-CLOSED: a thin/degenerate window, a flat/falling EMA, a broken structure, or any error
+    => ``(False, ...)`` so the add is BLOCKED (the GAP-3 guard then turns a would-fire into a
+    no-fire — the safe direction). This is a SIZE-DOWN/STRICTER-ADD gate; a False can never
+    increase risk. Pure; no I/O or mutation. docs/DESIGN/MOMENTUM_LANE.md"""
+    debug: dict[str, Any] = {"reason": "discrete_wait"}
+    try:
+        if not closes or len(closes) < 6:
+            debug["reason"] = "insufficient_bars"
+            return False, debug
+        cl = [float(c) for c in closes if c is not None and math.isfinite(float(c))]
+        if len(cl) < 6:
+            debug["reason"] = "insufficient_bars"
+            return False, debug
+        cur = cl[-1]
+        if live_price is not None:
+            try:
+                lp = float(live_price)
+                if lp > 0:
+                    cur = max(cl[-1], lp)
+            except (TypeError, ValueError):
+                pass
+        if cur <= 0:
+            debug["reason"] = "no_price"
+            return False, debug
+        # Rising-EMA basis: use the supplied EMA when present, else a short SMA proxy.
+        if ema and len(ema) >= len(cl):
+            ema_now = float(ema[-1])
+            ema_prev = float(ema[max(0, len(ema) - 5)])
+        else:
+            ema_now = sum(cl[-3:]) / 3.0
+            ema_prev = sum(cl[-6:-3]) / 3.0 if len(cl) >= 6 else ema_now
+        if not (ema_now > 0 and math.isfinite(ema_now)):
+            debug["reason"] = "no_ema"
+            return False, debug
+        if ema_now <= ema_prev * (1.0 + 1e-9):  # EMA must be RISING (trend intact)
+            debug["reason"] = "ema_not_rising"
+            return False, debug
+        # Two most-recent local lows in the window (prior vs latest pullback low).
+        window = cl[-6:]
+        mid = len(window) // 2
+        prior_low = min(window[:mid]) if window[:mid] else min(window)
+        latest_low = min(window[mid:]) if window[mid:] else min(window)
+        if latest_low <= prior_low * (1.0 + 1e-9):  # HIGHER LOW required (the dip held)
+            debug["reason"] = "not_higher_low"
+            return False, debug
+        # (1) the latest pullback dipped to/under the EMA (a real pullback, not a runaway).
+        dipped = latest_low <= ema_now * (1.0 + float(ema_band))
+        # (3) the bounce: current price turned back UP to/above the EMA hold band.
+        bounced = cur >= ema_now * (1.0 - float(ema_band)) and cur > latest_low * (1.0 + 1e-9)
+        if not (dipped and bounced):
+            debug["reason"] = "no_dip_or_bounce"
+            return False, debug
+        # (4) Ross never adds below VWAP.
+        if vwap is not None:
+            try:
+                vw = float(vwap)
+                if vw > 0 and cur < vw * (1.0 - 1e-9):
+                    debug["reason"] = "below_vwap"
+                    return False, debug
+            except (TypeError, ValueError):
+                pass
+        debug.update({
+            "reason": "discrete_bounce",
+            "ema_now": round(ema_now, 6),
+            "prior_low": round(prior_low, 6),
+            "latest_low": round(latest_low, 6),
+            "cur": round(cur, 6),
+        })
+        return True, debug
+    except Exception:
+        return False, {"reason": "error_fail_closed"}
+
+
 def pyramid_add_decision(
     *,
     enabled: bool,
@@ -566,6 +777,7 @@ def pyramid_add_decision(
     midday_lull: bool,
     iceberg_score: float | None = None,
     iceberg_threshold: float | None = None,
+    discrete_entry_trigger_fired: bool | None = None,
 ) -> dict[str, Any]:
     """Pure gate for the risk-neutral confirmation-pyramid ADD (no I/O, unit-testable).
 
@@ -652,6 +864,18 @@ def pyramid_add_decision(
     ):
         out["reason"] = "iceberg_hidden_seller"
         return out
+    # GAP 3 (HVM101) — require a FRESH DISCRETE entry sub-pattern for the add, not merely
+    # CONTINUOUS green. ``discrete_entry_trigger_fired`` is the result of an entry-trigger
+    # check at the add tick (a new higher-low bounce off the rising EMA/VWAP after a dip).
+    # ADDITIVE / fail-OPEN: ``None`` (the flag is OFF, or the trigger could not be evaluated)
+    # leaves the add UNCHANGED — byte-identical to before. Only an explicit ``False`` (flag
+    # ON, evaluated, NO fresh discrete trigger) BLOCKS the add. It can NEVER fire an add the
+    # existing cushion/HOD/OFI/iceberg guards blocked (those already returned above), so it
+    # ONLY tightens — it cannot increase risk.
+    out["discrete_trigger"] = discrete_entry_trigger_fired
+    if discrete_entry_trigger_fired is False:
+        out["reason"] = "discrete_entry_trigger_not_fired"
+        return out
     out["fire"] = True
     out["reason"] = "confirmed"
     return out
@@ -726,6 +950,483 @@ def runner_trail_stop(
     return min(cs, chandelier)
 
 
+# ---------------------------------------------------------------------------
+# LEVER 2A — MATH-VERIFIED adaptive vol-normalized runner trail (CORE).
+#
+# The frozen-ATR trail (runner_trail_stop / cushion_adaptive_trail_stop) snapshots
+# entry_stop_atr_pct AT ENTRY and never refreshes it, so a runner whose realized
+# vol COLLAPSES after the breakout keeps an entry-sized (often too-wide) trail and
+# bleeds back the move — exactly the ASTC/DCOY/LI/AMPX/TMC "breaks don't hold,
+# -$17 total" leak. The vol-norm trail re-derives the trail WIDTH from LIVE realized
+# vol scaled to the holding horizon, floored so the stop sits OUTSIDE the bid/ask
+# bounce. Every output composes through INVARIANT-A (ratchet-only) at the call site —
+# this core only ever produces a candidate WIDTH/STOP; it never loosens a live stop.
+#
+# All functions here are PURE (no DB, no clock) for replay/live parity + unit tests.
+# docs/DESIGN/MOMENTUM_LANE.md
+# ---------------------------------------------------------------------------
+
+
+def denoised_rv_ewma(grid_log_returns: list[float], *, half_life: float) -> float | None:
+    """Denoised realized-vol (per-grid-step stdev) from EVENT-GRID log returns via
+    an EWMA of squared returns. ``grid_log_returns`` are r_i = ln(p_i / p_{i-1})
+    computed on a SUB-SAMPLED grid (every ~1-5s or every-k-th tick) — sub-sampling is
+    what denoises microstructure/bid-ask-bounce noise out of the per-tick series
+    (the verification's correction: do NOT EWMA per-tick returns directly).
+
+    ``half_life`` is in GRID-STEP count (not seconds): the EWMA decay
+    lambda = exp(ln(0.5)/half_life), so the most recent steps dominate. Returns the
+    per-grid-step stdev (sqrt of the EWMA variance), or None when fewer than 2 grid
+    returns exist (caller falls back to expected_move). Pure."""
+    rs = [r for r in (grid_log_returns or []) if isinstance(r, (int, float)) and math.isfinite(r)]
+    if len(rs) < 2:
+        return None
+    try:
+        hl = float(half_life)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(hl) and hl > 0):
+        return None
+    lam = math.exp(math.log(0.5) / hl)  # decay per step, in (0, 1)
+    # EWMA of squared returns, oldest-first; mean ~0 over a short event grid so we
+    # use E[r^2] as the variance estimator (standard short-horizon RV).
+    ewma_var = rs[0] * rs[0]
+    for r in rs[1:]:
+        ewma_var = lam * ewma_var + (1.0 - lam) * (r * r)
+    if not (math.isfinite(ewma_var) and ewma_var >= 0.0):
+        return None
+    return math.sqrt(ewma_var)
+
+
+def roll_effective_spread_pct(grid_log_returns: list[float]) -> float | None:
+    """Roll (1984) effective-spread estimator as a FRACTION of price, from the same
+    EVENT-GRID returns. Roll: spread = 2 * sqrt(-Cov(r_t, r_{t-1})) when the lag-1
+    autocovariance of returns is NEGATIVE (the bid-ask bounce signature). Returns the
+    HALF-spread fraction (spread/2 ≈ the one-sided distance the stop must clear to sit
+    outside the bounce), or None when the autocovariance is non-negative (no bounce
+    signature ⇒ no Roll estimate; caller uses the vol floor alone). Pure — used to
+    push the trail floor OUTSIDE the round-trip noise so a healthy pullback isn't
+    shaken out."""
+    rs = [r for r in (grid_log_returns or []) if isinstance(r, (int, float)) and math.isfinite(r)]
+    if len(rs) < 3:
+        return None
+    n = len(rs) - 1
+    mean = sum(rs) / len(rs)
+    cov = 0.0
+    for i in range(1, len(rs)):
+        cov += (rs[i] - mean) * (rs[i - 1] - mean)
+    cov /= n
+    if not math.isfinite(cov) or cov >= 0.0:
+        return None
+    spread_frac = 2.0 * math.sqrt(-cov)  # full effective spread as a return-fraction
+    if not (math.isfinite(spread_frac) and spread_frac > 0.0):
+        return None
+    return spread_frac / 2.0  # half-spread (one-sided)
+
+
+def volnorm_trail_dist_pct(
+    *,
+    rv_live: float,
+    expected_hold_s: float,
+    grid_secs: float,
+    k: float,
+    vol_floor_pct: float,
+    effective_spread_pct: float | None = None,
+    spread_floor_mult: float = 1.5,
+    max_dist_pct: float = 0.15,
+) -> float:
+    """MATH-VERIFIED vol-normalized trail DISTANCE as a fraction of price.
+
+      rv_hold      = rv_live * sqrt(N),  N = expected_hold_s / grid_secs
+                     (both LIVE-derived: expected_hold from the median realized hold of
+                     recent scalps, grid_secs from the realized-vol event grid — no magic
+                     horizon).
+      candidate    = k * rv_hold                          (k in [1.1, 1.7], default 1.3)
+      floor_pct    = max(vol_floor_pct, spread_floor_mult * effective_spread_pct)
+                     (the stop sits OUTSIDE both the live vol-floor AND the bounce)
+      trail_dist   = clamp(candidate, floor_pct, max_dist_pct)
+
+    ``rv_live`` is the per-grid-step stdev (denoised_rv_ewma) and the sqrt-of-time rule
+    scales it to the holding horizon in the SAME grid units (N = expected_hold_s /
+    grid_secs = the number of GRID STEPS over the hold, NOT the number of ticks). Using
+    a tick-count here would over-scale by sqrt(tick_rate * grid_secs) and widen the band
+    well past the literature-justified k*rv_hold. ``vol_floor_pct`` is the existing entry
+    vol-floor (reuse, not a new magic number). ``max_dist_pct`` mirrors the existing 0.15
+    ATR-pct clamp. Pure; deterministic; INVARIANT-A is enforced by the caller
+    (ratchet-only)."""
+    try:
+        rv = float(rv_live)
+        hold = float(expected_hold_s)
+        gs = float(grid_secs)
+        kk = float(k)
+        floor = max(0.0, float(vol_floor_pct or 0.0))
+        cap = float(max_dist_pct)
+    except (TypeError, ValueError):
+        return max(0.0, float(vol_floor_pct or 0.0))
+    if not (math.isfinite(rv) and rv >= 0.0):
+        return floor
+    n = (
+        max(1.0, hold / max(gs, 1e-9))
+        if (math.isfinite(hold) and math.isfinite(gs))
+        else 1.0
+    )
+    rv_hold = rv * math.sqrt(n)
+    candidate = max(0.0, kk) * rv_hold
+    # Push the floor outside the bid/ask bounce when a Roll/Corwin-Schultz estimate exists.
+    if effective_spread_pct is not None:
+        try:
+            es = float(effective_spread_pct)
+            sm = float(spread_floor_mult)
+            if math.isfinite(es) and es > 0.0 and math.isfinite(sm) and sm > 0.0:
+                floor = max(floor, sm * es)
+        except (TypeError, ValueError):
+            pass
+    if not (math.isfinite(cap) and cap > 0.0):
+        cap = 0.15
+    lo = min(floor, cap)
+    return max(lo, min(candidate, cap))
+
+
+def trail_width_maturity_factor(
+    *,
+    rv_live: float | None,
+    vol_floor_pct: float | None,
+    ofi_level: float | None,
+    ofi_slope: float | None,
+    max_widen: float = 2.0,
+    vol_regime_pivot: float = 1.0,
+) -> float:
+    """DESIGN#2 — adaptive WIDEN factor in [1.0, ``max_widen``] applied to the 2A trail
+    ``k`` so a FRESH, vol-rich runner trails near the chandelier-literature optimum
+    (PF peaks ~3x ATR; 2x over-tightens) while a MATURING/exhausting runner decays back
+    to 1.0 so the existing RIDE-LOCK LOCK/HARD bands tighten unimpeded.
+
+    Two REAL signals, both already computed live (no new datum, no magic absolute):
+      vol_regime = rv_live / max(vol_floor_pct, eps) — how energetic the LIVE tape is vs
+                   the entry vol-floor. >pivot ⇒ vol-rich (room to run); <=pivot ⇒ calm.
+      maturity   = fresh trend (ofi_level > 0 ∧ ofi_slope >= 0) ⇒ flow still being fed
+                   ⇒ permit the widen; slope rolling over (< 0) ⇒ exhaustion ⇒ factor
+                   DECAYS to 1.0 (let LOCK/HARD do the tightening).
+
+    factor = 1.0 + (max_widen - 1.0) * vol_gate * maturity_gate
+      vol_gate      = clamp((vol_regime - vol_regime_pivot) / vol_regime_pivot, 0, 1)
+      maturity_gate = 1.0 if (ofi_level>0 ∧ ofi_slope>=0); 0.0 if ofi_slope<0; 0.5 if
+                      flow read missing/flat (neutral half-widen, fail-toward-mild).
+
+    Fail-NEUTRAL to 1.0 on any missing/degenerate input. Pure; deterministic; INVARIANT-A
+    is enforced by the caller (a wider band only lowers the candidate, composed via max())."""
+    try:
+        mw = float(max_widen)
+        piv = float(vol_regime_pivot)
+    except (TypeError, ValueError):
+        return 1.0
+    if not (math.isfinite(mw) and mw > 1.0) or not (math.isfinite(piv) and piv > 0.0):
+        return 1.0
+    try:
+        rv = float(rv_live)
+        vf = float(vol_floor_pct)
+    except (TypeError, ValueError):
+        return 1.0
+    if not (math.isfinite(rv) and rv >= 0.0 and math.isfinite(vf) and vf > 0.0):
+        return 1.0
+    vol_regime = rv / vf
+    if not math.isfinite(vol_regime):
+        return 1.0
+    vol_gate = max(0.0, min(1.0, (vol_regime - piv) / piv))
+    lvl = ofi_level if (ofi_level is not None and math.isfinite(float(ofi_level))) else None
+    slp = ofi_slope if (ofi_slope is not None and math.isfinite(float(ofi_slope))) else None
+    if lvl is None or slp is None:
+        maturity_gate = 0.5
+    elif float(slp) < 0.0:
+        maturity_gate = 0.0
+    elif float(lvl) > 0.0 and float(slp) >= 0.0:
+        maturity_gate = 1.0
+    else:
+        maturity_gate = 0.5
+    factor = 1.0 + (mw - 1.0) * vol_gate * maturity_gate
+    if not math.isfinite(factor):
+        return 1.0
+    return max(1.0, min(mw, factor))
+
+
+def volnorm_runner_trail_stop(
+    *,
+    high_water_mark: float,
+    trail_dist_pct: float,
+    breakeven_floor: float,
+    current_stop: float,
+    side_long: bool = True,
+) -> float:
+    """Apply a vol-normalized trail DISTANCE (from ``volnorm_trail_dist_pct``) to the
+    high-water mark and compose it through INVARIANT-A.
+
+      candidate = HWM * (1 - trail_dist_pct)              (long)
+      new_stop  = max(current_stop, breakeven_floor, candidate)   ← INVARIANT-A
+
+    INVARIANT-A (ratchet-only): the returned stop is NEVER below ``current_stop`` and
+    NEVER below ``breakeven_floor`` — a smaller live vol (narrower candidate) declines
+    to TIGHTEN but can never LOOSEN or null the structural/breakeven stop. The HWM is
+    expected to be the MICRO-PRICE high (passed in by the caller), not the bid. Pure."""
+    try:
+        hwm = float(high_water_mark)
+        dist = float(trail_dist_pct)
+        be = float(breakeven_floor)
+        cs = float(current_stop)
+    except (TypeError, ValueError):
+        return current_stop
+    if not (math.isfinite(hwm) and math.isfinite(dist) and math.isfinite(cs)):
+        return current_stop
+    dist = max(0.0, dist)
+    if side_long:
+        candidate = hwm * (1.0 - dist)
+        floors = [c for c in (cs, be, candidate) if math.isfinite(c)]
+        return max(floors) if floors else cs  # INVARIANT-A: ratchet-only
+    candidate = hwm * (1.0 + dist)
+    caps = [c for c in (cs, be, candidate) if math.isfinite(c)]
+    return min(caps) if caps else cs
+
+
+def micro_price(bid: float, bid_size: float, ask: float, ask_size: float) -> float | None:
+    """Stoikov micro-price: (bid*ask_size + ask*bid_size) / (bid_size + ask_size).
+
+    The size-weighted fair value — leans toward the side with MORE depth (the side
+    less likely to move), a less-noisy HWM reference than the raw bid for the trail.
+    Returns None on degenerate inputs. Pure."""
+    try:
+        b, bs, a, as_ = float(bid), float(bid_size), float(ask), float(ask_size)
+    except (TypeError, ValueError):
+        return None
+    denom = bs + as_
+    if not (math.isfinite(b) and math.isfinite(a) and math.isfinite(denom)) or denom <= 0:
+        return None
+    mp = (b * as_ + a * bs) / denom
+    return mp if math.isfinite(mp) else None
+
+
+# ---------------------------------------------------------------------------
+# LEVER 2B — VELOCITY/PERSISTENCE RIDE-LOCK (CORE) on top of the 2A vol-norm trail.
+#
+# The 2A vol-norm trail correctly SIZES the band, but it is still MECHANICAL: it will
+# tighten a runner out on a healthy mid-thrust pullback, and a true climax tops a full
+# candle before the candle-shaped exits print (the ASTC/DCOY/LI/AMPX/TMC "breaks don't
+# hold, -$17" leak). 2B reads the DENOISED order flow and decides a REGIME:
+#
+#   RIDE   — denoised signed-flow / OFI-SLOPE > 0 AND tick_rate persists ⇒ the thrust is
+#            still being fed; hold the band WIDE (return the 2A width unchanged) so the
+#            runner extends. NEVER loosens an existing stop (INVARIANT-A at the call site).
+#   LOCK   — the OFI-SLOPE / flow ROLLS OVER (turns negative) while price is NEAR the HWM ⇒
+#            climax; COLLAPSE the band to a tight giveback (sell into strength BEFORE a full
+#            candle prints — faster than the topping-tail).
+#   HARD   — strong-negative flow WITH sellers lifting THROUGH the micro-price ⇒ the most
+#            decisive distribution read; an even tighter climax band.
+#
+# The SLOPE is the 1st derivative of the DENOISED (EWMA) OFI LEVEL — NOT the raw
+# 2nd-derivative signed_accel (noise-amplifying, per the math verification). All functions
+# here are PURE (no DB, no clock) for replay/live parity + unit tests. Every output is a
+# candidate WIDTH/STOP composed through INVARIANT-A by the caller (ratchet-only). docs/DESIGN/MOMENTUM_LANE.md
+# ---------------------------------------------------------------------------
+
+
+def ewma_series(values: list[float], *, half_life: float) -> list[float] | None:
+    """Causal EWMA of ``values`` (oldest-first), one output per input. ``half_life`` is
+    in STEP count: lambda = exp(ln(0.5)/half_life). Returns the smoothed series, or None
+    on < 1 finite value / bad half_life. Pure — the DENOISING step that turns the noisy
+    per-grid OFI LEVEL into the smooth level whose 1st difference is the rollover signal."""
+    vs = [v for v in (values or []) if isinstance(v, (int, float)) and math.isfinite(v)]
+    if not vs:
+        return None
+    try:
+        hl = float(half_life)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(hl) and hl > 0):
+        return None
+    lam = math.exp(math.log(0.5) / hl)  # decay per step, in (0, 1)
+    out: list[float] = [vs[0]]
+    for v in vs[1:]:
+        out.append(lam * out[-1] + (1.0 - lam) * v)
+    return out
+
+
+def ofi_level_and_slope(
+    ofi_level_series: list[float], *, half_life: float
+) -> tuple[float | None, float | None]:
+    """DENOISED OFI LEVEL + its EWMA SLOPE (the 1st derivative on the event-time series).
+
+    ``ofi_level_series`` is the per-event-grid-bucket aggressor imbalance in [-1, 1]
+    (oldest-first; Lee-Ready signed). We EWMA-smooth it (``ewma_series``) and return
+    ``(level, slope)`` where ``level`` is the most-recent smoothed OFI and ``slope`` is the
+    LAST consecutive EWMA difference (smoothed[-1] - smoothed[-2]) — the denoised 1st
+    derivative. ``slope > 0`` ⇒ flow building (RIDE); ``slope < 0`` ⇒ flow rolling over
+    (LOCK candidate). Returns ``(None, None)`` on < 2 grid buckets (caller falls back to
+    the 2A trail). Using the 1st derivative of the DENOISED level — NOT the raw 2nd-
+    derivative signed_accel — is the verified, noise-suppressing choice. Pure."""
+    sm = ewma_series(ofi_level_series, half_life=half_life)
+    if sm is None or len(sm) < 2:
+        # a single smoothed value still gives a level (no slope yet)
+        if sm and len(sm) == 1:
+            return float(sm[0]), None
+        return None, None
+    return float(sm[-1]), float(sm[-1] - sm[-2])
+
+
+def velocity_persistence_ride_lock(
+    *,
+    high_water_mark: float,
+    entry_price: float,
+    bid: float,
+    base_trail_dist_pct: float,
+    ofi_level: float | None,
+    ofi_slope: float | None,
+    tick_rate_per_s: float | None,
+    entry_tick_rate_per_s: float | None,
+    persist_frac: float,
+    breakeven_floor: float,
+    current_stop: float,
+    micro_price_ref: float | None = None,
+    last_trade_px: float | None = None,
+    ofi_threshold: float = 0.25,
+    lock_band_pct: float | None = None,
+    side_long: bool = True,
+) -> dict[str, Any]:
+    """Velocity/persistence RIDE-LOCK regime decision on top of the 2A vol-norm trail.
+
+    Given the 2A trail width (``base_trail_dist_pct``) and the DENOISED live flow
+    (``ofi_level`` + ``ofi_slope`` from ``ofi_level_and_slope``) + the live ``tick_rate``,
+    pick a regime and return a band WIDTH and a ratchet-only stop CANDIDATE:
+
+      RIDE  — flow positive (level > 0 ∧ slope >= 0) AND the pace persists
+              (tick_rate >= entry_tick_rate * persist_frac): keep ``base_trail_dist_pct``
+              (the move is still being fed — do NOT mechanically tighten).
+      LOCK  — flow rolls over (slope < 0) while NEAR the high (giveback small): COLLAPSE
+              to a tight giveback band (``lock_band_pct``, default = half the 2A width,
+              floored small) so the next tick exits near the top. Sell into strength.
+      HARD  — strong-negative flow (level <= -ofi_threshold ∧ slope < 0) AND sellers
+              lifting THROUGH the micro-price (the last trade prints AT/BELOW the fair
+              value ``micro_price_ref`` — sellers hitting the bid down): an even tighter
+              band (half the LOCK band).
+      else  — NEUTRAL: keep ``base_trail_dist_pct`` (defer to the 2A trail).
+
+    The returned ``new_stop_floor`` is ALWAYS ``max(current_stop, breakeven_floor,
+    HWM*(1-width))`` (long) — INVARIANT-A, ratchet-only: a RIDE regime never loosens the
+    live stop (a wider band simply declines to tighten further), and only a LOCK/HARD
+    regime that lands ABOVE the current stop actually moves it. Pure; fail-safe (any
+    missing/NaN flow input ⇒ NEUTRAL, candidate == the 2A-width stop, no behavior change)."""
+    out: dict[str, Any] = {
+        "regime": "neutral",
+        "band_pct": base_trail_dist_pct,
+        "new_stop_floor": current_stop,
+        "fired": False,
+        "ride": False,
+        "ofi_level": ofi_level,
+        "ofi_slope": ofi_slope,
+        "tick_rate": tick_rate_per_s,
+        "persist_ok": None,
+    }
+    if not side_long:
+        return out
+    try:
+        hwm = float(high_water_mark)
+        entry = float(entry_price)
+        b = float(bid)
+        cs = float(current_stop)
+        be = float(breakeven_floor)
+        base_w = max(0.0, float(base_trail_dist_pct))
+    except (TypeError, ValueError):
+        return out
+    if not (math.isfinite(hwm) and math.isfinite(entry) and math.isfinite(b) and math.isfinite(cs)):
+        return out
+    if entry <= 0 or hwm <= 0 or b <= 0:
+        return out
+
+    def _stop_from_width(width: float) -> float:
+        cand = hwm * (1.0 - max(0.0, width))
+        floors = [c for c in (cs, be, cand) if math.isfinite(c)]
+        return max(floors) if floors else cs  # INVARIANT-A: ratchet-only
+
+    # ---- denoised flow reads (fail-safe to None) ----
+    lvl = ofi_level if (ofi_level is not None and math.isfinite(float(ofi_level))) else None
+    slope = ofi_slope if (ofi_slope is not None and math.isfinite(float(ofi_slope))) else None
+    if lvl is None or slope is None:
+        # no usable flow read ⇒ NEUTRAL, defer entirely to the 2A trail (byte-identical).
+        out["new_stop_floor"] = _stop_from_width(base_w)
+        out["band_pct"] = base_w
+        return out
+
+    try:
+        thr = abs(float(ofi_threshold))
+    except (TypeError, ValueError):
+        thr = 0.25
+
+    # ---- persistence: is the pace still being fed? (live tick_rate vs entry pace) ----
+    persist_ok = None
+    try:
+        tr = float(tick_rate_per_s) if tick_rate_per_s is not None else None
+        etr = float(entry_tick_rate_per_s) if entry_tick_rate_per_s is not None else None
+        pf = max(0.0, float(persist_frac))
+        if tr is not None and etr is not None and math.isfinite(tr) and math.isfinite(etr) and etr > 0:
+            persist_ok = tr >= etr * pf
+    except (TypeError, ValueError):
+        persist_ok = None
+    out["persist_ok"] = persist_ok
+
+    # ---- giveback off the high (near-high test, position-relative as a fraction of width)
+    # near the high == within the 2A band (the runner has NOT already pulled back past it).
+    giveback_frac = (hwm - b) / hwm if hwm > 0 else 1.0
+    near_high = giveback_frac <= base_w if base_w > 0 else (giveback_frac <= 0.0)
+
+    # ---- LOCK band: tight giveback. Default = half the 2A width, floored small so it is a
+    # genuine climax-lock (the 2A floor already keeps it outside the bounce). One derived
+    # number, no fresh magic. HARD band: half the LOCK band (the most decisive read).
+    try:
+        lock_w = float(lock_band_pct) if lock_band_pct is not None else max(0.001, 0.5 * base_w)
+        if not (math.isfinite(lock_w) and lock_w > 0):
+            lock_w = max(0.001, 0.5 * base_w)
+    except (TypeError, ValueError):
+        lock_w = max(0.001, 0.5 * base_w)
+    hard_w = max(0.0005, 0.5 * lock_w)
+
+    # ---- sellers lifting THROUGH the micro-price: the LAST executed trade prints AT/BELOW
+    # the fair value (micro_price_ref ≈ the mid on an L1 tape) — aggressive sellers hitting
+    # the bid down through fair value (distribution). Fail-safe: missing ref/print ⇒ False
+    # (then HARD cannot fire and the regime degrades to LOCK on the same rollover).
+    sellers_through = False
+    if micro_price_ref is not None and last_trade_px is not None:
+        try:
+            mp = float(micro_price_ref)
+            lp = float(last_trade_px)
+            if math.isfinite(mp) and mp > 0 and math.isfinite(lp) and lp > 0:
+                sellers_through = lp <= mp  # last print at/below fair value ⇒ hit down
+        except (TypeError, ValueError):
+            sellers_through = False
+
+    # ---- regime decision ----
+    flow_positive = lvl > 0.0 and slope >= 0.0
+    rolling_over = slope < 0.0
+    strong_negative = lvl <= -thr and slope < 0.0
+
+    if strong_negative and sellers_through and near_high:
+        out["regime"] = "hard"
+        width = hard_w
+    elif rolling_over and near_high:
+        out["regime"] = "lock"
+        width = lock_w
+    elif flow_positive and (persist_ok is None or persist_ok):
+        # RIDE: still being fed (or no pace datum) ⇒ hold the 2A band WIDE; do not tighten.
+        out["regime"] = "ride"
+        out["ride"] = True
+        width = base_w
+    else:
+        out["regime"] = "neutral"
+        width = base_w
+
+    out["band_pct"] = width
+    new_floor = _stop_from_width(width)
+    out["new_stop_floor"] = new_floor
+    out["fired"] = bool(new_floor > cs)
+    return out
+
+
 def cushion_adaptive_trail_stop(
     *,
     high_water_mark: float,
@@ -738,6 +1439,7 @@ def cushion_adaptive_trail_stop(
     current_stop: float,
     side_long: bool = True,
     ema_5m: float | None = None,
+    regime_band_mult: float = 1.0,
 ) -> float:
     """Cushion-adaptive runner trail (Ross day-4, 2026-06-11): exit patience is
     NOT one number — it scales with the CUSHION. "In the small account, the
@@ -786,6 +1488,19 @@ def cushion_adaptive_trail_stop(
         day_r = 0.0
     patience = min(1.0, (unrealized_r + day_r) / max(rr, 1e-9))
     trail_bps = floor_bps + (ceil_bps - floor_bps) * patience
+    # GAP3 (regime-conditioned hold-time, Warrior re-audit 2026-06-26): scale the
+    # give-back band by the ENTRY regime. HOT/explosive ⇒ mult > 1 (wider band ⇒ a
+    # LOWER trailed candidate ⇒ the runner is held through red longer); COLD ⇒
+    # mult < 1 (tighter band ⇒ a HIGHER trailed candidate ⇒ chop is cut quicker).
+    # Default 1.0 ⇒ byte-identical. This only ever moves the trailed CANDIDATE; the
+    # ratchet-only max(cs, be, trailed) below means an existing stop is NEVER widened
+    # (a hot mult cannot loosen the live stop — it just declines to tighten it).
+    try:
+        _rbm = float(regime_band_mult)
+        if math.isfinite(_rbm) and _rbm > 0:
+            trail_bps = trail_bps * _rbm
+    except (TypeError, ValueError):
+        pass
     if side_long:
         trailed = hwm * (1.0 - trail_bps / 10_000.0)
         # 5m-EMA structural runner anchor (2026-06-12 exit study: the bps band
@@ -1041,6 +1756,569 @@ def ofi_exhaustion_lock(
     # flips _be_floor to breakeven — the exact MEGA give-back fix.
     strong_flow = (o is not None and o < -2.0 * thr) and (m is not None and m < 0.0)
     out["partial_arm"] = bool(absorption or strong_flow)
+    return out
+
+
+def tape_accel_reversal_exit(
+    *,
+    high_water_mark: float,
+    entry_price: float,
+    bid: float,
+    atr_pct: float,
+    stop_atr_mult: float,
+    reward_risk: float,
+    current_stop: float,
+    breakeven_floor: float,
+    signed_tape_accel: float | None,
+    prev_signed_tape_accel: float | None = None,
+    side_long: bool = True,
+) -> dict[str, Any]:
+    """Tape-acceleration reversal exit — SELL INTO STRENGTH at the spike's climax.
+
+    The operator's model: the equity winners give back the spike because no exit
+    fires at exhaustion — ``scale_out_limit`` banks dust (~$2) and ``trail_stop``
+    only triggers AFTER the giveback. The OFI-exhaustion lock (``ofi_exhaustion_lock``
+    above) is the L2-flow analogue, but it is L2-DATA-STARVED on equity (only ~88/684
+    names carry ``iqfeed_depth_snapshots``) so it no-ops on most names. This helper
+    rides ``signed_tape_accel`` from the executed TRADE tape (``iqfeed_trade_ticks``,
+    broad equity coverage) — it covers the names the OFI lock misses.
+
+    It locks the runner the moment the executed-tape PUSH ends / turns NEAR the high
+    (sell into strength, before the giveback), NOT after a drop (that is the trail's
+    job). It is a sibling of the OFI lock and COMPOSES with it: both run, whichever
+    ratchets the stop HIGHER wins via Invariant A.
+
+    Gates (confluence-AND, fail-safe):
+
+      1. profit-arm  ``peak_r ≥ arm_r`` (= ``arm_frac · rr``, floored 0.5R) — only
+         ever lock a WINNER. Below the arm the trail/stop owns healthy pullbacks.
+      2. REVERSAL    ``signed_tape_accel ≤ 0`` (the aggressive-buy push has ended /
+         turned). When ``prev_signed_tape_accel`` is supplied, require a genuine TURN
+         (``prev > 0 ∧ current ≤ 0``) for a cleaner climax read; with no prior sample
+         ``accel ≤ 0`` alone qualifies. STILL ACCELERATING (``accel > 0``) ⇒ NO fire
+         (do not sell into a building spike).
+      3. NEAR-HIGH   the giveback ``(hwm − bid)`` is SMALL — within an adaptive band
+         (``giveback_frac · risk_dist``, the position's own ATR unit). If price has
+         already given a lot back, this is the trail's job, not a sell-into-strength.
+
+    On arm ∧ reversal ∧ near-high: candidate stop = ``bid − cushion`` where the
+    cushion is a tight adaptive band off the bid (``base_lock_bps`` — the SAME
+    irreducible base the OFI lock uses; NO new magic number). The next tick then
+    exits at/near the top.
+
+    RATCHET-ONLY / NEVER-LOOSEN (Invariant A): ``new_stop_floor`` is unconditionally
+    ``max(current_stop, breakeven_floor, candidate)`` — it can only RAISE, never null,
+    never write below the structural stop. ``fired = new_stop_floor > current_stop``.
+    The caller re-applies its own ``> stop_px`` guard (belt-and-suspenders). This can
+    therefore ONLY exit a winner near its top; it can NEVER cut a loser early or loosen
+    a stop.
+
+    Pure (no I/O) for replay/live parity. FAIL-SAFE: a short, any non-finite/missing
+    input, or ``signed_tape_accel is None`` ⇒ no-op (``new_stop_floor == current_stop``,
+    ``fired == False``). Crypto (``signed_tape_accel_features`` returns None upstream)
+    therefore no-ops ⇒ byte-identical. ALWAYS returns ``counterfactual_fixed_stop ==
+    current_stop`` (the lock-OFF baseline) so realized PnL can be A/B-measured.
+    """
+    out: dict[str, Any] = {
+        "new_stop_floor": current_stop,
+        "fired": False,
+        "armed": False,
+        "trigger": None,
+        "peak_r": None,
+        "counterfactual_fixed_stop": current_stop,  # lock-OFF baseline (no tighten)
+        "reason": None,
+    }
+    if not side_long:
+        out["reason"] = "not_long"
+        return out
+    # FAIL-SAFE: a missing tape signal (crypto / empty tape / any None) ⇒ no-op.
+    if signed_tape_accel is None:
+        out["reason"] = "no_tape"
+        return out
+    try:
+        hwm = float(high_water_mark)
+        entry = float(entry_price)
+        b = float(bid)
+        cs = float(current_stop)
+        be = float(breakeven_floor)
+        accel = float(signed_tape_accel)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_input"
+        return out
+    if not (
+        math.isfinite(hwm)
+        and math.isfinite(entry)
+        and math.isfinite(b)
+        and math.isfinite(cs)
+        and math.isfinite(accel)
+    ):
+        out["reason"] = "non_finite"
+        return out
+    if entry <= 0 or hwm <= 0 or b <= 0:
+        out["reason"] = "non_positive_price"
+        return out
+
+    # The trade's own risk unit, frozen at entry — IDENTICAL risk_dist convention to
+    # ofi_exhaustion_lock: entry · max(0.003, atr_pct · stop_atr_mult). atr_pct is the
+    # raw entry_stop_atr_pct and stop_atr_mult the plan's stop_atr_mult (the SAME two
+    # arguments the lock receives at the held tick), so peak_r here == the lock's peak_r.
+    risk_dist = entry * max(0.003, float(atr_pct or 0.0) * float(stop_atr_mult or 0.0))
+    if not (math.isfinite(risk_dist) and risk_dist > 0):
+        out["reason"] = "bad_risk_dist"
+        return out
+    peak_r = max(0.0, (hwm - entry) / risk_dist)
+    out["peak_r"] = round(peak_r, 4)
+
+    # ---- knobs: REUSE the OFI lock's irreducible base + arm_frac (no new magic) ----
+    try:
+        rr = float(reward_risk) if math.isfinite(float(reward_risk)) and float(reward_risk) > 0 else 2.0
+    except (TypeError, ValueError):
+        rr = 2.0
+    try:
+        arm_frac = float(getattr(settings, "chili_momentum_exit_ofi_arm_frac", 0.5) or 0.5)
+    except (TypeError, ValueError):
+        arm_frac = 0.5
+    arm_frac = min(max(arm_frac, 0.0), 1.0)
+    # arm_r derives from the plan's OWN reward:risk, floored 0.5R (parity with the OFI
+    # lock) — a sub-1R plan still arms a winner.
+    arm_r = max(0.5, arm_frac * rr)
+    try:
+        base_lock_bps = float(getattr(settings, "chili_momentum_exit_ofi_base_lock_bps", 120.0) or 120.0)
+    except (TypeError, ValueError):
+        base_lock_bps = 120.0
+    base_lock_bps = max(1.0, base_lock_bps)
+    # The ONE new documented knob: how close to the high the price must still be for
+    # this to count as "into strength" (giveback ≤ giveback_frac · risk_dist).
+    try:
+        giveback_frac = float(
+            getattr(settings, "chili_momentum_exit_accel_reversal_giveback_frac", 0.35) or 0.35
+        )
+    except (TypeError, ValueError):
+        giveback_frac = 0.35
+    giveback_frac = max(0.0, giveback_frac)
+    giveback_dist = giveback_frac * risk_dist
+
+    # ---- gate 1: profit-arm (only ever lock a winner) ----
+    if peak_r < arm_r:
+        out["reason"] = "below_arm"
+        return out
+    out["armed"] = True
+
+    # ---- gate 2: tape-acceleration REVERSAL (the executed push has ended/turned) ----
+    if prev_signed_tape_accel is not None:
+        try:
+            prev = float(prev_signed_tape_accel)
+        except (TypeError, ValueError):
+            prev = None
+        if prev is not None and math.isfinite(prev):
+            # genuine TURN: was pushing up, now ≤ 0 (a cleaner climax than ≤0 alone).
+            reversal = (prev > 0.0) and (accel <= 0.0)
+        else:
+            reversal = accel <= 0.0
+    else:
+        reversal = accel <= 0.0
+    if not reversal:
+        out["reason"] = "still_accelerating"
+        return out
+
+    # ---- gate 3: NEAR-HIGH (sell INTO strength, not after a drop) ----
+    giveback = hwm - b
+    if giveback > giveback_dist:
+        out["reason"] = "gave_back_too_much"  # the trail owns this, not the lock
+        return out
+
+    # ---- lock at the climax: tight adaptive cushion off the BID ----
+    # cushion = base_lock_bps off the bid (the SAME irreducible base the OFI lock uses).
+    # The candidate sits a hair below the live bid so the NEXT tick exits near the top;
+    # Invariant A guarantees it can only ever RAISE the stop.
+    cushion = b * (base_lock_bps / 10_000.0)
+    candidate = b - cushion
+    floors = [c for c in (cs, be, candidate) if math.isfinite(c)]
+    new_floor = max(floors) if floors else cs
+    out["new_stop_floor"] = new_floor
+    out["fired"] = bool(new_floor > cs)
+    out["trigger"] = "tape_accel_reversal"
+    out["reason"] = "fired" if out["fired"] else "ratchet_no_raise"
+    return out
+
+
+# ── Measured-move scale target + double-top exhaustion (winner-management) ─────
+# Ross "measured move": the FIRST leg up off the base breakout has a height; the
+# move often extends a SECOND leg of about the SAME height. We measure the name's
+# OWN initial impulse (impulse_leg_high − impulse_leg_entry, both frozen at the
+# first-target scale-out) and project it ABOVE the impulse high to a measured-move
+# target. At that target we SCALE OUT a fraction (the existing partial machinery)
+# and ratchet the runner stop up — a PARTIAL, never a full cut. A strong runner
+# that blows through keeps running on the cushion/chandelier trail (this helper
+# only ever fires ONCE, sells a fraction, and tightens — it cannot flatten).
+#
+# Double-top exhaustion: price prints the impulse high, pulls back, then RETESTS
+# the high and FAILS (a lower-high inside an ATR-relative band, optionally on weak
+# flow). That is distribution at the level ⇒ tighten the stop (and optionally arm
+# a partial). A CLEAN HIGHER-HIGH (price takes out the impulse high) is NOT a
+# double-top ⇒ no exhaustion exit (the winner is left to run).
+#
+# ADAPTIVE, no flat-% magic: the target is the name's own leg height (not a fixed
+# %); the double-top band is ATR-relative. ONE documented base each — the
+# scale-out fraction and the double-top retest ATR-mult. Everything else is
+# derived (the impulse height, the ATR risk unit frozen at entry). RATCHET-ONLY:
+# every stop this module returns is max(current_stop, breakeven_floor, candidate).
+# Flag OFF (default) ⇒ every helper is a pass-through no-op (byte-identical).
+
+
+def measured_move_exit_enabled() -> bool:
+    """Kill-switch for the measured-move scale target + double-top exhaustion.
+
+    Default OFF ⇒ both helpers return their inert pass-through (no scale, no
+    tighten) so the runner trails EXACTLY as before (byte-identical)."""
+    return bool(getattr(settings, "chili_momentum_measured_move_exit_enabled", False))
+
+
+def _measured_move_scale_fraction(default: float = 0.33) -> float:
+    """Fraction of the ORIGINAL position sold into the measured-move target.
+
+    ONE documented base (``chili_momentum_measured_move_exit_scale_fraction``).
+    This is a SCALE-OUT (sell a slice into strength), distinct from the heavier
+    first-target de-risk; bounded to the open interval so it can never sell 0%
+    (no-op) or 100% (no runner)."""
+    try:
+        v = float(getattr(settings, "chili_momentum_measured_move_exit_scale_fraction", default))
+    except (TypeError, ValueError):
+        v = default
+    if not math.isfinite(v):
+        v = default
+    return max(0.05, min(0.95, v))
+
+
+def _double_top_atr_mult(default: float = 0.75) -> float:
+    """ATR-relative retest tolerance for the double-top band.
+
+    ONE documented base (``chili_momentum_measured_move_exit_double_top_atr_mult``).
+    The retest "near the high" band is this multiple of the position's own ATR
+    risk unit — adaptive to the name's volatility, NOT a fixed %. Bounded so a
+    misconfig can never make the band absurdly wide or zero."""
+    try:
+        v = float(getattr(settings, "chili_momentum_measured_move_exit_double_top_atr_mult", default))
+    except (TypeError, ValueError):
+        v = default
+    if not math.isfinite(v):
+        v = default
+    return max(0.1, min(2.0, v))
+
+
+def measured_move_target(
+    *,
+    entry_price: float,
+    impulse_leg_high: float,
+    side_long: bool = True,
+) -> float | None:
+    """Project the name's OWN first-leg height above the impulse high.
+
+    leg_height = impulse_leg_high − entry (the base-breakout first leg up). The
+    measured-move target = impulse_leg_high + leg_height (a second equal leg). No
+    flat % — the projection is the name's own measured impulse. Returns None for a
+    degenerate (non-positive) leg, a short, or any bad input (the caller no-ops).
+    Pure for parity testing. docs/DESIGN/MOMENTUM_LANE.md"""
+    if not side_long:
+        return None
+    try:
+        e = float(entry_price)
+        h = float(impulse_leg_high)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(e) and math.isfinite(h)) or e <= 0 or h <= 0:
+        return None
+    leg = h - e
+    if leg <= 0:
+        return None
+    return h + leg
+
+
+def measured_move_scale_exit_decision(
+    *,
+    flag_on: bool,
+    current_qty: float,
+    original_qty: float,
+    entry_price: float,
+    impulse_leg_high: float,
+    bid: float,
+    atr_pct: float,
+    stop_atr_mult: float,
+    current_stop: float,
+    breakeven_floor: float,
+    already_fired: bool = False,
+    symbol: str | None = None,
+    base_increment: float | None = None,
+    base_min_size: float | None = None,
+    side_long: bool = True,
+) -> dict[str, Any]:
+    """Decide the measured-move PARTIAL scale-out + runner-stop ratchet (pure).
+
+    Returns ``{"fire": bool, "reason": str, "target_price": float|None,
+    "scale_qty": float, "remainder_qty": float, "scale_fraction": float,
+    "new_stop_floor": float, "leg_height": float|None}``.
+
+    Fires ONCE (``already_fired`` gates re-fire) when the bid reaches the
+    measured-move target (impulse high + leg height). On fire it sizes a
+    ``_measured_move_scale_fraction`` slice of the ORIGINAL position via the shared
+    ``scale_out_quantity`` splitter (so it never oversells or strands dust) and
+    ratchets the RUNNER stop up to AT LEAST breakeven (the partial de-risked the
+    rest). The remainder keeps running on the existing cushion/chandelier trail —
+    this is a PARTIAL, never a full exit.
+
+    WINNER-SAFE: a runner that has already blown PAST the target still only ever
+    scales a FRACTION here; the remainder is untouched and trails on. RATCHET-ONLY:
+    ``new_stop_floor = max(current_stop, breakeven_floor, breakeven_candidate)`` —
+    never below the input stop. Flag OFF / short / no-op ⇒ ``fire=False`` and
+    ``new_stop_floor == current_stop`` (byte-identical). Pure for parity testing.
+    docs/DESIGN/MOMENTUM_LANE.md"""
+    out: dict[str, Any] = {
+        "fire": False,
+        "reason": "flag_off" if not flag_on else "wait",
+        "target_price": None,
+        "scale_qty": 0.0,
+        "remainder_qty": max(0.0, float(current_qty or 0.0)),
+        "scale_fraction": 0.0,
+        "new_stop_floor": current_stop,
+        "leg_height": None,
+    }
+    if not flag_on or not side_long:
+        return out
+    if already_fired:
+        out["reason"] = "already_fired"
+        return out
+    try:
+        e = float(entry_price)
+        h = float(impulse_leg_high)
+        b = float(bid)
+        cs = float(current_stop)
+        be = float(breakeven_floor)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_basis"
+        return out
+    if not (math.isfinite(e) and math.isfinite(h) and math.isfinite(b) and math.isfinite(cs)):
+        out["reason"] = "bad_basis"
+        return out
+    tgt = measured_move_target(entry_price=e, impulse_leg_high=h, side_long=True)
+    if tgt is None:
+        out["reason"] = "no_leg"
+        return out
+    out["target_price"] = float(tgt)
+    out["leg_height"] = float(h - e)
+    # Ratchet candidate is ALWAYS at least breakeven; the partial de-risks the rest.
+    be_candidate = max(e, be)  # breakeven of the runner, derived (no new magic)
+    floors = [c for c in (cs, be, be_candidate) if math.isfinite(c)]
+    ratchet_floor = max(floors) if floors else cs
+    if b < tgt * (1.0 - 1e-9):  # target not yet reached
+        out["reason"] = "target_not_reached"
+        return out
+    # Target reached — split a fraction of the ORIGINAL via the shared splitter.
+    frac = _measured_move_scale_fraction()
+    if symbol is not None:
+        # crypto can take a heavier slice via the existing class knob; never below base
+        try:
+            ov = getattr(settings, "chili_momentum_crypto_scale_out_fraction", None)
+            if _is_crypto_symbol(symbol) and ov is not None:
+                ovf = float(ov)
+                if math.isfinite(ovf) and 0.0 < ovf < 1.0:
+                    frac = max(frac, min(0.95, ovf))
+        except (TypeError, ValueError):
+            pass
+    out["scale_fraction"] = float(frac)
+    scale_qty, remainder, can_split = scale_out_quantity(
+        current_qty=current_qty,
+        original_qty=original_qty,
+        fraction=frac,
+        base_increment=base_increment,
+        base_min_size=base_min_size,
+    )
+    if not can_split:
+        # Cannot split cleanly (dust) — do NOT flatten a runner here; the existing
+        # target/trail machinery owns the flat case. We still ratchet the stop up.
+        out["reason"] = "target_reached_no_split"
+        out["new_stop_floor"] = ratchet_floor
+        return out
+    out["fire"] = True
+    out["reason"] = "measured_move_target"
+    out["scale_qty"] = float(scale_qty)
+    out["remainder_qty"] = float(remainder)
+    out["new_stop_floor"] = ratchet_floor
+    return out
+
+
+def double_top_exhaustion_check(
+    *,
+    flag_on: bool,
+    impulse_leg_high: float,
+    current_high: float,
+    bid: float,
+    entry_price: float,
+    atr_pct: float,
+    stop_atr_mult: float,
+    ofi: float | None = None,
+    micro_edge: float | None = None,
+    side_long: bool = True,
+) -> dict[str, Any]:
+    """Detect a DOUBLE-TOP weak retest of the impulse high (pure, fail-safe).
+
+    The impulse high prints, price pulls back, then RETESTS the high. Returns
+    ``{"exhausted": bool, "weak_retest": bool, "clean_higher_high": bool,
+    "reason": str, "retest_gap_atr": float|None, "flow_weak": bool}``.
+
+    A DOUBLE-TOP (exhaustion) requires ALL:
+      * the retest peak (``current_high``) is a LOWER high — strictly below the
+        impulse high, AND
+      * it is NEAR the high — within an ATR-relative band (``_double_top_atr_mult``
+        × the position's own ATR risk unit) of the impulse high (a genuine retest,
+        not a shallow bounce that never approached the prior peak), AND
+      * the live bid has rolled back DOWN off that retest peak (rejected, not still
+        pressing) — ``bid < current_high`` within the band.
+
+    A CLEAN HIGHER-HIGH (``current_high`` ≥ impulse high) is NOT a double-top ⇒
+    ``exhausted=False, clean_higher_high=True`` (the winner is left to run).
+
+    Flow is an OPTIONAL corroborant: when OFI/micro are supplied and BOTH are weak
+    (ofi ≤ 0 and micro < 0) the retest is flagged ``flow_weak=True`` (the caller can
+    arm a partial vs a plain tighten). Absent/None flow ⇒ the structural lower-high
+    retest alone marks exhaustion (fail-OPEN on flow, never required).
+
+    Pure; fail-safe (bad/NaN inputs ⇒ ``exhausted=False``). Flag OFF ⇒ inert. This
+    NEVER returns a stop — the caller derives the tighten via
+    ``double_top_tighten_decision`` (ratchet-only). docs/DESIGN/MOMENTUM_LANE.md"""
+    out: dict[str, Any] = {
+        "exhausted": False,
+        "weak_retest": False,
+        "clean_higher_high": False,
+        "reason": "flag_off" if not flag_on else "wait",
+        "retest_gap_atr": None,
+        "flow_weak": False,
+    }
+    if not flag_on or not side_long:
+        return out
+    try:
+        h = float(impulse_leg_high)
+        rh = float(current_high)
+        b = float(bid)
+        e = float(entry_price)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_basis"
+        return out
+    if not (math.isfinite(h) and math.isfinite(rh) and math.isfinite(b) and math.isfinite(e)):
+        out["reason"] = "bad_basis"
+        return out
+    if h <= 0 or e <= 0:
+        out["reason"] = "bad_basis"
+        return out
+    # Clean higher-high — NOT a double top; leave the winner running.
+    if rh >= h * (1.0 - 1e-9):
+        out["clean_higher_high"] = True
+        out["reason"] = "clean_higher_high"
+        return out
+    # ATR-relative band: the retest must come NEAR the prior high (a real retest).
+    risk_dist = e * max(0.003, float(atr_pct or 0.0) * float(stop_atr_mult or 0.0))
+    band = _double_top_atr_mult() * risk_dist if (math.isfinite(risk_dist) and risk_dist > 0) else None
+    gap = h - rh  # how far the lower-high fell short of the impulse high
+    out["retest_gap_atr"] = round(gap / risk_dist, 4) if (risk_dist and risk_dist > 0) else None
+    if band is None or gap > band:
+        out["reason"] = "retest_too_shallow"  # never approached the prior high
+        return out
+    # The retest must be REJECTED — the live bid has rolled back below the retest peak.
+    if b >= rh * (1.0 - 1e-9):
+        out["reason"] = "still_pressing"  # price still at/above the retest peak
+        return out
+    # Structural double-top confirmed (lower-high near the prior high, rejected).
+    out["weak_retest"] = True
+    out["exhausted"] = True
+    out["reason"] = "double_top_weak_retest"
+    # Optional flow corroborant: BOTH OFI and micro weak ⇒ strong distribution.
+    try:
+        o = float(ofi) if ofi is not None and math.isfinite(float(ofi)) else None
+    except (TypeError, ValueError):
+        o = None
+    try:
+        m = float(micro_edge) if micro_edge is not None and math.isfinite(float(micro_edge)) else None
+    except (TypeError, ValueError):
+        m = None
+    out["flow_weak"] = bool(o is not None and o <= 0.0 and m is not None and m < 0.0)
+    return out
+
+
+def double_top_tighten_decision(
+    *,
+    flag_on: bool,
+    impulse_leg_high: float,
+    current_high: float,
+    bid: float,
+    entry_price: float,
+    atr_pct: float,
+    stop_atr_mult: float,
+    current_stop: float,
+    breakeven_floor: float,
+    ofi: float | None = None,
+    micro_edge: float | None = None,
+    side_long: bool = True,
+) -> dict[str, Any]:
+    """Map a double-top exhaustion into a RATCHET-ONLY stop tighten (+ partial arm).
+
+    Returns ``{"tighten": bool, "partial_arm": bool, "new_stop_floor": float,
+    "reason": str, "exhausted": bool, "flow_weak": bool}``.
+
+    On a confirmed double-top weak retest (``double_top_exhaustion_check``) the
+    candidate stop is tightened toward the rejected retest peak — but only the SAME
+    ATR distance the trail already uses, and ALWAYS floored at breakeven so the
+    runner is de-risked, never loosened. When the retest is also flow-weak (OFI ≤ 0
+    AND micro < 0) ``partial_arm=True`` so the caller can sell a fraction instead of
+    only tightening. A clean higher-high ⇒ ``tighten=False`` and
+    ``new_stop_floor == current_stop`` (winner runs).
+
+    RATCHET-ONLY (never loosens): ``new_stop_floor = max(current_stop,
+    breakeven_floor, candidate)``. Flag OFF / no exhaustion ⇒ pass-through. Pure for
+    parity testing. docs/DESIGN/MOMENTUM_LANE.md"""
+    out: dict[str, Any] = {
+        "tighten": False,
+        "partial_arm": False,
+        "new_stop_floor": current_stop,
+        "reason": "flag_off" if not flag_on else "wait",
+        "exhausted": False,
+        "flow_weak": False,
+    }
+    if not flag_on or not side_long:
+        return out
+    chk = double_top_exhaustion_check(
+        flag_on=flag_on,
+        impulse_leg_high=impulse_leg_high,
+        current_high=current_high,
+        bid=bid,
+        entry_price=entry_price,
+        atr_pct=atr_pct,
+        stop_atr_mult=stop_atr_mult,
+        ofi=ofi,
+        micro_edge=micro_edge,
+        side_long=True,
+    )
+    out["reason"] = chk["reason"]
+    out["exhausted"] = bool(chk["exhausted"])
+    out["flow_weak"] = bool(chk["flow_weak"])
+    try:
+        cs = float(current_stop)
+        be = float(breakeven_floor)
+        e = float(entry_price)
+        rh = float(current_high)
+    except (TypeError, ValueError):
+        return out
+    if not chk["exhausted"]:
+        # No double-top (incl. a clean higher-high) ⇒ no tighten (winner runs).
+        return out
+    # Tighten the stop to the SAME ATR distance below the rejected retest peak the
+    # trail already uses (no new magic) — but never below breakeven (the runner is
+    # de-risked). Ratchet-only via the max() floor.
+    risk_dist = e * max(0.003, float(atr_pct or 0.0) * float(stop_atr_mult or 0.0))
+    candidate = rh - risk_dist if (math.isfinite(risk_dist) and risk_dist > 0) else cs
+    floors = [c for c in (cs, be, e, candidate) if math.isfinite(c)]
+    new_floor = max(floors) if floors else cs
+    out["new_stop_floor"] = new_floor
+    out["tighten"] = new_floor > cs + 1e-12
+    out["partial_arm"] = bool(chk["flow_weak"])
     return out
 
 

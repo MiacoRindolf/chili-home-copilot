@@ -35,6 +35,33 @@ _VIABILITY_BRIDGE_MAX_TICKERS = 30
 _VIABILITY_BRIDGE_CHUNK = 32
 _BASELINE_AUDIT_SKIP_JOB_IDS = frozenset({"neural_mesh_drain"})
 
+# ── S1 event-driven feeder state (docs/DESIGN/MOMENTUM_ENGINE.md §1/§5) ────────
+# In-process high-water mark for the tape-delta ignite job: only tape rows with
+# observed_at > this are read each run (an incremental DELTA, NOT a full rescan).
+# The job advances it to the max observed_at it saw. A small CACHED field snapshot
+# (the last batch's {symbol: ross_signal} dict) preserves percentile context when a
+# single crosser is scored. Guarded by a lock; module-local so a restart resets it
+# (first run after restart reads from the lookback floor, not the whole table).
+_tape_delta_state_lock = threading.Lock()
+_tape_delta_hwm: "datetime | None" = None
+_tape_delta_last_run_monotonic: float = 0.0
+_tape_delta_field_snapshot: dict = {}
+
+
+def _tape_delta_set_field_snapshot(signals: dict) -> None:
+    """Cache the last batch's {symbol: ross_signal} dict so the tape-delta ignite job
+    can score a single crosser against the SAME field for percentile context. Called by
+    the equity viability-refresh batch (the field source). Best-effort; bounded copy."""
+    if not isinstance(signals, dict) or not signals:
+        return
+    try:
+        snap = {str(k).strip().upper(): v for k, v in signals.items() if k}
+    except Exception:
+        return
+    with _tape_delta_state_lock:
+        global _tape_delta_field_snapshot
+        _tape_delta_field_snapshot = snap
+
 
 def _should_write_scheduler_baseline_audit(job_id: str) -> bool:
     return str(job_id or "").strip() not in _BASELINE_AUDIT_SKIP_JOB_IDS
@@ -3693,6 +3720,15 @@ def _bridge_scanner_to_viability(
 
     if not tickers:
         return
+    # S1 EVENT FEEDER (docs/DESIGN/MOMENTUM_ENGINE.md §5): cache this EQUITY batch's
+    # ross_signals so the tape-delta ignite job can score a single crosser against the
+    # SAME field for percentile context. Equity refresh only (crypto has its own field
+    # semantics); best-effort + never affects the bridge write.
+    if source in ("equity_viability_refresh", "equity_momentum"):
+        try:
+            _tape_delta_set_field_snapshot(ross_signals)
+        except Exception:
+            logger.debug("[momentum_event_select] field snapshot cache skipped", exc_info=True)
     try:
         from .trading.momentum_neural.pipeline import run_momentum_neural_tick
 
@@ -4646,6 +4682,23 @@ def _run_equity_viability_refresh_job():
             "[scheduler] equity viability refresh: %d movers -> viability (crypto-parity cadence)",
             len(movers),
         )
+        # S1 INSTRUMENT (docs/DESIGN/MOMENTUM_ENGINE.md §5): the batch path is the BASELINE
+        # ignite latency the event feeder is measured against (~half the 600s gate). Logging
+        # it here lets the tape-delta path's per-symbol lead-time be compared apples-to-apples.
+        try:
+            from ..config import settings as _evs_settings
+
+            _batch_period_ms = max(
+                60_000.0,
+                float(getattr(_evs_settings, "chili_momentum_risk_viability_max_age_seconds", 600.0)) / 2.0 * 1000.0,
+            )
+            logger.info(
+                "[momentum_event_select] path=batch movers=%d batch_period_ms=%.0f "
+                "(baseline ignite_to_viability the event feeder beats)",
+                len(movers), _batch_period_ms,
+            )
+        except Exception:
+            pass
     except Exception as e:
         logger.warning("[scheduler] equity viability refresh bridge failed: %s", e)
     finally:
@@ -4654,6 +4707,162 @@ def _run_equity_viability_refresh_job():
         except Exception:
             pass
         write_db.close()
+
+
+def _run_tape_delta_ignite_job():
+    """S1 EVENT-DRIVEN FEEDER — Trigger B (docs/DESIGN/MOMENTUM_ENGINE.md §1/§5).
+
+    A fast, price-bus-INDEPENDENT job: read ONLY tape rows newer than an in-process
+    high-water mark (an incremental DELTA, not a full rescan), apply _ross_threshold_crossed,
+    and score each crosser straight into momentum_symbol_viability (freshness_ts=now) via the
+    SAME single-symbol run_momentum_neural_tick path the ignition loop + scanner bridge use —
+    so a cold new explosive mover reaches live_eligible in ~5-15s instead of waiting for the
+    ~300s batch (which keeps running as the backstop).
+
+    Byte-identical-OFF: when chili_momentum_tape_delta_ignite_enabled is False this returns
+    immediately (a no-op). The master flag chili_momentum_event_select_primary_enabled gates
+    REGISTRATION (the job is only added when the master is on).
+
+    Session hygiene (#561/#610 idle-in-transaction guard): its OWN short-lived SessionLocal,
+    commit on success, rollback-in-finally before close. Adaptive self-throttle to
+    clamp(p50 tape inter-row gap, floor, 15s) so a dense tape isn't hammered and a sparse one
+    isn't lagged — the APScheduler interval is registered at the floor and the job skips a run
+    that arrived sooner than the measured cadence.
+    """
+    from ..config import settings
+    from ..db import SessionLocal
+    from .trading.momentum_neural.nbbo_tape import (
+        tape_delta_threshold_crossers,
+        tape_inter_row_gap_p50_seconds,
+    )
+
+    if not bool(getattr(settings, "chili_momentum_tape_delta_ignite_enabled", True)):
+        return  # byte-identical-off: the registered job is a no-op
+
+    global _tape_delta_hwm, _tape_delta_last_run_monotonic
+
+    # The ONE documented floor (seconds); cadence = clamp(p50 tape gap, floor, 15).
+    try:
+        _floor = float(getattr(settings, "chili_momentum_tape_delta_min_seconds", 5.0) or 5.0)
+    except (TypeError, ValueError):
+        _floor = 5.0
+    _floor = max(1.0, _floor)
+
+    now_mono = time.monotonic()
+    now_utc = datetime.now(timezone.utc)
+
+    db = SessionLocal()
+    crossers: list[dict] = []
+    new_hwm = None
+    try:
+        # Adaptive cadence: measure how fast the tape fills, clamp to [floor, 15].
+        _p50 = tape_inter_row_gap_p50_seconds(db, now_utc=now_utc)
+        _cadence = _floor if _p50 is None else min(15.0, max(_floor, float(_p50)))
+        with _tape_delta_state_lock:
+            _last = _tape_delta_last_run_monotonic
+            _hwm = _tape_delta_hwm
+        if _last and (now_mono - _last) < _cadence:
+            return  # arrived sooner than the adaptive cadence — self-throttle (skip)
+        # First run after a (re)start: seed the hwm from the lookback floor so we read a
+        # bounded recent slice, not the whole table.
+        if _hwm is None:
+            _lookback_min = float(
+                getattr(settings, "chili_momentum_running_up_lookback_min", 5.0) or 5.0
+            )
+            _hwm = now_utc - timedelta(minutes=_lookback_min)
+
+        crossers, new_hwm = tape_delta_threshold_crossers(db, since=_hwm, now_utc=now_utc)
+        # Advance the hwm + stamp the run time regardless of crossers (so an empty delta
+        # still moves the window forward and doesn't re-scan the same rows next run).
+        with _tape_delta_state_lock:
+            _tape_delta_last_run_monotonic = now_mono
+            if new_hwm is not None:
+                if _tape_delta_hwm is None or new_hwm > _tape_delta_hwm:
+                    _tape_delta_hwm = new_hwm
+
+        if not crossers:
+            return
+
+        # Score each crosser via the SAME single-symbol path, against the CACHED field
+        # snapshot (percentile context preserved). One symbol per tick; the FULL cached
+        # field is passed as the ranking universe so the crosser is percentile-ranked
+        # within the real batch — `tickers` (which symbol gets a viability row) and
+        # `ross_signals` (the ranking universe) are decoupled, so only the crosser's own
+        # row is written.
+        with _tape_delta_state_lock:
+            _field = dict(_tape_delta_field_snapshot)
+
+        from .trading.momentum_neural.pipeline import run_momentum_neural_tick
+
+        _scored = 0
+        for c in crossers:
+            sym = c["symbol"]
+            # Build the single-symbol ross_signals: prefer the cached batch signal (full
+            # pillars), else a minimal tape-derived dict (move% as the momentum axis) —
+            # identical SHAPE to the ignition loop's emit so the scorer reads it.
+            _base = _field.get(sym)
+            if isinstance(_base, dict):
+                _sig = dict(_base)
+                _sig.setdefault("ticker", sym)
+                _sig.setdefault("direction", "long")
+            else:
+                _sig = {
+                    "ticker": sym,
+                    "direction": "long",
+                    "todays_change_perc": float(c.get("move_pct") or 0.0),
+                    "signal_type": "tape_delta_ignite",
+                    "source": "tape_delta_ignite",
+                }
+                if c.get("last_mid"):
+                    _sig["price"] = float(c["last_mid"])
+                if c.get("day_volume"):
+                    _sig["volume"] = float(c["day_volume"])
+            # Score it against the FULL field (percentile context) but persist ONLY the
+            # crosser's viability row. ross_signals = the real ranked universe (cached
+            # field + this crosser, which overrides any stale cached entry for `sym`);
+            # tickers = [sym] so only its row is written. Own commit; idempotent
+            # (symbol,variant_id) upsert downstream.
+            _universe = dict(_field)
+            _universe[sym] = _sig
+            try:
+                run_momentum_neural_tick(
+                    db, meta={"tickers": [sym], "ross_signals": _universe}
+                )
+                db.commit()
+                _scored += 1
+                # S1 INSTRUMENT: the event path put a name on the board within one cadence.
+                logger.info(
+                    "[momentum_event_select] path=tape_delta symbol=%s move_pct=%.2f "
+                    "cadence_s=%.1f field_ctx=%s ignited_to_viability=ok",
+                    sym, float(c.get("move_pct") or 0.0), _cadence,
+                    bool(isinstance(_base, dict)),
+                )
+            except Exception as _se:
+                logger.warning(
+                    "[momentum_event_select] tape-delta score %s failed: %s", sym, _se
+                )
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+        if _scored:
+            logger.info(
+                "[momentum_event_select] path=tape_delta scored=%d/%d crossers (cadence=%.1fs)",
+                _scored, len(crossers), _cadence,
+            )
+    except Exception as e:
+        logger.warning("[momentum_event_select] tape-delta ignite job failed: %s", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    finally:
+        # idle-in-transaction guard: rollback-in-finally before close.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
 
 
 def _run_intraday_signal_sweep_job():
@@ -6064,6 +6273,36 @@ def start_scheduler():
                 max_instances=1,
                 next_run_time=datetime.now() + timedelta(seconds=35),
             )
+
+            # S1 EVENT-DRIVEN FEEDER — Trigger B (docs/DESIGN/MOMENTUM_ENGINE.md §1/§5):
+            # a fast tape-delta ignite job so a cold new explosive mover reaches
+            # live_eligible in ~5-15s instead of waiting ~300s for the batch above (which
+            # stays as the backstop). REGISTERED only when the MASTER flag is on; the job
+            # itself is a byte-identical no-op when chili_momentum_tape_delta_ignite_enabled
+            # is off. Interval is registered at the documented floor; the job self-throttles
+            # UP to clamp(p50 tape gap, floor, 15s) adaptively. max_instances=1 + coalesce
+            # so a slow run can never stack; its own short-lived rollback-in-finally session.
+            if bool(
+                getattr(_cvr_settings, "chili_momentum_event_select_primary_enabled", True)
+            ):
+                try:
+                    _tdi_floor = float(
+                        getattr(_cvr_settings, "chili_momentum_tape_delta_min_seconds", 5.0) or 5.0
+                    )
+                except (TypeError, ValueError):
+                    _tdi_floor = 5.0
+                _tdi_secs = max(1.0, _tdi_floor)
+                _scheduler.add_job(
+                    _run_tape_delta_ignite_job,
+                    trigger=IntervalTrigger(seconds=_tdi_secs),
+                    id="tape_delta_ignite",
+                    name="S1 tape-delta event feeder (cold mover -> viability in ~5-15s)",
+                    replace_existing=True,
+                    max_instances=1,
+                    coalesce=True,
+                    misfire_grace_time=5,
+                    next_run_time=datetime.now() + timedelta(seconds=40),
+                )
 
             # Phase 0 crypto L2 writer: persist the warmed Coinbase full-book ring
             # -> fast_orderbook (crypto only; nothing else writes crypto L2). Feeds

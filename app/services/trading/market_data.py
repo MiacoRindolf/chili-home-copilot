@@ -116,7 +116,13 @@ def _finalize_ohlcv_df(df: pd.DataFrame, *, ticker: str, interval: str, provider
 
         # Round-21 FIX (2026-04-30): pass ticker so clean_ohlcv can skip
         # zero-volume rejection for index series (^VIX, ^GSPC, I:VIX).
-        out = clean_ohlcv(out, symbol=ticker)
+        # NaN-bar drop (default ON): drop individual malformed bars BEFORE the
+        # integrity verdict so one transient NaN/zero bar does not reject the
+        # whole frame and blank a healthy name. Flag OFF ⇒ byte-identical prior
+        # behaviour. The mostly-bad-frame guard in clean_ohlcv preserves the
+        # genuine-corruption whole-frame reject.
+        _drop_bad = bool(getattr(settings, "chili_momentum_clean_drop_bad_bars", True))
+        out = clean_ohlcv(out, symbol=ticker, drop_bad_bars_enabled=_drop_bad)
         integrity = validate_ohlcv_integrity(out, symbol=ticker, interval=interval)
         if not integrity.get("clean", False):
             _log_ohlcv_integrity_failure(

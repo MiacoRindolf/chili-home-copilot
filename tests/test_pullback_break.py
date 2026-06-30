@@ -13,17 +13,31 @@ from app.services.trading.momentum_neural.entry_gates import (
 
 
 def _isolate_trigger_logic(monkeypatch) -> None:
-    """Disable the ATR-scaled verticality skip for tests that isolate the
-    break/retest/reclaim TRIGGER mechanics (not the verticality gate).
+    """Hold off the newer OVERLAY gates so tests that isolate the classic
+    break/retest/reclaim TRIGGER mechanics keep meaning what they originally did.
 
-    These frames predate ``chili_momentum_entry_verticality_atr_mult`` (added
-    2026-06-12; covered by ``test_evening_batch3.py``). Their synthetic impulses
-    rise off a long flat base, so the break bar legitimately closes a few %
-    above the lagging EMA-9 and would now trip the chase-suppression skip — a
-    veto that has nothing to do with the trigger logic under test. The gate keeps
-    its own dedicated coverage; here we hold it off so the trigger assertions
-    mean what they originally did."""
+    Two overlays are neutralized:
+
+    1. The ATR-scaled verticality skip (``chili_momentum_entry_verticality_atr_mult``,
+       added 2026-06-12; covered by ``test_evening_batch3.py``). These synthetic
+       impulses rise off a long flat base, so the break bar legitimately closes a
+       few % above the lagging EMA-9 and would now trip the chase-suppression skip —
+       a veto that has nothing to do with the trigger logic under test.
+
+    2. The default-ON FIRST-PULLBACK overlay (``chili_momentum_entry_first_pullback_enabled``).
+       It is evaluated AHEAD of the retest/raw ladder and, on these shallow-pullback
+       frames, FIRES (returning ``first_pullback_ok`` and shadowing ``mode == "retest"``)
+       or ARMs (returning ``waiting_for_first_pullback_break`` instead of
+       ``waiting_for_break``/``waiting_for_retest``) — overriding the very classic
+       trigger these tests assert on. The overlay keeps its own dedicated coverage in
+       ``test_first_pullback.py``; here we hold it off so the classic ladder's reasons
+       (``pullback_break_ok`` / ``waiting_for_break`` / ``waiting_for_retest`` /
+       ``retest_failed_hold`` / runaway) are what we observe.
+
+    Each gate keeps its own dedicated coverage; here we hold them off so the trigger
+    assertions mean what they originally did."""
     monkeypatch.setattr(settings, "chili_momentum_entry_verticality_atr_mult", 0.0, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_entry_first_pullback_enabled", False, raising=False)
 
 
 def _df(rows: list[tuple[float, float, float, float]]) -> pd.DataFrame:
@@ -72,7 +86,8 @@ def test_deep_pullback_rejected() -> None:
     assert reason == "pullback_too_deep"
 
 
-def test_no_break_waits() -> None:
+def test_no_break_waits(monkeypatch) -> None:
+    _isolate_trigger_logic(monkeypatch)
     rows = [_base(100.0) for _ in range(14)]
     rows += [_base(c) for c in (102.0, 104.0, 106.0, 108.0, 110.0)]
     rows += [_base(109.0, 800.0), _base(108.5, 800.0)]
@@ -101,7 +116,8 @@ def test_retest_fires_on_break_then_retest_then_reclaim(monkeypatch) -> None:
     assert "pullback_high" in dbg and "pullback_low" in dbg  # breakout level + structural stop
 
 
-def test_retest_does_not_fire_on_runaway_first_break() -> None:
+def test_retest_does_not_fire_on_runaway_first_break(monkeypatch) -> None:
+    _isolate_trigger_logic(monkeypatch)
     # Broke then ran straight up (lows stay above the level) — never offered a retest.
     rows = _retest_rows()[:31] + [
         (110.5, 110.7, 110.30, 3000.0),
@@ -158,7 +174,8 @@ def test_runaway_break_blocked_by_raised_volume_floor() -> None:
     assert reason == "break_low_volume"  # runaways demand more conviction
 
 
-def test_retest_rejects_failed_hold() -> None:
+def test_retest_rejects_failed_hold(monkeypatch) -> None:
+    _isolate_trigger_logic(monkeypatch)
     # Broke, retested, but LOST the level on a close (failed breakout) — not bought.
     rows = _retest_rows()[:31] + [
         (109.5, 109.7, 109.30, 3000.0),

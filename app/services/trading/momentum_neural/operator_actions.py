@@ -585,6 +585,13 @@ def confirm_live_arm(
     )
     final_snap["arm_confirmed_at_utc"] = _utcnow().isoformat()
     final_snap["arm_confirmed"] = True
+    # Live-eligibility recency-grace ANCHOR (UPC +500% TOCTOU miss). At THIS point the name
+    # is provably live-eligible (row.live_eligible re-checked above) AND the risk eval
+    # allowed it — so stamp the confirm instant as the arm-time live-eligibility anchor the
+    # runner's entry gate reads. If neural re-scoring later FLICKERS live_eligible False at
+    # the exact entry instant, the recency grace tolerates it (within the window + live
+    # forward momentum). Absent stamp ⇒ no grace ⇒ today's block (fail-safe).
+    final_snap["live_eligible_at_utc"] = final_snap["arm_confirmed_at_utc"]
     allocation = build_session_allocation_decision(
         db,
         sess,

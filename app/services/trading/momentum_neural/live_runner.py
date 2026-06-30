@@ -61,14 +61,19 @@ from .risk_policy import (
     max_loss_circuit_decision,
     policy_float_cap,
     policy_int_cap,
+    adaptive_reentry_cooldown_seconds,
+    reentry_after_stop_allowed,
 )
 from .paper_execution import (
     _classify_cadence,
     cushion_adaptive_trail_stop,
     breakeven_stop_after_partial,
     class_aware_reward_risk,
+    double_top_tighten_decision,
     effective_stop_atr_pct,
     iceberg_seller_score,
+    measured_move_exit_enabled,
+    measured_move_scale_exit_decision,
     ofi_exhaustion_lock,
     pyramid_add_decision,
     pyramid_blend_on_fill,
@@ -79,6 +84,7 @@ from .paper_execution import (
     scale_out_quantity,
     stop_target_prices,
     structural_or_vol_floored_atr_pct,
+    tape_accel_reversal_exit,
     utc_iso,
 )
 from .persistence import variant_for_id
@@ -86,6 +92,7 @@ from .live_fsm import (
     LIVE_RUNNER_RUNNABLE_STATES,
     STATE_ARMED_PENDING_RUNNER,
     STATE_LIVE_BAILOUT,
+    STATE_LIVE_CANCELLED,
     STATE_LIVE_COOLDOWN,
     STATE_LIVE_ENTERED,
     STATE_LIVE_ENTRY_CANDIDATE,
@@ -118,6 +125,11 @@ from .entry_gates import (
     add_into_halt_ok,
     round_number_entry_context,
 )
+from .hold_signals import (
+    percentile as _percentile,
+    smart_hold_band_frac,
+    smart_hold_decision,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -128,6 +140,188 @@ AdapterFactory = Callable[[], Any]
 
 def _utcnow() -> datetime:
     return datetime.utcnow()
+
+
+# ── CHUNK 3 — S4 FAST EXECUTOR: rail-governed calls + RTT measurement ─────────────
+# A process-local exponential-moving-average of the MEASURED rail round-trip time, used
+# by the inline micro-repeg (inter-repeg delay) and the fast ack-poll (poll cadence) so
+# both adapt to the rail's real latency instead of a fixed clock. Bounded scalar (no
+# growth); seeded None until the first measured call. docs/DESIGN/MOMENTUM_ENGINE.md §3.
+_RAIL_RTT_EMA_S: float | None = None
+_RAIL_RTT_ALPHA = 0.3  # EMA smoothing on the measured RTT
+
+
+def _note_rail_rtt(elapsed_s: float) -> None:
+    """Fold a measured rail RTT into the process-local EMA (clamped to a sane band so a
+    one-off stall / clock skew can't poison the adaptive delays)."""
+    global _RAIL_RTT_EMA_S
+    try:
+        s = float(elapsed_s)
+    except (TypeError, ValueError):
+        return
+    if not (s >= 0.0) or s > 30.0:  # NaN-safe + reject absurd measurements
+        return
+    if _RAIL_RTT_EMA_S is None:
+        _RAIL_RTT_EMA_S = s
+    else:
+        _RAIL_RTT_EMA_S = (1.0 - _RAIL_RTT_ALPHA) * _RAIL_RTT_EMA_S + _RAIL_RTT_ALPHA * s
+
+
+def _measured_rail_rtt_s() -> float | None:
+    return _RAIL_RTT_EMA_S
+
+
+def _rail_lane_key(sess) -> str:
+    """Token-bucket key. ONE bucket per (user) lane so ALL of that user's lane rail
+    calls (places + polls across every session/symbol) share the SAME budget — that is
+    what bounds multi-admission. Falls back to the global lane bucket if user is unset."""
+    try:
+        return f"momentum:{int(getattr(sess, 'user_id', 0) or 0)}"
+    except (TypeError, ValueError):
+        return "momentum"
+
+
+def _governed_get_order(adapter, oid, *, sess=None):
+    """Rate-governed wrapper around ``adapter.get_order`` (a LIST endpoint sharing the
+    rail budget). Acquires a token (flag-OFF ⇒ instant pass-through, byte-identical),
+    times the call into the RTT EMA, and feeds the outcome back to the governor (a 429
+    halves the rate). Returns the EXACT ``(order, freshness)`` tuple ``get_order`` does;
+    on a governor DEFER returns ``(None, None)`` so the caller treats it as 'not yet
+    confirmed' (the resting order persists — never a silent drop, it is logged)."""
+    import time as _time
+
+    from .rail_governor import acquire_rail, note_rail_outcome
+
+    res = acquire_rail(settings, lane_key=_rail_lane_key(sess))
+    if not res.acquired:
+        _log.info(
+            "[momentum_s4] rail governor DEFER get_order oid=%s waited=%.3fs rps=%.3f",
+            oid, res.waited_s, res.refill_rps,
+        )
+        return None, None
+    _t0 = _time.monotonic()
+    try:
+        out = adapter.get_order(str(oid))
+    except Exception as exc:  # measure + feed back even on failure
+        # A 429 on the POLL path now SURFACES (the adapter re-raises the rate-limit case
+        # instead of masking it as a benign None) so the governor can HALVE the rate —
+        # without this, repeated poll-side 429s read as successes and WIDEN the rate INTO
+        # the rate limit. note_rail_outcome only halves on a recognized rate-limit signal;
+        # any other exception is NEUTRAL (neither widen nor halve).
+        note_rail_outcome(settings, exc, lane_key=_rail_lane_key(sess))
+        raise
+    _note_rail_rtt(_time.monotonic() - _t0)
+    # get_order returns (order, freshness). A 429 surfaces as the EXCEPTION above; a bare
+    # None order here is AMBIGUOUS (not-found vs a swallowed transient) so it is NEUTRAL —
+    # only an order object carrying a 429-shaped status halves the rate, a real order
+    # widens it. A None must NOT be counted as a success (that would falsely widen toward
+    # the limit on a transient poll error). [poll-path 429 unmasking, 2026-06-27]
+    _ord = out[0] if isinstance(out, tuple) and out else None
+    if _ord is not None:
+        note_rail_outcome(settings, _ord, lane_key=_rail_lane_key(sess))
+    return out
+
+
+def _fast_ack_poll_entry(adapter, oid, *, sess, interval_window_s: float):
+    """CHUNK 3-B — FAST ACK-POLL. Poll ``get_order`` repeatedly WITHIN the current tick
+    to confirm an entry fill without waiting for the next external WS/batch tick. The
+    cadence rides the MEASURED rail RTT (seed -> geometric widen); the TOTAL window is
+    bounded by ``interval_window_s`` (rest_bars * entry_interval, the EXISTING ack-timeout
+    backstop) AND a hard iteration cap (belt-and-suspenders). Every poll goes through the
+    rail governor (shared budget). Returns the FIRST order object that is done/filled, or
+    the LAST polled order (so the caller's existing open/cancel/repeg logic runs exactly
+    as today on a non-fill). Flag OFF ⇒ a single governed poll (one `get_order`), so the
+    confirm is byte-identical to the deployed tick-coupled path (modulo the governor,
+    which is itself byte-identical when OFF)."""
+    import time as _time
+
+    no, fr = _governed_get_order(adapter, oid, sess=sess)
+    # Already terminal/filled on the first look, or fast-poll disabled ⇒ done.
+    if not bool(getattr(settings, "chili_momentum_entry_fast_poll_enabled", True)):
+        return no, fr
+    if no is not None and (_order_done_for_entry(no) or float(getattr(no, "filled_size", 0) or 0.0) > 0.0):
+        return no, fr
+    seed = float(getattr(settings, "chili_momentum_entry_fast_poll_seed_interval_s", 0.25) or 0.25)
+    widen = float(getattr(settings, "chili_momentum_entry_fast_poll_widen_factor", 1.6) or 1.6)
+    max_iters = int(getattr(settings, "chili_momentum_entry_fast_poll_max_iters", 12) or 12)
+    # Cadence base = the measured RTT if we have one (poll about as fast as the rail
+    # answers), else the conservative seed. Never below the seed (no busy-spin).
+    rtt = _measured_rail_rtt_s()
+    interval = max(seed, rtt) if (rtt is not None and rtt > 0) else seed
+    window = max(0.0, float(interval_window_s))
+    if window <= 0.0:
+        return no, fr
+    # IDLE-IN-TRANSACTION GUARD (2026-06-27): `tick_live_session` holds a
+    # `SELECT ... FOR UPDATE NOWAIT` row lock on the session for the WHOLE call, so any
+    # sleeping done here pins a DB connection in an OPEN transaction (and blocks
+    # broker-sync / the reconciler from touching this session). The geometric widen to
+    # max_iters could otherwise sleep ~100s+ at a 5m interval (the rest_bars*interval
+    # window is NOT the binding cap there). Bound the TOTAL in-tick wall-clock to a small
+    # ceiling so worst-case lock-hold is single-digit seconds (ONE documented knob,
+    # default 5s). The fast-poll is a latency OPTIMIZER, not the ack-timeout backstop —
+    # an unfilled order still falls through to the existing event-driven cancel/repeg
+    # path on the NEXT tick, with the row lock RELEASED in between.
+    _fp_hard_ceiling_s = float(
+        getattr(settings, "chili_momentum_entry_fast_poll_max_wall_s", 5.0) or 5.0
+    )
+    window = min(window, max(0.0, _fp_hard_ceiling_s))
+    deadline = _time.monotonic() + window
+    iters = 0
+    polls = 1
+    while iters < max_iters and _time.monotonic() < deadline:
+        sleep_s = min(interval, max(0.0, deadline - _time.monotonic()))
+        if sleep_s > 0:
+            _time.sleep(sleep_s)
+        _no, _fr = _governed_get_order(adapter, oid, sess=sess)
+        polls += 1
+        iters += 1
+        interval = interval * widen  # geometric widening
+        if _no is None:
+            # governor DEFER or a transient None — keep the last good `no`, retry.
+            continue
+        no, fr = _no, _fr
+        if _order_done_for_entry(no) or float(getattr(no, "filled_size", 0) or 0.0) > 0.0:
+            _log.info(
+                "[momentum_s4] fast-poll CONFIRM oid=%s after polls=%d rtt=%s",
+                oid, polls, (round(rtt, 4) if rtt else None),
+            )
+            break
+    return no, fr
+
+
+def _governed_place(adapter, place_fn, *, sess=None, **kwargs):
+    """Rate-governed wrapper around an order PLACE (place_limit_order_gtc /
+    place_market_order). Acquires a token (flag-OFF ⇒ instant pass-through,
+    byte-identical), times the call into the RTT EMA, and feeds the place result back to
+    the governor (a 429 halves the rate, a clean place widens it). On a governor DEFER
+    returns a synthetic ``{"ok": False, "error": "rail_governor_deferred", ...}`` so the
+    caller's existing not-ok branch re-watches / retries next tick (never a silent
+    drop)."""
+    import time as _time
+
+    from .rail_governor import acquire_rail, note_rail_outcome
+
+    res = acquire_rail(settings, lane_key=_rail_lane_key(sess))
+    if not res.acquired:
+        _log.info(
+            "[momentum_s4] rail governor DEFER place waited=%.3fs rps=%.3f",
+            res.waited_s, res.refill_rps,
+        )
+        return {
+            "ok": False,
+            "error": "rail_governor_deferred",
+            "deferred": True,
+            "client_order_id": kwargs.get("client_order_id"),
+        }
+    _t0 = _time.monotonic()
+    try:
+        out = place_fn(**kwargs)
+    except Exception as exc:
+        note_rail_outcome(settings, exc, lane_key=_rail_lane_key(sess))
+        raise
+    _note_rail_rtt(_time.monotonic() - _t0)
+    note_rail_outcome(settings, out, lane_key=_rail_lane_key(sess))
+    return out
 
 
 # ── P0: per-(symbol, day) DailyContext cache (NO new per-tick fetch) ──────────────
@@ -166,6 +360,91 @@ def _daily_ctx_cached(symbol: str, *, price: float | None = None) -> Any:
                 _DAILY_CTX_CACHE.pop(_k, None)
         _DAILY_CTX_CACHE[_key] = _ctx
         return _ctx
+    except Exception:
+        return None
+
+
+# ── REGIME-ADAPTIVE FRONT-SIDE STRENGTH DISTRIBUTION (kill the fixed 0.25/0.75) ──
+# The front-side size-tilt ramp used to take s_lo/s_hi/defer from the function defaults
+# (0.25/0.75/0.15) — FIXED magic numbers that ignore the regime. The strength score is
+# ALREADY self-normalized per name (Kaufman-ER spine + saturating sigmoids), so the
+# CROSS-NAME distribution of recently-computed scores reflects the CURRENT regime: hot
+# tape ⇒ scores cluster HIGH, cold tape ⇒ LOW. We keep a small, BOUNDED, TTL'd rolling
+# cache of the most-recent strength scores (cross-name) and, once warm, derive the ramp
+# anchors as the p25/p75/p15 of that live distribution — the operator's "percentile-
+# within-batch" pattern. The cache obeys the repo convention (CLAUDE.md: "Caches must
+# have hard max size + TTL"): a hard sample cap + a per-sample timestamp TTL, both ONE
+# documented base each (FLOORS, not scattered caps).
+#
+#   * Window   : last _FRONTSIDE_DIST_MAX samples (256) OR last _FRONTSIDE_DIST_TTL_S
+#                seconds (30 min) — whichever binds first. Documented base = both.
+#   * Warm-up  : need >= _FRONTSIDE_DIST_MIN_K (30) fresh samples before adapting; below
+#                that we return None ⇒ the caller keeps the documented base 0.25/0.75/0.15
+#                (COLD-START byte-identical to today).
+#   * Cost     : O(window) append + one sorted-slice quantile; no fetch, never blocks.
+#   * size_floor stays the ONE documented SAFETY-FLOOR (not derived here) — the irreducible
+#     base the no-magic rule explicitly permits.
+_FRONTSIDE_DIST: "list[tuple[float, float]]" = []  # (monotonic_ts, strength)
+_FRONTSIDE_DIST_MAX = 256          # hard max samples (the cache size cap)
+_FRONTSIDE_DIST_TTL_S = 30 * 60.0  # 30 min per-sample TTL (the regime window)
+_FRONTSIDE_DIST_MIN_K = 30         # warm-up floor before the ramp adapts
+
+
+def _frontside_dist_note(strength: float, *, now: float | None = None) -> None:
+    """Append a freshly-computed cross-name front-side ``strength`` into the bounded,
+    TTL'd rolling distribution. Pure in-memory; never blocks, never fetches. Evicts
+    TTL-expired samples and enforces the hard max size. Non-finite / out-of-range inputs
+    are dropped (the score is [0,1] by construction). Fail-silent (a cache hiccup must
+    never touch the entry path)."""
+    try:
+        import time as _time
+
+        s = float(strength)
+        if not math.isfinite(s):
+            return
+        _now = float(now) if now is not None else _time.monotonic()
+        _FRONTSIDE_DIST.append((_now, s))
+        # TTL eviction: drop samples older than the regime window.
+        _cut = _now - _FRONTSIDE_DIST_TTL_S
+        if _FRONTSIDE_DIST and _FRONTSIDE_DIST[0][0] < _cut:
+            _kept = [t for t in _FRONTSIDE_DIST if t[0] >= _cut]
+            _FRONTSIDE_DIST[:] = _kept
+        # Hard max-size eviction: keep the most-recent _FRONTSIDE_DIST_MAX.
+        if len(_FRONTSIDE_DIST) > _FRONTSIDE_DIST_MAX:
+            del _FRONTSIDE_DIST[: len(_FRONTSIDE_DIST) - _FRONTSIDE_DIST_MAX]
+    except Exception:
+        return
+
+
+def _frontside_adaptive_thresholds(
+    *, now: float | None = None,
+) -> "tuple[float, float, float, int] | None":
+    """Return ``(s_lo, s_hi, defer_below, n_fresh)`` = (p25, p75, p15) of the FRESH
+    rolling front-side strength distribution + the warm sample count, or ``None`` when
+    the cache is cold (< _FRONTSIDE_DIST_MIN_K fresh samples) so the caller falls back
+    to the documented base (0.25/0.75/0.15 — byte-identical to today). O(window): one
+    TTL filter + a single sorted-slice quantile (``statistics.quantiles``). Fail-CLOSED
+    to ``None`` (⇒ base) on any error — adapting must never throw onto the entry path."""
+    try:
+        import time as _time
+        import statistics as _stats
+
+        _now = float(now) if now is not None else _time.monotonic()
+        _cut = _now - _FRONTSIDE_DIST_TTL_S
+        fresh = [s for (t, s) in _FRONTSIDE_DIST if t >= _cut and math.isfinite(s)]
+        if len(fresh) < _FRONTSIDE_DIST_MIN_K:
+            return None
+        # statistics.quantiles(n=100) -> 99 cut points; index i is the (i+1)-th percentile.
+        qs = _stats.quantiles(fresh, n=100, method="inclusive")
+        p15 = float(qs[14])  # 15th percentile
+        p25 = float(qs[24])  # 25th percentile
+        p75 = float(qs[74])  # 75th percentile
+        # Guard the ramp monotonicity (lo < hi) — degenerate (all-equal) dist ⇒ base.
+        if not (math.isfinite(p15) and math.isfinite(p25) and math.isfinite(p75)):
+            return None
+        if not (p25 < p75):
+            return None
+        return p25, p75, p15, len(fresh)
     except Exception:
         return None
 
@@ -515,6 +794,31 @@ def _record_fill_outcome_safe(
         # SAVEPOINT: the insert (incl. its guarded leg_seq read) is fully isolated —
         # any error rolls back ONLY this nested block, leaving the trade txn clean.
         with db.begin_nested():
+            # IDEMPOTENT BY broker_order_id (2026-06-27 duplicate-fill root cause):
+            # a recycled watcher / repeg / late-fill sweep can re-poll the SAME real
+            # broker order — and because leg_seq is MAX+1 per (session, side), the
+            # ON CONFLICT (session_id, side, leg_seq) clause can NEVER catch that
+            # repeat (it always picks a fresh leg_seq), double-logging one fill.
+            # When the broker assigned an order id, SKIP cleanly if a row for this
+            # (session, side, broker_order_id) already exists — the leg is logged.
+            # broker_order_id IS NULL (paper / synthetic / broker-zero escape) keeps
+            # the leg_seq path unchanged. Same SAVEPOINT, no new flag (already gated
+            # by chili_momentum_fill_log_enabled above).
+            if params["broker_order_id"] is not None:
+                _dup = db.execute(
+                    _text(
+                        "SELECT 1 FROM momentum_fill_outcomes "
+                        "WHERE session_id = :sid AND side = :side "
+                        "AND broker_order_id = :boid LIMIT 1"
+                    ),
+                    {
+                        "sid": params["session_id"],
+                        "side": params["side"],
+                        "boid": params["broker_order_id"],
+                    },
+                ).scalar()
+                if _dup is not None:
+                    return  # already logged this broker order leg — idempotent skip
             row = db.execute(
                 _text(
                     "SELECT COALESCE(MAX(leg_seq), -1) + 1 FROM momentum_fill_outcomes "
@@ -563,6 +867,22 @@ def _float_or_none(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return out if math.isfinite(out) else None
+
+
+def _safe_mult(x: Any) -> float:
+    """LOW-7 fail-NEUTRAL: sanitize ONE size-multiplier factor before it enters the product.
+    A non-finite (NaN/inf) or NEGATIVE multiplier from any upstream helper is coerced to 1.0
+    (neutral) so it cannot poison the combined product — a negative would flip the sign of the
+    budget and a NaN would make the whole budget NaN, each silently KILLING the fill instead of
+    sizing it. A valid (finite, >= 0) factor passes through unchanged, so the happy path and the
+    downstream 3x clamp + max_notional ceiling are untouched."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return 1.0
+    if not math.isfinite(v) or v < 0.0:
+        return 1.0
+    return v
 
 
 def _order_total_fees_usd(no: Any) -> float | None:
@@ -1662,7 +1982,19 @@ def _scale_out_to_runner(
         )
         pos["stop_price"] = be_stop
         pos["scaled_out_at_utc"] = _utcnow().isoformat()
-        pos["scale_out_fraction"] = scale_out_fraction(symbol=sess.symbol)
+        pos["scale_out_fraction"] = scale_out_fraction(symbol=sess.symbol, vol_pctl=_adaptive_scale_vol_pctl(le))
+        # Measured-move winner-management (flag-gated, default OFF): FREEZE the
+        # name's first impulse leg at the first-target scale-out — the breakout high
+        # so far (HWM) is the impulse high, entry the leg base. The runner-loop trail
+        # later projects this name's OWN leg height to a measured-move target (scale
+        # a fraction) and watches for a double-top retest. Frozen here ONCE; both are
+        # inert no-ops when the flag is off (byte-identical). docs/DESIGN/MOMENTUM_LANE.md
+        try:
+            _imp_high = _float_or_none(pos.get("high_water_mark")) or _float_or_none(entry_price)
+            pos["impulse_leg_high"] = _imp_high
+            pos["impulse_leg_entry"] = _float_or_none(entry_price)
+        except Exception:
+            pass
         le["position"] = pos
         _commit_le(sess, le)
         _safe_transition(db, sess, STATE_LIVE_TRAILING)
@@ -1850,7 +2182,7 @@ def _place_scale_out_limit(
         # first rung's price (the reactive market path takes the later rungs). The grid
         # anchor stop is frozen on the position at entry; build the ladder off it. Flag OFF
         # / no ladder => the single scale_out_fraction at target_px (byte-identical).
-        _rest_frac = scale_out_fraction(symbol=sess.symbol)
+        _rest_frac = scale_out_fraction(symbol=sess.symbol, vol_pctl=_adaptive_scale_vol_pctl(le))
         _rest_px = float(target_px)
         try:
             _pos = le.get("position") if isinstance(le.get("position"), dict) else {}
@@ -1859,7 +2191,7 @@ def _place_scale_out_limit(
                 _rest_frac = float(_grid[0][1])
                 _rest_px = float(_grid[0][0])
         except Exception:
-            _rest_frac = scale_out_fraction(symbol=sess.symbol)
+            _rest_frac = scale_out_fraction(symbol=sess.symbol, vol_pctl=_adaptive_scale_vol_pctl(le))
             _rest_px = float(target_px)
         scale_qty, _runner_qty, can_split = scale_out_quantity(
             current_qty=float(filled),
@@ -2010,14 +2342,131 @@ def _safe_transition(db: Session, sess: TradingAutomationSession, new_state: str
         emit_feedback_after_terminal_transition(db, sess)
 
 
+# Pre-entry, no-position states that a DETERMINISTIC policy decline can terminalize
+# cleanly from. A decline reached from any of these never owned capital, so routing it
+# to live_cancelled cannot abandon a live position.
+_PRE_ENTRY_DECLINE_STATES = frozenset(
+    {STATE_ARMED_PENDING_RUNNER, STATE_QUEUED_LIVE, STATE_WATCHING_LIVE, STATE_LIVE_ENTRY_CANDIDATE}
+)
+
+
+def _clean_decline_terminal_enabled() -> bool:
+    """ON by default (no-dark-flags): a deterministic PRE-ENTRY policy decline terminalizes
+    as the CLEAN live_cancelled state, not the alarm-coloured live_error — cutting the
+    recurring live_error noise + reaper churn so the REAL errors (zero-fill, place isError)
+    stand out. Flag OFF => byte-identical legacy (decline => live_error). FAIL-SAFE: any
+    settings read error keeps the change ON (the safe, noise-reducing default)."""
+    try:
+        return bool(getattr(settings, "chili_momentum_clean_decline_terminal_enabled", True))
+    except Exception:
+        return True
+
+
+def _decline_terminal(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    reason: str,
+    detail: dict[str, Any] | None = None,
+) -> None:
+    """Terminalize a DETERMINISTIC pre-entry POLICY decline (a known risk-eval BLOCK —
+    no_bbo / not-live-eligible / spread-too-wide / product-not-tradable — on a name that
+    never held a position) in the CLEAN live_cancelled state with the decline reason
+    recorded, instead of the alarm-coloured live_error.
+
+    This NEVER weakens a risk block: the session still does NOT enter; only the terminal
+    STATE/label changes. live_cancelled is already terminal across every consumer (focus-
+    set, reaper, feedback learner, busy-set, canonical status). When the flag is OFF, or the
+    session is somehow NOT in a pre-entry/no-position state (defensive), it falls back to the
+    legacy live_error so a held position can never be short-circuited by a decline reroute."""
+    if _clean_decline_terminal_enabled() and sess.state in _PRE_ENTRY_DECLINE_STATES:
+        payload: dict[str, Any] = {"reason": reason, "terminal": STATE_LIVE_CANCELLED}
+        if detail:
+            payload.update(detail)
+        _emit(db, sess, "live_declined", payload)
+        _safe_transition(db, sess, STATE_LIVE_CANCELLED)
+        return
+    _safe_transition(db, sess, STATE_LIVE_ERROR)
+
+
+def _arm_time_live_eligible_anchor(sess: TradingAutomationSession) -> str | None:
+    """Read the session's arm/confirm-time live-eligibility anchor (ISO-8601 UTC) for the
+    recency-grace (UPC +500% TOCTOU miss). ``confirm_live_arm`` stamps it on the snapshot
+    when the session was provably live-eligible at confirm. FAIL-SAFE: absent / non-string
+    ⇒ None ⇒ no grace ⇒ today's BLOCK.
+
+    The anchor is PINNED to the arm/confirm instant and is NEVER refreshed at runtime: only
+    ``operator_actions.confirm_live_arm`` writes the top-level ``live_eligible_at_utc`` stamp,
+    and no runner path re-stamps it when live-eligibility is later observed True. (The nested
+    ``le['live_eligible_at_utc']`` read below is therefore a dead branch — kept only as a
+    defensive fall-through; nothing populates it.) This pinning is DELIBERATE and the SAFER
+    behavior: because the anchor cannot move, the recency-grace window cannot creep — a slow
+    (> window) arm-to-entry setup ages out of the window and safely reverts to the
+    conservative BLOCK rather than holding the grace open indefinitely. The read prefers the
+    (currently-unwritten) live-exec block, then the authoritative top-level confirm stamp."""
+    try:
+        snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
+        le = snap.get(KEY_LIVE_EXEC) if isinstance(snap.get(KEY_LIVE_EXEC), dict) else {}
+        for raw in (le.get("live_eligible_at_utc"), snap.get("live_eligible_at_utc")):
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+    except Exception:
+        return None
+    return None
+
+
+def _live_forward_momentum(db: Session, sess: TradingAutomationSession) -> bool | None:
+    """Live FORWARD-MOMENTUM read for the eligibility recency-grace: True when the tape is
+    being fed UP right now per the codebase's CANONICAL RIDE definition — signed aggressor
+    OFI level > 0 AND OFI slope >= 0 (see ``paper_execution.velocity_persistence_ride_lock``
+    RIDE: ``level > 0 ∧ slope >= 0``). This is the AND (both legs agree) semantics, NOT the
+    looser OR: an OR let a transient dead-cat up-bucket in a sharp selloff (level<=0 but a
+    one-bar slope>0, or vice-versa) flip momentum True and grant the grace on a falling
+    tape. Reuses the SAME ``_live_flow_slope`` read (LEVER 2B / the maturity-widen use) — no
+    new datum, no new fetch path. Returns None on thin / stale / crypto tape
+    (``_live_flow_slope`` ⇒ None) OR when EITHER OFI leg is missing, so the grace stays
+    conservative (None ⇒ not-True ⇒ BLOCK held)."""
+    try:
+        from .pipeline import _live_flow_slope as _lfs_grace
+
+        fs = _lfs_grace(sess.symbol, db=db)
+        if not isinstance(fs, dict):
+            return None
+        lvl = fs.get("ofi_level")
+        slp = fs.get("ofi_slope")
+        # CANONICAL RIDE: BOTH legs must be present and agree (level > 0 AND slope >= 0).
+        # A missing leg ⇒ None (conservative; the grace stays blocked) — we can't confirm
+        # the tape is being fed up on a single available leg.
+        if lvl is None or slp is None:
+            return None
+        try:
+            return bool(float(lvl) > 0.0 and float(slp) >= 0.0)
+        except (TypeError, ValueError):
+            return None
+    except Exception:
+        return None
+
+
 def runner_boundary_risk_ok(
     db: Session,
     sess: TradingAutomationSession,
     *,
     expected_move_bps: float | None = None,
+    apply_eligibility_grace: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
     if sess.user_id is None:
         return False, {"reason": "no_user"}
+    # Live-eligibility RECENCY-GRACE evidence (UPC +500% TOCTOU miss). Only the ENTRY gate
+    # opts in (apply_eligibility_grace=True); scale-in adds inherit the entry admission and
+    # keep their own held-flicker tolerance. The evaluator stays byte-identical when neither
+    # is supplied (and when the grace flag is OFF). The OFI read is best-effort and the
+    # anchor is fail-safe — absent evidence ⇒ today's block.
+    _recent_elig: str | None = None
+    _fwd_mom: bool | None = None
+    if apply_eligibility_grace:
+        _recent_elig = _arm_time_live_eligible_anchor(sess)
+        if _recent_elig is not None:
+            _fwd_mom = _live_forward_momentum(db, sess)
     ev = evaluate_proposed_momentum_automation(
         db,
         user_id=int(sess.user_id),
@@ -2027,6 +2476,8 @@ def runner_boundary_risk_ok(
         execution_family=normalize_execution_family(sess.execution_family),
         exclude_session_id=int(sess.id),
         expected_move_bps=expected_move_bps,
+        recent_live_eligible_at_utc=_recent_elig,
+        live_forward_momentum=_fwd_mom,
     )
     return bool(ev.get("allowed", False)), ev
 
@@ -2143,8 +2594,48 @@ def _entry_chase_ceiling_px(*, limit_px: float, expected_move_bps: float | None)
     return limit_px * (1.0 + tol_bps / 10_000.0)
 
 
+def _ask_advanced_past_limit(
+    *, ask: float | None, limit_px: float, expected_move_bps: float | None
+) -> bool:
+    """FIX B — fast-push detector. True when the live ASK has advanced ABOVE our
+    resting buy limit by MORE than an adaptive band — i.e. the offer ran away and a
+    resting marketable limit is no longer marketable (the order won't fill until
+    price comes back). This is the EARLY signal of a vertical push that the existing
+    bid-based ``entry_limit_left_behind`` misses (the bid lags the ask up).
+
+    The band = ONE documented base (``..._runaway_cross_ask_band_bps``), widened by
+    a fraction of the name's expected per-bar move (reuses ``chase_move_ratio`` so
+    explosive names get proportionally more rope before we churn a cancel+replace),
+    HARD-CAPPED at the same adaptive live spread cap the chase ceiling uses (the
+    detector can never tolerate more drift than the risk budget). Debounces single-
+    tick offer jitter. The eventual cross price is STILL bounded separately by
+    ``_entry_repeg_price``'s cumulative ceiling. Pure + side-effect-free.
+
+    Returns False on any invalid input (fail-closed: no escalation)."""
+    try:
+        if ask is None or limit_px <= 0 or ask <= 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    try:
+        base_bps = float(getattr(settings, "chili_momentum_runaway_cross_ask_band_bps", 8.0) or 0.0)
+    except (TypeError, ValueError):
+        base_bps = 8.0
+    if base_bps < 0:
+        base_bps = 0.0
+    try:
+        ratio = float(getattr(settings, "chili_momentum_entry_chase_move_ratio", 0.25) or 0.0)
+    except (TypeError, ValueError):
+        ratio = 0.0
+    band_bps = max(base_bps, (expected_move_bps or 0.0) * ratio)
+    band_bps = min(band_bps, _adaptive_live_max_spread_bps(expected_move_bps))
+    threshold = limit_px * (1.0 + band_bps / 10_000.0)
+    return ask > threshold
+
+
 def _entry_repeg_price(
-    *, original_limit_px: float, live_ask: float, expected_move_bps: float | None
+    *, original_limit_px: float, live_ask: float, expected_move_bps: float | None,
+    vertical_confluence: float | None = None,
 ) -> float | None:
     """Bounded marketable RE-PEG price for a left-behind entry chase. Returns a new buy
     limit (a guarded live ask, so marketable) capped by a CUMULATIVE ceiling =
@@ -2159,11 +2650,99 @@ def _entry_repeg_price(
             return None
     except (TypeError, ValueError):
         return None
-    ceiling = original_limit_px * (1.0 + _adaptive_live_max_spread_bps(expected_move_bps) / 10_000.0)
+    # Cumulative ceiling = the abs-cap by default; on a CONFIRMED-THRUST halt-resume
+    # vertical (vertical_confluence supplied + flag on) it is adaptively raised toward
+    # the HARD vertical_chase_max_bps so a fast resume gap actually fills. Risk-first
+    # re-sizing at the chased price keeps dollar-risk pinned (recoverable).
+    ceiling = original_limit_px * (
+        1.0 + _vertical_chase_ceiling_bps(
+            expected_move_bps=expected_move_bps, confluence=vertical_confluence
+        ) / 10_000.0
+    )
     if live_ask > ceiling:
         return None  # ran past the cumulative spread budget -> do not chase
     new_px = live_ask * _adaptive_notional_guard_multiplier(expected_move_bps=expected_move_bps)
     return min(new_px, ceiling)
+
+
+def _vertical_chase_ceiling_bps(
+    *, expected_move_bps: float | None, confluence: float | None
+) -> float:
+    """Adaptive cumulative-chase ceiling (bps over the ORIGINAL entry limit) for a
+    CONFIRMED-THRUST halt-resume vertical. Returns the BASE abs-cap (today's behavior,
+    parity) unless the master flag is on AND a real thrust confluence in [0,1] clears
+    the documented floor; then it scales LINEARLY from the abs-cap (@min_confluence) up
+    to a HARD ``vertical_chase_max_bps`` (@confluence=1.0). The raise NEVER exceeds the
+    hard max, and a wrong chase is recoverable because the repeg re-sizes risk-first at
+    the chased price (dollar-risk pinned at _eff_max_loss + the #769 circuit). Pure +
+    side-effect-free. flag OFF / no confluence / confluence < floor ⇒ the abs-cap."""
+    base_cap = _adaptive_live_max_spread_bps(expected_move_bps)
+    try:
+        if not bool(getattr(settings, "chili_momentum_vertical_chase_enabled", True)):
+            return base_cap
+        if confluence is None or not math.isfinite(float(confluence)):
+            return base_cap
+        c = max(0.0, min(1.0, float(confluence)))
+        floor = float(getattr(settings, "chili_momentum_vertical_chase_min_confluence", 0.5) or 0.0)
+        if c < floor:
+            return base_cap
+        hard_max = float(getattr(settings, "chili_momentum_vertical_chase_max_bps", 800.0) or 0.0)
+        if hard_max <= base_cap:
+            return base_cap
+        span = 1.0 - floor
+        frac = 1.0 if span <= 0 else (c - floor) / span
+        raised = base_cap + frac * (hard_max - base_cap)
+        return max(base_cap, min(raised, hard_max))
+    except (TypeError, ValueError):
+        return base_cap
+
+
+def _vertical_thrust_confluence(
+    *, halt_resume_active: bool, tape_thrust_ok: bool | None,
+    squeeze_pct: float | None, rvol: float | None,
+) -> float | None:
+    """Confirmed-thrust confluence in [0,1] for the vertical chase. Returns None
+    (⇒ no raise, parity) UNLESS this is a recent halt-resume AND the tape is
+    explicitly thrusting (fail-closed: tape None/False ⇒ None). squeeze_pct (centered
+    at 0.5) and RVOL (vs the explosive floor) each add a bounded share. Pure."""
+    try:
+        if not halt_resume_active:
+            return None
+        if tape_thrust_ok is not True:
+            return None  # fail-closed: no thrust confirmation ⇒ no raise
+        score = 0.5  # halt-resume + confirmed tape is the floor of confidence
+        if squeeze_pct is not None and math.isfinite(float(squeeze_pct)):
+            score += max(0.0, min(0.25, (float(squeeze_pct) - 0.5) * 0.5))
+        rvol_floor = float(getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 3.0)
+        if rvol is not None and math.isfinite(float(rvol)) and float(rvol) > rvol_floor:
+            score += min(0.25, (float(rvol) - rvol_floor) * 0.05)
+        return max(0.0, min(1.0, score))
+    except (TypeError, ValueError):
+        return None
+
+
+def _entry_client_order_id(
+    *, session_id: Any, correlation_id: str | None,
+    trade_cycles: int, stopout_cycles: int, place_n: int,
+) -> str:
+    """Deterministic, recycle-UNIQUE entry client_order_id.
+
+    The broker rejects a duplicate Reference ID (409 'must be unique'). The per-session
+    ``entry_place_count`` (place_n) alone is NOT enough because it is CLEARED on recycle
+    (it lives in _RECYCLE_ENTRY_STATE_KEYS) — so after a stop-out + recycle, the #1
+    re-entry lever's first place restarts at place_n=1 and produces the SAME cid as the
+    very first entry → collision (CTNT sid 9763, 2026-06-29). We fold the PERSISTENT
+    recycle counters (``trade_cycles`` / ``stopout_cycles``, deliberately KEPT across a
+    recycle) into the seed so each recycle's attempts get a distinct namespace.
+
+    IDEMPOTENT by construction: a true RETRY of the SAME place attempt — same recycle
+    cycle (same trade_cycles/stopout_cycles) and same place_n — yields the SAME cid, so a
+    benign double-submit still de-dupes at the broker. Two consecutive re-entries on a
+    recycled session differ because trade_cycles advanced. Pure + side-effect-free."""
+    _corr = str(correlation_id or "x")
+    _seed = f"{session_id}|{_corr}|entry|c{int(trade_cycles)}s{int(stopout_cycles)}|{int(place_n)}".encode("utf-8")
+    _suffix = hashlib.sha1(_seed).hexdigest()[:10]
+    return f"chili_ml_e_{session_id}_{_corr[:8]}_{_suffix}"[:120]
 
 
 def _adaptive_notional_guard_multiplier(*, expected_move_bps: float | None) -> float:
@@ -2215,11 +2794,95 @@ def _expected_move_bps_from_ohlcv(df: Any) -> float | None:
         return None
 
 
-def _adaptive_live_max_spread_bps(expected_move_bps: float | None) -> float:
+def _conservative_em_fallback_bps(df: Any, price: float | None) -> float | None:
+    """FIX A — CONSERVATIVE expected-move (bps) for a cold/thin frame, derived from
+    the name's OWN data the stop already trusts. Used ONLY when the primary
+    ``_expected_move_bps_from_ohlcv`` returns None (frame too thin to ATR) so the
+    adaptive spread cap scales instead of collapsing to the 12bps floor.
+
+    Two conservative tiers, in order of preference:
+      1. RELAXED realized range — the SAME true-range basis the stop's expected-move
+         uses, but tolerating as few as 2 bars (vs the primary's 5-bar floor), then
+         SHRUNK by ``..._fallback_shrink`` (default 0.5). Shrinking guarantees this is
+         an UNDER-estimate of the move on a thin, noisy sample -> we never loosen the
+         cap more than a confident full-frame estimate would.
+      2. PRICE-TIER floor — when there are literally no usable candles, ascribe a
+         conservative per-bar move scaled UP for lower-priced names (which structurally
+         carry wider bps spreads at the same dollar tick). A sub-$5 name gets the full
+         ``..._price_tier_bps`` (default 150); it tapers to 0 by ~$20 so liquid
+         higher-priced names keep the tight floor (no free loosening).
+
+    Pure + side-effect-free. Returns None when neither tier yields a finite positive
+    value (the caller then keeps the existing collapse-to-floor behavior)."""
+    try:
+        shrink = float(getattr(settings, "chili_momentum_spread_cap_em_fallback_shrink", 0.5) or 0.0)
+    except (TypeError, ValueError):
+        shrink = 0.5
+    if not math.isfinite(shrink) or shrink < 0:
+        shrink = 0.0
+    # Tier 1: relaxed realized range (>=2 bars) on the same true-range basis as the stop.
+    try:
+        if df is not None and not getattr(df, "empty", True) and len(df) >= 2:
+            import pandas as pd
+
+            high = df["High"].astype(float)
+            low = df["Low"].astype(float)
+            close = df["Close"].astype(float)
+            prev_close = close.shift(1)
+            true_range = pd.concat(
+                [(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()],
+                axis=1,
+            ).max(axis=1).dropna()
+            if len(true_range) >= 1:
+                n = min(14, len(true_range))
+                atr = float(true_range.tail(n).mean())
+                last_close = float(close.iloc[-1])
+                if math.isfinite(atr) and atr > 0 and last_close > 0:
+                    em = (atr / last_close) * 10_000.0 * shrink
+                    if math.isfinite(em) and em > 0:
+                        return em
+    except Exception:
+        pass
+    # Tier 2: price-tier floor (no usable candles at all).
+    try:
+        tier_bps = float(getattr(settings, "chili_momentum_spread_cap_em_fallback_price_tier_bps", 150.0) or 0.0)
+    except (TypeError, ValueError):
+        tier_bps = 150.0
+    if tier_bps <= 0 or not math.isfinite(tier_bps):
+        return None
+    try:
+        px = float(price) if price is not None else None
+    except (TypeError, ValueError):
+        px = None
+    if px is None or not math.isfinite(px) or px <= 0:
+        return None
+    # Linear taper: full tier at <= $5, zero at >= $20. Lower-priced low-floats keep
+    # the floor; liquid higher-priced names get no loosening from this tier.
+    if px <= 5.0:
+        scale = 1.0
+    elif px >= 20.0:
+        scale = 0.0
+    else:
+        scale = (20.0 - px) / 15.0
+    em = tier_bps * scale
+    return em if (math.isfinite(em) and em > 0) else None
+
+
+def _adaptive_live_max_spread_bps(
+    expected_move_bps: float | None, *, fallback_em_bps: float | None = None
+) -> float:
     """Live spread cap, volatility-relative: ``max(base_floor, ratio x expected
     move)``. Reuses the shared, tested policy helper so the runner BBO gate and
     the pre-entry risk evaluator agree on the same adaptive tolerance. Reads the
-    documented base floor + ratio knobs from settings (no inline magic)."""
+    documented base floor + ratio knobs from settings (no inline magic).
+
+    FIX A: when ``expected_move_bps`` is None (cold/thin frame) AND the flag
+    ``chili_momentum_spread_cap_em_fallback_enabled`` is on, ``fallback_em_bps`` (a
+    CONSERVATIVE name-own-data estimate from ``_conservative_em_fallback_bps``) is
+    substituted so the cap scales instead of collapsing to the 12bps floor. The
+    fallback is an under-estimate and the abs_cap still hard-caps, so a toxic wide
+    spread on a genuinely small-move name STILL blocks (win-win invariant). When the
+    flag is off OR no fallback is supplied, behavior is byte-identical to before."""
     from .risk_policy import adaptive_max_spread_bps
 
     try:
@@ -2237,7 +2900,14 @@ def _adaptive_live_max_spread_bps(expected_move_bps: float | None) -> float:
         abs_cap = 300.0 if raw_cap is None else float(raw_cap)
     except (TypeError, ValueError):
         abs_cap = 300.0
-    return adaptive_max_spread_bps(base, expected_move_bps, ratio, abs_cap_bps=abs_cap)
+    em = expected_move_bps
+    if (
+        em is None
+        and fallback_em_bps is not None
+        and bool(getattr(settings, "chili_momentum_spread_cap_em_fallback_enabled", True))
+    ):
+        em = fallback_em_bps
+    return adaptive_max_spread_bps(base, em, ratio, abs_cap_bps=abs_cap)
 
 
 def _live_entry_quote_gate_applies(sess: TradingAutomationSession, le: dict[str, Any]) -> bool:
@@ -2260,6 +2930,21 @@ def _stop_vol_floor_mult() -> float:
     except (TypeError, ValueError):
         return 0.5
     return v if v >= 0 else 0.0
+
+
+def _require_live_atr_mode() -> str:
+    """WT-1 3-state knob: 'off' | 'observe' (default) | 'enforce'.
+
+    Resolves the thin-frame stop-fallback guard mode. On a frame too thin to compute
+    a LIVE expected-move, the stop-ATR sizing falls back to the regime DEFAULT (~1.5%%)
+    — a noise-tight stop on a low-float that gaps THROUGH it (the -$697 tail). 'observe'
+    is byte-identical to today (only emits a counter); 'enforce' abstains (no-data ->
+    no-trade). Unknown/garbage values fail to the safe-but-byte-identical 'observe'."""
+    try:
+        v = str(getattr(settings, "chili_momentum_require_live_atr_for_entry", "observe") or "observe").strip().lower()
+    except (TypeError, ValueError):
+        return "observe"
+    return v if v in ("off", "observe", "enforce") else "observe"
 
 
 def _parse_event_times_utc(raw: str | None) -> list[datetime]:
@@ -2377,6 +3062,41 @@ _INTERVAL_SECONDS: dict[str, float] = {
 
 
 _DAY_PNL_CACHE: dict[str, float] = {"at": 0.0, "v": 0.0}
+
+_SCALP_HOLD_CACHE: dict[str, Any] = {"at": 0.0, "v": None}
+
+
+def _recent_scalp_median_hold_s(db: Session, user_id: int) -> "float | None":
+    """LIVE-derived holding horizon for the vol-norm trail (LEVER 2A): the MEDIAN
+    realized hold (seconds) of this user's recent CLOSED momentum scalps. Read from
+    ``momentum_automation_outcomes.hold_seconds`` over the last N closed sessions —
+    NOT a fixed clock; it tracks how long this lane's scalps actually run. 300s-cached.
+    Returns None on no history (caller falls back to this session's own elapsed hold)."""
+    import time as _time
+
+    if _time.monotonic() - float(_SCALP_HOLD_CACHE["at"]) < 300.0:
+        return _SCALP_HOLD_CACHE["v"]
+    v: "float | None" = None
+    try:
+        from sqlalchemy import text as _sql
+
+        rows = db.execute(
+            _sql(
+                "SELECT hold_seconds FROM momentum_automation_outcomes "
+                "WHERE user_id = :u AND hold_seconds IS NOT NULL AND hold_seconds > 0 "
+                "ORDER BY terminal_at DESC LIMIT 50"
+            ),
+            {"u": int(user_id)},
+        ).fetchall()
+        vals = sorted(float(r[0]) for r in rows if r[0] is not None)
+        if vals:
+            n = len(vals)
+            v = vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2.0
+    except Exception:
+        v = None
+    _SCALP_HOLD_CACHE["at"] = _time.monotonic()
+    _SCALP_HOLD_CACHE["v"] = v
+    return v
 
 
 def _day_realized_usd_cached(db: Session, user_id: int) -> float:
@@ -2700,6 +3420,71 @@ def _session_is_explosive(via: Any, *, rvol: float | None = None) -> bool:
         return False
 
 
+def _adaptive_scale_vol_pctl(le: dict) -> float | None:
+    """DESIGN #3 — the name's realized intraday-vol percentile in [0,1] for the
+    vol-aware scale-out tilt, derived from the stashed entry_day_range_pct mapped
+    through the documented reference range (chili_momentum_adaptive_scale_vol_ref_pct,
+    the Ross ~5% small-cap opening range — the SAME 0.05 reference the opening-bell
+    widen uses). Returns None (no tilt, byte-identical) when the day-range
+    was not stashed. p>0.5 => higher-than-reference vol => smaller partial / bigger
+    runner. Pure read off `le`; fail-neutral."""
+    if not isinstance(le, dict):
+        return None
+    dr = _float_or_none(le.get("entry_day_range_pct"))
+    if dr is None or dr <= 0:
+        return None
+    try:
+        ref = float(getattr(settings, "chili_momentum_adaptive_scale_vol_ref_pct", 0.05) or 0.05)
+    except (TypeError, ValueError):
+        ref = 0.05
+    if not math.isfinite(ref) or ref <= 0:
+        ref = 0.05
+    # Map range -> [0,1] with the reference at the median: range==ref -> 0.5,
+    # range==2*ref -> 1.0, range->0 -> 0.0. Bounded, no batch fetch needed.
+    p = 0.5 * (dr / ref)
+    return max(0.0, min(1.0, p))
+
+
+def _session_squeeze_rank_pct(via: Any, symbol: str) -> float | None:
+    """P4 — the session's OWN within-batch squeeze percentile (``squeeze_fuel_rank_pct``), read
+    from its persisted scanner row (execution_readiness_json.extra.ross_signals[SYM]) — the SAME
+    source the arm-queue ranker + entry size-up read, no new fetch. Returns the [0,1] rank or
+    ``None`` (no squeeze data for the name ⇒ the exit band-widen is a no-op, byte-identical). Pure."""
+    try:
+        _ex = via.execution_readiness_json if isinstance(via.execution_readiness_json, dict) else {}
+        _extra = (_ex.get("extra") or {}) if isinstance(_ex, dict) else {}
+        _sig_map = _extra.get("ross_signals") if isinstance(_extra.get("ross_signals"), dict) else {}
+        _row = _sig_map.get(str(symbol or "").upper()) if isinstance(_sig_map, dict) else None
+        if isinstance(_row, dict):
+            return _float_or_none(_row.get("squeeze_fuel_rank_pct"))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return None
+
+
+def _squeeze_exit_band_widen_factor(via: Any, symbol: str) -> float:
+    """P4(2) — the bounded RIDE-band WIDEN factor in [1.0, max_widen] for this session, driven by
+    its OWN within-batch squeeze percentile (extreme-tail only). 1.0 (no-op, byte-identical) when
+    the flag is OFF, no squeeze data, or the name is below the extreme tail. INVARIANT-A SAFE: the
+    caller multiplies the smart-hold / volnorm trail ``k`` by this BEFORE band placement (a wider
+    candidate band lowers the trail candidate, which composes through max(stop, be, candidate) —
+    never loosens a placed stop). Fail-neutral to 1.0."""
+    if not bool(getattr(settings, "chili_momentum_squeeze_exit_hold_enabled", True)):
+        return 1.0
+    try:
+        from .ross_momentum import squeeze_exit_band_widen as _sq_widen
+
+        _rank = _session_squeeze_rank_pct(via, symbol)
+        _factor, _ = _sq_widen(
+            _rank,
+            tail_pctl=float(getattr(settings, "chili_momentum_squeeze_exit_tail_pctl", 0.90) or 0.90),
+            max_widen=float(getattr(settings, "chili_momentum_squeeze_exit_max_widen", 1.50) or 1.50),
+        )
+        return _safe_mult(_factor)
+    except Exception:
+        return 1.0
+
+
 def _latest_rvol(db, symbol: str) -> float | None:
     """Best-effort latest relative-volume (volume_ratio of the most recent bar) for the
     explosive carve-outs. Reads the SESSION-scoped micro-bar df from the densified tape
@@ -2737,6 +3522,276 @@ def _breakout_bailout_lock_in_seconds(*, explosive: bool) -> float:
         return base
     except (TypeError, ValueError):
         return 0.0
+
+
+_BREAK_RESOLUTION_CACHE: dict[str, Any] = {"at": 0.0, "v": None}
+
+
+def _smart_hold_time_floor_s(db: Session, user_id: int) -> "float | None":
+    """GAP-A adaptive TIME-FLOOR (seconds): the q(time_floor_q) of this user's recent
+    break-resolution times = the realized holds of recent CLOSED momentum scalps (the
+    same ``momentum_automation_outcomes.hold_seconds`` source as the vol-norm horizon).
+    Below this, a momentary sub-band dip is suppressed (a healthy retest of the broken
+    level typically resolves within the name's own typical resolution time). Falls back
+    to None (caller uses 2*bar_seconds) when fewer than ``min_samples`` rows exist.
+    300s-cached. Reuses the percentile primitive from hold_signals."""
+    import time as _time
+
+    if _time.monotonic() - float(_BREAK_RESOLUTION_CACHE["at"]) < 300.0:
+        return _BREAK_RESOLUTION_CACHE["v"]
+    v: "float | None" = None
+    try:
+        from sqlalchemy import text as _sql
+
+        min_n = int(getattr(settings, "chili_momentum_smart_hold_time_floor_min_samples", 5) or 5)
+        q = float(getattr(settings, "chili_momentum_smart_hold_time_floor_q", 0.25) or 0.25)
+        rows = db.execute(
+            _sql(
+                "SELECT hold_seconds FROM momentum_automation_outcomes "
+                "WHERE user_id = :u AND hold_seconds IS NOT NULL AND hold_seconds > 0 "
+                "ORDER BY terminal_at DESC LIMIT 50"
+            ),
+            {"u": int(user_id)},
+        ).fetchall()
+        vals = [float(r[0]) for r in rows if r[0] is not None]
+        if len(vals) >= max(1, min_n):
+            v = _percentile(vals, q)
+    except Exception:
+        v = None
+    _BREAK_RESOLUTION_CACHE["at"] = _time.monotonic()
+    _BREAK_RESOLUTION_CACHE["v"] = v
+    return v
+
+
+def _smart_hold_breach_volume(
+    db: Session, symbol: str, *, window_s: float
+) -> "tuple[float | None, float | None]":
+    """GAP-A volume-confirm read: returns ``(breach_window_volume, recent_median_volume)``
+    for the price-breach CUT confirmation. The breach-window volume is the summed trade
+    size over the most recent ``window_s`` of the equity tape; the recent median is the
+    median per-window summed volume over the prior comparable windows (the name's OWN
+    recent distribution — adaptive, no magic threshold). Both ``None`` (⇒ the price-CUT
+    is NOT volume-confirmed ⇒ HOLD, fail-safe) on a thin tape / crypto / any error.
+    Mirrors the existing iqfeed_trade_ticks read pattern."""
+    s = (symbol or "").strip().upper()
+    if not s or s.endswith("-USD") or db is None:
+        return None, None
+    try:
+        w = max(1.0, float(window_s))
+    except (TypeError, ValueError):
+        return None, None
+    try:
+        from sqlalchemy import text as _sql
+
+        # 10 comparable windows of history to form the per-window-volume distribution.
+        rows = db.execute(
+            _sql(
+                "SELECT size, observed_at FROM iqfeed_trade_ticks WHERE symbol = :s AND "
+                "observed_at > (now() at time zone 'utc') - make_interval(secs => :w) "
+                "ORDER BY observed_at ASC"
+            ),
+            {"s": s, "w": w * 10.0},
+        ).fetchall()
+    except Exception:
+        return None, None
+    if not rows:
+        return None, None
+    try:
+        import datetime as _dt
+
+        parsed = [
+            (float(r[0]), r[1])
+            for r in rows
+            if r[0] is not None and r[1] is not None
+        ]
+        if not parsed:
+            return None, None
+        latest = parsed[-1][1]
+        # bucket size summed per window, anchored at the latest tick.
+        buckets: dict[int, float] = {}
+        for sz, ts in parsed:
+            try:
+                delta = (latest - ts).total_seconds()
+            except (TypeError, ValueError, AttributeError):
+                continue
+            idx = int(delta // w)
+            buckets[idx] = buckets.get(idx, 0.0) + float(sz)
+        if not buckets:
+            return None, None
+        breach_vol = buckets.get(0)  # the most-recent (breach) window
+        hist = [v for k, v in buckets.items() if k > 0]
+        med = _percentile(hist, 0.5) if hist else None
+        return breach_vol, med
+    except Exception:
+        return None, None
+
+
+def bail_on_no_confirmation(
+    *,
+    entry_price: float,
+    bid: float,
+    high_water_mark: float | None,
+    held_seconds: float,
+    min_hold_seconds: float,
+    window_seconds: float,
+    buffer_bps: float,
+    ofi: float | None = None,
+) -> bool:
+    """GAP1 — affirmative breakout-or-bailout (Warrior re-audit 2026-06-26). The deployed
+    bailout is REACTIVE (price-retest-FAIL on the bid). This is the AFFIRMATIVE side: within
+    [min_hold, window] seconds of the fill, BAIL only on GENUINE non-confirmation —
+
+      * NO new high since entry above the confirmation buffer (high_water_mark <
+        entry*(1+buffer)), i.e. the breakout never followed through; AND
+      * the live bid is at/below the entry (near/below the fill, not extended up); AND
+      * the tape is NOT accelerating up (ofi is None/unknown OR ofi <= 0). When live OFI
+        shows buyers stepping IN (ofi > 0) the entry IS confirming → never bail.
+
+    A winner that POPS then consolidates is IMMUNE: its high_water_mark prints above the
+    buffer, so the first clause is False and this returns False. Pure / fail-closed (any
+    bad input → False → no bail; the structural stop is unaffected)."""
+    try:
+        e = float(entry_price)
+        b = float(bid)
+    except (TypeError, ValueError):
+        return False
+    if not (math.isfinite(e) and math.isfinite(b)) or e <= 0 or b <= 0:
+        return False
+    try:
+        held = float(held_seconds)
+        win = float(window_seconds)
+        mn = float(min_hold_seconds)
+    except (TypeError, ValueError):
+        return False
+    if win <= 0 or held < mn or held > win:
+        return False
+    # CONFIRMATION = a new high above the buffer over entry. high_water_mark is the
+    # peak bid since entry; absent it, treat the current bid as the best high seen
+    # (fail-closed toward NOT bailing if it has extended).
+    try:
+        bps = max(0.0, float(buffer_bps))
+    except (TypeError, ValueError):
+        bps = 0.0
+    confirm_level = e * (1.0 + bps / 10_000.0)
+    hwm = None
+    try:
+        if high_water_mark is not None and math.isfinite(float(high_water_mark)):
+            hwm = float(high_water_mark)
+    except (TypeError, ValueError):
+        hwm = None
+    peak = max(hwm if hwm is not None else b, b)
+    if peak >= confirm_level:
+        return False  # a new high above the buffer = the breakout confirmed → immune
+    # No follow-through high. Require the bid to be at/below entry (non-confirmation),
+    # NOT merely consolidating a few bps up.
+    if b > e:
+        return False
+    # Tape must not be accelerating up. Unknown OFI (None) does not block the bail
+    # (the no-new-high + bid<=entry conditions already establish non-confirmation),
+    # but a positive OFI (buyers stepping in) is live confirmation → do NOT bail.
+    try:
+        if ofi is not None and float(ofi) > 0.0:
+            return False
+    except (TypeError, ValueError):
+        pass
+    return True
+
+
+def instant_bid_below_fill_cut(
+    *,
+    entry_price: float,
+    bid: float,
+    held_seconds: float,
+    window_seconds: float,
+    margin_bps: float,
+) -> bool:
+    """GAP2 — instant bid-below-fill cut (Warrior re-audit 2026-06-26). Right after the
+    fill, if the live BID has dropped BELOW the fill price by MORE than spread noise (the
+    move failed at the entry tick), cut FAST instead of waiting for the structural stop.
+
+    The noise discriminator is ``margin_bps``: the bid must be < entry*(1 - margin/1e4),
+    so a bid merely sitting at/just under the fill (the normal spread on a fresh long) does
+    NOT trigger — only a genuine bid-collapse below the fill does. Tight window (first few
+    seconds). Pure / fail-closed (bad input → False → no cut)."""
+    try:
+        e = float(entry_price)
+        b = float(bid)
+        held = float(held_seconds)
+        win = float(window_seconds)
+        mbps = max(0.0, float(margin_bps))
+    except (TypeError, ValueError):
+        return False
+    if not (math.isfinite(e) and math.isfinite(b)) or e <= 0 or b <= 0:
+        return False
+    if win <= 0 or held < 0 or held > win:
+        return False
+    threshold = e * (1.0 - mbps / 10_000.0)
+    return b < threshold
+
+
+def instant_bid_above_fill_confirm_failed(
+    *,
+    entry_price: float,
+    bid: float,
+    high_water_mark: float | None,
+    held_seconds: float,
+    window_seconds: float,
+    margin_bps: float,
+) -> bool:
+    """LOCATE #7 — the POSITIVE MIRROR of ``instant_bid_below_fill_cut``. In the first
+    ``window_seconds`` after the fill the live BID should hold AT/ABOVE the fill (within
+    ``margin_bps`` noise) as positive confirmation. Returns ``True`` (confirmation FAILED ⇒
+    feed the existing bail) ONLY when, AT THE END of the window (``held_seconds`` near the
+    window edge), the bid is NOT at/above the fill AND the position never made a confirming
+    high (the high-water mark never cleared the fill+margin). A position that DID print a
+    confirming high is IMMUNE (the entry confirmed). This NEVER adds a new exit reason — the
+    caller routes it into the SAME instant-bid-below / no-confirmation bailout it already
+    gates. Pure / fail-CLOSED (any bad input ⇒ False ⇒ no cut)."""
+    try:
+        e = float(entry_price)
+        b = float(bid)
+        held = float(held_seconds)
+        win = float(window_seconds)
+        mbps = max(0.0, float(margin_bps))
+    except (TypeError, ValueError):
+        return False
+    if not (math.isfinite(e) and math.isfinite(b)) or e <= 0 or b <= 0:
+        return False
+    # Only evaluate at the END of the confirmation window (give the bid the full window to
+    # confirm); before that, never cut. After the window, the structural stop owns it.
+    if win <= 0 or held < win or held > win * 2.0:
+        return False
+    confirm_floor = e * (1.0 - mbps / 10_000.0)
+    # If the position EVER made a confirming high (hwm cleared the fill+margin), it confirmed.
+    try:
+        if high_water_mark is not None and math.isfinite(float(high_water_mark)):
+            if float(high_water_mark) >= e * (1.0 + mbps / 10_000.0):
+                return False
+    except (TypeError, ValueError):
+        pass
+    # No confirming high AND the bid is below the fill (minus noise) at the window edge ⇒
+    # the entry never confirmed → feed the bail.
+    return b < confirm_floor
+
+
+def _regime_holdtime_band_mult(*, explosive: bool) -> float:
+    """GAP3 (regime-conditioned hold-time, Warrior re-audit 2026-06-26): the give-back
+    band multiplier for the runner cushion-trail, conditioned on the ENTRY regime via the
+    deployed explosiveness classifier. HOT/explosive ⇒ hot_mult (>= 1.0, hold the runner
+    through red LONGER); COLD/non-explosive ⇒ cold_mult (<= 1.0, cut chop QUICKER).
+    Returns 1.0 (byte-identical, no scaling) unless the GAP3 flag is ON. The trail is
+    ratchet-only, so a hot mult can only DECLINE to tighten the live stop — it never
+    widens an existing stop (no risk added)."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_regime_holdtime_enabled", False)):
+            return 1.0
+        if explosive:
+            m = float(getattr(settings, "chili_momentum_regime_holdtime_hot_mult", 1.25) or 1.25)
+            return max(1.0, m)
+        m = float(getattr(settings, "chili_momentum_regime_holdtime_cold_mult", 0.85) or 0.85)
+        return min(1.0, max(1e-6, m))
+    except (TypeError, ValueError):
+        return 1.0
 
 
 def _held_position_keeps_exit_on_boundary_fail(state: str, has_position: Any) -> bool:
@@ -2920,6 +3975,34 @@ def _quote_quality_block(
                         }
                         tick = _rf_tick  # validate the FRESH quote from here down
             if _refetched_meta is None:
+                # LOG-ONLY diagnostics (FIX A): classify WHY this is a stale_bbo so the
+                # operator can tell freshness vs IQFeed-L1 COVERAGE. The source tells us
+                # whether the freshest available quote came from the tick-level IQFeed L1
+                # mirror (source='iqfeed_l1', ~1-2s) or a slower fallback (massive_ws / RH,
+                # 10-270s). A stale block on a NON-iqfeed source = missing L1 coverage on
+                # this name (the #1 killer's coverage face); a stale block ON iqfeed = a
+                # real age-breach (truly no recent print -> suspected halt). NO behavior
+                # change — the stale_bbo block stands exactly as before.
+                if bool(getattr(settings, "chili_momentum_quote_block_diagnostics", True)):
+                    try:
+                        _src = None
+                        _raw = getattr(tick, "raw", None)
+                        if isinstance(_raw, dict):
+                            _src = _raw.get("source")
+                        _from_iqfeed = (_src == "iqfeed_l1")
+                        _log.info(
+                            "[momentum_live] quote_block_diag symbol=%s reason=stale_bbo "
+                            "kind=%s source=%s age_seconds=%.2f max_age_seconds=%.2f "
+                            "iqfeed_l1_covered=%s",
+                            str(symbol),
+                            "real_age_breach" if _from_iqfeed else "missing_iqfeed_l1_coverage",
+                            _src,
+                            _age,
+                            _max_age,
+                            _from_iqfeed,
+                        )
+                    except Exception:
+                        pass
                 return {
                     "reason": "stale_bbo",
                     "age_seconds": round(_age, 4),
@@ -2968,6 +4051,27 @@ def _quote_quality_block(
         if _refetched_meta:
             _ws.update(_refetched_meta)
             _ws["failed_check"] = "wide_bbo_spread"
+        # LOG-ONLY diagnostics (FIX A): a wide-spread block is the THIRD face of the #1
+        # killer (freshness / coverage / spread). Emit a structured line so the operator
+        # can read how often the spread cap (now adaptive) is the binding constraint and
+        # by how much the live spread exceeds it. NO behavior change.
+        if bool(getattr(settings, "chili_momentum_quote_block_diagnostics", True)):
+            try:
+                _src = None
+                _raw = getattr(tick, "raw", None)
+                if isinstance(_raw, dict):
+                    _src = _raw.get("source")
+                _log.info(
+                    "[momentum_live] quote_block_diag symbol=%s reason=wide_bbo_spread "
+                    "source=%s spread_bps=%.2f max_spread_bps=%.2f over_by_bps=%.2f",
+                    str(symbol),
+                    _src,
+                    spread_bps,
+                    max_spread,
+                    spread_bps - max_spread,
+                )
+            except Exception:
+                pass
         return _ws
     # FIX B2: a secondary refetch RESCUED a stale primary tick (the fresh quote passed all
     # validation). Surface a no-block telemetry marker so the entry caller records that the
@@ -3056,6 +4160,194 @@ def _mark_entry_order_resolved(le: dict, order_id, outcome: str) -> None:
     res = dict(le.get("entry_orders_resolved") or {})
     res[str(order_id)] = outcome
     le["entry_orders_resolved"] = res
+
+
+# ── RECYCLE entry/position lifecycle reset (2026-06-27 duplicate-fill root cause) ──
+# At COOLDOWN -> WATCHING_LIVE the session RECYCLES into a fresh watcher. Today it keeps
+# the PRIOR trade's entry-order / position state in `le`, so the recycled watcher's first
+# WATCHING tick re-runs the late-fill sweep (`_unresolved_entry_order_ids` /
+# `_sweep_unresolved_entry_orders`) and the pre-submit poll against ITS OWN already-filled
+# entry order -> re-points + adopts a SECOND phantom position (AREC sid 9331: two entry
+# rows same broker_order_id, 221sh x2 -> stuck live_bailout spin).
+#
+# `_RECYCLE_ENTRY_STATE_KEYS` is the COMPLETE set of per-trade lifecycle keys cleared on
+# recycle so the next cycle starts as a clean watcher with NO entry order to re-poll. It
+# COVERS every key the entry-poll / adoption path reads to decide "do I already have an
+# entry order to adopt?" — the load-bearing five: entry_order_id, entry_order_ids_all,
+# entry_orders_resolved, entry_submitted, position (read at lines ~2279/4186/4220/4366 +
+# _unresolved_entry_order_ids). The rest are entry-sizing, pending-entry, repeg, scale-out,
+# pyramid/anticipation/micropullback add-leg, exit-order, stop/breach, max-loss-circuit and
+# halt-entry markers that all belong to the trade that just closed.
+#
+# NOT cleared (must persist across cycles): the symbol/variant identity (sess columns, not
+# le), cooldown bookkeeping (handled inline), trade_cycles, the cumulative daily-loss
+# accounting (realized_pnl_usd / fees_usd_total), the session-discipline counters
+# (per_symbol_fatigue / win_cycle_fatigue / *_fatigue_derate / green_day_graduation /
+# prior_day_pnl_damper / *_size* selection tilts), the symbol-level halt-resume CHAIN counters
+# (halt_chain_up_count / halt_down_consecutive_count — they track the SYMBOL across cycles), the
+# sizing audit metadata that is recomputed fresh every entry pass (streak_risk / cushion_risk /
+# schedule_risk / liquidity_risk / *_size* / *_cap, never read back as cross-cycle state), the
+# deferred post-exit-excursion learning marker (post_exit_excursion_pending — a separate horizon
+# job consumes it AFTER the exit), the per-tick telemetry (tick_count / last_mid / last_tick_utc /
+# last_quote_quality_gate), and the last_exit_* / last_partial_exit_* summary fields (read by
+# summarize_live_execution + the recycle event). See _record_fill_outcome_safe +
+# tests/test_momentum_recycle_no_phantom.py.
+_RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
+    # ── load-bearing: the entry-order / position adoption gate ──
+    "entry_order_id",
+    "entry_order_ids_all",
+    "entry_orders_resolved",
+    "entry_submitted",
+    "position",
+    # ── entry submit / sizing / pricing context ──
+    "entry_submit_utc",
+    "entry_client_order_id",
+    "entry_limit_price",
+    "entry_original_limit_px",
+    "entry_order_type",
+    "entry_place_count",
+    "entry_place_result",
+    "entry_repeg_count",
+    "entry_chunk_order_ids",
+    "entry_decision_packet_id",
+    "entry_features",
+    "entry_l2_snapshot",
+    "entry_regime_snapshot_json",
+    "entry_sizing",
+    "entry_resize_basis",
+    "entry_want_qty",
+    "entry_stop_atr_pct",
+    "entry_stop_model",
+    "entry_dollar_vol",
+    "entry_expected_move_bps",
+    "entry_squeeze_pct",
+    "entry_rvol",
+    "entry_realized_high",
+    "entry_day_range_pct",
+    "entry_notional_guard",
+    "entry_slip_bps_ref",
+    "entry_spread_bps_at_decision",
+    "entry_trigger_reason",
+    "entry_trigger_debug",
+    "entry_liq_mult",
+    "entry_session_extended",
+    "entry_session_overnight",
+    "entry_fee_usd_unbooked",
+    "admission_viability_score",
+    "breakout_level_price",
+    "watch_break_level",
+    # ── pending-exit / exit-order lifecycle ──
+    "exit_order_id",
+    "exit_client_order_id",
+    "exit_order_type",
+    "exit_limit_price",
+    "exit_place_result",
+    "exit_execution_intents",
+    "exit_floor_anchored",
+    "exit_floor_order",
+    "exit_next_retry_at_utc",
+    "exit_pending_first_seen_utc",
+    "exit_submit_attempts",
+    "exit_session_extended",
+    "exit_candle1m_min",
+    "exit_candle1m_exh",
+    "pending_exit_reason",
+    "pending_exit_quantity",
+    "pending_exit_submitted_at_utc",
+    "pending_exit_is_scale_out",
+    "last_exit_pending_confirmation",
+    "broker_zero_confirm_streak",
+    # ── scale-out / runner ladder ──
+    "scale_limit_order_id",
+    "scale_limit_px",
+    "scale_limit_qty",
+    "scale_limit_adopted_qty",
+    "scale_limit_source",
+    "ladder_cooldown_until_utc",
+    "measured_move_partial_armed",
+    "exhaustion_lock_partial_armed",
+    # ── pyramid add legs ──
+    "pyramid_order_id",
+    "pyramid_limit_px",
+    "pyramid_pending_R0",
+    "pyramid_add_count",
+    "pyramid_place_count",
+    "pyramid_submit_retry_count",
+    "pyramid_prev_stop",
+    "pyramid_entry_stop_ref",
+    "pyramid_risk_anchor_usd",
+    "pyramid_confirm_ofi",
+    "pyramid_discrete_trigger",
+    # ── anticipation probe / remainder ──
+    "anticipation_add_order_id",
+    "anticipation_add_limit_px",
+    "anticipation_armed",
+    "anticipation_completed",
+    "anticipation_full_qty",
+    "anticipation_probe_qty",
+    "anticipation_probe_fraction",
+    "anticipation_remainder_qty",
+    "anticipation_place_count",
+    # ── micropullback re-entry add leg ──
+    "micropullback_reentry_order_id",
+    "micropullback_reentry_limit_px",
+    "micropullback_reentry_count",
+    "micropullback_reentry_cooldown_until_utc",
+    "micropullback_reentry_pending_R0",
+    "micropullback_confirm_ofi",
+    "micropullback_confirm_trade_flow",
+    "micropullback_last_shelf",
+    "micropullback_pending_dip_low",
+    "micropullback_prev_stop",
+    # ── stop / breach / max-loss circuit / excursion markers ──
+    "structural_stop_price",
+    "structural_stop_atr_pct",
+    "stop_breach_pending_utc",
+    "stop_breach_chop_holds",
+    "max_loss_circuit_fired",
+    "max_loss_circuit_floor_price",
+    "prev_signed_tape_accel",
+    "last_bailout_trigger",
+    "benched_backside_hod",
+    # ── halt-entry markers tied to the closed position (NOT the symbol-level halt
+    #    CHAIN counters halt_chain_up_count / halt_down_consecutive_count, which track
+    #    the SYMBOL's resume sequence across watcher cycles and are kept) ──
+    "halt_entry_size_mult",
+    "halt_resumption_open",
+    "halt_resumed_at_utc",
+    "halt_down_pre_ref_bid",
+    "halt_down_last_resume_utc",
+    "suspected_halt_since_utc",
+    "halt_stale_streak",
+    "halt_level",
+    # ── EMA-trail / cadence carry computed against the closed position ──
+    "ema5m_min",
+    "ema5m_val",
+    "cadence_prev_ema5m",
+    "cadence_prev_rvol",
+    "cadence_cls",
+)
+# DELIBERATELY KEPT (NOT in the reset set): post_exit_excursion_pending. It is the deferred
+# shake-out-learning marker for the trade that JUST closed; a separate horizon job
+# (post_exit_excursion.run_post_exit_excursion_pass, ~30min horizon) labels it AFTER the exit
+# and the cooldown (typically seconds–minutes) is far shorter than that horizon. Clearing it on
+# recycle would DROP that learning signal before the horizon elapses — a regression. The exit
+# path OVERWRITES (not appends) this marker on the next real exit, and the labeler already skips
+# sessions that re-entered a holding state, so carrying it forward cannot mis-label the new trade.
+
+
+def _reset_entry_state_on_recycle(le: dict) -> list[str]:
+    """Pop every per-trade entry/position lifecycle key so the recycled watcher starts
+    CLEAN (no entry order for the late-fill sweep / pre-submit poll to re-adopt). Returns
+    the keys that were actually present (for the live_recycled audit). Identity, cooldown
+    bookkeeping, trade_cycles, cumulative PnL/fees and discipline counters are preserved
+    (they are not in _RECYCLE_ENTRY_STATE_KEYS)."""
+    cleared: list[str] = []
+    for k in _RECYCLE_ENTRY_STATE_KEYS:
+        if k in le:
+            le.pop(k, None)
+            cleared.append(k)
+    return cleared
 
 
 def _sweep_unresolved_entry_orders(adapter, db, sess, le: dict) -> bool:
@@ -3155,13 +4447,51 @@ def _halt_resume_cooldown_seconds() -> float:
         return 120.0
 
 
-def _register_stale_quote_tick(db, sess, le: dict) -> None:
+def _register_stale_quote_tick(db, sess, le: dict, tick: Any = None) -> None:
     """Count a consecutive stale-quote tick; at the threshold mark a suspected halt
-    (and alert loudly if a real position is held into it)."""
+    (and alert loudly if a real position is held into it).
+
+    GAP 2/3 (Warrior re-audit): when ``tick`` is supplied AND either the resumption-
+    direction or false-halt flag is ON, also capture ``halt_level`` (the LAST GOOD price
+    at the moment the halt is detected) so the resume-direction read can compare the
+    resumption open against it. The capture is the only behaviour change and is fully
+    flag-gated (both flags OFF ⇒ no halt_level is written ⇒ byte-identical)."""
     streak = int(le.get("halt_stale_streak") or 0) + 1
     le["halt_stale_streak"] = streak
     if streak == _halt_stale_ticks_threshold() and not le.get("suspected_halt_since_utc"):
         le["suspected_halt_since_utc"] = _utcnow().isoformat()
+        # MED-3 fail-SAFE: clear any PRIOR resume markers at the onset of a NEW halt so a
+        # RE-HALT does not read stale resume data (halt_resumed_at_utc / halt_resumption_open
+        # are stamped on resume but were never cleared at a fresh halt onset). The resume-stamp
+        # logic is unchanged; this only prevents the re-halt window from inheriting the last
+        # resume. Use pop (not set-None) so a FIRST halt with no prior resume leaves the keys
+        # ABSENT — byte-identical when no resume has occurred yet.
+        le.pop("halt_resumed_at_utc", None)
+        le.pop("halt_resumption_open", None)
+        # GAP 2/3 — capture the halt_level (last good price) once, at halt onset. Only
+        # when a resume-direction / false-halt flag is ON and a tick is available; the
+        # bid is the last good top-of-book before the book went dark (mid as fallback).
+        try:
+            if (
+                tick is not None
+                and (
+                    bool(getattr(settings, "chili_momentum_halt_resumption_direction_enabled", False))
+                    or bool(getattr(settings, "chili_momentum_false_halt_avoid_enabled", False))
+                    # The add-into-halt master needs halt_level for its H2/H3 leg (now
+                    # self-sufficient under the master). Master OFF + sub-flags OFF ⇒ no
+                    # halt_level is written ⇒ byte-identical.
+                    or bool(getattr(settings, "chili_momentum_add_into_halt_enabled", False))
+                )
+            ):
+                _hl = None
+                try:
+                    _hl = float(getattr(tick, "bid", None) or getattr(tick, "mid", None) or 0) or None
+                except (TypeError, ValueError):
+                    _hl = None
+                if _hl is not None and _hl > 0:
+                    le["halt_level"] = _hl
+        except Exception:
+            pass
         _emit(db, sess, "suspected_halt_detected", {"stale_tick_streak": streak})
         pos = le.get("position")
         if isinstance(pos, dict) and float(pos.get("quantity") or 0) > 0:
@@ -3311,15 +4641,81 @@ def _entry_pricebook_snapshot(symbol: str) -> dict | None:
         return None
 
 
-def _register_fresh_quote_tick(db, sess, le: dict) -> None:
+def _register_fresh_quote_tick(db, sess, le: dict, tick: Any = None) -> None:
     """Quote is live again: clear the streak; if a suspected halt was in force, mark
-    the RESUME (starts the entry cooldown) so the lane does not buy the whipsaw."""
+    the RESUME (starts the entry cooldown) so the lane does not buy the whipsaw.
+
+    GAP 1 (Warrior re-audit): when the halt-chain risk gate is ON, on each resume of a
+    suspected halt update a PER-SYMBOL consecutive halt-UP counter (le['halt_chain_up_
+    count']): increment when the name resumes UP (resumption price at/above the captured
+    halt_level — a limit-up halt in a chain) and RESET to 0 when it resumes DOWN/flat (a
+    halt-down or fade ends the up-chain). The counter is consumed by halt_chain_risk_gate
+    at entry to block/de-weight an over-extended halt-chain long. Flag OFF ⇒ the counter
+    is never touched ⇒ byte-identical."""
     le["halt_stale_streak"] = 0
     if le.get("suspected_halt_since_utc"):
+        # GAP 1 — update the consecutive halt-UP chain counter (flag-gated). Read the
+        # captured halt_level (GAP 2/3 capture) and the resumption price; up ⇒ +1, else
+        # reset. Fail-open: any miss leaves the counter unchanged (never blocks on a bug).
+        try:
+            # The add-into-halt MASTER flag also needs the chain count (its H1 leg is now
+            # self-sufficient under the master, independent of the sub-flag) — capture it
+            # when EITHER the standalone chain gate OR the add-into-halt master is ON. Both
+            # OFF ⇒ the counter is never touched ⇒ byte-identical.
+            if bool(getattr(settings, "chili_momentum_halt_chain_risk_gate_enabled", False)) or bool(
+                getattr(settings, "chili_momentum_add_into_halt_enabled", False)
+            ):
+                _hl = _float_or_none(le.get("halt_level"))
+                _resume_px = None
+                if tick is not None:
+                    try:
+                        _resume_px = float(getattr(tick, "bid", None) or getattr(tick, "mid", None) or 0) or None
+                    except (TypeError, ValueError):
+                        _resume_px = None
+                _prev = int(le.get("halt_chain_up_count") or 0)
+                if _hl is not None and _resume_px is not None and _hl > 0:
+                    if _resume_px >= _hl * (1.0 - 1e-9):
+                        le["halt_chain_up_count"] = _prev + 1
+                    else:
+                        le["halt_chain_up_count"] = 0  # resumed down/fade ends the up-chain
+                else:
+                    # No directional read available ⇒ count it as a halt-up (conservative:
+                    # an unclassified halt still extends the chain → tighter, not looser).
+                    le["halt_chain_up_count"] = _prev + 1
+        except Exception:
+            pass
+        # Capture the RESUMPTION price (the first fresh price on resume) so the
+        # add-into-halt H2/H3 (resumption-direction / false-halt) legs can compare it to
+        # the captured halt_level. Flag-gated: only written when a halt-family direction
+        # flag is ON, so an OFF lane is byte-identical (no new le key). Fail-open on a miss.
+        try:
+            if (
+                bool(getattr(settings, "chili_momentum_halt_resumption_direction_enabled", False))
+                or bool(getattr(settings, "chili_momentum_false_halt_avoid_enabled", False))
+                # The add-into-halt master needs the resumption price for its H2/H3 leg.
+                # Master OFF + sub-flags OFF ⇒ no halt_resumption_open is written ⇒
+                # byte-identical.
+                or bool(getattr(settings, "chili_momentum_add_into_halt_enabled", False))
+            ) and tick is not None:
+                _ro_px = None
+                try:
+                    _ro_px = float(
+                        getattr(tick, "open", None)
+                        or getattr(tick, "bid", None)
+                        or getattr(tick, "mid", None)
+                        or 0
+                    ) or None
+                except (TypeError, ValueError):
+                    _ro_px = None
+                if _ro_px is not None and _ro_px > 0:
+                    le["halt_resumption_open"] = _ro_px
+        except Exception:
+            pass
         le.pop("suspected_halt_since_utc", None)
         le["halt_resumed_at_utc"] = _utcnow().isoformat()
         _emit(db, sess, "halt_resumed", {
             "entry_cooldown_seconds": _halt_resume_cooldown_seconds(),
+            "halt_chain_up_count": le.get("halt_chain_up_count"),
         })
         # Persist the resume marker NOW — the halt_resume_dip trigger keys its
         # entry window off it, so it must survive a process restart mid-window
@@ -3633,6 +5029,19 @@ def tick_live_session(
         factory = adapter_factory or resolve_live_spot_adapter_factory(ef)
     except ExecutionFamilyNotImplementedError:
         return {"ok": True, "skipped": "execution_family_not_implemented", "execution_family": ef}
+    # ORDER CHUNKING (item 2, DEFAULT OFF ⇒ byte-identical): wrap the resolved factory so the
+    # entry place_limit_order_gtc is split into N venue blocks for queue priority. When the
+    # flag is OFF or blocks<=1, maybe_wrap_chunking returns the factory UNCHANGED (the exact
+    # same adapter object), so every place_*_order is byte-identical. The wrapper is transparent
+    # to every other VenueAdapter method (delegates) and folds child broker_order_ids onto the
+    # parent for the existing dedupe/orphan reconciliation. NEW order-path: do not enable
+    # without soak (the agentic rail's duplicate-fill history).
+    try:
+        from ..venue.chunking_adapter import maybe_wrap_chunking as _maybe_wrap_chunking
+
+        factory = _maybe_wrap_chunking(factory)
+    except Exception:
+        pass  # fail-closed to the base factory (byte-identical)
     adapter = factory()
     if not adapter.is_enabled():
         return {"ok": True, "skipped": "coinbase_adapter_unavailable"}
@@ -3779,7 +5188,11 @@ def tick_live_session(
     if tick is None or tick.mid is None or tick.mid <= 0:
         _emit(db, sess, "live_blocked_by_risk", {"reason": "no_bbo"})
         if sess.state in (STATE_ARMED_PENDING_RUNNER, STATE_QUEUED_LIVE):
-            _safe_transition(db, sess, STATE_LIVE_ERROR)
+            # A persistently quoteless name (thin/non-common-stock — the RVMDW warrant
+            # class) is a DETERMINISTIC policy decline, not a runner error: terminalize
+            # cleanly (live_cancelled) so the recurring no_bbo noise stops masking REAL
+            # errors. Still blocks entry; only the terminal label changes.
+            _decline_terminal(db, sess, reason="no_bbo")
         db.flush()
         return {"ok": True, "blocked": True, "reason": "no_quote"}
 
@@ -3801,13 +5214,37 @@ def tick_live_session(
         except Exception:
             _entry_df = None
         _expected_move_bps = _expected_move_bps_from_ohlcv(_entry_df)
-        _adaptive_max_spread = _adaptive_live_max_spread_bps(_expected_move_bps)
+        # FIX A: when the frame is too cold/thin to ATR (expected_move_bps None) — the
+        # low-float case where the cap would collapse to the 12bps floor and block — derive
+        # a CONSERVATIVE name-own-data fallback so the cap scales appropriately. Flag-gated
+        # inside _adaptive_live_max_spread_bps; the win-win invariant (under-estimate +
+        # abs_cap + small-move names still block) holds.
+        _em_fallback_bps: float | None = None
+        if _expected_move_bps is None and bool(
+            getattr(settings, "chili_momentum_spread_cap_em_fallback_enabled", True)
+        ):
+            try:
+                _em_fallback_bps = _conservative_em_fallback_bps(_entry_df, float(tick.mid))
+            except Exception:
+                _em_fallback_bps = None
+        _adaptive_max_spread = _adaptive_live_max_spread_bps(
+            _expected_move_bps, fallback_em_bps=_em_fallback_bps
+        )
+        # Structured A/B counterfactual: the operator can read how often the cold-frame
+        # fallback engaged and how much it raised the cap above the collapse-floor.
+        _collapse_floor = _adaptive_live_max_spread_bps(_expected_move_bps)
         _log.info(
-            "[momentum_live] adaptive_spread symbol=%s state=%s expected_move_bps=%s max_spread_bps=%.2f",
+            "[momentum_live] adaptive_spread symbol=%s state=%s expected_move_bps=%s "
+            "em_fallback_bps=%s max_spread_bps=%.2f collapse_floor_bps=%.2f "
+            "em_fallback_engaged=%s cap_delta_bps=%.2f",
             sess.symbol,
             sess.state,
             None if _expected_move_bps is None else round(_expected_move_bps, 2),
+            None if _em_fallback_bps is None else round(_em_fallback_bps, 2),
             _adaptive_max_spread,
+            _collapse_floor,
+            bool(_expected_move_bps is None and _em_fallback_bps is not None),
+            round(_adaptive_max_spread - _collapse_floor, 2),
         )
 
     # SKIP-FOR-LIMITS (operator 2026-06-23): the momentum entry is a marketable LIMIT whose
@@ -3828,9 +5265,9 @@ def tick_live_session(
     # returning = resume (starts the entry whipsaw-cooldown). A wide-but-live quote
     # is NOT a halt signal — only staleness is.
     if quote_block is not None and quote_block.get("reason") == "stale_bbo":
-        _register_stale_quote_tick(db, sess, le)
+        _register_stale_quote_tick(db, sess, le, tick)
     else:
-        _register_fresh_quote_tick(db, sess, le)
+        _register_fresh_quote_tick(db, sess, le, tick)
     # SPREAD STABILITY (2026-06-11 INDP): the instantaneous BBO passed the gate
     # for ONE tick inside a flickering, hostile spread regime — we submitted,
     # the spread blew out a second later, and the eventual fill bought a dying
@@ -3876,7 +5313,9 @@ def tick_live_session(
     bid = float(tick.bid or mid)
     ask = float(tick.ask or mid)
 
-    ok_b, ev = runner_boundary_risk_ok(db, sess, expected_move_bps=_expected_move_bps)
+    ok_b, ev = runner_boundary_risk_ok(
+        db, sess, expected_move_bps=_expected_move_bps, apply_eligibility_grace=True
+    )
     if not ok_b:
         _emit(
             db,
@@ -3897,7 +5336,16 @@ def tick_live_session(
             if _only_transient_freshness_block(ev):
                 _safe_transition(db, sess, STATE_WATCHING_LIVE)
             else:
-                _safe_transition(db, sess, STATE_LIVE_ERROR)
+                # A persistent risk-eval BLOCK (not-live-eligible / spread-too-wide / a
+                # cap that is not the kill-switch — a DETERMINISTIC policy decline on a
+                # name that never held a position) terminalizes cleanly (live_cancelled),
+                # not as a runner error. Entry is still blocked; only the label changes.
+                _decline_terminal(
+                    db,
+                    sess,
+                    reason="risk_block",
+                    detail={"severity": ev.get("severity"), "errors": ev.get("errors")},
+                )
             db.flush()
             return {"ok": True, "blocked": True, "risk_evaluation": ev}
         if sess.state == STATE_LIVE_PENDING_ENTRY and le.get("entry_order_id") and not le.get("position"):
@@ -4014,8 +5462,10 @@ def tick_live_session(
     except Exception as ex:
         _log.debug("get_product: %s", ex)
     if prod and not prod.tradable_for_spot_momentum():
-        _emit(db, sess, "live_error", {"reason": "product_not_tradable"})
-        _safe_transition(db, sess, STATE_LIVE_ERROR)
+        # A non-tradeable product (e.g. a warrant/non-common-stock the venue won't trade) is
+        # a DETERMINISTIC policy decline. In a pre-entry/no-position state terminalize cleanly
+        # (live_cancelled); _decline_terminal falls back to live_error if somehow held.
+        _decline_terminal(db, sess, reason="product_not_tradable")
         db.flush()
         return {"ok": False, "error": "product_not_tradable"}
 
@@ -4145,9 +5595,14 @@ def tick_live_session(
                                 try:
                                     from .entry_gates import halt_resume_dip_trigger
 
+                                    # GAP 2/3 (Warrior re-audit): pass the captured
+                                    # halt_level so the trigger can read the resumption
+                                    # DIRECTION (false-halt avoid / conviction modifier).
+                                    # None when neither flag captured one ⇒ byte-identical.
                                     _trigger_ok, _trigger_reason, _pb_debug = halt_resume_dip_trigger(
                                         _df_pb, entry_interval=_interval,
                                         halt_resumed_at_utc=_resumed_at,
+                                        halt_level=_float_or_none(le.get("halt_level")),
                                     )
                                 except Exception:
                                     _trigger_ok = False
@@ -4585,6 +6040,95 @@ def tick_live_session(
                                 except Exception:
                                     pass
 
+                                # GAP-B: TIGHT-MOMENTUM FALSE-BREAK-REVERSAL / VWAP-RECLAIM — a NEW
+                                # trigger family. On a COMPRESSED (coiled) tape with REQUIRED order-
+                                # flow + a self-relative volume surge, fire on a false-breakout
+                                # REVERSAL (pierce L -> fail/flush below L -> rip back & reclaim L) OR
+                                # a VWAP-reclaim from below. Carries the SAME four chase-guards (tape
+                                # REQUIRED+fail-closed via tape_confirms_hold INSIDE the detector,
+                                # _hod_extension_ok + _detect_back_side + front_side_state +
+                                # _l2_entry_veto) and returns the shared (ok, reason, debug) with
+                                # pullback_low/high under the IDENTICAL keys, so the structural-stop
+                                # + bailout machinery below + the setup-selector are reused unchanged.
+                                # MUTUALLY EXCLUSIVE per-tick with raw_break/break_retest: when GAP-B
+                                # is ON it joins the SAME candidate set the setup-selector arbitrates,
+                                # which returns a SINGLE choice (no double-fire). Flag-gated INSIDE
+                                # the detector (default OFF -> disabled before any compute, byte-
+                                # identical). l2_as_of=None = the LIVE default. docs/DESIGN/MOMENTUM_LANE.md
+                                try:
+                                    from .entry_gates import false_break_reclaim_confirmation
+
+                                    _fbr_ok, _fbr_reason, _fbr_dbg = false_break_reclaim_confirmation(
+                                        _df_trig, entry_interval=_iv_trig,
+                                        live_price=_live_px, symbol=sess.symbol,
+                                        now=None, db=db, l2_as_of=None,
+                                    )
+                                    if _fbr_ok:
+                                        _breakouts.append((_fbr_ok, _fbr_reason, _fbr_dbg))
+                                    elif (
+                                        _fbr_reason in TICK_ARMED_WAIT_REASONS
+                                        and isinstance(_fbr_dbg, dict)
+                                        and _fbr_dbg.get("pullback_high")
+                                        and not _trigger_ok
+                                        and _trigger_reason not in TICK_ARMED_WAIT_REASONS
+                                    ):
+                                        # Surface the GAP-B WAIT so tick-speed dispatch fires the
+                                        # instant the ask trades through the reclaim level (the
+                                        # ladder gave only a terminal wait).
+                                        _trigger_reason, _pb_debug = _fbr_reason, _fbr_dbg
+                                except Exception:
+                                    pass
+
+                                # LOCATE #2/#4/#5/#6: four NEW scalp/dip triggers. Each carries
+                                # the SAME chase-guards (tape REQUIRED+fail-closed via
+                                # tape_confirms_hold INSIDE the detector, _hod_extension_ok +
+                                # _detect_back_side + front_side_state + _l2_entry_veto) and
+                                # returns the shared (ok, reason, debug) with pullback_low/high
+                                # under the IDENTICAL keys, so the structural-stop + bailout
+                                # machinery below + the setup-selector are reused unchanged.
+                                # ask_thins/sub_vwap_trap are DIP-family (join the dip-fire slot
+                                # when no breakout wins); pulling_away/premarket_pivot are
+                                # BREAKOUT-family. Each flag-gated INSIDE the detector (default
+                                # OFF -> disabled before any compute, byte-identical). l2_as_of=
+                                # None = the LIVE default. docs/DESIGN/MOMENTUM_LANE.md
+                                try:
+                                    from .entry_gates import (
+                                        ask_thins_dip_entry,
+                                        premarket_pivot_macd_entry,
+                                        pulling_away_roc_entry,
+                                        sub_vwap_trap_entry,
+                                    )
+
+                                    for _sd_fn in (
+                                        ask_thins_dip_entry,
+                                        sub_vwap_trap_entry,
+                                        pulling_away_roc_entry,
+                                        premarket_pivot_macd_entry,
+                                    ):
+                                        try:
+                                            _sd_ok, _sd_reason, _sd_dbg = _sd_fn(
+                                                _df_trig, entry_interval=_iv_trig,
+                                                live_price=_live_px, symbol=sess.symbol,
+                                                now=None, db=db, l2_as_of=None,
+                                            )
+                                        except Exception:
+                                            _sd_ok, _sd_reason, _sd_dbg = False, "scalp_dip_error", {}
+                                        if _sd_ok:
+                                            _breakouts.append((_sd_ok, _sd_reason, _sd_dbg))
+                                        elif (
+                                            _sd_reason in TICK_ARMED_WAIT_REASONS
+                                            and isinstance(_sd_dbg, dict)
+                                            and _sd_dbg.get("pullback_high")
+                                            and not _trigger_ok
+                                            and _trigger_reason not in TICK_ARMED_WAIT_REASONS
+                                        ):
+                                            # Surface the WAIT so tick-speed dispatch fires the
+                                            # instant the ask trades through the level (the ladder
+                                            # gave only a terminal wait).
+                                            _trigger_reason, _pb_debug = _sd_reason, _sd_dbg
+                                except Exception:
+                                    pass
+
                                 if _breakouts:
                                     # SETUP-SELECTOR: choose the best R:R among the dip-family fire
                                     # (if any) and the breakout fire(s). Flag OFF -> the first fire
@@ -4671,8 +6215,82 @@ def tick_live_session(
                     _emit(db, sess, "live_entry_backside_unbenched", {
                         "reason": _bench_reason, **_bench_dbg,
                     })
+                elif _bench_reason == "front_side_vwap_reclaim":
+                    # FIX D COUNTERFACTUAL: the below-VWAP bench WOULD have latched here, but
+                    # the name is RECLAIMING VWAP from below -> NOT benched. Emit a structured
+                    # counter so the operator can read the FIX-D un-bench rate + the trigger
+                    # that was preserved (vs the old behaviour that ate SDOT/ILLR) and flip
+                    # chili_momentum_backside_vwap_reclaim_enabled off if net-negative. This is
+                    # a SAVE, not an entry: every downstream chase-guard still gates the fill.
+                    _emit(db, sess, "live_entry_backside_vwap_reclaim_exception", {
+                        "fix": "D",
+                        "preserved_trigger": (_trigger_reason if _trigger_ok else None),
+                        "trigger_ok": bool(_trigger_ok),
+                        **_bench_dbg,
+                    })
             except Exception:
                 pass  # fail-open: any error -> no bench change (never strand a name)
+        # GAP 1 + GAP 2 (Warrior re-audit) — HALT-CHAIN RISK GATE + RESUMPTION SIZE
+        # MODIFIER, applied ONLY to a halt-resume-dip entry that fired (it shares ALL the
+        # existing chase-guards — the bench veto above, the bid-prop confirmer + opening-
+        # bell below still run, and the tape-REQUIRED / extension / structural-stop gates
+        # downstream are untouched). GAP 1: when the per-symbol consecutive halt-UP count
+        # reaches the block threshold, VETO the long (over-extended halt chain); below it,
+        # de-weight. GAP 2: fold the resumption_size_mult (from the trigger debug) into the
+        # same halt size lever. The combined multiplier is stashed in le["halt_entry_size_
+        # mult"] for the sizing path; a clear when not a halt-resume entry keeps it from
+        # leaking. RISK-REDUCING + conviction only — it can BLOCK or shrink (and a bounded
+        # GAP-2 boost capped by the 3x clamp + max_notional). Both flags OFF ⇒ gate returns
+        # disabled + no mult is read ⇒ byte-identical.
+        if _trigger_ok and _trigger_reason == "halt_resume_dip_ok":
+            try:
+                from .entry_gates import halt_chain_risk_gate
+
+                _hc_block, _hc_mult, _hc_reason, _hc_dbg = halt_chain_risk_gate(
+                    consecutive_halt_up_count=int(le.get("halt_chain_up_count") or 0),
+                )
+                if _hc_block:
+                    _prev_trigger = _trigger_reason
+                    _trigger_ok = False
+                    _trigger_reason = "halt_chain_blocked"
+                    le.pop("halt_entry_size_mult", None)
+                    _emit(db, sess, "live_entry_halt_chain_blocked", {
+                        "blocked_trigger": _prev_trigger, "reason": _hc_reason, **_hc_dbg,
+                    })
+                else:
+                    # Compose the GAP-1 chain de-weight with the GAP-2 resumption-direction
+                    # modifier (annotated by the trigger in _pb_debug). Both default 1.0.
+                    _gap2_mult = 1.0
+                    try:
+                        if isinstance(_pb_debug, dict):
+                            _gm = _float_or_none(_pb_debug.get("resumption_size_mult"))
+                            if _gm is not None and _gm > 0:
+                                _gap2_mult = float(_gm)
+                    except Exception:
+                        _gap2_mult = 1.0
+                    _combined = float(_hc_mult) * float(_gap2_mult)
+                    if abs(_combined - 1.0) > 1e-9:
+                        le["halt_entry_size_mult"] = _combined
+                        _emit(db, sess, "live_entry_halt_size_modifier", {
+                            "halt_chain_mult": round(float(_hc_mult), 4),
+                            "resumption_mult": round(float(_gap2_mult), 4),
+                            "combined_mult": round(_combined, 4),
+                            "halt_chain_reason": _hc_reason,
+                            "resumption_direction": (
+                                _pb_debug.get("resumption_direction")
+                                if isinstance(_pb_debug, dict) else None
+                            ),
+                            **_hc_dbg,
+                        })
+                    else:
+                        le.pop("halt_entry_size_mult", None)
+            except Exception:
+                # fail-open: any error -> no block, no size change (never strand a name).
+                le.pop("halt_entry_size_mult", None)
+        elif not (_trigger_ok and _trigger_reason == "halt_resume_dip_ok"):
+            # Not a halt-resume entry this tick: clear any stale halt size lever so it can
+            # never leak into a non-halt entry's sizing.
+            le.pop("halt_entry_size_mult", None)
         # HVM101 (A): OPENING-BELL SUPPRESSION — hold a FRESH equity trigger in the
         # first ~N min after the 09:30 ET open (opening-auction whipsaw). Equity/RH
         # ONLY; premarket continuation of an already-armed runner is preserved (the
@@ -4696,6 +6314,66 @@ def tick_live_session(
                 _trigger_reason = "opening_bell_suppressed"
                 _emit(db, sess, "live_entry_opening_bell_suppressed", {
                     "suppressed_trigger": _prev_reason, **_ob_dbg,
+                })
+        # LOCATE #9 8AM BURST GUARD: a narrow time-windowed DISTRUST of the top-of-hour
+        # burst candle (esp. 08:00 ET) — within the guard window of a top-of-hour boundary,
+        # DEFER a fresh entry trigger (mirror of the opening-bell suppression). Equity/RH
+        # ONLY; the burst candle is order-imbalance noise, not a tradeable break. RISK-
+        # REDUCING ONLY: it can only DEFER a fresh fire (never enables/loosens). Flag OFF /
+        # crypto / outside-window ⇒ no-op, byte-identical.
+        if (
+            _trigger_ok
+            and not str(sess.symbol or "").upper().endswith("-USD")
+            and bool(getattr(settings, "chili_momentum_order_burst_candle_guard_enabled", False))
+        ):
+            try:
+                from zoneinfo import ZoneInfo as _ZIb
+
+                _now_et_b = datetime.now(_ZIb("America/New_York"))
+                _win_min = float(getattr(settings, "chili_momentum_order_burst_guard_window_minutes", 3.0) or 0.0)
+                # minutes since the most-recent top-of-hour boundary (0..59).
+                _mins_into_hour = _now_et_b.minute + _now_et_b.second / 60.0
+                _burst = _win_min > 0.0 and _mins_into_hour < _win_min
+            except Exception:
+                _burst, _now_et_b = False, None
+            if _burst:
+                _trigger_ok = False
+                _prev_reason = _trigger_reason
+                _trigger_reason = "order_burst_candle_deferred"
+                _emit(db, sess, "live_entry_order_burst_deferred", {
+                    "deferred_trigger": _prev_reason,
+                    "hour_et": (_now_et_b.hour if _now_et_b is not None else None),
+                    "minute_et": (_now_et_b.minute if _now_et_b is not None else None),
+                    "window_minutes": float(getattr(settings, "chili_momentum_order_burst_guard_window_minutes", 3.0) or 0.0),
+                })
+        # LOCATE #10 RED-CANDLE ENTRY BLOCK: do NOT fire a fresh entry while the CURRENT
+        # entry-interval bar is RED (close < open) — Ross never buys into a red candle.
+        # DEFER (stay WATCHING) when the latest completed bar on the entry frame is red.
+        # RISK-REDUCING ONLY: it can only DEFER a fresh fire (never enables/loosens). Flag
+        # OFF / no data ⇒ no-op (fail-OPEN — a missing frame never manufactures a defer),
+        # byte-identical.
+        if (
+            _trigger_ok
+            and bool(getattr(settings, "chili_momentum_red_candle_entry_block_enabled", False))
+        ):
+            try:
+                from ..market_data import fetch_ohlcv_df as _rc_fetch
+
+                _rc_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+                _rc_df = _rc_fetch(sess.symbol, interval=_rc_iv, period="5d")
+                _is_red = False
+                if _rc_df is not None and not getattr(_rc_df, "empty", True) and len(_rc_df) >= 1:
+                    _rc_c = float(_rc_df["Close"].astype(float).iloc[-1])
+                    _rc_o = float(_rc_df["Open"].astype(float).iloc[-1])
+                    _is_red = _rc_c < _rc_o
+            except Exception:
+                _is_red = False  # fail-OPEN: a missing/degenerate frame never defers
+            if _is_red:
+                _trigger_ok = False
+                _prev_reason = _trigger_reason
+                _trigger_reason = "red_candle_entry_blocked"
+                _emit(db, sess, "live_entry_red_candle_blocked", {
+                    "blocked_trigger": _prev_reason,
                 })
         # HVM101 (B): BID-PROP / SPREAD-TIGHTENING CONFIRMER — confirm a fired break
         # only when, over the last few L1 samples, the best-bid is non-decreasing AND
@@ -4797,6 +6475,24 @@ def tick_live_session(
                 # break level) under the SAME keys, so the same machinery is reused.
                 "abcd_break", "abcd_break_tick_ok",
                 "double_bottom_break", "double_bottom_break_tick_ok",
+                # LOCATE #2/#4/#5/#6: the four new scalp/dip triggers carry pullback_low
+                # (= the dip/trap/base structural stop) + pullback_high (= the break level)
+                # under the SAME keys, so the structural-stop + breakout-or-bailout machinery
+                # is reused unchanged.
+                "ask_thins_dip", "ask_thins_dip_tick",
+                "sub_vwap_trap", "sub_vwap_trap_tick",
+                "pulling_away_roc", "pulling_away_roc_tick",
+                "premarket_pivot_macd", "premarket_pivot_macd_tick",
+                # FIX C(1) BACKSTOP: the explosive RAW first-push / raw-break escapes and the
+                # first-pullback fire all carry pullback_low (= the raw/pullback structural stop)
+                # + pullback_high (= the break level) under the SAME debug keys (entry_gates.py
+                # populates them via _evaluate_raw_break), so they MUST reuse the structural-stop
+                # + breakout-or-bailout machinery. Omitting them silently dropped the structural
+                # stop on the default-ON first-push path -> noise-tight vol-floored ATR stop on
+                # exactly the gappy low-float names the -$697 tail came from.
+                "explosive_raw_first_push_ok", "explosive_raw_first_push_tick_ok",
+                "explosive_raw_break_ok", "explosive_raw_break_tick_ok",
+                "first_pullback_ok", "first_pullback_tick_ok",
             ) and _pb_debug.get("pullback_low"):
                 le["structural_stop_price"] = float(_pb_debug["pullback_low"])
                 # #2 Breakout-or-bailout: stash the broken pullback HIGH (the breakout
@@ -4810,6 +6506,41 @@ def tick_live_session(
             else:
                 le.pop("structural_stop_price", None)
                 le.pop("breakout_level_price", None)
+            # LOCATE #3 DIP-VELOCITY CONVICTION: scale entry SIZE by the dip ROC for a
+            # dip-family fire (steeper flush snaps back harder). The multiplier is in
+            # [1.0, 1+max_boost] (NEVER < 1.0) and composes multiplicatively under the SAME
+            # 3x clamp + max_notional ceiling as every other size lever, so it can never
+            # increase per-trade RISK past the caps. Stash it (mirroring halt_entry_size_
+            # mult); cleared on a non-dip fire so it cannot leak. Flag OFF / non-dip / no ROC
+            # ⇒ mult 1.0 / key absent ⇒ byte-identical. docs/DESIGN/MOMENTUM_LANE.md
+            le.pop("dip_velocity_size_mult", None)
+            if _trigger_reason in (
+                "flush_dip_buy", "vwap_reclaim", "wick_reclaim",
+                "ask_thins_dip", "ask_thins_dip_tick",
+                "sub_vwap_trap", "sub_vwap_trap_tick",
+            ):
+                try:
+                    from .entry_gates import _dip_velocity_size_mult
+
+                    _dv_mult = _dip_velocity_size_mult(
+                        dip_roc_per_bar=(
+                            _float_or_none(_pb_debug.get("dip_roc_per_bar"))
+                            if isinstance(_pb_debug, dict) else None
+                        ),
+                        atr_pct=(
+                            _float_or_none(_pb_debug.get("atr_pct"))
+                            if isinstance(_pb_debug, dict) else None
+                        ),
+                    )
+                    if _dv_mult is not None and abs(float(_dv_mult) - 1.0) > 1e-9 and float(_dv_mult) > 1.0:
+                        le["dip_velocity_size_mult"] = float(_dv_mult)
+                        _emit(db, sess, "live_entry_dip_velocity_conviction", {
+                            "trigger": _trigger_reason,
+                            "dip_roc_per_bar": (_pb_debug.get("dip_roc_per_bar") if isinstance(_pb_debug, dict) else None),
+                            "size_mult": round(float(_dv_mult), 4),
+                        })
+                except Exception:
+                    le.pop("dip_velocity_size_mult", None)
             # L2 depth snapshot AT THE DECISION MOMENT (Robinhood pricebook =
             # Nasdaq TotalView, the same book Legend's bid/ask windows show).
             # One GET per entry decision — NOT a stream (streaming an unofficial
@@ -4821,6 +6552,11 @@ def tick_live_session(
                 le["entry_l2_snapshot"] = _l2
             else:
                 le.pop("entry_l2_snapshot", None)
+            # Persist the FIRED trigger reason so the entry-sizing path (which runs on a
+            # LATER tick in LIVE_ENTRY_CANDIDATE, where the local _trigger_reason is no
+            # longer in scope) can thread it into the adaptive spread-cost veto for the
+            # RECLAIM carve-out (derate-only + permissive R base for dip/VWAP-reclaims).
+            le["entry_trigger_reason"] = _trigger_reason
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
             _emit(
@@ -5185,7 +6921,21 @@ def tick_live_session(
                     "blocked": True, "reason": "unresolved_entry_orders",
                 }
         if le.get("entry_submitted") and le.get("entry_order_id"):
-            no, _ = adapter.get_order(str(le["entry_order_id"]))
+            # CHUNK 3-B — FAST ACK-POLL: confirm the entry fill WITHIN this tick by
+            # polling get_order at the measured rail RTT (geometric widen), bounded by the
+            # EXISTING rest_bars * entry_interval ack-timeout window + a hard iter cap +
+            # the rail governor. On confirm we fall straight into the SAME adopt path
+            # below (no new write path). On a non-fill `no` is the last poll, so the
+            # existing open/cancel/repeg logic runs exactly as today. Fast-poll OFF ⇒ a
+            # single governed get_order (byte-identical confirm). The window mirrors the
+            # cancel-side backstop at the bottom of this branch (rest_bars * interval).
+            _fp_window_s = (
+                float(getattr(settings, "chili_momentum_entry_max_rest_bars", 2.0) or 2.0)
+                * float(_entry_interval_seconds())
+            )
+            no, _ = _fast_ack_poll_entry(
+                adapter, le["entry_order_id"], sess=sess, interval_window_s=_fp_window_s,
+            )
             # OPEN-WITH-FILLS (2026-06-11 INDP): RH can hold an order in state
             # "open" with shares ALREADY filled (a silently-failed cancel + a
             # later fill). Those shares are OURS the moment they exist — adopt
@@ -5239,6 +6989,7 @@ def tick_live_session(
                     stop_atr_mult=_stop_atr_mult,
                     target_atr_mult=float(params["target_atr_mult"]),
                     reward_risk=class_aware_reward_risk(sess.symbol),
+                    realized_high=_float_or_none(le.get("entry_realized_high")),
                 )
                 le["position"]["stop_price"] = stop_px
                 le["position"]["target_price"] = target_px
@@ -5416,6 +7167,91 @@ def tick_live_session(
                             interval_s=_entry_interval_seconds(),
                             chase_ceiling_px=_chase_ceiling,
                         )
+                        # ── FIX B — AGGRESSIVE REPEG/CROSS ON FAST PUSHES ───────────
+                        # The bid-based cancel reasons above MISS the most Ross-like
+                        # entry: a fast vertical where the ASK climbs THROUGH our
+                        # resting limit first (we stop being marketable) while the bid
+                        # lags below the chase ceiling — the order then sits unfilled
+                        # until the ~2-bar rest-backstop fires, after the move is gone
+                        # (SKYQ 56 submitted / 0 filled, test w0av0u3qy). When FIX B is
+                        # enabled AND the bid-based reasons did NOT already fire a HARDER
+                        # reason (stop-breach / bid-left-behind / bar-backstop are all
+                        # respected — we only fill the None gap) AND the live ask has
+                        # advanced past our limit by more than the adaptive band, PROMOTE
+                        # the reason to `entry_limit_left_behind` so it flows through the
+                        # EXACT SAME repeg machinery below (cancel-before-replace phantom-2x
+                        # guard, cumulative-spread ceiling, risk-first resize, max_repegs,
+                        # equity gate, fresh-quote gate). The cross is bounded by
+                        # _entry_repeg_price's cumulative ceiling, so R:R can't erode.
+                        # Counterfactual emit (always, even when it can't act) so the
+                        # operator reads the submit/fill-rate delta and can flip OFF.
+                        _fixb_on = bool(getattr(settings, "chili_momentum_runaway_cross_enabled", True))
+                        _fixb_eligible_equity = not str(sess.symbol or "").upper().endswith("-USD")
+                        _fixb_ask_adv = _ask_advanced_past_limit(
+                            ask=_pask,
+                            limit_px=_lim_px,
+                            expected_move_bps=(float(_emb) if _emb else None),
+                        )
+                        if (
+                            _fixb_on
+                            and _cancel_why is None
+                            and _fixb_eligible_equity
+                            and _fixb_ask_adv
+                            and bool(getattr(settings, "chili_momentum_entry_chase_enabled", True))
+                            and int(le.get("entry_repeg_count", 0) or 0)
+                                < int(getattr(settings, "chili_momentum_entry_max_repegs", 3) or 0)
+                            and _pfr is not None and is_fresh_enough(_pfr)
+                        ):
+                            # Confirm the cross is actually reachable within the cumulative
+                            # budget BEFORE committing to a cancel — if the ask already ran
+                            # past the ceiling, escalating would only cancel+abandon (worse
+                            # than letting the rest-backstop / re-watch handle it). Fail-
+                            # closed: only promote when _entry_repeg_price yields a usable px.
+                            # CONFIRMED-THRUST halt-resume vertical: if this is a recent
+                            # halt-resume AND the tape is thrusting past our limit (the very
+                            # push that triggered FIX-B, _fixb_ask_adv), supply a confluence
+                            # so the cumulative ceiling raises toward the HARD vertical cap and
+                            # the resume gap actually fills. Else None ⇒ abs-cap (parity).
+                            _vc = _vertical_thrust_confluence(
+                                halt_resume_active=_halt_resume_cooldown_active(le),
+                                tape_thrust_ok=_fixb_ask_adv,
+                                squeeze_pct=le.get("entry_squeeze_pct"),
+                                rvol=le.get("entry_rvol"),
+                            )
+                            _fixb_rp = _entry_repeg_price(
+                                original_limit_px=float(le.get("entry_original_limit_px") or _lim_px or 0.0),
+                                live_ask=float(_pask),
+                                expected_move_bps=(float(_emb) if _emb else None),
+                                vertical_confluence=_vc,
+                            )
+                            if _fixb_rp and _fixb_rp > _lim_px:
+                                _emit(db, sess, "entry_runaway_cross_triggered", {
+                                    "fix": "B", "bid": _pbid, "ask": _pask,
+                                    "limit": _lim_px or None,
+                                    "chase_ceiling": _chase_ceiling,
+                                    "repeg_target": _fixb_rp,
+                                    "repeg_count": int(le.get("entry_repeg_count", 0) or 0),
+                                })
+                                _cancel_why = "entry_limit_left_behind"
+                            else:
+                                # Ask advanced but the cross would exceed the cumulative
+                                # spread budget — log the counterfactual, do NOT escalate
+                                # (the move left for good; the existing re-watch handles it).
+                                _emit(db, sess, "entry_runaway_cross_skipped", {
+                                    "fix": "B", "reason": "past_cumulative_ceiling",
+                                    "bid": _pbid, "ask": _pask, "limit": _lim_px or None,
+                                })
+                        elif _fixb_on and _cancel_why is None and _fixb_ask_adv:
+                            # Eligible signal but a hard precondition blocked the escalation
+                            # (crypto / repeg budget exhausted / stale quote). Counterfactual
+                            # so the operator can see how often FIX B WOULD have fired.
+                            _emit(db, sess, "entry_runaway_cross_blocked", {
+                                "fix": "B",
+                                "equity": _fixb_eligible_equity,
+                                "repeg_count": int(le.get("entry_repeg_count", 0) or 0),
+                                "fresh": bool(_pfr is not None and is_fresh_enough(_pfr)),
+                                "bid": _pbid, "ask": _pask, "limit": _lim_px or None,
+                            })
                         if _cancel_why is not None:
                             # RACE GUARD: the order may have FILLED between the 10s
                             # ack timeout and this (<=30s-cadence) tick — illiquid
@@ -5427,7 +7263,7 @@ def tick_live_session(
                             # If it filled, leave the session pending so the entry
                             # fill-handler above ADOPTS it next tick; only cancel +
                             # re-watch a genuinely-still-open order. docs/DESIGN/MOMENTUM_LANE.md
-                            _fresh, _ = adapter.get_order(str(le["entry_order_id"]))
+                            _fresh, _ = _governed_get_order(adapter, le["entry_order_id"], sess=sess)
                             # Adopt the moment ANY size is filled — a partial on a
                             # marketable limit means we are AT THE FRONT and the rest is
                             # in flight; cancelling now orphans the clip. Matches the
@@ -5452,7 +7288,7 @@ def tick_live_session(
                             # session PENDING so the fill-handler above adopts it next tick.
                             # [SDOT 2026-06-10: 56sh / $1,608 filled while the ack-timeout
                             # cancel raced -> orphaned, operator had to exit it by hand.]
-                            _post, _ = adapter.get_order(str(le["entry_order_id"]))
+                            _post, _ = _governed_get_order(adapter, le["entry_order_id"], sess=sess)
                             if _post and _order_done_for_entry(_post):
                                 db.flush()
                                 return {
@@ -5504,68 +7340,230 @@ def tick_live_session(
                             _rp_n = int(le.get("entry_repeg_count", 0) or 0)
                             _rp_max = int(getattr(settings, "chili_momentum_entry_max_repegs", 3) or 0)
                             _rp_is_equity = not str(sess.symbol or "").upper().endswith("-USD")
-                            if (
+                            # CHUNK 3-A — INLINE MICRO-REPEG. When enabled, the bounded
+                            # repegs run WITHIN this tick (loop below) instead of one repeg
+                            # per external WS tick — "3 repegs over 6–45s" -> "3 over ~3
+                            # RTTs." EVERY existing bound is preserved and re-evaluated each
+                            # iteration: the cumulative-spread ceiling (_entry_repeg_price),
+                            # the risk-first re-size, the max-repeg counter (_rp_n<_rp_max),
+                            # the equity gate (_rp_is_equity), the fresh-quote gate. The
+                            # aggressiveness scales with repeg_index/max (first sits at the
+                            # guarded ask via the live-ask read, later iters lean toward the
+                            # ceiling but NEVER past it — _entry_repeg_price caps at the
+                            # cumulative budget). Inter-repeg delay is adaptive: min(measured
+                            # rail RTT, the inline max-delay ceiling). Flag OFF ⇒ the loop
+                            # body runs AT MOST ONCE and returns -> the current one-repeg-per-
+                            # tick behavior (byte-identical). _local ask/fresh re-read each
+                            # iter (seeded from the cancel-time _pask/_pfr).
+                            _inline = bool(getattr(settings, "chili_momentum_entry_inline_repeg_enabled", True))
+                            _rp_ask = _pask
+                            _rp_fr = _pfr
+                            _rp_iters = 0
+                            _rp_did = False
+                            while (
                                 _cancel_why == "entry_limit_left_behind"
                                 and bool(getattr(settings, "chili_momentum_entry_chase_enabled", True))
                                 and _rp_is_equity
                                 and _rp_n < _rp_max
-                                and _pask and _pask > 0
-                                and _pfr is not None and is_fresh_enough(_pfr)
+                                and _rp_ask and _rp_ask > 0
+                                and _rp_fr is not None and is_fresh_enough(_rp_fr)
                             ):
                                 _rp_new = _entry_repeg_price(
                                     original_limit_px=float(le.get("entry_original_limit_px") or _lim_px or 0.0),
-                                    live_ask=float(_pask),
+                                    live_ask=float(_rp_ask),
                                     expected_move_bps=(float(_emb) if _emb else None),
                                 )
                                 _rp_maxn = float((le.get("entry_notional_guard") or {}).get("max_notional_usd") or 0.0)
-                                if _rp_new and _rp_new > _lim_px and _rp_maxn > 0:
-                                    # RISK-FIRST re-size at the chased price (notional is the
-                                    # CEILING only) so a chase can't over-risk past max_loss.
-                                    # [G1 review #2]
-                                    _rb = le.get("entry_resize_basis") or {}
-                                    _rp_qty, _ = compute_risk_first_quantity(
-                                        entry_price=_rp_new,
-                                        atr_pct=float(_rb.get("atr_pct") or 0.0),
-                                        max_loss_usd=float(_rb.get("max_loss_usd") or 0.0),
-                                        max_notional_ceiling_usd=_rp_maxn,
-                                        base_increment=float(_rb.get("base_increment") or 1.0),
-                                        base_min_size=float(_rb.get("base_min_size") or 1.0),
-                                        stop_atr_mult=float(_rb.get("stop_atr_mult") or 0.60),
+                                if not (_rp_new and _rp_new > _lim_px and _rp_maxn > 0):
+                                    break  # ran past the cumulative ceiling -> stop chasing
+                                # RISK-FIRST re-size at the chased price (notional is the
+                                # CEILING only) so a chase can't over-risk past max_loss.
+                                # [G1 review #2]
+                                _rb = le.get("entry_resize_basis") or {}
+                                _rp_qty, _ = compute_risk_first_quantity(
+                                    entry_price=_rp_new,
+                                    atr_pct=float(_rb.get("atr_pct") or 0.0),
+                                    max_loss_usd=float(_rb.get("max_loss_usd") or 0.0),
+                                    max_notional_ceiling_usd=_rp_maxn,
+                                    base_increment=float(_rb.get("base_increment") or 1.0),
+                                    base_min_size=float(_rb.get("base_min_size") or 1.0),
+                                    stop_atr_mult=float(_rb.get("stop_atr_mult") or 0.60),
+                                )
+                                if not (_rp_qty and _rp_qty >= 1.0):
+                                    break
+                                _rp_old_eid = le.get("entry_order_id")
+                                # DUPLICATE-FILL GUARD (2026-06-27): the PRE-loop cancel
+                                # at the top of this branch only retired the ORIGINAL
+                                # order (O0). On EVERY subsequent inline iteration the
+                                # prior repeg (O1, O2, ...) is STILL a live resting order
+                                # at the broker — placing the next repeg WITHOUT cancelling
+                                # it first leaves two live buy orders that can BOTH fill
+                                # (phantom 2x long). So before each subsequent place,
+                                # CANCEL the current `le["entry_order_id"]` and CONFIRM it
+                                # terminal-cancelled, re-using the same race-guard the
+                                # per-tick path uses: adopt a fill, never place a second
+                                # live order while the prior repeg's fate is indeterminate.
+                                # `_rp_did` is True only AFTER the first repeg placed, so on
+                                # the first iteration (O0 already confirmed-cancelled above)
+                                # this block is skipped -> byte-identical to the legacy
+                                # one-repeg-per-tick path.
+                                if _rp_did:
+                                    try:
+                                        adapter.cancel_order(str(_rp_old_eid))
+                                    except Exception:
+                                        _log.debug(
+                                            "[momentum_s4] inline repeg pre-place cancel failed oid=%s",
+                                            _rp_old_eid, exc_info=True,
+                                        )
+                                    _rp_post, _ = _governed_get_order(
+                                        adapter, _rp_old_eid, sess=sess
                                     )
-                                    if _rp_qty and _rp_qty >= 1.0:
-                                        _rp_old_eid = le.get("entry_order_id")
-                                        _rp_pn = int(le.get("entry_place_count", 0) or 0) + 1
-                                        le["entry_place_count"] = _rp_pn
-                                        _rp_seed = f"{sess.id}|{sess.correlation_id or 'x'}|entry|{_rp_pn}".encode("utf-8")
-                                        _rp_cid = f"chili_ml_e_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{hashlib.sha1(_rp_seed).hexdigest()[:10]}"[:120]
-                                        _rp_res = adapter.place_limit_order_gtc(
-                                            product_id=product_id,
-                                            side="buy",
-                                            base_size=_fmt_base_size(_rp_qty),
-                                            limit_price=_fmt_limit_price_buy(_rp_new),
-                                            client_order_id=_rp_cid,
-                                            time_in_force="gfd",
-                                            extended_hours=bool(le.get("entry_session_extended")),
-                                        ) or {}
-                                        if _rp_res.get("ok"):
-                                            # OLD order confirmed terminal-cancelled above -> mark
-                                            # resolved so it can never resurface as an orphan.
-                                            # [G1 review #3]
-                                            _mark_entry_order_resolved(le, str(_rp_old_eid), "void")
-                                            le["entry_order_id"] = _rp_res.get("order_id")
-                                            le["entry_client_order_id"] = _rp_res.get("client_order_id") or _rp_cid
-                                            le["entry_limit_price"] = _fmt_limit_price_buy(_rp_new)
-                                            le["entry_repeg_count"] = _rp_n + 1
-                                            le["entry_submit_utc"] = _utcnow().isoformat()
-                                            le["entry_submitted"] = True
-                                            _record_entry_order_placed(le, _rp_res.get("order_id"))
-                                            _commit_le(sess, le)
-                                            _emit(db, sess, "entry_repegged", {
-                                                "old_limit": _lim_px, "new_limit": _rp_new,
-                                                "live_ask": _pask, "qty": _rp_qty, "n": _rp_n + 1,
-                                            })
-                                            db.flush()
-                                            return {"ok": True, "session_id": sess.id, "state": sess.state, "pending": "entry_repegged"}
+                                    if _rp_post and (
+                                        _order_done_for_entry(_rp_post)
+                                        or float(getattr(_rp_post, "filled_size", 0) or 0.0) > 0.0
+                                    ):
+                                        # The prior repeg filled during the cancel race —
+                                        # adopt it next tick (pointer intact), never place
+                                        # a second order on top of a real position.
+                                        _commit_le(sess, le)
+                                        db.flush()
+                                        return {
+                                            "ok": True, "session_id": sess.id,
+                                            "state": sess.state,
+                                            "pending": "inline_repeg_cancel_raced_fill_adopt",
+                                        }
+                                    if _rp_post is None or _order_open(_rp_post):
+                                        # Cancel NOT confirmed terminal (still open) OR the
+                                        # fetch failed (indeterminate): NEVER place a second
+                                        # live order while the prior repeg may still fill
+                                        # (naked-double-long guard). Stop chasing; keep the
+                                        # session PENDING with the pointer intact so the
+                                        # next tick re-checks venue truth (adopt / retry).
+                                        _emit(db, sess, "entry_repeg_cancel_unconfirmed", {
+                                            "order_id": str(_rp_old_eid),
+                                            "venue_status": getattr(_rp_post, "status", None),
+                                        })
+                                        _commit_le(sess, le)
+                                        db.flush()
+                                        return {
+                                            "ok": True, "session_id": sess.id,
+                                            "state": sess.state,
+                                            "pending": "inline_repeg_cancel_unconfirmed",
+                                        }
+                                    # else: _rp_post confirmed terminal-cancelled -> safe to
+                                    # place the replacement below (old order definitively gone).
+                                _rp_pn = int(le.get("entry_place_count", 0) or 0) + 1
+                                le["entry_place_count"] = _rp_pn
+                                # Same recycle-unique cid shape as the first entry (fold the
+                                # persistent trade_cycles/stopout_cycles) so an inline re-peg
+                                # after a recycle cannot collide with a prior cycle's cid.
+                                _rp_cid = _entry_client_order_id(
+                                    session_id=sess.id,
+                                    correlation_id=sess.correlation_id,
+                                    trade_cycles=int(le.get("trade_cycles") or 0),
+                                    stopout_cycles=int(le.get("stopout_cycles") or 0),
+                                    place_n=_rp_pn,
+                                )
+                                _rp_res = _governed_place(
+                                    adapter, adapter.place_limit_order_gtc, sess=sess,
+                                    product_id=product_id,
+                                    side="buy",
+                                    base_size=_fmt_base_size(_rp_qty),
+                                    limit_price=_fmt_limit_price_buy(_rp_new),
+                                    client_order_id=_rp_cid,
+                                    time_in_force="gfd",
+                                    extended_hours=bool(le.get("entry_session_extended")),
+                                ) or {}
+                                if not _rp_res.get("ok"):
+                                    # Governor DEFER or a place reject: stop the inline loop;
+                                    # the resting state is unchanged (old order already
+                                    # cancelled above), so fall through to the cancel+re-watch
+                                    # below — the next tick retries. Never a silent drop.
+                                    break
+                                # OLD order confirmed terminal-cancelled above -> mark
+                                # resolved so it can never resurface as an orphan. [G1 #3]
+                                _mark_entry_order_resolved(le, str(_rp_old_eid), "void")
+                                _rp_old_limit = _lim_px  # capture BEFORE reassigning for the emit
+                                le["entry_order_id"] = _rp_res.get("order_id")
+                                le["entry_client_order_id"] = _rp_res.get("client_order_id") or _rp_cid
+                                le["entry_limit_price"] = _fmt_limit_price_buy(_rp_new)
+                                _rp_n = _rp_n + 1
+                                le["entry_repeg_count"] = _rp_n
+                                le["entry_submit_utc"] = _utcnow().isoformat()
+                                le["entry_submitted"] = True
+                                _record_entry_order_placed(le, _rp_res.get("order_id"))
+                                _commit_le(sess, le)
+                                _lim_px = _rp_new  # the new resting limit for the next iter
+                                _rp_iters += 1
+                                _rp_did = True
+                                _emit(db, sess, "entry_repegged", {
+                                    "old_limit": _rp_old_limit, "new_limit": _rp_new,
+                                    "live_ask": _rp_ask, "qty": _rp_qty, "n": _rp_n,
+                                    "inline": _inline, "iter": _rp_iters,
+                                })
+                                if not _inline:
+                                    break  # one-repeg-per-tick (byte-identical legacy path)
+                                # ── INLINE continuation: re-read the live quote and decide
+                                # whether the move is STILL running away (left-behind) within
+                                # this tick. Adaptive inter-repeg delay = min(measured RTT,
+                                # the inline max-delay ceiling) — no fixed clock. Re-check the
+                                # cancel reason against the FRESH bid so we never chase a name
+                                # whose bid has fallen back through our (now higher) limit.
+                                import time as _t_inline
+                                _delay = float(getattr(settings, "chili_momentum_entry_inline_repeg_max_delay_s", 0.75) or 0.75)
+                                _rtt = _measured_rail_rtt_s()
+                                if _rtt is not None and _rtt > 0:
+                                    _delay = min(_delay, _rtt)
+                                if _delay > 0:
+                                    _t_inline.sleep(_delay)
+                                try:
+                                    _itick, _rp_fr = adapter.get_best_bid_ask(product_id)
+                                    _rp_bid = float(_itick.bid) if (_itick is not None and _itick.bid) else None
+                                    _rp_ask = float(_itick.ask) if (_itick is not None and _itick.ask) else None
+                                except Exception:
+                                    break  # stale/failed quote -> stop (fail-closed)
+                                # Recompute the cancel reason off the fresh quote: only keep
+                                # looping while STILL left-behind (bid above our new limit).
+                                _chase_ceiling2 = _entry_chase_ceiling_px(
+                                    limit_px=_lim_px,
+                                    expected_move_bps=(float(_emb) if _emb else None),
+                                )
+                                _cancel_why = _pending_entry_cancel_reason(
+                                    bid=_rp_bid,
+                                    structural_stop=_stop_px,
+                                    limit_px=_lim_px,
+                                    elapsed_s=0.0,  # within-tick: bar backstop n/a here
+                                    rest_bars=float(getattr(
+                                        settings, "chili_momentum_entry_max_rest_bars", 2.0) or 2.0),
+                                    interval_s=_entry_interval_seconds(),
+                                    chase_ceiling_px=_chase_ceiling2,
+                                )
+                                # FIX B continuation: a SUSTAINED vertical can keep the
+                                # ask climbing through each fresh limit while the bid
+                                # still lags below the chase ceiling. Keep the within-tick
+                                # loop running on the ask-advance signal too (same adaptive
+                                # band, same equity/freshness/repeg-budget bounds already
+                                # re-evaluated by the while-guard; cross still capped by
+                                # _entry_repeg_price). Never overrides a HARDER bid reason
+                                # (stop-breach / bid-left-behind) — only fills the None gap.
+                                if (
+                                    _cancel_why is None
+                                    and bool(getattr(settings, "chili_momentum_runaway_cross_enabled", True))
+                                    and _ask_advanced_past_limit(
+                                        ask=_rp_ask,
+                                        limit_px=_lim_px,
+                                        expected_move_bps=(float(_emb) if _emb else None),
+                                    )
+                                ):
+                                    _cancel_why = "entry_limit_left_behind"
+                            if _rp_did:
+                                if _rp_iters > 1:
+                                    _log.info(
+                                        "[momentum_s4] inline micro-repeg %s: %d repegs in one tick (n=%d/%d)",
+                                        sess.symbol, _rp_iters, _rp_n, _rp_max,
+                                    )
+                                db.flush()
+                                return {"ok": True, "session_id": sess.id, "state": sess.state, "pending": "entry_repegged", "repegs": _rp_iters}
                             _emit(db, sess, "entry_ack_timeout", {
                                 "elapsed_sec": (_utcnow() - t_sub).total_seconds(),
                                 "reason": _cancel_why,
@@ -5582,6 +7580,24 @@ def tick_live_session(
                         pass
                 db.flush()
                 return {"ok": True, "session_id": sess.id, "state": sess.state, "pending": "entry_open"}
+            # NO CONFIRMATION OBTAINED (2026-06-27): `no is None` means the entry-confirm
+            # poll produced no order object — either a governor DEFER (the shared rail
+            # bucket was empty so every governed poll deferred) or a transient get_order
+            # failure. The order's fate is UNKNOWN, NOT confirmed-bad: a healthy resting /
+            # about-to-fill entry order must NOT be pushed to LIVE_ERROR and orphaned (no
+            # lane stop). Stay PENDING with entry_submitted / entry_order_id INTACT and
+            # retry next tick (mirrors the cancel_indeterminate / entry_open pending
+            # returns). Only a REAL order object in a bad terminal state falls through to
+            # LIVE_ERROR below.
+            if no is None:
+                _emit(db, sess, "entry_confirm_deferred", {
+                    "order_id": str(le.get("entry_order_id")),
+                })
+                db.flush()
+                return {
+                    "ok": True, "session_id": sess.id, "state": sess.state,
+                    "pending": "entry_confirm_deferred",
+                }
             _emit(db, sess, "live_error", {"reason": "entry_order_state", "status": no.status if no else None})
             _safe_transition(db, sess, STATE_LIVE_ERROR)
             db.flush()
@@ -5812,6 +7828,48 @@ def tick_live_session(
         # when ATR/inputs are unusable. (docs/DESIGN/MOMENTUM_LANE.md)
         _regime = via.regime_snapshot_json if isinstance(via.regime_snapshot_json, dict) else {}
         _stop_atr_mult = float(params.get("stop_atr_mult") or 0.60)
+        # WT-1 (thin-frame stop fallback — SAFETY): when the 15m frame is too thin to
+        # compute a LIVE expected-move (_expected_move_bps is None) AND there is no
+        # structural pullback-low stop, the stop-ATR below collapses to the regime
+        # DEFAULT (~1.5%%) — a noise-tight stop on a low-float that gaps 5-9%% THROUGH it
+        # (the -$697 MTEN/SDOT/CCTG/CAST tail). 3-state knob:
+        #   off     -> no-op (size off the regime fallback, byte-identical).
+        #   observe -> DEFAULT: byte-identical (still trades); emit the [momentum_wt1]
+        #              would_abstain counter so the operator reads intraday firing freq.
+        #   enforce -> ABSTAIN (no-data -> no-trade), re-watch (the freshness re-score may
+        #              warm the frame) — mirrors the _enforce_ross_price_band fail-safe.
+        # A real structural stop means the stop is NOT a blind regime guess, so the guard
+        # only fires when BOTH the live expected-move is missing and no structural stop
+        # exists. (docs/DESIGN/MOMENTUM_LANE.md)
+        _wt1_mode = _require_live_atr_mode()
+        if _wt1_mode != "off" and _expected_move_bps is None:
+            try:
+                _wt1_struct_stop = float(le.get("structural_stop_price") or 0.0)
+            except (TypeError, ValueError):
+                _wt1_struct_stop = 0.0
+            if _wt1_struct_stop <= 0.0:
+                _wt1_blob = {
+                    "reason": "thin_frame_no_live_atr",
+                    "mode": _wt1_mode,
+                    "symbol": sess.symbol,
+                    "regime_atr_pct_fallback": round(float(regime_atr_pct(_regime) or 0.0), 6),
+                    "would_abstain": True,
+                }
+                _log.warning(
+                    "[momentum_wt1] would_abstain=1 mode=%s symbol=%s regime_atr_pct_fallback=%.6f",
+                    _wt1_mode, sess.symbol, float(regime_atr_pct(_regime) or 0.0),
+                )
+                _emit(db, sess, "live_wt1_thin_frame", _wt1_blob)
+                if _wt1_mode == "enforce":
+                    le["wt1_abstain"] = _wt1_blob
+                    _commit_le(sess, le)
+                    if sess.state in (
+                        STATE_LIVE_ENTRY_CANDIDATE, STATE_LIVE_PENDING_ENTRY
+                    ) and not le.get("entry_submitted"):
+                        _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                    db.flush()
+                    return {"ok": True, "blocked": True, "reason": "thin_frame_no_live_atr"}
+                # observe: fall through (byte-identical), counter already emitted.
         # Vol-floored stop ATR-pct: never tighter than vol_floor_mult x the live
         # expected-move, so the stop sits OUTSIDE the intraday noise (the KAIO
         # shake-out fix). Frozen in le and reused at the post-fill stop so sizing
@@ -5834,8 +7892,37 @@ def tick_live_session(
         )
         le["entry_stop_atr_pct"] = _eff_atr_pct
         le["entry_stop_model"] = _stop_model
+        # DESIGN #3: stash the realized intraday HEADROOM (session high) + day-range so
+        # the first-target R:R can adapt to the name's OWN proven travel at fill time,
+        # and the scale-out fraction can tilt by realized vol. Reuses the 15m _entry_df
+        # already fetched for the adaptive spread gate (no new I/O). Best-effort; absent
+        # data leaves the keys unset -> adaptive helpers fall back to base (byte-identical).
+        try:
+            if _entry_df is not None and not getattr(_entry_df, "empty", True) and len(_entry_df) >= 2:
+                _rh = float(_entry_df["High"].astype(float).max())
+                _rl = float(_entry_df["Low"].astype(float).min())
+                if math.isfinite(_rh) and _rh > 0:
+                    le["entry_realized_high"] = _rh
+                if math.isfinite(_rh) and math.isfinite(_rl) and _rl > 0 and _rh > _rl:
+                    le["entry_day_range_pct"] = (_rh - _rl) / _rl
+        except Exception:
+            pass
         if _stop_model == "structural_pullback":
             le["structural_stop_atr_pct"] = round(_eff_atr_pct, 6)
+        # LEVER 2B — snapshot the ENTRY tape PACE (ticks/sec) so the runner-time
+        # velocity/persistence RIDE-LOCK can test whether the thrust is still being fed
+        # (live tick_rate >= entry_tick_rate * persist_frac). Best-effort, fail-open: a
+        # thin/missing entry tape leaves it unset ⇒ the persistence test is skipped (the
+        # RIDE-LOCK falls back to flow-sign alone), byte-identical to flag-off there.
+        if bool(getattr(settings, "chili_momentum_velocity_persistence_exit_enabled", True)):
+            try:
+                from .pipeline import _live_flow_slope as _vp_entry_flow
+
+                _vp_e = _vp_entry_flow(sess.symbol, db=db)
+                if _vp_e is not None and _vp_e.get("tick_rate") is not None:
+                    le["entry_tick_rate"] = float(_vp_e["tick_rate"])
+            except Exception:
+                pass
         # Liquidity-ceiling (SCALING_ENGINE.md): never size beyond what the NAME can absorb
         # on EXIT (Ross's "can't move 500k shares in 1-2 min"). As the account COMPOUNDS the
         # equity notional cap grows, but this binds on thin names so CHILI scales only as far
@@ -5877,6 +7964,7 @@ def tick_live_session(
         # cold or after 3 straight losses. Bounds [0.5, 1.5]; fail-neutral 1.0.
         from .risk_policy import (
             cushion_risk_multiplier,
+            green_day_graduation_multiplier,
             prior_day_pnl_damper_multiplier,
             streak_risk_multiplier,
         )
@@ -5884,6 +7972,13 @@ def tick_live_session(
         # Segregate the streak dial by THIS lane (ef = normalized execution_family,
         # resolved above) so a crypto/paper-twin loss never de-risks the equity lane.
         _streak_mult, _streak_meta = streak_risk_multiplier(db, execution_family=ef)
+        # GREEN-DAY GRADUATION (default OFF ⇒ 1.0 byte-identical): graduate to bigger size
+        # only after a consecutive green-day streak (auto-derived from realized daily PnL,
+        # ET calendar). A bounded UPWARD multiplier — composes into the combined ceiling
+        # below, NEVER a veto. Lane-segregated by ef (same as the streak dial).
+        _graduation_mult, _graduation_meta = green_day_graduation_multiplier(
+            db, execution_family=ef
+        )
         _base_max_loss = policy_float_cap(
             caps, "max_loss_per_trade_usd", settings.chili_momentum_risk_max_loss_per_trade_usd
         )
@@ -5919,6 +8014,10 @@ def tick_live_session(
             except Exception:
                 pass
         le["streak_risk"] = _streak_meta
+        # GREEN-DAY GRADUATION meta (only stash when it actually graduated size up, to keep
+        # the OFF path byte-identical in the live-entry blob). 1.0 ⇒ nothing recorded.
+        if _graduation_mult > 1.0:
+            le["green_day_graduation"] = _graduation_meta
         # Day-cushion ladder (Ross 06-11): start the day at half risk; earn the
         # right to full and then aggressive size from TODAY's banked P&L.
         _cushion_mult, _cushion_meta = cushion_risk_multiplier(
@@ -6096,10 +8195,451 @@ def tick_live_session(
                     le["hot_cold_size"] = _hc_meta
             except Exception:
                 _hot_cold_mult = 1.0
+        # GAP 2 TIME/DECISION-FATIGUE DERATE (PSY101; Ross trades best EARLY): size DOWN
+        # as the session lengthens (minutes since the 09:30 ET RTH open) and/or today's
+        # real entered-trade count grows. The multiplier is bounded (floor, 1.0] — it can
+        # ONLY shrink the per-trade risk budget, composes multiplicatively under the SAME
+        # 3x clamp below, and compute_risk_first_quantity still caps qty at max_notional,
+        # so it can NEVER push notional past any ceiling. ENTRY-fill sizing path only (it
+        # physically cannot reach an exit). OFF (default) / fail-neutral => 1.0 (byte-
+        # identical). Replay applies the SAME helper with the SAME inputs => parity.
+        _time_fatigue_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_fatigue_derate_enabled", False)):
+            try:
+                from .risk_policy import (
+                    _count_real_entries_today as _fd_count,
+                    _minutes_since_rth_open_et as _fd_minutes,
+                    fatigue_derate_multiplier as _fd_mult,
+                )
+
+                _fd_is_crypto = str(sess.symbol or "").upper().endswith("-USD")
+                _fd_trades = _fd_count(db, execution_family=ef)
+                _fd_max = int(getattr(settings, "chili_momentum_daily_trade_count_base", 5) or 5)
+                _time_fatigue_mult, _time_fatigue_meta = _fd_mult(
+                    trade_count_today=_fd_trades,
+                    max_trades_per_day=_fd_max,
+                    minutes_since_open=(None if _fd_is_crypto else _fd_minutes()),
+                    is_crypto=_fd_is_crypto,
+                )
+                if _time_fatigue_mult < 1.0:
+                    le["time_fatigue_derate"] = _time_fatigue_meta
+            except Exception:
+                _time_fatigue_mult = 1.0
+        # GAP 1 + GAP 2 (Warrior re-audit) HALT-RESUME SIZE LEVER: a halt-resume-dip
+        # entry carries an optional size multiplier set upstream (le["halt_entry_size_
+        # mult"]): GAP 1 de-weights an extending halt-CHAIN long (<1.0), GAP 2 boosts a
+        # bullish gap-up resumption / penalises a lower resumption. It composes
+        # multiplicatively under the SAME 3x clamp + hard max_notional ceiling as every
+        # other lever (compute_risk_first_quantity still caps qty at max_notional, so a
+        # GAP-2 boost can NEVER push notional past any ceiling). Default (no halt-resume
+        # entry / both flags OFF ⇒ key absent) => 1.0 (byte-identical).
+        _halt_size_mult = 1.0
+        try:
+            _hsm = _float_or_none(le.get("halt_entry_size_mult"))
+            if _hsm is not None and _hsm > 0:
+                _halt_size_mult = float(_hsm)
+        except Exception:
+            _halt_size_mult = 1.0
+        # LOCATE #3 DIP-VELOCITY CONVICTION lever: a steeper dip-family flush carries a
+        # bounded (>=1.0) size boost (_dip_velocity_size_mult, set upstream). It composes
+        # multiplicatively under the SAME 3x clamp + hard max_notional ceiling, so it can
+        # NEVER push notional past any ceiling. Default (non-dip / flag OFF ⇒ key absent) =>
+        # 1.0 (byte-identical).
+        _dip_velocity_mult = 1.0
+        try:
+            _dvm = _float_or_none(le.get("dip_velocity_size_mult"))
+            if _dvm is not None and _dvm > 0:
+                _dip_velocity_mult = float(_dvm)
+        except Exception:
+            _dip_velocity_mult = 1.0
+        # CATALYST-CONVICTION lever (Ross E2): a STRONG, credible catalyst (the deployed
+        # strong/weak/fake news grade — no new feed) carries a bounded (>=1.0) UPWARD size
+        # multiplier. It composes multiplicatively under the SAME min(..., base*3.0) clamp +
+        # the hard max_notional ceiling below, so it can NEVER push notional past any ceiling
+        # and is NEVER a veto. Default (flag OFF / no-or-weak-or-fake catalyst) => 1.0
+        # (byte-identical). Lane-agnostic (grade is per-symbol news); fail-neutral to 1.0.
+        _catalyst_conviction_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_catalyst_conviction_enabled", False)):
+            try:
+                from .risk_policy import catalyst_conviction_size_multiplier
+
+                _catalyst_conviction_mult, _cc_meta = catalyst_conviction_size_multiplier(
+                    sess.symbol
+                )
+                if _catalyst_conviction_mult > 1.0:
+                    le["catalyst_conviction_size"] = _cc_meta
+            except Exception:
+                _catalyst_conviction_mult = 1.0
+        # PRIME-WINDOW SIZE LEVER (time-of-day schedule, default OFF ⇒ 1.0 byte-identical): a
+        # BOUNDED-UPWARD (>=1.0, <= prime_window_size_mult_max) multiplier when ET is inside the
+        # documented prime window (default 04:00-10:30 ET, the premarket+open drive band). It
+        # composes multiplicatively into the SAME min(..., base*3.0) clamp + the hard max_notional
+        # ceiling below, so a prime-window boost can NEVER push notional past base*3.0 and is NEVER
+        # a veto (floor 1.0 = never a shrink). Flag OFF / outside window / any error ⇒ 1.0. The
+        # FADE-DRIVEN late-day cutoff (the suppression half) lives in auto_arm (PRE-arm), not here.
+        _prime_window_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_timeofday_schedule_enabled", False)):
+            try:
+                from .auto_arm import prime_window_size_multiplier
+
+                _prime_window_mult, _pw_meta = prime_window_size_multiplier()
+                if _prime_window_mult > 1.0:
+                    le["prime_window_size"] = _pw_meta
+            except Exception:
+                _prime_window_mult = 1.0
+        # LEVER 1 — EXTREME-VOL / MISSING-RVOL RISK-BOUNDED SIZE-DOWN (the win-win other half).
+        # viability.py now keeps a GENUINE explosive Ross-class mover (clears the existing
+        # below_explosive_floor + tradable + spread-OK) LIVE-eligible on extreme-vol or a
+        # merely-MISSING rvol datum instead of blanket-blocking it (UPC +476%, Ross +$35k,
+        # CHILI $0). The condition of that admission is that it is sized DOWN here so the
+        # WORST-CASE dollar loss is bounded the SAME as a normal trade despite the wider vol /
+        # the unconfirmed rvol. We read the persisted marker (via.explain_json) AND re-confirm
+        # the live extreme-vol regime as a belt; either signal arms the down-size. The
+        # multiplier is ONE documented fraction (default 0.5 = half-risk, the same conservative
+        # end the ask-heavy/overnight levers use). It composes multiplicatively under the SAME
+        # 3x clamp + hard max_notional ceiling below, so it can ONLY shrink the per-trade RISK
+        # BUDGET (never raise it, never a veto); the max-loss circuit + structural/vol-floored
+        # stop + daily-loss breaker are untouched. Flag OFF / not-risk-bounded => 1.0 (byte-
+        # identical). Replay applies the SAME fraction off the SAME persisted marker => parity.
+        _extreme_vol_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_live_eligible_allow_extreme_explosive", True)):
+            try:
+                _evx = via.explain_json if isinstance(via.explain_json, dict) else {}
+                _evb_marker = bool(_evx.get("extreme_vol_risk_bounded"))
+                _evb_live_regime = str(_regime.get("volatility_regime") or "").lower() == "extreme"
+                if _evb_marker or _evb_live_regime:
+                    _extreme_vol_mult = float(
+                        getattr(settings, "chili_momentum_extreme_vol_risk_bounded_fraction", 0.5)
+                        or 0.5
+                    )
+                    _extreme_vol_mult = max(0.0, min(1.0, _extreme_vol_mult))
+                    if _extreme_vol_mult < 1.0:
+                        le["extreme_vol_risk_bounded_size_down"] = {
+                            "mult": round(_extreme_vol_mult, 4),
+                            "marker": _evb_marker,
+                            "live_regime_extreme": _evb_live_regime,
+                        }
+            except Exception:
+                _extreme_vol_mult = 1.0
+        # P4(1) SQUEEZE-FUEL ENTRY SIZE-UP (default ON; OFF / un-armed ⇒ 1.0 byte-identical):
+        # a name in the TOP within-batch squeeze percentile (its OWN squeeze_fuel_rank_pct, stamped
+        # by the pipeline from Ortex SI%+CTB) whose tape AGREES (live OFI > 0) AND whose news AGREES
+        # (strong-catalyst member) scales the per-trade RISK BUDGET UP by a bounded, PERCENTILE-driven
+        # multiplier in [1.0, max_mult] — only the most squeeze-prone, tape-confirmed, news-backed
+        # names get the FULL up-size. Triple-gated from REAL data (no magic absolute SI/CTB cutoff:
+        # the rank floats with the batch). Composes multiplicatively under the SAME min(..., base*3.0)
+        # clamp + hard max_notional ceiling below, so it can NEVER push notional past any cap and is
+        # NEVER a veto; the max-loss circuit + structural stop + daily-loss breaker are untouched.
+        # Equity-only (crypto has no borrow data ⇒ no rank stamped ⇒ 1.0). Fail-neutral to 1.0.
+        _squeeze_size_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_squeeze_entry_sizeup_enabled", True)):
+            try:
+                from .ross_momentum import squeeze_entry_size_multiplier as _sq_size
+
+                _sq_extra = (ex_live.get("extra") or {}) if isinstance(ex_live, dict) else {}
+                _sq_symu = str(sess.symbol or "").upper()
+                _sq_sig = ((_sq_extra.get("ross_signals") or {}) if isinstance(_sq_extra.get("ross_signals"), dict) else {}).get(_sq_symu)
+                _sq_rank = _float_or_none(_sq_sig.get("squeeze_fuel_rank_pct")) if isinstance(_sq_sig, dict) else None
+                if _sq_rank is not None:
+                    # Live OFI (tape agreement) — FRESH from the in-process flow feed, the SAME
+                    # source the entry flow-veto reads (NOT the stale batch exec_json).
+                    _sq_ofi = None
+                    try:
+                        from .pipeline import _live_ofi_microprice as _sq_ofi_fn
+                        _sq_ofi, _ = _sq_ofi_fn(sess.symbol, db=db)
+                        _sq_ofi = None if _sq_ofi is None else float(_sq_ofi)
+                    except Exception:
+                        _sq_ofi = None
+                    # News agreement — strong-catalyst membership (persisted from meta into extra).
+                    _sq_strong = _sq_extra.get("strong_catalyst_symbols")
+                    _sq_news = bool(_sq_strong and _sq_symu in {str(x).upper() for x in _sq_strong})
+                    _squeeze_size_mult, _sq_meta = _sq_size(
+                        _sq_rank, ofi=_sq_ofi, news_agrees=_sq_news,
+                        top_pctl=float(getattr(settings, "chili_momentum_squeeze_entry_top_pctl", 0.80) or 0.80),
+                        max_mult=float(getattr(settings, "chili_momentum_squeeze_entry_max_mult", 1.50) or 1.50),
+                    )
+                    if _squeeze_size_mult > 1.0:
+                        le["squeeze_fuel_size_up"] = _sq_meta
+            except Exception:
+                _squeeze_size_mult = 1.0
+        # FRACTIONAL-KELLY TRIPLE-CONFLUENCE SIZE-UP (P5): size UP — and ONLY up — when
+        # squeeze-fuel AND OFI AND a STRONG news catalyst ALL agree at THIS entry instant. A
+        # HALF-KELLY bet off the blended conviction percentile (no magic win-rate). Composes
+        # under the SAME min(.., base*3.0) clamp + hard max_notional ceiling below (never past
+        # any cap), NEVER a veto. The #769 max-loss circuit (every tick downstream) still bounds
+        # the realized worst case on the resulting qty. Equity-only; flag default ON; any missing
+        # leg / OFF / error => 1.0 (byte-identical). Reads are cached/fail-open (no new vendor).
+        _kelly_conviction_mult = 1.0
+        if (
+            bool(getattr(settings, "chili_momentum_kelly_conviction_enabled", True))
+            and not str(sess.symbol or "").upper().endswith("-USD")  # equity-only signals
+        ):
+            try:
+                from .risk_policy import triple_confluence_kelly_multiplier
+                from .pipeline import _live_ofi_microprice as _kc_ofi_reader
+                _kc_ofi, _ = _kc_ofi_reader(sess.symbol, db=db)
+                _kc_sq = None
+                try:
+                    from .ross_momentum import squeeze_fuel_signal as _kc_sf
+                    from .short_mechanics import get_short_mechanics as _kc_mech
+                    _km = _kc_mech(sess.symbol) or {}
+                    if _km:
+                        _kc_sig = _kc_sf(
+                            _km.get("short_interest_pct"), _km.get("cost_to_borrow"),
+                            utilization=_km.get("utilization"),
+                            is_easy_to_borrow=_km.get("is_easy_to_borrow"),
+                        )
+                        _kc_sq = _kc_sig.squeeze_pct
+                except Exception:
+                    _kc_sq = None
+                _kc_rank = 0
+                try:
+                    from .catalyst import catalyst_grade_rank as _kc_grade
+                    _kc_rank = int(_kc_grade(sess.symbol))
+                except Exception:
+                    _kc_rank = 0
+                _kelly_conviction_mult, _kc_meta = triple_confluence_kelly_multiplier(
+                    squeeze_pct=_kc_sq, ofi=_kc_ofi, news_grade_rank=_kc_rank,
+                )
+                if _kelly_conviction_mult > 1.0:
+                    le["kelly_conviction_size"] = _kc_meta
+            except Exception:
+                _kelly_conviction_mult = 1.0
+        # ADAPTIVE FRONT-SIDE STRENGTH SIZE-TILT (the successor to the killed binary E1
+        # backside veto; project_adaptive_frontside_strength). A CONTINUOUS strength score
+        # in [0,1] (Kaufman-ER spine + the live OFI level/SLOPE + signed tape, weight-
+        # renormalized over PRESENT terms) maps to a SIZE-TILT multiplier in [size_floor,1.0]
+        # — a VWAP-reclaim-turning-up scores HIGH (full size, the E1-killed winner), a
+        # falling-knife scores LOW (down-sized, NOT vetoed). SIZE-DOWN ONLY (mult<=1.0 by
+        # construction; never sizes up). It composes multiplicatively under the SAME 3x clamp +
+        # hard max_notional ceiling below, so it can ONLY shrink the per-trade RISK BUDGET; the
+        # #769 max-loss circuit + structural/vol-floored stop + daily-loss breaker are untouched.
+        # Inputs are the SAME live OFI/tape reads the squeeze/kelly levers already perform on
+        # THIS entry path (one _live_flow_slope read = ofi_level+ofi_slope; one _live_trade_flow
+        # = signed tape) — NO new network/db fetch. The ER-spine closes / vwap-dist / day-range
+        # are derived from the ALREADY-FETCHED `_entry_df` (the 15m/5d frame this pre-entry tick
+        # pulled once at the top for the spread gate, reused below for the range target), run
+        # through the SAME canonical `_today_session_frame(...) -> front_side_state(...)` the
+        # entry-gate backside vetoes use — a PURE, side-effect-free read (no new network/db
+        # fetch, correct symbol, ET-today-anchored so the session VWAP/range are right). The ER
+        # spine takes the today-session closes; vwap_dist_sigma / day_range_pos come from that
+        # same FrontSideState. Any missing leg (no _entry_df, thin/degenerate frame, error) ⇒
+        # that term is simply ABSENT and the score's weight-renormalized mean uses whatever
+        # remains (fail-OPEN: no informative term ⇒ strength None ⇒ mult 1.0). The flow read
+        # returning None (thin/stale tape) is threaded as stale_tape ⇒ mult 1.0. Flag OFF ⇒ mult 1.0 (byte-identical). The
+        # `defer` flag is ADVISORY for v1 (logged only — no new re-poll loop, to avoid starving
+        # the fast premarket window). docs/DESIGN/MOMENTUM_LANE.md
+        _frontside_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_frontside_adaptive_enabled", True)):
+            try:
+                from .ross_momentum import (
+                    front_side_size_tilt as _fs_tilt,
+                    front_side_strength_score as _fs_strength,
+                )
+                from .pipeline import (
+                    _live_flow_slope as _fs_flow_reader,
+                    _live_trade_flow as _fs_tape_reader,
+                )
+
+                # Reuse the SAME live order-flow read the recency-grace / RIDE-LOCK levers use
+                # (no new fetch). None ⇒ thin/stale/crypto tape ⇒ stale_tape ⇒ fail-open mult 1.0.
+                _fs_flow = _fs_flow_reader(sess.symbol, db=db)
+                _fs_stale = not isinstance(_fs_flow, dict)
+                _fs_ofi_level = _float_or_none(_fs_flow.get("ofi_level")) if isinstance(_fs_flow, dict) else None
+                _fs_ofi_slope = _float_or_none(_fs_flow.get("ofi_slope")) if isinstance(_fs_flow, dict) else None
+                try:
+                    _fs_tape = _fs_tape_reader(sess.symbol, db=db)
+                    _fs_tape = None if _fs_tape is None else float(_fs_tape)
+                except Exception:
+                    _fs_tape = None
+                # ER-SPINE inputs from the ALREADY-FETCHED `_entry_df` (no new fetch): run the
+                # 15m/5d frame through the SAME canonical today-slice + front_side_state the entry
+                # gates use, so the session VWAP/range anchor on ET-today and the closes feed the
+                # Kaufman ER. Pure / fail-OPEN: missing _entry_df / thin frame / any error ⇒ all
+                # three stay None (those terms simply drop out of the weight-renormalized mean).
+                _fs_closes = None
+                _fs_vwap_dist = None
+                _fs_range_pos = None
+                try:
+                    if _entry_df is not None and not getattr(_entry_df, "empty", True):
+                        from .entry_gates import _today_session_frame as _fs_today_frame
+                        from .ross_momentum import front_side_state as _fs_state_fn
+                        _fs_sess_df = _fs_today_frame(_entry_df)
+                        _fs_state = _fs_state_fn(_fs_sess_df)
+                        _fs_vwap_dist = _float_or_none(getattr(_fs_state, "vwap_dist_sigma", None))
+                        _fs_range_pos = _float_or_none(getattr(_fs_state, "day_range_pos", None))
+                        try:
+                            _fs_closes = [
+                                float(c)
+                                for c in _fs_sess_df["Close"].astype(float).tolist()[-12:]
+                            ]
+                        except Exception:
+                            _fs_closes = None
+                except Exception:
+                    _fs_closes = _fs_vwap_dist = _fs_range_pos = None
+                _fs_score = _fs_strength(
+                    closes=_fs_closes,
+                    vwap_dist_sigma=_fs_vwap_dist,
+                    day_range_pos=_fs_range_pos,
+                    ofi_level=_fs_ofi_level,
+                    ofi_slope=_fs_ofi_slope,
+                    signed_tape=_fs_tape,
+                )
+                # REGIME-ADAPTIVE RAMP ANCHORS (kill the fixed 0.25/0.75 magic): record this
+                # freshly-computed strength into the bounded TTL'd cross-name distribution, then
+                # — once >= K fresh samples are warm — derive s_lo/s_hi/defer = p25/p75/p15 of
+                # the LIVE regime distribution (hot tape ⇒ ramp shifts up; cold ⇒ down). COLD /
+                # insufficient samples / degenerate dist ⇒ None ⇒ the documented base 0.25/0.75/
+                # 0.15 (byte-identical to today). size_floor STAYS the one documented safety-base.
+                if _fs_score is not None:
+                    _frontside_dist_note(float(_fs_score))
+                _fs_defer_base = float(getattr(settings, "chili_momentum_frontside_defer_pctile", 0.15) or 0.0)
+                _fs_s_lo, _fs_s_hi, _fs_defer_below = 0.25, 0.75, _fs_defer_base
+                _fs_warm = False
+                _fs_n_samples = 0
+                _fs_adapt = _frontside_adaptive_thresholds()
+                if _fs_adapt is not None:
+                    _fs_s_lo, _fs_s_hi, _fs_adapt_defer, _fs_n_samples = _fs_adapt
+                    # Honor the operator knob: defer disabled (pctile 0) stays disabled even
+                    # when warm; otherwise the regime p15 replaces the fixed 0.15.
+                    _fs_defer_below = (_fs_adapt_defer if _fs_defer_base > 0.0 else 0.0)
+                    _fs_warm = True
+                _frontside_mult, _fs_defer, _fs_detail = _fs_tilt(
+                    _fs_score,
+                    size_floor=float(getattr(settings, "chili_momentum_frontside_size_floor", 0.25) or 0.25),
+                    s_lo=_fs_s_lo,
+                    s_hi=_fs_s_hi,
+                    defer_below=_fs_defer_below,
+                    stale_tape=bool(_fs_stale),
+                    enabled=True,
+                )
+                if _frontside_mult < 1.0 or _fs_defer:
+                    le["frontside_size_tilt"] = {
+                        "strength": (None if _fs_score is None else round(float(_fs_score), 4)),
+                        "mult": round(float(_frontside_mult), 4),
+                        "defer": bool(_fs_defer),
+                        "ofi_level": _fs_ofi_level,
+                        "ofi_slope": _fs_ofi_slope,
+                        "signed_tape": _fs_tape,
+                        "vwap_dist_sigma": _fs_vwap_dist,
+                        "day_range_pos": _fs_range_pos,
+                        "er_bars": (len(_fs_closes) if isinstance(_fs_closes, list) else 0),
+                        "stale_tape": bool(_fs_stale),
+                        # REGIME-ADAPTIVE ramp anchors actually in force this tick.
+                        "adaptive_warm": bool(_fs_warm),
+                        "adaptive_n": int(_fs_n_samples),
+                        "s_lo": round(float(_fs_s_lo), 4),
+                        "s_hi": round(float(_fs_s_hi), 4),
+                        "defer_below": round(float(_fs_defer_below), 4),
+                        **(_fs_detail if isinstance(_fs_detail, dict) else {}),
+                    }
+                _log.info(
+                    "[momentum_neural] frontside size-tilt sym=%s strength=%s mult=%s defer=%s "
+                    "adaptive=%s n=%s s_lo=%s s_hi=%s defer_below=%s base_max_loss=%s detail=%s",
+                    sess.symbol,
+                    (None if _fs_score is None else round(float(_fs_score), 4)),
+                    round(float(_frontside_mult), 4),
+                    bool(_fs_defer),
+                    bool(_fs_warm),
+                    int(_fs_n_samples),
+                    round(float(_fs_s_lo), 4),
+                    round(float(_fs_s_hi), 4),
+                    round(float(_fs_defer_below), 4),
+                    round(float(_base_max_loss), 4),
+                    _fs_detail,
+                )
+            except Exception:
+                _frontside_mult = 1.0  # fail-OPEN: a tilt error never blocks/shrinks the fill
+        # LOW-7: sanitize EACH per-factor multiplier (fail-NEUTRAL to 1.0 on NaN/inf/negative)
+        # as it enters the product so a single poisoned helper can never NaN-out or sign-flip the
+        # whole budget and silently kill the fill. The 3x clamp + max_notional ceiling below are
+        # unchanged; a valid product is byte-identical.
         _eff_max_loss = min(
-            float(_base_max_loss) * float(_streak_mult) * float(_cushion_mult) * float(_l2_mult) * float(_sched_mult) * float(_liq_mult) * float(_meta_mult) * float(_prior_day_mult) * float(_overnight_mult) * float(_fatigue_mult) * float(_sym_fatigue_mult) * float(_hot_cold_mult),
+            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
+        # THIN/TOXIC-SPREAD HARD PER-TRADE LOSS CAP (default ON; OFF / not-thin => no-op,
+        # byte-identical). When the name was admitted via the viability thin-spread squeeze
+        # carve-out (it carries the extreme_vol_risk_bounded marker AND its live spread is
+        # wide), clamp the per-trade dollar risk to a HARD fraction of the normal base so a
+        # wrong vertical chase / wide-spread fill is small + recoverable. This is the worst-
+        # case backstop on TOP of the extreme_vol size-down already in _eff_max_loss; it can
+        # ONLY shrink (min()), never raise, and never vetoes. The #769 max-loss circuit +
+        # structural/vol-floored stop + daily-loss breaker are untouched.
+        if bool(getattr(settings, "chili_momentum_thin_spread_squeeze_lane_enabled", True)):
+            try:
+                _ts_marker = bool(_evx.get("extreme_vol_risk_bounded")) if isinstance(_evx, dict) else False
+                _ts_wide = (
+                    spread_bps_live is not None
+                    and float(spread_bps_live) > float(
+                        getattr(settings, "chili_momentum_live_eligible_max_spread_bps", 300.0) or 300.0
+                    )
+                )
+                if _ts_marker and _ts_wide:
+                    _ts_frac = float(
+                        getattr(settings, "chili_momentum_thin_spread_hard_loss_fraction", 0.5) or 0.5
+                    )
+                    _ts_frac = max(0.05, min(1.0, _ts_frac))
+                    _ts_cap = float(_base_max_loss) * _ts_frac
+                    if _ts_cap < float(_eff_max_loss):
+                        _eff_max_loss = _ts_cap
+                        le["thin_spread_hard_loss_cap"] = {
+                            "cap_usd": round(_ts_cap, 2),
+                            "fraction": _ts_frac,
+                            "spread_bps": round(float(spread_bps_live), 2),
+                        }
+            except Exception:
+                pass
+        # ADAPTIVE SPREAD-COST VETO/DERATE (2026-06-27, DEFAULT OFF ⇒ byte-identical):
+        # judge the live entry spread RELATIVE to (a) the name's OWN recent typical spread
+        # distribution (rolling p50/p75/p90 over momentum_nbbo_spread_tape) and (b) the
+        # trade's expected R (round-trip spread cost as a fraction of the structural stop
+        # distance). NEVER a flat bps bar — Ross low-float movers inherently trade wide
+        # spreads (project_momentum_zero_fills_root_cause), so a flat veto re-creates the
+        # 0-fills over-restriction. This is DERATE-ONLY (2026-06-27): it NEVER blocks an entry,
+        # only sizes it DOWN (composing under the SAME 3x clamp + hard max_notional ceiling, so
+        # it can NEVER push notional past any cap) — a momentum entry fires at the widest-spread
+        # instant, so blocking on spread IS the 0-fills trap. At the extreme (EXTREME outlier vs
+        # the name's OWN p90 AND cost eats > the documented max fraction of R) it FLOORS the size;
+        # a wide-but-TYPICAL low-float spread with a good R PASSES at mult=1.0. Flag OFF / fail-
+        # open => 1.0. (adaptive_spread_cost_veto_derate always returns allow=True; the `if not
+        # _scv_allow` branch below is kept as a defensive guard but is currently unreachable.)
+        if bool(getattr(settings, "chili_momentum_adaptive_spread_cost_veto_enabled", False)):
+            try:
+                from .spread_cost_veto import adaptive_spread_cost_veto_derate
+
+                # stop_distance mirrors compute_risk_first_quantity's basis exactly.
+                _scv_stop_dist = float(guarded_ask) * max(
+                    0.003, float(_eff_atr_pct or 0.0) * float(_stop_atr_mult or 0.60)
+                )
+                _scv_allow, _scv_mult, _scv_reason, _scv_meta = adaptive_spread_cost_veto_derate(
+                    symbol=sess.symbol,
+                    entry_price=float(guarded_ask),
+                    current_spread_bps=spread_bps_live,
+                    stop_distance=_scv_stop_dist,
+                    db=db,
+                    flag_enabled=True,
+                    # RECLAIM CARVE-OUT: thread the FIRED entry-trigger reason so a
+                    # dip/VWAP-reclaim (which fires at the widest-spread moment) is
+                    # DERATE-ONLY (never hard-vetoed) + judged vs the permissive R base.
+                    entry_trigger_reason=le.get("entry_trigger_reason"),
+                )
+                if not _scv_allow:
+                    le["spread_cost_veto"] = {"reason": _scv_reason, **(_scv_meta or {})}
+                    _emit(db, sess, "live_entry_spread_cost_veto",
+                          {"reason": _scv_reason, "meta": _scv_meta})
+                    db.flush()
+                    return {"ok": True, "session_id": sess.id, "state": sess.state,
+                            "skipped": "spread_cost_veto"}
+                if 0.0 < _scv_mult < 1.0:
+                    _eff_max_loss = min(
+                        float(_eff_max_loss) * float(_scv_mult),
+                        float(_base_max_loss) * 3.0,  # same hard combined-multiplier ceiling
+                    )
+                    le["spread_cost_derate"] = {"reason": _scv_reason, "mult": round(_scv_mult, 4),
+                                                **(_scv_meta or {})}
+            except Exception:
+                pass  # fail-open: a spread-cost gate failure must never block a fill
         # Freeze the risk-first sizing inputs so a marketable re-peg (G1) can RE-SIZE
         # risk-first at the chased price instead of over-sizing off notional. [G1 review #2]
         le["entry_resize_basis"] = {
@@ -6129,6 +8669,53 @@ def tick_live_session(
             _safe_transition(db, sess, STATE_LIVE_ERROR)
             db.flush()
             return {"ok": False, "error": "size_zero"}
+        # ── ANTICIPATION STARTER (item 1, DEFAULT OFF ⇒ byte-identical) ──────────────
+        # Probe-then-add: submit a SMALL probe leg on the pivot break now, and ADD the
+        # remainder only after the probe CONFIRMS (a real fill = the break is real) —
+        # reusing the EXISTING pyramid in-flight add machinery (PHASE-1 broker-truth
+        # merge + dedupe-on-broker_order_id + orphan/late-fill tracking). EQUITY-ONLY
+        # (the crypto maker-only path is a distinct order shape; equity-first like the
+        # pyramid add). When the probe split would leave either leg below base_min_size
+        # we FALL BACK to the full single entry (byte-identical). Flag OFF ⇒ none of this
+        # runs, qty unchanged. The remainder is realised by the pyramid path; it does NOT
+        # bypass any veto (it only fires on a confirmed fill + passes the same in-flight
+        # dedupe). docs/DESIGN/MOMENTUM_LANE.md
+        le.pop("anticipation_remainder_qty", None)
+        le.pop("anticipation_armed", None)
+        if (
+            bool(getattr(settings, "chili_momentum_anticipation_starter_enabled", False))
+            and not str(sess.symbol or "").upper().endswith("-USD")
+        ):
+            try:
+                _ant_frac = float(
+                    getattr(settings, "chili_momentum_anticipation_probe_fraction", 0.25) or 0.25
+                )
+                _ant_frac = max(0.05, min(0.95, _ant_frac))
+                _ant_full = float(qty)
+                _ant_probe = _round_base_size(_ant_full * _ant_frac, inc, mn)
+                _ant_rem = _round_base_size(_ant_full - _ant_probe, inc, mn)
+                _ant_min = float(mn) if mn and mn > 0 else 1.0
+                # Only split when BOTH legs are independently viable (>= base_min_size) and the
+                # remainder is positive; else keep the single full entry (byte-identical).
+                if (
+                    _ant_probe is not None and _ant_rem is not None
+                    and _ant_probe >= _ant_min and _ant_rem >= _ant_min
+                    and (_ant_probe + _ant_rem) <= _ant_full + 1e-9
+                ):
+                    qty = _ant_probe
+                    le["anticipation_armed"] = True
+                    le["anticipation_full_qty"] = _ant_full
+                    le["anticipation_probe_qty"] = _ant_probe
+                    le["anticipation_remainder_qty"] = _ant_rem
+                    le["anticipation_probe_fraction"] = _ant_frac
+                    _emit(db, sess, "live_anticipation_probe_sized", {
+                        "full_qty": _ant_full, "probe_qty": _ant_probe,
+                        "remainder_qty": _ant_rem, "probe_fraction": _ant_frac,
+                    })
+            except Exception:
+                # Fail-CLOSED to the full single entry (never a malformed split).
+                le.pop("anticipation_remainder_qty", None)
+                le.pop("anticipation_armed", None)
         estimated_guarded_notional = qty * guarded_ask
         if estimated_guarded_notional > max_notional + 1e-9:
             _emit(
@@ -6241,9 +8828,18 @@ def tick_live_session(
         # _commit_le after the place. Format/length byte-identical (robin_stocks ignores ref_id).
         _entry_place_n = int(le.get("entry_place_count", 0) or 0) + 1
         le["entry_place_count"] = _entry_place_n
-        _entry_id_seed = f"{sess.id}|{sess.correlation_id or 'x'}|entry|{_entry_place_n}".encode("utf-8")
-        _entry_suffix = hashlib.sha1(_entry_id_seed).hexdigest()[:10]
-        cid = f"chili_ml_e_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{_entry_suffix}"[:120]
+        # Fold the PERSISTENT recycle counters (trade_cycles/stopout_cycles, kept across a
+        # recycle) into the seed so a #1-lever re-entry after a stop-out cannot collide with
+        # the first entry's cid (CTNT sid 9763 409 'Reference ID must be unique', 2026-06-29):
+        # entry_place_count is RESET on recycle, so place_n=1 alone repeats. Same-attempt
+        # retry (same cycle + same place_n) still reuses the SAME cid (idempotent).
+        cid = _entry_client_order_id(
+            session_id=sess.id,
+            correlation_id=sess.correlation_id,
+            trade_cycles=int(le.get("trade_cycles") or 0),
+            stopout_cycles=int(le.get("stopout_cycles") or 0),
+            place_n=_entry_place_n,
+        )
         # Pre-market / after-hours entries must be flagged so the venue routes them
         # (Alpaca: limit + DAY tif + extended_hours; RH: extended_hours_override). In
         # the regular session this is False and the order stays a plain marketable GTC.
@@ -6322,11 +8918,14 @@ def tick_live_session(
 
             from .risk_evaluator import (
                 aggregate_open_crypto_risk_usd,
+                aggregate_open_risk_usd,
                 count_inflight_entry_orders,
                 count_open_positions,
+                sum_inflight_entry_risk_usd,
             )
             from .risk_policy import (
                 _account_equity_usd,
+                admit_by_aggregate_risk,
                 effective_position_cap,
                 equity_relative_loss_cap,
             )
@@ -6337,6 +8936,12 @@ def tick_live_session(
             _lane_key = (_MOMENTUM_LANE_LOCK_NS << 32) | (int(sess.user_id) & 0xFFFFFFFF)
             db.execute(_sql_text("SELECT pg_advisory_xact_lock(:k)"), {"k": _lane_key})
 
+            # ── COUNT BACKSTOP (effective_position_cap) ──────────────────────
+            # When the atomic risk-budget governor (below) is ON, this count is a
+            # MISCONFIG BACKSTOP — an outer ceiling, not the primary governor. The
+            # primary admission is the shape-aware dollar budget. When the atomic
+            # flag is OFF, this count is the SOLE governor (byte-identical to the
+            # legacy decouple_watching path). docs/DESIGN/MOMENTUM_ENGINE.md §2.
             _cap = effective_position_cap(crypto=_is_crypto)
             _pos_ct = count_open_positions(db, user_id=sess.user_id, mode="live") + (
                 count_inflight_entry_orders(db, user_id=sess.user_id, exclude_session_id=sess.id)
@@ -6349,6 +8954,104 @@ def tick_live_session(
                     "ok": True, "session_id": sess.id, "state": sess.state,
                     "skipped": "position_cap_at_fill", "pos_ct": _pos_ct, "cap": _cap,
                 }
+            # ── ATOMIC SHAPE-AWARE RISK-BUDGET ADMISSION (CHUNK 2 PRIMARY) ────
+            # The load-bearing engine-core change: admit iff the EQUITY lane's open
+            # dollars-at-risk PLUS this candidate's ACTUAL (entry-stop)*fill_qty fit
+            # the equity-relative aggregate budget (REUSED 0.03 fraction). This is
+            # the CONTINUOUS dollars-at-risk governor that replaces the slot COUNT —
+            # a flat/stuck broker-zero session holds ZERO aggregate_open_risk_usd, so
+            # it can NEVER block a real entry (starvation dissolved by construction).
+            # Computed INSIDE the advisory lock so a fill-burst cannot pass two
+            # candidates against a stale aggregate (the second sees the first's
+            # committed in-flight risk). Shape-aware: a tight-stop scalp consumes far
+            # less budget than a wide-stop trade, so MORE tight scalps admit for the
+            # same dollars (the count treated them equally). Crypto keeps its own
+            # dollar backstop below (aggregate_open_risk_usd is equity-only by
+            # design — the 2026-06-11 correlation guard). FAIL-CLOSED on unknown
+            # equity / un-computable candidate risk (never size against the unknown).
+            # Flag OFF ⇒ this block is a no-op; the count above is the sole governor.
+            if (
+                bool(getattr(settings, "chili_momentum_atomic_risk_budget_enabled", True))
+                and not _is_crypto
+            ):
+                # FIX A (basis-INDEPENDENT budget): the 0.03 aggregate fraction was
+                # calibrated against STABLE/UNLEVERED equity. Reading the default
+                # buying-power basis (use_bp + apply_margin_multiple) would DOUBLE the
+                # dollar ceiling on a 2x-margin account — the same "2x-margin -> 4x-risk"
+                # basis bug the operator fixed for the slot COUNT (commit 0276285). Read
+                # the stabilized total equity (prefer_equity routes through the last-good
+                # stabilizer; apply_margin_multiple=False forces the unlevered basis), so
+                # the budget ceiling is independent of margin. Still FAIL-CLOSED: a hard
+                # outage returns None -> admit_by_aggregate_risk treats it as
+                # equity_unavailable -> reject (never size against the unknown).
+                _eq_eq = _account_equity_usd(
+                    ef, apply_margin_multiple=False, prefer_equity=True
+                )
+                # Shape-aware candidate risk = per-share structural stop distance
+                # (frozen by compute_risk_first_quantity at :7020 into _rf_meta) ×
+                # the FULL intended qty. FIX B (anticipation under-charge): when the
+                # anticipation starter splits the entry into a small probe leg now +
+                # a pyramid remainder later (:7073), `qty` is only the PROBE — charging
+                # the budget for the probe alone would admit ~4x too many anticipation
+                # positions (the remainder is added under the SAME risk thesis). Budget
+                # the FULL intended risk as ONE unit via anticipation_full_qty; fall back
+                # to qty when the split did not arm (le has no anticipation_full_qty).
+                # Mirrors max_loss_circuit_decision's structural-risk basis exactly.
+                try:
+                    _cand_stop_dist = float((_rf_meta or {}).get("stop_distance") or 0.0)
+                except (TypeError, ValueError):
+                    _cand_stop_dist = 0.0
+                try:
+                    _cand_full_qty = float(le.get("anticipation_full_qty") or qty)
+                except (TypeError, ValueError):
+                    _cand_full_qty = float(qty)
+                _cand_risk_usd = _cand_stop_dist * _cand_full_qty
+                # In-flight equity entries (submitted, not yet held) carry $ at-risk
+                # the held-only aggregate can't see. Charge each its ACTUAL per-order
+                # risk so a fill-burst can't slip dollars past the ceiling — the COUNT
+                # above bounds the count atomically in the same lock; this bounds the
+                # DOLLARS. Over-estimating is the safe side.
+                _open_eq_risk, _ = aggregate_open_risk_usd(db, user_id=sess.user_id)
+                # Per-trade loss-fraction FALLBACK. equity_relative_loss_cap(0.0, ...)
+                # short-circuits to 0.0 (a non-positive fixed fallback is preserved by
+                # _equity_relative_cap), so pass the SAME positive per-trade dollar
+                # fallback the sizing path uses (chili_momentum_risk_max_loss_per_trade_usd)
+                # — it resolves to equity x loss_fraction when equity is available and to
+                # the fixed floor on an equity-fetch outage. Charging 0.0 would let an
+                # in-flight fill-burst slip dollars past the ceiling.
+                _per_trade_loss_fallback = float(
+                    getattr(settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0) or 50.0
+                )
+                _per_trade_inflight_fallback = float(
+                    equity_relative_loss_cap(_per_trade_loss_fallback, ef) or 0.0
+                )
+                # FIX C (in-flight proxy shape/multiplier-awareness): a flat
+                # count * one-loss-fraction proxy under-charges a burst of HIGH-multiplier
+                # entries (_eff_max_loss can be up to 3x the base via :6957). Sum the REAL
+                # per-order risk each in-flight sibling persisted at submit time
+                # (le['entry_inflight_risk_usd'], set below), falling back to the positive
+                # flat per-trade estimate only when a sibling has none (pre-submit race /
+                # older image). Excludes this submitter's own row.
+                _inflight_eq_risk = sum_inflight_entry_risk_usd(
+                    db,
+                    user_id=sess.user_id,
+                    per_trade_fallback_usd=_per_trade_inflight_fallback,
+                    crypto_only=False,
+                    exclude_session_id=sess.id,
+                )
+                _admit, _admit_meta = admit_by_aggregate_risk(
+                    open_risk_usd=_open_eq_risk + _inflight_eq_risk,
+                    candidate_risk_usd=_cand_risk_usd,
+                    equity_usd=_eq_eq,
+                )
+                if not _admit:
+                    _emit(db, sess, "live_entry_blocked_atomic_risk_budget", _admit_meta)
+                    _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                    db.flush()
+                    return {
+                        "ok": True, "session_id": sess.id, "state": sess.state,
+                        "skipped": "atomic_risk_budget", "budget": _admit_meta,
+                    }
             # ADAPTIVE DAILY TRADE-COUNT BUDGET (SCAL101): cap the NUMBER of fresh entries
             # per ET session — a discipline/overtrading guard distinct from the slot COUNT
             # above. Ceiling floats with regime heat (today's banked cushion) + recent
@@ -6364,6 +9067,14 @@ def tick_live_session(
             )
             if not _tcb_ok:
                 _emit(db, sess, "live_entry_blocked_daily_trade_count_budget", _tcb_meta)
+                # GAP 1: hitting the daily trade-count budget is a broken over-trading
+                # discipline rule — arm the NEXT-day lockout (no-op unless the flag is on).
+                # Best-effort; never affects this tick's block result.
+                try:
+                    from ..governance import set_next_day_trading_lockout
+                    set_next_day_trading_lockout("daily_trade_count_budget")
+                except Exception:
+                    pass
                 _safe_transition(db, sess, STATE_WATCHING_LIVE)
                 db.flush()
                 return {
@@ -6403,7 +9114,17 @@ def tick_live_session(
                         "skipped": "equity_unavailable",
                     }
                 _open_cryp_risk, _ = aggregate_open_crypto_risk_usd(db, user_id=sess.user_id)
-                _planned_usd = float(equity_relative_loss_cap(0.0, ef) or 0.0)
+                # Per-trade loss-fraction proxy. equity_relative_loss_cap(0.0, ...)
+                # short-circuits to 0.0 (a non-positive fixed fallback is preserved),
+                # which would NEVER charge the candidate OR in-flight crypto dollars —
+                # the dollar cap would be dead. Pass the same positive per-trade dollar
+                # fallback (chili_momentum_risk_max_loss_per_trade_usd) so _planned_usd
+                # resolves to equity x loss_fraction (fixed floor on equity outage; we
+                # already fail-closed above when equity is unknown).
+                _per_trade_loss_fallback = float(
+                    getattr(settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0) or 50.0
+                )
+                _planned_usd = float(equity_relative_loss_cap(_per_trade_loss_fallback, ef) or 0.0)
                 # In-flight crypto entries (submitted, not yet filled) carry $ at-risk the
                 # held-only aggregate can't see. Charge each a conservative per-trade proxy
                 # (every crypto entry sizes to ~one loss-fraction) so a fill-burst can't
@@ -6430,6 +9151,94 @@ def tick_live_session(
                     return {
                         "ok": True, "session_id": sess.id, "state": sess.state,
                         "skipped": "crypto_dollar_cap",
+                    }
+            # ── FILL-BOUNDARY FINANCIAL-BREAKER RE-CHECK (safety completion) ──
+            # The three FINANCIAL breakers (per-broker daily-loss, portfolio drawdown,
+            # profit-giveback halt) are checked ONLY in auto_arm's arm-pass guards, not
+            # at THIS fill boundary. default-ON decouple_watching lets a watcher armed
+            # while the day was GREEN persist across many ticks, trigger, and submit an
+            # entry AFTER the day breaches — filling into a breached day. Re-check all
+            # three here, INSIDE the advisory lock (atomic with the risk-budget admit
+            # above), so a breach + a fill cannot race. On ANY breach: BLOCK the entry
+            # (do NOT submit), stay WATCHING (mirrors the count/risk-budget block — NOT
+            # terminal; it retries next tick once the breaker clears). Reuses the EXACT
+            # governance helpers auto_arm uses (broker_daily_loss_breached :3233 /
+            # check_portfolio_drawdown_breaker :3211 / evaluate_profit_giveback_halt
+            # :3268) — NO reimplementation. Per-broker daily-loss uses THIS session's
+            # execution_family (ef). Equity + crypto both honored. The kill-switch is
+            # already re-checked upstream (:4274/:4523); this ADDS the three financial
+            # breakers beside it. Flag OFF ⇒ this block is a no-op (byte-identical). The
+            # helpers fail-CLOSED on their own (return not-breached on internal error),
+            # mirroring auto_arm's fail-open early-out semantics; a breaker that DOES
+            # breach blocks. [[project_per_broker_daily_loss]] [[project_profitability_levers]]
+            if bool(
+                getattr(
+                    settings,
+                    "chili_momentum_fill_boundary_breaker_recheck_enabled",
+                    True,
+                )
+            ):
+                _breaker_block: Optional[dict] = None
+                # (1) Per-broker daily-loss breaker (auto_arm.py:3230-3233 call shape).
+                try:
+                    from ..governance import broker_daily_loss_breached as _bdlb
+
+                    _dl_breached, _dl_info = _bdlb(db, ef, user_id=int(sess.user_id))
+                    if _dl_breached:
+                        _breaker_block = {
+                            "breaker": "daily_loss_cap_broker",
+                            "family": _dl_info.get("family"),
+                            "daily_pnl_usd": round(
+                                float(_dl_info.get("realized", 0.0) or 0.0), 2
+                            ),
+                            "max_daily_loss_usd": round(
+                                float(_dl_info.get("cap", 0.0) or 0.0), 2
+                            ),
+                        }
+                except Exception:
+                    pass
+                # (2) Portfolio drawdown breaker (auto_arm.py:3209-3211 call shape).
+                if _breaker_block is None:
+                    try:
+                        from ..portfolio_risk import (
+                            check_portfolio_drawdown_breaker as _cpdb,
+                        )
+
+                        _dd_tripped, _dd_reason = _cpdb(db, int(sess.user_id))
+                        if _dd_tripped:
+                            _breaker_block = {
+                                "breaker": "drawdown_breaker",
+                                "dd_reason": _dd_reason,
+                            }
+                    except Exception:
+                        pass
+                # (3) Profit-giveback session halt (auto_arm.py:3266-3270 call shape).
+                if _breaker_block is None:
+                    try:
+                        from .risk_evaluator import (
+                            evaluate_profit_giveback_halt as _epgh,
+                        )
+
+                        _gb = _epgh(
+                            db, user_id=int(sess.user_id), execution_family=ef
+                        )
+                        if _gb.get("halted"):
+                            _breaker_block = {
+                                "breaker": "profit_giveback",
+                                "daily_pnl_usd": _gb.get("daily_pnl_usd"),
+                                "peak_pnl_usd": _gb.get("peak_pnl_usd"),
+                                "giveback_fraction": _gb.get("giveback_fraction"),
+                            }
+                    except Exception:
+                        pass
+                if _breaker_block is not None:
+                    _emit(db, sess, "live_entry_blocked_by_breaker", _breaker_block)
+                    _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                    db.flush()
+                    return {
+                        "ok": True, "session_id": sess.id, "state": sess.state,
+                        "skipped": "fill_boundary_breaker",
+                        "breaker": _breaker_block.get("breaker"),
                     }
         # ── end atomic position cap; the lock releases when this tick's txn commits ─
         # ── ENTRY-TIME FLOW VETO: never BUY this exact tick into max selling. Keys on
@@ -6602,11 +9411,58 @@ def tick_live_session(
                 "ok": True, "session_id": sess.id, "state": sess.state,
                 "skipped": "l2_confirm_defer", "l2_confirm": _l2c_dbg,
             }
-        res = adapter.place_limit_order_gtc(**_entry_kwargs)
+        # CHUNK 3-C — RAIL-GOVERNED PLACE: the token bucket shared with every other lane
+        # rail call (places + get_order polls) bounds the rate so multi-admission cannot
+        # flood / 429 the broker (the flooding risk Chunk 2 introduced by deleting the
+        # slot count). Governor OFF ⇒ _governed_place is an instant pass-through and this
+        # is byte-identical to `adapter.place_limit_order_gtc(**_entry_kwargs)`. A
+        # governor DEFER returns ok=False/error=rail_governor_deferred -> the existing
+        # not-ok branch below re-watches / retries next tick (never a silent drop).
+        res = _governed_place(
+            adapter, adapter.place_limit_order_gtc, sess=sess, **_entry_kwargs
+        )
+        # GOVERNOR DEFER (not a broker reject): the rail bucket was empty, so NO order was
+        # submitted. Do NOT mark entry_submitted, do NOT write an entry-reject cooldown
+        # (the name is fine — the rail was busy), do NOT transition to LIVE_ERROR. Stay
+        # WATCHING so the next tick re-attempts once the bucket refills — the entry is
+        # deferred, never dropped. This branch only runs when the governor is ON and the
+        # rate is currently saturated; OFF ⇒ res never carries `deferred`.
+        if res.get("deferred"):
+            _emit(db, sess, "live_entry_governor_deferred", {
+                "client_order_id": res.get("client_order_id"),
+                "limit_price": entry_limit_str,
+            })
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            db.flush()
+            return {
+                "ok": True, "session_id": sess.id, "state": sess.state,
+                "skipped": "rail_governor_deferred",
+            }
         le["entry_submitted"] = True
         le["entry_submit_utc"] = _utcnow().isoformat()
         le["entry_order_type"] = "limit"
         le["entry_limit_price"] = entry_limit_str
+        # FIX C (in-flight proxy shape/multiplier-awareness): persist THIS order's REAL
+        # shape-aware $-at-risk so a sibling fill-burst charges the actual per-order risk
+        # (multiplier-aware) instead of a flat per-trade fallback. Mirrors the held
+        # aggregate basis (entry-stop)*qty and the admission's FULL-intended-risk basis
+        # (anticipation_full_qty so the probe+remainder count as ONE unit). Best-effort
+        # side channel; sum_inflight_entry_risk_usd falls back to the flat estimate if
+        # absent, so a failure here never under-counts to $0. Gated on the SAME flags as
+        # the reader so a flag-off persisted snapshot is byte-identical (nothing writes
+        # or reads this key when the budget gate is off).
+        if (
+            getattr(settings, "chili_momentum_decouple_watching_enabled", False)
+            and bool(getattr(settings, "chili_momentum_atomic_risk_budget_enabled", True))
+        ):
+            try:
+                _il_stop_dist = float((_rf_meta or {}).get("stop_distance") or 0.0)
+                _il_full_qty = float(le.get("anticipation_full_qty") or qty)
+                _il_risk = _il_stop_dist * _il_full_qty
+                if _il_risk > 0:
+                    le["entry_inflight_risk_usd"] = _il_risk
+            except (TypeError, ValueError):
+                pass
         # FILL_OUTCOME_LOG (mig308): capture the REAL decision-time BBO spread at the
         # submit pulse so the fill row (and the replay) sees the spread the gate
         # actually faced, not a later NBBO snapshot. Side channel only — no behavior.
@@ -6619,12 +9475,45 @@ def tick_live_session(
             pass
         # stash the name's expected-move so the chase ceiling can vol-widen at cancel time
         le["entry_expected_move_bps"] = (None if _expected_move_bps is None else float(_expected_move_bps))
+        # Stamp the thrust-confluence inputs for the vertical chase ceiling (read by
+        # _vertical_thrust_confluence on a later FIX-B escalation tick). Best-effort,
+        # fail-soft: absent ⇒ the confluence falls back to the halt+tape floor (0.5).
+        # Source = the name's OWN persisted within-batch squeeze percentile + the raw
+        # RVOL pillar from the SAME scanner row the arm-queue ranker reads (no new fetch).
+        try:
+            le["entry_squeeze_pct"] = _session_squeeze_rank_pct(sess, sess.symbol)
+        except Exception:
+            le.setdefault("entry_squeeze_pct", None)
+        try:
+            from .ross_momentum import _extract_pillars as _vex_pillars
+            _vex = sess.execution_readiness_json if isinstance(sess.execution_readiness_json, dict) else {}
+            _vex_extra = (_vex.get("extra") or {}) if isinstance(_vex, dict) else {}
+            _vex_sigmap = _vex_extra.get("ross_signals") if isinstance(_vex_extra.get("ross_signals"), dict) else {}
+            _vex_row = _vex_sigmap.get(str(sess.symbol or "").upper()) if isinstance(_vex_sigmap, dict) else None
+            if isinstance(_vex_row, dict) and _vex_row:
+                _vex_rvol, _, _, _ = _vex_pillars(_vex_row)
+                le["entry_rvol"] = (float(_vex_rvol) if _vex_rvol is not None else None)
+            else:
+                le.setdefault("entry_rvol", None)
+        except Exception:
+            le.setdefault("entry_rvol", None)
         le["entry_client_order_id"] = res.get("client_order_id") or cid
         le["entry_order_id"] = res.get("order_id")
         # History: the ack-timeout may wipe the ACTIVE pointer later, but this id is
         # never forgotten — the late-fill sweep + pre-submit guard track it to a
         # terminal resolution (adopted | void). No fill can become untracked again.
         _record_entry_order_placed(le, res.get("order_id"))
+        # ORDER CHUNKING (item 2): when the chunking wrapper split this entry into N child
+        # blocks, fold EVERY child broker_order_id into the SAME entry-order history so the
+        # existing late-fill sweep + pre-submit guard track each leg to a terminal resolution
+        # (adopted | void) — no chunk leg can become an untracked stranded naked long. Absent
+        # / single-order ⇒ chunk_order_ids is empty ⇒ this is a no-op (byte-identical).
+        # Invariants proven in tests/test_momentum_order_path_dedupe.py (recorded-before-ok,
+        # distinct cids, fail-closed-to-single, sweep adopts every leg, no double-count).
+        for _chunk_oid in (res.get("chunk_order_ids") or []):
+            _record_entry_order_placed(le, _chunk_oid)
+        if res.get("chunk_order_ids"):
+            le["entry_chunk_order_ids"] = [str(o) for o in res.get("chunk_order_ids")]
         le["entry_place_result"] = {"ok": res.get("ok"), "error": res.get("error")}
         _commit_le(sess, le)
         _emit(db, sess, "live_entry_submitted", {
@@ -6649,6 +9538,24 @@ def tick_live_session(
                 _write_entry_reject_cooldown(
                     str(sess.symbol or "").upper(), reason=str(res.get("error") or "")
                 )
+            except Exception:
+                pass
+            # AGENTIC-TRADABILITY PRE-FILTER (learn-from-401): if THIS entry-place returned a
+            # per-instrument 401 / not-available-for-agentic-trading on the agentic MCP rail
+            # (CTNT 2026-06-29), record the symbol non-agentic-tradeable so auto-arm SKIPS it
+            # at selection (it will never fill on this rail until RH re-enables it — stop
+            # burning the single slot looping arm->break->401). Scoped to the agentic family;
+            # the matcher excludes whole-rail token-revoked 401s (those are not per-symbol).
+            # Best-effort + flag-gated inside the recorder (flag-off => no-op, byte-identical).
+            try:
+                if str(sess.execution_family or "") == "robinhood_agentic_mcp":
+                    from .auto_arm import (
+                        _record_agentic_non_tradeable,
+                        is_agentic_unauthorized_reject,
+                    )
+
+                    if is_agentic_unauthorized_reject(str(res.get("error") or "")):
+                        _record_agentic_non_tradeable(str(sess.symbol or "").upper())
             except Exception:
                 pass
             _safe_transition(db, sess, STATE_LIVE_ERROR)
@@ -6758,6 +9665,59 @@ def tick_live_session(
         held = (_utcnow() - t0).total_seconds()
         trail_activate_return = 1.0 + float(params["trail_activate_return_bps"]) / 10_000.0
 
+        # GAP 4 CONSECUTIVE-HALT-DOWN LIQUIDATE (SS101-062 ZJYL/HKD halt-ladder trap):
+        # a name that prints CONSECUTIVE down-halts (each halt RESUMES LOWER = a cascading
+        # limit-down death-spiral) is a trap — stand aside rather than hold. Uses the lane's
+        # existing halt lifecycle (suspected_halt_since_utc set at the stale-quote onset,
+        # halt_resumed_at_utc stamped on the resume): we stamp the last FRESH bid before a
+        # halt, and on each NEW resume compare the resume bid to that pre-halt ref. A resume
+        # LOWER increments the consecutive-down counter; a flat/up resume RESETS it. At/above
+        # the threshold we LIQUIDATE via the SAME bailout exit machinery. RISK-REDUCING ONLY:
+        # it can ONLY force an EXIT of an already-held position (never opens/sizes/holds);
+        # flag OFF (default) => the whole block is skipped => byte-identical.
+        if (
+            bool(getattr(settings, "chili_momentum_halt_down_cascade_liquidate_enabled", False))
+            and st in (STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING)
+            and bid is not None
+            and math.isfinite(float(bid))
+            and float(bid) > 0
+        ):
+            _in_halt = bool(le.get("suspected_halt_since_utc"))
+            if not _in_halt:
+                # Fresh, non-halted tick: remember the last good bid as the pre-halt ref.
+                le["halt_down_pre_ref_bid"] = float(bid)
+            _resume_marker = le.get("halt_resumed_at_utc")
+            _last_processed = le.get("halt_down_last_resume_utc")
+            if _resume_marker and _resume_marker != _last_processed:
+                # A halt has just RESUMED — classify it as down / flat-up exactly once.
+                le["halt_down_last_resume_utc"] = _resume_marker
+                _pre_ref = _float_or_none(le.get("halt_down_pre_ref_bid"))
+                _cnt = int(le.get("halt_down_consecutive_count") or 0)
+                if _pre_ref is not None and _pre_ref > 0 and float(bid) < _pre_ref * (1.0 - 1e-9):
+                    _cnt += 1  # resumed LOWER -> a down-halt in the cascade
+                    le["halt_down_consecutive_count"] = _cnt
+                    _emit(db, sess, "halt_down_detected", {
+                        "consecutive": _cnt, "pre_halt_bid": round(_pre_ref, 6),
+                        "resume_bid": round(float(bid), 6),
+                    })
+                else:
+                    _cnt = 0  # resumed flat/up -> the cascade broke, reset
+                    le["halt_down_consecutive_count"] = 0
+                # Reset the pre-ref so the NEXT halt measures from this resume's price.
+                le["halt_down_pre_ref_bid"] = float(bid)
+                _commit_le(sess, le)
+                _threshold = int(getattr(settings, "chili_momentum_halt_down_cascade_threshold", 2) or 2)
+                if _cnt >= max(2, _threshold) and st != STATE_LIVE_BAILOUT:
+                    _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                    _emit(db, sess, "live_bailout", {
+                        "reason": "halt_down_cascade_liquidate",
+                        "consecutive_halt_downs": _cnt,
+                        "threshold": max(2, _threshold),
+                        "unrealized_pnl": (float(bid) - avg) * qty,
+                    })
+                    db.flush()
+                    return {"ok": True, "session_id": sess.id, "state": sess.state}
+
         # C1: Per-trade loss enforcement
         max_loss_usd = float(caps.get("max_loss_per_trade_usd") or 0)
         if max_loss_usd > 0 and st != STATE_LIVE_BAILOUT:
@@ -6827,6 +9787,15 @@ def tick_live_session(
                     if _circuit.get("breach"):
                         le["max_loss_circuit_fired"] = True
                         le["max_loss_circuit_floor_price"] = _circuit["floor_price"]
+                        # GAP 1: a max-loss-circuit fire is a single-trade max-loss rule
+                        # break (the tilt/revenge-prone signature) — arm the NEXT-day
+                        # lockout (no-op unless the flag is on). Best-effort; never affects
+                        # the bailout that follows.
+                        try:
+                            from ..governance import set_next_day_trading_lockout
+                            set_next_day_trading_lockout("max_loss_circuit")
+                        except Exception:
+                            pass
                         # EQUITY-FIRST: the absolute floor + repeg-skip apply to the RH
                         # EQUITY paths only (where the gap-through tail lives) — BOTH the
                         # unofficial robin_stocks rail (robinhood_spot) AND the sanctioned
@@ -6866,8 +9835,138 @@ def tick_live_session(
         # CRITICAL: the structural stop + the #769 max-loss circuit are evaluated ABOVE
         # this block (and re-run every tick), so a genuinely collapsing position still
         # exits inside the lock-in — only the level-retest fast-bail is deferred.
+        # GAP-A — SMART POST-ENTRY HOLD. When the master flag is ON, replace the FIXED
+        # 0.001 wick buffer with a VOL-ADAPTIVE band on the name's live realized vol scaled
+        # to the holding horizon (dimensionally: band_frac = k*rv_live*sqrt(N), N =
+        # expected_hold_s/grid_secs = GRID STEPS — the SAME √-time rule the vol-norm exit
+        # uses, NOT a tick count), and gate the actual CUT on order-flow + a volume-confirmed
+        # breach + an adaptive time-floor. INVARIANT-A: this governs ONLY the early
+        # level-retest fast-bail and can only TIGHTEN/SUPPRESS it; the structural stop + the
+        # #769 max-loss circuit are evaluated ABOVE this block (every tick) and are NOT gated
+        # by it, so a genuinely collapsing position still exits. Flag OFF (default) ⇒ the
+        # fixed-0.001-buffer path below runs BYTE-IDENTICAL.
         _bb_lock_in = _breakout_bailout_lock_in_seconds(explosive=_session_is_explosive(via))
+        _smart_hold_on = bool(getattr(settings, "chili_momentum_smart_hold_enabled", False))
         if (
+            _smart_hold_on
+            and st == STATE_LIVE_ENTERED
+            and bool(getattr(settings, "chili_momentum_breakout_bailout_enabled", True))
+            and le.get("breakout_level_price") is not None
+            and bid is not None
+        ):
+            _sh_fired = False
+            try:
+                _sh_window = _breakout_bailout_window_seconds()
+                _bk_lvl = float(le.get("breakout_level_price"))
+                _anchor = max(_bk_lvl, float(avg))
+                # ── vol-adaptive band (the corrected √-time, N in GRID STEPS) ──
+                from .pipeline import _live_realized_vol, _live_flow_slope
+
+                _sh_rv = _live_realized_vol(sess.symbol, db=db)
+                _bar_secs = float(
+                    getattr(settings, "chili_momentum_micropull_bar_seconds", 15) or 15
+                )
+                _k_atr = float(getattr(settings, "chili_momentum_smart_hold_k_atr", 1.2) or 1.2)
+                _k = _k_atr * 1.2533  # mean-abs→stdev half-width (sqrt(pi/2))
+                # P4(2) SQUEEZE-AWARE HOLD: an EXTREME-tail squeeze name WIDENS the candidate band
+                # (k up by a bounded percentile factor) so the fueled runner extends. INVARIANT-A
+                # SAFE — this widens the CANDIDATE band BEFORE smart_hold_decision derives the hold
+                # floor; the decision never loosens a PLACED stop. Factor 1.0 ⇒ byte-identical.
+                _sq_widen_sh = _squeeze_exit_band_widen_factor(via, sess.symbol)
+                if _sq_widen_sh > 1.0:
+                    _k = _k * _sq_widen_sh
+                    le["squeeze_fuel_hold_widen"] = {"factor": round(_sq_widen_sh, 4), "k": round(_k, 5)}
+                if _sh_rv is not None and _sh_rv.get("rv_step") is not None:
+                    _sh_hold = _recent_scalp_median_hold_s(db, int(sess.user_id))
+                    if _sh_hold is None or _sh_hold <= 0:
+                        _sh_hold = max(2.0 * _bar_secs, float(held or 0.0))
+                    _band_frac = smart_hold_band_frac(
+                        rv_live=float(_sh_rv["rv_step"]),
+                        expected_hold_s=float(_sh_hold),
+                        grid_secs=float(_sh_rv.get("grid_secs") or 2.0),
+                        k=_k,
+                    )
+                else:
+                    # Thin tape ⇒ fall back to the fixed buffer width so the band is never
+                    # tighter than the legacy 0.001 (no spurious early cut on missing data).
+                    _band_frac = float(
+                        getattr(settings, "chili_momentum_breakout_bailout_buffer_pct", 0.001) or 0.0
+                    )
+                # ── adaptive flow thresholds (lower-tail of the name's own OFI dist) ──
+                _sh_fs = _live_flow_slope(sess.symbol, db=db)
+                _t_floor = float(getattr(settings, "chili_momentum_smart_hold_t_flow_floor", 0.25) or 0.25)
+                _s_floor = float(getattr(settings, "chili_momentum_smart_hold_s_flow_floor", 0.0) or 0.0)
+                _ofi_level = _sh_fs.get("ofi_level") if _sh_fs else None
+                _ofi_slope = _sh_fs.get("ofi_slope") if _sh_fs else None
+                _tick_rate = _sh_fs.get("tick_rate") if _sh_fs else None
+                # ── adaptive time-floor (q25 of recent break-resolution times) ──
+                _tfloor_s = _smart_hold_time_floor_s(db, int(sess.user_id))
+                if _tfloor_s is None or _tfloor_s <= 0:
+                    _tfloor_s = 2.0 * _bar_secs
+                # ── volume-confirmed breach (the name's own recent per-window dist) ──
+                _bvol, _bvol_med = _smart_hold_breach_volume(
+                    db, sess.symbol, window_s=max(1.0, _bar_secs)
+                )
+                _sh = smart_hold_decision(
+                    anchor=_anchor,
+                    bid=float(bid),
+                    band_frac=_band_frac,
+                    held_seconds=held,
+                    window_seconds=_sh_window,
+                    time_floor_s=_tfloor_s,
+                    ofi_level=_ofi_level,
+                    ofi_slope=_ofi_slope,
+                    t_flow=_t_floor,
+                    s_flow=_s_floor,
+                    tick_rate=_tick_rate,
+                    tick_rate_ref=_float_or_none(le.get("entry_tick_rate")),
+                    rho=float(getattr(settings, "chili_momentum_smart_hold_rho", 0.6) or 0.6),
+                    breach_volume=_bvol,
+                    breach_volume_median=_bvol_med,
+                )
+                _emit(db, sess, "smart_hold_decision", {
+                    "cut": bool(_sh.cut),
+                    "hold": bool(_sh.hold),
+                    "reason": _sh.reason,
+                    "band_frac": _sh.band_frac,
+                    "hold_floor_px": _sh.hold_floor_px,
+                    "anchor": _anchor,
+                    "bid": bid,
+                    "held_seconds": held,
+                    "window_seconds": _sh_window,
+                    "time_floor_s": _tfloor_s,
+                    "time_floor_suppressed": bool(_sh.time_floor_suppressed),
+                    "ofi_level": _ofi_level,
+                    "ofi_slope": _ofi_slope,
+                    "tick_rate": _tick_rate,
+                    "breach_volume": _bvol,
+                    "breach_volume_median": _bvol_med,
+                })
+                if _sh.cut:
+                    le["last_bailout_trigger"] = "smart_hold_cut"
+                    _commit_le(sess, le)
+                    _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                    _emit(db, sess, "live_bailout", {
+                        "reason": "smart_hold_fast_bail",
+                        "smart_hold_reason": _sh.reason,
+                        "breakout_level": _bk_lvl,
+                        "anchor": _anchor,
+                        "bid": bid,
+                        "held_seconds": held,
+                        "band_frac": _sh.band_frac,
+                        "hold_floor_px": _sh.hold_floor_px,
+                        "window_seconds": _sh_window,
+                    })
+                    db.flush()
+                    _sh_fired = True
+                    return {"ok": True, "session_id": sess.id, "state": sess.state}
+            except Exception:
+                # On ANY error, fall through to the legacy fixed-buffer path below
+                # (never strand a position because the adaptive read failed).
+                _sh_fired = False
+            if _sh_fired:
+                return {"ok": True, "session_id": sess.id, "state": sess.state}
+        elif (
             st == STATE_LIVE_ENTERED
             and bool(getattr(settings, "chili_momentum_breakout_bailout_enabled", True))
             and breakout_failed_to_hold(
@@ -6892,6 +9991,169 @@ def tick_live_session(
             })
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
+
+        # GAP2 — INSTANT BID-BELOW-FILL CUT (Warrior re-audit 2026-06-26). Right after
+        # the fill, if the live bid has collapsed BELOW the fill by more than spread
+        # noise (the move failed at the entry tick), cut FAST via the BAILOUT machinery
+        # — well inside the structural stop. ENTERED-only (scaling/trailing are already
+        # in profit, past their target partial). Fresh-quote gated (never on a stale/
+        # halted book). Flag OFF (default) ⇒ this whole block is a no-op ⇒ byte-identical.
+        # PROTECTIVE: only cuts a FAILED entry faster; it never widens any stop.
+        if (
+            st == STATE_LIVE_ENTERED
+            and bool(getattr(settings, "chili_momentum_instant_bid_below_fill_cut_enabled", False))
+            and bid is not None
+            and math.isfinite(float(bid))
+            and float(bid) > 0
+            and int(le.get("halt_stale_streak") or 0) == 0
+            and not le.get("suspected_halt_since_utc")
+            and instant_bid_below_fill_cut(
+                entry_price=avg,
+                bid=float(bid),
+                held_seconds=held,
+                window_seconds=float(getattr(settings, "chili_momentum_instant_bid_cut_window_seconds", 6.0) or 0.0),
+                margin_bps=float(getattr(settings, "chili_momentum_instant_bid_cut_margin_bps", 25.0) or 0.0),
+            )
+        ):
+            le["last_bailout_trigger"] = "instant_bid_below_fill"
+            _commit_le(sess, le)
+            _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+            _emit(db, sess, "live_bailout", {
+                "reason": "instant_bid_below_fill_cut",
+                "entry_price": avg,
+                "bid": bid,
+                "held_seconds": held,
+                "window_seconds": float(getattr(settings, "chili_momentum_instant_bid_cut_window_seconds", 6.0) or 0.0),
+                "margin_bps": float(getattr(settings, "chili_momentum_instant_bid_cut_margin_bps", 25.0) or 0.0),
+            })
+            db.flush()
+            return {"ok": True, "session_id": sess.id, "state": sess.state}
+
+        # LOCATE #7 — INSTANT BID-ABOVE-FILL CONFIRM (positive mirror of the below-fill
+        # cut). At the END of the confirm window, if the bid never held at/above the fill
+        # AND the position never printed a confirming high, the entry did NOT confirm —
+        # FEED the SAME bailout machinery (no new exit reason; the same protective cut).
+        # ENTERED-only, fresh-quote gated. Reuses the instant-bid margin/window knobs.
+        # Flag OFF (default) ⇒ no-op ⇒ byte-identical. PROTECTIVE: it can only cut a
+        # non-confirming entry sooner; never widens a stop.
+        if (
+            st == STATE_LIVE_ENTERED
+            and bool(getattr(settings, "chili_momentum_instant_bid_above_fill_confirm_enabled", False))
+            and bid is not None
+            and math.isfinite(float(bid))
+            and float(bid) > 0
+            and int(le.get("halt_stale_streak") or 0) == 0
+            and not le.get("suspected_halt_since_utc")
+            and instant_bid_above_fill_confirm_failed(
+                entry_price=avg,
+                bid=float(bid),
+                high_water_mark=_float_or_none(pos.get("high_water_mark")),
+                held_seconds=held,
+                window_seconds=float(getattr(settings, "chili_momentum_instant_bid_confirm_window_seconds", 6.0) or 0.0),
+                margin_bps=float(getattr(settings, "chili_momentum_instant_bid_cut_margin_bps", 25.0) or 0.0),
+            )
+        ):
+            le["last_bailout_trigger"] = "instant_bid_above_fill_unconfirmed"
+            _commit_le(sess, le)
+            _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+            _emit(db, sess, "live_bailout", {
+                "reason": "instant_bid_above_fill_unconfirmed",
+                "entry_price": avg,
+                "bid": bid,
+                "high_water_mark": _float_or_none(pos.get("high_water_mark")),
+                "held_seconds": held,
+                "window_seconds": float(getattr(settings, "chili_momentum_instant_bid_confirm_window_seconds", 6.0) or 0.0),
+            })
+            db.flush()
+            return {"ok": True, "session_id": sess.id, "state": sess.state}
+
+        # LOCATE #1 — SUB-5MIN SCALP BAILOUT (scalp-family fast time-stop). Reads the SAME
+        # deployed cadence classifier result the runner trail persists (le["cadence_cls"],
+        # written every held tick with its FULL ema/rvol signals — ONE source of truth, no
+        # duplicate classifier): only a SLOW_CHOPPER (a scalp that is NOT extending; a FAST
+        # runner is NEVER time-stopped) that is held >= the scalp max-hold AND is NOT green
+        # (bid <= entry) is time-stopped via the SAME bailout machinery. ENTERED-only (a
+        # scaled/trailing position is already past its first target = in profit, never a
+        # stalled scalp), fresh-quote gated. Flag OFF (default) ⇒ no-op ⇒ byte-identical.
+        # PROTECTIVE: it can only exit a stalled scalp sooner; it never widens a stop or
+        # admits risk. (The classifier is conservative: it falls to UNCERTAIN — no time-stop
+        # — unless velocity is decisively slow AND the trail's trend/vol read agrees.)
+        if (
+            st == STATE_LIVE_ENTERED
+            and bool(getattr(settings, "chili_momentum_sub5min_scalp_bailout_enabled", False))
+            and bid is not None
+            and math.isfinite(float(bid))
+            and float(bid) > 0
+            and int(le.get("halt_stale_streak") or 0) == 0
+            and not le.get("suspected_halt_since_utc")
+            and float(bid) <= float(avg)  # NOT green — a green scalp rides the trail, not a time-stop
+            and str(le.get("cadence_cls") or "") == "SLOW_CHOPPER"
+        ):
+            _scalp_max_min = float(getattr(settings, "chili_momentum_sub5min_scalp_bailout_minutes", 5.0) or 0.0)
+            if _scalp_max_min > 0.0 and held >= _scalp_max_min * 60.0:
+                le["last_bailout_trigger"] = "sub5min_scalp_timestop"
+                _commit_le(sess, le)
+                _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                _emit(db, sess, "live_bailout", {
+                    "reason": "sub5min_scalp_bailout",
+                    "entry_price": avg,
+                    "bid": bid,
+                    "held_seconds": held,
+                    "scalp_max_minutes": _scalp_max_min,
+                    "cadence_cls": le.get("cadence_cls"),
+                })
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state}
+
+        # GAP1 — BAIL ON ABSENCE-OF-STRENGTH (affirmative breakout-or-bailout, Warrior
+        # re-audit 2026-06-26). Within [min_hold, window] seconds of the fill, if the
+        # breakout showed NO confirming strength — no new high above the confirm buffer
+        # AND the bid is at/below entry AND the tape is not accelerating up — the thesis
+        # did not confirm, so BAIL before the stop via the BAILOUT machinery. A winner
+        # that pops then consolidates (high-water mark above the buffer) is IMMUNE. The
+        # OFI read is fail-open (None ⇒ governed by the price conditions). ENTERED-only,
+        # fresh-quote gated. Flag OFF (default) ⇒ no-op ⇒ byte-identical. PROTECTIVE only.
+        if (
+            st == STATE_LIVE_ENTERED
+            and bool(getattr(settings, "chili_momentum_bail_on_no_confirmation_enabled", False))
+            and bid is not None
+            and math.isfinite(float(bid))
+            and float(bid) > 0
+            and int(le.get("halt_stale_streak") or 0) == 0
+            and not le.get("suspected_halt_since_utc")
+        ):
+            _nc_ofi = None
+            try:
+                from .pipeline import _live_ofi_microprice as _nc_ofi_fn
+
+                _nc_ofi, _ = _nc_ofi_fn(sess.symbol, db=db)
+            except Exception:
+                _nc_ofi = None
+            if bail_on_no_confirmation(
+                entry_price=avg,
+                bid=float(bid),
+                high_water_mark=_float_or_none(pos.get("high_water_mark")),
+                held_seconds=held,
+                min_hold_seconds=float(getattr(settings, "chili_momentum_no_confirmation_min_hold_seconds", 8.0) or 0.0),
+                window_seconds=float(getattr(settings, "chili_momentum_no_confirmation_window_seconds", 20.0) or 0.0),
+                buffer_bps=float(getattr(settings, "chili_momentum_no_confirmation_buffer_bps", 10.0) or 0.0),
+                ofi=_nc_ofi,
+            ):
+                le["last_bailout_trigger"] = "no_confirmation"
+                _commit_le(sess, le)
+                _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                _emit(db, sess, "live_bailout", {
+                    "reason": "bail_on_no_confirmation",
+                    "entry_price": avg,
+                    "bid": bid,
+                    "high_water_mark": _float_or_none(pos.get("high_water_mark")),
+                    "held_seconds": held,
+                    "window_seconds": float(getattr(settings, "chili_momentum_no_confirmation_window_seconds", 20.0) or 0.0),
+                    "buffer_bps": float(getattr(settings, "chili_momentum_no_confirmation_buffer_bps", 10.0) or 0.0),
+                    "ofi": _nc_ofi,
+                })
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state}
 
         if st == STATE_LIVE_BAILOUT:
             # MAX-LOSS-CIRCUIT HALT GATE (2026-06-17): a circuit-originated bailout must
@@ -7100,6 +10362,13 @@ def tick_live_session(
                     _commit_le(sess, le)
             except Exception:
                 _ema5 = None
+            # GAP3: regime-conditioned hold-time — scale the give-back band by the
+            # entry regime (HOT ⇒ wider/hold longer, COLD ⇒ tighter/cut quicker).
+            # Default 1.0 (flag OFF) ⇒ byte-identical; ratchet-only ⇒ never weakens
+            # the live stop. Reuses the deployed _session_is_explosive classifier.
+            _regime_band_mult = _regime_holdtime_band_mult(
+                explosive=_session_is_explosive(via)
+            )
             _trailed = cushion_adaptive_trail_stop(
                 high_water_mark=_hwm_trail,
                 entry_price=avg,
@@ -7111,7 +10380,191 @@ def tick_live_session(
                 current_stop=stop_px,
                 side_long=True,
                 ema_5m=_ema5,
+                regime_band_mult=_regime_band_mult,
             )
+            # LEVER 2A — MATH-VERIFIED adaptive vol-normalized trail. Re-derive the trail
+            # WIDTH from LIVE tape realized vol (vs the frozen entry ATR width above) and
+            # compose it through INVARIANT-A. This is an ADDITIONAL ratchet-only layer:
+            # _trailed already passed through max(cs, be, ...) in the cushion helper, and
+            # the vol-norm candidate is composed via volnorm_runner_trail_stop (also
+            # max(cs, be, candidate)), so we take the MAX of the two ratchet candidates —
+            # the result can only ever TIGHTEN the live stop, never loosen it. Flag-off or
+            # a thin tape (vol read None) ⇒ _trailed is used unchanged (byte-identical).
+            _vn_dist = None  # the 2A width, reused as the RIDE-LOCK base band (2B)
+            if bool(getattr(settings, "chili_momentum_volnorm_trail_enabled", True)):
+                try:
+                    from .pipeline import _live_realized_vol
+                    from .paper_execution import (
+                        micro_price as _micro_price,
+                        volnorm_runner_trail_stop,
+                        volnorm_trail_dist_pct,
+                    )
+
+                    _rv = _live_realized_vol(sess.symbol, db=db)
+                    if _rv is not None and _rv.get("rv_step") is not None:
+                        _k = float(getattr(settings, "chili_momentum_volnorm_trail_k", 1.3) or 1.3)
+                        # P4(2) SQUEEZE-AWARE HOLD: an EXTREME-tail squeeze name WIDENS the volnorm
+                        # RIDE band (raise the trail k by a bounded percentile factor) so a fueled
+                        # runner extends further before the vol-norm trail tightens. INVARIANT-A SAFE
+                        # — a WIDER band lowers the trail CANDIDATE, which volnorm_runner_trail_stop
+                        # composes through max(current_stop, be, candidate): it can only decline to
+                        # ratchet as hard, NEVER loosen the placed stop. Factor 1.0 ⇒ byte-identical.
+                        _sq_widen_vn = _squeeze_exit_band_widen_factor(via, sess.symbol)
+                        if _sq_widen_vn > 1.0:
+                            _k = _k * _sq_widen_vn
+                        # DESIGN#2 ADAPTIVE TRAIL-WIDTH MATURITY WIDEN: a fresh, vol-rich runner
+                        # trails toward the chandelier-literature optimum (PF peaks ~3x ATR; 2x
+                        # over-tightens) by widening the 2A k; a maturing/exhausting runner (OFI
+                        # slope rolling over) decays the factor to 1.0 so the existing RIDE-LOCK
+                        # LOCK/HARD bands tighten unimpeded. INVARIANT-A SAFE — a wider band only
+                        # LOWERS the candidate, composed through max(stop, be, candidate) below;
+                        # never loosens a placed stop. Flag OFF / thin flow ⇒ factor 1.0 ⇒ byte-
+                        # identical. The OFI read is the SAME _live_flow_slope LEVER 2B uses.
+                        if bool(getattr(settings, "chili_momentum_volnorm_trail_maturity_widen_enabled", True)):
+                            try:
+                                from .pipeline import _live_flow_slope as _lfs_mat
+                                from .paper_execution import trail_width_maturity_factor as _twmf
+                                _fs_mat = _lfs_mat(sess.symbol, db=db) or {}
+                                _mat_factor = _twmf(
+                                    rv_live=float(_rv["rv_step"]),
+                                    vol_floor_pct=max(0.0, _atr_pct_trail * _sm),
+                                    ofi_level=_fs_mat.get("ofi_level"),
+                                    ofi_slope=_fs_mat.get("ofi_slope"),
+                                    max_widen=float(getattr(settings, "chili_momentum_volnorm_trail_maturity_max_widen", 2.0) or 2.0),
+                                )
+                                if _mat_factor > 1.0:
+                                    _k = _k * _mat_factor
+                            except Exception:
+                                pass
+                        # Live-derived holding horizon: median realized hold of recent scalps,
+                        # falling back to this session's own elapsed hold (no magic horizon).
+                        _hold_s = _recent_scalp_median_hold_s(db, int(sess.user_id))
+                        if _hold_s is None or _hold_s <= 0:
+                            _hold_s = max(30.0, float(held or 0.0))
+                        # Vol floor: reuse the frozen entry vol-floored ATR width (the same
+                        # vol-floor the entry stop used) so the trail can never sit tighter
+                        # than the entry stop's documented noise floor.
+                        _vol_floor_pct = max(0.0, _atr_pct_trail * _sm)
+                        # HWM reference: the MICRO-PRICE high (size-weighted fair value),
+                        # falling back to the existing HWM when L1 sizes are unavailable.
+                        # Sizes come from the latest iqfeed_trade_ticks bid/ask sizes when
+                        # present; absent sizes ⇒ raw HWM (the micro_price core is exercised
+                        # the moment L1 sizes are captured on the tick path).
+                        _bsz = _float_or_none(le.get("last_bid_size"))
+                        _asz = _float_or_none(le.get("last_ask_size"))
+                        _mp = None
+                        if bid and ask and _bsz and _asz:
+                            _mp = _micro_price(bid, _bsz, ask, _asz)
+                        _hwm_vn = max(_hwm_trail, _mp) if _mp is not None else _hwm_trail
+                        _vn_dist = volnorm_trail_dist_pct(
+                            rv_live=float(_rv["rv_step"]),
+                            expected_hold_s=float(_hold_s),
+                            grid_secs=float(_rv.get("grid_secs") or 2.0),
+                            k=_k,
+                            vol_floor_pct=_vol_floor_pct,
+                            effective_spread_pct=_rv.get("eff_spread_pct"),
+                            max_dist_pct=float(getattr(settings, "chili_momentum_volnorm_trail_max_dist_pct", 0.15) or 0.15),
+                        )
+                        _vn_stop = volnorm_runner_trail_stop(
+                            high_water_mark=_hwm_vn,
+                            trail_dist_pct=_vn_dist,
+                            breakeven_floor=_be_floor,
+                            current_stop=stop_px,
+                            side_long=True,
+                        )
+                        # INVARIANT-A: both candidates are ratchet-only over (cs, be); the
+                        # max never loosens the live stop.
+                        if _vn_stop > _trailed:
+                            _trailed = _vn_stop
+                        _emit(db, sess, "volnorm_trail_candidate", {
+                            "vn_dist_pct": _vn_dist,
+                            "vn_stop": _vn_stop,
+                            "cushion_stop": _trailed,
+                            "rv_step": _rv.get("rv_step"),
+                            "tick_rate": _rv.get("tick_rate"),
+                            "eff_spread_pct": _rv.get("eff_spread_pct"),
+                            "expected_hold_s": _hold_s,
+                            "micro_hwm": _hwm_vn,
+                        })
+                except Exception:
+                    pass
+
+            # LEVER 2B — VELOCITY/PERSISTENCE RIDE-LOCK on top of the 2A vol-norm trail.
+            # Reads the DENOISED flow (OFI LEVEL + its EWMA SLOPE = the 1st derivative, NOT
+            # raw signed_accel) + the live tick_rate, and modulates the 2A band by regime:
+            # RIDE holds the band WIDE while flow persists (do not mechanically tighten);
+            # LOCK collapses it to a tight giveback when flow rolls over near the HWM (sell
+            # into strength before a full candle prints); HARD is a tighter climax-lock on
+            # strong-negative flow + sellers lifting through the fair value. It is an
+            # ADDITIONAL ratchet-only layer composed via max() exactly like the 2A trail and
+            # the climax exits (INVARIANT-A): RIDE returns the 2A-width stop (never loosens —
+            # it only declines to tighten FURTHER), LOCK/HARD only move the stop when their
+            # tighter band lands ABOVE the live stop. The base band is the 2A width when the
+            # 2A path produced one, else the realized band off the current trail. Flag-off /
+            # thin-or-missing flow ⇒ no-op (the 2A trail alone, byte-identical).
+            if bool(getattr(settings, "chili_momentum_velocity_persistence_exit_enabled", True)):
+                try:
+                    from .pipeline import _live_flow_slope
+                    from .paper_execution import velocity_persistence_ride_lock
+
+                    _fs = _live_flow_slope(sess.symbol, db=db)
+                    if _fs is not None and _fs.get("ofi_slope") is not None:
+                        # base band: prefer the 2A width; else the realized band off the
+                        # current trail (so RIDE-LOCK always has a meaningful WIDE baseline).
+                        if _vn_dist is not None and _vn_dist > 0:
+                            _base_band = float(_vn_dist)
+                        elif _hwm_trail > 0 and _trailed > 0:
+                            _base_band = max(0.0, (_hwm_trail - _trailed) / _hwm_trail)
+                        else:
+                            _base_band = 0.0
+                        _persist_frac = float(
+                            getattr(settings, "chili_momentum_velocity_persist_frac", 0.6) or 0.6
+                        )
+                        _ofi_thr = abs(float(
+                            getattr(settings, "chili_momentum_ofi_threshold", 0.25) or 0.25
+                        ))
+                        _vp = velocity_persistence_ride_lock(
+                            high_water_mark=_hwm_trail,
+                            entry_price=avg,
+                            bid=bid,
+                            base_trail_dist_pct=_base_band,
+                            ofi_level=_fs.get("ofi_level"),
+                            ofi_slope=_fs.get("ofi_slope"),
+                            tick_rate_per_s=_fs.get("tick_rate"),
+                            entry_tick_rate_per_s=_float_or_none(le.get("entry_tick_rate")),
+                            persist_frac=_persist_frac,
+                            breakeven_floor=_be_floor,
+                            current_stop=stop_px,
+                            micro_price_ref=_fs.get("mid"),
+                            last_trade_px=_fs.get("last_price"),
+                            ofi_threshold=_ofi_thr,
+                            side_long=True,
+                        )
+                        # INVARIANT-A: RIDE-LOCK candidate is ratchet-only over (cs, be);
+                        # take the MAX with the 2A/cushion trail — only a LOCK/HARD band that
+                        # lands ABOVE the current _trailed actually tightens; RIDE never
+                        # loosens (its candidate == the 2A-width stop ≤ _trailed already).
+                        _vp_stop = _float_or_none(_vp.get("new_stop_floor"))
+                        if _vp_stop is not None and _vp_stop > _trailed:
+                            _trailed = _vp_stop
+                        _emit(db, sess, "velocity_persistence_ride_lock", {
+                            "regime": _vp.get("regime"),
+                            "ride": bool(_vp.get("ride")),
+                            "band_pct": _vp.get("band_pct"),
+                            "base_band_pct": _base_band,
+                            "vp_stop": _vp_stop,
+                            "trailed_stop": _trailed,
+                            "ofi_level": _fs.get("ofi_level"),
+                            "ofi_slope": _fs.get("ofi_slope"),
+                            "tick_rate": _fs.get("tick_rate"),
+                            "entry_tick_rate": le.get("entry_tick_rate"),
+                            "persist_ok": _vp.get("persist_ok"),
+                            "last_price": _fs.get("last_price"),
+                            "mid": _fs.get("mid"),
+                            "high_water_mark": _hwm_trail,
+                        })
+                except Exception:
+                    pass
             if _trailed > stop_px:
                 pos["stop_price"] = _trailed
                 stop_px = _trailed
@@ -7122,6 +10575,106 @@ def tick_live_session(
                     "high_water_mark": _hwm_trail,
                     "partial_taken": bool(pos.get("partial_taken")),
                 })
+
+            # MEASURED-MOVE SCALE TARGET + DOUBLE-TOP EXHAUSTION (winner-management,
+            # flag-gated, default OFF ⇒ this whole block is inert and the runner
+            # trails byte-identical). Runs on the held RUNNER (partial_taken True) AFTER
+            # the cushion ratchet, using the impulse leg frozen at the first-target
+            # scale-out. WINNER-SAFE: both helpers are RATCHET-ONLY over the live stop
+            # (Action A here) — they tighten the runner, never cut it. The measured-move
+            # PARTIAL + the double-top partial arm route through the SAME audited
+            # SCALING_OUT path (Action B, gated on its own one-tick marker, default OFF
+            # / observe-first like the OFI lock partial) so a fraction is scaled and the
+            # remainder keeps running. docs/DESIGN/MOMENTUM_LANE.md
+            if measured_move_exit_enabled() and bool(pos.get("partial_taken")):
+                try:
+                    _imp_high = _float_or_none(pos.get("impulse_leg_high"))
+                    _imp_entry = _float_or_none(pos.get("impulse_leg_entry")) or avg
+                    if _imp_high is not None and _imp_high > 0:
+                        _eq_shares = not str(sess.symbol or "").upper().endswith("-USD")
+                        _mm_inc = prod.base_increment if prod else (1.0 if _eq_shares else None)
+                        _mm_min = prod.base_min_size if prod else (1.0 if _eq_shares else None)
+                        _mm = measured_move_scale_exit_decision(
+                            flag_on=True,
+                            current_qty=_float_or_none(pos.get("quantity")) or 0.0,
+                            original_qty=_q0,
+                            entry_price=_imp_entry,
+                            impulse_leg_high=_imp_high,
+                            bid=bid,
+                            atr_pct=_atr_pct_trail,
+                            stop_atr_mult=_sm,
+                            current_stop=stop_px,
+                            breakeven_floor=_be_floor,
+                            already_fired=bool(pos.get("measured_move_taken")),
+                            symbol=sess.symbol,
+                            base_increment=_mm_inc,
+                            base_min_size=_mm_min,
+                            side_long=True,
+                        )
+                        # Double-top exhaustion off the SAME impulse high (flow optional).
+                        _mm_ofi = None
+                        _mm_micro = None
+                        try:
+                            from .pipeline import _live_ofi_microprice as _mm_flow
+
+                            _mm_ofi, _mm_micro = _mm_flow(sess.symbol, db=db)
+                        except Exception:
+                            _mm_ofi, _mm_micro = None, None
+                        _dt = double_top_tighten_decision(
+                            flag_on=True,
+                            impulse_leg_high=_imp_high,
+                            current_high=_hwm_trail,
+                            bid=bid,
+                            entry_price=_imp_entry,
+                            atr_pct=_atr_pct_trail,
+                            stop_atr_mult=_sm,
+                            current_stop=stop_px,
+                            breakeven_floor=_be_floor,
+                            ofi=_mm_ofi,
+                            micro_edge=_mm_micro,
+                            side_long=True,
+                        )
+                        # Action A — RATCHET-ONLY stop write (winner-safe core). The
+                        # measured-move ratchet (to breakeven on the runner) and the
+                        # double-top tighten both only ever RAISE the stop; the > stop_px
+                        # guard is belt-and-suspenders.
+                        _mm_floor = _float_or_none(_mm.get("new_stop_floor"))
+                        _dt_floor = _float_or_none(_dt.get("new_stop_floor"))
+                        _cand = max(
+                            [v for v in (_mm_floor, _dt_floor) if v is not None] or [stop_px]
+                        )
+                        if _cand > stop_px:
+                            pos["stop_price"] = _cand
+                            stop_px = _cand
+                            le["position"] = pos
+                            _commit_le(sess, le)
+                        if _mm.get("fire") or _dt.get("tighten") or _dt.get("exhausted"):
+                            _emit(db, sess, "live_measured_move_exit", {
+                                "mm_fire": bool(_mm.get("fire")),
+                                "mm_reason": _mm.get("reason"),
+                                "mm_target": _mm.get("target_price"),
+                                "mm_leg_height": _mm.get("leg_height"),
+                                "mm_scale_qty": _mm.get("scale_qty"),
+                                "mm_scale_fraction": _mm.get("scale_fraction"),
+                                "dt_exhausted": bool(_dt.get("exhausted")),
+                                "dt_tighten": bool(_dt.get("tighten")),
+                                "dt_flow_weak": bool(_dt.get("flow_weak")),
+                                "dt_reason": _dt.get("reason"),
+                                "new_stop": _cand,
+                                "bid": bid,
+                                "impulse_leg_high": _imp_high,
+                                "high_water_mark": _hwm_trail,
+                            })
+                        # Action B — arm the measured-move / double-top PARTIAL (one-tick
+                        # marker; observe-first, default OFF). It routes through the SAME
+                        # audited SCALING_OUT path; a fraction is scaled and the runner
+                        # keeps running (never a full cut). Promote after the A/B proves out.
+                        if bool(getattr(settings, "chili_momentum_exit_ofi_lock_partial_enabled", False)):
+                            if _mm.get("fire") or _dt.get("partial_arm"):
+                                le["measured_move_partial_armed"] = True
+                                _commit_le(sess, le)
+                except Exception:
+                    pass
 
             # Adaptive order-flow EXHAUSTION LOCK (crypto runner). Runs AFTER the
             # cushion ratchet so `current_band_bps` is the band's REALIZED output
@@ -7257,6 +10810,70 @@ def tick_live_session(
                 except Exception:
                     pass
 
+            # TAPE-ACCELERATION REVERSAL EXIT (sibling of the OFI lock). The OFI lock is
+            # L2-data-starved on equity (only ~88/684 names carry iqfeed_depth_snapshots);
+            # this rides signed_tape_accel from the executed TRADE tape (iqfeed_trade_ticks,
+            # broad equity coverage) so it covers the names the OFI lock misses. It SELLS
+            # INTO STRENGTH at the spike's climax — the moment the executed-buy push ends /
+            # turns while price is still near the high — BEFORE the giveback. COMPOSES with
+            # the OFI lock: both run, whichever ratchets the stop HIGHER wins (Invariant A).
+            # signed_tape_accel_features returns None for crypto / empty tape ⇒ the helper
+            # no-ops ⇒ crypto byte-identical. Kill-switch gates the WHOLE block (OFF ⇒ no
+            # fetch, byte-identical). RATCHET-ONLY: it can only ever exit a WINNER near its
+            # top, never cut a loser early, never loosen the stop.
+            if bool(
+                getattr(settings, "chili_momentum_exit_tape_accel_reversal_enabled", True)
+            ):
+                try:
+                    from .entry_gates import signed_tape_accel_features
+
+                    _tape = signed_tape_accel_features(sess.symbol, db=db)
+                    _accel = None
+                    if _tape is not None:
+                        _accel = _float_or_none(_tape.get("signed_tape_accel"))
+                    _prev_accel = _float_or_none(le.get("prev_signed_tape_accel"))
+                    _ar = tape_accel_reversal_exit(
+                        high_water_mark=_hwm_trail,
+                        entry_price=avg,
+                        bid=bid,
+                        atr_pct=_atr_pct_trail,
+                        stop_atr_mult=_sm,
+                        reward_risk=class_aware_reward_risk(sess.symbol),
+                        current_stop=stop_px,
+                        breakeven_floor=_be_floor,
+                        signed_tape_accel=_accel,
+                        prev_signed_tape_accel=_prev_accel,
+                        side_long=True,
+                    )
+                    # A/B telemetry on EVERY tick (with the lock-OFF counterfactual) so
+                    # realized PnL is measured vs the baseline before we trust it.
+                    _emit(db, sess, "live_tape_accel_reversal_exit", {
+                        "fired": bool(_ar.get("fired")),
+                        "trigger": _ar.get("trigger"),
+                        "peak_r": _ar.get("peak_r"),
+                        "armed": bool(_ar.get("armed")),
+                        "reason": _ar.get("reason"),
+                        "signed_tape_accel": _accel,
+                        "prev_signed_tape_accel": _prev_accel,
+                        "adaptive_stop": _ar.get("new_stop_floor"),
+                        "counterfactual_fixed_stop": _ar.get("counterfactual_fixed_stop"),
+                        "bid": bid,
+                        "high_water_mark": _hwm_trail,
+                    })
+                    # Store the current accel as the next tick's prev (genuine-TURN read).
+                    if _accel is not None:
+                        le["prev_signed_tape_accel"] = _accel
+                        _commit_le(sess, le)
+                    # RATCHET-ONLY stop write (belt-and-suspenders > stop_px guard).
+                    _ar_stop = _float_or_none(_ar.get("new_stop_floor"))
+                    if _ar.get("fired") and _ar_stop is not None and _ar_stop > stop_px:
+                        pos["stop_price"] = _ar_stop
+                        stop_px = _ar_stop
+                        le["position"] = pos
+                        _commit_le(sess, le)
+                except Exception:
+                    pass
+
             # v2 PROACTIVE sell-into-strength (Ross ladder read) — sibling to v1, runs
             # AFTER it so they compose: v1 DEFENDS (tightens the stop on exhaustion),
             # v2 HARVESTS the top (a small resting limit into genuine strength). The
@@ -7357,6 +10974,14 @@ def tick_live_session(
                             )
                             # ONLY a SLOW_CHOPPER loosens; FAST/UNCERTAIN never do.
                             _cad_loosen = bool(_cad.get("cls") == "SLOW_CHOPPER")
+                            # LOCATE #1: persist the deployed classification (with its FULL
+                            # ema/rvol signals) so the scalp time-stop in the exit handler
+                            # reads the SAME classifier result — no duplicate classifier, one
+                            # source of truth. Written every held tick; read next tick.
+                            try:
+                                le["cadence_cls"] = _cad.get("cls")
+                            except Exception:
+                                pass
                             _commit_le(sess, le)
                         except Exception:
                             _cad = None
@@ -7487,6 +11112,127 @@ def tick_live_session(
                                 })
                 except Exception:
                     pass
+
+            # ── ANTICIPATION STARTER REMAINDER (item 1, DEFAULT OFF ⇒ byte-identical) ──
+            # The entry placed only the PROBE leg; once the probe CONFIRMS (a real held
+            # position = the break is real) add the stashed remainder ONCE, reusing the
+            # SAME in-flight broker-truth merge the pyramid uses (pyramid_blend_on_fill —
+            # the shared/tested helper) on a SEPARATE in-flight slot so it is independent
+            # of the pyramid flag. Two phases, both FALL THROUGH (no early return) so the
+            # stop-breach check still runs this tick. Dedupe: one in-flight remainder order
+            # at a time (idempotent); orphan-safe: the child order_id is folded into the
+            # entry-order history so the late-fill sweep tracks it to terminal. Only fires
+            # when armed (probe split happened) AND the position is GREEN (confirmation) —
+            # it never bypasses a veto (a confirmed fill IS the trigger). Absent the arm
+            # (flag OFF / no split) ⇒ this whole block is a no-op (byte-identical).
+            if le.get("anticipation_armed") or le.get("anticipation_add_order_id"):
+                try:
+                    # PHASE 1 — resolve an in-flight remainder add (mirror the pyramid merge).
+                    _ant_oid = le.get("anticipation_add_order_id")
+                    if _ant_oid:
+                        _ano, _ = adapter.get_order(str(_ant_oid))
+                        if _ano is not None and not _order_open(_ano):
+                            _ant_filled = float(getattr(_ano, "filled_size", 0) or 0)
+                            if _ant_filled > 0:
+                                _Pa_a = float(getattr(_ano, "average_filled_price", 0) or 0) or float(
+                                    le.get("anticipation_add_limit_px") or ask
+                                )
+                                _blend_a = pyramid_blend_on_fill(
+                                    q0=float(pos["quantity"]),
+                                    a0=float(pos["avg_entry_price"]),
+                                    qa_f=_ant_filled,
+                                    Pa_f=_Pa_a,
+                                    stop_px=float(pos["stop_price"]),
+                                    original_quantity=_float_or_none(pos.get("original_quantity")),
+                                )
+                                pos["avg_entry_price"] = _blend_a["a1"]
+                                pos["quantity"] = _blend_a["q1"]
+                                pos["original_quantity"] = _blend_a["original_quantity"]
+                                pos["notional_usd"] = _blend_a["q1"] * _blend_a["a1"]
+                                pos["stop_price"] = _blend_a["s1"]
+                                stop_px = _blend_a["s1"]
+                                _ant_fee = _order_total_fees_usd(_ano) or 0.0
+                                if _ant_fee > 0.0:
+                                    le["entry_fee_usd_unbooked"] = (
+                                        float(le.get("entry_fee_usd_unbooked") or 0.0) + _ant_fee
+                                    )
+                                _mark_entry_order_resolved(le, str(_ant_oid), "adopted")
+                                le["anticipation_completed"] = True
+                                le.pop("anticipation_add_order_id", None)
+                                le.pop("anticipation_add_limit_px", None)
+                                le.pop("anticipation_armed", None)
+                                le.pop("anticipation_remainder_qty", None)
+                                le["position"] = pos
+                                _commit_le(sess, le)
+                                _emit(db, sess, "live_anticipation_remainder_filled", {
+                                    "add_qty": _ant_filled, "add_price": _Pa_a,
+                                    "q1": _blend_a["q1"], "a1": _blend_a["a1"],
+                                })
+                            else:
+                                # Terminal with NO fill — clear the in-flight slot so a later
+                                # tick may retry the remainder. No pos mutation.
+                                le.pop("anticipation_add_order_id", None)
+                                le.pop("anticipation_add_limit_px", None)
+                                _commit_le(sess, le)
+                    # PHASE 2 — submit the remainder ONCE when armed + confirmed green + idle.
+                    _ant_rem = _float_or_none(le.get("anticipation_remainder_qty"))
+                    if (
+                        le.get("anticipation_armed")
+                        and not le.get("anticipation_add_order_id")
+                        and not le.get("anticipation_completed")
+                        and _ant_rem is not None and _ant_rem > 0
+                        and float(bid) > float(pos["avg_entry_price"])  # confirmation: position is GREEN
+                    ):
+                        _ant_ask = float(ask) if (ask and float(ask) > 0) else float(bid)
+                        _ant_guard_ask = _ant_ask * _adaptive_notional_guard_multiplier(
+                            expected_move_bps=_expected_move_bps
+                        )
+                        _ant_limit_str = _fmt_limit_price_buy(_ant_guard_ask)
+                        _ant_place_n = int(le.get("anticipation_place_count", 0) or 0) + 1
+                        le["anticipation_place_count"] = _ant_place_n
+                        _ant_seed = (
+                            f"{sess.id}|{sess.correlation_id or 'x'}|ant|{_ant_place_n}"
+                        ).encode("utf-8")
+                        _ant_suffix = hashlib.sha1(_ant_seed).hexdigest()[:10]
+                        _ant_cid = (
+                            f"chili_ml_ant_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{_ant_suffix}"
+                        )[:120]
+                        try:
+                            from .market_profile import market_session_now as _ant_sess_now
+                            _ant_ext = _ant_sess_now(sess.symbol) != "regular"
+                        except Exception:
+                            _ant_ext = False
+                        _ant_res = adapter.place_limit_order_gtc(
+                            product_id=product_id,
+                            side="buy",
+                            base_size=_fmt_base_size(_ant_rem),
+                            limit_price=_ant_limit_str,
+                            client_order_id=_ant_cid,
+                            extended_hours=_ant_ext,
+                            time_in_force="gfd",
+                        ) or {}
+                        if _ant_res.get("ok") and _ant_res.get("order_id"):
+                            le["anticipation_add_order_id"] = str(_ant_res["order_id"])
+                            le["anticipation_add_limit_px"] = float(_ant_guard_ask)
+                            # Fold the remainder leg into the entry-order history so the
+                            # late-fill sweep + pre-submit guard track it to terminal (no
+                            # stranded naked leg). SAME safety net as the primary entry.
+                            _record_entry_order_placed(le, _ant_res.get("order_id"))
+                            _commit_le(sess, le)
+                            _emit(db, sess, "live_anticipation_remainder_submitted", {
+                                "order_id": le["anticipation_add_order_id"],
+                                "client_order_id": _ant_cid,
+                                "remainder_qty": float(_ant_rem),
+                                "limit_price": _ant_limit_str,
+                            })
+                except Exception:
+                    # Fail-OPEN: any error leaves the position unchanged (the probe leg is
+                    # already a complete, fully-managed position on its own). Never crash
+                    # the tick; never mutate pos outside the confirmed-fill PHASE-1 merge.
+                    logger.debug(
+                        "[momentum_live] anticipation remainder pass skipped session=%s",
+                        sess.id, exc_info=True,
+                    )
 
             # ── RISK-NEUTRAL CONFIRMATION PYRAMID (single add to a winner) ───────
             # Placed AFTER the cushion-trail ratchet + OFI-lock + v2-ladder, so
@@ -7672,6 +11418,40 @@ def tick_live_session(
                                 # Fail-OPEN: any L2 read/parse error leaves the add unchanged.
                                 _iceberg_score = None
                                 _iceberg_thresh = None
+                        # GAP 3 DISCRETE-ADD trigger (HVM101): require a FRESH discrete
+                        # entry sub-pattern (a new higher-low bounce off the rising 9-EMA/
+                        # VWAP) for the add, not merely CONTINUOUS cushion+HOD+OFI. Computed
+                        # here from a fresh bar frame + the SAME indicator_core 9-EMA the
+                        # entry triggers use; passed to pyramid_add_decision. None (flag OFF,
+                        # crypto, or any read/parse error) => the add is UNCHANGED (the guard
+                        # is inert / fail-OPEN). An explicit False (flag ON, evaluated, no
+                        # fresh trigger) BLOCKS the add — it can ONLY tighten, never loosen.
+                        _discrete_add = None
+                        if _is_equity_pyr and bool(
+                            getattr(settings, "chili_momentum_pyramid_discrete_add_enabled", False)
+                        ):
+                            try:
+                                from ..market_data import fetch_ohlcv_df as _da_fetch
+                                from ..indicator_core import compute_all_from_df as _da_compute
+                                from .paper_execution import discrete_pullback_add_trigger as _da_trig
+
+                                _da_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+                                _da_df = _da_fetch(sess.symbol, interval=_da_iv, period="5d")
+                                if _da_df is not None and not getattr(_da_df, "empty", True) and len(_da_df) >= 6:
+                                    _da_arr = _da_compute(_da_df, needed={"ema_9", "vwap"})
+                                    _da_closes = [float(x) for x in _da_df["Close"].astype(float).tolist()[-12:]]
+                                    _da_ema = _da_arr.get("ema_9") or []
+                                    _da_ema = [float(e) for e in _da_ema[-12:]] if _da_ema else None
+                                    _da_vwap_arr = _da_arr.get("vwap") or []
+                                    _da_vwap = float(_da_vwap_arr[-1]) if _da_vwap_arr else None
+                                    _da_fired, _da_dbg = _da_trig(
+                                        _da_closes, ema=_da_ema, vwap=_da_vwap, live_price=float(bid),
+                                    )
+                                    _discrete_add = bool(_da_fired)
+                                    le["pyramid_discrete_trigger"] = {"fired": _discrete_add, **_da_dbg}
+                            except Exception:
+                                # Fail-OPEN: any read/parse error leaves the add unchanged.
+                                _discrete_add = None
                         # SHARED pure predicate (one source of truth w/ replay + tests).
                         _decn = pyramid_add_decision(
                             enabled=True,  # outer block already gated on the flag
@@ -7692,6 +11472,7 @@ def tick_live_session(
                             midday_lull=_lull,
                             iceberg_score=_iceberg_score,
                             iceberg_threshold=_iceberg_thresh,
+                            discrete_entry_trigger_fired=_discrete_add,
                         )
                         _R0 = _decn.get("R0")
                         # GAP 6 ADD-INTO-THE-HALT (Warrior re-audit, RISKIEST — default OFF).
@@ -7724,6 +11505,49 @@ def tick_live_session(
                                 _halt_in_rth, _ = _dip_buy_in_rth_window(
                                     now=_utcnow(), bar_ts=None, symbol=sess.symbol,
                                 )
+                                # ── CHASE-GUARD context for the loss-sensitive halt-add ──
+                                # TAPE REQUIRED + fail-closed: read the live executed tape;
+                                # the add fires ONLY when the tape is lifting (trade_flow > 0).
+                                # None (no read) ⇒ tape_confirmed=None ⇒ the gate fails closed.
+                                _ah_tape = None
+                                try:
+                                    from .pipeline import _live_trade_flow as _ah_tf_fn
+                                    _ah_tf, _ = _ah_tf_fn(sess.symbol, db=db)
+                                    if _ah_tf is not None:
+                                        _ah_tape = bool(float(_ah_tf) > 0.0)
+                                except Exception:
+                                    _ah_tape = None  # fail-CLOSED in the gate
+                                # EXTENSION + NOT-BACKSIDE structure: a fresh OHLCV frame +
+                                # the breakout level (recent swing high) + ATR%. Missing ⇒
+                                # the gate fails closed on its own. crypto/thin ⇒ None df.
+                                _ah_df = None
+                                _ah_level = None
+                                _ah_atr_pct = None
+                                try:
+                                    from ..market_data import fetch_ohlcv_df as _ah_fetch
+                                    from ..indicator_core import compute_all_from_df as _ah_compute
+                                    _ah_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+                                    _ah_df = _ah_fetch(sess.symbol, interval=_ah_iv, period="5d")
+                                    if _ah_df is not None and not getattr(_ah_df, "empty", True) and len(_ah_df) >= 6:
+                                        _ah_arr = _ah_compute(_ah_df, needed={"atr"})
+                                        _ah_atr = _ah_arr.get("atr") or []
+                                        _ah_cur = len(_ah_df) - 1
+                                        _ah_close = float(_ah_df["Close"].astype(float).iloc[_ah_cur])
+                                        if _ah_atr and _ah_cur < len(_ah_atr) and _ah_atr[_ah_cur] is not None and _ah_close > 0:
+                                            _ah_atr_pct = float(_ah_atr[_ah_cur]) / _ah_close
+                                        # breakout level = the recent COMPLETED-bar swing high
+                                        # (the level the add price is measured against for
+                                        # extension), excluding the current forming bar.
+                                        _ah_k = max(2, int(getattr(settings, "chili_momentum_add_into_halt_swing_lookback", 6) or 6))
+                                        _ah_ws = max(0, _ah_cur - _ah_k)
+                                        if _ah_ws < _ah_cur:
+                                            _ah_level = float(_ah_df["High"].astype(float).iloc[_ah_ws:_ah_cur].max())
+                                    else:
+                                        _ah_df = None  # too thin for the structure read
+                                except Exception:
+                                    _ah_df = None
+                                    _ah_level = None
+                                    _ah_atr_pct = None
                                 _ah_ok, _ah_reason, _ah_dbg = add_into_halt_ok(
                                     avg_entry=float(pos["avg_entry_price"]),
                                     original_stop=_orig_stop,
@@ -7731,6 +11555,13 @@ def tick_live_session(
                                     bid=float(bid),
                                     is_limit_up_halt=bool(_is_limit_up),
                                     in_rth=bool(_halt_in_rth),
+                                    tape_confirmed=_ah_tape,
+                                    breakout_level=_ah_level,
+                                    atr_pct=_ah_atr_pct,
+                                    df=_ah_df,
+                                    consecutive_halt_up_count=int(le.get("halt_chain_up_count") or 0),
+                                    halt_level=_float_or_none(le.get("halt_level")),
+                                    resumption_open=_float_or_none(le.get("halt_resumption_open")),
                                 )
                                 if not _ah_ok:
                                     # EXTRA guard refused the halt-add: turn the decision into a
@@ -8535,9 +12366,9 @@ def tick_live_session(
             if _grid_active:
                 _grid = _resolve_scale_grid(pos, sess.symbol)
                 _gidx = int(pos.get("scale_grid_idx") or 0)
-                frac = float(_grid[_gidx][1]) if _gidx < len(_grid) else scale_out_fraction(symbol=sess.symbol)
+                frac = float(_grid[_gidx][1]) if _gidx < len(_grid) else scale_out_fraction(symbol=sess.symbol, vol_pctl=_adaptive_scale_vol_pctl(le))
             else:
-                frac = scale_out_fraction(symbol=sess.symbol)
+                frac = scale_out_fraction(symbol=sess.symbol, vol_pctl=_adaptive_scale_vol_pctl(le))
             scale_qty, runner_qty, can_split = scale_out_quantity(
                 current_qty=qty,
                 original_qty=orig_qty,
@@ -8656,11 +12487,39 @@ def tick_live_session(
             "cooldown_after_stopout_seconds",
             settings.chili_momentum_risk_cooldown_after_stopout_seconds,
         )
-        until = _utcnow() + timedelta(seconds=max(0, cd_sec))
+        # ADAPTIVE RE-ENTRY COOLDOWN (kill the magic fixed 300s): scale the base by
+        # the exit reason (a clean PROFIT/target exit => a SHORT re-scalp window so a
+        # runner can be re-entered on the next micro-pullback — the TNMG case; a
+        # STOP-OUT => the full base, sit out the chop) AND by the name's realized vol
+        # (entry_stop_atr_pct, persisted across recycle). OFF => byte-identical (uses
+        # cd_sec verbatim). The loss-side reason_mult is pinned 1.0 so an adaptive
+        # cooldown is NEVER shorter than the base on a loss.
+        _cd_dbg = None
+        if bool(getattr(settings, "chili_momentum_adaptive_reentry_cooldown_enabled", True)):
+            cd_sec, _cd_dbg = adaptive_reentry_cooldown_seconds(
+                base_seconds=int(cd_sec),
+                last_exit_reason=le.get("last_exit_reason"),
+                last_exit_return_bps=_float_or_none(le.get("last_exit_return_bps")),
+                entry_stop_atr_pct=_float_or_none(le.get("entry_stop_atr_pct")),
+                profit_factor=float(getattr(settings, "chili_momentum_reentry_profit_cooldown_factor", 0.25) or 0.25),
+                vol_ref_atr_pct=float(getattr(settings, "chili_momentum_reentry_cooldown_vol_ref_atr_pct", 0.03) or 0.03),
+                vol_span=float(getattr(settings, "chili_momentum_reentry_cooldown_vol_span", 1.5) or 1.5),
+            )
+        # Track WHETHER this exit was a stop-out/loss (for the bounded re-entry cap
+        # in COOLDOWN). A profit/target recycle is free; only loss recycles count.
+        _rb = _float_or_none(le.get("last_exit_return_bps"))
+        _was_loss = bool(_rb is not None and _rb <= 0)
+        le["last_recycle_was_stopout"] = _was_loss
+        until = _utcnow() + timedelta(seconds=max(0, int(cd_sec)))
         le["cooldown_until_utc"] = until.isoformat()
         _safe_transition(db, sess, STATE_LIVE_COOLDOWN)
         _commit_le(sess, le)
-        _emit(db, sess, "live_cooldown_started", {"until_utc": le["cooldown_until_utc"]})
+        _emit(db, sess, "live_cooldown_started", {
+            "until_utc": le["cooldown_until_utc"],
+            "cooldown_seconds": int(cd_sec),
+            "adaptive": _cd_dbg,
+            "was_stopout": _was_loss,
+        })
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -8673,11 +12532,41 @@ def tick_live_session(
         if _utcnow() >= until:
             le.pop("cooldown_until_utc", None)
             le["trade_cycles"] = int(le.get("trade_cycles") or 0) + 1
+            # Count LOSS recycles separately (a profit recycle is a free re-scalp).
+            if bool(le.pop("last_recycle_was_stopout", False)):
+                le["stopout_cycles"] = int(le.get("stopout_cycles") or 0) + 1
+            # BOUNDED RE-ENTRY AFTER STOP-OUT: a chopper must not re-arm forever. When
+            # the loss-recycle count hits the cap, TERMINALIZE (FINISHED) instead of
+            # recycling to WATCHING. Flag OFF => unlimited (byte-identical legacy).
+            _re_ok, _re_reason = reentry_after_stop_allowed(
+                enabled=bool(getattr(settings, "chili_momentum_reentry_after_stop_bound_enabled", True)),
+                stopout_cycles=int(le.get("stopout_cycles") or 0),
+                max_stopout_reentries=int(getattr(settings, "chili_momentum_max_stopout_reentries", 3) or 3),
+            )
+            if not _re_ok:
+                _commit_le(sess, le)
+                _safe_transition(db, sess, STATE_LIVE_FINISHED)
+                _emit(db, sess, "live_reentry_capped", {
+                    "reason": _re_reason,
+                    "stopout_cycles": int(le.get("stopout_cycles") or 0),
+                    "trade_cycles": le["trade_cycles"],
+                })
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state}
+            # RECYCLE ENTRY-STATE RESET (2026-06-27 duplicate-fill root cause): clear the
+            # PRIOR trade's entry-order / position lifecycle state so the recycled watcher
+            # starts CLEAN — without this it re-polls / re-adopts its OWN already-filled
+            # entry order on the next WATCHING tick -> phantom 2x long + stuck bailout spin
+            # (AREC sid 9331). OFF => byte-identical to the legacy recycle (state retained).
+            _recycle_reset_keys: list[str] = []
+            if bool(getattr(settings, "chili_momentum_recycle_entry_state_reset_enabled", True)):
+                _recycle_reset_keys = _reset_entry_state_on_recycle(le)
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_WATCHING_LIVE)
             _emit(db, sess, "live_recycled", {
                 "realized_pnl_usd": le.get("realized_pnl_usd"),
                 "trade_cycles": le["trade_cycles"],
+                "entry_state_reset_keys": _recycle_reset_keys,
             })
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}

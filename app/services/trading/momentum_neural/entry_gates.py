@@ -128,9 +128,9 @@ def momentum_volume_confirmation(df: pd.DataFrame) -> tuple[bool, str]:
         win = vol.tail(20)
         avg_v = float(win.iloc[:-1].mean()) if len(win) > 1 else float(vol.iloc[-1])
         cur_v = float(vol.iloc[-1])
-        if avg_v <= 0:
+        if not math.isfinite(avg_v) or avg_v <= 0:
             return False, "volume_avg_zero"
-        if cur_v < 1.5 * avg_v:
+        if not math.isfinite(cur_v) or cur_v < 1.5 * avg_v:
             return False, "volume_below_1p5x_avg"
         prev = float(close.iloc[-2]) if len(close) > 1 else price
         if price <= prev:
@@ -147,7 +147,9 @@ def momentum_volume_confirmation(df: pd.DataFrame) -> tuple[bool, str]:
         return False, "volume_window_short"
     avg_v = float(win.iloc[:-1].mean())
     cur_v = float(vol.iloc[-1])
-    if avg_v <= 0 or cur_v < 1.5 * avg_v:
+    if not math.isfinite(avg_v) or avg_v <= 0:
+        return False, "volume_avg_zero"
+    if not math.isfinite(cur_v) or cur_v < 1.5 * avg_v:
         return False, "volume_below_1p5x_avg"
     return True, "momentum_ok_abs_vol"
 
@@ -238,6 +240,33 @@ def _collapse_cap(atr_pct: float | None) -> float:
     halt-resume dip trigger and the deep-retrace reclaim path (same Ross mechanic:
     buy the dip's reclaim, never a collapse)."""
     return min(0.25, max(0.06, 6.0 * (atr_pct or 0.01)))
+
+
+def _adaptive_pullback_depth_ceiling(atr_pct: float | None, enabled: bool) -> float:
+    """Adaptive Ross retrace ceiling on the IMPULSE-relative axis (not the absolute
+    depth axis owned by ``_collapse_cap``). When ``enabled`` is False (default), returns
+    ``0.0`` -> callers fall through to their existing ceiling, BYTE-IDENTICAL behaviour.
+
+    THE TRAP (docs/STRATEGY: documented 0-fills/fewer-fills regression): tightening the
+    pullback-depth ceiling toward Ross's ~50%-of-prior-candle WITHOUT adapting cuts the
+    EXPLOSIVE low-float names whose normal pull is deeper (INHD-like). So the tightening
+    is CALM-ONLY: the ~0.50 base is the FLOOR of the ceiling for a calm name (ATR% ~ 0),
+    and it WIDENS with the instrument's OWN ATR% so a volatile name keeps the current
+    (deeper) tolerance.
+
+    Reuses the ONE documented base (``_VOL_SHALLOW_BASE``/``_VOL_SHALLOW_ATR_MULT``,
+    line ~192) -- same formula as ``_vol_aware_pullback_tolerances`` shallow return -- so
+    there is a single yardstick to tune. Hard-capped at ``_VOL_SHALLOW_CEIL`` (0.75);
+    never exceeds it. No fixed per-name magic.
+
+    Worked points (matches LOCATE): calm ``atr_pct=0.01`` -> ~0.515 (tighter than the
+    current 0.70 ceiling -> a calm name's deeper-than-~50% pull is now REJECTED);
+    explosive ``atr_pct=0.05`` -> ~0.575 (the same deep pull on a volatile name PASSES);
+    ``atr_pct=0.50`` -> 0.75 hard cap (never beyond)."""
+    if not enabled:
+        return 0.0
+    a = float(atr_pct) if (atr_pct is not None and atr_pct > 0) else 0.0
+    return min(_VOL_SHALLOW_CEIL, _VOL_SHALLOW_BASE + a * _VOL_SHALLOW_ATR_MULT)
 
 
 def _is_first_pullback(
@@ -343,6 +372,162 @@ def _detect_back_side(
     return False, ""
 
 
+def _doji_trigger_veto(
+    o: float, h: float, l: float, c: float, *, atr_pct: float | None, base_body_frac: float,
+) -> tuple[bool, dict[str, Any]]:
+    """DOJI VETO (candle-quality gate): the TRIGGER candle is a true DOJI — a weak body
+    relative to its range = indecision, not a conviction break. Returns ``(veto, debug)``;
+    ``veto=True`` means BLOCK the entry (a doji broke the level).
+
+    ADAPTIVE threshold (no fixed magic): a candle is a doji when ``body/range`` falls below
+    ``base_body_frac + atr_pct`` — the ONE documented base (``base_body_frac`` = 0.25, the
+    calm-name indecision floor) WIDENS with the instrument's volatility so an explosive
+    high-ATR name (whose normal bars carry larger wicks) is not over-restricted. ``atr_pct``
+    None -> just the base (Ross floor).
+
+    OVERRIDE: a STRONG full-body commitment candle ALWAYS passes regardless of the body/range
+    ratio — green (close >= open), closing in the upper half of its range, with a non-dominant
+    upper wick (reuses ``is_strong_bull_break_candle``). This keeps a wide-range conviction
+    candle (whose body may be a smaller fraction of a very tall range) from being mislabeled a
+    doji.
+
+    FAIL-SAFE: a zero-range / unreadable bar -> ``veto=False`` (never block on unreadable data).
+    Range-relative, pure, side-effect-free."""
+    from .candles import _ohlc, is_strong_bull_break_candle
+
+    dbg: dict[str, Any] = {}
+    try:
+        rng, body, _upper, _lower = _ohlc(o, h, l, c)
+        if rng <= 0:
+            return False, dbg  # unreadable bar -> never block (fail-safe)
+        body_frac = body / rng
+        thresh = float(base_body_frac) + max(0.0, float(atr_pct or 0.0))
+        dbg["doji_body_frac"] = round(body_frac, 4)
+        dbg["doji_threshold"] = round(thresh, 4)
+        if body_frac >= thresh:
+            return False, dbg  # full enough body -> not a doji
+        # Body is thin in fraction terms, BUT a strong full-body commitment candle still
+        # passes (a tall-range conviction bar can have a small body FRACTION yet be a real
+        # break). Only veto when it is NOT that conviction shape.
+        if is_strong_bull_break_candle(o, h, l, c):
+            dbg["doji_override"] = "strong_full_body"
+            return False, dbg
+        return True, dbg
+    except (TypeError, ValueError):
+        return False, dbg  # bad inputs -> fail-open (never block on a bug)
+
+
+def _resample_htf(df: pd.DataFrame, rule: str = "5min") -> pd.DataFrame | None:
+    """Resample a 1m OHLCV frame to a higher timeframe (default 5m) for the HTF-against
+    read — NO NEW FEED, the HTF is DERIVED from the 1m df the lane already supplies. Requires
+    a DatetimeIndex (the live runner / replay always pass one); returns ``None`` when the
+    index is not datetime or the frame is too thin to resample (-> caller fails open). Pure."""
+    try:
+        if df is None or getattr(df, "empty", True) or len(df) < 2:
+            return None
+        idx = df.index
+        if not isinstance(idx, pd.DatetimeIndex):
+            return None
+        cols = {x.lower(): x for x in df.columns}
+        agg = {}
+        if "open" in cols:
+            agg[cols["open"]] = "first"
+        if "high" in cols:
+            agg[cols["high"]] = "max"
+        if "low" in cols:
+            agg[cols["low"]] = "min"
+        if "close" in cols:
+            agg[cols["close"]] = "last"
+        if "volume" in cols:
+            agg[cols["volume"]] = "sum"
+        if "close" not in cols:
+            return None
+        htf = df.resample(rule).agg(agg).dropna(how="any")
+        if htf is None or getattr(htf, "empty", True) or len(htf) < 2:
+            return None
+        return htf
+    except (TypeError, ValueError, KeyError, AttributeError):
+        return None
+
+
+def _htf_against_veto(
+    df: pd.DataFrame, *, rule: str = "5min", macd_threshold: float = 0.0,
+    rolldown_bars: int = 3,
+) -> tuple[bool, dict[str, Any]]:
+    """MULTI-TF ALIGNMENT veto: the HIGHER TF (5m, resampled from the 1m ``df`` — no new
+    feed) is CLEARLY AGAINST the long. Returns ``(veto, debug)``; ``veto=True`` means BLOCK.
+
+    ⚠️ THE TRAP this gate is built to AVOID: requiring full multi-TF alignment breaks Ross's
+    1m-FAST geometry (the 1m leads, the HTF lags). So this fires ONLY when the HTF is CLEARLY
+    bearish/rolling-down — NEVER when it is merely neutral/lagging (not yet up but not down),
+    and NEVER on a single lagging EMA down-tick (a slow 5m EMA dips for ONE sample off a flush
+    while the 1m has already turned up — that is the dip-rip/VWAP-reclaim the lane catches).
+
+    CLEARLY AGAINST (veto) — reuses the SAME EMA/MACD-rollover structure as the 1m
+    ``_detect_back_side``, applied to the 5m arrays, but demanding a SUSTAINED (not single-bar)
+    deterioration:
+      (a) 5m EMA-9 SUSTAINED roll-down — strictly lower across EACH of the last ``rolldown_bars``
+          samples (a multi-bar negative slope, ONE documented base = 3 samples / 2 consecutive
+          down steps). A single lagging down-tick does NOT count; OR
+      (b) 5m MACD histogram clearly PEAKED — ``hist[-1] < hist[-2] >= hist[-3]`` with
+          ``hist[-2] > macd_threshold`` (an up-impulse that has topped and rolled over).
+
+    NEUTRAL/LAGGING (PASS) — EMA-9 flat/rising, EMA-9 dipping for only a single sample, MACD
+    histogram rising/flat/near-zero, or too few HTF bars to read a trend: all PASS (no
+    over-restriction on the lagging HTF). An aligned-UP HTF (EMA rising) also passes.
+
+    FAIL-OPEN: non-datetime index / thin HTF / missing arrays / any error -> ``veto=False``
+    (a missing HTF feed can NEVER block a valid 1m-fast entry). Pure, side-effect-free."""
+    dbg: dict[str, Any] = {}
+    try:
+        htf = _resample_htf(df, rule=rule)
+        if htf is None:
+            return False, dbg  # cannot read HTF -> fail-open (1m-fast preserved)
+        arrays = compute_all_from_df(htf, needed={"ema_9", "macd", "macd_signal", "macd_hist"})
+        ema9 = arrays.get("ema_9") or []
+        hist = arrays.get("macd_hist") or []
+        hcur = len(htf) - 1
+        # (a) 5m EMA-9 SUSTAINED roll-down — strictly lower across EACH of the last N samples
+        # (a multi-bar negative slope), NOT a single lagging down-tick. Needs N+1 EMA samples
+        # to read N consecutive steps; too few -> no read (neutral, PASS).
+        try:
+            _n = max(2, int(rolldown_bars))
+            e_cur = ema9[hcur] if 0 <= hcur < len(ema9) else None
+            e_prev = ema9[hcur - 1] if 0 <= hcur - 1 < len(ema9) else None
+            if e_cur is not None and e_prev is not None:
+                dbg["htf_ema9_slope"] = round(float(e_cur) - float(e_prev), 6)
+            if hcur - (_n - 1) >= 0 and len(ema9) > hcur:
+                _window = [ema9[hcur - k] for k in range(_n)]  # newest -> oldest
+                if all(x is not None for x in _window):
+                    _vals = [float(x) for x in _window]
+                    # newest strictly below next-older at EVERY step = sustained down-slope.
+                    _sustained = all(_vals[k] < _vals[k + 1] for k in range(_n - 1))
+                    dbg["htf_ema9_rolldown_bars"] = _n
+                    if _sustained:
+                        dbg["htf_against"] = "ema9_sustained_rolldown"
+                        return True, dbg
+        except (TypeError, ValueError, IndexError):
+            pass
+        # (b) 5m MACD histogram clearly PEAKED (positive-then-declining rollover).
+        try:
+            if len(hist) >= 3:
+                h0 = hist[hcur] if hist[hcur] is not None else None
+                h1 = hist[hcur - 1] if hist[hcur - 1] is not None else None
+                h2 = hist[hcur - 2] if hist[hcur - 2] is not None else None
+                if h0 is not None and h1 is not None and h2 is not None:
+                    h0, h1, h2 = float(h0), float(h1), float(h2)
+                    dbg["htf_macd_hist"] = [round(h2, 6), round(h1, 6), round(h0, 6)]
+                    if (h0 < h1) and (h1 >= h2) and (h1 > float(macd_threshold)):
+                        dbg["htf_against"] = "macd_peaked"
+                        return True, dbg
+        except (TypeError, ValueError, IndexError):
+            pass
+        # Neither rolling-down nor peaked -> neutral/lagging or aligned-up -> PASS.
+        return False, dbg
+    except (TypeError, ValueError, KeyError, AttributeError, IndexError):
+        return False, dbg  # any error -> fail-open (never block a valid 1m-fast entry)
+
+
 # LULD halt-band proximity (re-analysis survivor S3, video 60): buying a dip whose STOP
 # sits inside (or just above) the LULD down-halt band risks getting halt-TRAPPED mid-
 # cascade — the stock halts on a further drop and the position can't be exited at the stop
@@ -426,22 +611,62 @@ def add_into_halt_ok(
     bid: float | None,
     is_limit_up_halt: bool,
     in_rth: bool,
+    tape_confirmed: bool | None = None,
+    breakout_level: float | None = None,
+    atr_pct: float | None = None,
+    df: Any = None,
+    consecutive_halt_up_count: int | None = None,
+    halt_level: float | None = None,
+    resumption_open: float | None = None,
     settings_obj: Any = settings,
 ) -> tuple[bool, str, dict[str, Any]]:
     """GAP 6 (Warrior re-audit, RISKIEST — default OFF): the EXTRA-GUARDED predicate that
     permits a SMALL pyramid ADD while a name is HALTED LIMIT-UP. EVERY condition must hold;
     FAIL-CLOSED on any miss (a missing input ⇒ no add). Pure; never raises.
 
+    ADD-INTO-HALT is LOSS-SENSITIVE: you cannot exit a halted name, so a bad add is
+    dangerous. It therefore carries ALL the breakout-entry chase guards PLUS the now-live
+    Cluster-A halt-family context (the same gates the entry path uses — REUSED here, never
+    duplicated). Every chase guard fails-CLOSED on a missing input.
+
     Conditions (ALL required):
-      (1) flag ON (``chili_momentum_add_into_halt_enabled``);
-      (2) the halt is LIMIT-UP / bullish (``is_limit_up_halt``) — NEVER a limit-down halt;
-      (3) RTH (``in_rth``) — halts/resumes only matter in regular hours;
-      (4) ALREADY IN PROFIT by >= ``chili_momentum_add_into_halt_min_profit_r`` of the entry
-          risk R = (avg_entry − original_stop): ``bid >= avg_entry + min_profit_r · R``
-          (NEVER add if underwater — the profit-first rule);
-      (5) the ORIGINAL STRUCTURAL STOP is intact (``current_stop`` has not LOOSENED below
-          ``original_stop`` — a stop can only tighten; if it moved DOWN, structure changed,
-          refuse).
+      (1)  flag ON (``chili_momentum_add_into_halt_enabled``);
+      (2)  the halt is LIMIT-UP / bullish (``is_limit_up_halt``) — NEVER a limit-down halt;
+      (3)  RTH (``in_rth``) — halts/resumes only matter in regular hours;
+      (4)  ALREADY IN PROFIT by >= ``chili_momentum_add_into_halt_min_profit_r`` of the entry
+           risk R = (avg_entry − original_stop): ``bid >= avg_entry + min_profit_r · R``
+           (NEVER add if underwater — the profit-first rule);
+      (5)  the ORIGINAL STRUCTURAL STOP is intact (``current_stop`` has not LOOSENED below
+           ``original_stop`` — a stop can only tighten; if it moved DOWN, structure changed,
+           refuse). The structural stop on the ADDED shares = this same intact stop.
+
+    CHASE GUARDS (each fail-CLOSED on missing data — a missing input ⇒ NO add):
+      (T)  TAPE REQUIRED: ``tape_confirmed`` must be explicitly True. None / False ⇒ no add
+           (you do not add into a halt without confirming the tape is lifting).
+      (E)  EXTENSION VETO / NOT-PARABOLIC: reuse ``_entry_extension_veto`` — if the add price
+           (``bid``) sits too far above the breakout level for the name's ATR, it is a blow-off
+           top, refuse. Requires ``breakout_level`` + ``atr_pct`` (missing ⇒ fail-closed here).
+      (B)  NOT-BACKSIDE / ABOVE-VWAP: reuse ``_detect_back_side`` (1m EMA/MACD rollover) +
+           ``front_side_state`` (below-VWAP / faded / rolled-over top) on ``df``. Backside or
+           below VWAP ⇒ refuse. Missing/thin ``df`` ⇒ fail-closed here.
+
+    HALT-FAMILY CONTEXT — evaluated DIRECTLY on the raw halt signals under the MASTER
+    flag, INDEPENDENT of the standalone Cluster-A sub-flags (``halt_chain_risk_gate_
+    enabled`` / ``halt_resumption_direction_enabled`` / ``false_halt_avoid_enabled``).
+    Those sub-flags govern the PRIMARY-ENTRY path; a halt-ADD is loss-sensitive and must
+    self-enforce the halt context whenever the master flag is ON — otherwise a sub-flag-OFF
+    lane would silently fail-OPEN and add into a blow-off it could not exit. FAIL-CLOSED on
+    any MISSING halt signal:
+      (H1) HALT-CHAIN risk: if ``consecutive_halt_up_count`` >= ``chili_momentum_halt_
+           chain_block_count`` (an extended consecutive-halt-up blow-off), refuse the add.
+           (Reuses the same block-count setting — no new magic. The de-weight branch only
+           shrinks size on the primary path; it never refuses an add.)
+      (H2) HALT-RESUMPTION DIRECTION: a ``halt_level`` is REQUIRED. The resume must NOT be
+           unfavorable — ``resumption_open`` must NOT be below ``halt_level``. A lower resume
+           ⇒ refuse. A MISSING ``halt_level`` ⇒ fail-closed (``add_into_halt_no_halt_signal``);
+           a missing ``resumption_open`` ⇒ fail-closed (``add_into_halt_no_resumption``).
+      (H3) FALSE-HALT AVOID: a WEAK resume (``resumption_open`` below ``halt_level``) is a
+           false halt ⇒ refuse (same predicate as H2 — a sub-threshold resume is unfavorable).
 
     Returns ``(ok, reason, debug)``. ``ok=True`` ONLY when every leg passes. The add SIZE is
     NOT decided here — the existing pyramid sizing + ``chili_momentum_pyramid_max_adds`` cap
@@ -469,21 +694,173 @@ def add_into_halt_ok(
             "avg_entry": round(a, 6), "original_stop": round(os_, 6),
             "bid": round(b, 6), "profit_r": round(profit_r, 3), "min_profit_r": min_r,
         })
+
+        # ── (T) TAPE REQUIRED + fail-CLOSED ────────────────────────────────────────────
+        # No add into a halt without an explicit tape confirmation. None (no tape read) or
+        # False (tape not lifting) ⇒ refuse. This runs FIRST among the risk legs so a
+        # tape-less halt can never even reach the profit/structure checks.
+        if tape_confirmed is not True:
+            dbg["tape_confirmed"] = tape_confirmed
+            return False, "add_into_halt_no_tape", dbg
+
         # (4) PROFIT-FIRST: never add unless sufficiently in the green.
         if profit_r < min_r:
             return False, "add_into_halt_insufficient_profit", dbg
         # (5) STRUCTURAL STOP INTACT: the current stop must NOT be below the original
-        # (a stop only ever tightens; a looser stop = structure changed, refuse).
+        # (a stop only ever tightens; a looser stop = structure changed, refuse). The
+        # structural stop carried on the ADDED shares is THIS intact stop.
+        _add_stop = os_
         if current_stop is not None:
             try:
-                if float(current_stop) < os_ - 1e-9:
-                    dbg["current_stop"] = round(float(current_stop), 6)
+                _cs = float(current_stop)
+                if _cs < os_ - 1e-9:
+                    dbg["current_stop"] = round(_cs, 6)
                     return False, "add_into_halt_stop_loosened", dbg
+                _add_stop = _cs  # the (possibly tightened) live stop bounds the added shares
             except (TypeError, ValueError):
                 return False, "add_into_halt_bad_stop", dbg
+        dbg["add_structural_stop"] = round(_add_stop, 6)
+
+        # ── (E) EXTENSION VETO / NOT-PARABOLIC ─────────────────────────────────────────
+        # Reuse the entry-extension chase guard: the add price (bid) must NOT sit too far
+        # above the breakout level for the name's ATR. Missing level/atr ⇒ fail-CLOSED
+        # (we will NOT add into a halt without the data to prove it is not extended).
+        if breakout_level is None or atr_pct is None:
+            dbg["breakout_level"] = breakout_level
+            dbg["atr_pct"] = atr_pct
+            return False, "add_into_halt_no_extension_inputs", dbg
+        if _entry_extension_veto(b, float(breakout_level), float(atr_pct), settings_obj):
+            dbg["breakout_level"] = round(float(breakout_level), 6)
+            dbg["atr_pct"] = round(float(atr_pct), 6)
+            return False, "add_into_halt_extended", dbg
+
+        # ── (B) NOT-BACKSIDE / ABOVE-VWAP ──────────────────────────────────────────────
+        # Reuse _detect_back_side (1m EMA/MACD rollover) + front_side_state (below-VWAP /
+        # faded / rolled-over top). Missing/thin df ⇒ fail-CLOSED (no add without the
+        # structure to prove front-side).
+        if df is None or getattr(df, "empty", True) or len(df) < 5:
+            return False, "add_into_halt_no_structure", dbg
+        try:
+            _arrays = compute_all_from_df(
+                df, needed={"ema_9", "ema_20", "macd", "macd_signal"}
+            )
+            _ema9 = _arrays.get("ema_9") or []
+            _ema20 = _arrays.get("ema_20") or []
+            _macd = _arrays.get("macd") or []
+            _macd_sig = _arrays.get("macd_signal") or []
+            _cur = len(df) - 1
+            _bs, _bs_reason = _detect_back_side(
+                _ema9, _ema20, _macd, _macd_sig, _cur,
+                macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+            )
+            if _bs:
+                dbg["back_side"] = _bs_reason
+                return False, "add_into_halt_back_side", dbg
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            dbg["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            if getattr(_fs, "is_backside", False):
+                dbg["front_side_state"] = getattr(_fs, "reason", "backside")
+                return False, "add_into_halt_backside_lifecycle", dbg
+        except Exception:
+            # thin / degenerate frame ⇒ fail-CLOSED for this loss-sensitive add.
+            return False, "add_into_halt_structure_error", dbg
+
+        # ── (H1) HALT-CHAIN risk — evaluate the RAW chain count DIRECTLY under the MASTER ─
+        # flag, INDEPENDENT of chili_momentum_halt_chain_risk_gate_enabled. add-into-halt is
+        # loss-sensitive: the standalone risk-gate's flag controls the *primary-entry* path,
+        # but a halt-ADD must self-enforce the chain block whenever the master flag is ON —
+        # otherwise a sub-flag-OFF lane would silently skip H1 (fail-OPEN) and add into an
+        # over-extended halt-chain blow-off. Reuse the SAME block-count setting (no new
+        # magic). At/above the block count ⇒ refuse. Below it ⇒ pass (the de-weight branch
+        # only shrinks size on the primary path; it never refuses an add).
+        try:
+            _hc_count = int(consecutive_halt_up_count or 0)
+            _hc_block_at = max(2, int(getattr(settings_obj, "chili_momentum_halt_chain_block_count", 3) or 3))
+            dbg["consecutive_halt_up"] = _hc_count
+            dbg["halt_chain_block_count"] = _hc_block_at
+            if _hc_count >= _hc_block_at:
+                return False, "add_into_halt_halt_chain_blocked", dbg
+        except (TypeError, ValueError):
+            return False, "add_into_halt_halt_chain_error", dbg
+
+        # ── (H2/H3) HALT-RESUMPTION DIRECTION + FALSE-HALT — evaluate DIRECTLY on the raw ─
+        # halt_level / resumption_open under the MASTER flag, INDEPENDENT of the resumption-
+        # direction / false-halt sub-flags. A halt-ADD must CONFIRM the resume was favorable
+        # (resumption_open NOT below halt_level); an unfavorable / weak resume is a false
+        # halt ⇒ refuse. FAIL-CLOSED on a MISSING halt signal: no halt_level ⇒ we cannot
+        # prove the resume direction at all (add_into_halt_no_halt_signal); a halt_level but
+        # no resumption_open ⇒ we cannot confirm the resume (add_into_halt_no_resumption).
+        # We will NOT add into a halt we cannot confirm resumed favorably.
+        if halt_level is None:
+            return False, "add_into_halt_no_halt_signal", dbg
+        try:
+            _hl = float(halt_level)
+        except (TypeError, ValueError):
+            return False, "add_into_halt_bad_halt_level", dbg
+        if not (_hl > 0):
+            return False, "add_into_halt_no_halt_signal", dbg
+        dbg["halt_level"] = round(_hl, 6)
+        if resumption_open is None:
+            return False, "add_into_halt_no_resumption", dbg
+        try:
+            _ro = float(resumption_open)
+        except (TypeError, ValueError):
+            return False, "add_into_halt_bad_resumption", dbg
+        dbg["resumption_open"] = round(_ro, 6)
+        if _ro < _hl * (1.0 - 1e-9):
+            # below the halt level on the resume = unfavorable / false halt.
+            return False, "add_into_halt_unfavorable_resumption", dbg
+
         return True, "add_into_halt_ok", dbg
     except Exception:
         return False, "add_into_halt_error", dbg  # any error -> fail-CLOSED
+
+
+def halt_chain_risk_gate(
+    *,
+    consecutive_halt_up_count: int | None,
+    settings_obj: Any = settings,
+) -> tuple[bool, float, str, dict[str, Any]]:
+    """GAP 1 (Warrior re-audit): the HALT-CHAIN risk predicate for a halt-resume-dip long.
+
+    A name that keeps halting UP again and again is climbing the LULD ladder — each
+    successive limit-up halt-resume long is later / more extended / sharper to unwind.
+    Given the PER-SYMBOL consecutive halt-UP count, returns ``(block, size_mult, reason,
+    debug)``:
+
+      * ``block=True``  — at/above ``chili_momentum_halt_chain_block_count`` ⇒ BLOCK the
+        halt-resume long entirely (turn a would-fire into a no-fire).
+      * ``block=False`` + ``size_mult<1.0`` — below the block but on a chain (count>=2):
+        DE-WEIGHT linearly toward the block so the size shrinks as the chain extends.
+      * ``block=False`` + ``size_mult=1.0`` — count 0/1 (no chain) ⇒ no change.
+
+    RISK-REDUCING ONLY: it can only ever BLOCK or SHRINK; ``size_mult`` is always in
+    ``[lo, 1.0]`` and never exceeds 1.0. Pure; never raises. Default OFF
+    (``chili_momentum_halt_chain_risk_gate_enabled``) ⇒ ``(False, 1.0, "disabled", {})``
+    before any compute = byte-identical."""
+    dbg: dict[str, Any] = {}
+    try:
+        if not bool(getattr(settings_obj, "chili_momentum_halt_chain_risk_gate_enabled", False)):
+            return False, 1.0, "halt_chain_gate_disabled", dbg
+        cnt = int(consecutive_halt_up_count or 0)
+        block_at = int(getattr(settings_obj, "chili_momentum_halt_chain_block_count", 3) or 3)
+        block_at = max(2, block_at)
+        dbg.update({"consecutive_halt_up": cnt, "block_count": block_at})
+        if cnt >= block_at:
+            return True, 1.0, "halt_chain_blocked", dbg
+        # De-weight linearly from the 2nd halt up toward the block: at count==1 (the
+        # first halt up) full size; at count==block_at-1 the most-shrunk pre-block size.
+        if cnt >= 2 and block_at > 2:
+            # fraction of the way from the 1st halt-up (full) to the block (most shrunk).
+            frac = (cnt - 1) / (block_at - 1)
+            mult = max(0.5, 1.0 - 0.5 * frac)  # floor at 0.5x; never below
+            dbg["size_mult"] = round(mult, 4)
+            return False, mult, "halt_chain_deweighted", dbg
+        return False, 1.0, "halt_chain_ok", dbg
+    except Exception:
+        return False, 1.0, "halt_chain_error", dbg  # fail-open: never blocks on a bug
 
 
 def _dipbuy_signals_ok(
@@ -1889,11 +2266,20 @@ def _entry_extension_veto(
     try:
         if not bool(getattr(settings, "chili_momentum_entry_extension_veto_enabled", True)):
             return False
-        if entry_price is None or breakout_level is None or atr_pct is None:
-            return False  # missing level/atr -> never veto (parity)
+        if entry_price is None or breakout_level is None:
+            return False  # missing level/price -> never veto (parity)
         ep = float(entry_price)
         lvl = float(breakout_level)
-        a = float(atr_pct)
+        # HIGH-2 fail-SAFE: a missing/non-finite ATR (thin low-float runner with no
+        # computable volatility) must NOT disarm the chase-guard. Fall back to a=0.0
+        # so the cap collapses to the FLAT extension floor and an entry extended beyond
+        # the floor still VETOES, instead of being chased far over the break unguarded.
+        if atr_pct is None:
+            a = 0.0
+        else:
+            a = float(atr_pct)
+            if not math.isfinite(a):
+                a = 0.0
         if lvl <= 0 or ep <= 0:
             return False  # bad level/price -> never veto (parity)
         k = float(getattr(settings, "chili_momentum_entry_extension_atr_mult", 8.0))
@@ -2396,10 +2782,14 @@ def bull_flag_confirmation(
         opn = df["Open"].astype(float) if "Open" in getattr(df, "columns", []) else None
         n = len(df)
         cur = n - 1
+        # Request vwap too so the NOT-PARABOLIC extension guard's VWAP arm gets a REAL series
+        # (compute_all_from_df only computes what is requested — an un-requested vwap would
+        # silently no-op the extension VWAP arm, a chase hole). Mirrors wedge_break / cup.
         arrays = compute_all_from_df(
-            df, needed={"ema_9", "ema_20", "macd", "macd_signal", "volume_ratio", "atr"}
+            df, needed={"ema_9", "ema_20", "macd", "macd_signal", "vwap", "volume_ratio", "atr"}
         )
         ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
         vr = arrays.get("volume_ratio") or []
         atr = arrays.get("atr") or []
 
@@ -2494,12 +2884,22 @@ def bull_flag_confirmation(
         retrace = (win_high - pb_low) / impulse_range
         depth = (win_high - pb_low) / win_high if win_high > 0 else 1.0
         flag_ceil = min(_BULL_FLAG_RETRACE_CEIL + a * _BULL_FLAG_RETRACE_CEIL_ATR_MULT, 0.90)
+        # Adaptive Ross retrace ceiling (default OFF -> 0.0 -> no-op, byte-identical).
+        # When enabled it TIGHTENS the retrace axis toward Ross's ~50% for CALM names
+        # while widening for volatile names (so explosive deeper pulls still pass). Only
+        # tightens (min with flag_ceil); never relaxes the existing ceiling.
+        adaptive_ceiling = _adaptive_pullback_depth_ceiling(
+            atr_pct, settings.chili_momentum_adaptive_pullback_depth_ceiling_enabled
+        )
+        eff_ceil = min(flag_ceil, adaptive_ceiling) if adaptive_ceiling > 0 else flag_ceil
         debug["bull_flag_retrace"] = round(retrace, 3)
         debug["bull_flag_floor"] = round(eff_shallow, 3)
-        debug["bull_flag_ceil"] = round(flag_ceil, 3)
+        debug["bull_flag_ceil"] = round(eff_ceil, 3)
+        if adaptive_ceiling > 0:
+            debug["bull_flag_adaptive_ceil"] = round(adaptive_ceiling, 3)
         if retrace <= eff_shallow:
             return False, "bull_flag_too_shallow_is_first_pullback", debug
-        if retrace > flag_ceil or depth > _collapse_cap(atr_pct):
+        if retrace > eff_ceil or depth > _collapse_cap(atr_pct):
             return False, "bull_flag_too_deep", debug
 
         # -- GUARD 5: held the 9-EMA band through the pullback (vol-aware wick tolerance).
@@ -2543,6 +2943,10 @@ def bull_flag_confirmation(
                             }
 
         # -- ANTI-CHASE: backside / rolled-over top veto (reused, fail-OPEN) ---------------
+        # _detect_back_side reads the 1m EMA/MACD rollover; front_side_state reads WHERE the
+        # name sits in its OWN session (below VWAP / faded — Ross never buys below VWAP). The
+        # front_side read fails CLOSED on a thin/degenerate frame (this is a new-conviction
+        # fire path). Mirrors wedge_break / cup_and_handle.
         _bs, _bs_reason = _detect_back_side(
             ema9, (arrays.get("ema_20") or []),
             (arrays.get("macd") or []), (arrays.get("macd_signal") or []),
@@ -2551,6 +2955,18 @@ def bull_flag_confirmation(
         if _bs:
             debug["back_side"] = _bs_reason
             return False, "bull_flag_back_side", debug
+        try:
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            if getattr(_fs, "is_backside", False):
+                debug["front_side_state"] = getattr(_fs, "reason", "backside")
+                return False, "bull_flag_backside_lifecycle", debug
+        except (TypeError, ValueError, AttributeError, KeyError):
+            # thin/degenerate frame -> fail-CLOSED for this new-conviction fire path.
+            debug["reason"] = "front_side_read_error"
+            return False, "bull_flag_backside_lifecycle", debug
 
         # -- L2 hidden-seller veto (reused; fail-open on disabled/null/stale L2) -----------
         _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
@@ -2565,6 +2981,20 @@ def bull_flag_confirmation(
         debug["pullback_low"] = float(stop)
         debug["sustained_rvol"] = round(srv_guard, 2) if srv_guard is not None else None
 
+        # -- NOT PARABOLIC: extension vs the 9-EMA AND VWAP (the blow-off defense) ---------
+        # The pullback-swing-high break level (= the entry) must not sit excessively extended
+        # above the 9-EMA / VWAP — a vertical run INTO the break is a parabolic blow-off, not a
+        # tested flag break. Reuses the SAME adaptive ATR extension yardstick the chase veto
+        # uses (fail-OPEN on a missing reference so thin data never blocks). Mirrors wedge/cup.
+        ema9_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        _ext_ok, _ext_dbg = _hod_extension_ok(
+            level=level, ema9_cur=ema9_cur, vwap_cur=vwap_cur, atr_pct=atr_pct, rvol=None,
+        )
+        if not _ext_ok:
+            debug.update(_ext_dbg)
+            return False, "bull_flag_extended", debug
+
         # -- TICK-BREAK: the live ask already trading through the swing high ("the second it
         # breaks ... I'm a buyer"), gated by the premarket + dipbuy thrust buffers.
         if (
@@ -2578,6 +3008,13 @@ def bull_flag_confirmation(
                 live_price=float(live_price), level=float(level), atr_pct=atr_pct,
             )
         ):
+            # -- TAPE REQUIRED + FAIL-CLOSED (the LAST gate; no fire without buyers on tape) --
+            # Mirrors wedge / cup: buyers must be actively lifting the ask THIS tick. Any
+            # disabled-flag / no-tape / thin / stale / crypto / error ⇒ NO fire.
+            _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+            debug["tape_reason"] = _tape_dbg.get("reason")
+            if not _tape_ok:
+                return False, "bull_flag_tape_unconfirmed", debug
             debug["tick_break"] = True
             debug["live_price"] = float(live_price)
             return True, "bull_flag_break_tick_ok", debug
@@ -2612,6 +3049,15 @@ def bull_flag_confirmation(
         debug["vol_ratio"] = round(vol_ratio, 2)
         if vol_ratio < _vol_mult:
             return False, "bull_flag_low_volume", debug
+
+        # -- TAPE REQUIRED + FAIL-CLOSED (the LAST gate before the completed-bar fire too) --
+        # Mirrors wedge / cup: a completed-bar break with no buyers lifting the ask is a dead
+        # break — never chase it. Any disabled-flag / no-tape / thin / stale / crypto / error
+        # ⇒ NO fire.
+        _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+        debug["tape_reason"] = _tape_dbg.get("reason")
+        if not _tape_ok:
+            return False, "bull_flag_tape_unconfirmed", debug
         return True, "bull_flag_break", debug
     except Exception:
         return False, "bull_flag_error", {"entry_interval": entry_interval, "pattern": "bull_flag"}
@@ -2725,6 +3171,66 @@ def evaluate_sticky_backside_bench(
                     return False, "front_side_live_new_high", None, debug
             except (TypeError, ValueError, KeyError):
                 pass
+        # ── FIX D: BELOW-VWAP RECLAIM-FROM-BELOW EXCEPTION ──────────────────────────────
+        # The w0av0u3qy replay showed this below_vwap bench ATE the SDOT/ILLR early pushes
+        # (44x/14x) — names that dipped below VWAP for a tick but were RECLAIMING it from
+        # below with upward momentum. Do NOT latch a below_vwap bench when the name is
+        # actively reclaiming: current price has crossed BACK to/above VWAP (within the
+        # existing vwap_hold_buffer tolerance) AND is RISING vs the prior bar (positive
+        # reclaim direction). A name still FALLING below VWAP (price below VWAP-buffer, or
+        # not rising) STAYS benched — the genuine-backside fade veto is untouched. ONLY the
+        # below_vwap reason qualifies (already_faded / chasing_top still latch). Flag OFF ->
+        # this whole block is skipped -> below_vwap latches exactly as before (byte-identical).
+        if _reason == "below_vwap" and bool(
+            getattr(settings, "chili_momentum_backside_vwap_reclaim_enabled", True)
+        ):
+            try:
+                _vwap = getattr(_fs, "session_vwap", None)
+                # current price: live tick over the completed close when present.
+                _closes = _sess["Close"].astype(float)
+                _last_close = float(_closes.iloc[-1])
+                _cur_px = _last_close
+                if live_price is not None:
+                    try:
+                        _lp = float(live_price)
+                        if _lp > 0:
+                            _cur_px = _lp
+                    except (TypeError, ValueError):
+                        pass
+                _prior_close = float(_closes.iloc[-2]) if len(_closes) >= 2 else None
+                if _vwap is not None and float(_vwap) > 0 and _prior_close is not None:
+                    _vwap = float(_vwap)
+                    _buf = 0.0
+                    try:
+                        _buf = max(0.0, float(getattr(
+                            settings, "chili_momentum_entry_vwap_hold_buffer", 0.0) or 0.0))
+                    except (TypeError, ValueError):
+                        _buf = 0.0
+                    # RECLAIM-from-below: price has crossed back to/above VWAP (within the
+                    # below-VWAP hold tolerance) AND is rising vs the prior bar. The buffer
+                    # is the SAME tolerance the entry vwap-hold gate uses (one documented
+                    # base) — a price at >= VWAP*(1-buf) counts as reclaiming the level.
+                    _reclaimed = _cur_px >= _vwap * (1.0 - _buf)
+                    _rising = _cur_px > _prior_close
+                    if _reclaimed and _rising:
+                        debug["vwap_reclaim_exception"] = {
+                            "cur_px": round(_cur_px, 6),
+                            "session_vwap": round(_vwap, 6),
+                            "prior_close": round(_prior_close, 6),
+                            "vwap_hold_buffer": round(_buf, 6),
+                        }
+                        # NOT benched — the name is reclaiming VWAP from below. Downstream
+                        # chase-guards + tape-required + structural stop + max-loss circuit
+                        # all still gate the entry; this only declines to LATCH the bench.
+                        return False, "front_side_vwap_reclaim", None, debug
+                    debug["vwap_reclaim_declined"] = {
+                        "cur_px": round(_cur_px, 6),
+                        "session_vwap": round(_vwap, 6),
+                        "reclaimed": bool(_reclaimed),
+                        "rising": bool(_rising),
+                    }
+            except (TypeError, ValueError, AttributeError, KeyError, IndexError):
+                pass  # any error -> fall through to the normal below_vwap latch (safe)
         # CONFIRMED backside -> LATCH the bench at the current session HOD (the anchor the
         # un-bench compares against). below_vwap / already_faded / a rolled-over chasing_top.
         debug["latched"] = _reason
@@ -3600,6 +4106,37 @@ def wick_reclaim_confirmation(
                 flush_recedes = (sum(_post_vrs) / len(_post_vrs)) < _rej_vr
         except (TypeError, ValueError, IndexError):
             flush_recedes = True  # thin data -> fail-open on the volume-dry-up leg only
+
+        # ── SLOW-RECOVERY BAR-COUNT GATE (HVM101 #008; quality filter, REJECTS only) ────
+        # Ross: a wick rejection must RECOVER within 1-3 bars; the 4th bar only counts when
+        # the tape is "really showing a lot of price action" (here: a high-rate-of-change,
+        # drying-up flush == flush_recedes True); 5-6+ bars = a slow trickle = invalid =
+        # confirms the rejection, NOT a reclaim. The rejection-bar OFFSET is already
+        # computed (cur - rej_idx) and was only logged before — this gates on it. ADAPTIVE
+        # RELAXATION: bars <= (max-1) fire; the boundary bar (== max) fires ONLY on the
+        # strong-action proof (flush_recedes); > max is rejected outright. Flag OFF ->
+        # skipped entirely (byte-identical). It can only REJECT a slow trickle; it never
+        # loosens the existing wick-reclaim guards (which still run below).
+        if bool(
+            getattr(settings, "chili_momentum_wick_reclaim_slow_recovery_gate_enabled", False)
+        ):
+            max_recovery_bars = max(
+                1,
+                int(getattr(settings, "chili_momentum_wick_reclaim_max_recovery_bars", 4) or 4),
+            )
+            recovery_bars = int(cur - rej_idx)
+            # the boundary (Nth) bar needs the strong price-action proof; bars beyond it are
+            # rejected unconditionally (no relaxation can save a 5-6+ bar slow trickle).
+            strong_action = bool(flush_recedes)
+            too_slow = (recovery_bars > max_recovery_bars) or (
+                recovery_bars == max_recovery_bars and not strong_action
+            )
+            if too_slow:
+                debug["rejection_bar_offset"] = recovery_bars
+                debug["max_recovery_bars"] = max_recovery_bars
+                debug["strong_action"] = strong_action
+                return False, "wick_reclaim_slow_recovery", debug
+
         if not flush_recedes:
             debug["flush_recedes"] = False
             return False, "wick_reclaim_flush_not_dry", debug
@@ -4308,6 +4845,1132 @@ def absorption_snap_entry(
         return False, "absorption_snap_error", {"entry_interval": entry_interval}
 
 
+# ── GAP-B — TIGHT-MOMENTUM FALSE-BREAKOUT-REVERSAL / VWAP-RECLAIM ENTRY ────────────
+# A NEW trigger family (distinct from every break/pullback/HOD/ORB trigger above). The
+# CORE is the TIGHT-MOMENTUM regime: a name whose intrabar range has COMPRESSED to the
+# low tail of its own recent range distribution (a coil), with REQUIRED order-flow
+# (fail-closed) + a self-relative VOLUME surge. On that tight base it fires on ONE of two
+# geometries: (B.2) a FALSE-BREAKOUT REVERSAL (a push pierces a level L, fails/flushes
+# below L on elevated/red volume, then the current bar RIPS back and reclaims L), or
+# (B.3) a VWAP-RECLAIM (price reclaims VWAP from below with upward momentum). It carries
+# the SAME four chase-guards every breakout trigger carries (tape REQUIRED + fail-closed
+# via tape_confirms_hold as the LAST gate, _hod_extension_ok NOT-parabolic, _detect_back_side
+# + front_side_state NOT-backside/NOT-below-VWAP, _l2_entry_veto) and returns the shared
+# (ok, reason, debug) 3-tuple with pullback_high / pullback_low under the IDENTICAL keys,
+# so the runner's structural-stop + sizing + breakout-or-bailout machinery + the setup-
+# selector are reused unchanged. EVERY threshold is an ADAPTIVE percentile/ratio of the
+# name's OWN recent distribution (no magic numbers) with ONE documented base each. The
+# structural stop + #769 max-loss circuit stay AHEAD + always-live; GAP-A governs only the
+# first post-entry window and can only TIGHTEN. Flag-gated INSIDE the detector (default
+# OFF -> disabled before any compute, byte-identical). MUTUALLY EXCLUSIVE per-tick with
+# raw_break/break_retest (flag-selected at dispatch; no double-fire). docs/DESIGN/MOMENTUM_LANE.md
+
+
+def _tight_compression(
+    high: pd.Series, low: pd.Series, close: pd.Series, cur: int, *, lookback: int,
+    coil_bars: int = 5,
+) -> tuple[float | None, float | None, list[float]]:
+    """PURE: the TIGHT-MOMENTUM compression read at ``cur`` and the name's OWN recent
+    compression distribution (so the threshold theta_c is a self-relative percentile, not a
+    magic level).
+
+    Per-bar ``atr_pct`` proxy = (High-Low)/Close (a one-bar true-range fraction; cheap,
+    lookahead-free, no EMA warmup). The compression read is the recent COIL (the base
+    LEADING INTO the firing bar — the median atr_pct of the last ``coil_bars`` COMPLETED bars
+    BEFORE ``cur``) divided by the longer ``lookback`` median: a coiled base tightens BELOW
+    1.0. The firing bar itself (the rip-back / reclaim) is EXCLUDED — it is wide by nature, so
+    measuring tightness on it would always read non-tight. ``compression`` = median(coil
+    atr_pct) / median(lookback atr_pct). TIGHT ⇒ compression below the low tail of the name's
+    own recent rolling-compression distribution. Returns ``(compression_now, coil_atr_pct,
+    recent_compression_distribution)``; the distribution is the rolling coil-vs-baseline ratio
+    at each recent completed bar, so the caller derives theta_c = p30 of THIS list.
+    ``(None, None, [])`` on thin data."""
+    look = min(int(lookback), cur)
+    cb = max(1, int(coil_bars))
+    if look < max(3, cb + 1):
+        return None, None, []
+    def _bar_atr_pct(i: int) -> float | None:
+        try:
+            h = float(high.iloc[i]); l = float(low.iloc[i]); c = float(close.iloc[i])
+        except (TypeError, ValueError, IndexError):
+            return None
+        if not (c > 0) or not (h >= l):
+            return None
+        return (h - l) / c
+    def _med(xs: list[float]) -> float | None:
+        xs = sorted(v for v in xs if math.isfinite(v))
+        if not xs:
+            return None
+        m = len(xs)
+        return xs[m // 2] if m % 2 == 1 else 0.5 * (xs[m // 2 - 1] + xs[m // 2])
+    # per-bar atr_pct over the COMPLETED bars [cur-look, cur) (EXCLUDE the firing bar).
+    series: list[float] = []
+    for i in range(cur - look, cur):
+        v = _bar_atr_pct(i)
+        if v is not None and math.isfinite(v):
+            series.append(v)
+    if len(series) < (cb + 1):
+        return None, None, []
+    baseline_med = _med(series)
+    if baseline_med is None or not (baseline_med > 0):
+        return None, None, []
+    # the COIL = the last coil_bars completed bars BEFORE cur (the base into the setup).
+    coil_now = _med(series[-cb:])
+    if coil_now is None:
+        return None, None, []
+    comp_now = coil_now / baseline_med
+    # the name's OWN recent rolling-compression distribution: at each recent completed bar t,
+    # the median of the prior coil_bars / the baseline median (self-relative ratios). theta_c =
+    # a percentile of these, so a structurally compressed name still reads tight vs its OWN past.
+    dist: list[float] = []
+    for t in range(cb, len(series)):
+        cm = _med(series[t - cb:t])
+        if cm is not None and math.isfinite(cm / baseline_med):
+            dist.append(cm / baseline_med)
+    if not dist:
+        dist = [comp_now]
+    return comp_now, coil_now, dist
+
+
+def _recent_rvol_distribution(vol: pd.Series, cur: int, *, lookback: int) -> list[float]:
+    """PURE: each recent completed bar's RVOL (bar volume / the rolling mean of the prior
+    ``lookback`` bars) — the name's OWN recent RVOL distribution, used to derive the adaptive
+    volume multiple ``vmult`` (a quantile of THIS list). Lookahead-free; ``[]`` on thin data."""
+    n = len(vol)
+    look = min(int(lookback), cur)
+    if look < 3:
+        return []
+    out: list[float] = []
+    for i in range(cur - look + 1, cur + 1):
+        j0 = max(0, i - look)
+        prior = vol.iloc[j0:i]
+        if len(prior) < 1:
+            continue
+        try:
+            mean_prior = float(prior.mean())
+            v = float(vol.iloc[i])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if mean_prior > 0 and math.isfinite(v):
+            out.append(v / mean_prior)
+    return [r for r in out if math.isfinite(r)]
+
+
+def false_break_reclaim_confirmation(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str,
+    live_price: float | None = None,
+    symbol: str | None = None,
+    now: Any = None,
+    db: Any = None,
+    l2_as_of: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """GAP-B: TIGHT-MOMENTUM FALSE-BREAKOUT-REVERSAL / VWAP-RECLAIM entry (flag
+    ``chili_momentum_entry_tight_false_break_reclaim_enabled``, default OFF).
+
+    A NEW trigger family. The CORE (all REQUIRED, fail-closed) is the TIGHT-MOMENTUM regime:
+
+      (1) COMPRESSION — ``compression = atr_pct_now / median(atr_pct, Lc)`` is TIGHT when it
+          sits below ``theta_c`` = the p30 of the name's OWN recent compression distribution
+          (adaptive; ``_tight_compression`` + ``hold_signals.percentile``). A coil, not chop.
+      (2) FLOW_OK — REQUIRED + FAIL-CLOSED: ``ofi_level > +T_flow_entry`` AND ``ofi_slope > 0``
+          (demand pressing AND building). T_flow_entry = the |lower-tail| (``flow_tail_q``) of
+          the name's OWN recent OFI-level distribution, floored at the lane's existing
+          ``ofi_threshold``. Any stale / empty / thin tape ⇒ flow_ok = False ⇒ NO fire.
+      (3) VOL_OK — ``trade_volume_now > vmult * median(trade_volume, Lv)``, ``vmult =
+          clamp(q60(recent RVOL distribution), floor, ceil)`` (the SAME adaptive-volume
+          kill-2.5x logic; ``_recent_rvol_distribution`` + the shipped floor/ceil knobs).
+
+    Then ONE geometry (B.2 OR B.3):
+
+      (B.2) FALSE-BREAKOUT REVERSAL — within the recent tail a push PIERCED a level L (a swing
+            high), the next bars FAILED/FLUSHED below L (a close back under L) on elevated /
+            red volume, and the CURRENT bar RIPS back and RECLAIMS L (trades/closes back above
+            it). Entry = L (the reclaimed level; ``pullback_high``); STOP = the flush low
+            (``pullback_low``).
+      (B.3) VWAP-RECLAIM — the prior bar(s) sat BELOW VWAP and the current bar reclaims it
+            from below with upward momentum (close > VWAP, close > open). Entry = VWAP-reclaim
+            level = max(VWAP, prior bar high) (``pullback_high``); STOP = the recent swing low
+            (``pullback_low``).
+
+    Fires ONLY when TIGHT ∧ flow_ok ∧ vol_ok ∧ (B.2 ∨ B.3) ∧ ALL FOUR chase-guards pass.
+
+    CHASE-GUARDS (each reused; no weakened veto), wired EXACTLY like ``wedge_break_entry`` /
+    ``absorption_snap_entry``:
+      * NOT BACKSIDE / NOT BELOW-VWAP — ``_detect_back_side`` (1m EMA/MACD rollover) AND
+        ``front_side_state`` (folds in below-VWAP / faded; FAILS CLOSED on a thin frame).
+      * NOT PARABOLIC — ``_hod_extension_ok`` vs the 9-EMA AND VWAP.
+      * L2 hidden-seller / big-seller veto — ``_l2_entry_veto``.
+      * TAPE REQUIRED + FAIL-CLOSED — ``tape_confirms_hold`` is the LAST gate before each
+        return-True (in ADDITION to the core flow_ok gate; both must confirm).
+
+    Shared (ok, reason, debug) + the IDENTICAL pullback_high / pullback_low keys, so the
+    runner's stop / sizing / breakout-or-bailout machinery + the setup-selector are reused
+    unchanged. ADDITIVE: flag OFF / thin / not tight / weak flow / weak volume / no geometry
+    ⇒ ``(False, reason, {...})`` with NO side effects; fail-OPEN to a benign decline on any
+    error (never raises, never blocks the rest of the ladder). docs/DESIGN/MOMENTUM_LANE.md"""
+    debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "tight_false_break_reclaim"}
+    try:
+        if not bool(getattr(settings, "chili_momentum_entry_tight_false_break_reclaim_enabled", False)):
+            return False, "tight_false_break_reclaim_disabled", debug
+        if df is None or getattr(df, "empty", True) or len(df) < 12:
+            return False, "tight_false_break_reclaim_insufficient_bars", debug
+        from .hold_signals import adaptive_quantile_clamp, percentile
+
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        vol = df["Volume"].astype(float)
+        opn = df["Open"].astype(float) if "Open" in getattr(df, "columns", []) else None
+        n = len(df)
+        cur = n - 1
+        arrays = compute_all_from_df(
+            df, needed={"ema_9", "ema_20", "macd", "macd_signal", "vwap", "atr"}
+        )
+        ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
+        atr_pct, _atr_abs = _batch_c_atr_pct(df, close, cur)
+
+        # ── (1) COMPRESSION (TIGHT) — adaptive theta_c = p30 of the name's own dist ─────
+        _lc = int(getattr(settings, "chili_momentum_tight_compression_lookback", 20) or 20)
+        _coil = int(getattr(settings, "chili_momentum_tight_compression_coil_bars", 5) or 5)
+        comp_now, _bar_atr_pct_now, comp_dist = _tight_compression(
+            high, low, close, cur, lookback=_lc, coil_bars=_coil
+        )
+        if comp_now is None or not comp_dist:
+            return False, "tight_false_break_reclaim_no_compression", debug
+        # NOTE: a quantile of 0.0 is a VALID (most-aggressive) setting, so do NOT coalesce it
+        # with `or` (which would silently snap 0.0 -> the default); use a None-safe read.
+        _theta_q_raw = getattr(settings, "chili_momentum_tight_compression_pctile", 0.30)
+        _theta_q = float(_theta_q_raw) if _theta_q_raw is not None else 0.30
+        theta_c = percentile(comp_dist, _theta_q)
+        debug["compression"] = round(float(comp_now), 4)
+        debug["theta_c"] = (round(float(theta_c), 4) if theta_c is not None else None)
+        if theta_c is None or float(comp_now) >= float(theta_c):
+            return False, "tight_false_break_reclaim_not_tight", debug
+
+        # ── (3) VOL_OK — vmult = clamp(q60(recent RVOL dist), floor, ceil) ──────────────
+        # (computed before flow so a cheap reject short-circuits before the DB tape read.)
+        _lv = int(getattr(settings, "chili_momentum_tight_volume_lookback", 20) or 20)
+        rvol_dist = _recent_rvol_distribution(vol, cur, lookback=_lv)
+        _vq_raw = getattr(settings, "chili_momentum_tight_volume_pctile", 0.60)
+        _vq = float(_vq_raw) if _vq_raw is not None else 0.60
+        _vfloor = float(getattr(settings, "chili_momentum_tight_volume_mult_floor", 1.5) or 1.5)
+        _vceil = float(getattr(settings, "chili_momentum_tight_volume_mult_ceil", 3.0) or 3.0)
+        vmult = adaptive_quantile_clamp(
+            rvol_dist, _vq, floor=_vfloor, ceil=_vceil, fallback=_vfloor
+        )
+        # current bar volume vs the median of the recent completed bars (self-relative).
+        _vol_look = min(_lv, cur)
+        _vol_med = None
+        if _vol_look >= 2:
+            try:
+                _vol_med = float(vol.iloc[cur - _vol_look:cur].median())
+            except (TypeError, ValueError, IndexError):
+                _vol_med = None
+        try:
+            _vol_now = float(vol.iloc[cur])
+        except (TypeError, ValueError, IndexError):
+            _vol_now = None
+        debug["vmult"] = round(float(vmult), 3)
+        if _vol_med is None or not (_vol_med > 0) or _vol_now is None:
+            return False, "tight_false_break_reclaim_no_volume", debug
+        debug["vol_ratio"] = round(_vol_now / _vol_med, 3)
+        if _vol_now <= vmult * _vol_med:
+            return False, "tight_false_break_reclaim_weak_volume", debug
+
+        # ── (2) FLOW_OK — REQUIRED + FAIL-CLOSED (ofi_level > +T_flow_entry ∧ slope > 0) ─
+        # Reuse the wqwu5t2n2 live flow read (denoised OFI level + EWMA slope). A None read
+        # (no db / no symbol / crypto / thin / stale / error) ⇒ flow_ok=False ⇒ NO fire.
+        from .pipeline import _live_flow_slope
+
+        _fs_flow = _live_flow_slope(symbol, db=db, as_of=l2_as_of) if (db is not None and symbol) else None
+        if not _fs_flow:
+            debug["flow_reason"] = "no_flow_read"
+            return False, "tight_false_break_reclaim_no_flow", debug
+        _ofi_level = _fs_flow.get("ofi_level")
+        _ofi_slope = _fs_flow.get("ofi_slope")
+        if _ofi_level is None or _ofi_slope is None:
+            debug["flow_reason"] = "incomplete_flow_read"
+            return False, "tight_false_break_reclaim_no_flow", debug
+        # T_flow_entry = the |lower-tail| of the name's own recent OFI-level distribution
+        # (here the available sample is the per-grid OFI level series proxy; we floor it at
+        # the lane's existing ofi_threshold so the entry pressure bar is never weaker than
+        # the lane's documented base). ADAPTIVE with ONE documented floor.
+        _flow_tail_q_raw = getattr(settings, "chili_momentum_tight_flow_tail_q", 0.15)
+        _flow_tail_q = float(_flow_tail_q_raw) if _flow_tail_q_raw is not None else 0.15
+        _flow_floor = abs(float(getattr(settings, "chili_momentum_ofi_threshold", 0.25) or 0.25))
+        # the grid OFI levels aren't returned, so derive T_flow_entry from the single floor
+        # (documented base) — adaptive_quantile_clamp degrades to the floor on a thin sample,
+        # which is exactly this case (one live level), keeping ONE documented base, no magic.
+        t_flow_entry = adaptive_quantile_clamp(
+            [], _flow_tail_q, floor=_flow_floor, ceil=max(_flow_floor, 1.0), fallback=_flow_floor
+        )
+        debug["ofi_level"] = round(float(_ofi_level), 4)
+        debug["ofi_slope"] = round(float(_ofi_slope), 5)
+        debug["t_flow_entry"] = round(float(t_flow_entry), 4)
+        if not (float(_ofi_level) > float(t_flow_entry) and float(_ofi_slope) > 0.0):
+            debug["flow_reason"] = "weak_or_rolling_flow"
+            return False, "tight_false_break_reclaim_weak_flow", debug
+
+        # current price (live tick when above the bar close; never lowers the price).
+        try:
+            cur_close = float(close.iloc[cur])
+        except (TypeError, ValueError, IndexError):
+            return False, "tight_false_break_reclaim_no_close", debug
+        cur_px = cur_close
+        if live_price is not None:
+            try:
+                lp = float(live_price)
+                if lp > 0:
+                    cur_px = max(cur_close, lp)
+            except (TypeError, ValueError):
+                pass
+
+        # ── GEOMETRY: (B.2) false-breakout reversal OR (B.3) VWAP-reclaim ───────────────
+        # window of recent COMPLETED bars to read the pierce/flush/reclaim shape.
+        K = max(3, int(getattr(settings, "chili_momentum_tight_geometry_lookback", 6) or 6))
+        w0 = max(0, cur - K)
+        level: float | None = None
+        stop: float | None = None
+        geom: str | None = None
+
+        # (B.2) FALSE-BREAKOUT REVERSAL: a level L (the max swing high among the completed
+        # bars BEFORE the most recent flush) was pierced, then a bar CLOSED back below L
+        # (the failed breakout / flush) on elevated-or-red volume, and now we reclaim L.
+        try:
+            if w0 < cur - 1:
+                # L = the highest completed-bar HIGH in the window EXCLUDING the last bar
+                # (the level that was pierced then lost).
+                _Lwin_hi = high.iloc[w0:cur]
+                _Lwin_cl = close.iloc[w0:cur]
+                _Lwin_lo = low.iloc[w0:cur]
+                L = float(_Lwin_hi.max())
+                # a PIERCE: some completed bar's high exceeded L's region (by construction L is
+                # the max high, so the bar that set it pierced). A FAIL: a LATER completed bar
+                # closed back BELOW L. Find the pierce bar (argmax high) and require a close
+                # below L after it (the flush).
+                _hi_vals = list(_Lwin_hi.values)
+                _pierce_off = int(_hi_vals.index(max(_hi_vals)))  # offset within [w0, cur)
+                _pierce_idx = w0 + _pierce_off
+                _flush_low = None
+                _failed = False
+                for j in range(_pierce_idx + 1, cur):
+                    try:
+                        if float(close.iloc[j]) < L:
+                            _failed = True
+                            _lj = float(low.iloc[j])
+                            _flush_low = _lj if _flush_low is None else min(_flush_low, _lj)
+                    except (TypeError, ValueError, IndexError):
+                        continue
+                # RECLAIM: the current bar trades/closes back above L (the rip-back).
+                _reclaimed = (cur_px > L) or (float(high.iloc[cur]) > L)
+                if _failed and _reclaimed and _flush_low is not None and 0.0 < _flush_low < L:
+                    level = L
+                    stop = _flush_low
+                    geom = "false_break_reversal"
+                    debug["fbr_level"] = round(L, 6)
+                    debug["fbr_flush_low"] = round(_flush_low, 6)
+        except (TypeError, ValueError, IndexError):
+            pass
+
+        # (B.3) VWAP-RECLAIM: the prior bar(s) sat BELOW VWAP and the current bar reclaims it
+        # from below with upward momentum (close > VWAP and close > open). Entry = the reclaim
+        # level = max(VWAP_cur, prior-bar high); STOP = the recent swing low in the window.
+        if geom is None:
+            try:
+                _vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+                _vwap_prev = vwap[cur - 1] if cur - 1 < len(vwap) and vwap[cur - 1] is not None else None
+                if _vwap_cur is not None and float(_vwap_cur) > 0:
+                    _prev_close = float(close.iloc[cur - 1])
+                    _below_before = (
+                        _prev_close < float(_vwap_prev) if _vwap_prev is not None
+                        else _prev_close < float(_vwap_cur)
+                    )
+                    _o_cur = float(opn.iloc[cur]) if opn is not None else cur_close
+                    _up_momentum = (cur_close > float(_vwap_cur)) and (cur_close > _o_cur)
+                    if _below_before and _up_momentum:
+                        _prev_hi = float(high.iloc[cur - 1])
+                        level = max(float(_vwap_cur), _prev_hi)
+                        stop = float(low.iloc[w0:cur + 1].min())
+                        geom = "vwap_reclaim"
+                        debug["vwap_reclaim_level"] = round(level, 6)
+                        debug["vwap"] = round(float(_vwap_cur), 6)
+            except (TypeError, ValueError, IndexError):
+                pass
+
+        if geom is None or level is None or stop is None or not (0.0 < stop < level):
+            return False, "tight_false_break_reclaim_no_geometry", debug
+        debug["geometry"] = geom
+
+        # ── CHASE-GUARD 1: NOT BACKSIDE (1m EMA/MACD rollover) ──────────────────────────
+        _bs, _bs_reason = _detect_back_side(
+            ema9, (arrays.get("ema_20") or []),
+            (arrays.get("macd") or []), (arrays.get("macd_signal") or []),
+            cur, macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+        )
+        if _bs:
+            debug["back_side"] = _bs_reason
+            return False, "tight_false_break_reclaim_back_side", debug
+        # ── CHASE-GUARD 1b: NOT BELOW-VWAP / NOT FADED (front_side_state; fail-CLOSED) ───
+        try:
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            if getattr(_fs, "is_backside", False):
+                debug["front_side_state"] = getattr(_fs, "reason", "backside")
+                return False, "tight_false_break_reclaim_backside_lifecycle", debug
+        except (TypeError, ValueError, AttributeError, KeyError):
+            debug["reason"] = "front_side_read_error"
+            return False, "tight_false_break_reclaim_backside_lifecycle", debug
+
+        # ── CHASE-GUARD 2: NOT PARABOLIC (extension vs 9-EMA AND VWAP) ──────────────────
+        ema9_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        _ext_ok, _ext_dbg = _hod_extension_ok(
+            level=level, ema9_cur=ema9_cur, vwap_cur=vwap_cur, atr_pct=atr_pct, rvol=None,
+        )
+        if not _ext_ok:
+            debug.update(_ext_dbg)
+            return False, "tight_false_break_reclaim_extended", debug
+
+        # ── CHASE-GUARD 3: L2 hidden-seller / big-seller veto (reused; fail-open) ───────
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
+        if _l2v is not None:
+            _reason, _l2patch = _l2v
+            debug.update(_l2patch)
+            return False, f"tight_false_break_reclaim_{_reason}", debug
+
+        debug["pullback_high"] = float(level)
+        debug["pullback_low"] = float(stop)
+        debug["atr_pct"] = (round(atr_pct, 6) if atr_pct is not None else None)
+
+        # ── CHASE-GUARD 4: TAPE REQUIRED + FAIL-CLOSED (the LAST gate; no fire w/o buyers) ─
+        _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+        debug["tape_reason"] = _tape_dbg.get("reason")
+        if not _tape_ok:
+            return False, "tight_false_break_reclaim_tape_unconfirmed", debug
+
+        if live_price is not None and float(live_price) > 0 and float(live_price) > level:
+            debug["tick_break"] = True
+            debug["live_price"] = float(live_price)
+            return True, "tight_false_break_reclaim_tick", debug
+        return True, "tight_false_break_reclaim", debug
+    except Exception:
+        return False, "tight_false_break_reclaim_error", {"entry_interval": entry_interval}
+
+
+# ── LOCATE #2/#4/#5/#6: four NEW scalp/dip entry triggers ─────────────────────────
+# Each is flag-gated INSIDE the detector (default OFF -> returns disabled BEFORE any
+# compute = byte-identical), carries the SAME chase-guards as wedge/absorption (tape
+# REQUIRED+fail-closed via tape_confirms_hold as the LAST gate, _hod_extension_ok
+# (NOT parabolic) + _detect_back_side + front_side_state (NOT backside / NOT below-VWAP),
+# _l2_entry_veto) and returns the shared (ok, reason, debug) 3-tuple with pullback_low /
+# pullback_high under the IDENTICAL keys so the runner's structural-stop + sizing +
+# breakout-or-bailout machinery + the setup-selector are reused unchanged. No lookahead
+# (levels from completed bars; the live tick break is the only intrabar use). Fail-OPEN
+# to a benign decline on any error. docs/DESIGN/MOMENTUM_LANE.md
+
+
+def _dip_velocity_size_mult(
+    *, dip_roc_per_bar: float | None, atr_pct: float | None, settings_obj: Any = settings,
+) -> float:
+    """LOCATE #3 DIP-VELOCITY CONVICTION multiplier. A steeper/faster dip (a more violent
+    algo-stop-run) snaps back harder, so scale entry SIZE by the dip's ROC (per-bar % drop)
+    measured RELATIVE to the instrument's own ATR%. Returns a multiplier in
+    ``[1.0, 1+max_boost]`` (NEVER < 1.0, so it can only ADD conviction within the existing
+    3x clamp + max_notional caps, never reduce size below the base / increase risk past the
+    caps). Pure; fail-OPEN to ``1.0`` (no boost) on flag-off / missing data / any error."""
+    try:
+        if not bool(getattr(settings_obj, "chili_momentum_dip_velocity_conviction_enabled", False)):
+            return 1.0
+        if dip_roc_per_bar is None:
+            return 1.0
+        roc = abs(float(dip_roc_per_bar))
+        a = float(atr_pct) if (atr_pct is not None and atr_pct > 0) else 0.01
+        # The ROC is "steep" when the per-bar drop exceeds ~1 ATR%; interpolate the boost
+        # from 0 (at 1x ATR%) to max_boost (at 3x ATR%+). Below 1x ATR% = noise -> no boost.
+        floor = a
+        ceil = 3.0 * a
+        if roc <= floor or ceil <= floor:
+            return 1.0
+        frac = min(1.0, (roc - floor) / (ceil - floor))
+        max_boost = float(getattr(settings_obj, "chili_momentum_dip_velocity_conviction_max_boost", 0.25) or 0.0)
+        max_boost = max(0.0, min(0.5, max_boost))
+        return 1.0 + frac * max_boost
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def ask_thins_dip_entry(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str,
+    live_price: float | None = None,
+    symbol: str | None = None,
+    now: Any = None,
+    db: Any = None,
+    l2_as_of: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """LOCATE #2: ASK-THINS-TO-ZERO DIP-BOTTOM long (flag
+    ``chili_momentum_ask_thins_dip_entry_enabled``).
+
+    A real dip (an ATR-scaled retrace that holds a structural higher-low) where the resting
+    ASK supply has been EXHAUSTED — the offer collapsed across the L2 window
+    (``read_ladder_distribution.ask_build <= -min_depletion_frac``) WITH buy-side OFI — then
+    price ticks back up off the dip low. The thinning offer means the sellers are gone, so
+    the bounce has room. Entry = the bounce/recent high (``pullback_high``); STOP = the dip
+    low (``pullback_low``).
+
+    CHASE-GUARDS (each reused; no weakened veto): TAPE REQUIRED+FAIL-CLOSED
+    (``tape_confirms_hold``), NOT PARABOLIC (``_hod_extension_ok`` vs 9-EMA AND VWAP), NOT
+    BACKSIDE / NOT BELOW-VWAP (``_detect_back_side`` + ``front_side_state``), L2 hidden/
+    big-seller veto (``_l2_entry_veto``). ADDITIVE: flag OFF / thin / no depletion / no dip
+    ⇒ ``(False, reason, {...})`` with NO side effects; fail-OPEN on any error."""
+    debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "ask_thins_dip"}
+    try:
+        if not bool(getattr(settings, "chili_momentum_ask_thins_dip_entry_enabled", False)):
+            return False, "ask_thins_disabled", debug
+        if df is None or getattr(df, "empty", True) or len(df) < 12:
+            return False, "ask_thins_insufficient_bars", debug
+        if db is None or not symbol:
+            return False, "ask_thins_no_l2", debug
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        n = len(df)
+        cur = n - 1
+        arrays = compute_all_from_df(df, needed={"ema_9", "ema_20", "macd", "macd_signal", "vwap", "atr"})
+        ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
+        atr_pct, _atr_abs = _batch_c_atr_pct(df, close, cur)
+
+        # current price (live tick when above the bar close; never lowers the price).
+        try:
+            cur_close = float(close.iloc[cur])
+        except (TypeError, ValueError, IndexError):
+            return False, "ask_thins_no_close", debug
+        cur_px = cur_close
+        if live_price is not None:
+            try:
+                lp = float(live_price)
+                if lp > 0:
+                    cur_px = max(cur_close, lp)
+            except (TypeError, ValueError):
+                pass
+
+        # ── STRUCTURE: a real dip off a recent reference high holding a higher-low ───────
+        K = max(3, int(getattr(settings, "chili_momentum_swing_pivot_half_window", 2) or 2) * 2)
+        w_start = max(0, cur - K)
+        if w_start >= cur:
+            return False, "ask_thins_insufficient_bars", debug
+        ref_high = float(high.iloc[w_start:cur].max())
+        dip_low = float(low.iloc[w_start:cur + 1].min())
+        if not (0.0 < dip_low < ref_high):
+            return False, "ask_thins_bad_structure", debug
+        dip_depth = (ref_high - dip_low) / ref_high if ref_high > 0 else 0.0
+        a = float(atr_pct) if (atr_pct is not None and atr_pct > 0) else 0.0
+        noise_floor = max(0.003, 0.5 * (a or 0.01))
+        deep_cap = _collapse_cap(atr_pct)
+        if dip_depth < noise_floor:
+            return False, "ask_thins_too_shallow", debug
+        if dip_depth > deep_cap:
+            return False, "ask_thins_too_deep", debug
+        # the CURRENT bar must hold the dip (a higher-low; no fresh new low while thinning).
+        if float(low.iloc[cur]) < dip_low * (1.0 - 1e-9):
+            return False, "ask_thins_broke_low", debug
+        # the break/bounce LEVEL = the recent reference high; STOP = the dip low.
+        level = ref_high
+        stop = dip_low
+        debug["dip_low"] = round(stop, 6)
+        debug["dip_depth_pct"] = round(dip_depth * 100.0, 2)
+        # dip ROC (per-bar % drop into the low) — the conviction yardstick (#3 reads this).
+        try:
+            _lo_pos = int(low.iloc[w_start:cur + 1].astype(float).values.argmin()) + w_start
+            _ref_pos = int(high.iloc[w_start:cur].astype(float).values.argmax()) + w_start
+            _bars = max(1, _lo_pos - _ref_pos)
+            debug["dip_roc_per_bar"] = round(dip_depth / _bars, 6)
+        except (TypeError, ValueError):
+            debug["dip_roc_per_bar"] = None
+
+        # ── (1)+(2) L2 ASK DEPLETION: the offer collapsed across the window + buy-side OFI ─
+        from .pipeline import read_ladder_distribution
+
+        lr = read_ladder_distribution(symbol, db=db, as_of=l2_as_of)
+        if lr is None or int(getattr(lr, "n_snaps", 0) or 0) <= 0:
+            return False, "ask_thins_no_l2", debug
+        ask_build = getattr(lr, "ask_build", None)
+        ofi = getattr(lr, "ofi", None)
+        if ask_build is None:
+            return False, "ask_thins_no_ask_build", debug
+        try:
+            min_dep = abs(float(getattr(settings, "chili_momentum_ask_thins_min_depletion_frac", 0.25) or 0.25))
+            if float(ask_build) > -min_dep:
+                return False, "ask_thins_ask_not_depleted", debug
+        except (TypeError, ValueError):
+            return False, "ask_thins_no_ask_build", debug
+        # buy-side OFI confirms demand is pressing the (now-thin) offer. Fail-CLOSED on miss.
+        try:
+            ofi_thr = abs(float(getattr(settings, "chili_momentum_ofi_threshold", 0.25) or 0.25))
+        except (TypeError, ValueError):
+            ofi_thr = 0.25
+        if ofi is None:
+            return False, "ask_thins_no_ofi", debug
+        try:
+            if float(ofi) < ofi_thr:
+                return False, "ask_thins_weak_ofi", debug
+        except (TypeError, ValueError):
+            return False, "ask_thins_no_ofi", debug
+        debug["ask_build"] = round(float(ask_build), 4)
+        debug["ofi"] = round(float(ofi), 4)
+
+        # ── NOT BACKSIDE ────────────────────────────────────────────────────────────────
+        _bs, _bs_reason = _detect_back_side(
+            ema9, (arrays.get("ema_20") or []),
+            (arrays.get("macd") or []), (arrays.get("macd_signal") or []),
+            cur, macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+        )
+        if _bs:
+            debug["back_side"] = _bs_reason
+            return False, "ask_thins_back_side", debug
+        try:
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            if getattr(_fs, "is_backside", False):
+                debug["front_side_state"] = getattr(_fs, "reason", "backside")
+                return False, "ask_thins_backside_lifecycle", debug
+        except (TypeError, ValueError, AttributeError, KeyError):
+            debug["reason"] = "front_side_read_error"
+            return False, "ask_thins_backside_lifecycle", debug
+
+        # ── NOT PARABOLIC ──────────────────────────────────────────────────────────────
+        ema9_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        _ext_ok, _ext_dbg = _hod_extension_ok(
+            level=level, ema9_cur=ema9_cur, vwap_cur=vwap_cur, atr_pct=atr_pct, rvol=None,
+        )
+        if not _ext_ok:
+            debug.update(_ext_dbg)
+            return False, "ask_thins_extended", debug
+
+        # ── L2 hidden-seller / big-seller veto (reused; fail-open on disabled/null L2) ──
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
+        if _l2v is not None:
+            _reason, _l2patch = _l2v
+            debug.update(_l2patch)
+            return False, f"ask_thins_{_reason}", debug
+
+        debug["pullback_high"] = float(level)
+        debug["pullback_low"] = float(stop)
+        debug["atr_pct"] = (round(atr_pct, 6) if atr_pct is not None else None)
+
+        # ── BREAK: price ticks back up off the dip toward the level ─────────────────────
+        cur_hi = float(high.iloc[cur])
+        _broke = (cur_px > level) or (cur_hi > level)
+        if not _broke:
+            return False, "waiting_for_break", debug  # tick-armable (pullback_high set)
+
+        # ── TAPE REQUIRED + FAIL-CLOSED (the LAST gate; no fire without buyers on tape) ──
+        _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+        debug["tape_reason"] = _tape_dbg.get("reason")
+        if not _tape_ok:
+            return False, "ask_thins_tape_unconfirmed", debug
+        if live_price is not None and float(live_price) > 0 and float(live_price) > level:
+            debug["tick_break"] = True
+            debug["live_price"] = float(live_price)
+            return True, "ask_thins_dip_tick", debug
+        return True, "ask_thins_dip", debug
+    except Exception:
+        return False, "ask_thins_error", {"entry_interval": entry_interval}
+
+
+def sub_vwap_trap_entry(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str,
+    live_price: float | None = None,
+    symbol: str | None = None,
+    now: Any = None,
+    db: Any = None,
+    l2_as_of: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """LOCATE #4: SUB-VWAP TRAP / short-cover long (flag
+    ``chili_momentum_sub_vwap_trap_entry_enabled``).
+
+    A SHARP breakdown BELOW VWAP that FAILS to follow through (a bottoming-tail flush bar
+    that undercut VWAP and got bought, no fresh new low for the trap bar) then the CURRENT
+    bar RECLAIMS back above VWAP = a bear-trap / short-cover squeeze long. DISTINCT from
+    ``vwap_reclaim_confirmation`` (which requires ``K`` sustained closes below VWAP): the
+    trap is the violent stop-run undercut-and-reclaim, not a slow loss of VWAP. Entry = the
+    reclaim bar high (``pullback_high``); STOP = the trap low (``pullback_low``).
+
+    CHASE-GUARDS reused (no weakened veto): TAPE REQUIRED+FAIL-CLOSED, NOT PARABOLIC
+    (``_hod_extension_ok``), NOT BACKSIDE / NOT BELOW-VWAP (``_detect_back_side`` +
+    ``front_side_state`` — the reclaim must put price back ABOVE VWAP so front_side_state
+    is satisfied), L2 veto. ADDITIVE: flag OFF / thin / no trap ⇒ ``(False, reason, {...})``
+    with NO side effects; fail-OPEN on any error."""
+    debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "sub_vwap_trap"}
+    try:
+        if not bool(getattr(settings, "chili_momentum_sub_vwap_trap_entry_enabled", False)):
+            return False, "sub_vwap_trap_disabled", debug
+        if df is None or getattr(df, "empty", True) or len(df) < 10:
+            return False, "sub_vwap_trap_insufficient_bars", debug
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        opn = df["Open"].astype(float) if "Open" in getattr(df, "columns", []) else None
+        n = len(df)
+        cur = n - 1
+        arrays = compute_all_from_df(df, needed={"ema_9", "ema_20", "macd", "macd_signal", "vwap", "atr"})
+        ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
+        atr_pct, _atr_abs = _batch_c_atr_pct(df, close, cur)
+
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        if vwap_cur is None or float(vwap_cur) <= 0:
+            return False, "sub_vwap_trap_vwap_warmup", debug
+
+        # The TRAP bar = the bar before the current (reclaim) bar. It must have UNDERCUT VWAP
+        # on its low (the stop-run) and printed a bottoming tail (got bought), not closed down
+        # in a trend. The current bar reclaims back above VWAP.
+        trap_idx = cur - 1
+        if trap_idx < 1:
+            return False, "sub_vwap_trap_insufficient_bars", debug
+        vwap_trap = vwap[trap_idx] if trap_idx < len(vwap) and vwap[trap_idx] is not None else None
+        if vwap_trap is None or float(vwap_trap) <= 0:
+            return False, "sub_vwap_trap_vwap_warmup", debug
+        t_o = float(opn.iloc[trap_idx]) if opn is not None else float(close.iloc[trap_idx - 1])
+        t_h, t_l, t_c = float(high.iloc[trap_idx]), float(low.iloc[trap_idx]), float(close.iloc[trap_idx])
+        # UNDERCUT: the trap low pierced below VWAP (the breakdown that traps shorts).
+        if t_l >= float(vwap_trap):
+            return False, "sub_vwap_trap_no_undercut", debug
+        # BOTTOMING TAIL: the flush got bought (close in the upper part of the bar range).
+        if not _bottoming_tail(t_o, t_h, t_l, t_c):
+            return False, "sub_vwap_trap_no_bottoming_tail", debug
+        trap_low = t_l
+        if not (trap_low > 0):
+            return False, "sub_vwap_trap_bad_low", debug
+
+        # CURRENT bar RECLAIMS above VWAP (price + close back above) AND holds the trap low.
+        px = float(live_price) if (live_price is not None and float(live_price) > 0) else float(close.iloc[cur])
+        if px < float(vwap_cur) or float(close.iloc[cur]) < float(vwap_cur):
+            return False, "waiting_for_vwap_reclaim", debug  # tick-armable on the reclaim
+        if float(low.iloc[cur]) < trap_low * (1.0 - 1e-9):
+            return False, "sub_vwap_trap_undercut_again", debug
+        from .candles import is_strong_bull_break_candle
+
+        c_o = float(opn.iloc[cur]) if opn is not None else float(close.iloc[cur - 1])
+        c_h, c_l, c_c = float(high.iloc[cur]), float(low.iloc[cur]), float(close.iloc[cur])
+        if not is_strong_bull_break_candle(
+            c_o, c_h, c_l, c_c,
+            min_close_pos=float(getattr(settings, "chili_momentum_entry_break_candle_min_close_pos", 0.50) or 0.50),
+        ):
+            return False, "sub_vwap_trap_weak_reclaim", debug
+
+        level = float(high.iloc[cur])   # the reclaim bar high (break level)
+        stop = trap_low                 # the trap low (structural stop)
+        if not (0.0 < stop < level):
+            return False, "sub_vwap_trap_bad_level", debug
+
+        # ── NOT BACKSIDE / NOT BELOW-VWAP ───────────────────────────────────────────────
+        _bs, _bs_reason = _detect_back_side(
+            ema9, (arrays.get("ema_20") or []),
+            (arrays.get("macd") or []), (arrays.get("macd_signal") or []),
+            cur, macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+        )
+        if _bs:
+            debug["back_side"] = _bs_reason
+            return False, "sub_vwap_trap_back_side", debug
+        try:
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            if getattr(_fs, "is_backside", False):
+                debug["front_side_state"] = getattr(_fs, "reason", "backside")
+                return False, "sub_vwap_trap_backside_lifecycle", debug
+        except (TypeError, ValueError, AttributeError, KeyError):
+            debug["reason"] = "front_side_read_error"
+            return False, "sub_vwap_trap_backside_lifecycle", debug
+
+        # ── NOT PARABOLIC ──────────────────────────────────────────────────────────────
+        ema9_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+        _ext_ok, _ext_dbg = _hod_extension_ok(
+            level=level, ema9_cur=ema9_cur, vwap_cur=float(vwap_cur), atr_pct=atr_pct, rvol=None,
+        )
+        if not _ext_ok:
+            debug.update(_ext_dbg)
+            return False, "sub_vwap_trap_extended", debug
+
+        # ── L2 hidden-seller / big-seller veto (reused; fail-open on disabled/null L2) ──
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
+        if _l2v is not None:
+            _reason, _l2patch = _l2v
+            debug.update(_l2patch)
+            return False, f"sub_vwap_trap_{_reason}", debug
+
+        # dip ROC for the conviction modifier (#3): the undercut depth per bar.
+        try:
+            _roc = (float(vwap_trap) - trap_low) / float(vwap_trap) if float(vwap_trap) > 0 else None
+            debug["dip_roc_per_bar"] = round(_roc, 6) if _roc is not None else None
+        except (TypeError, ValueError):
+            debug["dip_roc_per_bar"] = None
+        debug.update({
+            "pullback_high": float(level),
+            "pullback_low": float(stop),
+            "vwap": round(float(vwap_cur), 6),
+            "atr_pct": (round(atr_pct, 6) if atr_pct is not None else None),
+        })
+
+        # ── TAPE REQUIRED + FAIL-CLOSED (the LAST gate) ─────────────────────────────────
+        _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+        debug["tape_reason"] = _tape_dbg.get("reason")
+        if not _tape_ok:
+            return False, "sub_vwap_trap_tape_unconfirmed", debug
+        if live_price is not None and float(live_price) > 0 and float(live_price) > level:
+            debug["tick_break"] = True
+            debug["live_price"] = float(live_price)
+            return True, "sub_vwap_trap_tick", debug
+        return True, "sub_vwap_trap", debug
+    except Exception:
+        return False, "sub_vwap_trap_error", {"entry_interval": entry_interval}
+
+
+def pulling_away_roc_entry(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str,
+    live_price: float | None = None,
+    symbol: str | None = None,
+    now: Any = None,
+    db: Any = None,
+    l2_as_of: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """LOCATE #5: PULLING-AWAY ROC-inflection break (flag
+    ``chili_momentum_pulling_away_roc_entry_enabled``).
+
+    Price tapped a multi-tap RESISTANCE band (>= ``min_taps`` swing-high taps within an
+    ATR-derived band = a tested ceiling, not a first touch) then PULLS AWAY: the current-bar
+    rate-of-change ACCELERATES above its recent baseline by an ATR-scaled margin (a ROC
+    inflection — the break is finally going, vs the dead taps before it). Entry = the
+    resistance/break level (``pullback_high``); STOP = the last swing low under the base
+    (``pullback_low``).
+
+    CHASE-GUARDS reused (no weakened veto): TAPE REQUIRED+FAIL-CLOSED, NOT PARABOLIC
+    (``_hod_extension_ok``), NOT BACKSIDE / NOT BELOW-VWAP, L2 veto. ADDITIVE: flag OFF /
+    thin / too-few-taps / no ROC inflection ⇒ ``(False, reason, {...})``; fail-OPEN on error."""
+    debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "pulling_away_roc"}
+    try:
+        if not bool(getattr(settings, "chili_momentum_pulling_away_roc_entry_enabled", False)):
+            return False, "pulling_away_disabled", debug
+        half_w = int(getattr(settings, "chili_momentum_swing_pivot_half_window", 2) or 2)
+        if df is None or getattr(df, "empty", True) or len(df) < (2 * half_w + 6):
+            return False, "pulling_away_insufficient_bars", debug
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        n = len(df)
+        cur = n - 1
+        arrays = compute_all_from_df(df, needed={"ema_9", "ema_20", "macd", "macd_signal", "vwap", "atr"})
+        ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
+        atr_pct, atr_abs = _batch_c_atr_pct(df, close, cur)
+        noise_frac = float(getattr(settings, "chili_momentum_swing_pivot_atr_noise_frac", 0.5) or 0.0)
+        pivots = _swing_pivots(
+            high, low, half_window=half_w, atr_abs=atr_abs, atr_noise_frac=noise_frac,
+        )
+        highs = [p for p in pivots if p["kind"] == "H"]
+        lows = [p for p in pivots if p["kind"] == "L"]
+        min_taps = max(2, int(getattr(settings, "chili_momentum_pulling_away_min_taps", 2) or 2))
+        if len(highs) < min_taps:
+            return False, "pulling_away_too_few_taps", debug
+
+        # The resistance BAND = the taps clustered near the highest recent swing high within an
+        # ATR-derived band. Count taps in the band; require >= min_taps (a tested ceiling).
+        top = max(float(p["price"]) for p in highs)
+        band = (0.6 * float(atr_abs)) if (atr_abs is not None and atr_abs > 0) else (0.01 * top)
+        taps = [p for p in highs if abs(float(p["price"]) - top) <= band]
+        debug["n_taps"] = len(taps)
+        if len(taps) < min_taps:
+            return False, "pulling_away_too_few_band_taps", debug
+        level = top
+        # STOP = the most-recent swing low UNDER the base (back into the consolidation).
+        if not lows:
+            return False, "pulling_away_no_stop", debug
+        stop = float(lows[-1]["price"])
+        if not (0.0 < stop < level):
+            return False, "pulling_away_bad_level", debug
+
+        # ── ROC INFLECTION: the current-bar ROC accelerates above its recent baseline ────
+        # ROC per bar = fractional close change; baseline = the mean |ROC| over the prior
+        # window. A genuine pull-away spikes the current ROC well above that flat baseline.
+        roc_lb = 5
+        if cur - roc_lb - 1 < 0:
+            return False, "pulling_away_insufficient_bars", debug
+        cur_roc = (float(close.iloc[cur]) - float(close.iloc[cur - 1])) / float(close.iloc[cur - 1]) if float(close.iloc[cur - 1]) > 0 else 0.0
+        base_rocs = []
+        for i in range(cur - roc_lb, cur):
+            p0 = float(close.iloc[i - 1])
+            if p0 > 0:
+                base_rocs.append(abs((float(close.iloc[i]) - p0) / p0))
+        base_roc = (sum(base_rocs) / len(base_rocs)) if base_rocs else 0.0
+        a = float(atr_pct) if (atr_pct is not None and atr_pct > 0) else 0.01
+        # the inflection margin = max(baseline + ~0.5 ATR%, a small abs floor) — adaptive.
+        infl_margin = max(base_roc + 0.5 * a, 0.003)
+        debug["cur_roc"] = round(cur_roc, 5)
+        debug["base_roc"] = round(base_roc, 5)
+        debug["infl_margin"] = round(infl_margin, 5)
+        if cur_roc < infl_margin:
+            return False, "pulling_away_no_roc_inflection", debug
+
+        # ── NOT BACKSIDE ────────────────────────────────────────────────────────────────
+        _bs, _bs_reason = _detect_back_side(
+            ema9, (arrays.get("ema_20") or []),
+            (arrays.get("macd") or []), (arrays.get("macd_signal") or []),
+            cur, macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+        )
+        if _bs:
+            debug["back_side"] = _bs_reason
+            return False, "pulling_away_back_side", debug
+        try:
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            if getattr(_fs, "is_backside", False):
+                debug["front_side_state"] = getattr(_fs, "reason", "backside")
+                return False, "pulling_away_backside_lifecycle", debug
+        except (TypeError, ValueError, AttributeError, KeyError):
+            debug["reason"] = "front_side_read_error"
+            return False, "pulling_away_backside_lifecycle", debug
+
+        # ── NOT PARABOLIC ──────────────────────────────────────────────────────────────
+        ema9_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        _ext_ok, _ext_dbg = _hod_extension_ok(
+            level=level, ema9_cur=ema9_cur, vwap_cur=vwap_cur, atr_pct=atr_pct, rvol=None,
+        )
+        if not _ext_ok:
+            debug.update(_ext_dbg)
+            return False, "pulling_away_extended", debug
+
+        # ── L2 hidden-seller / big-seller veto (reused; fail-open on disabled/null L2) ──
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
+        if _l2v is not None:
+            _reason, _l2patch = _l2v
+            debug.update(_l2patch)
+            return False, f"pulling_away_{_reason}", debug
+
+        debug["pullback_high"] = float(level)
+        debug["pullback_low"] = float(stop)
+        debug["atr_pct"] = (round(atr_pct, 6) if atr_pct is not None else None)
+
+        # current price (live tick when above the bar close; never lowers).
+        try:
+            cur_close = float(close.iloc[cur])
+        except (TypeError, ValueError, IndexError):
+            return False, "pulling_away_no_close", debug
+        cur_px = cur_close
+        if live_price is not None:
+            try:
+                lp = float(live_price)
+                if lp > 0:
+                    cur_px = max(cur_close, lp)
+            except (TypeError, ValueError):
+                pass
+        cur_hi = float(high.iloc[cur])
+        _broke = (cur_px > level) or (cur_hi > level)
+        if not _broke:
+            return False, "waiting_for_break", debug  # tick-armable (pullback_high set)
+
+        # ── TAPE REQUIRED + FAIL-CLOSED (the LAST gate) ─────────────────────────────────
+        _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+        debug["tape_reason"] = _tape_dbg.get("reason")
+        if not _tape_ok:
+            return False, "pulling_away_tape_unconfirmed", debug
+        if live_price is not None and float(live_price) > 0 and float(live_price) > level:
+            debug["tick_break"] = True
+            debug["live_price"] = float(live_price)
+            return True, "pulling_away_roc_tick", debug
+        return True, "pulling_away_roc", debug
+    except Exception:
+        return False, "pulling_away_error", {"entry_interval": entry_interval}
+
+
+def premarket_pivot_macd_entry(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str,
+    live_price: float | None = None,
+    symbol: str | None = None,
+    now: Any = None,
+    db: Any = None,
+    l2_as_of: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """LOCATE #6: PREMARKET PIVOT + MACD re-cross gap-and-go (flag
+    ``chili_momentum_premarket_pivot_macd_entry_enabled``).
+
+    A premarket break: price breaks the premarket PIVOT (the recent premarket swing high)
+    WITH a fresh MACD re-cross (the MACD line crosses back ABOVE its signal within the
+    lookback — momentum re-igniting) AND a COLD-MARKET avoid (skip when RVOL is below the
+    cold floor — a cold premarket with no interest fakes out). Entry = the pivot level
+    (``pullback_high``); STOP = the premarket pivot low (``pullback_low``). EQUITY-ONLY
+    (crypto is 24/7, no premarket).
+
+    CHASE-GUARDS reused (no weakened veto): TAPE REQUIRED+FAIL-CLOSED, NOT PARABOLIC
+    (``_hod_extension_ok``), NOT BACKSIDE / NOT BELOW-VWAP, L2 veto. ADDITIVE: flag OFF /
+    crypto / thin / cold / no MACD re-cross ⇒ ``(False, reason, {...})``; fail-OPEN on error."""
+    debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "premarket_pivot_macd"}
+    try:
+        if not bool(getattr(settings, "chili_momentum_premarket_pivot_macd_entry_enabled", False)):
+            return False, "premarket_pivot_disabled", debug
+        # EQUITY-ONLY: crypto is 24/7 and has no premarket pivot concept.
+        if bool(symbol) and str(symbol).upper().endswith("-USD"):
+            return False, "premarket_pivot_crypto_exempt", debug
+        half_w = int(getattr(settings, "chili_momentum_swing_pivot_half_window", 2) or 2)
+        if df is None or getattr(df, "empty", True) or len(df) < (2 * half_w + 6):
+            return False, "premarket_pivot_insufficient_bars", debug
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        n = len(df)
+        cur = n - 1
+        arrays = compute_all_from_df(df, needed={"ema_9", "ema_20", "macd", "macd_signal", "vwap", "atr", "volume_ratio"})
+        ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
+        macd = arrays.get("macd") or []
+        macd_sig = arrays.get("macd_signal") or []
+        vr = arrays.get("volume_ratio") or []
+        atr_pct, atr_abs = _batch_c_atr_pct(df, close, cur)
+
+        # COLD-MARKET avoid: a real gap-and-go has volume; skip a cold premarket fake-out.
+        rvol = None
+        try:
+            rvol = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
+        except (TypeError, ValueError):
+            rvol = None
+        cold_floor = float(getattr(settings, "chili_momentum_premarket_pivot_cold_rvol_floor", 1.5) or 0.0)
+        debug["rvol"] = round(rvol, 2) if rvol is not None else None
+        if cold_floor > 0.0 and (rvol is None or rvol < cold_floor):
+            return False, "premarket_pivot_cold_market", debug
+
+        # The premarket PIVOT = the most-recent swing high (the level that, broken, signals the
+        # gap-and-go); STOP = the most-recent swing low under it.
+        noise_frac = float(getattr(settings, "chili_momentum_swing_pivot_atr_noise_frac", 0.5) or 0.0)
+        pivots = _swing_pivots(
+            high, low, half_window=half_w, atr_abs=atr_abs, atr_noise_frac=noise_frac,
+        )
+        highs = [p for p in pivots if p["kind"] == "H"]
+        lows = [p for p in pivots if p["kind"] == "L"]
+        if not highs or not lows:
+            return False, "premarket_pivot_no_pivot", debug
+        level = float(highs[-1]["price"])
+        stop = float(lows[-1]["price"])
+        if not (0.0 < stop < level):
+            return False, "premarket_pivot_bad_level", debug
+
+        # ── MACD RE-CROSS: the line crossed back ABOVE signal within the lookback AND is
+        # STILL above now (a fresh bullish re-cross, not a stale one). ─────────────────
+        _lb = int(_BACKSIDE_MACD_CROSS_LOOKBACK)
+        _recrossed = False
+        try:
+            m_cur = macd[cur] if cur < len(macd) else None
+            s_cur = macd_sig[cur] if cur < len(macd_sig) else None
+            if m_cur is not None and s_cur is not None and float(m_cur) > float(s_cur):
+                lo_i = max(1, cur - _lb + 1)
+                for i in range(lo_i, cur + 1):
+                    mp = macd[i - 1] if 0 <= i - 1 < len(macd) else None
+                    sp = macd_sig[i - 1] if 0 <= i - 1 < len(macd_sig) else None
+                    mi = macd[i] if 0 <= i < len(macd) else None
+                    si = macd_sig[i] if 0 <= i < len(macd_sig) else None
+                    if mp is None or sp is None or mi is None or si is None:
+                        continue
+                    if float(mp) <= float(sp) and float(mi) > float(si):
+                        _recrossed = True
+                        break
+        except (TypeError, ValueError, IndexError):
+            _recrossed = False
+        if not _recrossed:
+            return False, "premarket_pivot_no_macd_recross", debug
+        debug["macd_recross"] = True
+
+        # ── NOT BACKSIDE ────────────────────────────────────────────────────────────────
+        _bs, _bs_reason = _detect_back_side(
+            ema9, (arrays.get("ema_20") or []),
+            macd, macd_sig, cur, macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+        )
+        if _bs:
+            debug["back_side"] = _bs_reason
+            return False, "premarket_pivot_back_side", debug
+        try:
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            if getattr(_fs, "is_backside", False):
+                debug["front_side_state"] = getattr(_fs, "reason", "backside")
+                return False, "premarket_pivot_backside_lifecycle", debug
+        except (TypeError, ValueError, AttributeError, KeyError):
+            debug["reason"] = "front_side_read_error"
+            return False, "premarket_pivot_backside_lifecycle", debug
+
+        # ── NOT PARABOLIC ──────────────────────────────────────────────────────────────
+        ema9_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        _ext_ok, _ext_dbg = _hod_extension_ok(
+            level=level, ema9_cur=ema9_cur, vwap_cur=vwap_cur, atr_pct=atr_pct, rvol=rvol,
+        )
+        if not _ext_ok:
+            debug.update(_ext_dbg)
+            return False, "premarket_pivot_extended", debug
+
+        # ── L2 hidden-seller / big-seller veto (reused; fail-open on disabled/null L2) ──
+        _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
+        if _l2v is not None:
+            _reason, _l2patch = _l2v
+            debug.update(_l2patch)
+            return False, f"premarket_pivot_{_reason}", debug
+
+        debug["pullback_high"] = float(level)
+        debug["pullback_low"] = float(stop)
+        debug["atr_pct"] = (round(atr_pct, 6) if atr_pct is not None else None)
+
+        # current price (live tick when above the bar close; never lowers).
+        try:
+            cur_close = float(close.iloc[cur])
+        except (TypeError, ValueError, IndexError):
+            return False, "premarket_pivot_no_close", debug
+        cur_px = cur_close
+        if live_price is not None:
+            try:
+                lp = float(live_price)
+                if lp > 0:
+                    cur_px = max(cur_close, lp)
+            except (TypeError, ValueError):
+                pass
+        cur_hi = float(high.iloc[cur])
+        _broke = (cur_px > level) or (cur_hi > level)
+        if not _broke:
+            return False, "waiting_for_break", debug  # tick-armable (pullback_high set)
+
+        # ── TAPE REQUIRED + FAIL-CLOSED (the LAST gate) ─────────────────────────────────
+        _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+        debug["tape_reason"] = _tape_dbg.get("reason")
+        if not _tape_ok:
+            return False, "premarket_pivot_tape_unconfirmed", debug
+        if live_price is not None and float(live_price) > 0 and float(live_price) > level:
+            debug["tick_break"] = True
+            debug["live_price"] = float(live_price)
+            return True, "premarket_pivot_macd_tick", debug
+        return True, "premarket_pivot_macd", debug
+    except Exception:
+        return False, "premarket_pivot_error", {"entry_interval": entry_interval}
+
+
 def ross_double_bottom_confirmation(
     df: pd.DataFrame,
     *,
@@ -4585,6 +6248,16 @@ def inverse_head_shoulders_confirmation(
         debug["pullback_high"] = float(level)
         debug["pullback_low"] = float(stop)
 
+        # Request ema_9 + volume_ratio (break surge) PLUS ema_20 / macd / macd_signal / vwap
+        # so the NOT-BACKSIDE + NOT-PARABOLIC chase-guards below get REAL series —
+        # compute_all_from_df only computes what is requested, so an un-requested ema_20/macd
+        # would silently no-op _detect_back_side (a chase hole). Mirrors wedge_break / cup.
+        arrays = compute_all_from_df(
+            df, needed={"ema_9", "ema_20", "macd", "macd_signal", "vwap", "volume_ratio"},
+        )
+        ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
+
         # L2 hidden-seller / big-seller veto (reused; fail-open on disabled/null L2).
         _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
         if _l2v is not None:
@@ -4592,30 +6265,72 @@ def inverse_head_shoulders_confirmation(
             debug.update(_l2patch)
             return False, f"inverse_head_shoulders_{_reason}", debug
 
-        # BACK-SIDE veto (reused; fail-open). Never fire a fresh long into a rolled-over,
-        # back-side-of-the-move tape — the pattern only buys an exhaustion bottom turning up.
+        # ── NOT BACKSIDE / NOT BELOW-VWAP (the #1 chase guard — mirrors wedge / cup) ─────
+        # Never fire a fresh long into a rolled-over, back-side-of-the-move tape — the pattern
+        # only buys an exhaustion bottom turning up. _detect_back_side reads the 1m EMA/MACD
+        # rollover (ARRAY signature, mirrors wedge/cup — NOT the old df+kwarg call that raised
+        # TypeError + silently no-opped); front_side_state reads WHERE the name sits in its OWN
+        # session (below VWAP / faded). The front_side read fails CLOSED on a thin frame.
+        _bs, _bs_reason = _detect_back_side(
+            ema9, (arrays.get("ema_20") or []),
+            (arrays.get("macd") or []), (arrays.get("macd_signal") or []),
+            cur, macd_lookback=_BACKSIDE_MACD_CROSS_LOOKBACK,
+        )
+        if _bs:
+            debug["back_side"] = _bs_reason
+            return False, "inverse_head_shoulders_back_side", debug
         try:
-            _bs = _detect_back_side(df, entry_interval=entry_interval)
-            if _bs is not None and bool(_bs.get("back_side")):
-                debug["back_side"] = True
-                debug.update({k: _bs[k] for k in ("back_side_reason",) if k in _bs})
-                return False, "inverse_head_shoulders_back_side", debug
-        except Exception:
-            pass  # fail-open: a backside-detector error never blocks the fire
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            if getattr(_fs, "is_backside", False):
+                debug["front_side_state"] = getattr(_fs, "reason", "backside")
+                return False, "inverse_head_shoulders_backside_lifecycle", debug
+        except (TypeError, ValueError, AttributeError, KeyError):
+            # thin/degenerate frame -> fail-CLOSED for this new-conviction fire path.
+            debug["reason"] = "front_side_read_error"
+            return False, "inverse_head_shoulders_backside_lifecycle", debug
+
+        # ── NOT PARABOLIC: extension vs the 9-EMA AND VWAP (the blow-off defense) ────────
+        # The neckline break level (= the entry) must not sit excessively extended above the
+        # 9-EMA / VWAP. Reuses the SAME adaptive ATR extension yardstick the chase veto uses
+        # (fail-OPEN on a missing reference so thin data never blocks). Mirrors cup_and_handle.
+        ema9_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        _ext_ok, _ext_dbg = _hod_extension_ok(
+            level=level, ema9_cur=ema9_cur, vwap_cur=vwap_cur, atr_pct=atr_pct, rvol=None,
+        )
+        if not _ext_ok:
+            debug.update(_ext_dbg)
+            return False, "inverse_head_shoulders_extended", debug
 
         # ── TRIGGER: the break above the neckline (the edges of the two shoulders) ───────
+        # Compute WHICH fire path BEFORE the tape gate so TAPE REQUIRED applies to BOTH the
+        # tick-break and the completed-bar break (mirrors cup_and_handle).
         cur_hi = float(high.iloc[cur])
-        if (
-            live_price is not None and float(live_price) > 0
-            and float(live_price) > level
-        ):
+        _tick_break = bool(
+            live_price is not None and float(live_price) > 0 and float(live_price) > level
+        )
+        _bar_break = bool(cur_hi > level)
+        if not (_tick_break or _bar_break):
+            return False, "waiting_for_break", debug  # tick-armable (pullback_high set)
+
+        # ── TAPE REQUIRED + FAIL-CLOSED (the LAST gate; no fire without buyers on tape) ──
+        # Mirrors wedge / absorption / cup: buyers must be actively lifting the ask THIS tick.
+        # Any disabled-flag / no-tape / thin / stale / crypto / error ⇒ NO fire. Applies to
+        # BOTH the tick-break and the completed-bar break.
+        _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+        debug["tape_reason"] = _tape_dbg.get("reason")
+        if not _tape_ok:
+            return False, "inverse_head_shoulders_tape_unconfirmed", debug
+
+        if _tick_break:
             debug["tick_break"] = True
             debug["live_price"] = float(live_price)
             return True, "inverse_head_shoulders_break_tick_ok", debug
-        if cur_hi <= level:
-            return False, "waiting_for_break", debug  # tick-armable (pullback_high set)
-        arrays_v = compute_all_from_df(df, needed={"volume_ratio"})
-        vr = arrays_v.get("volume_ratio") or []
+        # A completed bar broke the neckline -> ALSO require a VOLUME spike on the break bar.
+        vr = arrays.get("volume_ratio") or []
         vol_ratio = None
         try:
             vol_ratio = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
@@ -4913,6 +6628,128 @@ def cup_and_handle_confirmation(
         return False, "cup_and_handle_error", {"entry_interval": entry_interval}
 
 
+def _explosive_raw_break_escape(
+    symbol: str | None,
+    *,
+    vol_ratio: float | None,
+    explosive_rvol_floor: float,
+    db: Any = None,
+    l2_as_of: Any = None,
+    debug: dict[str, Any] | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """ADAPTIVE-RETEST escape (the explosive raw-break Ross actually takes on the strongest
+    setups). When ``chili_momentum_pullback_require_retest`` is True the trigger waits for a
+    break→pullback→retest→reclaim sequence; a genuinely EXPLOSIVE vertical runner never offers
+    that pullback. Ross's real behaviour is asymmetric: he takes the RAW first break on the
+    STRONGEST setups (huge RVOL, the ask getting eaten) and waits for the retest on the weaker
+    ones. This is the strongest-setups-only escape — it converts a ``waiting_for_retest`` into a
+    raw-break FIRE *only* when the break is, by the tape, clearly explosive.
+
+    EXPLOSIVE is defined STRICTLY from EXISTING adaptive floors (no new magic level):
+      1. RVOL >= an ADAPTIVE explosive floor = ``explosive_floor_rvol`` (Ross's '5x') x ONE
+         documented multiplier ``chili_momentum_pullback_raw_break_rvol_mult`` (>= 1.0, default
+         1.0 — i.e. AT the explosive floor; the operator can raise it). The floor itself is the
+         instrument-relative trigger-bar vol_ratio the gate already computed, so this is
+         self-relative, not a fixed share count.
+      2. The executed TAPE actively confirms aggressive buying ACCELERATING into the break —
+         ``signed_tape_accel > 0`` (back-half aggressor-signed buy volume exceeds the front-half:
+         the ask is getting eaten) AND ``tick_rate >= tick_rate_floor`` (recent activity at/above
+         its OWN self-relative percentile floor) AND the thrust is STRONG: the back-half buy
+         acceleration is a meaningful fraction of the window's signed buy volume (the thrust is a
+         real surge, not a one-lot poke) — ``signed_tape_accel >= thrust_frac x back_half_buy_vol``
+         where ``thrust_frac`` = ``chili_momentum_pullback_raw_break_thrust_frac`` (the SAME
+         single documented base; default a strict 0.50 = the back half must out-buy the front by
+         at least half the back-half buy volume).
+
+    FAIL-CLOSED on the tape (the 'TAPE REQUIRED + fail-closed' chase-guard): no symbol / no db /
+    crypto / empty-or-thin tape / any error ⇒ NO escape (``False``). The escape NEVER fires
+    blind — without a live tick tape confirming the ask is being eaten, the retest discipline
+    stays in force. Returns ``(escape, dbg_patch)`` where ``dbg_patch`` is merged into ``debug``
+    for observability. PURE read (no writes). docs/DESIGN/MOMENTUM_LANE.md"""
+    dbg: dict[str, Any] = {}
+    try:
+        # 1) ADAPTIVE explosive RVOL floor (derived from the existing explosive floor x ONE base).
+        try:
+            _rvol_mult = float(
+                getattr(settings, "chili_momentum_pullback_raw_break_rvol_mult", 1.0) or 1.0
+            )
+        except (TypeError, ValueError):
+            _rvol_mult = 1.0
+        _rvol_mult = max(1.0, _rvol_mult)
+        _explosive_floor = max(0.0, float(explosive_rvol_floor)) * _rvol_mult
+        dbg["raw_break_rvol_floor"] = round(_explosive_floor, 3)
+        if vol_ratio is None or float(vol_ratio) < _explosive_floor:
+            dbg["raw_break_rvol"] = None if vol_ratio is None else round(float(vol_ratio), 3)
+            dbg["raw_break_blocked"] = "rvol_below_explosive_floor"
+            return False, dbg
+        dbg["raw_break_rvol"] = round(float(vol_ratio), 3)
+
+        # 2) TAPE thrust — REQUIRED + FAIL-CLOSED (no tape ⇒ no escape).
+        tape = signed_tape_accel_features(symbol, db=db, as_of=l2_as_of)
+        if tape is None:
+            dbg["raw_break_blocked"] = "tape_required_fail_closed"
+            return False, dbg
+        accel = float(tape.get("signed_tape_accel", 0.0))
+        tick_rate = float(tape.get("tick_rate", 0.0))
+        tick_rate_floor = float(tape.get("tick_rate_floor", 0.0))
+        dbg.update({
+            "raw_break_signed_tape_accel": round(accel, 6),
+            "raw_break_tick_rate": round(tick_rate, 4),
+            "raw_break_tick_rate_floor": round(tick_rate_floor, 4),
+            "raw_break_n_ticks": int(tape.get("n_ticks", 0)),
+        })
+        # ask-eaten + active: positive aggressor acceleration AND recent activity at/above floor.
+        if not (accel > 0.0 and tick_rate >= tick_rate_floor):
+            dbg["raw_break_blocked"] = "tape_not_confirming"
+            return False, dbg
+        # STRONG thrust: the back-half buy acceleration is a meaningful fraction of the window's
+        # back-half buy volume (a real surge, not a single-lot poke). back_half_buy_vol is
+        # reconstructed from the front_buy + accel identity isn't available here, so derive the
+        # strength self-relatively against the signed-buy magnitude the tape exposes: require the
+        # acceleration to clear thrust_frac of (accel + |front-half buy|) ≈ back-half buy volume.
+        try:
+            _thrust_frac = float(
+                getattr(settings, "chili_momentum_pullback_raw_break_thrust_frac", 0.50) or 0.50
+            )
+        except (TypeError, ValueError):
+            _thrust_frac = 0.50
+        _thrust_frac = max(0.0, min(1.0, _thrust_frac))
+        # back_half_buy = front_half_buy + signed_tape_accel; front_half_buy = back_half_buy - accel.
+        # We only have accel (= back_buy - front_buy). The strongest-thrust read is accel relative
+        # to the back-half buy volume; since back_buy >= accel (front_buy >= 0), accel/back_buy <= 1.
+        # Without back_buy exposed we use the conservative self-relative proxy: the acceleration
+        # must be POSITIVE and at least thrust_frac of itself-plus-the-prior-half — i.e. the back
+        # half bought at least (1/(1-thrust_frac)) x more than the front half. Express directly:
+        # accel >= thrust_frac/(1-thrust_frac) x front_buy. front_buy = back_buy - accel is unknown,
+        # so fall back to requiring accel to clear a thrust_frac share of the tape's total signed
+        # buy magnitude when exposed; else require strictly-positive accel (already checked) AND a
+        # tick_rate strictly ABOVE the floor (a true surge, not merely at-floor).
+        _back_buy = tape.get("back_half_buy_vol")
+        _strong = True
+        if _back_buy is not None:
+            try:
+                _bb = float(_back_buy)
+                _strong = _bb > 0 and accel >= _thrust_frac * _bb
+            except (TypeError, ValueError):
+                _strong = True
+        else:
+            # No back-half buy volume exposed → demand a strictly-rising tape (tick_rate ABOVE
+            # floor, not merely at it) as the strong-thrust proxy. Strictly-positive accel is
+            # already required above; this raises the bar so an at-floor flat tape does not escape.
+            _strong = tick_rate > tick_rate_floor
+        dbg["raw_break_thrust_frac"] = round(_thrust_frac, 3)
+        dbg["raw_break_strong_thrust"] = bool(_strong)
+        if not _strong:
+            dbg["raw_break_blocked"] = "thrust_not_strong"
+            return False, dbg
+
+        dbg["raw_break_explosive"] = True
+        return True, dbg
+    except Exception:
+        dbg["raw_break_blocked"] = "raw_break_error_fail_closed"
+        return False, dbg
+
+
 def pullback_break_confirmation(
     df: pd.DataFrame,
     *,
@@ -5081,6 +6918,123 @@ def pullback_break_confirmation(
         ok_t, _runaway = True, True
         debug["runaway"] = True
 
+    # ADAPTIVE-RETEST EXPLOSIVE RAW-BREAK ESCAPE (Ross's asymmetric rule: raw break on the
+    # STRONGEST setups, retest on the rest). When require_retest is True and the break RAN with
+    # NO pullback (``waiting_for_retest``), the retest ladder strands a genuinely explosive
+    # vertical runaway. This GUARDED escape converts that wait into a raw-break FIRE *only* when
+    # the break is, BY THE TAPE, clearly explosive: RVOL >= an ADAPTIVE explosive floor (derived
+    # from ``explosive_floor_rvol`` x ONE documented base) AND the executed tape confirms
+    # aggressive buying ACCELERATING into the break (signed_tape_accel > 0 = the ask getting
+    # eaten, tick_rate >= floor, strong thrust) — TAPE REQUIRED + FAIL-CLOSED (no tape ⇒ no
+    # escape, the retest discipline stays in force). It is a strongest-setups-only RAW BREAK, NOT
+    # a chase: it sets ok_t and then runs the SAME 4 chase-guards every other fire runs (backside
+    # EMA/MACD + front_side_state + VWAP-hold, extension/verticality veto, structural stop, and —
+    # via the runaway weak-prior set below — the RAISED volume floor + fail-CLOSED sustained
+    # volume). Flag OFF ⇒ this whole block is skipped ⇒ BYTE-IDENTICAL to the current ladder.
+    # ONE adaptive base (rvol_mult x explosive_floor); no magic level. docs/DESIGN/MOMENTUM_LANE.md
+    _explosive_raw_break = False
+    if (
+        not ok_t
+        and require_retest
+        and reason_t == "waiting_for_retest"
+        and debug.get("pullback_high") is not None
+        and debug.get("pullback_low") is not None
+        and bool(getattr(settings, "chili_momentum_pullback_raw_break_when_explosive", False))
+    ):
+        # Trigger-bar RVOL (the SAME self-relative vol_ratio the explosive-floor gate uses below).
+        _erb_vr = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
+        if _erb_vr is None:
+            _erb_w = vol.tail(21)
+            _erb_avg = float(_erb_w.iloc[:-1].mean()) if len(_erb_w) > 1 else float(vol.iloc[-1])
+            _erb_vr = (float(vol.iloc[-1]) / _erb_avg) if _erb_avg > 0 else 0.0
+        try:
+            _erb_floor = float(getattr(settings, "chili_momentum_explosive_floor_rvol", 5.0) or 5.0)
+        except (TypeError, ValueError):
+            _erb_floor = 5.0
+        _escape, _escape_dbg = _explosive_raw_break_escape(
+            symbol,
+            vol_ratio=_erb_vr,
+            explosive_rvol_floor=_erb_floor,
+            db=db,
+            l2_as_of=l2_as_of,
+            debug=debug,
+        )
+        debug.update(_escape_dbg)
+        if _escape:
+            ok_t, _explosive_raw_break = True, True
+            debug["explosive_raw_break"] = True
+
+    # FIX C(1): EXPLOSIVE RAW FIRST-PUSH. The escape above only rescues a break that ALREADY
+    # printed and ran without a retest (``waiting_for_retest``). But the require_retest ladder also
+    # strands the EXPLOSIVE tier ONE step earlier — at ``waiting_for_break`` — because the stable
+    # retest level is anchored ``retest_lookback_bars`` back, so the first completed-bar break of
+    # the (nearer) raw pullback high is NOT yet a "break" of that older level. For a genuinely
+    # explosive low-float runner (NVCT/FISN/SKYQ class in the w0av0u3qy study) the retest never
+    # comes; the name simply runs. Ross's asymmetric rule takes the RAW first break on the
+    # STRONGEST setups. When this flag is ON and the name is, BY THE TAPE, clearly explosive (the
+    # SAME _explosive_raw_break_escape gate: RVOL >= adaptive explosive floor AND tape-confirmed
+    # aggressive buying — TAPE REQUIRED + FAIL-CLOSED), re-evaluate the trigger as a RAW first break
+    # (the require_retest=False semantics for THIS tier only) so it fires the instant a COMPLETED
+    # bar crosses the (nearer) pullback high. Crucially this is NOT a chase: it only sets ok_t +
+    # adopts the raw-break pb_high/pb_low, then runs the SAME 4 chase-guards every other fire runs
+    # (backside EMA/MACD + front_side_state + VWAP-hold, extension/verticality, structural stop, and
+    # — via the _explosive_raw_break weak-prior set below — the RAISED runaway volume floor +
+    # fail-CLOSED sustained volume). Flag OFF ⇒ skipped ⇒ BYTE-IDENTICAL. docs/DESIGN/MOMENTUM_LANE.md
+    _explosive_raw_first_push = False
+    if (
+        not ok_t
+        and require_retest
+        and reason_t == "waiting_for_break"
+        and bool(getattr(settings, "chili_momentum_explosive_raw_break_enabled", True))
+    ):
+        # Trigger-bar RVOL (the SAME self-relative vol_ratio the explosive-floor gate uses).
+        _rfp_vr = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
+        if _rfp_vr is None:
+            _rfp_w = vol.tail(21)
+            _rfp_avg = float(_rfp_w.iloc[:-1].mean()) if len(_rfp_w) > 1 else float(vol.iloc[-1])
+            _rfp_vr = (float(vol.iloc[-1]) / _rfp_avg) if _rfp_avg > 0 else 0.0
+        try:
+            _rfp_floor = float(getattr(settings, "chili_momentum_explosive_floor_rvol", 5.0) or 5.0)
+        except (TypeError, ValueError):
+            _rfp_floor = 5.0
+        # TAPE REQUIRED + FAIL-CLOSED — reuse the EXACT explosive-tape gate the retest escape uses,
+        # so the first-push tier can never fire blind (no tape ⇒ no escape ⇒ retest discipline holds).
+        _rfp_escape, _rfp_escape_dbg = _explosive_raw_break_escape(
+            symbol,
+            vol_ratio=_rfp_vr,
+            explosive_rvol_floor=_rfp_floor,
+            db=db,
+            l2_as_of=l2_as_of,
+            debug=debug,
+        )
+        debug.update(_rfp_escape_dbg)
+        if _rfp_escape:
+            # Re-evaluate as the RAW first break (require_retest=False semantics for THIS tier only):
+            # fires ``raw_break`` the instant the current COMPLETED bar's high crosses the nearer
+            # pullback high, with NO retest wait.
+            _rfp_ok, _rfp_reason, _rfp_pbh, _rfp_pbl, _rfp_dbg = _evaluate_raw_break(
+                high, low, ema9, cur,
+                entry_interval=entry_interval,
+                max_pullback_bars=max_pullback_bars,
+                retracement_threshold=retracement_threshold,
+                atr_pct=atr_pct,
+            )
+            if _rfp_ok and _rfp_pbh is not None and _rfp_pbl is not None:
+                # Adopt the raw-break levels; treat as the explosive raw-break weak-prior set so the
+                # RAISED runaway volume floor + fail-CLOSED sustained-volume apply downstream.
+                ok_t = True
+                _explosive_raw_first_push = True
+                _explosive_raw_break = True
+                pb_high, pb_low = _rfp_pbh, _rfp_pbl
+                debug.update(_rfp_dbg)
+                debug["pullback_high"] = float(_rfp_pbh)
+                debug["pullback_low"] = float(_rfp_pbl)
+                debug["explosive_raw_first_push"] = True
+            else:
+                # Tape said explosive but the completed bar has not crossed the raw pullback high
+                # yet — leave the wait reason intact (the tick-break block below can still arm).
+                debug["explosive_raw_first_push_armed"] = True
+
     # TICK-BREAK (Ross-speed entry): the structure is valid on COMPLETED bars but
     # the break hasn't printed on a CLOSED bar yet — and the LIVE tick is already
     # trading through the level. Ross enters on that tick ("first candle to make a
@@ -5199,6 +7153,63 @@ def pullback_break_confirmation(
         except (TypeError, ValueError, AttributeError, KeyError):
             pass  # thin/degenerate frame or other error -> fail-open (never block on a bug)
 
+    # ── CANDLE-QUALITY + MULTI-TF (HTF-against) ENTRY VETO (flag-gated, default OFF) ──
+    # Two ADDITIVE entry-quality gates, slotted AFTER the trigger fires + the backside vetoes
+    # and BEFORE the downstream VWAP/MACD/volume confirmations (validate the trigger candle's
+    # quality + the HTF context before the heavier checks). Flag OFF -> the whole block is
+    # skipped -> BYTE-IDENTICAL.
+    #
+    # EXEMPT the deep-reclaim/dip-buy reversal path (same `if not _deep_reclaim` carve-out the
+    # backside gates above use): that mode INTENTIONALLY catches the turn off a dip, so it
+    # expects a lagging HTF (a slow 5m EMA still leaning down off the flush) and an indecision
+    # bar at the very bottom — exactly the shapes these two gates veto. Without this carve-out
+    # the HTF/doji gates kill the dip-rip / VWAP-reclaim. The deep-reclaim path carries its own
+    # dip-vs-dump discipline (#734). docs/DESIGN/MOMENTUM_LANE.md
+    if not _deep_reclaim and bool(
+        getattr(settings, "chili_momentum_candle_quality_multitf_veto_enabled", False)
+    ):
+        # (6) DOJI VETO — the TRIGGER candle is a true doji (weak body relative to range =
+        # indecision). Skip on a TICK-break (the breaking bar is still FORMING mid-bar — its
+        # body/wick are unknowable, exactly as the conviction-candle gate skips it). A strong
+        # full-body commitment candle passes (handled inside _doji_trigger_veto). ATR-adaptive
+        # band (ONE documented base, widened by atr_pct); fail-safe on a zero-range bar.
+        if not _tick_break:
+            try:
+                _dj_o = float(df["Open"].iloc[cur])
+                _dj_h, _dj_l, _dj_c = (
+                    float(high.iloc[cur]), float(low.iloc[cur]), float(close.iloc[cur])
+                )
+                _dj_base = float(getattr(settings, "chili_momentum_doji_body_frac", 0.25))
+                _dj_veto, _dj_dbg = _doji_trigger_veto(
+                    _dj_o, _dj_h, _dj_l, _dj_c, atr_pct=atr_pct, base_body_frac=_dj_base,
+                )
+                if _dj_dbg:
+                    debug["doji"] = _dj_dbg
+                if _dj_veto:
+                    return False, "doji_trigger_veto", debug
+            except (TypeError, ValueError, IndexError, KeyError):
+                pass  # unreadable trigger bar -> fail-open (never block on a bug)
+
+        # (7) HTF-AGAINST VETO — the higher TF (5m, resampled from the 1m df, NO new feed) is
+        # CLEARLY bearish (5m EMA-9 in a SUSTAINED roll-down or MACD clearly peaked). A
+        # NEUTRAL/LAGGING HTF (not yet up but not down) — including a single lagging EMA
+        # down-tick — MUST still pass -> the 1m-FAST geometry is preserved (the 1m leads, the
+        # HTF lags; requiring full alignment would break Ross's method). Applies to tick-breaks
+        # too (it reads COMPLETED HTF bars, independent of the forming 1m bar). Fail-OPEN on
+        # non-datetime index / thin HTF (a missing feed never blocks).
+        try:
+            _htf_thresh = float(getattr(settings, "chili_momentum_htf_against_macd_threshold", 0.0))
+            _htf_bars = int(getattr(settings, "chili_momentum_htf_against_ema9_rolldown_bars", 3))
+            _htf_veto, _htf_dbg = _htf_against_veto(
+                df, rule="5min", macd_threshold=_htf_thresh, rolldown_bars=_htf_bars,
+            )
+            if _htf_dbg:
+                debug["htf"] = _htf_dbg
+            if _htf_veto:
+                return False, "htf_against_veto", debug
+        except (TypeError, ValueError, AttributeError):
+            pass  # thin / non-datetime frame -> fail-open (1m-fast preserved)
+
     # Volume spike on the trigger (break / reclaim) bar.
     vol_ratio = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
     if vol_ratio is None:
@@ -5310,9 +7321,56 @@ def pullback_break_confirmation(
     # forming — its volume is unknowable); the sustained-volume gate below still applies.
     _vol_floor = (
         float(runaway_min_volume_spike)
-        if (_runaway or _deep_reclaim or _late_pullback)
+        if (_runaway or _explosive_raw_break or _deep_reclaim or _late_pullback)
         else float(volume_spike_multiple)
     )
+    # FIX C(2): RVOL-RELATIVE break-volume floor (kills the fixed 1.5x/2.0x magic). The fixed floor
+    # above held a +400%-RVOL explosive name to the SAME trigger-bar relative-volume bar as a +20%
+    # name — the w0av0u3qy study saw break_low_volume reject 529 explosive breaks. When the flag is
+    # ON, scale the floor DOWN as the name's OWN trigger-bar RVOL rises above the explosive floor:
+    # a name running R x the explosive RVOL floor needs only floor x clamp(explosive_floor/R, ratio,
+    # 1.0). At ratio=0.25 a name >=4x the explosive floor needs only 25% of the base bar; a name AT
+    # the floor still needs the full base; the floor NEVER drops below a documented absolute minimum
+    # (a hyper-explosive name still needs a real green volume bar, not a one-lot poke). Self-relative,
+    # no magic share count. Flag OFF ⇒ _vol_floor unchanged ⇒ byte-identical. docs/DESIGN/MOMENTUM_LANE.md
+    if (
+        not _tick_break
+        and bool(getattr(settings, "chili_momentum_break_volume_rvol_relative", True))
+        and vol_ratio is not None
+    ):
+        try:
+            _bv_ratio = float(getattr(settings, "chili_momentum_break_volume_rvol_ratio", 0.25) or 0.25)
+        except (TypeError, ValueError):
+            _bv_ratio = 0.25
+        _bv_ratio = max(0.0, min(1.0, _bv_ratio))
+        try:
+            _bv_min = float(getattr(settings, "chili_momentum_break_volume_rvol_min_floor", 1.0) or 0.0)
+        except (TypeError, ValueError):
+            _bv_min = 1.0
+        try:
+            _bv_explosive_floor = float(getattr(settings, "chili_momentum_explosive_floor_rvol", 5.0) or 0.0)
+        except (TypeError, ValueError):
+            _bv_explosive_floor = 5.0
+        # Scale factor in [ratio, 1.0]: 1.0 when the name is AT/below the explosive floor (no relief),
+        # shrinking toward `ratio` as the name's RVOL exceeds it. clamp keeps it bounded both ways.
+        if _bv_explosive_floor > 0 and float(vol_ratio) > 0:
+            _bv_scale = _bv_explosive_floor / float(vol_ratio)
+        else:
+            _bv_scale = 1.0
+        _bv_scale = max(_bv_ratio, min(1.0, _bv_scale))
+        _bv_relaxed = max(_bv_min, _vol_floor * _bv_scale)
+        # Only ever RELAX (never tighten) the per-bar floor — a misconfigured min/ratio must not
+        # raise the bar above the fixed multiple the operator already accepted.
+        if _bv_relaxed < _vol_floor:
+            debug["break_volume_rvol_relative"] = {
+                "base_floor": round(_vol_floor, 3),
+                "rvol": round(float(vol_ratio), 3),
+                "explosive_floor": round(_bv_explosive_floor, 3),
+                "scale": round(_bv_scale, 4),
+                "min_floor": round(_bv_min, 3),
+                "effective_floor": round(_bv_relaxed, 3),
+            }
+            _vol_floor = _bv_relaxed
     if not _tick_break and vol_ratio < _vol_floor:
         return False, "break_low_volume", debug
 
@@ -5344,8 +7402,63 @@ def pullback_break_confirmation(
     if require_break_candle and not _tick_break:
         from .candles import is_strong_bull_break_candle
 
+        # ADAPTIVE close-position floor (gate-audit fix): the FIXED 0.50 close-pos
+        # over-rejected explosive FIRST-pushes (Ross buys the first strong push even
+        # when the 1m candle isn't textbook-strong). When the flag is ON and THIS break
+        # is explosive (trigger-bar RVOL >= the SAME E3 explosive floor used above),
+        # float the requirement DOWN from 0.50 toward the relaxed floor as RVOL exceeds
+        # the floor — RVOL-DERIVED, no new magic threshold. Ordinary tape (RVOL below
+        # the floor, or unknown) keeps the textbook 0.50; a genuinely weak/doji break
+        # still blocks below the relaxed floor even at high RVOL (doji rejection
+        # preserved). Flag OFF ⇒ _close_pos == break_candle_min_close_pos AND the upper-
+        # wick cap stays at its 0.50 default ⇒ byte-identical.
+        #
+        # NOTE on the upper-wick cap: for a GREEN break bar (the only bar this gate lets
+        # through — red is rejected outright) is_strong_bull_break_candle's upper-wick
+        # fraction is identically (1 - close_pos), so the default max_upper_wick_frac=0.50
+        # would re-impose the very 0.50 floor we are relaxing. So the relaxed path floats
+        # the wick cap UP in lockstep to (1 - effective_close_pos), keeping the two
+        # conditions equivalent; the non-relaxed/flag-off path leaves it at the 0.50
+        # default (byte-identical).
+        _close_pos = float(break_candle_min_close_pos)
+        _max_upper_wick = 0.50  # is_strong_bull_break_candle's documented default
+        if bool(
+            getattr(settings, "chili_momentum_break_candle_adaptive_close_pos_enabled", False)
+        ):
+            _adapt_floor_rvol = float(
+                getattr(settings, "chili_momentum_explosive_floor_rvol", 5.0) or 0.0
+            )
+            if (
+                _adapt_floor_rvol > 0
+                and vol_ratio is not None
+                and float(vol_ratio) >= _adapt_floor_rvol
+            ):
+                _relaxed = float(
+                    getattr(settings, "chili_momentum_break_candle_adaptive_close_pos_floor", 0.30)
+                    or 0.0
+                )
+                # Only relax DOWNWARD (a relaxed floor mistakenly set above the textbook
+                # 0.50 must never TIGHTEN the gate — keep the smaller of the two).
+                if _relaxed < _close_pos:
+                    # Over-floor excess in [0,1]: 0 AT the floor -> textbook 0.50;
+                    # 1 at RVOL = 2x the floor (and beyond) -> the relaxed floor.
+                    _excess = (float(vol_ratio) - _adapt_floor_rvol) / _adapt_floor_rvol
+                    _excess = max(0.0, min(1.0, _excess))
+                    _close_pos = _close_pos - _excess * (_close_pos - _relaxed)
+                    # Float the wick cap up in lockstep (never below the 0.50 default, so a
+                    # relaxed bar can never be held to a STRICTER wick than the textbook gate).
+                    _max_upper_wick = max(0.50, 1.0 - _close_pos)
+                    debug["break_candle_adaptive_close_pos"] = {
+                        "rvol": round(float(vol_ratio), 2),
+                        "rvol_floor": round(_adapt_floor_rvol, 2),
+                        "relaxed_floor": round(_relaxed, 4),
+                        "effective_min_close_pos": round(_close_pos, 4),
+                        "effective_max_upper_wick_frac": round(_max_upper_wick, 4),
+                    }
+
         if not is_strong_bull_break_candle(
-            cur_o, cur_h, cur_l, cur_c, min_close_pos=float(break_candle_min_close_pos)
+            cur_o, cur_h, cur_l, cur_c,
+            min_close_pos=_close_pos, max_upper_wick_frac=_max_upper_wick,
         ):
             debug["break_candle"] = {"o": cur_o, "h": cur_h, "l": cur_l, "c": cur_c}
             return False, "weak_break_candle", debug
@@ -5400,7 +7513,15 @@ def pullback_break_confirmation(
         _vert_mult = float(getattr(settings, "chili_momentum_entry_verticality_atr_mult", 1.5) or 0.0)
     except (TypeError, ValueError):
         _vert_mult = 1.5
-    if _vert_mult > 0:
+    # SD-1 (cold-frame fail-OPEN): when atr_pct is None (ATR array not warm on a
+    # cold/short frame), the cap below collapses to the 0.5% punitive floor, which
+    # over-rejects valid low-float Ross names that normally breathe >0.5% per bar.
+    # When the flag is ON (default True) we SKIP the verticality veto entirely on a
+    # cold frame (fail-OPEN — we cannot tell a chase from a normal breath without
+    # ATR). The veto stays FULLY active whenever atr_pct IS known. Flag OFF ⇒ the
+    # exact 0.5%-floor behaviour below (byte-identical).
+    _vert_skip_cold = bool(getattr(settings, "chili_momentum_verticality_skip_on_cold_atr", True))
+    if _vert_mult > 0 and not (_vert_skip_cold and atr_pct is None):
         _e9 = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
         if _e9 is not None and float(_e9) > 0:
             _px_v = float(live_price) if (_tick_break and live_price) else cur_c
@@ -5420,6 +7541,14 @@ def pullback_break_confirmation(
     # aggressive early entry vs the legacy ladder), bar-fired or tick-fired.
     if debug.get("pattern") == "first_pullback":
         return True, ("first_pullback_tick_ok" if _tick_break else "first_pullback_ok"), debug
+    # FIX C(1): the explosive RAW FIRST-PUSH gets its OWN observable reason (distinct from the
+    # waiting_for_retest escape) so the live A/B can attribute the first-push tier separately.
+    if _explosive_raw_first_push:
+        return True, ("explosive_raw_first_push_tick_ok" if _tick_break else "explosive_raw_first_push_ok"), debug
+    # The adaptive-retest explosive RAW-BREAK escape gets its OWN observable reason (so the replay
+    # A/B can attribute it vs the runaway rescue and the plain break-retest).
+    if _explosive_raw_break:
+        return True, ("explosive_raw_break_tick_ok" if _tick_break else "explosive_raw_break_ok"), debug
     return True, ("pullback_break_tick_ok" if _tick_break else "pullback_break_ok"), debug
 
 
@@ -6113,6 +8242,27 @@ def select_best_setup(
             return _veto_choice(fires[0])
         from .paper_execution import class_aware_reward_risk, stop_target_prices
 
+        # LOCATE #8 SECOND-LEG PREFERENCE: prefer a later, BASED leg over a 1st extended leg.
+        # A based second-leg candidate (a breakout whose tested base/support sits ABOVE the
+        # candidate set's lowest structural low by an ATR-scaled margin — i.e. it consolidated
+        # higher, a second leg) gets a small R:R TILT in the arbitration. It is a PREFERENCE
+        # among already-passing fires — it never admits a NEW entry and never loosens a guard.
+        # OFF / single fire ⇒ no tilt (byte-identical). Bounded so it can't dominate a far
+        # worse R:R. docs/DESIGN/MOMENTUM_LANE.md
+        _2leg_on = bool(getattr(settings, "chili_momentum_second_leg_preference_enabled", False))
+        _2leg_tilt = 0.0
+        _set_low = None
+        if _2leg_on and len(fires) > 1:
+            try:
+                _lows = [float(d["pullback_low"]) for _, _, d in fires
+                         if isinstance(d, dict) and d.get("pullback_low") and float(d["pullback_low"]) > 0]
+                _set_low = min(_lows) if _lows else None
+                _2leg_tilt = max(0.0, min(1.0, float(
+                    getattr(settings, "chili_momentum_second_leg_rr_tilt", 0.15) or 0.0
+                )))
+            except (TypeError, ValueError):
+                _set_low, _2leg_tilt = None, 0.0
+
         _ap = float(atr_pct) if (atr_pct is not None and atr_pct > 0) else 0.01
         best = None
         best_rr = -1.0
@@ -6129,10 +8279,19 @@ def select_best_setup(
                 risk = entry - stop
                 reward = float(target) - entry
                 rr = (reward / risk) if risk > 0 else -1.0
+                # #8: a based second leg (this fire's structural base sits an ATR-scaled
+                # margin ABOVE the candidate set's lowest base) earns the bounded R:R tilt.
+                _eff_rr = rr
+                if _2leg_tilt > 0.0 and _set_low is not None and rr > 0:
+                    _margin = _ap * float(entry)  # ~1 ATR in price terms
+                    if _margin > 0 and (stop - _set_low) >= _margin:
+                        _eff_rr = rr * (1.0 + _2leg_tilt)
+                        if isinstance(dbg, dict):
+                            dbg["second_leg_based"] = True
             except (TypeError, ValueError, KeyError):
                 continue
-            if rr > best_rr:
-                best_rr, best = rr, (ok_t, reason_t, dbg)
+            if _eff_rr > best_rr:
+                best_rr, best = _eff_rr, (ok_t, reason_t, dbg)
         if best is None:
             return _veto_choice(fires[0])
         _ok, _reason, _dbg = best
@@ -6757,6 +8916,26 @@ def ma_vwap_pullback_confirmation(
             debug["back_side"] = _bs_reason
             return False, "ma_vwap_pullback_back_side", debug
 
+        # -- NOT BELOW-VWAP (the lifecycle veto — mirrors cup_and_handle / wedge): never fire a
+        # 9/20-EMA reclaim while the name sits BELOW VWAP (a backside reclaim Ross skips —
+        # "I never buy below VWAP"). front_side_state reads WHERE the name sits in its OWN
+        # session; it fails CLOSED on a thin/degenerate frame (this is a new-conviction fire
+        # path). The _detect_back_side EMA/MACD read above does NOT cover below-VWAP, so this
+        # is the distinct lifecycle arm. (No inline tape here — this gate matches the live
+        # DIP-BUY family that substitutes tick-thrust + volume for tape.)
+        try:
+            from .ross_momentum import front_side_state
+
+            _fs = front_side_state(_today_session_frame(df))
+            debug["above_vwap"] = bool(getattr(_fs, "above_vwap", True))
+            if getattr(_fs, "is_backside", False):
+                debug["front_side_state"] = getattr(_fs, "reason", "backside")
+                return False, "ma_vwap_pullback_backside_lifecycle", debug
+        except (TypeError, ValueError, AttributeError, KeyError):
+            # thin/degenerate frame -> fail-CLOSED for this new-conviction fire path.
+            debug["reason"] = "front_side_read_error"
+            return False, "ma_vwap_pullback_backside_lifecycle", debug
+
         # -- L2 hidden-seller veto (reused; fail-open on disabled/null L2)
         _l2v = _l2_entry_veto(symbol, db=db, l2_as_of=l2_as_of, is_ssr=None)
         if _l2v is not None:
@@ -6926,10 +9105,14 @@ def bottom_reversal_confirmation(
         debug["pullback_low"] = float(series_low)
 
         # ── ATR% yardstick (tick-thrust + volume floors) ───────────────────────────────
+        # Request vwap too so the NOT-PARABOLIC extension guard's VWAP arm gets a REAL series
+        # (compute_all_from_df only computes what is requested — an un-requested vwap would
+        # silently no-op the extension VWAP arm, a chase hole). Mirrors absorption_snap / cup.
         arrays = compute_all_from_df(
-            df, needed={"ema_9", "ema_20", "macd", "macd_signal", "volume_ratio", "atr"}
+            df, needed={"ema_9", "ema_20", "macd", "macd_signal", "vwap", "volume_ratio", "atr"}
         )
         ema9 = arrays.get("ema_9") or []
+        vwap = arrays.get("vwap") or []
         vr = arrays.get("volume_ratio") or []
         atr = arrays.get("atr") or []
         atr_pct = None
@@ -7017,6 +9200,42 @@ def bottom_reversal_confirmation(
             debug.update(_l2patch)
             return False, f"bottom_reversal_{_reason}", debug
 
+        # ── NOT PARABOLIC: extension vs the 9-EMA AND VWAP (the blow-off / knife-catch
+        # defense — mirrors absorption_snap). A snap-back into a parabolic prior-high is a
+        # chase: the green-bar break LEVEL (= the entry) must not sit excessively extended
+        # above the 9-EMA / VWAP. Reuses the SAME adaptive ATR extension yardstick the chase
+        # veto uses (fail-OPEN on a missing reference so thin data never blocks). ──────────
+        ema9_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        _ext_ok, _ext_dbg = _hod_extension_ok(
+            level=level, ema9_cur=ema9_cur, vwap_cur=vwap_cur, atr_pct=atr_pct, rvol=None,
+        )
+        if not _ext_ok:
+            debug.update(_ext_dbg)
+            return False, "bottom_reversal_extended", debug
+
+        # ── OPTIONAL VELOCITY REFINEMENT (the "jackknife" sharp-V delta): gate the flush to be
+        # a sharp V (a violent algo-stop-run that snaps back), NOT a slow grind down. Reuses the
+        # EXISTING _dip_velocity yardstick (per-bar % drop relative to the name's OWN ATR%; a
+        # drop is "steep" when the per-bar move exceeds ~1 ATR%). Require flush_roc_per_bar >=
+        # k*atr_pct, where k = the config floor. floor=0.0 ⇒ OFF ⇒ byte-identical current
+        # behavior. fail-OPEN (no gate) on missing atr%/degenerate data. ───────────────────
+        vel_floor = float(getattr(settings, "chili_momentum_bottom_reversal_velocity_floor_atr_mult", 0.0) or 0.0)
+        if vel_floor > 0.0 and atr_pct is not None and atr_pct > 0:
+            try:
+                # the red-run START price = the open of the first red bar (top of the flush);
+                # the flush depth = (start - series_low) / start, spread over the red bars =
+                # a per-bar ROC measured the SAME way _dip_velocity_size_mult reads it.
+                _start_px = float(opn.iloc[red_lo_start])
+                if _start_px > 0 and red_count > 0:
+                    flush_roc_per_bar = ((_start_px - float(series_low)) / _start_px) / float(red_count)
+                    debug["flush_roc_per_bar"] = round(flush_roc_per_bar, 6)
+                    debug["velocity_floor_atr_mult"] = round(vel_floor, 3)
+                    if flush_roc_per_bar < vel_floor * float(atr_pct):
+                        return False, "bottom_reversal_flush_too_slow", debug
+            except (TypeError, ValueError, IndexError, ZeroDivisionError):
+                pass  # fail-OPEN: a velocity-read error never blocks the fire
+
         # ── TICK-BREAK: the live ask breaking the green bar's HIGH with the ATR thrust
         # buffer (the SAME contract the rest of the ladder uses). ──────────────────────
         if (
@@ -7030,6 +9249,14 @@ def bottom_reversal_confirmation(
                 live_price=float(live_price), level=float(level), atr_pct=atr_pct,
             )
         ):
+            # ── TAPE REQUIRED + FAIL-CLOSED (the LAST gate; no fire without buyers on tape) ──
+            # Mirrors absorption_snap: buyers must be actively lifting the ask THIS tick. Any
+            # disabled-flag / no-tape / thin / stale / crypto / error ⇒ NO fire (never chase a
+            # snap-back into a dead bottom).
+            _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+            debug["tape_reason"] = _tape_dbg.get("reason")
+            if not _tape_ok:
+                return False, "bottom_reversal_tape_unconfirmed", debug
             debug["tick_break"] = True
             debug["live_price"] = float(live_price)
             return True, "bottom_reversal_tick_ok", debug
@@ -7039,6 +9266,14 @@ def bottom_reversal_confirmation(
         # completed bar (the green CLOSE itself confirms the reversal -> fire now).
         if live_price is not None and float(live_price) > 0 and float(live_price) <= level:
             return False, "waiting_for_break", debug
+
+        # ── TAPE REQUIRED + FAIL-CLOSED (the LAST gate before the completed-bar fire too) ──
+        # The green candle has closed, but still require buyers on tape — a green close on a
+        # dead tape is a knife-catch, not a reversal. Mirrors absorption_snap; fail-CLOSED.
+        _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+        debug["tape_reason"] = _tape_dbg.get("reason")
+        if not _tape_ok:
+            return False, "bottom_reversal_tape_unconfirmed", debug
 
         # Completed-bar confirmation: the green candle has closed (the first-green-close
         # confirmation Ross enters on). Fire.
@@ -7249,6 +9484,7 @@ def halt_resume_dip_trigger(
     entry_interval: str = "1m",
     halt_resumed_at_utc: Any,
     now: Any = None,
+    halt_level: float | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Ross's halt-resume DIP BUY (2026-06-10 DSY +$20k leg: "it drops and on the
     resumption I bought the dip").
@@ -7276,6 +9512,15 @@ def halt_resume_dip_trigger(
     post-resume reference high = breakout-or-bailout level) under the SAME keys as
     the pullback-break trigger, so sizing, stop placement, and the fast-bailout
     machinery are reused unchanged in live, paper, and replay.
+
+    ``halt_level`` (GAP 2 / GAP 3, Warrior re-audit): the price at the moment the name
+    HALTED (captured by the live runner at halt detection). Default ``None`` keeps the
+    behaviour byte-identical. When supplied AND the relevant flag is ON, the resumption
+    open (first post-resume bar open) is compared to ``halt_level``: a WEAK resume
+    (opens below) is a FALSE halt → no-fire (``chili_momentum_false_halt_avoid_enabled``);
+    a directional read (``chili_momentum_halt_resumption_direction_enabled``) annotates
+    ``debug['resumption_size_mult']`` for the runner to scale entry size by. The modifier
+    NEVER enables an entry or loosens a gate — risk-reducing / conviction only.
     """
     debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "halt_resume_dip"}
     if df is None or getattr(df, "empty", True) or len(df) < 3:
@@ -7307,6 +9552,61 @@ def halt_resume_dip_trigger(
     debug["bars_post_resume"] = int(len(post))
     if len(post) < 3:
         return False, "resume_dip_forming", debug
+
+    # GAP 2 + GAP 3 (Warrior re-audit) — HALT-RESUMPTION PRICE-DIRECTION.
+    # The deployed trigger reads ONLY post-resume bars and never the halt_level (the
+    # price at the moment the name halted). When the caller passes halt_level AND the
+    # relevant flag is ON, compare the resumption open (the OPEN of the first post-resume
+    # bar) vs halt_level:
+    #   • GAP 3 FALSE-HALT (chili_momentum_false_halt_avoid_enabled): a limit-UP halt
+    #     that resumes WEAK — resumption_open BELOW halt_level — is a FALSE halt (the
+    #     limit-up move did not hold through the auction). AVOID: return a no-fire. This
+    #     runs BEFORE all the dip/reclaim structure checks, so a weak resume never even
+    #     reaches the fire path. Pure risk-reduction (only ever adds a no-fire).
+    #   • GAP 2 CONVICTION (chili_momentum_halt_resumption_direction_enabled): annotate
+    #     debug with resumption_direction ('higher'/'lower'/'flat') + a bounded
+    #     resumption_size_mult the live runner applies to entry size (HIGHER ⇒ small
+    #     boost, LOWER ⇒ penalty). It is ONLY a size annotation — it never enables an
+    #     entry on its own and never loosens a gate.
+    # Both flags default OFF and halt_level defaults None ⇒ this whole block is skipped
+    # ⇒ byte-identical. Fail-OPEN on any error (no annotation, no veto).
+    _hr_dir_on = bool(getattr(settings, "chili_momentum_halt_resumption_direction_enabled", False))
+    _hr_false_on = bool(getattr(settings, "chili_momentum_false_halt_avoid_enabled", False))
+    try:
+        _hl = float(halt_level) if (halt_level is not None and (_hr_dir_on or _hr_false_on)) else None
+        if _hl is not None and _hl > 0:
+            _resume_open = float(post["Open"].astype(float).iloc[0])
+            debug["halt_level"] = round(_hl, 6)
+            debug["resumption_open"] = round(_resume_open, 6)
+            _resume_dir = (
+                "higher" if _resume_open > _hl * (1.0 + 1e-9)
+                else "lower" if _resume_open < _hl * (1.0 - 1e-9)
+                else "flat"
+            )
+            # GAP 3 — FALSE-HALT REVERSAL avoid (limit-UP halt resuming below the halt
+            # price = the up-move failed to hold). Only ever turns a would-fire into a
+            # no-fire; never enables.
+            if _hr_false_on and _resume_dir == "lower":
+                debug["resumption_direction"] = _resume_dir
+                debug["false_halt"] = True
+                return False, "resume_dip_false_halt_resume_weak", debug
+            # GAP 2 — conviction-size modifier annotation (does NOT gate; applied to size
+            # by the live runner only).
+            if _hr_dir_on:
+                try:
+                    _frac = float(getattr(settings, "chili_momentum_halt_resumption_boost_frac", 0.15) or 0.15)
+                except (TypeError, ValueError):
+                    _frac = 0.15
+                _frac = max(0.0, min(_frac, 0.5))
+                _mult = (
+                    1.0 + _frac if _resume_dir == "higher"
+                    else 1.0 - _frac if _resume_dir == "lower"
+                    else 1.0
+                )
+                debug["resumption_direction"] = _resume_dir
+                debug["resumption_size_mult"] = round(_mult, 4)
+    except Exception:
+        pass
 
     high = post["High"].astype(float)
     low = post["Low"].astype(float)

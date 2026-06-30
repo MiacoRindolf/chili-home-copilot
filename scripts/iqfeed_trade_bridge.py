@@ -27,7 +27,14 @@ import socket
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, time as _dtime, timedelta, timezone
+
+try:  # stdlib tz DB (3.9+); used to anchor the IQFeed time-of-day to US/Eastern
+    from zoneinfo import ZoneInfo
+
+    _ET = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover - zoneinfo always present on 3.11, defensive only
+    _ET = None
 
 import sqlalchemy as sa
 
@@ -39,6 +46,16 @@ DB_URL = os.environ.get("DATABASE_URL", "postgresql://chili:chili@localhost:5433
 FLUSH_INTERVAL_S = 1.0                   # batch-insert cadence
 REFRESH_S = 20.0                         # live-session symbol refresh cadence
 STICKY_RESUBSCRIBE = os.environ.get("CHILI_IQFEED_STICKY_RESUBSCRIBE", "1") != "0"
+# --- Version-agnostic-backtest coverage (STEP 0): watch the ELIGIBLE-MOVER universe (the names ANY momentum
+# version could pick — ranked by explosiveness), not just armed names, so a backtest of a NEW version has
+# prints to fill against. The working cap is SELF-DISCOVERED: start at WATCH_HARD_MAX, HALVE on an IQFeed
+# symbol-limit signal (the rail-governor pattern), floored at WATCH_FLOOR — no need to know the plan's limit
+# up front. The fresh-eligible set is the natural ceiling (usually a few hundred), so the cap rarely binds.
+# One documented base (WATCH_FLOOR); the cap is adaptive. Retention raised 3d->30d so we can backtest N days.
+RETENTION_DAYS = float(os.environ.get("IQFEED_TRADE_RETENTION_DAYS", "30") or 30)
+WATCH_FLOOR = int(os.environ.get("IQFEED_WATCH_FLOOR", "64") or 64)          # the ONE documented base
+WATCH_HARD_MAX = int(os.environ.get("IQFEED_WATCH_HARD_MAX", "1000") or 1000)  # backstop only
+ELIGIBLE_FRESH_S = float(os.environ.get("IQFEED_ELIGIBLE_FRESH_SECONDS", "1800") or 1800)  # mover-freshness window
 # We use IQFeed's DEFAULT 6.2 update layout (NO `SELECT UPDATE FIELDS` — it raised !SYNTAX_ERROR! and
 # is unnecessary). Verified live layout (S,CURRENT UPDATE FIELDNAMES): Symbol, Most Recent Trade,
 # Most Recent Trade Size, Most Recent Trade Time, Most Recent Trade Market Center, Total Volume, Bid,
@@ -65,10 +82,70 @@ INS = sa.text(
     "VALUES (:sym, :at, :px, :sz, :bid, :ask)"
 )
 
+# Also feed the momentum ENTRY-GATE's NBBO freshness tape with this SAME tick-level IQFeed L1.
+# The entry gate reads momentum_nbbo_spread_tape for its stale_bbo freshness check, but that
+# table was fed ONLY by the slower/sparser Massive WS recorder — so the fresh tick-level IQFeed
+# quotes (this bridge) NEVER reached the entry decision and wide-spread movers false-blocked on
+# stale_bbo (VNTG had 1578 IQFeed ticks/5min @1s old, yet the gate saw a 10-270s WS quote).
+# Mirror each valid-quote tick into the tape (source='iqfeed_l1') so the gate uses the freshest
+# available quote. Default ON; IQFEED_WRITE_NBBO_TAPE=0 reverts.
+WRITE_NBBO_TAPE = os.environ.get("IQFEED_WRITE_NBBO_TAPE", "1").strip().lower() not in ("0", "false", "no")
+# OBSERVED_AT TRUTH (default ON): stamp observed_at with the IQFeed Most-Recent-Trade-Time
+# (the actual print time, in US/Eastern) converted to UTC — NOT host wall-clock at insert. On
+# an IQFeed reconnect the feed replays a BURST of buffered OLD ticks; stamping those with now()
+# made stale ticks read as 1-2s-fresh, so the entry gate's stale_bbo freshness check trusted
+# minutes-old quotes. Anchoring to the real trade time means a buffered-replay tick correctly
+# ages out. Falls back to now() when the trade-time is unparseable. IQFEED_OBSERVED_AT_TRADE_TIME=0
+# reverts to the host-clock behavior (byte-identical to pre-fix). Stored naive-UTC like before.
+OBSERVED_AT_TRADE_TIME = (
+    os.environ.get("IQFEED_OBSERVED_AT_TRADE_TIME", "1").strip().lower() not in ("0", "false", "no")
+)
+NBBO_INS = sa.text(
+    "INSERT INTO momentum_nbbo_spread_tape "
+    "(symbol, observed_at, bid, ask, mid, spread_bps, day_volume, source) "
+    "VALUES (:sym, :at, :bid, :ask, :mid, :spread_bps, NULL, 'iqfeed_l1')"
+)
+
+def _trade_time_to_naive_utc(last_t: str, now_utc: datetime) -> datetime | None:
+    """Convert an IQFeed Most-Recent-Trade-Time field into a NAIVE-UTC datetime (matching the
+    table's TIMESTAMP-without-tz, UTC-stored convention). IQFeed's default 6.2 layout sends the
+    trade time as a US/Eastern *time-of-day* ('HH:MM:SS' or 'HH:MM:SS.ffffff') with NO date, so
+    we anchor it to TODAY in ET. Handles the midnight-rollover edge (a tick whose ET time-of-day
+    is far in the future of the current ET time-of-day belongs to the prior ET day). Returns None
+    when unparseable / no tz DB so the caller falls back to host wall-clock.
+    (operator: data truth — a reconnect burst of OLD ticks must NOT read as fresh.)"""
+    if _ET is None:
+        return None
+    s = (last_t or "").strip()
+    if not s:
+        return None
+    tod: _dtime | None = None
+    for fmt in ("%H:%M:%S.%f", "%H:%M:%S", "%H:%M"):
+        try:
+            tod = datetime.strptime(s, fmt).time()
+            break
+        except ValueError:
+            continue
+    if tod is None:
+        return None
+    try:
+        now_et = now_utc.astimezone(_ET)
+        cand = datetime.combine(now_et.date(), tod, tzinfo=_ET)
+        # Rollover guard: if the parsed time-of-day is meaningfully AHEAD of the current ET
+        # time-of-day it must be from yesterday's ET session (e.g. 23:59 print read at 00:01).
+        if cand - now_et > timedelta(hours=1):
+            cand = cand - timedelta(days=1)
+        return cand.astimezone(timezone.utc).replace(tzinfo=None)
+    except Exception:
+        return None
+
+
 _pending: list[dict] = []
 _pending_lock = threading.Lock()
 _last_trade: dict[str, str] = {}        # symbol -> last seen Most-Recent-Trade-Time (dedup key)
 watched: set[str] = set()
+_max_watch = WATCH_HARD_MAX             # adaptive watch cap; halved on an IQFeed limit signal, floored at WATCH_FLOOR
+_limit_hit = False                      # set by the reader thread when IQFeed signals a symbol limit
 sock_lock = threading.Lock()
 sock: socket.socket | None = None
 running = True
@@ -95,6 +172,28 @@ def _live_symbols() -> set[str]:
         return set()
 
 
+def _eligible_symbols(limit: int) -> list[str]:
+    """The fresh ELIGIBLE-MOVER universe ranked by explosiveness (viability_score) — the names ANY momentum
+    version could pick, so a backtested new version has prints to fill against. Up to `limit`, most-explosive
+    first. Empty outside market hours (no fresh viability) — fine, nothing to watch then."""
+    if limit <= 0:
+        return []
+    try:
+        with engine.connect() as c:
+            rows = c.execute(sa.text(
+                "SELECT symbol FROM ("
+                "  SELECT DISTINCT ON (symbol) symbol, viability_score FROM momentum_symbol_viability "
+                "  WHERE symbol NOT LIKE '%-USD' AND (live_eligible OR paper_eligible) "
+                "    AND freshness_ts > (now() at time zone 'utc') - make_interval(secs => :fresh) "
+                "  ORDER BY symbol, freshness_ts DESC"
+                ") q ORDER BY viability_score DESC NULLS LAST LIMIT :lim"
+            ), {"fresh": ELIGIBLE_FRESH_S, "lim": int(limit)}).fetchall()
+        return [str(r[0]).upper() for r in rows]
+    except Exception as e:
+        log.warning("eligible query failed: %s", e)
+        return []
+
+
 def _parse_l1(line: str) -> None:
     """Parse one L1 update frame ('Q'/'P') under IQFeed's DEFAULT 6.2 layout; record a row only on a
     GENUINELY NEW trade (Most-Recent-Trade-Time advanced) with a positive size (quote-only updates
@@ -116,7 +215,13 @@ def _parse_l1(line: str) -> None:
         bid = float(p[L1_BID]) if p[L1_BID].strip() else None
         ask = float(p[L1_ASK]) if p[L1_ASK].strip() else None
         _last_trade[sym] = last_t
-        row = {"sym": sym, "at": datetime.now(timezone.utc).replace(tzinfo=None),
+        _now_utc = datetime.now(timezone.utc)
+        _at = _now_utc.replace(tzinfo=None)
+        if OBSERVED_AT_TRADE_TIME:
+            _tt = _trade_time_to_naive_utc(last_t, _now_utc)
+            if _tt is not None:
+                _at = _tt
+        row = {"sym": sym, "at": _at,
                "px": px, "sz": sz, "bid": bid, "ask": ask}
         with _pending_lock:
             _pending.append(row)
@@ -125,7 +230,7 @@ def _parse_l1(line: str) -> None:
 
 
 def reader() -> None:
-    global running
+    global running, _limit_hit
     buf = b""
     seen = 0
     while running:
@@ -151,12 +256,16 @@ def reader() -> None:
             elif c0 == "T":                     # timestamp heartbeat (NOT a trade)
                 continue
             elif line.startswith("S,") or c0 in ("n", "E"):
-                log.info("feed: %s", line[:160])
+                if any(k in line.upper() for k in ("SYMBOL LIMIT", "MAX SYMBOL", "LIMIT REACHED", "TOO MANY SYMBOL")):
+                    _limit_hit = True               # adaptive cap: writer halves the watch-set on this signal
+                    log.warning("IQFeed symbol-limit signal: %s", line[:160])
+                else:
+                    log.info("feed: %s", line[:160])
     running = False
 
 
 def writer(forced_syms: set[str], deadline: float | None) -> None:
-    global running
+    global running, _max_watch, _limit_hit
     last_refresh = 0.0
     last_prune = 0.0
     while running and (deadline is None or time.monotonic() < deadline):
@@ -167,12 +276,23 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
                 with engine.begin() as c:
                     c.execute(sa.text(
                         "DELETE FROM iqfeed_trade_ticks "
-                        "WHERE observed_at < (now() at time zone 'utc') - interval '3 days'"))
+                        "WHERE observed_at < (now() at time zone 'utc') - make_interval(days => :d)"),
+                        {"d": int(RETENTION_DAYS)})
             except Exception as e:
                 log.debug("retention prune failed: %s", e)
             last_prune = time.monotonic()
         if time.monotonic() - last_refresh >= REFRESH_S:
-            target = forced_syms or _live_symbols()
+            if _limit_hit:                          # adaptive: IQFeed signalled its symbol limit -> back off
+                _max_watch = max(WATCH_FLOOR, len(watched) // 2)
+                _limit_hit = False
+                log.warning("IQFeed symbol limit -> capping watch-set to %d", _max_watch)
+            if forced_syms:
+                target = forced_syms
+            else:
+                armed = _live_symbols()             # armed/live names: ALWAYS watched (load-bearing for live)
+                room = max(0, _max_watch - len(armed))
+                movers = [s for s in _eligible_symbols(_max_watch) if s not in armed][:room]
+                target = armed | set(movers)
             for sym in target - watched:
                 _send(f"w{sym}")                # Level-1 watch -> Q/P updates with Last + Last Size
                 watched.add(sym)
@@ -192,6 +312,18 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
             try:
                 with engine.begin() as c:
                     c.execute(INS, rows)
+                    if WRITE_NBBO_TAPE:
+                        nbbo = []
+                        for r in rows:
+                            b, a = r.get("bid"), r.get("ask")
+                            if b and a and b > 0 and a > 0 and a >= b:
+                                mid = (b + a) / 2.0
+                                nbbo.append({
+                                    "sym": r["sym"], "at": r["at"], "bid": b, "ask": a,
+                                    "mid": mid, "spread_bps": (a - b) / mid * 10_000.0,
+                                })
+                        if nbbo:
+                            c.execute(NBBO_INS, nbbo)
             except Exception as e:
                 log.warning("trade insert failed (%d rows): %s", len(rows), e)
     running = False

@@ -448,6 +448,127 @@ def effective_position_cap(*, crypto: bool = False) -> int:
     return max(1, min(max(adaptive_n, pos_floor), ceiling))
 
 
+def adaptive_watch_fanout(field_size: int | None = None) -> int:
+    """Adaptive WATCH-fanout cap (CHUNK 2 engine core): how many $0-risk pre-fill
+    watchers the lane may hold concurrently.
+
+    A machine's edge is BREADTH — when 40 names are igniting it should watch more
+    than when 3 are. The cap floats with the live field rather than a flat 15:
+
+        cap = clamp(field_size, floor, watch_fanout_max)
+
+    where ``field_size`` = the count of distinct live-eligible names right now
+    (passed by the caller from the same source the arm queue ranks from), ``floor``
+    = ``chili_momentum_watch_fanout_floor`` (the ONE documented base — never watch
+    fewer than this so the lane is always primed for the first igniter), and
+    ``watch_fanout_max`` is the hard upper bound (the documented per-tick
+    processing-cost ceiling). Watchers are FREE ($0 risk); the atomic risk-budget
+    governs real admission, so widening the watch field never widens risk.
+
+    When the adaptive flag is OFF, or ``field_size`` is unavailable/unusable, this
+    returns the flat ``chili_momentum_watch_fanout_max`` — BYTE-IDENTICAL to the
+    legacy flat cap. docs/DESIGN/MOMENTUM_ENGINE.md §2."""
+    try:
+        hard_max = int(getattr(settings, "chili_momentum_watch_fanout_max", 15) or 15)
+    except (TypeError, ValueError):
+        hard_max = 15
+    hard_max = max(1, hard_max)
+    if not bool(getattr(settings, "chili_momentum_watch_fanout_adaptive_enabled", True)):
+        return hard_max
+    if field_size is None:
+        return hard_max
+    try:
+        fs = int(field_size)
+    except (TypeError, ValueError):
+        return hard_max
+    if fs < 0:
+        return hard_max
+    try:
+        floor = int(getattr(settings, "chili_momentum_watch_fanout_floor", 5) or 5)
+    except (TypeError, ValueError):
+        floor = 5
+    floor = max(1, min(floor, hard_max))
+    return max(floor, min(fs, hard_max))
+
+
+def admit_by_aggregate_risk(
+    *,
+    open_risk_usd: float,
+    candidate_risk_usd: float,
+    equity_usd: float | None,
+    budget_fraction: float | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """ATOMIC SHAPE-AWARE risk-budget admission decision (pure, zero-I/O, testable).
+
+    Admit a new entry iff::
+
+        open_risk_usd + candidate_risk_usd <= budget_fraction * equity_usd
+
+    where ``candidate_risk_usd`` is the candidate's ACTUAL shape-aware dollars-at-
+    risk = ``(entry_price - structural_stop_price) * fill_qty`` (so a tight-stop
+    scalp consumes far less budget than a wide-stop trade of the same notional — the
+    count would have treated them equally), ``open_risk_usd`` = the summed entry-to-
+    stop $ across currently-OPEN positions (``aggregate_open_risk_usd``), and the
+    budget = ``budget_fraction`` (defaults to the REUSED
+    ``chili_momentum_max_aggregate_risk_pct_of_equity``, no new magic number) times
+    equity.
+
+    The caller MUST evaluate this INSIDE the per-(user,lane) advisory lock so two
+    near-simultaneous fills cannot both pass against a stale ``open_risk_usd`` (the
+    fill-burst race) — this function is the pure arithmetic; the lock is the
+    serializer.
+
+    FAIL-CLOSED on an unknown/unusable account or candidate risk: a non-positive /
+    non-finite ``equity_usd`` returns ``admit=False`` (never size against an unknown
+    account — [[feedback_adaptive_no_magic]]); a non-finite/negative candidate risk
+    returns ``admit=False``. A budget_fraction <= 0 DISABLES the gate (admit=True,
+    reason='budget_disabled') — the operator's documented kill of the dollar cap.
+
+    Returns ``(admit, meta)``."""
+    if budget_fraction is None:
+        try:
+            budget_fraction = float(getattr(
+                settings, "chili_momentum_max_aggregate_risk_pct_of_equity", 0.03) or 0.0)
+        except (TypeError, ValueError):
+            budget_fraction = 0.0
+    try:
+        bf = float(budget_fraction)
+    except (TypeError, ValueError):
+        bf = 0.0
+    if bf <= 0 or not math.isfinite(bf):
+        return True, {"reason": "budget_disabled", "budget_fraction": bf}
+    try:
+        eq = float(equity_usd) if equity_usd is not None else 0.0
+    except (TypeError, ValueError):
+        eq = 0.0
+    if eq <= 0 or not math.isfinite(eq):
+        return False, {"reason": "equity_unavailable", "budget_fraction": bf}
+    try:
+        cand = float(candidate_risk_usd)
+    except (TypeError, ValueError):
+        cand = float("nan")
+    if not math.isfinite(cand) or cand < 0:
+        return False, {"reason": "candidate_risk_invalid",
+                       "candidate_risk_usd": candidate_risk_usd}
+    try:
+        opn = float(open_risk_usd)
+    except (TypeError, ValueError):
+        opn = 0.0
+    if not math.isfinite(opn) or opn < 0:
+        opn = 0.0
+    cap = bf * eq
+    projected = opn + cand
+    admit = projected <= cap + 1e-9
+    return admit, {
+        "open_risk_usd": round(opn, 2),
+        "candidate_risk_usd": round(cand, 2),
+        "projected_usd": round(projected, 2),
+        "cap_usd": round(cap, 2),
+        "budget_fraction": bf,
+        "equity_usd": round(eq, 2),
+    }
+
+
 def streak_risk_multiplier(db, *, execution_family: str | None = None) -> tuple[float, dict]:
     """Streak-adaptive risk dial (Ross: 'coming out of the gates swinging' on a
     hot streak; 'size down' when cold). A multiplier on the per-trade max loss
@@ -560,15 +681,24 @@ def _et_day_bounds_utc(*, days_ago: int = 0) -> tuple[datetime, datetime]:
     Mirrors ``governance.global_realized_pnl_today_et``'s ET-session windowing so the
     daily-trade-count budget and the prior-day damper bucket trades on the SAME calendar
     boundary the daily-loss cap uses (no off-by-one between the gate and the breaker)."""
+    from datetime import datetime as _dt
     from datetime import timedelta as _td
     from zoneinfo import ZoneInfo
 
     et = ZoneInfo("America/New_York")
-    now_et = datetime.now(et)
-    start_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0) - _td(days=days_ago)
-    end_et = start_et + _td(days=1)
-    start_utc = start_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
-    end_utc = end_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+    utc = ZoneInfo("UTC")
+    # MED-4 fail-SAFE: do the day arithmetic in ET CALENDAR-DATE space, not by subtracting
+    # an ABSOLUTE 24h timedelta from a DST-aware datetime. An ET calendar day is 23h/25h
+    # across a DST transition, so `now_et.replace(hour=0) - timedelta(days=N)` drifted the
+    # window an hour on transition days. Subtract days on the DATE, then build the aware ET
+    # midnight from that date via zoneinfo so each [start,end) is a true ET calendar day.
+    today_et_date = datetime.now(et).date()
+    start_date = today_et_date - _td(days=days_ago)
+    end_date = start_date + _td(days=1)
+    start_et = _dt(start_date.year, start_date.month, start_date.day, 0, 0, 0, 0, tzinfo=et)
+    end_et = _dt(end_date.year, end_date.month, end_date.day, 0, 0, 0, 0, tzinfo=et)
+    start_utc = start_et.astimezone(utc).replace(tzinfo=None)
+    end_utc = end_et.astimezone(utc).replace(tzinfo=None)
     return start_utc, end_utc
 
 
@@ -693,6 +823,92 @@ def daily_trade_count_budget_decision(
         return allowed, meta
     except Exception:
         return True, {"reason": "error_fail_open"}
+
+
+def _minutes_since_rth_open_et() -> float | None:
+    """Minutes since the 09:30 ET RTH open for TODAY (clamped >= 0), or None.
+
+    Returns None BEFORE 09:30 ET (premarket — the time-fatigue leg is neutral there;
+    the early window has its own clock policy) and None on any error. Pure read of the
+    wall clock — no I/O. Used ONLY by the GAP-2 fatigue derate (size-down)."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        et = ZoneInfo("America/New_York")
+        now_et = datetime.now(et)
+        open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        if now_et < open_et:
+            return None
+        return max(0.0, (now_et - open_et).total_seconds() / 60.0)
+    except Exception:
+        return None
+
+
+def fatigue_derate_multiplier(
+    *,
+    trade_count_today: int,
+    max_trades_per_day: int,
+    minutes_since_open: float | None = None,
+    is_crypto: bool = False,
+) -> tuple[float, dict[str, Any]]:
+    """TIME + DECISION-FATIGUE size-down multiplier in [floor, 1.0] (GAP 2, PSY101).
+
+    Ross trades best EARLY: decision quality degrades as the session lengthens and as the
+    trade count climbs. This derate REDUCES the per-trade risk budget the deeper into the
+    session / the more trades taken today — it is bounded to ``(floor, 1.0]`` and is NEVER
+    > 1.0, so it can ONLY shrink size (the caller composes it multiplicatively under the
+    existing 3x clamp; the equity-relative notional ceiling + liquidity cap still bound qty).
+
+        time_frac  = clamp(minutes_since_open / full_session_minutes, 0, 1)   # 0 at open
+        trade_frac = clamp(trade_count_today / max(max_trades_per_day, 1), 0, 1)
+        derate     = 1.0 - 0.5*(1-floor as weight)... -> implemented as:
+        derate     = 1.0 - (1.0 - floor) * (0.5*time_frac + 0.5*trade_frac)
+        result     = clamp(derate, floor, 1.0)
+
+    The TWO legs are weighted equally and TOGETHER can pull the multiplier all the way to
+    ``floor`` (both maxed). Crypto (24/7, no RTH open) zeroes the TIME leg (``minutes_since_open``
+    is None) so only the trade-count leg applies — the time clock is meaningless there.
+
+    FAIL-NEUTRAL (returns 1.0): the flag is checked by the CALLER, so this helper is only
+    invoked when enabled; any bad/degenerate input here still returns 1.0 (never a derate
+    smaller than warranted, never > 1.0). Pure; no I/O. docs/DESIGN/MOMENTUM_LANE.md"""
+    meta: dict[str, Any] = {"fatigue_mult": 1.0}
+    try:
+        floor = float(getattr(settings, "chili_momentum_fatigue_derate_floor", 0.5) or 0.5)
+        if not math.isfinite(floor) or floor <= 0:
+            floor = 0.5
+        floor = max(0.1, min(1.0, floor))
+        full_min = float(getattr(settings, "chili_momentum_fatigue_full_session_minutes", 240.0) or 240.0)
+        if not math.isfinite(full_min) or full_min <= 0:
+            full_min = 240.0
+        # TIME leg (equities only; crypto has no RTH open -> neutral).
+        time_frac = 0.0
+        if not is_crypto and minutes_since_open is not None:
+            try:
+                time_frac = max(0.0, min(1.0, float(minutes_since_open) / full_min))
+            except (TypeError, ValueError):
+                time_frac = 0.0
+        # TRADE-COUNT leg.
+        try:
+            tc = max(0, int(trade_count_today))
+            mx = max(1, int(max_trades_per_day))
+            trade_frac = max(0.0, min(1.0, tc / mx))
+        except (TypeError, ValueError):
+            trade_frac = 0.0
+        fatigue = 0.5 * time_frac + 0.5 * trade_frac  # in [0, 1]
+        derate = 1.0 - (1.0 - floor) * fatigue
+        mult = max(floor, min(1.0, derate))
+        meta = {
+            "fatigue_mult": round(mult, 4),
+            "time_frac": round(time_frac, 4),
+            "trade_frac": round(trade_frac, 4),
+            "minutes_since_open": (round(float(minutes_since_open), 1) if minutes_since_open is not None else None),
+            "trade_count_today": int(max(0, int(trade_count_today))) if isinstance(trade_count_today, (int, float)) else 0,
+            "floor": round(floor, 3),
+        }
+        return mult, meta
+    except Exception:
+        return 1.0, {"fatigue_mult": 1.0, "reason": "error_fail_neutral"}
 
 
 def _prior_session_pnl_over_equity(
@@ -822,6 +1038,264 @@ def prior_day_pnl_damper_multiplier(
         }
     except Exception:
         return 1.0, {"damper_mult": 1.0, "reason": "error_fail_neutral"}
+
+
+def consecutive_green_days(
+    db: Any, *, execution_family: str | None, lookback_days: int = 30
+) -> tuple[int, dict[str, Any]]:
+    """Count consecutive GREEN ET calendar days (net realized PnL > 0) for the lane,
+    walking BACKWARDS from the most-recent PAST day (today excluded — today's session is
+    incomplete; including it would let an intraday red flicker collapse the streak mid-day).
+
+    Buckets terminated live outcomes by ET calendar day, sums net realized PnL per day, and
+    counts how many of the most-recent CONTIGUOUS past days closed green, stopping at the
+    first red (or zero) day. Read-only, ephemeral (recomputed each call — never persisted),
+    lookahead-free. Returns ``(streak, meta)``; thin/failed history => ``(0, ...)`` (neutral).
+    """
+    meta: dict[str, Any] = {"streak": 0, "lookback_days": int(lookback_days)}
+    if db is None or not execution_family or lookback_days <= 0:
+        return 0, {**meta, "reason": "no_input"}
+    try:
+        from ....models.trading import MomentumAutomationOutcome
+        from .outcome_labels import is_real_entry_outcome
+
+        far_start, _ = _et_day_bounds_utc(days_ago=int(lookback_days))
+        today_start, _ = _et_day_bounds_utc(days_ago=0)
+        rows = (
+            db.query(
+                MomentumAutomationOutcome.terminal_at,
+                MomentumAutomationOutcome.realized_pnl_usd,
+                MomentumAutomationOutcome.outcome_class,
+            )
+            .filter(
+                MomentumAutomationOutcome.execution_family == execution_family,
+                MomentumAutomationOutcome.mode == "live",
+                MomentumAutomationOutcome.realized_pnl_usd.isnot(None),
+                MomentumAutomationOutcome.terminal_at >= far_start,
+                MomentumAutomationOutcome.terminal_at < today_start,
+            )
+            .all()
+        )
+    except Exception:
+        logger.debug("[momentum_neural] green-day streak read failed", exc_info=True)
+        return 0, {**meta, "reason": "read_failed"}
+    if not rows:
+        return 0, {**meta, "reason": "no_history"}
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    utc = ZoneInfo("UTC")
+    by_day: dict[Any, float] = {}
+    for ts, pnl, oc in rows:
+        try:
+            # Only REAL entered trades carry strategy P&L. A never-entered row
+            # (cancelled_pre_entry / no_fill / risk_block) carries realized_pnl_usd=0.0
+            # (NOT NULL — slips past the not-null filter); a day of ONLY such rows would
+            # sum to 0.0 and spuriously BREAK the streak (0.0 is not > 0.0) even though no
+            # real trade happened. Mirror _count_real_entries_today: exclude them so the
+            # daily green/red verdict is the REAL realized-PnL sum. [momentum_neural]
+            if ts is None or pnl is None or not is_real_entry_outcome(oc):
+                continue
+            d = ts.replace(tzinfo=utc).astimezone(et).date()
+            by_day[d] = by_day.get(d, 0.0) + float(pnl)
+        except Exception:
+            continue
+    if not by_day:
+        return 0, {**meta, "reason": "no_buckets"}
+    days_sorted = sorted(by_day.keys(), reverse=True)  # most-recent first
+    streak = 0
+    green_usd = 0.0
+    for d in days_sorted:
+        if by_day[d] > 0.0:
+            streak += 1
+            green_usd += by_day[d]
+        else:
+            break
+    return streak, {
+        **meta,
+        "streak": int(streak),
+        "green_usd": round(green_usd, 2),
+        "days_seen": len(by_day),
+    }
+
+
+def green_day_graduation_multiplier(
+    db: Any, *, execution_family: str | None
+) -> tuple[float, dict[str, Any]]:
+    """GREEN-DAY GRADUATION size multiplier (NOT a hard live-block).
+
+    After a consecutive green-day streak (realized daily PnL > 0, ET calendar, auto-derived
+    from history), scale the per-trade risk basis UP a bounded amount so the lane graduates
+    to bigger size only once it has PROVEN consistency — Ross/Mike's "earn the size" rule.
+
+      mult = clamp(1.0 + step * max(0, streak - 1), 1.0, max_multiplier)
+
+    Day-1 (streak<=1) => 1.0 (no graduation off a single green day). Composes multiplicatively
+    into the runner's existing combined-multiplier ceiling, applied at entry-quantity compute
+    time — it is NEVER a veto and never blocks an entry. ADDITIVE / FAIL-NEUTRAL: flag OFF,
+    thin history, or any error => ``(1.0, ...)`` (never changes sizing). Read-only; ephemeral
+    (the streak is recomputed each call, never persisted). [momentum_neural] graduation."""
+    if not bool(getattr(settings, "chili_momentum_green_day_graduation_enabled", False)):
+        return 1.0, {"reason": "disabled", "graduation_mult": 1.0}
+    try:
+        step = float(getattr(settings, "chili_momentum_green_day_step_per_day", 0.1) or 0.1)
+        max_mult = float(getattr(settings, "chili_momentum_green_day_max_multiplier", 2.0) or 2.0)
+        lookback = int(getattr(settings, "chili_momentum_green_day_lookback_days", 30) or 30)
+        if max_mult < 1.0:
+            max_mult = 1.0
+        streak, s_meta = consecutive_green_days(
+            db, execution_family=execution_family, lookback_days=lookback
+        )
+        mult = max(1.0, min(max_mult, 1.0 + step * max(0, int(streak) - 1)))
+        return mult, {
+            "graduation_mult": round(mult, 4),
+            "consecutive_green_days": int(streak),
+            "step_per_day": step,
+            "max_multiplier": max_mult,
+            **{k: v for k, v in s_meta.items() if k in ("green_usd", "days_seen")},
+        }
+    except Exception:
+        return 1.0, {"reason": "error_fail_neutral", "graduation_mult": 1.0}
+
+
+def catalyst_conviction_size_multiplier(
+    symbol: str,
+    *,
+    strong_symbols: set[str] | None = None,
+    weak_symbols: set[str] | None = None,
+    fake_symbols: set[str] | None = None,
+) -> tuple[float, dict[str, Any]]:
+    """CATALYST-CONVICTION size multiplier (NOT a hard live-block).
+
+    When the name carries a STRONG, credible catalyst (the DEPLOYED strong/weak/fake news
+    grade — FDA/trial/M&A/contract/beat, not also diluting/rumored/hacked) scale the per-trade
+    risk basis UP a bounded amount — Ross's "a real reason a low-float runs earns the size".
+
+      mult = clamp(1.0 + step * grade_rank, 1.0, max_multiplier)
+
+    ``grade_rank`` comes from ``catalyst_grade_rank`` (STRONG=3, weak/fake/none=0), so weak and
+    fake DOMINATE (suppress the boost to rank 0). Mirrors ``green_day_graduation_multiplier``:
+    composes multiplicatively into the runner's existing 3x combined-multiplier ceiling +
+    downstream hard notional ceiling, applied at entry-quantity compute time — it is NEVER a
+    veto and NEVER shrinks a trade (a catalyst only ADDS; the no-news shrink lives elsewhere).
+    ADDITIVE / FAIL-NEUTRAL: flag OFF, no/weak/fake catalyst, or any error => ``(1.0, ...)``
+    (never changes sizing). Read-only; reuses the SAME news accessors (no new feed). The
+    grade sets may be passed in (fetched once upstream); omitted => fetched fresh here.
+    [momentum_neural] catalyst-conviction."""
+    if not bool(getattr(settings, "chili_momentum_catalyst_conviction_enabled", False)):
+        return 1.0, {"reason": "disabled", "conviction_mult": 1.0}
+    try:
+        from .catalyst import catalyst_grade_rank
+
+        # None-aware defaults (NOT `or` — a legit step=0.0 is falsy and would wrongly fall back)
+        _step_raw = getattr(settings, "chili_momentum_catalyst_conviction_step", 0.15)
+        step = float(_step_raw if _step_raw is not None else 0.15)
+        _max_raw = getattr(settings, "chili_momentum_catalyst_conviction_max_multiplier", 1.5)
+        max_mult = float(_max_raw if _max_raw is not None else 1.5)
+        if max_mult < 1.0:
+            max_mult = 1.0
+        rank = int(
+            catalyst_grade_rank(
+                symbol,
+                strong_symbols=strong_symbols,
+                weak_symbols=weak_symbols,
+                fake_symbols=fake_symbols,
+            )
+        )
+        # A catalyst only ADDS: clamp floor 1.0 (rank<=0 / negative step => no boost), ceiling
+        # max_mult. The runner's min(..., base*3.0) clamp + the hard notional ceiling further
+        # contain the COMBINED multiplier — this factor can never push past any ceiling.
+        mult = max(1.0, min(max_mult, 1.0 + step * max(0, rank)))
+        return mult, {
+            "conviction_mult": round(mult, 4),
+            "grade_rank": rank,
+            "step": step,
+            "max_multiplier": max_mult,
+        }
+    except Exception:
+        return 1.0, {"reason": "error_fail_neutral", "conviction_mult": 1.0}
+
+
+def _kelly_fraction_from_conviction(conviction: float) -> float:
+    """HALF-KELLY bet fraction from a [0,1] conviction percentile (no hardcoded win-rate).
+
+    Kelly: f* = edge/odds = p - (1-p)/b. Even-money proxy (b=1) => f* = 2p-1. We use the
+    BLENDED triple-confluence percentile as the win-probability proxy p. Full Kelly is
+    over-aggressive (operator warned: sizing up before proven expectancy is risky) => HALF
+    Kelly: f = 0.5*max(0, 2p-1). p<=0.5 => 0 (no size-up); p=1 => 0.5. Bounded [0,0.5]."""
+    try:
+        p = float(conviction)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(p):
+        return 0.0
+    p = max(0.0, min(1.0, p))
+    return 0.5 * max(0.0, 2.0 * p - 1.0)
+
+
+def triple_confluence_kelly_multiplier(
+    *,
+    squeeze_pct: float | None,
+    ofi: float | None,
+    news_grade_rank: int | None,
+) -> tuple[float, dict[str, Any]]:
+    """FRACTIONAL-KELLY TRIPLE-CONFLUENCE size-up multiplier (NOT a hard live-block).
+
+    Sizes UP — and ONLY up — when ALL THREE pillars AGREE: SQUEEZE squeeze_pct>0.5, OFI
+    ofi>0, NEWS news_grade_rank>0. Any leg missing/sub-neutral => 1.0 (fail-open). All agree:
+      c=clamp((w_sq*sq_lift+w_ofi*ofi_lift+w_news*news_lift)/sum_w,0,1); f_half=0.5*max(0,2c-1)
+      mult=clamp(1.0+gain*f_half,1.0,max_multiplier)
+    sq_lift=(squeeze_pct-0.5)/0.5; ofi_lift=ofi; news_lift=1.0. max_multiplier (default 1.5,
+    clamped [1,2]) is the ONE documented HALF-KELLY ceiling; the #769 circuit still bounds the
+    realized worst case. Composes under the runner's min(.., base*3.0) clamp + hard notional
+    ceiling + the unchanged #769 circuit. NEVER a veto/shrink (>=1.0). Flag OFF / leg missing /
+    error => (1.0, ...). Pure; settings only. [momentum_neural] kelly-conviction."""
+    if not bool(getattr(settings, "chili_momentum_kelly_conviction_enabled", True)):
+        return 1.0, {"reason": "disabled", "kelly_mult": 1.0}
+    try:
+        sq = None if squeeze_pct is None else float(squeeze_pct)
+        of = None if ofi is None else float(ofi)
+        nr = 0 if news_grade_rank is None else int(news_grade_rank)
+        sq_ok = sq is not None and math.isfinite(sq) and sq > 0.5
+        ofi_ok = of is not None and math.isfinite(of) and of > 0.0
+        news_ok = nr > 0
+        if not (sq_ok and ofi_ok and news_ok):
+            return 1.0, {"kelly_mult": 1.0, "reason": "confluence_incomplete",
+                         "squeeze_ok": bool(sq_ok), "ofi_ok": bool(ofi_ok), "news_ok": bool(news_ok)}
+        sq_lift = max(0.0, min(1.0, (sq - 0.5) / 0.5))
+        ofi_lift = max(0.0, min(1.0, of))
+        news_lift = 1.0
+        def _w(name: str, default: float) -> float:
+            raw = getattr(settings, name, default)
+            try:
+                v = float(raw if raw is not None else default)
+            except (TypeError, ValueError):
+                return default
+            return v if (math.isfinite(v) and v >= 0) else default
+        w_sq = _w("chili_momentum_kelly_conviction_w_squeeze", 0.4)
+        w_ofi = _w("chili_momentum_kelly_conviction_w_ofi", 0.4)
+        w_news = _w("chili_momentum_kelly_conviction_w_news", 0.2)
+        wsum = w_sq + w_ofi + w_news
+        if wsum <= 0:
+            return 1.0, {"kelly_mult": 1.0, "reason": "weights_disabled"}
+        conviction = max(0.0, min(1.0, (w_sq*sq_lift + w_ofi*ofi_lift + w_news*news_lift) / wsum))
+        f_half = _kelly_fraction_from_conviction(conviction)
+        _gain_raw = getattr(settings, "chili_momentum_kelly_conviction_gain", 1.0)
+        kelly_gain = float(_gain_raw if _gain_raw is not None else 1.0)
+        if not math.isfinite(kelly_gain) or kelly_gain < 0:
+            kelly_gain = 1.0
+        _max_raw = getattr(settings, "chili_momentum_kelly_conviction_max_multiplier", 1.5)
+        max_mult = float(_max_raw if _max_raw is not None else 1.5)
+        if not math.isfinite(max_mult) or max_mult < 1.0:
+            max_mult = 1.0
+        mult = max(1.0, min(max_mult, 1.0 + kelly_gain * f_half))
+        return mult, {"kelly_mult": round(mult, 4), "conviction": round(conviction, 4),
+                      "kelly_fraction_half": round(f_half, 4), "squeeze_pct": round(sq, 4),
+                      "ofi": round(of, 4), "news_grade_rank": nr,
+                      "weights": {"squeeze": w_sq, "ofi": w_ofi, "news": w_news},
+                      "max_multiplier": max_mult, "gain": kelly_gain}
+    except Exception:
+        return 1.0, {"reason": "error_fail_neutral", "kelly_mult": 1.0}
 
 
 def compute_risk_first_quantity(
@@ -998,6 +1472,100 @@ def max_loss_circuit_decision(
     }
 
 
+def adaptive_reentry_cooldown_seconds(
+    *,
+    base_seconds: int,
+    last_exit_reason: str | None,
+    last_exit_return_bps: float | None,
+    entry_stop_atr_pct: float | None,
+    profit_factor: float = 0.25,
+    vol_ref_atr_pct: float = 0.03,
+    vol_span: float = 1.5,
+) -> tuple[int, dict[str, Any]]:
+    """Adaptive after-exit cooldown (pure, zero-I/O). Replaces the FIXED magic
+    `chili_momentum_risk_cooldown_after_stopout_seconds` with a regime/vol- and
+    exit-reason-scaled value. ONE documented base (`base_seconds`, the env floor);
+    everything else is derived, no scattered magic.
+
+    Two adaptive factors, multiplied onto the base:
+      * reason_mult: a clean PROFIT/target exit (return_bps > 0 OR reason in the
+        profit set) -> `profit_factor` (a SHORT cooldown so a winner can be
+        re-scalped immediately — the TNMG re-enter-after-the-pop case). A stop-out
+        / loss -> 1.0 (the full base cooldown — sit out the chop).
+      * vol_mult: scale by the name's realized vol relative to a reference. A
+        higher-ATR name needs a LONGER pause to let the next structure form;
+        clamp to [1/vol_span, vol_span] so it never explodes or vanishes.
+          vol_mult = clamp((atr_pct / vol_ref_atr_pct), 1/vol_span, vol_span)
+
+    Returns (seconds:int >= 0, debug). Fail-NEUTRAL: any unusable input falls back
+    to `base_seconds` (never a shorter-than-base loss-side cooldown). The result is
+    floored at 0 and never raises. docs/DESIGN/MOMENTUM_LANE.md"""
+    dbg: dict[str, Any] = {}
+    try:
+        base = max(0, int(base_seconds or 0))
+    except (TypeError, ValueError):
+        base = 0
+    # reason_mult — profit/target => short re-arm; stop/loss => full base.
+    _profit_reasons = {"target", "first_target", "scale_out", "trail", "runner_target", "profit"}
+    is_profit = False
+    try:
+        rb = float(last_exit_return_bps) if last_exit_return_bps is not None else None
+        if rb is not None and rb > 0:
+            is_profit = True
+    except (TypeError, ValueError):
+        rb = None
+    _reason = (str(last_exit_reason or "").strip().lower())
+    if any(p in _reason for p in _profit_reasons):
+        is_profit = True
+    reason_mult = float(profit_factor) if is_profit else 1.0
+    # vol_mult — clamp(atr_pct / vol_ref, 1/span, span); higher vol => longer.
+    vol_mult = 1.0
+    try:
+        ap = float(entry_stop_atr_pct) if entry_stop_atr_pct is not None else None
+        ref = float(vol_ref_atr_pct)
+        span = float(vol_span)
+        if ap is not None and math.isfinite(ap) and ap > 0 and ref > 0 and span >= 1.0:
+            raw = ap / ref
+            vol_mult = max(1.0 / span, min(span, raw))
+    except (TypeError, ValueError):
+        vol_mult = 1.0
+    secs = int(round(base * reason_mult * vol_mult))
+    secs = max(0, secs)
+    dbg.update(
+        base_seconds=base, reason_mult=reason_mult, vol_mult=round(vol_mult, 4),
+        is_profit=is_profit, last_exit_reason=_reason, secs=secs,
+    )
+    return secs, dbg
+
+
+def reentry_after_stop_allowed(
+    *,
+    enabled: bool,
+    stopout_cycles: int,
+    max_stopout_reentries: int,
+) -> tuple[bool, str]:
+    """Pure bound on RE-ENTRIES after a STOP-OUT for a single session/name (no I/O).
+
+    `stopout_cycles` is the count of prior LOSS recycles for this name today (not
+    profit recycles — those are free to re-scalp). When it reaches
+    `max_stopout_reentries` the session must TERMINALIZE (FINISHED) instead of
+    recycling to WATCHING, so a chopper cannot bleed via unlimited re-arms. Flag OFF
+    => always allowed (byte-identical legacy unlimited recycle).
+    Returns (allowed, reason)."""
+    if not enabled:
+        return True, "flag_off"
+    try:
+        c = int(stopout_cycles or 0)
+        m = int(max_stopout_reentries or 0)
+    except (TypeError, ValueError):
+        return True, "bad_basis_fail_open"
+    if m <= 0:
+        return True, "uncapped"
+    if c >= m:
+        return False, "max_stopout_reentries_reached"
+    return True, "allowed"
+
+
 def liquidity_capped_notional(
     equity_notional_cap: float, dollar_volume: float | None, *, fraction: float | None = None
 ) -> float:
@@ -1073,6 +1641,18 @@ class MomentumAutomationRiskPolicy:
     stale_market_data_max_age_sec: float = 30.0
     require_live_eligible_for_live: bool = True
     require_fresh_viability: bool = True
+    # Live-eligibility TOCTOU recency grace (2026-06-29 UPC +500% miss). On a fast/thin
+    # premarket vertical the neural re-scoring can FLICKER live_eligible False at the exact
+    # entry instant even though the name armed+confirmed live-eligible seconds earlier. When
+    # the session was live-eligible at ARM/CONFIRM within this grace window AND there is live
+    # forward momentum, the eligibility block is DOWNGRADED to a warn so a transient flicker
+    # cannot terminally veto a just-confirmed active mover. The grace ONLY relaxes on positive
+    # evidence (recent eligibility + forward momentum); a name never live-eligible, or whose
+    # ineligibility is older than the window, still BLOCKS. ONE documented base (seconds);
+    # flag OFF => byte-identical (no downgrade). Composes with — never widens — the separate
+    # freshness check, and never touches the drawdown / kill-switch / max-loss hard blocks.
+    live_eligible_recency_grace_enabled: bool = True
+    live_eligible_recency_grace_seconds: float = 90.0
     require_strict_coinbase_freshness: bool = False
     disable_live_if_governance_inhibit: bool = True
     block_paper_when_kill_switch: bool = False
@@ -1108,6 +1688,12 @@ class MomentumAutomationRiskPolicy:
             ),
             require_live_eligible_for_live=bool(getattr(s, "chili_momentum_risk_require_live_eligible", True)),
             require_fresh_viability=bool(getattr(s, "chili_momentum_risk_require_fresh_viability", True)),
+            live_eligible_recency_grace_enabled=bool(
+                getattr(s, "chili_momentum_live_eligible_recency_grace_enabled", True)
+            ),
+            live_eligible_recency_grace_seconds=float(
+                getattr(s, "chili_momentum_live_eligible_recency_grace_seconds", 90.0)
+            ),
             require_strict_coinbase_freshness=bool(
                 getattr(s, "chili_momentum_risk_require_strict_coinbase_freshness", False)
             ),

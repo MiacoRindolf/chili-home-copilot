@@ -125,8 +125,172 @@ REPLAY_TICK_ENTRY = bool(
 REPLAY_FULL_PIPELINE = bool(
     getattr(settings, "chili_momentum_replay_full_pipeline_enabled", False)
 )
+# FIDELITY-V2 (2026-06-28, diagnosis wf4wdtntt): two INDEPENDENT replay-only flags.
+#   * FIDELITY_V2 — size off the full live ~18-dial de-risk stack (collapse the 2.71x
+#     over-size) + a marketable-LIMIT FILL-OR-REJECT with a per-minute fill governor
+#     (collapse the 2.24x over-fill) + a confidence band over the irreducible tail.
+#   * ENGINE_ON — A/B the live ENGINE: aggregate-risk admission (vs the fixed slot cap)
+#     + adaptive watch-fanout (vs the fixed MAX_SLOTS). HONEST: barely moves this data.
+# Both DEFAULT-OFF ⇒ EVERY edit below is no-op'd ⇒ byte-identical to current HEAD (an
+# md5-of-trades parity check proves it). READ ONLY in this replay module — no live path.
+REPLAY_FIDELITY_V2 = bool(
+    getattr(settings, "chili_momentum_replay_fidelity_v2", False)
+)
+REPLAY_ENGINE_ON = bool(
+    getattr(settings, "chili_momentum_replay_engine_on", False)
+)
+# RECORDED-FILLS CONSUMER (2026-06-28, "RECORD don't derive"): for armed_source=='live'
+# ONLY, consume the recorded broker truth in momentum_fill_outcomes instead of deriving
+# fills from the tape — exact SETUP/FILL fidelity for the names live actually traded.
+# INDEPENDENT of FIDELITY_V2. DEFAULT-OFF ⇒ byte-identical (no recorded-fill load).
+REPLAY_RECORDED_FILLS = bool(
+    getattr(settings, "chili_momentum_replay_recorded_fills_enabled", False)
+)
+# PRINTS-BASED FILL MODEL (2026-06-28, STEP 2; docs/DESIGN/VERSION_AGNOSTIC_BACKTEST.md): the
+# quote-touch fill OVER-fills because quotes can't see executions — the TRADE PRINTS can. When
+# ON, the entry-fill seam swaps the quote model (min(limit,max(bid,mid)) + the touch-through
+# test) for prints_fill_decision over the immutable iqfeed_trade_ticks (version-agnostic: any
+# version's (sym,limit,qty,t0) is scored against the same recorded prints). DEFAULT-OFF ⇒ the
+# EXACT current quote fill (md5-of-trades byte-identical). REPLAY-ONLY (no live-path read).
+REPLAY_PRINTS_FILL = bool(
+    getattr(settings, "chili_momentum_replay_prints_fill_enabled", False)
+)
+# Adaptive review-latency multiplier on the DERIVED latency (NOT a constant latency). 1.0 =
+# use the lane's own median (live_entry_submitted - live_entry_candidate_detected) as measured.
+REPLAY_REVIEW_LATENCY_K = float(
+    getattr(settings, "chili_momentum_replay_review_latency_k", 1.0) or 1.0
+)
 
 REPLAY_RESULTS_DIR = os.environ.get("CHILI_REPLAY_RESULTS_DIR", "/app/data/replays")
+
+
+def _replay_derisk_stack_multiplier(
+    *, cum_pnl_usd: float, peak_pnl_usd: float, base_loss_usd: float,
+    trade_pnls: list[float], symbol_loss_strikes: int,
+) -> tuple[float, dict]:
+    """FIDELITY-V2 SIZE FIDELITY — the replay-side image of the live ~18-dial de-risk
+    stack (live_runner.py:7307-7310 ``_eff_max_loss`` product, capped at base*3.0).
+
+    The live dials each read live DB state that is meaningless inside a replay (the live
+    system's realized day P&L, its streak window, its consecutive-green-days). So instead
+    of calling them against the live DB, we feed the SAME bounded FORMULAS the live dials
+    use their published callable bounds — applied to the REPLAY's OWN simulated running
+    state, which is the faithful analog of what the dial would read live AT THAT POINT of
+    the simulated day:
+
+      * cushion   — cushion_risk_multiplier formula: clamp(0.5 + 0.5*cushion/base, 1.0, 2.0)
+                    where cushion = max(0, replay's realized day P&L so far) [state["cum"]].
+      * green-day — green_day_graduation_multiplier: OFF by default (returns 1.0) — gated on
+                    the live flag exactly like the runner; a single replayed day cannot
+                    establish a multi-day green streak, so it is 1.0 here (parity with the
+                    runner's day-1 => 1.0 rule). The dial is wired (reads the live flag) so
+                    if the operator turns graduation on it composes identically.
+      * streak    — streak_risk_multiplier formula: clamp(0.5 + win_rate, 0.5, 1.5) over the
+                    last 10 REAL entered trades; >=3 consecutive losses => 0.5; <5 => 1.0 —
+                    computed from the replay's OWN closed-trade P&L list (the same lane).
+      * per-name  — per-name de-risk: the replay already tracks per-symbol loss_strikes for
+                    the live G2 2-strike guard; mirror live's per-symbol-fatigue down-size on a
+                    name that has already chopped us today (>=1 prior loss strike) by the SAME
+                    live knob chili_momentum_per_symbol_yellow_size_fraction — gated on the SAME
+                    chili_momentum_per_symbol_fatigue_enabled flag (no new magic number).
+
+    Each factor is bounded exactly as its live callable; the COMBINED product is clamped at
+    base*3.0 (live_runner.py:7309) — the SAME hard ceiling. Returns (mult, meta). All knobs
+    read the SAME settings the runner reads. REPLAY-ONLY (zero live-path effect)."""
+    meta: dict = {}
+    base = float(base_loss_usd or 0.0)
+    if base <= 0:
+        return 1.0, {"reason": "no_base_loss", "stack_mult": 1.0}
+
+    # ── cushion dial (cushion_risk_multiplier formula, replay day-P&L as the cushion) ──
+    cushion = max(0.0, float(cum_pnl_usd or 0.0))
+    cushion_mult = max(1.0, min(2.0, 0.5 + 0.5 * (cushion / base)))
+    meta["cushion_mult"] = round(cushion_mult, 4)
+
+    # ── green-day graduation dial — gated on the live flag (runner parity: day-1 => 1.0) ──
+    green_day_mult = 1.0
+    if bool(getattr(settings, "chili_momentum_green_day_graduation_enabled", False)):
+        # A single replayed session cannot establish a >1-day green streak, so the
+        # graduation multiplier is 1.0 (clamp(1.0 + step*max(0, streak-1)) with streak<=1).
+        green_day_mult = 1.0
+    meta["green_day_mult"] = round(green_day_mult, 4)
+
+    # ── streak dial (streak_risk_multiplier formula over the replay's closed trades) ──
+    streak_mult = 1.0
+    pnls = [float(p) for p in (trade_pnls or [])][-10:]
+    pnls = list(reversed(pnls))  # newest first, mirroring the live query order
+    if len(pnls) >= 5:
+        win_rate = sum(1 for p in pnls if p > 0) / len(pnls)
+        consec_losses = 0
+        for p in pnls:
+            if p <= 0:
+                consec_losses += 1
+            else:
+                break
+        streak_mult = max(0.5, min(1.5, 0.5 + win_rate))
+        if consec_losses >= 3:
+            streak_mult = 0.5
+    meta["streak_mult"] = round(streak_mult, 4)
+
+    # ── per-name de-risk dial — live per_symbol_fatigue yellow size-down on a name that
+    # has already chopped us today (>=1 prior loss strike). Reuses the EXACT live knob +
+    # flag the runner's per_symbol_fatigue_size_multiplier reads (no new magic number).
+    per_name_mult = 1.0
+    strikes = int(symbol_loss_strikes or 0)
+    if strikes > 0 and bool(getattr(settings, "chili_momentum_per_symbol_fatigue_enabled", False)):
+        _frac = float(getattr(settings, "chili_momentum_per_symbol_yellow_size_fraction", 0.5) or 0.5)
+        if 0.0 < _frac < 1.0 and _frac == _frac:  # NaN guard, same as the live helper
+            per_name_mult = _frac
+    meta["per_name_mult"] = round(per_name_mult, 4)
+
+    combined = cushion_mult * green_day_mult * streak_mult * per_name_mult
+    # Sanitize + the SAME hard combined-multiplier ceiling the runner applies (3x base).
+    if not (combined == combined) or combined < 0:  # NaN/negative fail-neutral
+        combined = 1.0
+    combined = min(combined, 3.0)
+    meta["stack_mult"] = round(combined, 4)
+    return combined, meta
+
+
+class _ReplayFillGovernor:
+    """FIDELITY-V2 per-minute fill-admission TOKEN BUCKET — the SIMULATION-TIME image of
+    rail_governor.GovernorConfig (the live adaptive rate governor that bounds rail call
+    rate so a burst of simultaneous admissions can never flood/429 the broker).
+
+    The live governor is a WALL-CLOCK token bucket (time.monotonic); a replay runs on a
+    simulated minute grid, so wall-clock is meaningless here. This mirrors the SAME config
+    (burst capacity + refill_rps, read from the SAME chili_momentum_rail_governor_* settings)
+    but refills against SIMULATION minutes: tokens replenish at refill_rps tokens/second of
+    sim-time elapsed, capped at burst. When N triggers fire in the same sim-minute, only up
+    to the available tokens admit; the rest are DEFERRED (the live 429/queue analog), exactly
+    the burst-fill artifact that spiked the replay/live ratio to 6.7-8.0x on the high-fan-out
+    days (06-23/24). Gated on the SAME chili_momentum_entry_placement_governor_enabled kill-
+    switch the live governor uses — OFF ⇒ admit() always True (no rate limit). REPLAY-ONLY."""
+
+    def __init__(self) -> None:
+        self._burst = max(1.0, float(getattr(settings, "chili_momentum_rail_governor_burst", 4.0) or 4.0))
+        self._rps = max(1e-3, float(getattr(settings, "chili_momentum_rail_governor_start_rps", 2.0) or 2.0))
+        self._enabled = bool(getattr(settings, "chili_momentum_entry_placement_governor_enabled", True))
+        self._tokens = self._burst
+        self._last = None  # last sim-time we refilled at (tz-aware datetime)
+        self.deferrals = 0
+
+    def admit(self, now) -> bool:
+        """Take one fill token at simulation-time ``now``. Refill from sim-elapsed
+        seconds; defer (return False) when the bucket is empty. OFF ⇒ always True."""
+        if not self._enabled:
+            return True
+        na = _aware(now)
+        if self._last is not None:
+            elapsed = (na - self._last).total_seconds()
+            if elapsed > 0:
+                self._tokens = min(self._burst, self._tokens + elapsed * self._rps)
+        self._last = na
+        if self._tokens >= 1.0:
+            self._tokens -= 1.0
+            return True
+        self.deferrals += 1
+        return False
 
 
 def _run_r_value(entry: float, stop0: float, mfe_px: float) -> float:
@@ -163,6 +327,96 @@ def _premarket_utc_hhmm(date: str) -> str:
         return t.strftime("%H:%M")
     except Exception:
         return "11:00"  # 07:00 EDT
+
+
+def _load_recorded_fills(date: str) -> dict[str, list[dict]]:
+    """RECORDED-FILLS CONSUMER ("RECORD don't derive") — load the day's REAL broker fills
+    from ``momentum_fill_outcomes`` (equity lane = symbol NOT LIKE '%-USD') and collapse the
+    per-leg rows into per-``(session_id, leg_seq)`` round-trips. Returns ``{SYMBOL_UPPER:
+    [round_trip, ...]}`` — a symbol present in the map = it RECORDED a live entry fill that day
+    (the FILL-SET truth the replay must reproduce exactly for live-armed names).
+
+    Leg model (verified in-container 2026-06-28): one row per fill leg, ``side`` in
+    {entry, exit, partial_exit, scale_out}. A round-trip is keyed by ``(session_id, leg_seq)``:
+      * entry leg     — ``broker_fill_price`` = the realized entry fill, ``qty``,
+                        ``spread_bps_at_decision``, ``intended_price`` (the marketable-limit).
+      * exit-side legs — exit/partial_exit/scale_out: ``broker_fill_price`` = the exit fill,
+                        ``realized_pnl_usd`` = that leg's realized $; ``exit_reason`` the live
+                        exit reason. The round-trip's exit price = the LAST exit-side leg's fill,
+                        its $ = the SUM of all exit-side legs' realized_pnl_usd, its exit reason =
+                        the last terminal (non-partial) exit leg's reason (else the last leg's).
+    An entry with NO exit-side leg (open at EOD / a re-arm that did not close) is still a faithful
+    FILL — emitted with exit=entry and $=Σ(any partials) so the SETUP counts (the operator's
+    priority is setup/fill accuracy, not the $). Faithful by construction: NO derivation, NO tape.
+    REPLAY-ONLY (read-only single SELECT; rolled back). [momentum_neural]"""
+    out: dict[str, list[dict]] = defaultdict(list)
+    db = SessionLocal()
+    try:
+        rows = db.execute(
+            text(
+                "SELECT symbol, session_id, leg_seq, side, qty, broker_fill_price, "
+                "entry_price, intended_price, spread_bps_at_decision, realized_pnl_usd, "
+                "exit_reason, fill_ts "
+                "FROM momentum_fill_outcomes "
+                "WHERE symbol NOT LIKE '%-USD' "
+                "AND created_at >= :lo AND created_at < :hi "
+                "ORDER BY symbol, session_id, leg_seq, fill_ts, id"
+            ),
+            {"lo": f"{date} 00:00:00", "hi": f"{date} 23:59:59"},
+        ).fetchall()
+    finally:
+        db.rollback(); db.close()
+
+    # group raw legs by (symbol, session_id, leg_seq)
+    grp: dict[tuple, list] = defaultdict(list)
+    for r in rows:
+        grp[(str(r[0]).upper(), r[1], r[2])].append(r)
+
+    def _f(x, d=0.0):
+        try:
+            return float(x) if x is not None else d
+        except (TypeError, ValueError):
+            return d
+
+    for (sym, sid, leg), legs in grp.items():
+        entry_leg = next((l for l in legs if str(l[3]) == "entry"), None)
+        if entry_leg is None:
+            continue  # an exit with no recorded entry leg cannot anchor a round-trip
+        exit_legs = [l for l in legs if str(l[3]) in ("exit", "partial_exit", "scale_out")]
+        entry_px = _f(entry_leg[5])               # broker_fill_price on the entry leg
+        qty = _f(entry_leg[4])
+        spread = _f(entry_leg[8])
+        intended = _f(entry_leg[7], entry_px)
+        entry_ts = entry_leg[11]
+        if entry_px <= 0 or qty <= 0:
+            continue
+        # exit price = the LAST exit-side leg's fill; $ = Σ realized_pnl over exit-side legs;
+        # reason = the last TERMINAL (exit) leg's reason, else the last exit-side leg's reason.
+        pnl = sum(_f(l[9]) for l in exit_legs)
+        if exit_legs:
+            exit_px = _f(exit_legs[-1][5], entry_px)
+            _terminal = [l for l in exit_legs if str(l[3]) == "exit"]
+            _src_leg = _terminal[-1] if _terminal else exit_legs[-1]
+            exit_reason = str(_src_leg[10] or "exit")
+            exit_ts = exit_legs[-1][11]
+            closed = bool(_terminal)
+        else:
+            exit_px = entry_px            # open at EOD / unclosed re-arm: flat-mark the fill
+            exit_reason = "open_eod"
+            exit_ts = entry_ts
+            closed = False
+        out[sym].append({
+            "sym": sym, "session_id": sid, "leg_seq": leg,
+            "entry": entry_px, "exit": exit_px, "qty": qty,
+            "spread_bps": spread, "intended": intended,
+            "usd": pnl, "exit_reason": exit_reason, "closed": closed,
+            "entry_ts": _aware(entry_ts) if entry_ts is not None else None,
+            "exit_ts": _aware(exit_ts) if exit_ts is not None else None,
+        })
+    # stable order per symbol: by entry time then leg_seq
+    for sym in out:
+        out[sym].sort(key=lambda d: (d["entry_ts"] or _aware(datetime(1970, 1, 1)), d["leg_seq"]))
+    return dict(out)
 
 
 class Tape:
@@ -292,6 +546,308 @@ class Tape:
         return out
 
 
+class TradeTape:
+    """STEP 2 — the immutable per-symbol TRADE PRINTS for one date (the prints-based fill
+    model; docs/DESIGN/VERSION_AGNOSTIC_BACKTEST.md). A twin of ``Tape`` but over
+    ``iqfeed_trade_ticks`` (real per-trade executions: price + size + bid/ask at the print)
+    instead of the 1-min NBBO. Bulk-loads the whole day ONCE, indexes by symbol, and exposes
+    a lookahead-free ``prints_through`` (executions AT/THROUGH a limit in a half-open window
+    using only ``observed_at`` in [t_lo, t_hi)).
+
+    Why this exists: the quote-touch fill in the entry seam treats a quote touch as a fill and
+    OVER-fills (BEEM 29/34 predicted vs 1/34 live) because quotes cannot SEE executions. A
+    through-print IS an execution — direct evidence shares traded at/through the limit. The
+    fill model below cumulates real print size against an inferred queue to decide FILL /
+    PARTIAL / CANCEL and a MEASURED ``fill_vwap``. Version-agnostic: nothing here reads
+    ``momentum_fill_outcomes``; any version's order at any ``(sym, limit, qty, t0)`` is scored
+    against these same recorded prints. Reuses the bid/ask carried on each print so
+    ``queue_ahead`` (the L1 size-at-touch proxy) can be inferred without a separate L2 load."""
+
+    def __init__(self, date: str):
+        # per-symbol list of (ts, price, size, bid, ask) in time order
+        self.by_sym: dict[str, list[tuple[datetime, float, float, float, float]]] = defaultdict(list)
+        db = SessionLocal()
+        try:
+            rows = db.execute(
+                text(
+                    "SELECT symbol, observed_at, price, size, bid, ask "
+                    "FROM iqfeed_trade_ticks "
+                    "WHERE observed_at >= :lo AND observed_at < :hi "
+                    "AND price > 0 AND size > 0 "
+                    "ORDER BY symbol, observed_at"
+                ),
+                {"lo": f"{date} {_premarket_utc_hhmm(date)}:00", "hi": f"{date} 20:10:00"},
+            ).fetchall()
+        except Exception:
+            # iqfeed_trade_ticks may not exist on this DB / date → no prints; the fill model
+            # degrades every order to quote_fallback (handled by the caller). Fail-open.
+            rows = []
+        finally:
+            db.rollback()
+            db.close()
+        for sym, ts, px, sz, bid, ask in rows:
+            ts = _aware(ts)
+            self.by_sym[str(sym)].append(
+                (ts, float(px), float(sz or 0.0),
+                 float(bid) if bid is not None else 0.0,
+                 float(ask) if ask is not None else 0.0)
+            )
+        self._times: dict[str, list[datetime]] = {s: [r[0] for r in v] for s, v in self.by_sym.items()}
+        # adaptive per-name inter-trade cadence (median gap between prints) — the fallback
+        # review-latency basis when no automation-event latencies exist for the day.
+        self._cadence_s: dict[str, float] = {}
+        for s, tms in self._times.items():
+            if len(tms) < 2:
+                continue
+            gaps = sorted((b - a).total_seconds() for a, b in zip(tms, tms[1:]) if b > a)
+            if gaps:
+                self._cadence_s[s] = gaps[len(gaps) // 2]
+        # DERIVED review latency (seconds): the lane's OWN median submit-minus-detected
+        # latency from the recorded automation events for this date (NOT a constant). Computed
+        # once here so the fill window opens at t0 - review_latency without a per-call query.
+        self.review_latency_s: float | None = _derive_review_latency_s(date)
+
+    def symbols(self) -> list[str]:
+        return list(self.by_sym.keys())
+
+    def cadence_s(self, sym: str) -> float | None:
+        """Adaptive inter-trade cadence (median print gap, seconds) for the name, or None."""
+        return self._cadence_s.get(sym)
+
+    def queue_ahead_at(self, sym: str, ts, side: str = "long") -> float | None:
+        """L1 size-at-touch proxy for the resting queue ahead of our order: the bid/ask SIZE is
+        not carried on the print, so we use the most recent print's size at/just-before ``ts``
+        as the observable depth proxy (the live model degrades to 0 + a low-confidence flag when
+        absent). Returns the print size of the last print at/before ts, or None if no print."""
+        times = self._times.get(sym)
+        if not times:
+            return None
+        i = bisect.bisect_right(times, _aware(ts)) - 1
+        if i < 0:
+            return None
+        return float(self.by_sym[sym][i][2])
+
+    def prints_through(self, sym: str, limit: float, side: str, t_lo, t_hi) -> list[tuple[float, float, datetime]]:
+        """LOOKAHEAD-FREE executions AT/THROUGH ``limit`` whose ``observed_at`` ∈ [t_lo, t_hi),
+        in time order, as ``(price, size, ts)``. For a long marketable buy LIMIT, an execution
+        "through" the limit is a print at ``price <= limit`` (the offer traded down to/through
+        our resting bid-side limit). Reuses the bisected ``_times`` index (no scan)."""
+        times = self._times.get(sym)
+        if not times:
+            return []
+        lo = bisect.bisect_left(times, _aware(t_lo))
+        hi = bisect.bisect_left(times, _aware(t_hi))
+        out: list[tuple[float, float, datetime]] = []
+        _long = (side or "long").lower() != "short"
+        for r in self.by_sym[sym][lo:hi]:
+            _ts, _px, _sz = r[0], r[1], r[2]
+            if _sz <= 0:
+                continue
+            if (_long and _px <= limit) or ((not _long) and _px >= limit):
+                out.append((_px, _sz, _ts))
+        return out
+
+    def has_prints_near(self, sym: str, t_lo, t_hi) -> bool:
+        """LOOKAHEAD-FREE local coverage probe: does the name have ANY print (at ANY price, not
+        just through our limit) whose ``observed_at`` ∈ [t_lo, t_hi]? Used to source-tag a fill
+        honestly: 'prints_fill' means there WAS local print coverage for THIS order's window so a
+        no-through-print is a genuine no-fill; 'quote_fallback' means the name had no prints in
+        the neighborhood of this order at all (so the absence of a through-print is uninformative).
+        Whole-day cadence cannot answer this — a name can have prints elsewhere in the day yet none
+        in this order's window. Inclusive on t_hi so a print exactly at the ack horizon still counts
+        as coverage. Reuses the bisected ``_times`` index (no scan)."""
+        times = self._times.get(sym)
+        if not times:
+            return False
+        lo = bisect.bisect_left(times, _aware(t_lo))
+        hi = bisect.bisect_right(times, _aware(t_hi))
+        return hi > lo
+
+
+def _derive_review_latency_s(date: str) -> float | None:
+    """ADAPTIVE review latency for the prints-fill window (NO magic constant): the MEDIAN of the
+    momentum lane's OWN recorded (live_entry_submitted.ts − live_entry_candidate_detected.ts)
+    latencies for ``date``, paired per session in time order. Returns seconds, or None when no
+    pairable events exist (the caller then falls back to the name's inter-trade print cadence).
+    REPLAY-ONLY read of recorded events (the same table _build_divergence joins)."""
+    db = SessionLocal()
+    try:
+        rows = db.execute(
+            text(
+                "SELECT e.session_id, e.event_type, e.ts FROM trading_automation_events e "
+                "JOIN trading_automation_sessions s ON s.id = e.session_id "
+                "WHERE s.mode='live' AND s.symbol NOT LIKE '%-USD' "
+                "AND e.event_type IN ('live_entry_candidate_detected','live_entry_submitted') "
+                "AND e.ts >= :lo AND e.ts < :hi ORDER BY e.session_id, e.ts"
+            ),
+            {"lo": f"{date} 04:00:00", "hi": f"{date} 23:59:59"},
+        ).fetchall()
+    except Exception:
+        return None
+    finally:
+        db.rollback(); db.close()
+    # pair each detected with the NEXT submit in the same session (FIFO) → latency seconds
+    pending: dict = {}
+    lats: list[float] = []
+    for sid, et, ts in rows:
+        if et == "live_entry_candidate_detected":
+            pending.setdefault(sid, []).append(ts)
+        elif et == "live_entry_submitted":
+            q = pending.get(sid)
+            if q:
+                det = q.pop(0)
+                dt = (ts - det).total_seconds()
+                if dt >= 0:
+                    lats.append(dt)
+    if not lats:
+        return None
+    lats.sort()
+    return lats[len(lats) // 2]
+
+
+def prints_fill_decision(
+    trade_tape: "TradeTape",
+    sym: str,
+    limit: float,
+    qty: float,
+    t0,
+    *,
+    side: str = "long",
+    queue_ahead: float | None,
+    review_latency_s: float | None,
+    ack_window_s: float,
+    bid: float,
+    participation: float,
+    min_size: float = 1.0,
+) -> dict:
+    """STEP 2 prints-based fill model. Scores ONE order ``(sym, limit, qty, t0)`` against the
+    immutable trade prints in [t0 − review_latency, t0 + ack_window):
+
+      * cumulate ``participation * size`` of the through-prints (executions at/through the limit),
+      * ``filled = max(0, min(qty, cum_size − queue_ahead))`` (queue_ahead = inferred size ahead),
+      * ``fill_vwap`` = the size-weighted price over the FILLING slice, bounded [bid, limit]
+        (never better than the best bid, never worse than our limit),
+      * ``filled >= qty`` → FILL; ``0 < filled < qty`` → PARTIAL (caller emits + cancels the
+        remainder; below ``min_size`` → CANCEL); ``filled <= 0`` → CANCEL.
+
+    Returns {filled_qty, fill_vwap, status ∈ FILL|PARTIAL|CANCEL, source, meta}. ``source`` =
+    'prints_fill' when the name has ANY print in a neighborhood of THIS order ([t_lo, t_hi]),
+    'quote_fallback' when it has NO local print coverage for this order's window (so the caller
+    widens the confidence band) — tagged off LOCAL coverage, not whole-day cadence, so it honestly
+    reflects whether THIS order could be resolved against prints. When the queue depth ahead of us
+    is unobservable (no print at/before the window open), ``queue_ahead`` falls back to a
+    CONSERVATIVE non-zero proxy = the median in-window through-print size (so a single tiny print
+    cannot clear an unknown queue and over-fill); ``meta.low_confidence`` flags this, and
+    ``meta.queue_proxy`` records which basis was used ('observed' | 'median_through_print' |
+    'none'). Lookahead-free (only ``observed_at`` ∈ the window). NO magic numbers — every input is
+    derived/passed."""
+    review_latency_s = max(0.0, float(review_latency_s or 0.0))
+    t_lo = _aware(t0) - timedelta(seconds=review_latency_s)
+    t_hi = _aware(t0) + timedelta(seconds=max(0.0, float(ack_window_s)))
+    prints = trade_tape.prints_through(sym, limit, side, t_lo, t_hi)
+    # SEMANTICS: the queue ahead of us must be the queue that EXISTED when the fill window OPENS
+    # (t_lo = t0 − review_latency), NOT at t0. The through-prints we credit span [t_lo, t_hi); if
+    # we snapshotted the queue at t0 we'd consume prints in [t_lo, t0) against a queue that did
+    # not yet exist at the time those prints happened — systematically over-filling on fast movers
+    # (most through-prints sit in that backward sub-window). Re-snapshot at t_lo so the queue and
+    # the through-prints share the same time origin. The caller-supplied ``queue_ahead`` (taken at
+    # t0) is used only to preserve the low-confidence flag (None ⇒ no observable depth proxy).
+    low_conf = queue_ahead is None
+    qa_at_open = trade_tape.queue_ahead_at(sym, t_lo, side=side)
+    qa_obs = qa_at_open if qa_at_open is not None else queue_ahead
+    if qa_obs is not None:
+        # We have an OBSERVED depth proxy (a print's size at/just-before the window open).
+        qa = max(0.0, float(qa_obs))
+    else:
+        # FIX 1 — CONSERVATIVE UNKNOWN-QUEUE PROXY (anti-over-fill). When the queue depth is
+        # unobservable (no print at/before t_lo to read a size off) the previous code coerced the
+        # queue to 0.0, which FULLY BYPASSES the queue gate: a single tiny through-print then clears
+        # the (unknown) queue and the order fills as if first-in-line — exactly the BEEM over-fill
+        # the prints model exists to prevent. Instead, stand a NON-ZERO proxy queue ahead of us,
+        # derived from the order's OWN in-window through-prints: the MEDIAN through-print size. This
+        # is adaptive (no constant) and makes the model demand at least a typical-print's worth of
+        # flow before we are credited — so one undersized print can no longer clear an unknown
+        # queue. low_confidence stays set so the caller still widens the band. If there are no
+        # through-prints the proxy is 0.0 (moot — the no-print branch below returns CANCEL anyway).
+        _sizes = sorted(_sz for (_px, _sz, _ts) in prints if _sz > 0)
+        qa = float(_sizes[len(_sizes) // 2]) if _sizes else 0.0
+    # queue_proxy semantics for the meta/audit: 'observed' = a real print size at/before t_lo;
+    # 'median_through_print' = FIX-1 conservative non-zero proxy (queue depth unobservable);
+    # 'none' = no through-prints so the proxy was moot (the no-print branch returns below).
+    qa_proxy = "observed" if qa_obs is not None else ("median_through_print" if prints else "none")
+    # FIX 2 — HONEST SOURCE TAG (local coverage, not whole-day cadence). The previous code tagged
+    # 'prints_fill' vs 'quote_fallback' off whole-day cadence_s (>=2 prints ANYWHERE in the day),
+    # which mis-tagged an order whose OWN [t_lo, t_hi] window had no prints as 'prints_fill'. Tag
+    # off whether the name has ANY print in a NEIGHBORHOOD of THIS order instead, so quote_fallback
+    # honestly means "no local print coverage for THIS order's window." Lookahead-free (the probe
+    # only inspects observed_at ≤ t_hi). When there ARE through-prints we resolved against real
+    # prints ⇒ always 'prints_fill'; only the no-through-print path consults local coverage.
+    src = "prints_fill" if trade_tape.has_prints_near(sym, t_lo, t_hi) else "quote_fallback"
+    if not prints:
+        # No execution at/through the limit in the window — version-agnostically this is a
+        # genuine NO-FILL (the offer never traded down to us). But there may simply be no print
+        # COVERAGE for this name/day (87% of candidates have no prints, per the design audit);
+        # the caller distinguishes by checking whether the name has ANY prints at all.
+        return {
+            "filled_qty": 0.0, "fill_vwap": None, "status": "CANCEL",
+            "source": src,
+            "meta": {"reason": "no_through_print", "queue_ahead": qa, "queue_proxy": qa_proxy,
+                     "review_latency_s": round(review_latency_s, 3),
+                     "low_confidence": low_conf, "n_prints": 0},
+        }
+    # cumulate participation-weighted through-print size; consume queue_ahead first, then fill us
+    cum = 0.0
+    fill_sz = 0.0
+    fill_notional = 0.0
+    remaining_q = max(0.0, float(qty))
+    for _px, _sz, _ts in prints:
+        avail = max(0.0, float(participation)) * float(_sz)
+        if avail <= 0:
+            continue
+        cum += avail
+        # shares available to US after the inferred queue ahead is served
+        usable = cum - qa
+        if usable <= fill_sz:
+            continue  # still serving the queue / already counted
+        take = min(remaining_q - fill_sz, usable - fill_sz)
+        if take <= 0:
+            continue
+        # the filling price is bounded [bid, limit] — never better than the best bid, never
+        # worse than our resting limit (the empirical resting-limit fill shape, no hardcoded bps)
+        px_eff = min(limit, max(float(bid), float(_px)))
+        fill_sz += take
+        fill_notional += take * px_eff
+        if fill_sz >= remaining_q:
+            break
+    filled = max(0.0, min(float(qty), fill_sz))
+    if filled <= 0:
+        return {
+            "filled_qty": 0.0, "fill_vwap": None, "status": "CANCEL",
+            "source": src,
+            "meta": {"reason": "queue_not_cleared", "queue_ahead": qa, "queue_proxy": qa_proxy,
+                     "cum_size": round(cum, 1),
+                     "review_latency_s": round(review_latency_s, 3),
+                     "low_confidence": low_conf, "n_prints": len(prints)},
+        }
+    fill_vwap = fill_notional / filled if filled > 0 else None
+    if fill_vwap is not None:
+        fill_vwap = min(limit, max(float(bid), float(fill_vwap)))
+    if filled >= float(qty) - 1e-9:
+        status = "FILL"
+    elif filled >= float(min_size):
+        status = "PARTIAL"
+    else:
+        status = "CANCEL"
+    return {
+        "filled_qty": filled, "fill_vwap": fill_vwap, "status": status,
+        "source": src,
+        "meta": {"reason": status.lower(), "queue_ahead": qa, "queue_proxy": qa_proxy,
+                 "cum_size": round(cum, 1),
+                 "review_latency_s": round(review_latency_s, 3),
+                 "low_confidence": low_conf, "n_prints": len(prints)},
+    }
+
+
 def _expected_move_bps_15m(upto: pd.DataFrame, H: str, L: str, C: str) -> float | None:
     """Live's expected-move basis (live_runner._expected_move_bps_from_ohlcv):
     mean true range of the last <=14 FIFTEEN-minute bars over the last close, in
@@ -361,6 +917,10 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
     started = datetime.now(timezone.utc)
     tape = Tape(date)
     syms = tape.symbols()
+    # STEP 2 prints-based fill model: bulk-load the day's TRADE PRINTS once (twin of Tape over
+    # iqfeed_trade_ticks) only when the flag is on. OFF ⇒ None ⇒ the entry seam keeps the EXACT
+    # quote fill (byte-identical). REPLAY-ONLY.
+    trade_tape = TradeTape(date) if REPLAY_PRINTS_FILL else None
     result: dict = {
         "date": date,
         "engine": "v2",
@@ -493,6 +1053,36 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             live_spans[str(sym2).upper()].append((_aware(a2), _aware(b2)))
         result["live_sessions"] = sum(len(v) for v in live_spans.values())
 
+    # RECORDED-FILLS CONSUMER ("RECORD don't derive"): for armed_source=='live' + flag ON,
+    # load the day's REAL broker fills and partition the live-armed universe into
+    #   * recorded_filled_syms — live ARMED *and* recorded a broker entry fill: the replay
+    #     emits these from the RECORDED round-trips (exact entry/exit/spread/$/qty) and the
+    #     derived tape model is BYPASSED for them.
+    #   * live_armed_syms \ recorded_filled_syms — live armed but the recorded truth shows NO
+    #     fill (live cancelled pre-entry): the replay DROPS them (trace gate_fail:live_cancelled)
+    #     so the over-firing derived auto-fill can't invent a trade live never took.
+    # A name the replay arms that live NEVER armed (pure counterfactual) is untouched here and
+    # keeps the DERIVED model (tagged ':counterfactual' at emission). OFF / non-live ⇒ all empty.
+    recorded_fills: dict[str, list[dict]] = {}
+    live_armed_syms: set[str] = set()
+    recorded_filled_syms: set[str] = set()
+    use_recorded = bool(REPLAY_RECORDED_FILLS and armed_source == "live")
+    if use_recorded:
+        live_armed_syms = set(live_spans or {})
+        try:
+            recorded_fills = _load_recorded_fills(date)
+        except Exception:
+            logger.warning("[replay_v2] recorded-fill load failed; falling back to derived", exc_info=True)
+            recorded_fills = {}
+            use_recorded = False
+        recorded_filled_syms = {s for s in recorded_fills if s in live_armed_syms}
+        result["recorded_fills_consumer"] = {
+            "enabled": True,
+            "live_armed": len(live_armed_syms),
+            "recorded_filled": sorted(recorded_filled_syms),
+            "live_cancelled_dropped": sorted(live_armed_syms - recorded_filled_syms),
+        }
+
     armed: dict[str, dict] = {}
     trigger_cache: dict[tuple, tuple] = {}
     trace: list[dict] = []
@@ -520,6 +1110,14 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
     loss_strikes: dict = {}          # symbol -> count of losing trades today
     state = {"cum": 0.0, "peak": 0.0, "halted": None}
     day_grid = pd.date_range(f"{date} {_premarket_utc_hhmm(date)}:00", f"{date} 19:59:00", freq="1min", tz="UTC")
+    # ── FIDELITY-V2 / ENGINE-ON running ledgers (no-op when both flags OFF) ──────────
+    # ENGINE-ON aggregate dollars-at-risk across OPEN positions (Σ(entry-stop)*qty),
+    # accumulated on fill + released on close (mirrors aggregate_open_risk_usd); the
+    # admit_by_aggregate_risk gate reads it. FIDELITY-V2 per-minute fill governor + the
+    # irreducible-tail names the confidence band brackets.
+    engine_open_risk_usd = {"v": 0.0}
+    fill_governor = _ReplayFillGovernor() if REPLAY_FIDELITY_V2 else None
+    band_tail = {"rail_4xx": [], "tape_ceiling_miss": []}  # symbols feeding the band
 
     def asof_rank(now) -> list[str]:
         sigs = {}
@@ -706,11 +1304,21 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
         # structural risk. The MESO separator: winners thrust, losers fade (~0R).
         _mfe_px = max(float(p.get("hwm", p["entry"])), float(p["entry"]))
         _run_r = _run_r_value(p["entry"], p.get("stop0", p["stop"]), _mfe_px)
+        # RECORDED-FILLS CONSUMER: when active, any DERIVED trade that reaches here is a
+        # pure COUNTERFACTUAL (live-armed-and-filled names are emitted from the recorded
+        # round-trips, not here; live-armed-not-filled names are dropped) — so tag its why
+        # ':counterfactual' + source='derived' to distinguish it from the recorded_live set.
+        # OFF ⇒ no new keys / no suffix (byte-identical why + dict).
+        _extra: dict = {}
+        if use_recorded:
+            why = why + ":counterfactual"
+            _extra["source"] = "derived"
         trades.append({**p["meta"], "exit": round(exit_px, 4), "why": why,
                        "exit_t": (str(when)[11:16] if when is not None else None),
                        "stop": round(p.get("stop0", p["stop"]), 4),
                        "target": round(p["target"], 4),
                        "mfe_px": round(_mfe_px, 4), "run_r": round(_run_r, 2),
+                       **_extra,
                        "usd": round(pnl + p.get("scale_usd", 0.0), 0)})
         # G2: per-symbol post-loss discipline — mirror live _symbol_loss_guards (only a
         # net LOSS cools down + strikes; a WIN stays re-armable, preserving the legit
@@ -719,6 +1327,11 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             _w = when if when is not None else now
             loss_strikes[s] = loss_strikes.get(s, 0) + 1
             loss_cooldown_until[s] = _aware(_w) + timedelta(minutes=LOSS_COOLDOWN_MIN)
+        # ENGINE-ON: release this position's dollars-at-risk from the running aggregate
+        # (mirrors the live atomic boundary releasing on exit). No-op when the flag is OFF
+        # (engine_open_risk_usd stays 0.0 because nothing accumulated into it).
+        if REPLAY_ENGINE_ON:
+            engine_open_risk_usd["v"] = max(0.0, engine_open_risk_usd["v"] - float(p.get("open_risk_usd", 0.0)))
         del open_pos[s]
         if state["halted"] is None and state["cum"] <= -daily_loss_cap_usd:
             state["halted"] = "daily_loss"
@@ -912,18 +1525,28 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                     continue  # ride one bounded beat
                 p.pop("stop_breach_chop_holds", None)
                 why = "trail_stop" if (p["scaled"] or p["trail_armed"]) and p["stop"] > p["stop0"] else "stop"
-                # GUARD-#1 (replay mirror of the #769 max-loss circuit clamp): a
-                # pyramided position's worst-case realized loss is capped at the
-                # STARTER's original risk R0. On a gap-through below the absolute floor
-                # (entry - R0/qty) the exit prices AT the floor (not the deeper bid), so
-                # realized loss <= R0 — exactly what live's clamped circuit guarantees.
-                # No pyramid => p["pyr_R0"] absent => exits at the bid (byte-identical).
+                # GUARD-#1 (replay mirror of the #769 max-loss circuit — T1.1 fidelity fix
+                # 2026-06-27): the LIVE runner caps EVERY entry's realized loss via
+                # risk_policy.max_loss_circuit_decision (floor = avg - k*stop_distance, basis =
+                # structural stop_distance*qty) when chili_momentum_max_loss_circuit_enabled is on
+                # — NOT only pyramids. The old replay mirror floored ONLY pyramided positions
+                # (pyr_R0 set), so single-entry gap-throughs (99% of fills) exited at the raw deep
+                # bid and over-counted the loss tail vs live (the -$1,988-vs-$345 5.8x driver).
+                # Wire the SAME live leaf with the SAME args (pyr_R0 threads as the risk anchor,
+                # exactly as live le["pyramid_risk_anchor_usd"]): a breach exits AT the floor
+                # (<= ~k*R); a clean stop (bid > floor / no breach) is byte-identical to the raw
+                # bid. Flag OFF => exit at the raw bid (pre-circuit byte-identical).
                 _exit_px = bid
-                _pyr_R0 = p.get("pyr_R0")
-                if _pyr_R0 and _pyr_R0 > 0 and p["qty"] > 0:
-                    _floor_px = p["entry"] - float(_pyr_R0) / p["qty"]
-                    if _exit_px < _floor_px:
-                        _exit_px = _floor_px
+                if bool(getattr(settings, "chili_momentum_max_loss_circuit_enabled", False)):
+                    from .risk_policy import max_loss_circuit_decision
+                    _sd_circ = float(p["entry"]) - float(p.get("stop0", p["stop"]))
+                    _k_circ = float(getattr(settings, "chili_momentum_max_loss_risk_multiple", 2.0) or 2.0)
+                    _circ = max_loss_circuit_decision(
+                        avg=p["entry"], qty=p["qty"], stop_distance=_sd_circ, bid=bid, k=_k_circ,
+                        risk_anchor_usd=p.get("pyr_R0"),
+                    )
+                    if _circ.get("breach") and _circ.get("floor_price") is not None:
+                        _exit_px = max(bid, float(_circ["floor_price"]))
                 close_trade(s, p, _exit_px, why, when=now)
                 continue
             # flicker recovery: bid back above stop clears the hold counter (live 4047-4054)
@@ -957,6 +1580,16 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                     del armed[s]
             ranked = _rank(now)   # full_pipeline re-screen+re-score when on; asof otherwise
             pos = {s: i for i, s in enumerate(ranked)}
+            # ENGINE-ON (B): the WATCH-fanout cap floats with the live-eligible FIELD SIZE
+            # (adaptive_watch_fanout) instead of the fixed MAX_SLOTS — wider watch breadth
+            # when many names are igniting. field_size = the eligible-name count at `now`
+            # (``ranked`` IS that as-of field). Reads the SAME watch_fanout settings the
+            # live auto_arm reads. OFF ⇒ _slots == MAX_SLOTS (byte-identical). HONEST: on
+            # this data the slot cap rarely binds, so this barely moves the trade-set.
+            _slots = MAX_SLOTS
+            if REPLAY_ENGINE_ON:
+                from .risk_policy import adaptive_watch_fanout as _awf
+                _slots = int(_awf(len(ranked)))
             for s in ranked:
                 if s in armed or s in open_pos:
                     continue
@@ -967,11 +1600,11 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                 if not _arm_freshness_ok(s, now):
                     _tr(s, "arm_skip:faded_impulse", now)
                     continue
-                if len(armed) < MAX_SLOTS:
+                if len(armed) < _slots:
                     armed[s] = {"since": now}
                     armed_spans[s].append([str(now)[11:16], None])
                     continue
-                if pos[s] >= MAX_SLOTS:
+                if pos[s] >= _slots:
                     break  # ranked is ordered — nothing further down can displace either
                 # Displacement arming: live re-scans continuously, so a newly-hot name
                 # (e.g. a halt-resume pop) gets armed within minutes; first-come-slots +
@@ -981,7 +1614,7 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                 # still holding a top rank is never displaced, so pullback dips that
                 # stay top-ranked keep their watcher while the entry forms).
                 evict = max((a for a in armed if a not in open_pos), key=lambda a: pos.get(a, 1 << 30), default=None)
-                if evict is None or pos.get(evict, 1 << 30) < MAX_SLOTS:
+                if evict is None or pos.get(evict, 1 << 30) < _slots:
                     break  # every armed symbol still holds a top rank
                 if armed_spans[evict] and armed_spans[evict][-1][1] is None:
                     armed_spans[evict][-1][1] = str(now)[11:16]
@@ -991,9 +1624,27 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
         for s in list(armed):
             if s in open_pos:
                 continue
+            # RECORDED-FILLS CONSUMER ("RECORD don't derive"): bypass the DERIVED fill model
+            # for any live-armed name. A name the recorded broker truth shows FILLED is emitted
+            # from its RECORDED round-trips (handled once, just below the loop), so skip it here;
+            # a live-armed name with NO recorded fill = live CANCELLED it pre-entry, so DROP it
+            # (the over-firing derived auto-fill must not invent a trade live never took). OFF /
+            # non-live ⇒ this whole block is skipped (byte-identical). Counterfactual names (not
+            # live-armed) never enter this branch and keep the derived model.
+            if use_recorded and s in live_armed_syms:
+                if s not in recorded_filled_syms:
+                    _tr(s, "gate_fail:live_cancelled", now)
+                # FILLED names are emitted from the recorded round-trips (post-loop); either
+                # way the derived path does not run for a live-armed name.
+                continue
             # G1: concurrency cap — live holds only ~MAX_OPEN_CONCURRENT positions at once
             # (adaptive_max_concurrent_live_sessions base); open_pos is the held analog.
-            if len(open_pos) >= MAX_OPEN_CONCURRENT:
+            # ENGINE-ON (A): the FIXED count cap is replaced by the engine's shape-aware
+            # admit_by_aggregate_risk — but the candidate's dollars-at-risk ((entry-stop)*qty)
+            # are not known until the fill block computes the stop + qty, so the aggregate-risk
+            # admission is evaluated THERE (search 'admit_by_aggregate_risk'); here we only skip
+            # the fixed count gate when ENGINE_ON. OFF ⇒ the fixed count gate (byte-identical).
+            if not REPLAY_ENGINE_ON and len(open_pos) >= MAX_OPEN_CONCURRENT:
                 _tr(s, "gate_fail:concurrency_cap", now)
                 continue
             # G2: per-symbol re-entry discipline — 2-strike (today's losses) then a
@@ -1129,6 +1780,13 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             # low-float movers live now accepts (the NXTS-class divergence on the under-fill side).
             _skip_spread = bool(getattr(settings, "chili_momentum_skip_spread_gate_for_limit_entry", True))
             _spread_ceiling = SPREAD_ABS_CAP_BPS if _skip_spread else max_spread
+            # FIDELITY-V2 (STEP 2a) SPREAD-CEILING REJECT: the deterministic auto-fill below
+            # passed 59 names the live rail killed (diagnosis). When fidelity_v2 is on, judge
+            # the spread at the live RAIL's adaptive threshold (the SAME adaptive_max_spread_bps
+            # gate, NOT the lenient skip-for-limits abs-cap) so wide low-float quotes the rail
+            # would not have crossed are rejected (trace gate_fail:wide_spread). OFF ⇒ unchanged.
+            if REPLAY_FIDELITY_V2:
+                _spread_ceiling = max_spread
             if sbps > _spread_ceiling:
                 _tr(s, "gate_fail:wide_spread_%.0fbps" % sbps, now)
                 continue
@@ -1147,7 +1805,92 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             if nxt[1] > limit:  # next bid above our limit: it ran away inside the ack window
                 _tr(s, "gate_fail:ack_timeout", now)
                 continue
-            fill_px = ask  # marketable limit realizes ~the ask (live: 1.66 limit -> 1.63-1.64 fills)
+            # FIDELITY-V2 (STEP 2b) MARKETABLE-LIMIT FILL-OR-REJECT — the dominant over-fill
+            # lever (302 of 451 reducible live cancels were cancelled_pre_entry: the resting
+            # marketable LIMIT never crossed within the ack window, then cancelled). The
+            # deterministic auto-fill above converts those to fills live cancels. When
+            # fidelity_v2 is on, model the resting LIMIT as FILLED only if WITHIN THE ACK
+            # WINDOW the tape shows the offer actually TRADED THROUGH the limit (an ask<=limit
+            # print), else CANCELLED. The ack window = the SAME live backstop the runner uses:
+            # chili_momentum_entry_max_rest_bars x the entry-interval seconds (live_runner.py
+            # :6128-6131). Plus the per-minute fill-admission TOKEN BUCKET (STEP 2c) suppresses
+            # the burst-fill artifact on high-fan-out minutes. OFF ⇒ none of this runs.
+            if REPLAY_FIDELITY_V2:
+                _rest_bars = float(getattr(settings, "chili_momentum_entry_max_rest_bars", 2.0) or 2.0)
+                _ack_window_s = _rest_bars * float(ENTRY_BAR_MIN) * 60.0
+                _ack_end = _aware(now) + timedelta(seconds=_ack_window_s)
+                _through = False
+                for _ts, _b, _a, _src in tape.prices_between(s, now, _ack_end):
+                    if _a <= limit:  # the offer traded down through our resting limit
+                        _through = True
+                        break
+                if not _through:
+                    _tr(s, "gate_fail:limit_not_filled", now)
+                    continue
+                # STEP 2c per-minute fill-admission token bucket (rail-governor analog): a
+                # burst of simultaneous triggers cannot all "fill" — admit up to the bucket,
+                # defer the rest (live would 429/queue). OFF ⇒ admit() always True (no-op).
+                if fill_governor is not None and not fill_governor.admit(now):
+                    _tr(s, "gate_fail:fill_governor_deferred", now)
+                    continue
+            # T1.2 FILL-PRICE FIDELITY (2026-06-27): the marketable LIMIT rests at `limit`
+            # (just above the ask) but FILLS as price pulls back toward the bid/mid, NOT by
+            # sweeping the offer — 74 real broker entries averaged ~247bps BELOW the intended
+            # limit (0 ever filled above it). Modeling fill@ask paid the full spread on every
+            # entry that live does NOT, the dominant driver of the -$1,988-vs-$345 (5.8x) loss
+            # overstatement. Realize at the MID — the tape-anchored central fill of a resting
+            # marketable limit (the improvement scales with the live spread; NO hardcoded bps) —
+            # bounded above by the limit (never worse) and below by the bid (never better than
+            # the best bid). For wide low-float spreads this ~= the empirical -247bps; for tight
+            # names it collapses to ~the ask (small improvement), exactly the live shape.
+            fill_px = min(limit, max(bid, mid))
+            # ── STEP 2 fill-source bookkeeping (default quote model unless prints override) ──
+            _fill_source = "quote_fallback" if REPLAY_PRINTS_FILL else "quote"
+            _prints_avail: float | None = None      # max fillable shares per the prints (None ⇒ unbounded)
+            _prints_meta: dict | None = None
+            _entry_partial_pf: float | None = None   # prints PARTIAL fraction (None ⇒ not applicable)
+            # STEP 2 PRINTS-BASED FILL MODEL (docs/DESIGN/VERSION_AGNOSTIC_BACKTEST.md): the
+            # quote-touch above can't SEE executions and OVER-fills. When the prints flag is on,
+            # resolve the fill against the immutable TRADE PRINTS: an execution AT/THROUGH the
+            # limit is direct evidence shares traded. The window opens at t0 − DERIVED review
+            # latency (median submit-minus-detected of the lane's OWN recorded events × K; NO
+            # magic constant) and closes at t0 + the SAME ack window the fidelity_v2 test uses
+            # (chili_momentum_entry_max_rest_bars × entry-interval). queue_ahead = the L1 size-
+            # at-touch proxy (degrade to 0 + low-confidence when absent). On status==CANCEL the
+            # trade is DROPPED (gate_fail:prints_no_fill); else fill_vwap REPLACES the quote
+            # fill and the available print size caps qty below (PARTIAL). The qty-dependent
+            # PARTIAL/CANCEL split is finalized AFTER sizing; here we capture the max fillable +
+            # the measured vwap. OFF ⇒ this whole block is skipped ⇒ byte-identical.
+            if REPLAY_PRINTS_FILL and trade_tape is not None:
+                _rest_bars_p = float(getattr(settings, "chili_momentum_entry_max_rest_bars", 2.0) or 2.0)
+                _ack_window_p = _rest_bars_p * float(ENTRY_BAR_MIN) * 60.0
+                # DERIVED review latency: the day's median lane latency (× K), fallback = the
+                # name's inter-trade print cadence (× K) when no events exist. NO constant.
+                _rev_lat = trade_tape.review_latency_s
+                if _rev_lat is None:
+                    _rev_lat = trade_tape.cadence_s(s)
+                _rev_lat = (float(_rev_lat) if _rev_lat is not None else 0.0) * REPLAY_REVIEW_LATENCY_K
+                _qa = trade_tape.queue_ahead_at(s, now, side="long")
+                # ask an unbounded qty so the decision returns the MAX fillable (cum_size −
+                # queue_ahead) + the vwap; the qty-bounded PARTIAL/CANCEL is finalized after the
+                # real sizing below (sizing needs fill_px, which the vwap here provides).
+                _probe_qty = 1e12
+                _pf = prints_fill_decision(
+                    trade_tape, s, limit, _probe_qty, now, side="long",
+                    queue_ahead=_qa, review_latency_s=_rev_lat,
+                    ack_window_s=_ack_window_p, bid=bid,
+                    participation=PARTICIPATION_CAP, min_size=1.0,
+                )
+                _prints_meta = _pf.get("meta")
+                _fill_source = _pf.get("source", "quote_fallback")
+                if _pf["status"] == "CANCEL" or float(_pf.get("filled_qty") or 0.0) <= 0.0:
+                    # no execution at/through the limit in the window → live never filled here
+                    _tr(s, "gate_fail:prints_no_fill", now)
+                    continue
+                # measured fill price REPLACES the quote estimate (already bounded [bid, limit])
+                if _pf.get("fill_vwap") is not None:
+                    fill_px = float(_pf["fill_vwap"])
+                _prints_avail = float(_pf["filled_qty"])
             pblow = dbg.get("pullback_low")
             # LIVE stop width: vol-floored by the 15m expected move (the floor can BIND
             # here, exactly like live_runner.py:2358-2382), then structural pullback-low
@@ -1172,7 +1915,42 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                 _liq_mult, _ = spread_liquidity_risk_multiplier(
                     sbps, em_bps,
                     floor=float(getattr(settings, "chili_momentum_liquidity_risk_floor", 0.5) or 0.5))
-            want_qty = min((risk_per_trade_usd * _liq_mult) / max(fill_px - stop, 1e-9), max_notional / fill_px)
+            # T1.3 SIZING PARITY (2026-06-27): route through the SAME live leaf
+            # compute_risk_first_quantity the runner calls (live_runner.py:6810) instead of a bare
+            # division. The bare `(risk)/(fill-stop)` OVER-sized — no 0.003 stop-distance floor, no
+            # whole-share rounding, no below-min-size rejection, no consistent notional ceiling —
+            # inflating per-trade $ (and thus loss magnitude) on chaotic tight-stop low-float names.
+            # atr_pct=eff is the structural-or-vol-floored stop the exit also uses, so qty is sized
+            # off the same stop (matching the old denominator) but with the live floors/rounding.
+            # FIDELITY-V2 (STEP 1) SIZE FIDELITY — the biggest + most consistent lever: replay
+            # sized $1,994 median vs live $463 (~4.3x) because it modeled only the BASE risk
+            # budget. Multiply the per-trade max-loss by the LIVE ~18-dial de-risk stack
+            # (cushion / green-day / streak / per-name de-risk) — each via the SAME live
+            # callable's bounded formula, computed against the REPLAY's OWN running simulated
+            # state (state["cum"] day P&L for cushion; the closed-trade P&L list for the streak;
+            # per-symbol loss_strikes for the per-name de-risk), capped at the SAME base*3.0
+            # combined ceiling the runner uses. NO hardcoded multipliers. OFF ⇒ _stack_mult=1.0
+            # ⇒ byte-identical max_loss_usd.
+            _stack_mult = 1.0
+            if REPLAY_FIDELITY_V2:
+                _stack_mult, _stack_meta = _replay_derisk_stack_multiplier(
+                    cum_pnl_usd=state["cum"], peak_pnl_usd=state["peak"],
+                    base_loss_usd=risk_per_trade_usd,
+                    trade_pnls=[float(t.get("usd", 0.0)) for t in trades],
+                    symbol_loss_strikes=loss_strikes.get(s, 0),
+                )
+            # (The remaining T1.3 piece = the full ~18-dial risk-budget stack; budget here stays the
+            # liquidity-adjusted base, the dominant term on these days where cushion/green-day~=1.0.)
+            from .risk_policy import compute_risk_first_quantity
+            want_qty, _rf_meta = compute_risk_first_quantity(
+                entry_price=fill_px, atr_pct=eff,
+                max_loss_usd=risk_per_trade_usd * _liq_mult * _stack_mult,
+                max_notional_ceiling_usd=max_notional,
+                base_increment=1.0, base_min_size=1.0, stop_atr_mult=STOP_ATR_MULT,
+            )
+            if not want_qty or want_qty < 1.0:
+                _tr(s, "gate_fail:%s" % (_rf_meta.get("reason", "below_min_size")), now)
+                continue
             # shares printed over the next ~minute: diff day-volume against the row
             # ~55s ahead — on the dense WS tape (rows every ~1s) the immediate next
             # row would show a near-zero diff and falsely reject for no liquidity
@@ -1183,6 +1961,52 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             if qty <= 0:
                 _tr(s, "gate_fail:no_liquidity_printed", now)
                 continue
+            # STEP 2 PRINTS PARTIAL/CANCEL: cap the desired qty by the shares the PRINTS actually
+            # delivered at/through the limit in the window (_prints_avail). filled>=desired ⇒ FILL;
+            # 0<filled<desired ⇒ PARTIAL (fill what printed, cancel the remainder); below the live
+            # min size ⇒ CANCEL (drop). OFF / no prints flag ⇒ _prints_avail is None ⇒ no-op.
+            if _prints_avail is not None:
+                # min size = the SAME base_min_size compute_risk_first_quantity used above (1.0
+                # whole share); a sub-min partial is a CANCEL, not a fill. No new magic number.
+                _min_size_pf = 1.0
+                _filled_pf = max(0.0, min(qty, _prints_avail))
+                if _filled_pf < _min_size_pf:
+                    _tr(s, "gate_fail:prints_no_fill", now)
+                    continue
+                _entry_partial_pf = (_filled_pf / qty) if qty > 0 else 1.0
+                qty = _filled_pf
+            # ENGINE-ON (A) AGGREGATE-RISK ADMISSION — the candidate's SHAPE-AWARE dollars-at-
+            # risk are now known: (entry-stop)*qty. Admit iff the running open aggregate plus
+            # this candidate's risk stays within budget_fraction x equity, via the SAME live
+            # admit_by_aggregate_risk helper + the SAME chili_momentum_max_aggregate_risk_pct_
+            # of_equity budget (wiring the live risk_block denials the replay used to let
+            # through). HONEST: on this data the budget rarely binds (peak ~9 tight-stop names
+            # ~$1.2k vs ~$1.35k budget), so this is engine A/B fidelity, not a reliability lever.
+            # OFF ⇒ this whole block is skipped (no aggregate maintained) ⇒ byte-identical.
+            _cand_risk_usd = max(0.0, (fill_px - stop)) * qty
+            if REPLAY_ENGINE_ON:
+                from .risk_policy import admit_by_aggregate_risk as _admit
+                _ok_adm, _adm_meta = _admit(
+                    open_risk_usd=engine_open_risk_usd["v"],
+                    candidate_risk_usd=_cand_risk_usd,
+                    equity_usd=basis_usd,
+                    budget_fraction=float(getattr(settings, "chili_momentum_max_aggregate_risk_pct_of_equity", 0.03) or 0.0),
+                )
+                if not _ok_adm:
+                    _tr(s, "gate_fail:risk_block", now)
+                    continue
+                engine_open_risk_usd["v"] += _cand_risk_usd
+            # FIDELITY-V2 (STEP 3 input) IRREDUCIBLE-TAIL TAG: a fill on a WIDE-spread low-float
+            # name is exactly the rail-4xx-reject class (LHSW/RGNX/SKYQ/WKSP — error_exit-
+            # dominated; 23.3% of live over-fill attempts) whose live fill/no-fill the replay
+            # genuinely CANNOT resolve offline. Tag a fill as band-tail when its entry spread is
+            # in the wide irreducible tail (>= the live rail abs-cap broken-quote ceiling, the
+            # documented widest the rail tolerates) so the confidence band brackets these names'
+            # PnL between fill and no-fill extremes. NOT a hardcoded bps — reads SPREAD_ABS_CAP_BPS,
+            # the SAME live setting. OFF ⇒ never tagged (band stays empty / point==band).
+            _band_tail = bool(REPLAY_FIDELITY_V2 and sbps >= SPREAD_ABS_CAP_BPS)
+            if _band_tail:
+                band_tail["rail_4xx"].append(s)
             _tr(s, "fill@%.4g" % fill_px, now)
             _feat = None
             if bool(getattr(settings, "chili_momentum_replay_capture_features", False)):
@@ -1193,10 +2017,24 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
                 "entry": fill_px, "qty": qty, "qty0": qty, "stop": stop, "stop0": stop,
                 "target": target, "hwm": fill_px, "atrp": eff, "scaled": False,
                 "trail_armed": False, "scale_usd": 0.0,
+                # ENGINE-ON: this position's dollars-at-risk to RELEASE from the running
+                # aggregate on close (0.0 when ENGINE_ON is OFF ⇒ no aggregate maintained).
+                "open_risk_usd": (_cand_risk_usd if REPLAY_ENGINE_ON else 0.0),
                 "meta": {"sym": s, "t": str(_fire_ts)[11:16], "entry": round(fill_px, 4),
                          "qty": round(qty, 0), "spread_bps": round(sbps, 0),
                          "partial": round(qty / want_qty if want_qty > 0 else 1.0, 2),
                          "fidelity": "tape", "entry_fidelity": _entry_fidelity,
+                         # STEP 2: how this fill was RESOLVED — 'prints_fill' (measured against
+                         # real executions) vs 'quote_fallback' (no prints / degraded queue → the
+                         # quote model) so the confidence band can widen on the latter. Only
+                         # emitted when the prints flag is ON (flag-off ⇒ key absent ⇒ md5-of-
+                         # trades byte-identical to HEAD). Carries the prints meta (queue_ahead /
+                         # review_latency_s / n_prints / low_confidence) when the model ran.
+                         **({"source": _fill_source} if REPLAY_PRINTS_FILL else {}),
+                         **({"prints_meta": _prints_meta} if _prints_meta else {}),
+                         **({"prints_partial": round(_entry_partial_pf, 2)}
+                            if _entry_partial_pf is not None else {}),
+                         **({"band_tail": True} if _band_tail else {}),
                          **({"features": _feat} if _feat else {})},
             }
     finally:
@@ -1207,6 +2045,43 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
         p = open_pos[s]
         last_bid = tape.by_sym[s][-1][1]
         close_trade(s, p, last_bid, "eod", when=day_grid[-1])
+
+    # RECORDED-FILLS CONSUMER ("RECORD don't derive"): emit the live-armed FILLED names from
+    # the RECORDED broker round-trips (NOT the derived tape model — those were skipped in the
+    # entry loop above). Each round-trip = one trade with the EXACT recorded entry/exit/spread/
+    # $/qty; why='recorded_live' (or carrying the live exit reason). The point-estimate $ now
+    # sums RECORDED $ for these + DERIVED $ for any counterfactual names. This is what makes the
+    # live-armed fill-SET match what live actually traded. OFF / non-live ⇒ none of this runs.
+    if use_recorded and recorded_filled_syms:
+        _rec_emitted = 0
+        for s in sorted(recorded_filled_syms):
+            for rt in recorded_fills.get(s, []):
+                _ent = float(rt["entry"]); _exi = float(rt["exit"]); _q = float(rt["qty"])
+                _usd = float(rt["usd"])
+                state["cum"] += _usd
+                state["peak"] = max(state["peak"], state["cum"])
+                _et = rt.get("entry_ts"); _xt = rt.get("exit_ts")
+                _why = "recorded_live:" + str(rt.get("exit_reason") or "open_eod")
+                trades.append({
+                    "sym": s,
+                    "t": (str(_et)[11:16] if _et is not None else None),
+                    "entry": round(_ent, 4), "qty": round(_q, 0),
+                    "spread_bps": round(float(rt.get("spread_bps") or 0.0), 0),
+                    "partial": 1.0,
+                    "fidelity": "recorded", "entry_fidelity": "recorded_broker",
+                    "source": "recorded_live",
+                    "session_id": rt.get("session_id"), "leg_seq": rt.get("leg_seq"),
+                    "exit": round(_exi, 4), "why": _why,
+                    "exit_t": (str(_xt)[11:16] if _xt is not None else None),
+                    # recorded broker truth carries no modeled bracket; stop/target/run_r are
+                    # not derivable from a fill leg → null (the $ + setup are the truth here).
+                    "stop": None, "target": None, "mfe_px": None, "run_r": None,
+                    "closed": bool(rt.get("closed")),
+                    "usd": round(_usd, 0),
+                })
+                _rec_emitted += 1
+        if isinstance(result.get("recorded_fills_consumer"), dict):
+            result["recorded_fills_consumer"]["recorded_trades_emitted"] = _rec_emitted
 
     # close any still-open armed spans at EOD
     eod_label = str(day_grid[-1])[11:16]
@@ -1263,6 +2138,60 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
     # known skews so any A/B reads run_r, not usd. (wf w6c11y2s9.)
     result["sizing_basis_usd"] = round(basis_usd, 2)
     result["daily_loss_cap_usd"] = round(daily_loss_cap_usd, 2)
+    # FIDELITY-V2 (STEP 3) CONFIDENCE BAND — the day-$ is an INTERVAL, never a false-precise
+    # single number. The point estimate stays result["total_usd"]; the band brackets the
+    # IRREDUCIBLE tail the replay genuinely cannot resolve offline (diagnosis honest_ceiling):
+    #   (i)  RAIL-4xx names (wide-spread low-float, error_exit-dominated) — whether they
+    #        filled live is a coin flip. Bracket each such replay trade between FILLED (its
+    #        realized PnL, already in total) and NOT-FILLED ($0). So removing the tail's
+    #        PROFITS gives the conservative low; removing its LOSSES gives the optimistic high.
+    #   (ii) TAPE-CEILING MISSES — live-filled equity names the replay never quoted (no tape
+    #        row ⇒ no replay entry). A one-sided FLOOR caveat (their live PnL is unknown), so
+    #        it is annotated with the realized fill-set overlap, not numerically folded in.
+    # OFF ⇒ band == [point, point] and the note is unchanged (byte-identical result shape adds
+    # only the additive day_pnl_band key; trades/total are untouched).
+    if REPLAY_FIDELITY_V2:
+        _tail_names = set(band_tail["rail_4xx"])
+        _tail_trades = [t for t in trades if t.get("band_tail") or t["sym"] in _tail_names]
+        _tail_profit = sum(float(t["usd"]) for t in _tail_trades if float(t["usd"]) > 0)
+        _tail_loss = sum(float(t["usd"]) for t in _tail_trades if float(t["usd"]) <= 0)
+        _point = float(state["cum"])
+        _band_low = _point - _tail_profit   # the rail-4xx winners may NOT have filled live
+        _band_high = _point - _tail_loss    # the rail-4xx losers may NOT have filled live
+        # tape-ceiling misses: live-filled equity names this replay never entered (the
+        # one-sided floor). Best-effort live read (bounded, rollback'd, SELECT-only); a DB
+        # error degrades to an empty miss-set (the band still emits from the rail tail).
+        _miss = []
+        _live_n = None
+        try:
+            _dbm = SessionLocal()
+            try:
+                _rowsm = _dbm.execute(
+                    text(
+                        "SELECT DISTINCT symbol FROM momentum_fill_outcomes "
+                        "WHERE symbol NOT LIKE '%-USD' AND created_at >= :lo AND created_at < :hi"
+                    ),
+                    {"lo": f"{date} 04:00:00", "hi": f"{date} 23:59:59"},
+                ).fetchall()
+            finally:
+                _dbm.rollback(); _dbm.close()
+            _live_set = {str(r[0]).upper() for r in _rowsm}
+            _live_n = len(_live_set)
+            _miss = sorted(_live_set - {t["sym"].upper() for t in trades})
+        except Exception:
+            logger.warning("[replay_v2] band tape-ceiling-miss read failed", exc_info=True)
+        _overlap = (_live_n - len(_miss)) if _live_n is not None else None
+        result["day_pnl_band"] = [round(_band_low, 0), round(_band_high, 0)]
+        result["day_pnl_band_meta"] = {
+            "point_usd": round(_point, 0),
+            "rail_4xx_tail_names": sorted(_tail_names),
+            "rail_4xx_tail_profit_usd": round(_tail_profit, 0),
+            "rail_4xx_tail_loss_usd": round(_tail_loss, 0),
+            "tape_ceiling_miss_names": _miss,
+            "tape_ceiling_miss_count": len(_miss),
+            "live_filled_names": _live_n,
+            "fill_set_overlap": _overlap,
+        }
     result["dollar_skew_note"] = (
         "Sizing basis is now LIVE-faithful (real account equity, same equity-fractions + "
         "daily-loss cap as live). RESIDUAL replay->live gaps (decision-side, being closed "
@@ -1270,6 +2199,16 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
         "(a gap-through loss runs deeper than live), frictionless ask/bid fills. Lead A/Bs "
         "with run_r; absolute $ are now ~live-scale, treat the residual gaps as noise."
     )
+    if REPLAY_FIDELITY_V2 and result.get("day_pnl_band"):
+        _bm = result["day_pnl_band_meta"]
+        _ov = _bm.get("fill_set_overlap")
+        _ln = _bm.get("live_filled_names")
+        result["dollar_skew_note"] += (
+            " FIDELITY-V2: day-$ is %s over band [%s, %s]"
+            % (result["total_usd"], result["day_pnl_band"][0], result["day_pnl_band"][1])
+            + (", fill-set overlap %s/%s" % (_ov, _ln) if _ov is not None and _ln else "")
+            + " (band brackets the irreducible rail-4xx tail; tape-ceiling misses are a one-sided floor)."
+        )
     result["day_halted"] = state["halted"]
     result["duration_s"] = round((datetime.now(timezone.utc) - started).total_seconds(), 1)
     if persist:

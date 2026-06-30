@@ -377,6 +377,271 @@ def _session_still_front_side(le: Any) -> bool:
     return True  # no affirmative backside evidence -> front-side (keep eligible)
 
 
+# ── PRE-ARM MOVE-EXHAUSTION ABANDON (orthogonal to the reaper above) ────────────────
+# A RISK-REDUCING pre-arm VETO: a fresh trigger fired, but if the move is GENUINELY
+# EXHAUSTED — faded off its HOD AND (the tape has gone cold OR its viability/conviction
+# has regressed off its recent peak) — REFUSE to arm a new watcher (sit flat on a done
+# move) instead of chasing the last leg into a fade.
+#
+# ORTHOGONALITY (do NOT confuse with the event-based reaper above): that reaper KEEPS a
+# still-strong WATCHING watcher past its clock and reaps a faded one. THIS gate is ENTRY-
+# time only — it gates whether a NEW arm happens at all. A faded prior bar does NOT mean a
+# fresh mover is exhausted, so this gate reads CURRENT structure (front_side_state on the
+# already-fetched arm frame), CURRENT tape (the same signed_tape_accel the entry uses), and
+# the per-symbol viability PEAK — it never reuses the reaper's keep-by-conviction path.
+#
+# CONSERVATIVE + AGREEMENT-GATED (the danger is over-restriction, NOT under-): abandon ONLY
+# when FADED-FROM-HOD **AND** (COLD-TAPE **OR** VIABILITY-REGRESSED). A still-front-side
+# strong mover (near HOD, hot/None tape, viability at/near peak) NEVER trips it — every axis
+# fails OPEN (a missing signal can only PERMIT the arm, never block it). One documented base
+# per axis; all adaptive (name-relative ratios), no scattered magic.
+#
+# CHEAP: front-side reads the OHLCV frame the arm probe ALREADY fetched; tape reuses the
+# entry gate's signed_tape_accel (the arm watches => the symbol is subscribed); viability
+# reads the per-pass row's OWN persisted ross_score + an in-process per-symbol peak.
+
+
+# Per-symbol in-process VIABILITY PEAK (scheduler-local). Tracks the best ross_score seen
+# for a symbol within the recent session so the exhaustion gate can tell a name that has
+# REGRESSED off its peak from one that is still at/near it. Same bounded-prune + TTL-decay
+# shape as _REAP_COOLDOWN (sym_upper -> (peak_ross, last_seen_at)). A stale entry (not seen
+# within the decay window) is dropped so a fresh resurgence rebuilds its own peak. Written
+# unconditionally each pass (flag-independent), but only READ when the exhaustion flag is on,
+# so a populated peak NEVER changes flag-OFF behavior (byte-identical).
+_VIABILITY_PEAK: dict[tuple[str, Any], tuple[float, datetime]] = {}
+
+
+def _viability_peak_key(sym_u: str, session_id: Any = None) -> tuple[str, Any]:
+    """MED-5 fail-SAFE: key the per-symbol viability peak by ``(symbol, session_id)`` so two
+    DIFFERENT sessions (or a re-arm) of the same ticker do NOT share the running max. A fresh
+    re-arm at a lower score then builds its OWN peak instead of being wrongly judged regressed
+    against a PRIOR session's peak. ``session_id=None`` (the default) preserves the legacy
+    symbol-only behavior for a single continuous session — byte-identical for that case."""
+    return (sym_u, session_id)
+
+
+def _move_exhaustion_abandon_enabled() -> bool:
+    """Kill-switch. OFF (default) => the exhaustion gate never runs and ``_entry_trigger_fires``
+    returns its normal (fires, reason) unchanged => arm-time is byte-identical."""
+    return bool(getattr(settings, "chili_momentum_move_exhaustion_abandon_enabled", False))
+
+
+def _move_exhaustion_peak_ttl_seconds() -> float:
+    """TTL/decay window for the in-process viability-peak tracker. Reuses the live risk
+    freshness window (``chili_momentum_risk_viability_max_age_seconds``, 600s) so the peak
+    decays on the SAME staleness boundary the arm queue already trusts — one documented
+    base, no new clock. A peak not refreshed within this window is dropped (a resurging name
+    rebuilds its peak from its fresh score)."""
+    try:
+        return float(getattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0)
+    except (TypeError, ValueError):
+        return 600.0
+
+
+def _row_ross_score(row: Any) -> float | None:
+    """This candidate's own ross_score from its persisted scanner batch
+    (``execution_readiness_json.extra.ross_scores[SYM]``) — the SAME source the arm-queue
+    ranker, the continuation gate, and the keep helper read. None when absent/unparseable
+    (the viability-regressed axis then fails OPEN: cannot prove regression => permits the arm)."""
+    try:
+        extra = (getattr(row, "execution_readiness_json", None) or {}).get("extra") or {}
+        rs_map = extra.get("ross_scores") if isinstance(extra.get("ross_scores"), dict) else {}
+        symu = str(getattr(row, "symbol", "") or "").upper()
+        if symu in rs_map:
+            return float(rs_map[symu] or 0.0)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return None
+
+
+def _update_viability_peak(
+    sym_u: str, ross_score: float | None, now: datetime, *, session_id: Any = None
+) -> None:
+    """Record/raise the per-(symbol, session) viability PEAK from the current ross_score.
+    Decays a stale entry (older than the TTL) back to a fresh peak so a name that fell out
+    and resurged rebuilds its own peak. Written unconditionally (flag-independent); the peak
+    is only READ by the exhaustion gate when its flag is on, so this never alters flag-OFF
+    behavior. Bounded prune (same shape as _REAP_COOLDOWN). ``session_id=None`` keeps the
+    legacy symbol-only key (single-session behavior unchanged)."""
+    if not sym_u or ross_score is None:
+        return
+    try:
+        rs = float(ross_score)
+    except (TypeError, ValueError):
+        return
+    key = _viability_peak_key(sym_u, session_id)
+    ttl = _move_exhaustion_peak_ttl_seconds()
+    prev = _VIABILITY_PEAK.get(key)
+    if prev is not None:
+        prev_peak, prev_at = prev
+        if ttl > 0 and (now - prev_at).total_seconds() <= ttl:
+            # within the session window -> keep the running MAX, refresh the timestamp.
+            _VIABILITY_PEAK[key] = (max(float(prev_peak), rs), now)
+        else:
+            _VIABILITY_PEAK[key] = (rs, now)  # stale -> rebuild from the fresh score
+    else:
+        _VIABILITY_PEAK[key] = (rs, now)
+    if len(_VIABILITY_PEAK) > 500:
+        stale = now - timedelta(hours=1)
+        for k in [k for k, v in _VIABILITY_PEAK.items() if v[1] < stale]:
+            _VIABILITY_PEAK.pop(k, None)
+
+
+def _viability_regressed(
+    sym_u: str, ross_now: float | None, now: datetime, *, session_id: Any = None
+) -> bool:
+    """True iff the name's CURRENT ross_score has regressed meaningfully off its recent
+    in-process PEAK: ``ross_now <= peak * (1 - regress_frac)``. FAIL-OPEN (False) on any
+    missing datum — no current score, no tracked peak, a stale/zero peak, or the axis
+    disabled (regress_frac <= 0) — so absent conviction history can never block an arm.
+    Adaptive: the drop is measured as a FRACTION of the name's OWN peak (no fixed score).
+    Keyed by ``(symbol, session_id)`` so a re-arm reads its OWN peak (MED-5)."""
+    try:
+        frac = float(getattr(settings, "chili_momentum_move_exhaustion_regress_frac", 0.20) or 0.0)
+    except (TypeError, ValueError):
+        frac = 0.0
+    if frac <= 0.0 or ross_now is None:
+        return False
+    entry = _VIABILITY_PEAK.get(_viability_peak_key(sym_u, session_id))
+    if entry is None:
+        return False
+    peak, at = entry
+    ttl = _move_exhaustion_peak_ttl_seconds()
+    if ttl > 0 and (now - at).total_seconds() > ttl:
+        return False  # stale peak -> cannot prove regression (fail-open)
+    try:
+        peak_f = float(peak)
+        now_f = float(ross_now)
+    except (TypeError, ValueError):
+        return False
+    if peak_f <= 0.0:
+        return False
+    return now_f <= peak_f * (1.0 - frac)
+
+
+def _faded_from_hod(fss: Any) -> bool:
+    """True iff the move has FADED off its HOD per the arm-frame's ``front_side_state``:
+    ``retrace_from_hod`` exceeds ``chili_momentum_move_exhaustion_retrace_floor`` (the SAME
+    name-relative ratio the reaper uses). FAIL-OPEN (False) on a missing retrace datum — a
+    fresh thrust at/near a new high has retrace ~0 and is NEVER faded. Adaptive (ratio)."""
+    if fss is None:
+        return False
+    r = getattr(fss, "retrace_from_hod", None)
+    if r is None:
+        return False
+    try:
+        rf = float(r)
+        floor = float(getattr(settings, "chili_momentum_move_exhaustion_retrace_floor", 0.66) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if floor <= 0.0:
+        return False
+    return rf > floor
+
+
+def _tape_cold(symbol: str) -> bool:
+    """True iff the executed tape has gone COLD for ``symbol`` — using the IDENTICAL
+    signed-tape definition the entry gate (``_l2_entry_confirm`` / ``tape_confirms_hold``)
+    uses: ``signed_tape_accel <= 0`` (not accelerating into the buy) OR ``tick_rate`` below
+    its self-relative floor (activity collapsed). FAIL-OPEN (False = NOT cold) on no symbol /
+    crypto (no equity tick tape) / empty/thin tape / any error — a name we cannot prove cold
+    is treated HOT, so missing tape never blocks an arm. Reuses the entry's window/floor (one
+    definition of hot/cold tape). Opens a SHORT-LIVED read session (#561 pattern) and always
+    closes it (never holds a txn across the probe)."""
+    s = str(symbol or "").strip().upper()
+    if not s or s.endswith("-USD"):
+        return False
+    try:
+        from .entry_gates import signed_tape_accel_features
+        from ....db import SessionLocal
+    except Exception:
+        return False
+    tdb = None
+    try:
+        tdb = SessionLocal()
+        tape = signed_tape_accel_features(s, db=tdb)
+    except Exception:
+        return False
+    finally:
+        if tdb is not None:
+            try:
+                tdb.close()
+            except Exception:
+                pass
+    if not isinstance(tape, dict):
+        return False  # no/thin tape -> fail-open (not cold)
+    try:
+        accel = float(tape.get("signed_tape_accel", 0.0) or 0.0)
+        rate = float(tape.get("tick_rate", 0.0) or 0.0)
+        floor = float(tape.get("tick_rate_floor", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return (accel <= 0.0) or (floor > 0.0 and rate < floor)
+
+
+def _exhaustion_abandon_eligible(faded: bool, tape_cold: bool, regressed: bool) -> bool:
+    """THE agreement rule (conservative, single definition): ABANDON only when the move has
+    FADED-FROM-HOD **AND** at least one corroborating exhaustion signal agrees — the tape has
+    gone COLD **OR** viability has REGRESSED. A lone faded flag (tape still hot, viability at
+    peak) is a single flicker => NOT enough agreement => the arm proceeds. A near-HOD strong
+    mover is never faded => never abandoned."""
+    return bool(faded and (tape_cold or regressed))
+
+
+def _move_is_exhausted(symbol: str, df: Any, row: Any) -> tuple[bool, dict[str, Any]]:
+    """Pure-ish arm-time exhaustion read for ``symbol`` on the ALREADY-fetched arm frame
+    ``df`` and the per-pass ``row`` (its persisted ross_score). Returns ``(abandon, debug)``.
+
+    Reads the three CHEAP agreeing axes — faded-from-HOD (front_side_state on ``df``),
+    cold-tape (signed_tape_accel), viability-regressed (current ross_score vs in-process
+    peak) — and applies the agreement rule. NEVER raises (any error => (False, ...) =>
+    the arm proceeds: the gate can only ever VETO on POSITIVE multi-signal agreement, never
+    on its own failure). Also refreshes the per-symbol viability peak from the current score."""
+    dbg: dict[str, Any] = {}
+    try:
+        sym_u = str(symbol or "").upper()
+        now = _utcnow()
+        ross_now = _row_ross_score(row)
+        # MED-5: discriminate the peak per ARM (variant) so a re-arm of the same ticker does
+        # not inherit a prior arm's peak (None when absent -> legacy symbol-only behavior).
+        _peak_sid: Any = getattr(row, "variant_id", None)
+        # Refresh the peak FIRST so the running max includes this pass's score, THEN test
+        # regression against it (a name still printing its peak is never regressed).
+        _update_viability_peak(sym_u, ross_now, now, session_id=_peak_sid)
+
+        fss = None
+        try:
+            from .ross_momentum import front_side_state
+
+            retrace_floor = float(
+                getattr(settings, "chili_momentum_move_exhaustion_retrace_floor", 0.66) or 0.66
+            )
+            fss = front_side_state(df, retrace_veto=retrace_floor)
+        except Exception:
+            fss = None
+
+        faded = _faded_from_hod(fss)
+        # Short-circuit: faded is REQUIRED for abandonment, so only probe the (DB-bound) tape
+        # and the regression axis when the cheap structure read already shows a fade. A fresh
+        # near-HOD mover skips the tape read entirely (cheap + can never be abandoned).
+        tape_cold = _tape_cold(symbol) if faded else False
+        regressed = _viability_regressed(sym_u, ross_now, now, session_id=_peak_sid) if faded else False
+        abandon = _exhaustion_abandon_eligible(faded, tape_cold, regressed)
+        dbg = {
+            "faded_from_hod": bool(faded),
+            "tape_cold": bool(tape_cold),
+            "viability_regressed": bool(regressed),
+            "retrace_from_hod": (
+                getattr(fss, "retrace_from_hod", None) if fss is not None else None
+            ),
+            "ross_now": ross_now,
+            "abandon": bool(abandon),
+        }
+        return abandon, dbg
+    except Exception:
+        return False, {"abandon": False, "reason": "exhaustion_error"}
+
+
 def _build_reap_conviction_index(db: Session) -> dict[str, Any]:
     """Build the {UPPER symbol -> MomentumSymbolViability} index the reaper reads conviction
     from, in a SINGLE bulk query BEFORE the reap loop (never a per-session read inside it).
@@ -394,6 +659,406 @@ def _build_reap_conviction_index(db: Session) -> dict[str, Any]:
         if su and su not in idx:
             idx[su] = r
     return idx
+
+
+# ── NO-A-SETUP SESSION SIT-CASH GATE (NEW-INITIATION ONLY) ──────────────────────────────
+# A CONSERVATIVE, margin-gated SESSION veto: SUPPRESS a fresh entry initiation only when the
+# day's BEST available setup quality (top ross_score among the fresh live-eligible board) is
+# CLEARLY below an A+ bar (by ONE documented margin) AND the regime is poor (cold tape-breadth
+# AND no fresh news catalyst on any candidate). Ross sits flat when nothing A+ is up — but a
+# genuine A+ (explosive top ross_score + catalyst) MUST still initiate, and a borderline-good
+# setup (best at/above the bar) still trades (the margin prevents over-restriction).
+#
+# NEW-INITIATION ONLY — THE ISOLATION INVARIANT: this gate is evaluated ONCE per auto-arm pass,
+# in run_auto_arm_pass, BEFORE the candidate scan/arm loop. It can ONLY ever set
+# out["skipped"]="no_asetup_sit_cash" and return early (i.e. NOT arm a NEW session). It NEVER
+# blocks, delays, or downsizes an EXIT / stop-loss / trail / scale-out / flatten / bailout or
+# any management of an OPEN position — every one of those runs EXCLUSIVELY in the live runner,
+# which does not consult this gate. An open position's session is already armed; this gate only
+# decides whether a NEW fresh session arms.
+#
+# ADAPTIVE + AGREEMENT-GATED (the danger is OVER-restriction, never under): the A+ bar is
+# derived from the ross_score DISTRIBUTION (median - margin*std), floored at the existing
+# A-setup conviction floor — no fixed magic. Regime poorness requires BOTH axes to agree
+# (cold tape AND no catalyst); every axis FAILS OPEN (a missing datum can only PERMIT the arm,
+# never suppress it).
+
+
+def _no_asetup_sit_cash_enabled() -> bool:
+    """Kill-switch. OFF (default) => the sit-cash gate never runs and run_auto_arm_pass is
+    byte-identical (no new query, no new logic, no suppression)."""
+    return bool(getattr(settings, "chili_momentum_no_asetup_sit_cash_enabled", False))
+
+
+def _asetup_margin_multiple() -> float:
+    """The ONE documented margin for the adaptive A+ bar (std-devs below the median). Larger
+    => more permissive (lower bar); smaller => stricter. Fail-safe to 1.0 on a bad value."""
+    try:
+        # None-aware default (NOT `or 1.0` — a legit margin=0.0 is falsy and would wrongly
+        # fall back to 1.0; the `m >= 0.0 else 1.0` below already fail-safes negatives).
+        _raw = getattr(settings, "chili_momentum_no_asetup_sit_cash_margin_multiple", 1.0)
+        m = float(_raw if _raw is not None else 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+    return m if m >= 0.0 else 1.0
+
+
+def _board_ross_scores(candidates: list[Any]) -> list[float]:
+    """The fresh board's ross_score distribution sample: each candidate's OWN persisted
+    ross_score (``execution_readiness_json.extra.ross_scores[SYM]``), the SAME source the
+    arm-queue ranker / continuation gate / keep helper read. Missing/unparseable scores are
+    dropped (never coerced to 0.0, which would drag the median down artificially). Empty list
+    when nothing is readable (the gate then fails open — cannot prove a sub-A+ board)."""
+    out: list[float] = []
+    for c in candidates or []:
+        rs = _row_ross_score(c)
+        if rs is not None:
+            try:
+                out.append(float(rs))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def _asetup_quality_floor(scores: list[float]) -> float:
+    """The ADAPTIVE A+ bar from the board's ross_score distribution + ONE documented margin:
+
+        bar = max(A-setup conviction floor, median - margin_multiple * std_dev)
+
+    The floor is ``chili_momentum_continuation_ross_floor`` (the existing A-setup conviction
+    floor the continuation gate / keep helper already use) so the bar can NEVER drop below
+    what the lane already calls "high conviction". The distribution term lets the bar ADAPT to
+    the tape (a hot board with a high median raises the bar; a cold thin board lowers it toward
+    the floor). No fixed numeric cutoff. Empty/degenerate distribution => the conviction floor
+    (the safe, byte-identical-to-existing-floor default)."""
+    convict_floor = float(getattr(settings, "chili_momentum_continuation_ross_floor", 0.7) or 0.7)
+    if not scores:
+        return convict_floor
+    n = len(scores)
+    srt = sorted(scores)
+    # median (distribution center).
+    if n % 2:
+        median = srt[n // 2]
+    else:
+        median = (srt[n // 2 - 1] + srt[n // 2]) / 2.0
+    # population std-dev (spread). n==1 => 0 spread => bar collapses to max(floor, median).
+    mean = sum(scores) / n
+    var = sum((x - mean) ** 2 for x in scores) / n
+    std = var ** 0.5
+    adaptive = median - _asetup_margin_multiple() * std
+    return max(convict_floor, adaptive)
+
+
+def _best_setup_quality_below_floor(
+    candidates: list[Any], floor: float
+) -> tuple[bool, dict[str, Any]]:
+    """True iff the board's TOP ross_score is CLEARLY below the A+ ``floor`` (i.e. NO candidate
+    clears the bar). Returns ``(below, debug)``. FAIL-OPEN: an empty/unreadable board returns
+    ``(False, ...)`` — we cannot prove the best is sub-A+, so we never suppress on absent data."""
+    scores = _board_ross_scores(candidates)
+    if not scores:
+        return False, {"best_ross": None, "floor": round(float(floor), 4), "reason": "no_scores"}
+    best = max(scores)
+    below = best < float(floor)
+    return below, {
+        "best_ross": round(float(best), 4),
+        "floor": round(float(floor), 4),
+        "n_scored": len(scores),
+        "below": bool(below),
+    }
+
+
+def _tape_cold_breadth(candidates: list[Any]) -> bool:
+    """True iff the board's EQUITY tape-breadth is affirmatively COLD — i.e. NOT a single
+    readable equity candidate has provably-HOT tape (every one we can read is cold per the
+    entry gate's ``signed_tape_accel<=0 OR tick_rate<floor`` definition, reused via
+    ``_tape_cold``). FAIL-OPEN (False = NOT cold): if ANY equity reads hot, OR the board is
+    all-crypto / unreadable (no equity tape to judge), the breadth is treated HOT so the gate
+    can never suppress on absent tape. Reads only equity names (crypto has no equity tick
+    tape; ``_tape_cold`` already returns not-cold for ``-USD``). Cheap-bounded: probes at most
+    a handful of TOP names (the board is already ross-ranked, so the leaders are first)."""
+    eq = [
+        c for c in (candidates or [])
+        if not str(getattr(c, "symbol", "") or "").upper().endswith("-USD")
+    ]
+    if not eq:
+        return False  # all-crypto / empty equity board -> no equity tape to judge -> fail-open
+    try:
+        probe_n = int(getattr(settings, "chili_momentum_no_asetup_tape_probe_n", 5) or 5)
+    except (TypeError, ValueError):
+        probe_n = 5
+    probe_n = max(1, probe_n)
+    probed = 0
+    saw_one = False
+    for c in eq[:probe_n]:
+        sym = str(getattr(c, "symbol", "") or "")
+        try:
+            cold = _tape_cold(sym)
+        except Exception:
+            continue  # unreadable name -> skip (fail-open on this name)
+        probed += 1
+        saw_one = True
+        if not cold:
+            return False  # at least one leader has hot tape -> breadth is HOT (fail-open)
+    if not saw_one or probed == 0:
+        return False  # nothing readable -> cannot prove cold breadth -> fail-open (not cold)
+    return True  # every readable leader's tape is affirmatively cold -> cold breadth
+
+
+def _has_fresh_catalyst_on_board(candidates: list[Any]) -> bool:
+    """True iff ANY board candidate carries a FRESH news catalyst, read from each candidate's
+    OWN embedded ``ross_signals`` (the persisted scanner result — zero new fetch). Recognizes
+    the boolean/explicit ``news_catalyst`` flag AND the pipeline's catalyst sub-score fields
+    (``news_catalyst_pct`` > 0 / a non-empty ``news_catalyst_grade``) so a board the catalyst
+    pillar already graded counts. FAIL-OPEN: if NO candidate carries ANY catalyst field at all
+    (the data is simply absent), returns True — missing catalyst data is NOT 'poor regime' per
+    the design, so absent catalyst data can never contribute to a suppression."""
+    saw_any_field = False
+    for c in candidates or []:
+        sig = _row_ross_signal(c)
+        if not isinstance(sig, dict):
+            continue
+        present = False
+        # explicit boolean / truthy flag.
+        if "news_catalyst" in sig:
+            saw_any_field = True
+            present = True
+            if bool(sig.get("news_catalyst")):
+                return True
+        # pipeline catalyst sub-score (a graded headline).
+        if "news_catalyst_pct" in sig:
+            saw_any_field = True
+            present = True
+            try:
+                if float(sig.get("news_catalyst_pct") or 0.0) > 0.0:
+                    return True
+            except (TypeError, ValueError):
+                pass
+        grade = sig.get("news_catalyst_grade")
+        if grade is not None:
+            saw_any_field = True
+            present = True
+            if str(grade).strip():
+                return True
+        # generic catalyst flag some scanners stamp.
+        if "has_catalyst" in sig:
+            saw_any_field = True
+            present = True
+            if bool(sig.get("has_catalyst")):
+                return True
+        _ = present
+    # No candidate carried ANY catalyst field => the data is absent (not a proven 'no catalyst')
+    # => FAIL-OPEN as 'has catalyst' so absent data never makes the regime poor.
+    return not saw_any_field
+
+
+def _regime_is_poor(tape_cold: bool, has_catalyst: bool) -> bool:
+    """THE regime agreement rule (conservative, single definition): the regime is POOR only
+    when BOTH axes say so — the tape-breadth is affirmatively COLD **AND** there is NO fresh
+    catalyst anywhere on the board. A hot tape OR any fresh catalyst => the regime is NOT poor
+    (the gate does not suppress). Both axes fail open independently upstream, so a missing datum
+    on either axis can only PERMIT the arm."""
+    return bool(tape_cold and not has_catalyst)
+
+
+def _should_sit_cash_no_asetup(
+    db: Session, candidates: list[Any]
+) -> tuple[bool, dict[str, Any]]:
+    """THE GATE (NEW-INITIATION ONLY): coordinate the three checks and return
+    ``(suppress, debug)``. SUPPRESS a fresh arm iff:
+
+        best ross_score CLEARLY below the adaptive A+ bar   (sub-A+ board)
+        AND regime is poor                                  (cold tape AND no catalyst)
+
+    A genuine A+ (top ross_score >= bar) NEVER suppresses (local A+ beats the regime veto). A
+    poor regime with a borderline-good best (>= bar) NEVER suppresses (the margin protects it).
+    NEVER raises — any error returns ``(False, ...)`` so the gate can only ever VETO on POSITIVE
+    multi-axis agreement, never on its own failure (it can never block a fresh arm spuriously,
+    and structurally CANNOT touch an exit: it is only ever called pre-arm). ``db`` is accepted
+    for signature symmetry with the other guards / future tape reads; the current axes read the
+    already-loaded candidate rows (no per-candidate DB loop)."""
+    try:
+        scores = _board_ross_scores(candidates)
+        floor = _asetup_quality_floor(scores)
+        below, q_dbg = _best_setup_quality_below_floor(candidates, floor)
+        if not below:
+            # best is at/above the A+ bar -> a genuine/borderline A+ is present -> ARM.
+            return False, {"suppress": False, "reason": "asetup_present", **q_dbg}
+        tape_cold = _tape_cold_breadth(candidates)
+        has_catalyst = _has_fresh_catalyst_on_board(candidates)
+        poor = _regime_is_poor(tape_cold, has_catalyst)
+        suppress = bool(below and poor)
+        dbg = {
+            "suppress": suppress,
+            "best_below_floor": bool(below),
+            "tape_cold": bool(tape_cold),
+            "has_catalyst": bool(has_catalyst),
+            "regime_poor": bool(poor),
+            "margin_multiple": _asetup_margin_multiple(),
+            **q_dbg,
+        }
+        return suppress, dbg
+    except Exception:
+        logger.debug("[auto_arm] no-asetup sit-cash gate errored (fail-open)", exc_info=True)
+        return False, {"suppress": False, "reason": "gate_error"}
+
+
+# ── TIME-OF-DAY SCHEDULE: PRIME-WINDOW SIZE LEVER + FADE-DRIVEN LATE-DAY CUTOFF ──────────
+# Two NEW-INITIATION-ONLY behaviors, both kill-switched OFF by default (byte-identical):
+#
+#   (1) PRIME-WINDOW SIZE LEVER — a BOUNDED-UPWARD (>=1.0, <= max) per-trade size multiplier
+#       during the documented prime window (default 04:00-10:30 ET = the premarket+open drive,
+#       the SAME band as schedule_window_now's "hot"). It is computed here and threaded into
+#       the live_runner _eff_max_loss PRODUCT, where it composes under the SAME min(..., base*3.0)
+#       clamp + hard notional ceiling that green_day/catalyst/cushion feed — so a prime-window
+#       boost can NEVER push notional past base*3.0 and is NEVER a veto (floor 1.0 = no shrink).
+#
+#   (2) FADE-DRIVEN LATE-DAY NEW-ENTRY CUTOFF — suppress a FRESH arm only when the day's
+#       momentum/breadth has FADED, REUSING the EXACT regime signal the no-asetup-sit-cash gate
+#       uses (_tape_cold_breadth AND not _has_fresh_catalyst_on_board => _regime_is_poor). The
+#       documented fallback clock (default 14:30 ET) is a CEILING, not the primary driver: the
+#       fade must be present AND the clock at/past the fallback to suppress, so a strong-momentum
+#       (non-faded) afternoon STILL trades. With fade DISABLED the cutoff is clock-only.
+#
+# ISOLATION INVARIANT: evaluated ONCE per auto-arm pass, BEFORE the arm loop (alongside the
+# sit-cash gate). It can ONLY set out["skipped"]="momentum_timeofday_schedule" + return early
+# (NOT arm a NEW session). It NEVER blocks/delays/downsizes an EXIT / stop / trail / scale-out /
+# flatten / open-position management — those run EXCLUSIVELY in the live runner, which never
+# consults this gate. Every axis fails open (a missing datum can only PERMIT the arm + leave the
+# size lever at 1.0). One documented base per knob; no scattered magic.
+
+
+def _timeofday_schedule_enabled() -> bool:
+    """Kill-switch. OFF (default) => the time-of-day gate never runs, the prime-window size
+    lever stays 1.0, and run_auto_arm_pass is byte-identical (no new query, no suppression)."""
+    return bool(getattr(settings, "chili_momentum_timeofday_schedule_enabled", False))
+
+
+def _et_minutes_now(now: datetime | None = None) -> tuple[int, bool]:
+    """Current ET minutes-of-day + a weekday flag, via the shared market-profile clock (DST
+    correct). ``now`` is treated as UTC if naive (matching _utcnow / market_session_now). Returns
+    ``(minutes_of_day, is_weekday)``. Any clock error => (-1, False) => fail-open (no suppression,
+    treated as outside the prime window)."""
+    try:
+        from datetime import timezone as _tz
+
+        from .market_profile import _NY_TZ
+
+        ref = now or _utcnow()
+        if ref.tzinfo is None:
+            ref = ref.replace(tzinfo=_tz.utc)
+        local = ref.astimezone(_NY_TZ)
+        return local.hour * 60 + local.minute, local.weekday() < 5
+    except Exception:
+        return -1, False
+
+
+def _timeofday_bounds() -> tuple[int, int, int]:
+    """Resolve the THREE documented clock bases (prime start, prime end, fallback clock) to
+    ET minutes-of-day via market_profile._parse_hhmm (the SAME parser the premarket/afterhours
+    bounds use). Malformed strings fail-safe to the documented defaults (04:00 / 10:30 / 14:30)."""
+    try:
+        from .market_profile import _parse_hhmm
+
+        start = _parse_hhmm(
+            getattr(settings, "chili_momentum_timeofday_prime_window_start_et", None), 4 * 60
+        )
+        end = _parse_hhmm(
+            getattr(settings, "chili_momentum_timeofday_prime_window_end_et", None), 10 * 60 + 30
+        )
+        fallback = _parse_hhmm(
+            getattr(settings, "chili_momentum_timeofday_fallback_clock_et", None), 14 * 60 + 30
+        )
+        return start, end, fallback
+    except Exception:
+        return 4 * 60, 10 * 60 + 30, 14 * 60 + 30
+
+
+def _prime_window_size_mult_max() -> float:
+    """The ONE bound on the prime-window size lever. Clamped to >= 1.0 (the lever is NEVER a
+    shrink). Fail-safe to 1.5 on a bad value."""
+    try:
+        m = float(getattr(settings, "chili_momentum_timeofday_prime_window_size_mult_max", 1.5))
+    except (TypeError, ValueError):
+        return 1.5
+    return m if m >= 1.0 else 1.0
+
+
+def prime_window_size_multiplier(now: datetime | None = None) -> tuple[float, dict[str, Any]]:
+    """The PRIME-WINDOW size lever (NEW-INITIATION sizing only): a BOUNDED-UPWARD multiplier
+    (>= 1.0, <= prime_window_size_mult_max) when ET is inside the documented prime window
+    [start, end), else exactly 1.0. NEVER < 1.0 (never a shrink), NEVER a veto. The runner
+    composes this into its _eff_max_loss PRODUCT under the SAME min(..., base*3.0) clamp + hard
+    notional ceiling, so it can never escape 3x. Flag OFF / weekend / outside window / any error
+    => (1.0, ...) (byte-identical). One documented base per bound; no scattered magic."""
+    if not _timeofday_schedule_enabled():
+        return 1.0, {"reason": "disabled", "prime_mult": 1.0}
+    try:
+        mod, is_weekday = _et_minutes_now(now)
+        if mod < 0 or not is_weekday:
+            return 1.0, {"reason": "outside_window", "prime_mult": 1.0, "et_min": mod}
+        start, end, _fallback = _timeofday_bounds()
+        if start <= mod < end:
+            mult = _prime_window_size_mult_max()
+            return max(1.0, mult), {
+                "prime_mult": round(max(1.0, mult), 4),
+                "et_min": mod,
+                "window": [start, end],
+                "in_prime": True,
+            }
+        return 1.0, {"reason": "outside_window", "prime_mult": 1.0, "et_min": mod,
+                     "window": [start, end]}
+    except Exception:
+        return 1.0, {"reason": "error_fail_neutral", "prime_mult": 1.0}
+
+
+def _should_suppress_late_day(
+    candidates: list[Any], *, now: datetime | None = None
+) -> tuple[bool, dict[str, Any]]:
+    """THE FADE-DRIVEN LATE-DAY CUTOFF (NEW-INITIATION ONLY): suppress a FRESH arm iff ET is
+    at/past the documented fallback clock AND the day's regime has FADED. ``(suppress, debug)``.
+
+    The cutoff is FADE-DRIVEN — it REUSES the SAME regime signal the no-asetup-sit-cash gate
+    uses (``_regime_is_poor(_tape_cold_breadth(board), _has_fresh_catalyst_on_board(board))``):
+    the board's equity tape-breadth is affirmatively COLD AND there is NO fresh catalyst. The
+    fallback clock is only a CEILING — a strong-momentum (non-faded) afternoon STILL trades past
+    it. If fade-check is DISABLED (``chili_momentum_timeofday_fade_enabled`` false), the cutoff
+    is clock-only (past the fallback => suppress). Every axis fails OPEN (a missing datum only
+    PERMITS the arm). NEVER raises — any error returns ``(False, ...)`` so the gate can only
+    suppress on POSITIVE agreement, never on its own failure. NEW-INITIATION ONLY (the live
+    runner's exits never call this)."""
+    try:
+        mod, is_weekday = _et_minutes_now(now)
+        if mod < 0 or not is_weekday:
+            return False, {"suppress": False, "reason": "outside_clock", "et_min": mod}
+        _start, _end, fallback = _timeofday_bounds()
+        past_fallback = mod >= fallback
+        if not past_fallback:
+            # Before the fallback ceiling — the late-day cutoff never suppresses (prime/midday
+            # initiation is governed by the other gates, not this one).
+            return False, {"suppress": False, "reason": "before_fallback_clock",
+                           "et_min": mod, "fallback": fallback}
+        fade_enabled = bool(getattr(settings, "chili_momentum_timeofday_fade_enabled", True))
+        if not fade_enabled:
+            # Clock-only cutoff: past the documented fallback => suppress a NEW entry.
+            return True, {"suppress": True, "reason": "past_fallback_clock_only",
+                          "et_min": mod, "fallback": fallback}
+        # FADE-DRIVEN: reuse the no-asetup-sit-cash regime signal verbatim (one definition).
+        tape_cold = _tape_cold_breadth(candidates)
+        has_catalyst = _has_fresh_catalyst_on_board(candidates)
+        faded = _regime_is_poor(tape_cold, has_catalyst)
+        return bool(faded), {
+            "suppress": bool(faded),
+            "reason": "fade_driven" if faded else "afternoon_still_strong",
+            "et_min": mod,
+            "fallback": fallback,
+            "tape_cold": bool(tape_cold),
+            "has_catalyst": bool(has_catalyst),
+            "regime_faded": bool(faded),
+        }
+    except Exception:
+        logger.debug("[auto_arm] time-of-day late-day cutoff errored (fail-open)", exc_info=True)
+        return False, {"suppress": False, "reason": "gate_error"}
 
 
 # Per-symbol PRE-ENTRY REAP cooldown (in-process, scheduler-local). A name reaped
@@ -532,6 +1197,215 @@ def _write_entry_reject_cooldown(sym_u: str, now: datetime | None = None, *, rea
             _TRADABILITY_24H[sym_u] = (False, now)
     except Exception:
         pass
+
+
+# ── AGENTIC-TRADABILITY PRE-FILTER (learn-from-401) ────────────────────────────────
+# The Robinhood AGENTIC MCP rail rejects SOME instruments at entry-place with a 401
+# Unauthorized ("instrument not available for agentic trading on the isolated CASH
+# account" — CTNT 2026-06-29). Unlike the entry-reject cooldown (a short, self-healing
+# suitability/session timeout), an agentic-untradeable name will NEVER fill on this rail
+# until RH changes the instrument's eligibility, so it is a SEPARATE, longer-TTL negative
+# cache: arm-time SKIP keeps the name out of the watcher pool entirely (the throughput
+# win — the single slot is never burned looping arm->break->401). LEARN-FROM-401: the set
+# is populated only from REAL place 401s (no per-candidate broker pre-check). Scoped to the
+# robinhood_agentic_mcp family only. Mirrors the bounded-prune pattern of the cooldowns.
+# dict[sym_upper -> recorded_at]. TTL = chili_momentum_agentic_non_tradeable_ttl_sec.
+_AGENTIC_NON_TRADEABLE: dict[str, datetime] = {}
+_AGENTIC_NON_TRADEABLE_MAX = 500
+
+
+def _agentic_non_tradeable_ttl_sec() -> float:
+    try:
+        return float(getattr(settings, "chili_momentum_agentic_non_tradeable_ttl_sec", 86400.0) or 0.0)
+    except (TypeError, ValueError):
+        return 86400.0
+
+
+def _agentic_prefilter_enabled() -> bool:
+    """Flag-OFF => byte-identical (no recording, no skip). Also disabled when the TTL is 0
+    (instant kill-switch). FAIL-OPEN: a settings read error keeps the lane unblocked."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_agentic_tradability_prefilter_enabled", True)):
+            return False
+        return _agentic_non_tradeable_ttl_sec() > 0
+    except Exception:
+        return False
+
+
+def is_agentic_unauthorized_reject(reason: str | None) -> bool:
+    """True iff a place-failure ``reason`` carries the agentic per-instrument 401 / not-
+    available-for-agentic-trading signature.
+
+    Matches the REAL error strings the agentic rail produces (see rh_mcp_client / robinhood_mcp):
+      * the per-instrument isError content path -> ``MCP tool 'place_equity_order' returned
+        isError: API error 401: {...}`` (the same shape as the observed 409 idempotency reject,
+        just status 401 — RH puts the instrument-not-tradeable reason in the body), and
+      * the transport-level 401 -> ``unauthorized — Robinhood Agentic token missing/expired``
+        / ``needs_reauth`` / ``grant_revoked``.
+
+    A bare token-revoked/needs-reauth 401 is a WHOLE-RAIL auth failure (not a per-symbol
+    property), so it is deliberately EXCLUDED here — recording every symbol non-tradeable on a
+    transient token expiry would falsely starve the entire equity lane. We therefore key only
+    on the per-instrument 401 signatures (``401`` co-occurring with an instrument/tradeable/
+    agentic marker, or an explicit not-available-for-agentic phrase)."""
+    low = str(reason or "").lower()
+    if not low:
+        return False
+    # Whole-rail auth failures are NOT a per-symbol property — never learn from them.
+    if "needs_reauth" in low or "grant_revoked" in low or "token missing" in low or "re-auth" in low:
+        return False
+    has_401 = "401" in low or "unauthorized" in low
+    if not has_401:
+        # An explicit eligibility phrase can stand alone without a 401 status.
+        return ("not available for agentic" in low) or ("not eligible for agentic" in low)
+    # A 401 that co-occurs with an instrument/eligibility marker == per-instrument rejection.
+    return any(
+        kw in low
+        for kw in (
+            "instrument", "not available", "not eligible", "not tradeable",
+            "not tradable", "untradeable", "untradable", "agentic", "available for trading",
+        )
+    ) or ("api error 401" in low)  # the place isError content path is always per-instrument
+
+
+def _record_agentic_non_tradeable(sym_u: str, now: datetime | None = None) -> None:
+    """Record ``sym_u`` (UPPER) as non-agentic-tradeable after a real 401 at entry-place so
+    auto-arm skips it (it will never fill on this rail until RH re-enables it). Bounded prune.
+    No-op when the pre-filter is disabled (flag off / TTL 0) so flag-off is byte-identical."""
+    if not sym_u or not _agentic_prefilter_enabled():
+        return
+    now = now or _utcnow()
+    _AGENTIC_NON_TRADEABLE[sym_u] = now
+    if len(_AGENTIC_NON_TRADEABLE) > _AGENTIC_NON_TRADEABLE_MAX:
+        ttl = _agentic_non_tradeable_ttl_sec()
+        _stale = now - timedelta(seconds=ttl)
+        for _k in [k for k, v in _AGENTIC_NON_TRADEABLE.items() if v < _stale]:
+            _AGENTIC_NON_TRADEABLE.pop(_k, None)
+        # Still over the cap after dropping expired entries (a burst of fresh rejects)?
+        # Evict the OLDEST so the bounded store has a hard ceiling (no unbounded growth).
+        while len(_AGENTIC_NON_TRADEABLE) > _AGENTIC_NON_TRADEABLE_MAX:
+            _oldest = min(_AGENTIC_NON_TRADEABLE, key=_AGENTIC_NON_TRADEABLE.get)
+            _AGENTIC_NON_TRADEABLE.pop(_oldest, None)
+
+
+def _agentic_non_tradeable_active(sym_u: str, now: datetime | None = None) -> bool:
+    """True iff ``sym_u`` (UPPER) is currently marked non-agentic-tradeable (recorded within
+    the TTL). FAIL-OPEN: any error => False (let the name try; the 401 re-catches). Self-
+    healing: past the TTL the entry is dropped and the name re-admitted (tradability can
+    change)."""
+    try:
+        if not _agentic_prefilter_enabled():
+            return False
+        at = _AGENTIC_NON_TRADEABLE.get(sym_u)
+        if at is None:
+            return False
+        now = now or _utcnow()
+        if (now - at).total_seconds() >= _agentic_non_tradeable_ttl_sec():
+            _AGENTIC_NON_TRADEABLE.pop(sym_u, None)  # expired -> re-admit
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _symbol_routes_to_agentic(symbol: str | None) -> bool:
+    """True iff ``symbol`` resolves to the robinhood_agentic_mcp execution family RIGHT NOW.
+    The pre-filter is scoped to the agentic family ONLY (crypto/alpaca/robinhood_spot have
+    different tradable universes — a name untradeable on the agentic CASH account is fine on
+    those). FAIL-OPEN: a resolution error returns False (do not skip) so a non-agentic family
+    is never penalized and the lane is never starved by the scoping check itself."""
+    try:
+        from ..execution_family_registry import (
+            EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
+            normalize_execution_family,
+            resolve_execution_family_for_symbol,
+        )
+
+        ef = normalize_execution_family(resolve_execution_family_for_symbol(str(symbol or "")))
+        return ef == EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP
+    except Exception:
+        return False
+
+
+def _agentic_tradability_blocks_arm(symbol: str | None, now: datetime | None = None) -> bool:
+    """ARM-time SKIP gate: True iff ``symbol`` routes to the agentic rail AND is currently
+    marked non-agentic-tradeable. The actual throughput win — a name the rail 401'd never
+    becomes a watcher/entry again until the TTL self-heals. FAIL-OPEN end-to-end."""
+    sym_u = str(symbol or "").strip().upper()
+    if not sym_u:
+        return False
+    if not _agentic_non_tradeable_active(sym_u, now):
+        return False
+    return _symbol_routes_to_agentic(sym_u)
+
+
+# ── CONSERVATIVE ASSET-TYPE ARM-SKIP (warrant / non-common-stock) ─────────────────────
+# Diagnosis (2026-06-29): 67/72 momentum live_error were PRE-entry no_bbo on thin/non-
+# common-stock names — WARRANTS especially (the "W" 5th-letter class suffix, e.g. RVMDW,
+# appeared 5×). A warrant has its OWN illiquid book and is frequently not tradeable on the
+# equity rail at all, so it arms, hits no_bbo/place-error, and burns the slot + paints a
+# live_error every pass. There is NO real asset_type / instrument-type field anywhere in the
+# candidate / viability / execution-readiness data (investigated: features.py carries only
+# spread_bps / product_tradable; the agentic tradability tool returns session-eligibility,
+# not security class), so the TICKER STRUCTURE is the only available signal. We use it
+# CONSERVATIVELY — ONLY the well-established US class-suffix conventions that unambiguously
+# denote a warrant/right/unit, never a bare 4-letter root, never a wide-spread or low-float
+# COMMON stock. A thin-but-quoted premarket common mover (the UPC-class +500% low-float name)
+# has a normal 1–4 letter root and is NEVER matched here — it still arms.
+#
+# Matched (equity only; crypto -USD/-USDC always exempt):
+#   * explicit punctuation class suffix: ``.WS`` / ``.WT`` / ``-WT`` / ``.W`` / ``-W`` /
+#     ``.U`` / ``-U`` / ``.R`` / ``-R`` / ``=`` (warrant marker on some feeds), and
+#   * a 5-LETTER all-alpha root ending in ``W`` (the standard NASDAQ 5th-letter warrant
+#     class — RVMDW, GXAIW, …). 5th-letter ``R``/``U`` (rights/units) are deliberately NOT
+#     matched on the bare-root form: too many legit commons end in R/U (e.g. CRWV, ININ-style
+#     roots), so we require the explicit punctuation form for those. ``W`` is the only bare
+#     5th-letter we trust, because a 5-letter common ending in W is vanishingly rare and the
+#     warrant case dominates the observed noise.
+_WARRANT_PUNCT_SUFFIXES = (".WS", ".WT", "-WT", ".W", "-W", ".U", "-U", ".R", "-R")
+
+
+def _looks_like_non_common_stock(symbol: str | None) -> bool:
+    """True iff ``symbol`` looks like a WARRANT / right / unit (a non-common-stock the Ross
+    lane should not arm) by US ticker-class convention. CONSERVATIVE + crypto-exempt — see the
+    section header. Pure string logic (no network/DB), so it is cheap and deterministic.
+    FAIL-OPEN: an empty / unparseable symbol returns False (do NOT skip)."""
+    sym_u = str(symbol or "").strip().upper()
+    if not sym_u or "-USD" in sym_u:
+        return False  # crypto pairs are never warrants; empty => fail-open
+    # A warrant marker via the ``=`` convention some feeds use (e.g. ``RVMD=``).
+    if sym_u.endswith("="):
+        return True
+    for suf in _WARRANT_PUNCT_SUFFIXES:
+        if sym_u.endswith(suf):
+            return True
+    # Bare 5-letter all-alpha root ending in W == the standard 5th-letter NASDAQ warrant class.
+    if len(sym_u) == 5 and sym_u.isalpha() and sym_u.endswith("W"):
+        return True
+    return False
+
+
+def _asset_type_arm_skip_enabled() -> bool:
+    """ON by default (no-dark-flags): SKIP structurally-non-common (warrant) names at ARM so
+    the lane stops burning the slot + painting live_error on a name it cannot fill. Flag OFF
+    => byte-identical (no skip). FAIL-SAFE: a settings read error keeps it ON (the safe,
+    noise-reducing default — the matcher itself is conservative + crypto-exempt)."""
+    try:
+        return bool(getattr(settings, "chili_momentum_asset_type_arm_skip_enabled", True))
+    except Exception:
+        return True
+
+
+def _asset_type_blocks_arm(symbol: str | None) -> bool:
+    """ARM-time SKIP gate for non-common-stock (warrant) names. Scoped to EQUITIES (crypto is
+    exempt inside ``_looks_like_non_common_stock``). FAIL-OPEN: flag off / any error => False
+    (let it arm). NEVER matches a thin-but-quoted COMMON premarket mover (normal root)."""
+    if not _asset_type_arm_skip_enabled():
+        return False
+    try:
+        return _looks_like_non_common_stock(symbol)
+    except Exception:
+        return False
 
 
 # ── TIER-2: 24h-tradeability eligibility cache (proactive probe, no-spam) ──────────
@@ -891,6 +1765,32 @@ def _active_live_session_count(db: Session, *, user_id: int | None) -> int:
     if user_id is not None:
         q = q.filter(TradingAutomationSession.user_id == int(user_id))
     return int(q.count())
+
+
+def _count_live_eligible_field(db: Session) -> int:
+    """Distinct live-eligible names in the field RIGHT NOW (the adaptive watch-fanout
+    basis, CHUNK 2). Same eligibility + lane filter the arm queue ranks from
+    (``_fresh_live_eligible_candidates``): scope=symbol, live_eligible, fresh within
+    the live viability gate, crypto/equity lane filter. Counts DISTINCT symbols (a
+    symbol has many variant rows) so the fanout reflects how many NAMES are igniting,
+    not row count. Fail-soft: any error returns 0 ⇒ the flat fanout_max fallback."""
+    try:
+        max_age = float(
+            getattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0
+        )
+        cutoff = datetime.utcnow() - timedelta(seconds=max_age)
+        q = db.query(MomentumSymbolViability.symbol).filter(
+            MomentumSymbolViability.scope == "symbol",
+            MomentumSymbolViability.live_eligible.is_(True),
+            MomentumSymbolViability.freshness_ts >= cutoff,
+        )
+        if _auto_arm_crypto_only():
+            q = q.filter(MomentumSymbolViability.symbol.like("%-USD%"))
+        elif _auto_arm_equity_only():
+            q = q.filter(~MomentumSymbolViability.symbol.like("%-USD%"))
+        return int(q.distinct().count())
+    except Exception:
+        return 0
 
 
 def _count_watching_prefill(db: Session, *, user_id: int | None) -> int:
@@ -1979,6 +2879,16 @@ def _entry_trigger_fires(symbol: str, row: Any = None) -> tuple[bool, str]:
                     # Legacy probe: raw library defaults (require_retest=False).
                     ok, reason, _ = pullback_break_confirmation(df_pb, entry_interval=interval)
                 if ok:
+                    # MOVE-EXHAUSTION ABANDON (pre-arm VETO, flag-gated default OFF): a trigger
+                    # fired, but if the move is GENUINELY exhausted (faded-from-HOD AND
+                    # (cold-tape OR viability-regressed)) REFUSE the arm and sit flat on a done
+                    # move. Flag OFF => never runs => byte-identical. Reuses the ALREADY-fetched
+                    # df_pb (no new fetch); a strong front-side mover (near HOD / hot / at-peak)
+                    # is never abandoned. docs/DESIGN/MOMENTUM_LANE.md
+                    if _move_exhaustion_abandon_enabled():
+                        _ex_abandon, _ = _move_is_exhausted(symbol, df_pb, row)
+                        if _ex_abandon:
+                            return False, "exhaustion_abandoned"
                     return True, reason
                 # MOMENTUM-CONTINUATION arm-time trigger (the STRUCTURE side). A
                 # high-conviction straight-up runner (SDOT +84%) never gives the pullback
@@ -1992,6 +2902,13 @@ def _entry_trigger_fires(symbol: str, row: Any = None) -> tuple[bool, str]:
                 # helper returns (False, ...) before any compute). docs/DESIGN/MOMENTUM_LANE.md
                 _cont_ok, _cont_reason = _continuation_active_trigger(symbol, df_pb, row)
                 if _cont_ok:
+                    # Same pre-arm exhaustion veto on the continuation (straight-up runner)
+                    # branch — a runner that has topped and faded off its HOD with cold tape /
+                    # regressed viability is a done move; sit flat. Flag OFF => byte-identical.
+                    if _move_exhaustion_abandon_enabled():
+                        _ex_abandon, _ = _move_is_exhausted(symbol, df_pb, row)
+                        if _ex_abandon:
+                            return False, "exhaustion_abandoned"
                     return True, _cont_reason
                 if mode == "pullback_break":
                     return False, reason
@@ -2414,6 +3331,22 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     except Exception:
         pass
 
+    # Guard 1b (GAP 1): NEXT-DAY rule-break lockout (PSY101 Mod 10). If a hard discipline
+    # rule was broken in a PRIOR ET session (daily-loss breach / trade-count budget /
+    # max-loss circuit), block LIVE ARMING for this session — auto-clears once the lockout's
+    # ET day rolls past. RISK-REDUCING ONLY: it can only SKIP arming (never permits a trade
+    # nor sizes one). Flag OFF (default) => check returns not-locked => byte-identical.
+    try:
+        from ..governance import check_next_day_trading_lockout
+
+        _locked, _lock_meta = check_next_day_trading_lockout()
+        if _locked:
+            out["skipped"] = "rulebreak_nextday_lockout"
+            out["lockout"] = _lock_meta
+            return out
+    except Exception:
+        pass
+
     # Reap stale pre-entry sessions FIRST so a faded leftover (e.g. a name armed
     # long ago whose intraday move never triggered) does not pin the only slot.
     reaped = _reap_stale_watching_sessions(db, user_id=uid, now=datetime.utcnow())
@@ -2435,9 +3368,14 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         # into a full book) — the AUTHORITATIVE position cap is the advisory-locked
         # fill boundary in live_runner (a soft re-count cannot be atomic at arm time).
         from .risk_evaluator import count_open_positions as _count_open_positions
+        from .risk_policy import adaptive_watch_fanout as _adaptive_watch_fanout
         from .risk_policy import effective_position_cap as _effective_position_cap
 
-        _fanout = int(getattr(settings, "chili_momentum_watch_fanout_max", 15) or 15)
+        # ADAPTIVE watch-fanout (CHUNK 2): the cap floats with the live field size
+        # (clamp(field, floor, fanout_max)) so the lane watches MORE when more names
+        # are igniting. Flag-off / field unavailable ⇒ the flat fanout_max (byte-
+        # identical). Watchers are $0-risk; the atomic risk-budget governs admission.
+        _fanout = int(_adaptive_watch_fanout(_count_live_eligible_field(db)))
         _watch_ct = _count_watching_prefill(db, user_id=uid)
         if _watch_ct >= _fanout:
             # RANK-DISPLACEMENT: rather than skip, try to evict the worst inert watcher so
@@ -2648,6 +3586,68 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         out["skipped"] = "no_fresh_live_eligible"
         return out
 
+    # Guard 6: NO-A-SETUP SESSION SIT-CASH (NEW INITIATION ONLY, kill-switch
+    # chili_momentum_no_asetup_sit_cash_enabled, default OFF => byte-identical: the gate is
+    # NOT called, no new query, no new logic). Evaluated ONCE per pass on the already-fetched
+    # board, BEFORE the candidate scan/arm loop. SUPPRESS a FRESH arm only when the board's
+    # best ross_score is CLEARLY below the adaptive A+ bar (sub-A+ board) AND the regime is poor
+    # (cold tape-breadth AND no fresh catalyst). A genuine A+ (top ross_score >= bar) still
+    # initiates; a borderline-good best (>= bar) still trades (the margin prevents over-
+    # restriction). ISOLATION INVARIANT: this can ONLY skip a NEW arm — it NEVER blocks, delays,
+    # or downsizes an EXIT / stop / trail / scale-out / flatten / open-position management (all of
+    # which run exclusively in the live runner, ungated by this). Conservative + agreement-gated
+    # + fail-open on every axis. docs/DESIGN/MOMENTUM_LANE.md [[feedback_adaptive_no_magic]]
+    if _no_asetup_sit_cash_enabled():
+        try:
+            _sit, _sit_dbg = _should_sit_cash_no_asetup(db, candidates)
+            if _sit:
+                out["skipped"] = "no_asetup_sit_cash"
+                out["sit_cash"] = _sit_dbg
+                logger.info(
+                    "[auto_arm] no-A-setup sit-cash: suppressing NEW initiation — best_ross=%s "
+                    "below A+ bar=%s AND poor regime (tape_cold=%s, has_catalyst=%s). Exits/"
+                    "position-management are UNAFFECTED.",
+                    _sit_dbg.get("best_ross"),
+                    _sit_dbg.get("floor"),
+                    _sit_dbg.get("tape_cold"),
+                    _sit_dbg.get("has_catalyst"),
+                )
+                return out
+        except Exception:
+            logger.debug("[auto_arm] no-asetup sit-cash guard failed (fail-open)", exc_info=True)
+
+    # Guard 7: TIME-OF-DAY FADE-DRIVEN LATE-DAY NEW-ENTRY CUTOFF (NEW INITIATION ONLY, kill-
+    # switch chili_momentum_timeofday_schedule_enabled, default OFF => byte-identical: the gate is
+    # NOT called, no new query, no suppression). Evaluated ONCE per pass on the already-fetched
+    # board, BEFORE the candidate scan/arm loop. SUPPRESS a FRESH arm only when ET is at/past the
+    # documented fallback clock (default 14:30 ET, a CEILING not the primary driver) AND the day's
+    # momentum/breadth has FADED — REUSING the SAME regime signal (_tape_cold_breadth AND no fresh
+    # catalyst => _regime_is_poor) the sit-cash gate above uses. A strong-momentum (non-faded)
+    # afternoon STILL initiates. The PRIME-WINDOW SIZE LEVER (the upward half of this feature) is
+    # applied separately in live_runner's _eff_max_loss product, NOT here. ISOLATION INVARIANT:
+    # this can ONLY skip a NEW arm — it NEVER blocks/delays/downsizes an EXIT / stop / trail /
+    # scale-out / flatten / open-position management (all of which run exclusively in the live
+    # runner, ungated). Fail-open on every axis. docs/DESIGN/MOMENTUM_LANE.md
+    if _timeofday_schedule_enabled():
+        try:
+            _tod, _tod_dbg = _should_suppress_late_day(candidates)
+            if _tod:
+                out["skipped"] = "momentum_timeofday_schedule"
+                out["timeofday_schedule"] = _tod_dbg
+                logger.info(
+                    "[auto_arm] time-of-day cutoff: suppressing NEW initiation — past fallback "
+                    "clock (et_min=%s, fallback=%s) AND day faded (reason=%s, tape_cold=%s, "
+                    "has_catalyst=%s). Exits/position-management are UNAFFECTED.",
+                    _tod_dbg.get("et_min"),
+                    _tod_dbg.get("fallback"),
+                    _tod_dbg.get("reason"),
+                    _tod_dbg.get("tape_cold"),
+                    _tod_dbg.get("has_catalyst"),
+                )
+                return out
+        except Exception:
+            logger.debug("[auto_arm] time-of-day cutoff guard failed (fail-open)", exc_info=True)
+
     # Cheap pre-filter (no network): venue, market hours, per-symbol mutex,
     # and self-collision (a symbol we already hold an active live session for).
     busy_symbols = _symbols_with_active_live_session(db, user_id=uid)
@@ -2664,6 +3664,8 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     out["crypto_illiquid_skipped"] = 0
     out["reap_cooldown_skipped"] = 0
     out["entry_reject_cooldown_skipped"] = 0
+    out["agentic_tradability_skipped"] = 0
+    out["asset_type_skipped"] = 0
     # TIER-2 OVERNIGHT: resolve the clock + flags ONCE per pass. When overnight trading is
     # active, proactively probe 24h-eligibility for the equity candidates (batched <=10) so
     # ineligible names are SKIPPED at the gate below — never order-rejected (no spam).
@@ -2708,6 +3710,24 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         if _entry_reject_cooldown_active(_sym_u, _utcnow()):
             out["entry_reject_cooldown_skipped"] += 1
             continue  # broker REFUSED this name's entry recently (suitability/untradable) — don't loop on it
+        # AGENTIC-TRADABILITY PRE-FILTER (learn-from-401): a name the agentic MCP rail 401'd
+        # at entry-place ("instrument not available for agentic trading") will never fill on
+        # this rail until RH re-enables it — SKIP it here so it never becomes a watcher/entry
+        # again and the single slot goes to a FILLABLE mover. Scoped to the agentic family
+        # (no penalty to crypto/alpaca/robinhood_spot); self-healing via the TTL; FAIL-OPEN.
+        if _agentic_tradability_blocks_arm(c.symbol, _utcnow()):
+            out["agentic_tradability_skipped"] = out.get("agentic_tradability_skipped", 0) + 1
+            logger.info("[momentum_neural] tradability skip sym=%s (non-agentic-tradeable; learn-from-401)", _sym_u)
+            continue
+        # CONSERVATIVE ASSET-TYPE SKIP: a structurally-non-common name (a WARRANT — the RVMDW
+        # "W"-suffix class that paints 67/72 of the no_bbo live_errors) has its own illiquid /
+        # often-untradeable book; it arms, hits no_bbo, and burns the slot every pass. Skip it
+        # here so a FILLABLE common mover gets the slot. CRYPTO-EXEMPT + crucially NEVER matches
+        # a thin-but-quoted COMMON premarket mover (normal 1–4 letter root); FAIL-OPEN.
+        if _asset_type_blocks_arm(c.symbol):
+            out["asset_type_skipped"] = out.get("asset_type_skipped", 0) + 1
+            logger.info("[momentum_neural] asset-type skip sym=%s reason=non_common_stock_warrant", _sym_u)
+            continue
         if not _symbol_market_open(c.symbol):
             continue  # equities only during their session; crypto always passes (24/7)
         # Crypto liquidity floor (A1): the Ross scorer is blind to executability,
