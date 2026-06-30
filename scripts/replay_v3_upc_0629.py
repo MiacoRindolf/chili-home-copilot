@@ -71,17 +71,23 @@ if _ROOT not in sys.path:
 os.environ.setdefault("CHILI_PYTEST", "1")
 
 from app.config import settings  # noqa: E402
+from app.models.trading import (  # noqa: E402
+    TradingAutomationEvent,
+    TradingAutomationSession,
+)
 from app.services.trading.momentum_neural import live_runner as lr  # noqa: E402
 from app.services.trading.momentum_neural import market_profile as _mp  # noqa: E402
 from app.services.trading.momentum_neural import replay_eligibility as relig  # noqa: E402
 from app.services.trading.momentum_neural import replay_v3 as rv3  # noqa: E402
 from app.services.trading.momentum_neural import risk_evaluator as _re  # noqa: E402
+from app.services.trading.momentum_neural import risk_policy as _rp  # noqa: E402
 from app.services.trading.momentum_neural.live_fsm import (  # noqa: E402
     STATE_LIVE_ENTERED,
     STATE_WATCHING_LIVE,
 )
 from app.services.trading.momentum_neural.replay_mock_broker import (  # noqa: E402
     MockBrokerAdapter,
+    make_mock_broker_factory,
 )
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s")
@@ -658,6 +664,485 @@ def run_arm(
         db.close()
 
 
+# ══════════════════════════════════════════════════════════════════════════════════
+# FULL-WINDOW SCAN (the operator's decisive question) — does the CURRENT system ENTER
+# UPC at ANY instant of its 2026-06-29 strong-move run, or does a gate block at EVERY
+# instant? The focused A/B above tested ONLY the single recorded 13:08 block instant +90s.
+# This scan drives ONE long-lived session across the FULL premarket explosion window
+# (~12:40..13:35Z — the recorded $7.4->$18.84 run + its topping/fade) with the CURRENT
+# system (grace ON), recording at EACH instant: did eligibility pass (grace)? did the entry
+# TRIGGER fire (and if not, WHICH gate)? did it ENTER + FILL?
+#
+# FAITHFUL by construction: ONE session ticks forward (exactly how the live runner works),
+# the NBBO quote is the recorded as-of-t tape (the mock fills off it + the FSM tick-break
+# uses tick.ask), and the OHLCV bars are resampled from the REAL trade ticks AS-OF the sim
+# clock (no lookahead — the as-of provider slices bars to <= t each call). The eligibility
+# timeline (grace's gated input) is the SAME Tier-B event-derived reconstruction the A/B uses.
+# ══════════════════════════════════════════════════════════════════════════════════
+
+# The strong-move window to scan (naive-UTC). Bounded by the recorded tape: the explosion
+# fired in the 12:50 bucket ($7.4->$15.53) and topped at $18.84 ~13:25, fading after ~13:30.
+# We open the scan a little before (12:40) to include the launch and run to 13:35 (the fade)
+# so the scan covers the WHOLE strong move, not just the recorded 13:08 block instant.
+FULLSCAN_WINDOW_START = datetime(2026, 6, 29, 12, 40, 0)
+FULLSCAN_WINDOW_END = datetime(2026, 6, 29, 13, 35, 0)
+# OHLCV history floor: resample real ticks from premarket open so the as-of-t 5m frame has the
+# >=25 bars momentum_volume_confirmation requires by the time we reach the window (else the
+# trigger trivially returns 'insufficient_bars' and the scan can't see the REAL gate verdict).
+FULLSCAN_OHLCV_HISTORY_START = datetime(2026, 6, 29, 8, 0, 0)
+
+
+@dataclass
+class FullScanData:
+    grid: list[rv3.RecordedNbboTick]
+    tick_history_df: pd.DataFrame  # the WIDE trade-tick history (for the as-of OHLCV provider)
+    mirror_ticks_df: pd.DataFrame  # the entry-window ticks to mirror (the as-of OFI evidence)
+    events: list[tuple[int, str, datetime, dict]]
+    tier_a_probe: TierAProbe
+
+
+def load_fullscan_upc(prod_db_url: str, *, grid_step_seconds: float = 5.0) -> FullScanData:
+    """Load UPC's recorded 06-29 FULL-WINDOW NBBO grid + the wide trade-tick history (for the
+    as-of OHLCV provider) + the entry-window ticks to mirror (for the as-of OFI read) + the
+    recorded session events (Tier-B eligibility source). READ-ONLY (SELECTs only)."""
+    eng = create_engine(prod_db_url)
+    with eng.connect() as c:
+        nbbo = pd.read_sql(
+            text(
+                "SELECT observed_at, bid, ask, mid FROM momentum_nbbo_spread_tape "
+                "WHERE symbol = :s AND observed_at >= :a AND observed_at <= :b ORDER BY observed_at"
+            ),
+            c,
+            params={
+                "s": SYMBOL,
+                "a": FULLSCAN_WINDOW_START.replace(tzinfo=timezone.utc),
+                "b": FULLSCAN_WINDOW_END.replace(tzinfo=timezone.utc),
+            },
+        )
+        # the WIDE tick history -> the as-of-t OHLCV bars (resampled per-tick inside the window).
+        hist = pd.read_sql(
+            text(
+                "SELECT observed_at, price, size FROM iqfeed_trade_ticks "
+                "WHERE symbol = :s AND observed_at >= :a AND observed_at <= :b ORDER BY observed_at"
+            ),
+            c,
+            params={"s": SYMBOL, "a": FULLSCAN_OHLCV_HISTORY_START, "b": FULLSCAN_WINDOW_END},
+        )
+        # the entry-window ticks to MIRROR into the throwaway DB (the as-of-t forward-momentum
+        # OFI read the grace keys on — keyed source='replay_v3').
+        mirror = pd.read_sql(
+            text(
+                "SELECT observed_at, price, size, bid, ask FROM iqfeed_trade_ticks "
+                "WHERE symbol = :s AND observed_at >= :a AND observed_at <= :b ORDER BY observed_at"
+            ),
+            c,
+            params={
+                "s": SYMBOL,
+                "a": (FULLSCAN_WINDOW_START - timedelta(seconds=60)),
+                "b": FULLSCAN_WINDOW_END,
+            },
+        )
+        evrows = c.execute(
+            text(
+                "SELECT id, event_type, ts, payload_json FROM trading_automation_events "
+                "WHERE session_id = :sid ORDER BY id ASC"
+            ),
+            {"sid": SESSION_ID},
+        ).fetchall()
+        tier_a_probe = _probe_tier_a_feasibility(c)
+
+    grid: list[rv3.RecordedNbboTick] = []
+    for _, r in nbbo.iterrows():
+        ts = _naive(pd.Timestamp(r["observed_at"]).to_pydatetime())
+        grid.append(
+            rv3.RecordedNbboTick(
+                ts=ts,
+                bid=float(r["bid"]),
+                ask=float(r["ask"]),
+                last=float(r["mid"]) if pd.notna(r["mid"]) else None,
+            )
+        )
+    grid = rv3.build_event_grid(grid, step_seconds=grid_step_seconds)
+
+    events: list[tuple[int, str, datetime, dict]] = []
+    for row in evrows:
+        eid, et, ts, pj = row[0], str(row[1]), row[2], row[3]
+        if isinstance(pj, str):
+            try:
+                pj = json.loads(pj)
+            except Exception:
+                pj = {}
+        if not isinstance(pj, dict):
+            pj = {}
+        events.append((int(eid), et, _naive(ts), pj))
+
+    return FullScanData(
+        grid=grid,
+        tick_history_df=hist,
+        mirror_ticks_df=mirror,
+        events=events,
+        tier_a_probe=tier_a_probe,
+    )
+
+
+class AsOfOhlcvProvider:
+    """Serve OHLCV bars resampled from the REAL trade-tick history AS-OF the sim clock — NO
+    LOOKAHEAD. The live runner reads ``provider(ticker, interval=…, period=…)`` once per tick;
+    this slices the tick history to ``<= the sim clock`` and resamples, so each tick sees only
+    the bars that had completed by that instant (exactly the live runner's information set).
+
+    The sim clock is read from ``live_runner._utcnow()`` (governed by the ``replay_clock`` the
+    driver installs per tick) so the provider needs no out-of-band clock wiring. A small LRU on
+    the (interval, minute-bucket) keeps the repeated per-tick resamples cheap."""
+
+    def __init__(self, tick_history_df: pd.DataFrame) -> None:
+        t = tick_history_df.copy()
+        if not t.empty:
+            t["observed_at"] = pd.to_datetime(t["observed_at"])
+            t = t.set_index("observed_at").sort_index()
+        self._ticks = t
+        self._rule = {"15m": "15min", "5m": "5min", "1m": "1min", "1d": "1D"}
+        self._cache: dict[tuple[str, int], pd.DataFrame] = {}
+        self.call_log: list[tuple[str, str]] = []
+
+    def __call__(self, ticker: str, *, interval: str = "1d", period: str = "6mo") -> pd.DataFrame:
+        now = _naive(lr._utcnow())
+        self.call_log.append((str(interval), now.isoformat()))
+        rule = self._rule.get(str(interval), "5min")
+        # cache key: interval + the minute bucket of `now` (bars only change minute-to-minute).
+        bucket = int(now.timestamp() // 60)
+        ck = (str(interval), bucket)
+        if ck in self._cache:
+            return self._cache[ck].copy()
+        if self._ticks.empty:
+            return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+        sl = self._ticks[self._ticks.index <= now]
+        if sl.empty:
+            return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+        o = sl["price"].resample(rule).ohlc()
+        v = sl["size"].resample(rule).sum()
+        bars = o.join(v.rename("Volume")).dropna()
+        if bars.empty:
+            return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+        bars = bars.rename(
+            columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"}
+        )
+        bars = bars[["Open", "High", "Low", "Close", "Volume"]].reset_index(drop=True)
+        # bound the cache (window is ~55 minutes * 3 intervals; this never grows unbounded).
+        if len(self._cache) > 512:
+            self._cache.clear()
+        self._cache[ck] = bars
+        return bars.copy()
+
+
+# the per-tick events that classify WHY an instant did not enter (the gate breakdown).
+_GATE_EVENTS = {
+    "live_blocked_by_risk",            # eligibility / risk gate (the recorded 57x block)
+    "live_entry_trigger_wait",         # a trigger gate blocked (reason in payload)
+    "live_entry_midday_deweighted",    # the midday de-weight raised the score bar
+    "live_entry_backside_benched",     # backside/below-VWAP bench
+    "live_entry_wait_no_trade_regime", # hard no-trade regime (off by default)
+    "live_entry_wait_market_closed",   # tradeable-now wall (neutralized in this harness)
+}
+# the per-tick events that mean an entry ADVANCED (trigger fired / entry placed / filled).
+_ENTER_EVENTS = {
+    "live_entry_momentum_continuation_fire",
+    "live_entry_pending_place",
+    "live_entry_submitted",
+    "live_entry_filled",
+}
+
+
+@dataclass
+class InstantOutcome:
+    ts: datetime
+    state_after: str
+    ask: Optional[float]
+    eligible_grace: bool          # did the as-of-t eligibility (grace input) pass this tick?
+    advanced: bool                # did the FSM advance toward entry this tick?
+    entered: bool                 # reached live_entered (this tick or earlier)?
+    fill_price: Optional[float]
+    gate: str                     # the dominant blocking gate this tick (or 'ADVANCED'/'ENTERED')
+    trigger_reason: Optional[str] # the trigger-wait reason when gate == trigger_wait
+    new_events: list[str]
+
+
+@dataclass
+class FullScanResult:
+    grace_enabled: bool
+    instants: list[InstantOutcome]
+    entered_any: bool
+    first_entry: Optional[InstantOutcome]
+    grace_passed_any: bool
+    trigger_fired_any: bool
+    gate_histogram: dict[str, int]
+    trigger_reason_histogram: dict[str, int]
+    grid_ticks: int
+    tier: str
+    fwd_mom_true_ticks: int
+
+
+def run_full_window_scan(
+    SessionLocal,
+    data: FullScanData,
+    *,
+    grace_enabled: bool = True,
+    tier: str = "auto",
+    clear_score_gate: bool = False,
+) -> FullScanResult:
+    """Drive ONE UPC session across the FULL strong-move window with the CURRENT system
+    (grace ON). At each recorded NBBO instant: write the as-of-t eligibility (the grace's
+    gated input), set the broker clock+quote, serve as-of-t real OHLCV bars (no lookahead),
+    and tick the REAL ``tick_live_session``. Classify each instant by the event(s) emitted that
+    tick. Returns the per-instant gate breakdown + whether ANY instant ENTERED.
+
+    ``clear_score_gate``:
+      * ``False`` (FAITHFUL): seed UPC's REAL recorded viability score (0.55). This is below the
+        impulse_breakout entry floor (0.56), so the SCORE gate blocks the trigger from even being
+        evaluated at most instants — the faithful report of the real system on the real score.
+      * ``True`` (TRIGGER-ISOLATION): seed a score (0.90) ABOVE the floor so ``_score_ok`` passes
+        whenever eligibility passes, letting the ENTRY TRIGGER become the deciding gate. This
+        isolates the trigger question ("if the score weren't sub-threshold, would a trigger fire
+        across the window?") — the SAME isolation pattern the focused A/B uses for the score gate."""
+    db: Session = SessionLocal()
+    try:
+        # current system: grace ON + the real runner + the env-coupled gates neutralized (kill
+        # switch / broker connectivity / tradeable-now), exactly as the focused A/B does — these
+        # do NOT touch the eligibility-grace or the entry-trigger gates (the scan's subjects).
+        settings.chili_momentum_live_eligible_recency_grace_enabled = grace_enabled
+        settings.chili_momentum_live_runner_enabled = True
+        lr._venue_broker_connected = lambda ef: True  # type: ignore[assignment]
+        lr.is_kill_switch_active = lambda: False  # type: ignore[assignment]
+        _re.is_kill_switch_active = lambda: False  # type: ignore[assignment]
+        _re.get_kill_switch_status = lambda: {"active": False, "reason": None}  # type: ignore[assignment]
+        _mp.is_tradeable_now = lambda symbol, **k: True  # type: ignore[assignment]
+        import app.services.trading.market_data as _md
+
+        def _boom_fetch(*a, **k):
+            raise AssertionError("NETWORK GUARD: real fetch_ohlcv_df during UPC full-window scan")
+
+        def _boom_adapter(*a, **k):
+            raise AssertionError("NETWORK GUARD: real adapter factory during UPC full-window scan")
+
+        _md.fetch_ohlcv_df = _boom_fetch  # type: ignore[assignment]
+        lr.resolve_live_spot_adapter_factory = _boom_adapter  # type: ignore[assignment]
+        lr._entry_pricebook_snapshot = lambda symbol: None  # type: ignore[assignment]
+        lr._refetch_bbo_secondary = lambda symbol: None  # type: ignore[assignment]
+        import app.services.trading.momentum_neural.universe as _uni
+
+        _uni.snapshot_dollar_volumes = lambda syms: {}  # type: ignore[assignment]
+        import app.services.trading.momentum_neural.entry_features as _ef
+
+        _ef.macro_regime_features = lambda *a, **k: {}  # type: ignore[assignment]
+
+        # seed the viability score: FAITHFUL = UPC's REAL recorded 0.55 (below the
+        # impulse_breakout 0.56 floor); TRIGGER-ISOLATION = 0.90 (clears the score gate so the
+        # entry trigger is the deciding gate).
+        _seed_score = 0.90 if clear_score_gate else 0.55
+        arm = rv3.RecordedArm(
+            symbol=SYMBOL,
+            live_eligible_at_utc=ARM_CONFIRMED_AT.isoformat() + "+00:00",
+            viability_score=_seed_score,
+            atr_pct=0.05,
+        )
+        seed = rv3.seed_replay_session(db, arm, execution_family="robinhood_agentic_mcp")
+        db.flush()
+
+        relig.clear_forward_momentum_ticks(db, symbol=SYMBOL)
+        n_ticks = mirror_real_ticks(db, data.mirror_ticks_df)
+        _log.info("[upc_0629] full-scan mirrored %d real UPC trade ticks", n_ticks)
+
+        # the eligibility timeline (Tier-B event-derived; the same reconstruction the A/B uses).
+        # NOTE the timeline is built off the recorded session-9505 events (confirm@13:08 ->
+        # block@13:08:31). Its INITIAL state is True (eligible at the start of the window) and it
+        # flips False at the recorded block instant; the grace tolerates the flicker on real
+        # forward-momentum ticks. This is the honest as-of-t eligibility input the grace gates on.
+        _fs_data = RealUpcData(
+            grid=data.grid,
+            ohlcv_frames={},
+            mirror_ticks_df=data.mirror_ticks_df,
+            confirm_at=ARM_CONFIRMED_AT,
+            block_at=BLOCK_AT,
+            events=data.events,
+            tier_a_probe=data.tier_a_probe,
+        )
+        timeline = build_eligibility_timeline(_fs_data, tier=tier)
+        eligibility = relig.EligibilityReplayer(
+            symbol=SYMBOL, variant_id=seed.variant_id, timeline=timeline
+        )
+
+        provider = AsOfOhlcvProvider(data.tick_history_df)
+        mock = MockBrokerAdapter(slippage_bps=0.0, venue_rt_bps=0.0, freshness_mode="wall")
+
+        # forward-momentum diagnostic across the grid (how many instants the grace's real-tape
+        # leg shows ofi_level>0 & slope>=0 — i.e. the grace WOULD tolerate a flicker there).
+        fwd_true = 0
+        try:
+            from app.services.trading.momentum_neural.pipeline import _live_flow_slope
+
+            for tk in data.grid:
+                fs = _live_flow_slope(SYMBOL, db=db, as_of=tk.ts)
+                if isinstance(fs, dict):
+                    lvl, slp = fs.get("ofi_level"), fs.get("ofi_slope")
+                    if lvl is not None and slp is not None and float(lvl) > 0 and float(slp) >= 0:
+                        fwd_true += 1
+        except Exception:
+            _log.debug("[upc_0629] full-scan fwd-mom diagnostic failed", exc_info=True)
+
+        # drive the REAL FSM tick-by-tick; classify each instant by the events emitted that tick.
+        factory = make_mock_broker_factory(mock)
+        sid = seed.session_id
+
+        def _session_state() -> str:
+            s = (
+                db.query(TradingAutomationSession)
+                .filter(TradingAutomationSession.id == sid)
+                .one_or_none()
+            )
+            return str(s.state) if s is not None else "<gone>"
+
+        def _events_after(last_id: int) -> list[tuple[int, str, dict]]:
+            rows = (
+                db.query(TradingAutomationEvent)
+                .filter(
+                    TradingAutomationEvent.session_id == sid,
+                    TradingAutomationEvent.id > last_id,
+                )
+                .order_by(TradingAutomationEvent.id.asc())
+                .all()
+            )
+            out = []
+            for e in rows:
+                pj = e.payload_json if isinstance(e.payload_json, dict) else {}
+                out.append((int(e.id), str(e.event_type), pj))
+            return out
+
+        # neutralize ONLY the same pre-entry risk-gate boundary the A/B leaves real (None ⇒ the
+        # genuine runner_boundary_risk_ok -> evaluate_proposed_momentum_automation runs, so the
+        # live_eligible + grace path is exercised). We do NOT short-circuit it.
+        last_seen_id = 0
+        # advance the seeded queued_live -> watching_live (the runner does this on the 1st tick).
+        instants: list[InstantOutcome] = []
+        entered = False
+        first_entry: Optional[InstantOutcome] = None
+        grace_passed_any = False
+        trigger_fired_any = False
+        gate_hist: dict[str, int] = {}
+        trig_hist: dict[str, int] = {}
+
+        for tk in data.grid:
+            t = tk.ts
+            eligibility.apply(db, t)
+            elig_now = eligibility.eligible_as_of(t)
+            mock.set_clock(t)
+            mock.set_quote(SYMBOL, tk.as_quote())
+            before_id = last_seen_id
+            with lr.replay_clock(t), lr.replay_ohlcv_provider(provider), _rp.replay_account_equity(
+                lambda *a, **k: 100000.0
+            ):
+                lr.tick_live_session(db, sid, adapter_factory=factory)
+            db.flush()
+            new_evs = _events_after(before_id)
+            if new_evs:
+                last_seen_id = new_evs[-1][0]
+            new_types = [et for _, et, _ in new_evs]
+            state_after = _session_state()
+
+            # classify the dominant gate this tick.
+            advanced = any(et in _ENTER_EVENTS for et in new_types)
+            this_entered = state_after == STATE_LIVE_ENTERED or "live_entry_filled" in new_types
+            trig_reason = None
+            for _id, et, pj in new_evs:
+                if et == "live_entry_trigger_wait":
+                    trig_reason = str(pj.get("reason") or "trigger_wait")
+            if this_entered or STATE_LIVE_ENTERED in (state_after,):
+                gate = "ENTERED"
+                entered = True
+            elif advanced:
+                gate = "ADVANCED"
+                trigger_fired_any = True
+            else:
+                # pick the dominant blocking gate emitted this tick (priority: eligibility block,
+                # then trigger gate, then midday/backside/regime).
+                blocking = [et for et in new_types if et in _GATE_EVENTS]
+                if "live_blocked_by_risk" in blocking:
+                    gate = "eligibility_block"
+                elif "live_entry_trigger_wait" in blocking:
+                    gate = f"trigger:{trig_reason}"
+                elif "live_entry_midday_deweighted" in blocking:
+                    gate = "midday_deweighted"
+                elif "live_entry_backside_benched" in blocking:
+                    gate = "backside_benched"
+                elif "live_entry_wait_no_trade_regime" in blocking:
+                    gate = "no_trade_regime"
+                elif "live_entry_wait_market_closed" in blocking:
+                    gate = "market_closed"
+                elif blocking:
+                    gate = blocking[0]
+                else:
+                    # NO event emitted while watching_live = the SCORE gate held the entry before
+                    # the trigger was even evaluated (the watching_live block emits trigger_wait
+                    # ONLY when _score_ok is True; below the viability bar it returns silently). In
+                    # the FAITHFUL arm UPC's 0.55 score sits below the 0.56 impulse_breakout floor,
+                    # so this is the score gate. (When eligibility is the cause the runner emits the
+                    # block; a silent hold here is the score bar.) Distinguish for transparency.
+                    if state_after == STATE_WATCHING_LIVE:
+                        gate = "score_below_bar" if _seed_score < 0.56 else "watching_silent"
+                    else:
+                        gate = "no_event"
+
+            if elig_now:
+                grace_passed_any = True
+            if trig_reason is not None:
+                trig_hist[trig_reason] = trig_hist.get(trig_reason, 0) + 1
+            gate_hist[gate] = gate_hist.get(gate, 0) + 1
+
+            fill_px = None
+            if this_entered:
+                fills, _ = mock.get_fills(limit=50)
+                for f in fills:
+                    if f.side in ("buy", "bid", "long"):
+                        fill_px = float(f.price)
+                        break
+
+            outcome = InstantOutcome(
+                ts=t,
+                state_after=state_after,
+                ask=tk.ask,
+                eligible_grace=bool(elig_now),
+                advanced=advanced,
+                entered=this_entered,
+                fill_price=fill_px,
+                gate=gate,
+                trigger_reason=trig_reason,
+                new_events=new_types,
+            )
+            instants.append(outcome)
+            if this_entered and first_entry is None:
+                first_entry = outcome
+
+        return FullScanResult(
+            grace_enabled=grace_enabled,
+            instants=instants,
+            entered_any=entered,
+            first_entry=first_entry,
+            grace_passed_any=grace_passed_any,
+            trigger_fired_any=trigger_fired_any,
+            gate_histogram=gate_hist,
+            trigger_reason_histogram=trig_hist,
+            grid_ticks=len(data.grid),
+            tier=timeline.tier,
+            fwd_mom_true_ticks=fwd_true,
+        )
+    finally:
+        try:
+            relig.clear_forward_momentum_ticks(db, symbol=SYMBOL)
+            db.commit()
+        except Exception:
+            db.rollback()
+        db.close()
+
+
 def _purge_replay_rows(test_engine) -> None:
     """Purge ALL replay-seeded rows from the THROWAWAY DB (replay_v3 ticks + the seeded UPC
     sessions/events). Idempotent + best-effort; only ever runs against the _test DB. Keeps the
@@ -684,15 +1169,206 @@ def _purge_replay_rows(test_engine) -> None:
         _log.warning("[upc_0629] replay-row purge failed (throwaway DB)", exc_info=True)
 
 
+# ── full-window scan entrypoint ──────────────────────────────────────────────────────
+def _run_full_window_main(prod_db_url: str, test_db_url: str, args) -> int:
+    """The DECISIVE full-window scan: does the CURRENT system (grace ON) ENTER UPC at ANY
+    instant of its 06-29 strong-move run, or does a gate block at EVERY instant?"""
+    step = args.grid_step_seconds if args.grid_step_seconds != 1.0 else 5.0
+    print("=" * 90)
+    print("Replay v3 FULL-WINDOW SCAN — does the CURRENT system ENTER UPC at ANY 06-29 instant?")
+    print("=" * 90)
+    print(f"  prod (READ-ONLY): {prod_db_url}")
+    print(f"  sim  (WRITE):     {test_db_url}")
+    print(
+        f"  window: [{FULLSCAN_WINDOW_START:%H:%M:%S}..{FULLSCAN_WINDOW_END:%H:%M:%S}]Z "
+        f"(the recorded $7.4->$18.84 explosion + topping/fade); grid step={step}s; grace ON"
+    )
+
+    data = load_fullscan_upc(prod_db_url, grid_step_seconds=step)
+    print(
+        f"  loaded REAL UPC data: grid={len(data.grid)} NBBO instants; "
+        f"tick history rows={len(data.tick_history_df)}; mirror_ticks={len(data.mirror_ticks_df)}; "
+        f"session-9505 events={len(data.events)}"
+    )
+    if not data.grid:
+        print("  NO recorded NBBO grid for the window — cannot drive the FSM. ABORT.")
+        return 1
+
+    test_engine = create_engine(test_db_url)
+    SessionLocal = sessionmaker(bind=test_engine)
+
+    # TWO arms across the SAME real window:
+    #   FAITHFUL        — UPC's real 0.55 score (the real system, score gate included).
+    #   TRIGGER-ISOLATION — score cleared to 0.90 so the ENTRY TRIGGER is the deciding gate
+    #                       (answers "if the score weren't sub-threshold, would a trigger fire?").
+    try:
+        res_faithful = run_full_window_scan(
+            SessionLocal, data, grace_enabled=True, tier=args.tier, clear_score_gate=False
+        )
+        res_trigger = run_full_window_scan(
+            SessionLocal, data, grace_enabled=True, tier=args.tier, clear_score_gate=True
+        )
+    finally:
+        _purge_replay_rows(test_engine)
+
+    def _print_arm(label: str, res: FullScanResult) -> None:
+        print()
+        print("#" * 90)
+        print(f"# ARM: {label}")
+        print("#   per-instant gate breakdown (one row per gate/state CHANGE)")
+        print("#   columns: time | ask | elig(grace) | gate/outcome | state")
+        print("#" * 90)
+        prev_key = None
+        shown = 0
+        for o in res.instants:
+            key = (o.gate, o.state_after)
+            if key != prev_key:
+                print(
+                    f"  {o.ts:%H:%M:%S}  ask={o.ask:7.2f}  elig={'Y' if o.eligible_grace else 'N'}  "
+                    f"{o.gate:24}  (state={o.state_after})"
+                )
+                prev_key = key
+                shown += 1
+        print(f"  ... {len(res.instants)} instants, {shown} distinct gate/state segments")
+        print("  -- gate histogram --")
+        for g, n in sorted(res.gate_histogram.items(), key=lambda kv: -kv[1]):
+            print(f"     {n:5d}  {g}")
+        if res.trigger_reason_histogram:
+            print("  -- trigger-wait reason breakdown --")
+            for r, n in sorted(res.trigger_reason_histogram.items(), key=lambda kv: -kv[1]):
+                print(f"     {n:5d}  trigger:{r}")
+
+    _print_arm("FAITHFUL (UPC's real 0.55 viability score — the real system)", res_faithful)
+    _print_arm(
+        "TRIGGER-ISOLATION (score cleared to 0.90 — does ANY entry trigger fire?)", res_trigger
+    )
+
+    # ── the decisive answer ──
+    # The CURRENT system entering UPC requires BOTH: (a) the score gate passes (real 0.55 < 0.56
+    # ⇒ it does NOT in faithful) AND (b) eligibility passes (grace) AND (c) a trigger fires. We
+    # report the faithful verdict as THE answer, and the trigger-isolation arm to attribute the
+    # block precisely (eligibility vs trigger vs score).
+    print()
+    print("=" * 90)
+    entered_any = res_faithful.entered_any
+    grace_did_its_job = res_faithful.grace_passed_any
+    trigger_ever_fired = res_trigger.trigger_fired_any or res_faithful.trigger_fired_any
+    if entered_any and res_faithful.first_entry is not None:
+        fe = res_faithful.first_entry
+        verdict = "UPC-ENTERS-FULLWINDOW"
+        px = f"${fe.fill_price:.4f}" if fe.fill_price else "(no fill price)"
+        print(
+            f"VERDICT: {verdict} — the CURRENT system ENTERS UPC at {fe.ts:%H:%M:%S}Z, "
+            f"entry {px}, via {fe.gate} (events: {', '.join(fe.new_events)})."
+        )
+    else:
+        dom = (
+            max(res_faithful.gate_histogram.items(), key=lambda kv: kv[1])
+            if res_faithful.gate_histogram
+            else ("?", 0)
+        )
+        verdict = "UPC-STILL-BLOCKED"
+        print(
+            f"VERDICT: {verdict} — across ALL {len(res_faithful.instants)} scanned instants the "
+            f"CURRENT system NEVER enters UPC. Faithful-arm dominant blocking gate: '{dom[0]}' "
+            f"({dom[1]}/{len(res_faithful.instants)} instants)."
+        )
+        # attribute precisely from the trigger-isolation arm.
+        if res_trigger.entered_any:
+            print(
+                "  ATTRIBUTION: with the score gate cleared the system WOULD enter "
+                f"(first at {res_trigger.first_entry.ts:%H:%M:%S}Z) — so the SCORE gate (UPC's real "
+                "0.55 < the 0.56 impulse_breakout floor) is the binding block; the trigger CAN fire."
+            )
+        elif trigger_ever_fired:
+            print(
+                "  ATTRIBUTION: even with the score gate cleared the trigger fires/advances but the "
+                "entry still does not complete — see the trigger-isolation arm's gate histogram."
+            )
+        else:
+            tdom = (
+                max(res_trigger.gate_histogram.items(), key=lambda kv: kv[1])
+                if res_trigger.gate_histogram
+                else ("?", 0)
+            )
+            print(
+                "  ATTRIBUTION: even with the SCORE gate cleared AND eligibility passing (grace), "
+                f"NO entry trigger EVER fires across the window — the TRIGGER gate is the deeper "
+                f"block (trigger-isolation dominant gate: '{tdom[0]}', {tdom[1]}/"
+                f"{len(res_trigger.instants)}). UPC's miss is the TRIGGER geometry, not only "
+                "eligibility/score."
+            )
+    print(
+        f"  grace did its job (eligibility passed at >=1 instant): {grace_did_its_job} "
+        f"(fwd-mom-True ticks on the real tape: {res_faithful.fwd_mom_true_ticks}/"
+        f"{res_faithful.grid_ticks})"
+    )
+    print(f"  any entry TRIGGER ever fired/advanced (either arm): {trigger_ever_fired}")
+    print(f"  eligibility reconstruction tier: {res_faithful.tier}")
+    print(
+        "  HONESTY: bounded by (a) the Tier-B eligibility reconstruction (the live_eligible "
+        "time-series is not column-recorded; rebuilt from session-9505 events — R1) and (b) the "
+        "OHLCV bar reconstruction (bars resampled from real ticks as-of-t; the P3 parity caveats "
+        "apply — the recorded live bars/feed timing may differ slightly). No entry is fabricated: "
+        "the trigger verdict is whatever the REAL tick_live_session decides on the real tape."
+    )
+    print("=" * 90)
+
+    if args.json:
+        def _arm_json(res: FullScanResult) -> dict:
+            return {
+                "entered_any": res.entered_any,
+                "first_entry": (
+                    {
+                        "ts": res.first_entry.ts.isoformat(),
+                        "ask": res.first_entry.ask,
+                        "fill_price": res.first_entry.fill_price,
+                        "gate": res.first_entry.gate,
+                    }
+                    if res.first_entry
+                    else None
+                ),
+                "grace_passed_any": res.grace_passed_any,
+                "trigger_fired_any": res.trigger_fired_any,
+                "fwd_mom_true_ticks": res.fwd_mom_true_ticks,
+                "grid_ticks": res.grid_ticks,
+                "tier": res.tier,
+                "gate_histogram": res.gate_histogram,
+                "trigger_reason_histogram": res.trigger_reason_histogram,
+            }
+
+        out = {
+            "verdict": verdict,
+            "window": f"{FULLSCAN_WINDOW_START.isoformat()}..{FULLSCAN_WINDOW_END.isoformat()}",
+            "grid_step_seconds": step,
+            "arm_faithful": _arm_json(res_faithful),
+            "arm_trigger_isolation": _arm_json(res_trigger),
+        }
+        print(json.dumps(out, indent=2, default=str))
+    return 0
+
+
 # ── main ────────────────────────────────────────────────────────────────────────────
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Replay v3 focused-P4: real UPC 2026-06-29 grace A/B")
     ap.add_argument("--json", action="store_true", help="emit a machine-readable JSON summary")
     ap.add_argument(
+        "--full-window",
+        action="store_true",
+        help=(
+            "scan the FULL UPC 06-29 strong-move window (~12:40..13:35Z) with the CURRENT system "
+            "(grace ON) and report the per-instant gate breakdown + whether UPC ENTERS at ANY "
+            "instant (the operator's decisive question). Without this flag the focused 13:08 A/B runs."
+        ),
+    )
+    ap.add_argument(
         "--grid-step-seconds",
         type=float,
         default=1.0,
-        help="down-sample the real NBBO grid to one tick per N seconds (default 1.0)",
+        help=(
+            "down-sample the recorded NBBO grid to one tick per N seconds. Default 1.0 for the "
+            "focused A/B; the full-window scan defaults to 5.0 (a ~55-min window = ~660 ticks)."
+        ),
     )
     ap.add_argument(
         "--tier",
@@ -718,6 +1394,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             file=sys.stderr,
         )
         return 2
+
+    if args.full_window:
+        return _run_full_window_main(prod_db_url, test_db_url, args)
 
     print("=" * 78)
     print("Replay v3 FOCUSED-P4 — REAL UPC 2026-06-29 recency-grace A/B")
