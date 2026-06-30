@@ -108,6 +108,18 @@ def _events(db, session_id):
     ]
 
 
+def _event_payload(db, session_id, event_type):
+    e = (
+        db.query(TradingAutomationEvent)
+        .filter(
+            TradingAutomationEvent.session_id == session_id,
+            TradingAutomationEvent.event_type == event_type,
+        )
+        .first()
+    )
+    return e.payload_json if e is not None else None
+
+
 def _set_flag(monkeypatch, value: bool):
     monkeypatch.setattr(
         aq.settings, "chili_momentum_adopt_on_cancel_fill_enabled", value
@@ -265,3 +277,56 @@ def test_equity_untouched(db, monkeypatch):
     db.flush()
     rows2 = brs._load_local_view(db, user_id=None)
     assert "ORPHANED" in _tickers(rows2)  # no non-terminal session -> not excluded
+
+
+# ── 8. cancel-attribution label reflects the TRUE initiator ──────────────────
+# BTCT sess 9871 (2026-06-29): an AUTOMATED monitor cancel (post-recycle) logged
+# session_cancelled {"by": "operator"} even though no human cancelled it. The "by"
+# field must record the caller's real identity: the default (automated) callers
+# record "automation_monitor"; only the operator HTTP endpoint records "operator".
+def test_cancel_default_records_automation_monitor(db, monkeypatch):
+    """An automated caller (the default — auto-arm reaper, confirm-block release,
+    stale-session reaper) must NOT be mislabeled as an operator action."""
+    _set_flag(monkeypatch, True)
+    sess = _live_session(db, symbol="BTCT", state=aq.STATE_WATCHING_LIVE)
+    _patch_adapter(monkeypatch, _fake_adapter(filled_size=0.0, status="cancelled"))
+
+    res = aq.cancel_automation_session(db, user_id=None, session_id=sess.id)
+
+    assert res["ok"] is True
+    payload = _event_payload(db, sess.id, "session_cancelled")
+    assert payload is not None
+    assert payload["by"] == "automation_monitor"
+    assert payload["by"] != "operator"  # the 9871 mislabel must not recur
+
+
+def test_cancel_operator_records_operator(db, monkeypatch):
+    """A genuine operator-initiated cancel (the HTTP endpoint passes cancelled_by=
+    'operator') still records 'operator'."""
+    _set_flag(monkeypatch, True)
+    sess = _live_session(db, symbol="BTCT", state=aq.STATE_WATCHING_LIVE)
+    _patch_adapter(monkeypatch, _fake_adapter(filled_size=0.0, status="cancelled"))
+
+    res = aq.cancel_automation_session(
+        db, user_id=None, session_id=sess.id, cancelled_by="operator"
+    )
+
+    assert res["ok"] is True
+    payload = _event_payload(db, sess.id, "session_cancelled")
+    assert payload is not None
+    assert payload["by"] == "operator"
+
+
+def test_adopt_on_cancel_records_caller_identity(db, monkeypatch):
+    """The adopt-on-cancel-fill path also attributes to the real caller (the
+    entry_adopted_on_cancel event's "by"), not a hardcoded 'operator'."""
+    _set_flag(monkeypatch, True)
+    sess = _live_session(db, symbol="BTCT", state=aq.STATE_WATCHING_LIVE)
+    _patch_adapter(monkeypatch, _fake_adapter(filled_size=100.0, status="filled"))
+
+    res = aq.cancel_automation_session(db, user_id=None, session_id=sess.id)
+
+    assert res.get("adopted") is True
+    payload = _event_payload(db, sess.id, "entry_adopted_on_cancel")
+    assert payload is not None
+    assert payload["by"] == "automation_monitor"  # default automated identity

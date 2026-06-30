@@ -1915,7 +1915,7 @@ def delete_automation_session(db: Session, *, user_id: int, session_id: int) -> 
 
 
 def _try_adopt_filled_entry_on_cancel(
-    db: Session, sess: TradingAutomationSession
+    db: Session, sess: TradingAutomationSession, *, cancelled_by: str = "automation_monitor"
 ) -> Optional[dict[str, Any]]:
     """If a LIVE session being cancelled has an entry order that actually FILLED at
     the broker, ADOPT it instead of orphaning the position. Mirrors
@@ -1993,7 +1993,7 @@ def _try_adopt_filled_entry_on_cancel(
                 "order_id": str(oid),
                 "filled_size": filled,
                 "venue_status": venue_status,
-                "by": "operator",
+                "by": cancelled_by,
             },
         )
         # Walk the LEGAL live FSM chain (no watching->pending shortcut exists).
@@ -2013,7 +2013,19 @@ def _try_adopt_filled_entry_on_cancel(
     return None
 
 
-def cancel_automation_session(db: Session, *, user_id: int, session_id: int) -> dict[str, Any]:
+def cancel_automation_session(
+    db: Session, *, user_id: int, session_id: int, cancelled_by: str = "automation_monitor"
+) -> dict[str, Any]:
+    """Terminalize a cancellable automation session.
+
+    ``cancelled_by`` records the TRUE initiator on the ``session_cancelled`` event's
+    ``by`` field: the operator HTTP endpoint passes ``"operator"``; every automated
+    caller (the auto-arm watch reaper, the rank-displacement reaper, the
+    confirm-block release, the stale-session reaper) leaves the default
+    ``"automation_monitor"`` so a monitor-driven cancel is never mislabeled as a
+    human action (BTCT sess 9871, 2026-06-29: an automated post-recycle cancel logged
+    ``by=operator`` though no operator touched it).
+    """
     if not _tables_present(db):
         return {"ok": False, "error": "tables_missing"}
 
@@ -2057,7 +2069,7 @@ def cancel_automation_session(db: Session, *, user_id: int, session_id: int) -> 
         and sess.mode == "live"
         and prev in LIVE_CANCELLABLE_STATES
     ):
-        _adopt = _try_adopt_filled_entry_on_cancel(db, sess)
+        _adopt = _try_adopt_filled_entry_on_cancel(db, sess, cancelled_by=cancelled_by)
         if _adopt is not None:
             return _adopt
 
@@ -2127,7 +2139,7 @@ def cancel_automation_session(db: Session, *, user_id: int, session_id: int) -> 
         sess.id,
         "session_cancelled",
         {
-            "previous_state": prev, "by": "operator", "terminal_state": sess.state,
+            "previous_state": prev, "by": cancelled_by, "terminal_state": sess.state,
             **({"order_cleanup": _order_cleanup} if _order_cleanup else {}),
         },
         correlation_id=sess.correlation_id,
