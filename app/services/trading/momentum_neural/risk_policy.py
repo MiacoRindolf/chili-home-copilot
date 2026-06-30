@@ -746,6 +746,237 @@ def cushion_risk_multiplier(db, *, base_loss_usd: float) -> tuple[float, dict]:
         return 1.0, {"cushion_mult": 1.0, "reason": "error_fail_neutral"}
 
 
+def _smoothstep(x: float) -> float:
+    """Hermite smoothstep on [0,1]: 0 at/below 0, 1 at/above 1, smooth S in between.
+    Used for the continuous (no fixed step) size ramps."""
+    if not math.isfinite(x):
+        return 1.0
+    t = max(0.0, min(1.0, float(x)))
+    return t * t * (3.0 - 2.0 * t)
+
+
+def daily_room_size_down_multiplier(
+    dist_to_sma_200_atr: float | None,
+    dist_to_resistance_atr: float | None,
+) -> tuple[float, dict[str, Any]]:
+    """ROSS RISK GAP 1 — size-DOWN approaching the daily 200MA / overhead resistance.
+
+    Ross cuts share size as price approaches a clear overhead wall (the daily 200MA from
+    BELOW, or the nearest overhead resistance) — full size with lots of clear sky, smaller
+    into the wall. A CONTINUOUS multiplier in ``[floor, 1.0]`` computed by a smoothstep over
+    the signed daily-ATR distance to the nearest BINDING overhead level:
+
+      room_atr = the closest overhead distance among {200MA-from-below, resistance}
+                 (a NEGATIVE / zero distance means at-or-above the level ⇒ at the wall)
+      mult     = floor + (1 - floor) * smoothstep(room_atr / band_atr)
+
+    Only the SIGNED distance matters and only when the level is OVERHEAD (distance >= 0 = the
+    wall is above/at price). When price is already comfortably ABOVE the 200MA (a large
+    POSITIVE dist_to_sma_200_atr) that level is NOT overhead and contributes no size-down (a
+    momentum name extended above its 200MA is exactly where Ross presses, not trims). The
+    nearest overhead resistance ATR is always treated as a wall-from-below (it is computed as
+    distance-to-overhead). SIZE-DOWN ONLY (mult <= 1.0 by construction; never sizes up). The
+    band + floor are the ONE documented base each (FLOORS, not scattered caps). FAIL-OPEN:
+    no usable distance / flag OFF (handled by the caller) ⇒ ``(1.0, ...)`` byte-identical.
+    Pure (no I/O). docs/DESIGN/MOMENTUM_LANE.md [[project_ross_self_ref_daily_resistance]]"""
+    band = float(getattr(settings, "chili_momentum_daily_room_band_atr", 2.0) or 2.0)
+    floor = float(getattr(settings, "chili_momentum_daily_room_size_floor", 0.4) or 0.4)
+    if not math.isfinite(band) or band <= 0:
+        band = 2.0
+    if not (0.05 <= floor <= 1.0):
+        floor = 0.4
+    # Collect the overhead-distance candidates (daily-ATR units). The resistance distance is
+    # already a "distance to the nearest level ABOVE", so it is a wall whenever it is finite.
+    # The 200MA is only a wall when price is BELOW it (a negative signed dist = above the MA =
+    # not overhead). We take the SMALLEST overhead room (the binding, nearest wall).
+    candidates: list[float] = []
+    try:
+        d_res = float(dist_to_resistance_atr) if dist_to_resistance_atr is not None else None
+    except (TypeError, ValueError):
+        d_res = None
+    if d_res is not None and math.isfinite(d_res):
+        candidates.append(max(0.0, d_res))
+    try:
+        d200 = float(dist_to_sma_200_atr) if dist_to_sma_200_atr is not None else None
+    except (TypeError, ValueError):
+        d200 = None
+    # Signed daily-ATR units: + above the 200MA, - below. The MA is overhead only when price
+    # is BELOW it (d200 < 0); the room-to-the-wall is then |d200|. Above it ⇒ not a wall.
+    if d200 is not None and math.isfinite(d200) and d200 < 0:
+        candidates.append(abs(d200))
+    if not candidates:
+        return 1.0, {"daily_room_mult": 1.0, "reason": "no_overhead_distance"}
+    room_atr = min(candidates)
+    mult = floor + (1.0 - floor) * _smoothstep(room_atr / band)
+    # Numeric safety: clamp into [floor, 1.0] (size-DOWN only).
+    mult = max(floor, min(1.0, mult))
+    return float(mult), {
+        "daily_room_mult": round(float(mult), 4),
+        "room_atr": round(float(room_atr), 4),
+        "band_atr": round(band, 4),
+        "floor": round(floor, 4),
+        "dist_to_sma_200_atr": (None if d200 is None else round(d200, 4)),
+        "dist_to_resistance_atr": (None if d_res is None else round(d_res, 4)),
+    }
+
+
+def red_intraday_size_down_multiplier(
+    db: Any, *, base_loss_usd: float, user_id: int | None = None
+) -> tuple[float, dict[str, Any]]:
+    """ROSS RISK GAP 2 — size-DOWN when down on the day (the cushion ladder, down side).
+
+    Ross trades SMALLER when red on the day. ``cushion_risk_multiplier`` is the UP side
+    (it climbs a ladder off banked GREEN cushion, floored at 1.0); this is the missing DOWN
+    side. A CONTINUOUS multiplier in ``[floor, 1.0]`` keyed on today's REALIZED P&L when it is
+    NEGATIVE, scaled by how deep the red is in UNITS of the day's per-trade risk budget
+    (self-relative / adaptive — no fixed $):
+
+      red_units = max(0, -realized_today) / base_loss_usd
+      mult      = clamp(1 - (1 - floor) * red_units / full_down_units, floor, 1.0)
+
+    Green / flat today ⇒ ``red_units == 0`` ⇒ mult 1.0 (byte-identical). At ``full_down_units``
+    of red (e.g. down ~2x the per-trade loss budget) the size reaches the documented floor.
+    SIZE-DOWN ONLY (never raises). The daily-loss cap + drawdown breaker remain the hard
+    downside bound ABOVE this soft de-risk. ADDITIVE / FAIL-NEUTRAL: flag OFF (handled by the
+    caller), no db, a degenerate base, or any error ⇒ ``(1.0, ...)`` (never increases risk,
+    never blocks). Read-only. docs/DESIGN/MOMENTUM_LANE.md [[reference_ross_video_2026_06_11]]"""
+    try:
+        full_down = float(getattr(settings, "chili_momentum_red_intraday_full_down_units", 2.0) or 2.0)
+        floor = float(getattr(settings, "chili_momentum_red_intraday_size_floor", 0.4) or 0.4)
+        if not math.isfinite(full_down) or full_down <= 0:
+            full_down = 2.0
+        if not (0.05 <= floor <= 1.0):
+            floor = 0.4
+        base = float(base_loss_usd or 0.0)
+        if base <= 0 or not math.isfinite(base):
+            return 1.0, {"red_intraday_mult": 1.0, "reason": "no_base_loss"}
+        from ..governance import global_realized_pnl_today_et
+
+        day = global_realized_pnl_today_et(db, user_id)
+        realized = float(day.get("total_usd") or 0.0)
+        if realized >= 0.0:
+            return 1.0, {
+                "red_intraday_mult": 1.0,
+                "reason": "not_red",
+                "day_realized_usd": round(realized, 2),
+            }
+        red_units = (-realized) / base
+        mult = 1.0 - (1.0 - floor) * (red_units / full_down)
+        mult = max(floor, min(1.0, mult))
+        return float(mult), {
+            "red_intraday_mult": round(float(mult), 4),
+            "day_realized_usd": round(realized, 2),
+            "red_units": round(float(red_units), 4),
+            "full_down_units": round(full_down, 4),
+            "floor": round(floor, 4),
+            "base_loss_usd": round(base, 2),
+        }
+    except Exception:
+        return 1.0, {"red_intraday_mult": 1.0, "reason": "error_fail_neutral"}
+
+
+def account_wide_consecutive_losses(
+    db: Any, *, lookback: int = 40
+) -> tuple[int, dict[str, Any]]:
+    """ROSS RISK GAP 3 — count CONSECUTIVE realized LOSSES across ALL symbols + families.
+
+    Ross's tilt rule: 2-3 reds in a row = walk away. The streak dial only de-SIZES, the
+    count day-blocks are PER-SYMBOL, and the account-wide halts are DOLLAR-based — so N small
+    losses across N different tickers trip no halt. This counts the run of consecutive realized
+    LOSSES over the most-recent REAL ENTERED live outcomes ACROSS ALL execution families
+    (account-wide — NOT lane-segregated), most-recent first, stopping at the first WIN.
+
+    A "loss" is a real ENTERED outcome with realized_pnl_usd < 0; a break-even (== 0) entered
+    trade is treated as NON-loss (it does not extend the tilt run, matching 'a red in a row').
+    Never-entered rows (cancel / no-fill / risk-block carry realized=0.0 NOT NULL) are pruned
+    via ``is_real_entry_outcome`` so they neither count as losses nor reset the run.
+
+    NEW-DAY RESET: only TODAY's ET-session outcomes are considered (the count resets each ET
+    day automatically — a fresh day starts the streak at 0). Read-only, lookahead-free.
+    Returns ``(consecutive_losses, meta)``; thin/failed history ⇒ ``(0, ...)`` (no halt)."""
+    meta: dict[str, Any] = {"consecutive_losses": 0, "lookback": int(lookback)}
+    if db is None or lookback <= 0:
+        return 0, {**meta, "reason": "no_input"}
+    try:
+        from ....models.trading import MomentumAutomationOutcome, TradingAutomationSession
+        from .outcome_labels import is_real_entry_outcome
+
+        # TODAY's ET session only (auto new-day reset). Exclude the alpaca_spot paper twins
+        # (fake money) so their outcomes never trip the real-account tilt halt.
+        start_utc, end_utc = _et_day_bounds_utc(days_ago=0)
+        rows = (
+            db.query(
+                MomentumAutomationOutcome.realized_pnl_usd,
+                MomentumAutomationOutcome.outcome_class,
+            )
+            .join(
+                TradingAutomationSession,
+                TradingAutomationSession.id == MomentumAutomationOutcome.session_id,
+            )
+            .filter(
+                MomentumAutomationOutcome.mode == "live",
+                MomentumAutomationOutcome.realized_pnl_usd.isnot(None),
+                MomentumAutomationOutcome.terminal_at >= start_utc,
+                MomentumAutomationOutcome.terminal_at < end_utc,
+                TradingAutomationSession.execution_family != "alpaca_spot",
+            )
+            .order_by(MomentumAutomationOutcome.terminal_at.desc())
+            .limit(int(lookback))
+            .all()
+        )
+    except Exception:
+        logger.debug("[momentum_neural] account-wide consec-loss read failed", exc_info=True)
+        return 0, {**meta, "reason": "read_failed"}
+    consec = 0
+    seen = 0
+    for pnl, oc in rows:  # newest first
+        if not is_real_entry_outcome(oc):
+            continue  # never-entered: neither a loss nor a reset
+        seen += 1
+        try:
+            pv = float(pnl)
+        except (TypeError, ValueError):
+            continue
+        if pv < 0:
+            consec += 1
+        else:
+            break  # a win (or break-even) ends the consecutive-loss run
+    return consec, {
+        **meta,
+        "consecutive_losses": int(consec),
+        "real_entries_today_seen": int(seen),
+    }
+
+
+def consecutive_loss_halt_decision(db: Any) -> tuple[bool, dict[str, Any]]:
+    """ROSS RISK GAP 3 — account-wide consecutive-loss ARM HALT decision (HALTS ARMING ONLY).
+
+    After ``chili_momentum_consecutive_loss_halt_count`` consecutive account-wide realized
+    losses today (see ``account_wide_consecutive_losses``), HALT NEW ARMING for the rest of
+    the ET session. This is an ADDITIONAL count-based halt that composes with the dollar-based
+    daily-loss cap; it resets on a win or a new ET day, and is reversible.
+
+    Returns ``(halted, meta)``. ⚠️ The caller MUST only gate NEW ARMS with this — open
+    positions still manage + exit normally (this never runs on any exit path). ADDITIVE /
+    FAIL-OPEN: flag OFF / any error ⇒ ``(False, ...)`` so arming is byte-identical to today."""
+    if not bool(getattr(settings, "chili_momentum_consecutive_loss_halt_enabled", True)):
+        return False, {"halted": False, "reason": "disabled"}
+    try:
+        threshold = int(getattr(settings, "chili_momentum_consecutive_loss_halt_count", 4) or 4)
+        if threshold < 2:
+            threshold = 2
+        consec, meta = account_wide_consecutive_losses(db)
+        halted = consec >= threshold
+        return halted, {
+            "halted": bool(halted),
+            "consecutive_losses": int(consec),
+            "halt_count": int(threshold),
+            **{k: v for k, v in meta.items() if k not in ("consecutive_losses",)},
+        }
+    except Exception:
+        return False, {"halted": False, "reason": "error_fail_open"}
+
+
 def _et_day_bounds_utc(*, days_ago: int = 0) -> tuple[datetime, datetime]:
     """[start_utc, end_utc) (naive UTC) for the US/Eastern calendar day ``days_ago`` back.
 

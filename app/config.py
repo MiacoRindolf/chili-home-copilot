@@ -4100,6 +4100,77 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FRONTSIDE_DEFER_PCTILE"),
         description="Own-distribution strength percentile below which the entry SOFT-DEFERS (non-terminal re-poll, bounded) instead of admitting at the floor. Default 0.15 (p15). 0 ⇒ defer disabled. Band [0,0.5].",
     )
+    # ── ROSS RISK GAP 1 — SIZE-DOWN INTO THE 200MA / OVERHEAD RESISTANCE ──────────────
+    # Ross cuts share size approaching the daily 200MA from below / into clear overhead.
+    # A continuous size-DOWN multiplier in [floor, 1.0] keyed on the signed daily-ATR
+    # distance to the 200MA (and the nearest overhead resistance): full size with lots of
+    # room, ramping DOWN (smoothstep over an ATR band) as price approaches the wall from
+    # below. SIZE-DOWN ONLY (never sizes up). Composes as one more bounded _safe_mult factor
+    # in the runner's _eff_max_loss product. OFF / missing distance ⇒ mult 1.0 (byte-identical,
+    # fail-open). docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_daily_room_size_down_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_ROOM_SIZE_DOWN_ENABLED"),
+        description="GAP 1: continuous SIZE-DOWN as price approaches the daily 200MA / overhead resistance from below (signed daily-ATR distance). Risk-reducing only; OFF / missing distance ⇒ mult 1.0 (byte-identical). Default ON.",
+    )
+    chili_momentum_daily_room_band_atr: float = Field(
+        default=2.0,
+        gt=0.0,
+        le=20.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_ROOM_BAND_ATR"),
+        description="GAP 1: the daily-ATR distance band over which the 200MA/resistance size-down ramps (smoothstep). At >= band ATR of room ⇒ full size; AT the wall ⇒ floor. ONE documented base. Default 2.0 daily-ATR.",
+    )
+    chili_momentum_daily_room_size_floor: float = Field(
+        default=0.4,
+        ge=0.05,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_ROOM_SIZE_FLOOR"),
+        description="GAP 1: minimum size multiplier right at / into the 200MA-or-resistance wall (never zeros the order ⇒ no hard veto). ONE documented base. Default 0.4, band [0.05,1.0].",
+    )
+    # ── ROSS RISK GAP 2 — RED-INTRADAY SIZE-DOWN (cushion ladder, down side) ──────────
+    # Ross trades SMALLER when down on the day. The cushion ladder sizes UP after green but
+    # never DOWN when red intraday. A continuous size-DOWN multiplier in [floor, 1.0] keyed
+    # on the day's REALIZED P&L (deeper red ⇒ smaller), measured as a fraction of the day's
+    # risk budget (units of the per-trade loss cap) so it is self-relative/adaptive (no fixed
+    # $). SIZE-DOWN ONLY; green/flat ⇒ 1.0. OFF ⇒ byte-identical. docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_red_intraday_size_down_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RED_INTRADAY_SIZE_DOWN_ENABLED"),
+        description="GAP 2: continuous SIZE-DOWN when down on the day (red intraday realized P&L); deeper red ⇒ smaller, floored. Risk-reducing only; green/flat / OFF ⇒ mult 1.0 (byte-identical). Default ON.",
+    )
+    chili_momentum_red_intraday_full_down_units: float = Field(
+        default=2.0,
+        gt=0.0,
+        le=20.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RED_INTRADAY_FULL_DOWN_UNITS"),
+        description="GAP 2: how many units of the per-trade loss budget of intraday RED reaches the size floor (linear ramp). Down ~2x the per-trade risk ⇒ floor. ONE documented base. Default 2.0.",
+    )
+    chili_momentum_red_intraday_size_floor: float = Field(
+        default=0.4,
+        ge=0.05,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RED_INTRADAY_SIZE_FLOOR"),
+        description="GAP 2: minimum size multiplier when deep red intraday (never zeros the order). ONE documented base. Default 0.4, band [0.05,1.0].",
+    )
+    # ── ROSS RISK GAP 3 — ACCOUNT-WIDE CONSECUTIVE-LOSS ARM HALT (tilt rule) ──────────
+    # Ross's tilt rule: 2-3 reds in a row = walk away. The streak dial only de-SIZES (never
+    # halts), the count day-blocks are PER-SYMBOL, and the account-wide halts are DOLLAR-based
+    # — so N small losses across N tickers trip no halt (death by a thousand papercuts). After
+    # N consecutive realized LOSSES across ALL symbols/families (count resets on a win or a new
+    # ET day), HALT new ARMING (open positions still manage + exit normally). Risk-reducing,
+    # reversible. docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_consecutive_loss_halt_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CONSECUTIVE_LOSS_HALT_ENABLED"),
+        description="GAP 3: HALT new ARMING after N consecutive account-wide realized losses (resets on a win / new ET day). Halts arming only — never blocks exits/management of open positions. OFF ⇒ never halts (byte-identical). Default ON.",
+    )
+    chili_momentum_consecutive_loss_halt_count: int = Field(
+        default=4,
+        ge=2,
+        le=20,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CONSECUTIVE_LOSS_HALT_COUNT"),
+        description="GAP 3: the consecutive account-wide realized-loss count that halts new arming. ONE documented base (Ross's 2-3-red tilt rule, set conservative). Default 4, band [2,20].",
+    )
     # E3 — EXPLOSIVE-FLOOR HARD GATE. Selection ranks by within-batch PERCENTILE, so on a
     # dull tape the best-of-a-dull-batch ranks #1 and arms a non-explosive name. Ross's
     # stated floors (RVOL >= ~5x AND day-change >= ~10%) are absolute, not relative. When

@@ -3504,6 +3504,35 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     except Exception:
         pass
 
+    # Guard 5b2: ACCOUNT-WIDE CONSECUTIVE-LOSS HALT (Ross GAP 3 — the tilt rule '2-3 reds in a
+    # row = walk away'). The streak dial only de-SIZES (never halts), the COUNT day-blocks are
+    # PER-SYMBOL, and the other account-wide halts are DOLLAR-based — so N small losses across N
+    # different tickers trip no halt (death by a thousand papercuts). This is the missing
+    # account-wide, COUNT-based tilt halt: after N consecutive realized losses across ALL
+    # symbols/families today (resets on a win or a new ET day), STOP arming NEW entries for the
+    # session. It composes WITH the dollar caps (an ADDITIONAL count halt, not a replacement).
+    # ⚠️ HALTS ARMING ONLY — every exit/stop/trail/bailout/scale-out runs in the live runner,
+    # which this guard does not gate, so OPEN positions still manage + exit normally. Same
+    # early-out shape as Guards 4/5; observable (out["skipped"]=consecutive_loss_halt + a log).
+    # OFF (handled in the helper) => not halted => byte-identical. Fail-open. MOMENTUM_LANE.md
+    try:
+        from .risk_policy import consecutive_loss_halt_decision
+
+        _cl_halt, _cl_meta = consecutive_loss_halt_decision(db)
+        if _cl_halt:
+            out["skipped"] = "consecutive_loss_halt"
+            out["consecutive_losses"] = _cl_meta.get("consecutive_losses")
+            out["consecutive_loss_halt_count"] = _cl_meta.get("halt_count")
+            logger.warning(
+                "[auto_arm] account-wide consecutive-loss HALT: %s consecutive realized "
+                "losses today >= %s threshold — halting NEW arming (open positions still "
+                "manage/exit). meta=%s",
+                _cl_meta.get("consecutive_losses"), _cl_meta.get("halt_count"), _cl_meta,
+            )
+            return out
+    except Exception:
+        pass
+
     # Guard 5c: WIN-CYCLE FATIGUE — RED hard-stop (Batch E(2), ENTRIES ONLY). Once today's
     # CLEAN-WIN count (this execution family) reaches the RED threshold, STOP arming NEW
     # entries for the session — lock in the green day instead of over-trading it back. This

@@ -8934,12 +8934,72 @@ def tick_live_session(
                 )
             except Exception:
                 _frontside_mult = 1.0  # fail-OPEN: a tilt error never blocks/shrinks the fill
+        # ROSS RISK GAP 1 — SIZE-DOWN INTO THE 200MA / OVERHEAD RESISTANCE. Ross cuts share
+        # size approaching the daily 200MA from below / into clear overhead; the ~22-factor
+        # sizing chain below had NO 200MA/resistance-distance factor (full size straight into
+        # the wall). The signed daily-ATR distances (dist_to_sma_200_atr / dist_to_resistance_atr)
+        # are ALREADY computed on the cached, per-(symbol,day) DailyContext (no new fetch). A
+        # CONTINUOUS smoothstep size-DOWN in [floor,1.0] keyed on the nearest OVERHEAD distance
+        # composes as one more bounded _safe_mult factor below (under the SAME 3x clamp + hard
+        # max_notional ceiling, so it can ONLY shrink the per-trade risk budget — never sizes up,
+        # never vetoes). Equities only (the daily 200MA/overhead frame is a stock-chart concept;
+        # crypto -USD names skip it). Flag OFF / no DailyContext / no overhead distance ⇒ mult 1.0
+        # (byte-identical, fail-OPEN). docs/DESIGN/MOMENTUM_LANE.md
+        _daily_room_mult = 1.0
+        if (
+            bool(getattr(settings, "chili_momentum_daily_room_size_down_enabled", True))
+            and not str(sess.symbol or "").upper().endswith("-USD")
+        ):
+            try:
+                from .risk_policy import daily_room_size_down_multiplier as _drm
+
+                _dr_ctx = _daily_ctx_cached(sess.symbol, price=guarded_ask)
+                _dr_d200 = _float_or_none(getattr(_dr_ctx, "dist_to_sma_200_atr", None)) if _dr_ctx is not None else None
+                _dr_dres = _float_or_none(getattr(_dr_ctx, "dist_to_resistance_atr", None)) if _dr_ctx is not None else None
+                _daily_room_mult, _dr_meta = _drm(_dr_d200, _dr_dres)
+                if _daily_room_mult < 1.0:
+                    le["daily_room_size_down"] = _dr_meta
+                    _log.info(
+                        "[momentum_neural] daily-room size-down sym=%s mult=%s room_atr=%s "
+                        "dist_200=%s dist_res=%s base_max_loss=%s",
+                        sess.symbol, round(float(_daily_room_mult), 4),
+                        _dr_meta.get("room_atr"), _dr_d200, _dr_dres, round(float(_base_max_loss), 4),
+                    )
+            except Exception:
+                _daily_room_mult = 1.0  # fail-OPEN: any error never blocks/shrinks the fill
+        # ROSS RISK GAP 2 — RED-INTRADAY SIZE-DOWN (the cushion ladder, down side). Ross trades
+        # SMALLER when down on the day; the cushion ladder sizes UP off banked GREEN cushion but
+        # never DOWN when red intraday. A CONTINUOUS size-DOWN in [floor,1.0] keyed on today's
+        # NEGATIVE realized P&L, scaled by the red depth in units of the day's per-trade risk
+        # budget (self-relative — no fixed $). Composes as one more bounded _safe_mult factor
+        # below (same 3x clamp + hard max_notional ceiling); green/flat ⇒ 1.0 (byte-identical).
+        # The daily-loss cap + drawdown breaker remain the hard downside bound above this soft
+        # de-risk. Flag OFF / fail-open ⇒ 1.0. docs/DESIGN/MOMENTUM_LANE.md
+        _red_intraday_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_red_intraday_size_down_enabled", True)):
+            try:
+                from .risk_policy import red_intraday_size_down_multiplier as _rim
+
+                _red_intraday_mult, _ri_meta = _rim(
+                    db, base_loss_usd=float(_base_max_loss), user_id=sess.user_id
+                )
+                if _red_intraday_mult < 1.0:
+                    le["red_intraday_size_down"] = _ri_meta
+                    _log.info(
+                        "[momentum_neural] red-intraday size-down sym=%s mult=%s day_realized=%s "
+                        "red_units=%s base_max_loss=%s",
+                        sess.symbol, round(float(_red_intraday_mult), 4),
+                        _ri_meta.get("day_realized_usd"), _ri_meta.get("red_units"),
+                        round(float(_base_max_loss), 4),
+                    )
+            except Exception:
+                _red_intraday_mult = 1.0  # fail-OPEN: any error never blocks/shrinks the fill
         # LOW-7: sanitize EACH per-factor multiplier (fail-NEUTRAL to 1.0 on NaN/inf/negative)
         # as it enters the product so a single poisoned helper can never NaN-out or sign-flip the
         # whole budget and silently kill the fill. The 3x clamp + max_notional ceiling below are
         # unchanged; a valid product is byte-identical.
         _eff_max_loss = min(
-            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult),
+            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult) * _safe_mult(_daily_room_mult) * _safe_mult(_red_intraday_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # THIN/TOXIC-SPREAD HARD PER-TRADE LOSS CAP (default ON; OFF / not-thin => no-op,
