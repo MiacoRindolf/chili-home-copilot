@@ -1552,6 +1552,94 @@ def run_momentum_neural_tick(
                             _weights["news_catalyst"] = ROSS_NEWS_CATALYST_PILLAR_WEIGHT
                 except Exception:
                     pass
+            # CROWDED-TAPE CATALYST-SUBSTITUTE (selection-rank hold; default ON, no-op until the
+            # news pillar is also on ⇒ byte-identical). Ross trades SYMPATHY movers: a crowded-tape
+            # / high-RVOL name riding a THEME is a real leadership signal even WITHOUT its own
+            # primary (P1) catalyst. In the news pillar above, a name in NONE of the catalyst sets
+            # reads news_catalyst_pct=None (pillar omitted) — NEUTRAL in isolation, but its
+            # strong-catalyst peers carry a high news percentile and out-rank it on the same
+            # RVOL+momentum core, so the catalyst-LESS sympathy name is demoted purely on P1-absence.
+            # THE FIX: a genuine keyword-THEME member (a sympathy peer of a real leader) that is ALSO
+            # a CROWDED high-RVOL name (within-batch RVOL percentile in the top tail) gets a partial
+            # news-substitute sub-score FLOORED onto news_catalyst_pct — at MOST the present/ungraded
+            # reference (so a real GRADED catalyst leader still out-ranks it, and a NON-mover crowded
+            # tape with low RVOL earns nothing). Adaptive (own within-batch RVOL percentile), bounded
+            # (capped below strong), a FLOOR applied ONLY to no-own-catalyst names (never lowers a
+            # graded name), selection-only re-rank — never a veto. Equity-only (crypto has no equity
+            # news theme). Gated on BOTH the news pillar AND this flag; either OFF ⇒ byte-identical.
+            if (
+                bool(getattr(settings, "chili_momentum_news_catalyst_weight_enabled", False))
+                and bool(getattr(settings, "chili_momentum_theme_crowded_substitute_enabled", True))
+            ):
+                try:
+                    from ...massive_client import get_recent_news_items as _ctx_news_items
+                    from .ross_momentum import (
+                        ROSS_NEWS_GRADE_PRESENT as _ctx_grade_present,
+                        ROSS_NEWS_CATALYST_PILLAR_WEIGHT as _ctx_nc_weight,
+                        _extract_pillars as _ctx_extract,
+                        _percentile_rank as _ctx_pctl,
+                    )
+                    from .theme_detector import (
+                        crowded_tape_news_substitute as _ctx_substitute,
+                        theme_sympathy_symbols as _ctx_theme_peers,
+                    )
+
+                    # within-batch RVOL percentiles + the theme-sympathy movers, from the SAME
+                    # equity signals (crypto -USD has no equity news theme — excluded).
+                    _ctx_rvol: dict[str, float] = {}
+                    _ctx_movers: dict[str, float] = {}
+                    for _csym, _csig in _ross_signals.items():
+                        _csu = str(_csym).upper()
+                        if _csu.endswith("-USD") or not isinstance(_csig, dict):
+                            continue
+                        _crv, _cmom, _, _ = _ctx_extract(_csig)
+                        if _crv is not None:
+                            _ctx_rvol[_csu] = float(_crv)
+                        if _cmom is not None:
+                            _ctx_movers[_csu] = float(_cmom)
+                    if _ctx_rvol and _ctx_movers:
+                        _rvol_sorted = sorted(_ctx_rvol.values())
+                        _peers = _ctx_theme_peers(_ctx_movers, _ctx_news_items())
+                        _peers_u = {str(p).upper() for p in (_peers or set())}
+                        if _peers_u:
+                            _n_sub = 0
+                            for _csym, _csig in _ross_signals.items():
+                                if not isinstance(_csig, dict):
+                                    continue
+                                _csu = str(_csym).upper()
+                                if _csu.endswith("-USD") or _csu not in _peers_u:
+                                    continue
+                                # only NO-own-catalyst names (the demoted ones); never lower a
+                                # graded name. A name the news block stamped has grade != "none".
+                                _grade = _csig.get("news_catalyst_grade")
+                                if _grade not in (None, "none"):
+                                    continue
+                                _rv = _ctx_rvol.get(_csu)
+                                if _rv is None:
+                                    continue
+                                _rp = _ctx_pctl(_rv, _rvol_sorted)
+                                _sub = _ctx_substitute(
+                                    True, _rp, grade_present=float(_ctx_grade_present))
+                                if _sub is None:
+                                    continue
+                                _prev = _csig.get("news_catalyst_pct")
+                                try:
+                                    _prev_f = float(_prev) if _prev is not None else None
+                                except (TypeError, ValueError):
+                                    _prev_f = None
+                                # FLOOR: only stamp when it RAISES (or first-sets) the sub-score.
+                                if _prev_f is None or _sub > _prev_f:
+                                    _csig["news_catalyst_pct"] = _sub
+                                    _csig["news_catalyst_grade"] = "theme_crowded"
+                                    _csig["news_crowded_substitute"] = True
+                                    _n_sub += 1
+                            if _n_sub > 0:
+                                # ensure the pillar is folded even if NO graded name was stamped
+                                # above (the credit alone makes the news axis meaningful).
+                                _weights = dict(_weights)
+                                _weights["news_catalyst"] = _ctx_nc_weight
+                except Exception:
+                    pass
             # PRICE SWEET-SPOT TILT (default OFF ⇒ byte-identical): Ross trades mostly $3-10.
             # The HARD $1-20 price-band gate (auto_arm) is UNTOUCHED — this is a SOFT PREFERENCE
             # pillar that BOOSTS names in the $3-10 sweet-spot and mildly de-rates names outside
