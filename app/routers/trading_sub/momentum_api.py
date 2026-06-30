@@ -664,7 +664,9 @@ def post_automation_session_cancel(
     session_id: int,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    out = cancel_automation_session(db, user_id=_automation_user_id(request, db), session_id=session_id)
+    out = cancel_automation_session(
+        db, user_id=_automation_user_id(request, db), session_id=session_id, cancelled_by="operator"
+    )
     if not out.get("ok"):
         err = out.get("error")
         code = 404 if err == "not_found" else 400

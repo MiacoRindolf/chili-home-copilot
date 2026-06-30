@@ -4100,6 +4100,77 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FRONTSIDE_DEFER_PCTILE"),
         description="Own-distribution strength percentile below which the entry SOFT-DEFERS (non-terminal re-poll, bounded) instead of admitting at the floor. Default 0.15 (p15). 0 ⇒ defer disabled. Band [0,0.5].",
     )
+    # ── ROSS RISK GAP 1 — SIZE-DOWN INTO THE 200MA / OVERHEAD RESISTANCE ──────────────
+    # Ross cuts share size approaching the daily 200MA from below / into clear overhead.
+    # A continuous size-DOWN multiplier in [floor, 1.0] keyed on the signed daily-ATR
+    # distance to the 200MA (and the nearest overhead resistance): full size with lots of
+    # room, ramping DOWN (smoothstep over an ATR band) as price approaches the wall from
+    # below. SIZE-DOWN ONLY (never sizes up). Composes as one more bounded _safe_mult factor
+    # in the runner's _eff_max_loss product. OFF / missing distance ⇒ mult 1.0 (byte-identical,
+    # fail-open). docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_daily_room_size_down_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_ROOM_SIZE_DOWN_ENABLED"),
+        description="GAP 1: continuous SIZE-DOWN as price approaches the daily 200MA / overhead resistance from below (signed daily-ATR distance). Risk-reducing only; OFF / missing distance ⇒ mult 1.0 (byte-identical). Default ON.",
+    )
+    chili_momentum_daily_room_band_atr: float = Field(
+        default=2.0,
+        gt=0.0,
+        le=20.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_ROOM_BAND_ATR"),
+        description="GAP 1: the daily-ATR distance band over which the 200MA/resistance size-down ramps (smoothstep). At >= band ATR of room ⇒ full size; AT the wall ⇒ floor. ONE documented base. Default 2.0 daily-ATR.",
+    )
+    chili_momentum_daily_room_size_floor: float = Field(
+        default=0.4,
+        ge=0.05,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_ROOM_SIZE_FLOOR"),
+        description="GAP 1: minimum size multiplier right at / into the 200MA-or-resistance wall (never zeros the order ⇒ no hard veto). ONE documented base. Default 0.4, band [0.05,1.0].",
+    )
+    # ── ROSS RISK GAP 2 — RED-INTRADAY SIZE-DOWN (cushion ladder, down side) ──────────
+    # Ross trades SMALLER when down on the day. The cushion ladder sizes UP after green but
+    # never DOWN when red intraday. A continuous size-DOWN multiplier in [floor, 1.0] keyed
+    # on the day's REALIZED P&L (deeper red ⇒ smaller), measured as a fraction of the day's
+    # risk budget (units of the per-trade loss cap) so it is self-relative/adaptive (no fixed
+    # $). SIZE-DOWN ONLY; green/flat ⇒ 1.0. OFF ⇒ byte-identical. docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_red_intraday_size_down_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RED_INTRADAY_SIZE_DOWN_ENABLED"),
+        description="GAP 2: continuous SIZE-DOWN when down on the day (red intraday realized P&L); deeper red ⇒ smaller, floored. Risk-reducing only; green/flat / OFF ⇒ mult 1.0 (byte-identical). Default ON.",
+    )
+    chili_momentum_red_intraday_full_down_units: float = Field(
+        default=2.0,
+        gt=0.0,
+        le=20.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RED_INTRADAY_FULL_DOWN_UNITS"),
+        description="GAP 2: how many units of the per-trade loss budget of intraday RED reaches the size floor (linear ramp). Down ~2x the per-trade risk ⇒ floor. ONE documented base. Default 2.0.",
+    )
+    chili_momentum_red_intraday_size_floor: float = Field(
+        default=0.4,
+        ge=0.05,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RED_INTRADAY_SIZE_FLOOR"),
+        description="GAP 2: minimum size multiplier when deep red intraday (never zeros the order). ONE documented base. Default 0.4, band [0.05,1.0].",
+    )
+    # ── ROSS RISK GAP 3 — ACCOUNT-WIDE CONSECUTIVE-LOSS ARM HALT (tilt rule) ──────────
+    # Ross's tilt rule: 2-3 reds in a row = walk away. The streak dial only de-SIZES (never
+    # halts), the count day-blocks are PER-SYMBOL, and the account-wide halts are DOLLAR-based
+    # — so N small losses across N tickers trip no halt (death by a thousand papercuts). After
+    # N consecutive realized LOSSES across ALL symbols/families (count resets on a win or a new
+    # ET day), HALT new ARMING (open positions still manage + exit normally). Risk-reducing,
+    # reversible. docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_consecutive_loss_halt_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CONSECUTIVE_LOSS_HALT_ENABLED"),
+        description="GAP 3: HALT new ARMING after N consecutive account-wide realized losses (resets on a win / new ET day). Halts arming only — never blocks exits/management of open positions. OFF ⇒ never halts (byte-identical). Default ON.",
+    )
+    chili_momentum_consecutive_loss_halt_count: int = Field(
+        default=4,
+        ge=2,
+        le=20,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CONSECUTIVE_LOSS_HALT_COUNT"),
+        description="GAP 3: the consecutive account-wide realized-loss count that halts new arming. ONE documented base (Ross's 2-3-red tilt rule, set conservative). Default 4, band [2,20].",
+    )
     # E3 — EXPLOSIVE-FLOOR HARD GATE. Selection ranks by within-batch PERCENTILE, so on a
     # dull tape the best-of-a-dull-batch ranks #1 and arms a non-explosive name. Ross's
     # stated floors (RVOL >= ~5x AND day-change >= ~10%) are absolute, not relative. When
@@ -5518,6 +5589,160 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULLBACK_REENTRY_MAX_DIP_PCT"),
         description="Shallow-dip cap: the micro-pullback dip from the local bounce-high must be <= this fraction (a deep rollover is NOT a micro-pullback). Adaptive convention; keep small.",
     )
+    # ── ROSS BUY-THE-DIP / PULLBACK ADD (the operator ask). The #772 pyramid + the
+    # micro-pullback re-load both add on CONTINUATION (UP/new-HOD, dip-and-curl). Ross
+    # ALSO buys the controlled PULLBACK to support (a higher-low / breakout shelf / VWAP)
+    # in an INTACT uptrend — sized conservatively, the add's stop just below the higher-low.
+    # FALLING-KNIFE-GUARDED by the just-shipped front-side strength (front_side_strength_score
+    # >= an adaptive floor) + OFI-not-collapsing + above-VWAP-or-reclaiming + higher-low. A
+    # SEPARATE sub-branch in the held-position tick path with its OWN predicate
+    # (pullback_add_decision), OWN counter (pullback_add_count), OWN in-flight marker
+    # (pullback_add_order_id), OWN cooldown. ADDITIVE: composes with — never double-fires
+    # with — the UP-pyramid / micro-pullback (it refuses when EITHER has an add in flight).
+    # Re-loads route through pyramid_blend_on_fill + pyramid_risk_anchor_usd VERBATIM so the
+    # #769 max-loss circuit keeps re-basing to the STARTER R0. EQUITY-FIRST (crypto deferred).
+    # Default ON (no dark flags); flag OFF ⇒ byte-identical (no pullback-add). This is an ADD
+    # lever (more position on a healthy dip), NEVER a veto. docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_pullback_add_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_ENABLED"),
+        description="Kill-switch for the Ross BUY-THE-DIP pullback ADD (add on a controlled pullback to support in an intact uptrend). false = byte-identical (no pullback-add, no pos mutation, no emit, no broker call). Default ON.",
+    )
+    chili_momentum_pullback_add_max: int = Field(
+        default=2,
+        ge=1,
+        le=4,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_MAX"),
+        description="Per-name/per-session cap on pullback-adds (bounds total pullback-add risk = max * risk_fraction * R0). Separate counter from the UP-pyramid for clean attribution. Documented small N.",
+    )
+    chili_momentum_pullback_add_cooldown_seconds: float = Field(
+        default=30.0,
+        ge=0.0,
+        le=600.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_COOLDOWN_SECONDS"),
+        description="Cooldown between pullback-adds. PINNED to >= 2 * micropull_bar_seconds (min 30s @ 15s bars) so one wiggle cannot fire two adds before the structure re-forms.",
+    )
+    chili_momentum_pullback_add_risk_fraction: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_RISK_FRACTION"),
+        description="rho: each pullback-add's structural risk as a fraction of the STARTER R0 (Ross sizes the pullback-add conservatively; <=1 keeps the add inside the banked cushion). Sized via compute_risk_first_quantity, never a hardcoded block. The add size is structurally <= the initial entry (R-funded off R0).",
+    )
+    chili_momentum_pullback_add_depth_lo_frac: float = Field(
+        default=0.20,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_DEPTH_LO_FRAC"),
+        description="Lower edge of the CONTROLLED pullback-depth band: the dip from the HWM must be >= this fraction of the move's range (a 1-tick wiggle is NOT a pullback-buy). ONE documented FLOOR; range-relative (no fixed-price magic). Default 0.20.",
+    )
+    chili_momentum_pullback_add_depth_hi_frac: float = Field(
+        default=0.62,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_DEPTH_HI_FRAC"),
+        description="Upper edge of the CONTROLLED pullback-depth band: the dip from the HWM must be <= this fraction of the move's range (a deeper retrace is a rollover, not a healthy dip). A Fibonacci-0.618 retrace ceiling; range-relative. Default 0.62.",
+    )
+    chili_momentum_pullback_add_strength_floor: float = Field(
+        default=0.50,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_STRENGTH_FLOOR"),
+        description="⭐ FALLING-KNIFE GUARD base: the minimum front_side_strength_score for the uptrend to count as INTACT before a pullback-add. ONE documented base (the neutral 0.50 midpoint = a FLOOR); when the regime-adaptive p25 (the entry-side s_lo) is warm and HIGHER, the caller uses that instead. front_side_strength None ⇒ fail-CLOSED (no add). Default 0.50.",
+    )
+    # ROSS ADD GAP — ADD-ON-FLAG-BREAKOUT on the HELD position. The FOURTH held-position add:
+    # while holding a winner that consolidated into a tight BULL FLAG (a base after the
+    # impulse), Ross buys the BREAK of the flag's swing high — a CONTINUATION add at the
+    # breakout. DISTINCT from (1) the UP-pyramid (new-HOD + OFI thrust), (2) the micro-pullback
+    # re-load, and (3) the BUY-THE-DIP pullback-add (bounce off support). The flag geometry +
+    # the confirmed break reuse bull_flag_confirmation on the held position's recent bars; this
+    # block has its OWN counter (flag_breakout_add_count), kill-switch, in-flight marker
+    # (flag_breakout_add_order_id), and cooldown. ADDITIVE: composes with — never double-fires
+    # with — the other 3 adds (it refuses when ANY of them has an add in flight). Re-loads route
+    # through pyramid_blend_on_fill + pyramid_risk_anchor_usd VERBATIM so the #769 max-loss
+    # circuit keeps re-basing to the STARTER R0. EQUITY-FIRST (crypto deferred). Default ON (no
+    # dark flags); flag OFF ⇒ byte-identical. ADD lever (more position on a confirmed flag-break),
+    # NEVER a veto. docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_flag_breakout_add_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLAG_BREAKOUT_ADD_ENABLED"),
+        description="Kill-switch for the Ross ADD-ON-FLAG-BREAKOUT (pyramid into a held-position bull-flag BREAK — a continuation add at the flag-top take-out). false = byte-identical (no flag-break add, no pos mutation, no emit, no broker call). Default ON.",
+    )
+    chili_momentum_flag_breakout_add_max: int = Field(
+        default=2,
+        ge=1,
+        le=4,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLAG_BREAKOUT_ADD_MAX"),
+        description="Per-name/per-session cap on flag-breakout adds (bounds total flag-add risk = max * risk_fraction * R0). Separate counter from the UP-pyramid / dip-add for clean attribution. Documented small N.",
+    )
+    chili_momentum_flag_breakout_add_cooldown_seconds: float = Field(
+        default=30.0,
+        ge=0.0,
+        le=600.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLAG_BREAKOUT_ADD_COOLDOWN_SECONDS"),
+        description="Cooldown between flag-breakout adds. PINNED to >= 2 * micropull_bar_seconds (min 30s @ 15s bars) so one break wiggle cannot fire two adds before a new flag re-forms.",
+    )
+    chili_momentum_flag_breakout_add_risk_fraction: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLAG_BREAKOUT_ADD_RISK_FRACTION"),
+        description="rho: each flag-breakout add's structural risk as a fraction of the STARTER R0 (Ross sizes a continuation add conservatively; <=1 keeps the add inside the banked cushion and structurally <= the initial entry). Sized via compute_risk_first_quantity, never a hardcoded block.",
+    )
+    chili_momentum_flag_breakout_add_margin_frac: float = Field(
+        default=0.10,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLAG_BREAKOUT_ADD_MARGIN_FRAC"),
+        description="The breakout-confirmation margin: the live bid must clear the flag high by >= this fraction of the flag RANGE (flag_high - flag_low) for the break to count as a GENUINE take-out (not a 1-tick wick). ONE documented base; range-relative (no fixed-price magic). Default 0.10 (one-tenth of the flag's own range).",
+    )
+    chili_momentum_flag_breakout_add_strength_floor: float = Field(
+        default=0.50,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLAG_BREAKOUT_ADD_STRENGTH_FLOOR"),
+        description="⭐ FALLING-KNIFE GUARD base: the minimum front_side_strength_score for the uptrend to count as INTACT before a flag-breakout add. ONE documented base (the neutral 0.50 midpoint = a FLOOR); when the regime-adaptive p25 (the entry-side s_lo) is warm and HIGHER, the caller uses that instead. front_side_strength None ⇒ fail-CLOSED (no add). Default 0.50.",
+    )
+    # ROSS EXIT GAP 1 — "lost VWAP → flatten" on the HELD position. Ross's intraday
+    # line-in-the-sand: after entry, if price LOSES session VWAP in a CONFIRMED way he
+    # is OUT. The CONFIRMED-LOSS definition (anti-whipsaw, the ONE documented base): the
+    # last CLOSED bar closed below session VWAP AND the live bid is still below VWAP by
+    # an ADAPTIVE margin (the name's OWN close-vs-VWAP dispersion sigma, NOT a fixed
+    # magnitude) AND order-flow is NOT positive (tape/OFI confirms the break, fail-OPEN
+    # to "confirmed" only when both the closed-bar and the margin already agree). A
+    # momentary 1-tick undercut canNOT fire it (a CLOSED bar is required); a dip that
+    # HOLDS/RECLAIMS VWAP is a DIP-BUY (the pullback-add), not a flatten. COMPOSES with
+    # the pullback-add by PRE-EMPTING it: this check runs BEFORE the dip-add block and
+    # returns on a confirmed loss, so the same tick can never both add and flatten.
+    chili_momentum_lost_vwap_flatten_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LOST_VWAP_FLATTEN_ENABLED"),
+        description="Kill-switch for the Ross lost-VWAP → flatten exit on a held LONG (confirmed loss: last closed bar below session VWAP AND live bid below VWAP by the name's own dispersion-sigma margin AND order-flow not positive). false = byte-identical (no flatten, no transition, no emit). EXIT-only — respects INVARIANT-A (can flatten, never loosens the ratchet floor). Default ON.",
+    )
+    chili_momentum_lost_vwap_margin_sigma: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=3.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LOST_VWAP_MARGIN_SIGMA"),
+        description="Anti-whipsaw margin for the lost-VWAP flatten: the live bid must sit below session VWAP by this many of the name's OWN close-vs-VWAP sigma before the loss counts as CONFIRMED (a fraction of the name's own dispersion, NOT a fixed-price magnitude). ONE documented base; raise to demand a deeper confirmed break. Default 0.25.",
+    )
+    # ROSS EXIT GAP 2 — live close-below-structure (BOS). Ross exits on a confirmed bar
+    # CLOSE below structure (the last confirmed swing low), not an intrabar wick. The
+    # live lane only had ATR/chandelier INTRABAR trailing; this ports the backtest/paper
+    # bos_exit_triggered_long onto a CLOSED-bar read so it fires on a confirmed close
+    # below the swing low, distinct from the intrabar trail (whichever fires first wins).
+    chili_momentum_bos_exit_live_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BOS_EXIT_LIVE_ENABLED"),
+        description="Kill-switch for the live close-below-structure (BOS) exit on a held LONG: a CONFIRMED last-closed-bar close below the last confirmed swing low (minus a small buffer) flattens. Distinct from the intrabar chandelier trail; whichever fires first wins. false = byte-identical (no BOS exit, no transition, no emit). EXIT-only — respects INVARIANT-A. Default ON.",
+    )
+    chili_momentum_bos_exit_buffer_pct: float = Field(
+        default=0.003,
+        ge=0.0,
+        le=0.05,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BOS_EXIT_BUFFER_PCT"),
+        description="Buffer below the last confirmed swing low for the live BOS exit: the closed-bar close must be below swing_low * (1 - buffer) to flatten (a small structural cushion so a tick AT the swing low does not flatten). ONE documented base; matches the backtest/paper bos_exit_triggered_long default. Default 0.003 (30 bps).",
+    )
     # EVENT-DRIVEN TICK EXIT (Lever B-2, 2026-06-16): a held crypto trailing position
     # whose order flow rolls over (OFI < thr) wakes the exit runner on the WS tick —
     # up to 15s sooner than the poll (Ross "eject the moment the ask thickens"). A
@@ -6261,6 +6486,16 @@ class Settings(BaseSettings):
         default=0.5, ge=0.0, le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_VERTICAL_CHASE_MIN_CONFLUENCE"),
         description="Minimum confirmed-thrust confluence in [0,1] (tape-thrust AND squeeze-fuel AND RVOL, halt-resume-gated) before any raise above the abs_cap is granted. Below this the ceiling stays at the abs_cap. Adaptive: the raise scales linearly from abs_cap@this to max_bps@1.0.",
+    )
+    chili_momentum_vertical_chase_nohalt_thrust_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VERTICAL_CHASE_NOHALT_THRUST_ENABLED"),
+        description="Unlock the deep vertical chase-ceiling raise on a CONFIRMED no-halt UP-thrust vertical (a genuine 1m new-high push that never halted), not ONLY inside a halt-resume. The no-halt unlock is FAIL-CLOSED + knife-guarded: it requires ALL of live OFI>0 (buyers lifting) AND price making a NEW HIGH above the breakout level (ask being eaten up) AND above-VWAP-or-reclaiming AND RVOL above the explosive floor — a fade / below-VWAP / OFI<=0 / non-new-high move stays at the abs_cap. The chased price is still risk-first re-sized (dollar-risk unchanged) + bounded by the #769 max-loss circuit. False ⇒ the deep budget stays halt-resume-gated (byte-identical to the prior behavior). Inert while vertical_chase_enabled=False.",
+    )
+    chili_momentum_vertical_chase_nohalt_min_confluence: float = Field(
+        default=0.6, ge=0.0, le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VERTICAL_CHASE_NOHALT_MIN_CONFLUENCE"),
+        description="Floor share of the thrust confluence granted to a CONFIRMED no-halt UP-thrust vertical (vs the 0.5 halt-resume floor). Set above the halt floor (default 0.6) because a no-halt vertical must clear a genuinely strong, UP, confirmed-thrust bar (OFI>0 + new-high + above-VWAP + RVOL) to earn the deep budget; squeeze-fuel + RVOL still add bounded share on top, capped at 1.0. Inert while vertical_chase_nohalt_thrust_enabled=False.",
     )
     chili_momentum_risk_max_position_size_base: float = Field(
         default=1_000_000.0,
@@ -8406,6 +8641,18 @@ class Settings(BaseSettings):
     chili_alpaca_quote_max_age_seconds: float = Field(
         default=60.0, ge=1.0, le=600.0,
         validation_alias=AliasChoices("CHILI_ALPACA_QUOTE_MAX_AGE_SECONDS"),
+    )
+    # ── Short-side lane (SHORT_SIDE_LANE.md) ──────────────────────────────────
+    # Master gate for the SHORT side on the Alpaca rail. DEFAULT-OFF on purpose:
+    # shorting is asymmetric/dangerous (unbounded squeeze upside) and not yet
+    # wired into the momentum lane (no short triggers until P1+) or soaked, so
+    # paper-first + OFF until proven. OFF ⇒ byte-identical long-only lane. This
+    # is the ONE deliberate dark flag (an un-soaked dangerous capability with no
+    # triggers yet) — unlike the profitable LONG levers, which ship ON.
+    chili_momentum_short_lane_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SHORT_LANE_ENABLED"),
+        description="Master gate for the Alpaca SHORT lane. Default OFF (paper-first, un-soaked, no triggers wired yet). OFF ⇒ byte-identical long-only lane.",
     )
     # Shake-out learning: how long after an exit to watch the price path to judge
     # whether the thesis would have worked (was the stop too tight?). 30min.

@@ -914,6 +914,406 @@ def pyramid_blend_on_fill(
     return {"q1": q1, "a1": a1, "s1": s1, "original_quantity": orig}
 
 
+def pullback_add_decision(
+    *,
+    enabled: bool,
+    is_equity: bool,
+    add_count: int,
+    max_adds: int,
+    in_flight: bool,
+    other_add_in_flight: bool,
+    a0: float,
+    q0: float,
+    d0: float | None,
+    bid: float,
+    stop_px: float,
+    high_water_mark: float | None,
+    support_level: float | None,
+    pullback_low: float | None,
+    prior_pullback_low: float | None,
+    move_range: float | None,
+    pullback_depth_lo_frac: float,
+    pullback_depth_hi_frac: float,
+    bounced: bool,
+    front_side_strength: float | None,
+    strength_floor: float,
+    above_vwap_or_reclaiming: bool,
+    ofi_level: float | None,
+    ofi_slope: float | None,
+    midday_lull: bool,
+    cooldown_active: bool,
+) -> dict[str, Any]:
+    """Pure gate for the Ross BUY-THE-DIP / pullback ADD (no I/O, unit-testable).
+
+    The existing pyramid (``pyramid_add_decision``) adds on CONTINUATION — a new HOD +
+    an OFI thrust (it pyramids UP on strength). Ross ALSO buys the PULLBACK: while a held
+    winner's uptrend is INTACT, he re-loads on a controlled dip BACK to support (a higher-
+    low / the breakout shelf / VWAP / a short MA) that then BOUNCES. This predicate owns
+    that distinct trigger; the caller (live_runner / replay) sizes via
+    ``compute_risk_first_quantity`` (the add's stop sits just below the pullback's higher-
+    low), routes the SAME GUARD #4 admission, blends via ``pyramid_blend_on_fill`` (so the
+    #769 max-loss circuit re-bases to the STARTER R0), and submits.
+
+    Returns ``{"fire": bool, "reason": str, "R0": float|None, "cushion_r": float|None,
+    "cushion_usd": float|None, "pullback_depth_frac": float|None, "add_stop": float|None}``.
+    R0 = d0 * q0 is the STARTER's original structural risk; ``add_stop`` is the proposed
+    add stop = just below the pullback's higher-low (``pullback_low``).
+
+    The add fires iff ALL hold:
+      * flag ON, EQUITY (crypto deferred — partial L2/OFI), under the max-adds cap, no add
+        of EITHER kind (this one OR the UP-pyramid / micro-pullback) currently in flight
+        (composes with the existing pyramid; never two adds on one tick), cooldown elapsed;
+      * a SUPPORT zone is known and the price PULLED BACK toward it but is HOLDING ABOVE the
+        structural stop (``pullback_low >= stop_px`` — never a collapse below the stop);
+      * the pullback depth is CONTROLLED: the dip from the HWM is within the adaptive band
+        [``pullback_depth_lo_frac``, ``pullback_depth_hi_frac``] of the move's range (a
+        healthy pullback, not a 1-tick wiggle and not a deep rollover);
+      * a HIGHER LOW held: ``pullback_low > prior_pullback_low`` (the dip made a higher low
+        than the prior — NOT a lower-low breakdown);
+      * a BOUNCE / hold / reclaim is in progress (``bounced`` — price turning back up off
+        support: a green re-load tick / reclaim / firming bid; the caller computes it);
+      * ⭐ FALLING-KNIFE GUARD (the E1/CTNT lesson): the uptrend is INTACT, measured by the
+        JUST-shipped front-side strength — ``front_side_strength >= strength_floor`` (an
+        adaptive floor; reuse the regime-adaptive p-thresholds) AND OFI is NOT collapsing
+        (``ofi_level > 0`` and ``ofi_slope >= 0`` — the RIDE definition) AND price is above
+        VWAP or cleanly reclaiming (``above_vwap_or_reclaiming``). If ANY fail ⇒ NO add
+        (it's a knife, not a dip);
+      * NOT inside the equity midday lull (anti-Ross midday, parity with the pyramid).
+
+    FAIL-CLOSED — this is an EXTRA discretionary BUY, so it requires PROOF: a missing/zero
+    R0, a ``front_side_strength`` of None (stale/absent strength ⇒ cannot prove the trend is
+    intact ⇒ no add — the opposite of the entry-side tilt, which fails OPEN to full size),
+    a None OFI, a missing support / higher-low / move-range, or any unusable basis ⇒ no
+    fire. Bias toward NOT adding when uncertain (a missed add is fine; adding into a
+    breakdown is not). This is an ADD lever — it can only ever ADD position on a healthy
+    dip; it NEVER vetoes or touches an exit. docs/DESIGN/MOMENTUM_LANE.md"""
+    out: dict[str, Any] = {
+        "fire": False, "reason": "", "R0": None, "cushion_r": None, "cushion_usd": None,
+        "pullback_depth_frac": None, "add_stop": None,
+    }
+    if not enabled:
+        out["reason"] = "flag_off"
+        return out
+    if not is_equity:
+        out["reason"] = "crypto_deferred"
+        return out
+    if in_flight or other_add_in_flight:
+        out["reason"] = "add_in_flight"
+        return out
+    if int(add_count) >= int(max_adds):
+        out["reason"] = "max_adds_reached"
+        return out
+    if cooldown_active:
+        out["reason"] = "cooldown"
+        return out
+    if midday_lull:
+        out["reason"] = "midday_lull"
+        return out
+    try:
+        _d0 = float(d0) if d0 is not None else 0.0
+        _q0 = float(q0)
+        _a0 = float(a0)
+        _bid = float(bid)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_basis"
+        return out
+    if not (_d0 > 0 and math.isfinite(_d0) and _q0 > 0 and math.isfinite(_q0) and _a0 > 0):
+        out["reason"] = "bad_basis"
+        return out
+    R0 = _d0 * _q0
+    out["R0"] = R0
+    cushion_usd = (_bid - _a0) * _q0
+    out["cushion_usd"] = cushion_usd
+    out["cushion_r"] = (cushion_usd / R0) if R0 > 0 else None
+    # SUPPORT + structural-stop floor: a pullback that breaks the structural stop is a
+    # COLLAPSE, never a buyable dip (a too-deep pullback is refused here, never sold).
+    if support_level is None or pullback_low is None or prior_pullback_low is None:
+        out["reason"] = "no_support_structure"
+        return out
+    try:
+        _support = float(support_level)
+        _pb_low = float(pullback_low)
+        _prior_low = float(prior_pullback_low)
+        _stop = float(stop_px)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_basis"
+        return out
+    out["add_stop"] = _pb_low
+    if not (_pb_low >= _stop - 1e-9):
+        out["reason"] = "pullback_below_stop"      # too deep — below the structural stop
+        return out
+    # HIGHER LOW: the dip made a HIGHER low than the prior pullback (not a lower-low break).
+    if not (_pb_low > _prior_low + 1e-9):
+        out["reason"] = "not_higher_low"
+        return out
+    # CONTROLLED pullback DEPTH from the HWM, as a fraction of the move's range. Too shallow
+    # (a 1-tick wiggle) and too deep (a rollover) are BOTH refused — the band is adaptive.
+    if high_water_mark is None or move_range is None:
+        out["reason"] = "no_move_range"
+        return out
+    try:
+        _hwm = float(high_water_mark)
+        _rng = float(move_range)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_basis"
+        return out
+    if not (_rng > 0 and math.isfinite(_rng) and _hwm > 0):
+        out["reason"] = "no_move_range"
+        return out
+    depth_frac = (_hwm - _pb_low) / _rng
+    out["pullback_depth_frac"] = depth_frac
+    if depth_frac < float(pullback_depth_lo_frac) - 1e-12:
+        out["reason"] = "pullback_too_shallow"
+        return out
+    if depth_frac > float(pullback_depth_hi_frac) + 1e-12:
+        out["reason"] = "pullback_too_deep"
+        return out
+    # BOUNCE / hold / reclaim off support (the dip turned back up — the caller computes it).
+    if not bool(bounced):
+        out["reason"] = "no_bounce"
+        return out
+    # ⭐ FALLING-KNIFE GUARD #1 — front-side strength INTACT (FAIL-CLOSED on None: an extra
+    # discretionary BUY into a dip needs PROOF the trend is alive; stale strength ⇒ no add).
+    if front_side_strength is None:
+        out["reason"] = "no_strength"
+        return out
+    try:
+        _strength = float(front_side_strength)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_basis"
+        return out
+    out["front_side_strength"] = _strength
+    if not (math.isfinite(_strength) and _strength >= float(strength_floor) - 1e-12):
+        out["reason"] = "weak_front_side"
+        return out
+    # ⭐ FALLING-KNIFE GUARD #2 — OFI NOT collapsing (the RIDE definition: level > 0 AND a
+    # non-negative slope). FAIL-CLOSED on a None read (no proof the book is holding up).
+    if ofi_level is None or ofi_slope is None:
+        out["reason"] = "ofi_unknown"
+        return out
+    try:
+        _ofi_lvl = float(ofi_level)
+        _ofi_slp = float(ofi_slope)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_basis"
+        return out
+    if not (_ofi_lvl > 0.0 and _ofi_slp >= 0.0):
+        out["reason"] = "ofi_collapsing"
+        return out
+    # ⭐ FALLING-KNIFE GUARD #3 — above VWAP or cleanly reclaiming (Ross never adds below
+    # VWAP unless it is being reclaimed turning up — the E1-killed winner shape).
+    if not bool(above_vwap_or_reclaiming):
+        out["reason"] = "below_vwap"
+        return out
+    out["fire"] = True
+    out["reason"] = "pullback_confirmed"
+    return out
+
+
+def flag_breakout_add_decision(
+    *,
+    enabled: bool,
+    is_equity: bool,
+    add_count: int,
+    max_adds: int,
+    in_flight: bool,
+    other_add_in_flight: bool,
+    a0: float,
+    q0: float,
+    d0: float | None,
+    bid: float,
+    stop_px: float,
+    flag_confirmed: bool,
+    flag_high: float | None,
+    flag_low: float | None,
+    prior_flag_high: float | None,
+    breakout_margin_frac: float,
+    front_side_strength: float | None,
+    strength_floor: float,
+    above_vwap_or_reclaiming: bool,
+    ofi_level: float | None,
+    ofi_slope: float | None,
+    midday_lull: bool,
+    cooldown_active: bool,
+) -> dict[str, Any]:
+    """Pure gate for the Ross ADD-ON-FLAG-BREAKOUT (no I/O, unit-testable).
+
+    The THREE existing held-position adds each own a DISTINCT trigger geometry:
+      * ``pyramid_add_decision`` — adds on a NEW HOD + an OFI thrust (pyramid UP on a fresh
+        session high; continuation up the right side of the move).
+      * the micro-pullback re-load — adds on a shallow dip-and-curl back to the moving avg.
+      * ``pullback_add_decision`` (BUY-THE-DIP) — adds on a CONTROLLED pullback to support
+        that BOUNCES (a higher-low to the shelf / VWAP), an INTACT-uptrend re-load.
+
+    Ross ALSO adds a FOURTH, distinct way: while HOLDING a winner, the name consolidates
+    into a tight BULL FLAG (a base after the impulse) and he buys the BREAK of the flag's
+    swing high — a CONTINUATION add at the breakout. This is neither a new-HOD pyramid (the
+    flag-break may be the FIRST new high after a base, not a fresh day high) nor a dip-buy
+    bounce (the trigger is the BREAK of the flag top, not a bounce off support). This
+    predicate owns that distinct trigger. The CALLER detects the flag geometry + the
+    confirmed break (reuse ``bull_flag_confirmation`` on the held position's recent bars:
+    ``flag_high`` = its ``pullback_high`` break level, ``flag_low`` = its ``pullback_low``
+    stop, ``flag_confirmed`` = its ``ok``) and passes them in; the caller then sizes via
+    ``compute_risk_first_quantity`` (the add's stop sits just below the flag low), routes
+    the SAME GUARD #4 admission, blends via ``pyramid_blend_on_fill`` (so the #769 max-loss
+    circuit re-bases to the STARTER R0), and submits.
+
+    Returns ``{"fire": bool, "reason": str, "R0": float|None, "cushion_r": float|None,
+    "cushion_usd": float|None, "breakout_frac": float|None, "add_stop": float|None}``.
+    R0 = d0 * q0 is the STARTER's original structural risk; ``add_stop`` is the proposed
+    add stop = just below the flag low (``flag_low``).
+
+    The add fires iff ALL hold:
+      * flag ON, EQUITY (crypto deferred — partial L2/OFI), under the max-adds cap, no add
+        of ANY kind (this one OR the UP-pyramid / micro-pullback / dip-add) currently in
+        flight (composes with the other 3; never two adds on one tick), cooldown elapsed;
+      * a valid BULL FLAG was detected and CONFIRMED-BROKEN (``flag_confirmed`` — the caller
+        ran the full ``bull_flag_confirmation`` ladder: tight consolidation, depth band,
+        EMA-9 hold, light-pullback volume, anti-chase / backside / L2 vetoes, NOT-extended,
+        and a genuine swing-high break on thrust with tape). A False ⇒ no real flag-break;
+      * the break is GENUINE (not an already-extended chase): the live bid is ABOVE the flag
+        high by at least ``breakout_margin_frac`` of the flag range (``flag_high - flag_low``)
+        — a clean take-out, not a wick poking the level. (The caller's bull_flag NOT-PARABOLIC
+        extension guard already rejects a vertical blow-off INTO the level; this confirms the
+        break itself cleared the top by a real margin rather than a 1-tick touch);
+      * the flag is a HIGHER base: ``flag_high > prior_flag_high`` (the new flag built ABOVE
+        the prior flag/add level — each flag-add steps the structure UP, never re-adds at the
+        same shelf), and the flag low HELD above the structural stop (``flag_low >= stop_px``);
+      * ⭐ FALLING-KNIFE / QUALITY GUARD (the E1/CTNT lesson, identical discipline to the
+        dip-add): the uptrend is INTACT — ``front_side_strength >= strength_floor`` (an
+        adaptive floor; reuse the regime-adaptive p-thresholds) AND OFI is NOT collapsing
+        (``ofi_level > 0`` and ``ofi_slope >= 0`` — the RIDE definition) AND price is above
+        VWAP or cleanly reclaiming (``above_vwap_or_reclaiming``). If ANY fail ⇒ NO add (a
+        sloppy break / breakdown dressed as a flag is a knife, not a continuation);
+      * NOT inside the equity midday lull (anti-Ross midday, parity with the pyramid).
+
+    FAIL-CLOSED — this is an EXTRA discretionary BUY, so it requires PROOF: a missing/zero
+    R0, ``flag_confirmed`` False, a ``front_side_strength`` of None (stale/absent strength
+    ⇒ cannot prove the trend is intact ⇒ no add — the opposite of the entry-side tilt, which
+    fails OPEN to full size), a None OFI, a missing flag level / higher-base / range, or any
+    unusable basis ⇒ no fire. Bias toward NOT adding when uncertain (a missed add is fine;
+    adding into a fake-out is not). This is an ADD lever — it can only ever ADD position on a
+    confirmed healthy flag-break; it NEVER vetoes or touches an exit.
+    docs/DESIGN/MOMENTUM_LANE.md"""
+    out: dict[str, Any] = {
+        "fire": False, "reason": "", "R0": None, "cushion_r": None, "cushion_usd": None,
+        "breakout_frac": None, "add_stop": None,
+    }
+    if not enabled:
+        out["reason"] = "flag_off"
+        return out
+    if not is_equity:
+        out["reason"] = "crypto_deferred"
+        return out
+    if in_flight or other_add_in_flight:
+        out["reason"] = "add_in_flight"
+        return out
+    if int(add_count) >= int(max_adds):
+        out["reason"] = "max_adds_reached"
+        return out
+    if cooldown_active:
+        out["reason"] = "cooldown"
+        return out
+    if midday_lull:
+        out["reason"] = "midday_lull"
+        return out
+    try:
+        _d0 = float(d0) if d0 is not None else 0.0
+        _q0 = float(q0)
+        _a0 = float(a0)
+        _bid = float(bid)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_basis"
+        return out
+    if not (_d0 > 0 and math.isfinite(_d0) and _q0 > 0 and math.isfinite(_q0) and _a0 > 0):
+        out["reason"] = "bad_basis"
+        return out
+    R0 = _d0 * _q0
+    out["R0"] = R0
+    cushion_usd = (_bid - _a0) * _q0
+    out["cushion_usd"] = cushion_usd
+    out["cushion_r"] = (cushion_usd / R0) if R0 > 0 else None
+    # FLAG GEOMETRY: the caller must have detected + CONFIRMED a real bull-flag BREAK
+    # (the full bull_flag_confirmation ladder). A False ⇒ no flag-break ⇒ never an add.
+    if not bool(flag_confirmed):
+        out["reason"] = "no_flag_break"
+        return out
+    if flag_high is None or flag_low is None or prior_flag_high is None:
+        out["reason"] = "no_flag_structure"
+        return out
+    try:
+        _fhi = float(flag_high)
+        _flo = float(flag_low)
+        _prior_hi = float(prior_flag_high)
+        _stop = float(stop_px)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_basis"
+        return out
+    if not (0.0 < _flo < _fhi):
+        out["reason"] = "bad_flag_levels"
+        return out
+    out["add_stop"] = _flo
+    # The flag low must hold ABOVE the structural stop — a flag whose base undercut the stop
+    # is a breakdown, never a buyable continuation (refused here, never sold).
+    if not (_flo >= _stop - 1e-9):
+        out["reason"] = "flag_below_stop"
+        return out
+    # HIGHER BASE: the new flag built ABOVE the prior flag/add level (steps the structure UP,
+    # never re-adds at the same shelf — the analogue of the dip-add's higher-low).
+    if not (_fhi > _prior_hi + 1e-9):
+        out["reason"] = "not_higher_base"
+        return out
+    # GENUINE BREAK (not a 1-tick wick / not an extended chase): the live bid cleared the flag
+    # high by >= breakout_margin_frac of the flag RANGE. Range-relative (no fixed-price magic);
+    # the bull_flag NOT-PARABOLIC extension guard upstream already rejects a vertical blow-off
+    # INTO the level, so this only confirms the take-out cleared the top by a real margin.
+    _flag_range = _fhi - _flo
+    if not (_flag_range > 0 and math.isfinite(_flag_range)):
+        out["reason"] = "bad_flag_levels"
+        return out
+    breakout_frac = (_bid - _fhi) / _flag_range
+    out["breakout_frac"] = breakout_frac
+    if breakout_frac < float(breakout_margin_frac) - 1e-12:
+        out["reason"] = "break_not_clear"      # wick / not yet a confirmed clear of the top
+        return out
+    # ⭐ FALLING-KNIFE GUARD #1 — front-side strength INTACT (FAIL-CLOSED on None: an extra
+    # discretionary BUY into a break needs PROOF the trend is alive; stale strength ⇒ no add).
+    if front_side_strength is None:
+        out["reason"] = "no_strength"
+        return out
+    try:
+        _strength = float(front_side_strength)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_basis"
+        return out
+    out["front_side_strength"] = _strength
+    if not (math.isfinite(_strength) and _strength >= float(strength_floor) - 1e-12):
+        out["reason"] = "weak_front_side"
+        return out
+    # ⭐ FALLING-KNIFE GUARD #2 — OFI NOT collapsing (the RIDE definition: level > 0 AND a
+    # non-negative slope). FAIL-CLOSED on a None read (no proof the book is holding up).
+    if ofi_level is None or ofi_slope is None:
+        out["reason"] = "ofi_unknown"
+        return out
+    try:
+        _ofi_lvl = float(ofi_level)
+        _ofi_slp = float(ofi_slope)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_basis"
+        return out
+    if not (_ofi_lvl > 0.0 and _ofi_slp >= 0.0):
+        out["reason"] = "ofi_collapsing"
+        return out
+    # ⭐ FALLING-KNIFE GUARD #3 — above VWAP or cleanly reclaiming (Ross never adds below
+    # VWAP unless it is being reclaimed turning up — the E1-killed winner shape).
+    if not bool(above_vwap_or_reclaiming):
+        out["reason"] = "below_vwap"
+        return out
+    out["fire"] = True
+    out["reason"] = "flag_break_confirmed"
+    return out
+
+
 def runner_trail_stop(
     *,
     high_water_mark: float,

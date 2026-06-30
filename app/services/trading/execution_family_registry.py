@@ -25,6 +25,13 @@ EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP = "robinhood_agentic_mcp"
 # route to the market + can REST on the book (post-inside-the-spread, which RH's PFOF routing
 # cannot do). The DMA-style execution upgrade for the momentum lane. (docs/DESIGN/ALPACA_LANE.md)
 EXECUTION_FAMILY_ALPACA_SPOT = "alpaca_spot"
+# Alpaca SHORT lane — its OWN execution family, kept ISOLATED from the long agentic
+# lane so risk, daily-loss, and concurrency caps don't co-mingle (SHORT_SIDE_LANE.md).
+# Same AlpacaSpotAdapter, but the runner sets SELL_TO_OPEN / BUY_TO_CLOSE per-order.
+# PAPER-only by construction: excluded from REAL_DAILY_LOSS_FAMILIES until a later
+# phase adds a live alpaca family + per-broker cap. (P0: adapter + family only — NO
+# momentum-lane short triggers yet; gated behind chili_momentum_short_lane_enabled.)
+EXECUTION_FAMILY_ALPACA_SHORT = "alpaca_short"
 
 # ── Documented stubs only (no behavior, no jobs, no hidden execution) ────────
 EXECUTION_FAMILY_MULTI_VENUE_ARBITRAGE = "multi_venue_arbitrage"
@@ -37,6 +44,7 @@ DOCUMENTED_EXECUTION_FAMILIES: frozenset[str] = frozenset(
         EXECUTION_FAMILY_ROBINHOOD_SPOT,
         EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
         EXECUTION_FAMILY_ALPACA_SPOT,
+        EXECUTION_FAMILY_ALPACA_SHORT,
         EXECUTION_FAMILY_MULTI_VENUE_ARBITRAGE,
         EXECUTION_FAMILY_SAME_VENUE_TRIANGULAR_ARB,
         EXECUTION_FAMILY_BASIS_TRADE,
@@ -48,6 +56,7 @@ IMPLEMENTED_MOMENTUM_AUTOMATION_FAMILIES: frozenset[str] = frozenset({
     EXECUTION_FAMILY_ROBINHOOD_SPOT,
     EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
     EXECUTION_FAMILY_ALPACA_SPOT,
+    EXECUTION_FAMILY_ALPACA_SHORT,
 })
 
 # Asset-class grouping: a symbol may route to ANY venue of its asset class — an EQUITY can go
@@ -60,6 +69,7 @@ _EQUITY_EXECUTION_FAMILIES: frozenset[str] = frozenset({
     EXECUTION_FAMILY_ROBINHOOD_SPOT,
     EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
     EXECUTION_FAMILY_ALPACA_SPOT,
+    EXECUTION_FAMILY_ALPACA_SHORT,
 })
 
 # Asset classes each family can actually TRADE. Alpaca serves BOTH (US equities
@@ -71,6 +81,8 @@ _EXECUTION_FAMILY_ASSET_CLASSES: dict[str, frozenset[str]] = {
     EXECUTION_FAMILY_ROBINHOOD_SPOT: frozenset({"equity"}),
     EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP: frozenset({"equity"}),
     EXECUTION_FAMILY_ALPACA_SPOT: frozenset({"equity", "crypto"}),
+    # The short lane is equity-only (Alpaca cannot short crypto).
+    EXECUTION_FAMILY_ALPACA_SHORT: frozenset({"equity"}),
 }
 
 
@@ -138,6 +150,12 @@ def execution_family_capabilities() -> list[dict[str, Any]]:
             "Implemented: Alpaca US equities VenueAdapter (alpaca-py) — DMA-style limit-posting, "
             "FREE paper sandbox. Active when chili_alpaca_enabled AND API keys are set "
             "(paper until chili_alpaca_paper=False)."
+        ),
+        EXECUTION_FAMILY_ALPACA_SHORT: (
+            "Implemented (P0 adapter only): Alpaca SHORT lane — isolated execution family on the "
+            "same AlpacaSpotAdapter with SELL_TO_OPEN / BUY_TO_CLOSE position-intent. PAPER-only "
+            "(excluded from REAL_DAILY_LOSS_FAMILIES); gated behind chili_momentum_short_lane_enabled "
+            "(default OFF). No momentum-lane short triggers wired yet (P1+)."
         ),
         EXECUTION_FAMILY_MULTI_VENUE_ARBITRAGE: (
             "Planned seam only — needs multi-venue intelligence, inventory, transfers, risk (not built)."
@@ -252,7 +270,7 @@ def venue_for_execution_family(execution_family: str) -> str:
     ef = normalize_execution_family(execution_family)
     if ef in (EXECUTION_FAMILY_ROBINHOOD_SPOT, EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP):
         return "robinhood"
-    if ef == EXECUTION_FAMILY_ALPACA_SPOT:
+    if ef in (EXECUTION_FAMILY_ALPACA_SPOT, EXECUTION_FAMILY_ALPACA_SHORT):
         return "alpaca"
     return "coinbase"
 
@@ -276,7 +294,9 @@ def resolve_live_spot_adapter_factory(execution_family: str) -> Callable[[], Any
         from .venue.robinhood_mcp import RobinhoodAgenticMcpAdapter
 
         return RobinhoodAgenticMcpAdapter
-    if ef == EXECUTION_FAMILY_ALPACA_SPOT:
+    if ef in (EXECUTION_FAMILY_ALPACA_SPOT, EXECUTION_FAMILY_ALPACA_SHORT):
+        # The short lane reuses the SAME Alpaca adapter; the runner sets the
+        # per-order SELL_TO_OPEN / BUY_TO_CLOSE position_intent (SHORT_SIDE_LANE.md).
         from .venue.alpaca_spot import AlpacaSpotAdapter
 
         return AlpacaSpotAdapter
