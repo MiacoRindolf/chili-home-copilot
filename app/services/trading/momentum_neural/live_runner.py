@@ -10243,15 +10243,11 @@ def tick_live_session(
                     if _circuit.get("breach"):
                         le["max_loss_circuit_fired"] = True
                         le["max_loss_circuit_floor_price"] = _circuit["floor_price"]
-                        # GAP 1: a max-loss-circuit fire is a single-trade max-loss rule
-                        # break (the tilt/revenge-prone signature) — arm the NEXT-day
-                        # lockout (no-op unless the flag is on). Best-effort; never affects
-                        # the bailout that follows.
-                        try:
-                            from ..governance import set_next_day_trading_lockout
-                            set_next_day_trading_lockout("max_loss_circuit")
-                        except Exception:
-                            pass
+                        # GAP 1 (DECOUPLED): a #769 max-loss-circuit fire is the bot's own
+                        # mechanical per-trade stop doing its job on ONE position — NOT the
+                        # PSY101 human-tilt signature. It does NOT arm the cross-day lockout.
+                        # Same-day controls (per-broker daily cap / giveback / green-to-red /
+                        # consecutive-loss halt) still bound the rest of the session.
                         # EQUITY-FIRST: the absolute floor + repeg-skip apply to the RH
                         # EQUITY paths only (where the gap-through tail lives) — BOTH the
                         # unofficial robin_stocks rail (robinhood_spot) AND the sanctioned
