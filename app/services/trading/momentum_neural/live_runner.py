@@ -10,13 +10,15 @@ Snapshot contract:
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
 import json
 import logging
 import math
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
@@ -138,8 +140,75 @@ KEY_LIVE_EXEC = "momentum_live_execution"
 AdapterFactory = Callable[[], Any]
 
 
+# ── REPLAY v3 P0a — SIMULATED CLOCK (the single chokepoint) ──────────────────────
+# The whole live FSM reads time through ``_utcnow()`` (and the few ET / aware-UTC
+# helpers below, which all DERIVE from it). A process-global, async/thread-safe
+# ``ContextVar`` lets the Replay v3 harness FREEZE the runner's clock at a historical
+# instant without forking a single line of the FSM. Default is ``None`` — and when it
+# is ``None`` (ALWAYS in prod, since only the replay harness ever sets it) ``_utcnow()``
+# returns the real ``datetime.utcnow()`` on the EXACT same code path as before, so prod
+# is BYTE-IDENTICAL. The ContextVar resets automatically on block/exception exit, so it
+# can never leak a frozen clock into a real lane. See docs/DESIGN/REPLAY_V3_LIVE_FSM_SIM.md §3.1.
+_SIM_NOW: contextvars.ContextVar[Optional[datetime]] = contextvars.ContextVar(
+    "_chili_replay_sim_now", default=None
+)
+
+
 def _utcnow() -> datetime:
-    return datetime.utcnow()
+    v = _SIM_NOW.get()
+    return v if v is not None else datetime.utcnow()
+
+
+def set_sim_clock(ts: Optional[datetime]) -> "contextvars.Token[Optional[datetime]]":
+    """Push a simulated 'now' onto the clock chokepoint (replay harness only).
+
+    ``ts`` is interpreted as naive-UTC — the codebase's dominant convention and what
+    ``_utcnow()`` returns in prod (``datetime.utcnow()``). A tz-aware ``ts`` is normalized
+    to naive-UTC so the sim instant matches the prod shape exactly. Returns the
+    ``contextvars.Token`` so the caller can ``reset_sim_clock(token)`` to restore the prior
+    value (prefer the ``replay_clock`` context manager, which does this for you)."""
+    if ts is not None and ts.tzinfo is not None:
+        ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+    return _SIM_NOW.set(ts)
+
+
+def reset_sim_clock(token: "contextvars.Token[Optional[datetime]]") -> None:
+    """Pop the simulated clock, restoring the value before the matching ``set_sim_clock``."""
+    _SIM_NOW.reset(token)
+
+
+@contextlib.contextmanager
+def replay_clock(ts: Optional[datetime]) -> Iterator[None]:
+    """Context manager freezing ``_utcnow()`` (and the aware-UTC / ET helpers) at ``ts``.
+
+    Pure ContextVar push/pop — async- and thread-safe, and auto-resets on normal exit AND
+    on exception (the ``finally`` always restores the prior value), so a frozen clock can
+    never escape the block into prod. Nests correctly: an inner ``replay_clock`` restores
+    the OUTER sim time on exit, not ``None``. Prod never enters this manager, so prod stays
+    byte-identical."""
+    token = set_sim_clock(ts)
+    try:
+        yield
+    finally:
+        reset_sim_clock(token)
+
+
+def _utcnow_aware() -> datetime:
+    """tz-AWARE UTC 'now', derived from the same chokepoint as ``_utcnow()``.
+
+    Prod path is byte-identical to ``datetime.now(timezone.utc)``: with no sim clock,
+    ``_utcnow()`` is ``datetime.utcnow()`` (naive UTC) and stamping ``tzinfo=utc`` yields the
+    same instant ``datetime.now(timezone.utc)`` would (both are the real wall clock in UTC).
+    Under the replay clock it returns the injected sim instant as aware-UTC."""
+    return _utcnow().replace(tzinfo=timezone.utc)
+
+
+def _now_in_tz(zone: Any) -> datetime:
+    """'now' projected into ``zone`` (e.g. ET), derived from the clock chokepoint so the sim
+    clock governs the ET wall-clock window checks too. ``zone`` is a ``ZoneInfo``/tzinfo. Prod
+    path is byte-identical to ``datetime.now(zone)``: with no sim clock the converted instant
+    is the real wall clock in ``zone``; under replay it is the sim instant projected there."""
+    return _utcnow().replace(tzinfo=timezone.utc).astimezone(zone)
 
 
 # ── CHUNK 3 — S4 FAST EXECUTOR: rail-governed calls + RTT measurement ─────────────
@@ -2989,7 +3058,7 @@ def hard_no_trade_regime(
     only settings + the shared clock; fail-open (any error => not blocked)."""
     if not bool(getattr(settings, "chili_momentum_hard_no_trade_regime_enabled", False)):
         return False, "disabled"
-    ref = now or datetime.now(timezone.utc)
+    ref = now or _utcnow_aware()  # replay v3: sim-clock-governed (prod byte-identical)
     if ref.tzinfo is None:
         ref = ref.replace(tzinfo=timezone.utc)
     try:
@@ -3311,13 +3380,14 @@ def _build_micro_bar_df(db, symbol: str, *, bar_seconds: int, lookback_minutes: 
     """
     try:
         from datetime import timedelta as _td
-        from datetime import timezone as _tz
 
         from sqlalchemy import text as _text
 
         from .micro_bars import _resample_micro_bars
 
-        since = datetime.now(_tz.utc).replace(tzinfo=None) - _td(minutes=float(lookback_minutes))
+        # replay v3: anchor the lookback on the sim clock (prod byte-identical — _utcnow()
+        # is naive-UTC, exactly what datetime.now(utc).replace(tzinfo=None) produced here).
+        since = _utcnow() - _td(minutes=float(lookback_minutes))
         rows = db.execute(
             _text(
                 "SELECT observed_at, bid, ask FROM momentum_nbbo_spread_tape "
@@ -3883,7 +3953,9 @@ def _refetch_bbo_secondary(symbol: str) -> tuple[Any, str] | None:
             product_id=sym, bid=b, ask=a, mid=mid,
             spread_abs=spread_abs, spread_bps=spread_bps,
             last_price=(float(last) if last else None),
-            freshness=FreshnessMeta(retrieved_at_utc=datetime.now(timezone.utc)),
+            # replay v3: stamp freshness at the sim clock so the runner's stale-quote
+            # checks compare sim-to-sim (prod byte-identical — _utcnow_aware() == now(utc)).
+            freshness=FreshnessMeta(retrieved_at_utc=_utcnow_aware()),
             raw={"source": source},
         ), source
 
@@ -4919,7 +4991,7 @@ def _maybe_sweep_agentic_orphans(db: Session) -> None:
             return  # inert until the operator opts the equity lane onto the agentic rail
         if not str(getattr(settings, "chili_robinhood_agentic_mcp_account_number", "") or "").strip():
             return
-        now = datetime.utcnow()
+        now = _utcnow()  # replay v3: sim-clock-governed (prod byte-identical)
         if now - _agentic_sweep_last[0] < _AGENTIC_SWEEP_INTERVAL:
             return
         _agentic_sweep_last[0] = now
@@ -5380,7 +5452,8 @@ def tick_live_session(
         try:
             from zoneinfo import ZoneInfo as _ZI
 
-            _now_et = datetime.now(_ZI("America/New_York"))
+            # replay v3: sim-clock-governed ET wall-clock (prod byte-identical).
+            _now_et = _now_in_tz(_ZI("America/New_York"))
             _lead = float(getattr(settings, "chili_momentum_eod_flatten_lead_min", 5.0) or 0.0)
             _mins_to_close = (16 * 60) - (_now_et.hour * 60 + _now_et.minute)
             if (
@@ -6329,7 +6402,8 @@ def tick_live_session(
             try:
                 from zoneinfo import ZoneInfo as _ZIb
 
-                _now_et_b = datetime.now(_ZIb("America/New_York"))
+                # replay v3: sim-clock-governed ET wall-clock (prod byte-identical).
+                _now_et_b = _now_in_tz(_ZIb("America/New_York"))
                 _win_min = float(getattr(settings, "chili_momentum_order_burst_guard_window_minutes", 3.0) or 0.0)
                 # minutes since the most-recent top-of-hour boundary (0..59).
                 _mins_into_hour = _now_et_b.minute + _now_et_b.second / 60.0
