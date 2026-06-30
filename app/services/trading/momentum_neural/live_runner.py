@@ -9113,6 +9113,73 @@ def tick_live_session(
             float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult) * _safe_mult(_daily_room_mult) * _safe_mult(_red_intraday_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
+        # COMBINED SIZE-DOWN FLOOR for a genuine front-side A-setup (default ON; OFF /
+        # non-A-setup / fail => byte-identical). The product above has a combined CEILING
+        # (base x 3.0) but NO combined FLOOR — so unbounded MULTIPLICATIVE STACKING of the
+        # 23 size-DOWN multipliers (e.g. daily_room 0.40 x midday-sched 0.50 = 0.20) can
+        # crush a REAL A-setup's per-trade risk far below the equity-relative base (CUPR:
+        # base $122 x 0.40 x 0.50 = $24, ~0.18% risk instead of 1%). This RAISES a stacked-
+        # down budget back toward the base ONLY for a confirmed front-side A-setup; it can
+        # ONLY RAISE _eff_max_loss toward base, NEVER above it (the floor multiplies the
+        # base by FLOOR<=1.0, and we only apply it when the realized aggregate is BELOW the
+        # floor) — so dollar-risk stays risk-FIRST and <= base (1% equity). Fail-CLOSED:
+        # missing/ambiguous A-setup signals => no raise (today's stacked size-down stands).
+        # The combined x3.0 CEILING above, the #769 max-loss circuit, the structural/vol-
+        # floored stop, the notional ceiling, and the per-broker daily-loss cap are ALL
+        # untouched and still bound the worst case. Flag OFF => byte-identical.
+        if (
+            bool(getattr(settings, "chili_momentum_combined_size_floor_enabled", True))
+            and float(_base_max_loss) > 0.0
+        ):
+            try:
+                # A-SETUP GATE — built from signals ALREADY in scope on this entry path (no
+                # new fetch / no invented signal): (1) front-side + above-VWAP, (2) forward
+                # momentum (live OFI level/slope > 0), (3) viability cleared the family
+                # A-setup floor (params["entry_revalidate_floor"], the bar this entry already
+                # passed). Fail-CLOSED: any unbound/ambiguous signal => not an A-setup.
+                _af_above_vwap = (le.get("entry_above_vwap") is True)
+                try:
+                    _af_ofi_fwd = (
+                        (_fs_ofi_level is not None and float(_fs_ofi_level) > 0.0)
+                        or (_fs_ofi_slope is not None and float(_fs_ofi_slope) > 0.0)
+                    )
+                except NameError:
+                    _af_ofi_fwd = False  # front-side block didn't run / flag OFF => fail-closed
+                _af_via = float(via.viability_score or 0.0)
+                _af_via_floor = float(params["entry_revalidate_floor"])
+                _is_frontside_a_setup = bool(
+                    _af_above_vwap and _af_ofi_fwd and (_af_via >= _af_via_floor)
+                )
+                _csf_floor = float(
+                    getattr(settings, "chili_momentum_combined_size_down_floor", 0.5) or 0.5
+                )
+                _csf_floor = max(0.0, min(1.0, _csf_floor))
+                _combined_mult = float(_eff_max_loss) / float(_base_max_loss)  # realized aggregate size-down
+                if _is_frontside_a_setup and _combined_mult < _csf_floor:
+                    _csf_prev = float(_eff_max_loss)
+                    _eff_max_loss = float(_base_max_loss) * _csf_floor
+                    le["combined_size_down_floor"] = {
+                        "floor": round(_csf_floor, 4),
+                        "combined_mult_before": round(_combined_mult, 4),
+                        "eff_before": round(_csf_prev, 2),
+                        "eff_after": round(float(_eff_max_loss), 2),
+                        "base_max_loss": round(float(_base_max_loss), 2),
+                        "above_vwap": True,
+                        "viability_score": round(_af_via, 4),
+                    }
+                    _log.info(
+                        "[momentum_neural] combined size-down floor sym=%s eff=%s->%s "
+                        "(combined_mult=%s floor=%s base=%s via=%s)",
+                        sess.symbol,
+                        round(_csf_prev, 2),
+                        round(float(_eff_max_loss), 2),
+                        round(_combined_mult, 4),
+                        round(_csf_floor, 4),
+                        round(float(_base_max_loss), 2),
+                        round(_af_via, 4),
+                    )
+            except Exception:
+                pass  # fail-CLOSED: any error never RAISES the budget (stacked size-down stands)
         # THIN/TOXIC-SPREAD HARD PER-TRADE LOSS CAP (default ON; OFF / not-thin => no-op,
         # byte-identical). When the name was admitted via the viability thin-spread squeeze
         # carve-out (it carries the extreme_vol_risk_bounded marker AND its live spread is
