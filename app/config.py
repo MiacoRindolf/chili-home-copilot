@@ -5102,6 +5102,40 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_RISK_MULTIPLE"),
         description="K — the circuit fires when unrealized loss <= -(K x structural_risk) and flattens at avg - K*stop_distance. ge=1.0 so the floor can never sit looser than the structural stop.",
     )
+    # ── C1 PER-TRADE MAX-LOSS FRESH-QUOTE GUARD (2026-06-30, PULLBACK-SCALP-ENABLE) ──
+    # The C1 1x per-trade max-loss check (unrealized_pnl <= -max_loss_per_trade_usd) had NO
+    # fresh-quote guard (unlike the C1b #769 circuit just below it). A torn/stale/zero bid
+    # (bid = float(tick.bid or mid) — falls back to a stale mid) trips a SPURIOUS full
+    # liquidation on a phantom unrealized loss while the real NBBO is fine (CELZ session 9920
+    # force-exited on a phantom unrealized=-$148 while the real bid was >= $4.22 / +18%). This
+    # flag adds the SAME fresh-quote predicate C1b uses (finite bid > 0, halt_stale_streak==0,
+    # no suspected_halt_since_utc): when ON and the quote is NOT fresh, SKIP C1 this pulse (the
+    # structural stop + the fresh-guarded C1b still protect; the next fresh tick re-checks). A
+    # genuine -max_loss on a FRESH bid still fires C1 immediately. Flag OFF = byte-identical
+    # (C1 fires regardless of freshness).
+    chili_momentum_max_loss_fresh_quote_guard_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_FRESH_QUOTE_GUARD_ENABLED"),
+        description="Kill-switch for the fresh-quote guard on the C1 per-trade max-loss check. true (default) = SKIP the C1 force-exit on a provably stale/torn/zero bid (reuses the C1b fresh-quote predicate: finite bid>0, halt_stale_streak==0, no suspected_halt) AND on an IQFeed tick-level NBBO cross-check (in-process bid materially below a fresh momentum_nbbo_spread_tape bid => phantom loss, skip); a genuine -max_loss on a FRESH bid still fires immediately. false = byte-identical legacy (C1 fires regardless of quote freshness). The #769 max-loss circuit + structural stop are untouched.",
+    )
+    # C1 IQFeed phantom-loss cross-check (2026-06-30): on the C1-trigger path ONLY, the
+    # in-process bid is compared to the freshest IQFeed NBBO mirrored into
+    # momentum_nbbo_spread_tape. The divergence tolerance is ADAPTIVE — a multiple of the
+    # name's OWN recent median spread (no fixed bps clock); the multiple is the only knob.
+    chili_momentum_max_loss_phantom_divergence_spread_mult: float = Field(
+        default=3.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_PHANTOM_DIVERGENCE_SPREAD_MULT"),
+        description="C1 IQFeed cross-check: the in-process bid must sit below the fresh IQFeed/tape bid by MORE than (this multiple x the name's recent median spread_bps) to be flagged a PHANTOM loss (=> skip C1). Adaptive (name-relative); ge=1.0 so the tolerance is never tighter than one typical spread.",
+    )
+    # The ONE documented fallback divergence tolerance, used ONLY when the recent tape
+    # spread is unavailable (thin/absent L1) so there is no name-relative scale to adapt to.
+    chili_momentum_max_loss_phantom_divergence_fallback_bps: float = Field(
+        default=100.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_PHANTOM_DIVERGENCE_FALLBACK_BPS"),
+        description="C1 IQFeed cross-check fallback: the divergence tolerance (bps below the fresh tape bid) used ONLY when the recent tape median spread is unavailable. The single documented base — adaptive name-relative scale is preferred when present.",
+    )
     # ── ADAPTIVE SPREAD-COST VETO/DERATE (2026-06-27, DEFAULT OFF = byte-identical) ──
     # Judges the live entry spread RELATIVE to (a) the name's OWN recent typical spread
     # (rolling p50/p75/p90 over its momentum_nbbo_spread_tape history) and (b) the trade's
