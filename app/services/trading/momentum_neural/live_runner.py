@@ -3893,6 +3893,105 @@ def _smart_hold_breach_volume(
         return None, None
 
 
+def _c1_iqfeed_phantom_loss(
+    db: Session,
+    symbol: str,
+    *,
+    in_process_bid: float,
+    now: datetime | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """C1 IQFeed cross-check (2026-06-30, PULLBACK-SCALP-ENABLE): on the C1-trigger path
+    ONLY (a max-loss breach is about to fire — rare), cross-check the in-process ``bid``
+    against the freshest IQFeed tick-level NBBO mirrored into ``momentum_nbbo_spread_tape``
+    (the iqfeed trade bridge writes per-tick L1 there). If the in-process bid is MATERIALLY
+    below a FRESH tape bid, the in-process tick is torn/stale and the unrealized loss is
+    PHANTOM — the real market is much higher (the CELZ-9920 case: in-process phantom −$148
+    while IQFeed showed $4.22+).
+
+    Returns ``(phantom, debug)``. ``phantom=True`` => C1 must SKIP this pulse.
+
+    ADAPTIVE divergence tolerance (no fixed bps clock): the in-process bid must sit below the
+    fresh tape bid by MORE than ``mult × recent_median_spread`` for the name — its OWN recent
+    spread is the reference scale. When the recent tape spread is unavailable, fall back to
+    the ONE documented base ``chili_momentum_max_loss_phantom_divergence_fallback_bps``.
+
+    Recency-gated by the SAME documented floor the IQFeed-L1-first BBO uses
+    (``chili_momentum_quote_freshness_floor_seconds``): a tape bid older than that window is
+    NOT trusted as truth (=> not phantom; the binary stale-flag guard remains the fail-safe).
+
+    FAIL-CLOSED toward FIRING C1: any missing/thin/stale tape, bad input, or a tape bid that
+    CONFIRMS the in-process bid (also low) => ``phantom=False`` => C1 fires (a real loss is
+    never suppressed). Pure read; never raises. EQUITY/RH names; crypto (-USD) tape is sparse
+    so it simply returns not-phantom (fail-closed)."""
+    dbg: dict[str, Any] = {"checked": False}
+    try:
+        ipb = float(in_process_bid)
+        if not (math.isfinite(ipb) and ipb > 0):
+            return False, dbg
+    except (TypeError, ValueError):
+        return False, dbg
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return False, dbg
+    try:
+        from .nbbo_tape import recent_bid_spread_tape
+
+        _window_s = float(
+            getattr(settings, "chili_momentum_quote_freshness_floor_seconds", 15.0) or 15.0
+        )
+        # Pull the last few fresh L1 samples; the NEWEST is the IQFeed truth bid, and the
+        # median spread over the window is the adaptive divergence scale.
+        tape = recent_bid_spread_tape(
+            db, sym, window_s=_window_s, max_rows=8, now_utc=now,
+        )
+    except Exception:
+        return False, dbg
+    if not tape:
+        return False, dbg
+    # recent_bid_spread_tape returns [(bid, spread_bps)] oldest→newest, recency-bounded.
+    truth_bid = float(tape[-1][0])
+    if not (math.isfinite(truth_bid) and truth_bid > 0):
+        return False, dbg
+    _spreads = [float(s) for (_b, s) in tape if math.isfinite(float(s)) and float(s) >= 0]
+    _spreads.sort()
+    _median_spread_bps: float | None = None
+    if _spreads:
+        _mid = len(_spreads) // 2
+        _median_spread_bps = (
+            _spreads[_mid]
+            if len(_spreads) % 2 == 1
+            else (_spreads[_mid - 1] + _spreads[_mid]) / 2.0
+        )
+    _mult = float(
+        getattr(settings, "chili_momentum_max_loss_phantom_divergence_spread_mult", 3.0) or 3.0
+    )
+    if _median_spread_bps is not None and _median_spread_bps > 0:
+        _tol_bps = _mult * _median_spread_bps
+        _tol_basis = "recent_median_spread"
+    else:
+        _tol_bps = float(
+            getattr(settings, "chili_momentum_max_loss_phantom_divergence_fallback_bps", 100.0)
+            or 100.0
+        )
+        _tol_basis = "documented_fallback"
+    # Divergence of the in-process bid BELOW the IQFeed truth bid, in bps of the truth bid.
+    _divergence_bps = (truth_bid - ipb) / truth_bid * 10_000.0
+    phantom = _divergence_bps > _tol_bps
+    dbg = {
+        "checked": True,
+        "in_process_bid": round(ipb, 6),
+        "iqfeed_truth_bid": round(truth_bid, 6),
+        "divergence_bps": round(_divergence_bps, 2),
+        "tolerance_bps": round(_tol_bps, 2),
+        "tolerance_basis": _tol_basis,
+        "median_spread_bps": (round(_median_spread_bps, 2) if _median_spread_bps is not None else None),
+        "spread_mult": _mult,
+        "samples": len(tape),
+        "phantom": bool(phantom),
+    }
+    return bool(phantom), dbg
+
+
 def bail_on_no_confirmation(
     *,
     entry_price: float,
@@ -10178,11 +10277,58 @@ def tick_live_session(
         max_loss_usd = float(caps.get("max_loss_per_trade_usd") or 0)
         if max_loss_usd > 0 and st != STATE_LIVE_BAILOUT:
             unrealized_pnl = (bid - avg) * qty
-            if unrealized_pnl <= -max_loss_usd:
-                _safe_transition(db, sess, STATE_LIVE_BAILOUT)
-                _emit(db, sess, "live_bailout", {"reason": "max_loss_per_trade", "unrealized_pnl": unrealized_pnl})
-                db.flush()
-                return {"ok": True, "session_id": sess.id, "state": sess.state}
+            # FRESH-QUOTE GUARD (2026-06-30, PULLBACK-SCALP-ENABLE): the C1 1x max-loss
+            # force-exit had NO fresh-quote guard (unlike the C1b #769 circuit just below),
+            # so a torn/stale/zero bid (bid = float(tick.bid or mid) — falls back to a stale
+            # mid) trips a SPURIOUS full liquidation on a phantom unrealized loss while the
+            # real NBBO is fine (CELZ 9920: phantom unrealized=-$148 while the real bid was
+            # >= $4.22 / +18%). Reuses the EXACT C1b fresh-quote predicate. When the guard is
+            # ON and the quote is NOT fresh, SKIP C1 this pulse — the structural stop + the
+            # fresh-guarded C1b still protect, and the next FRESH tick re-checks. A genuine
+            # -max_loss on a FRESH bid still fires C1 immediately. Flag OFF => byte-identical
+            # (C1 fires regardless of freshness).
+            _c1_fresh_quote = (
+                bid is not None
+                and math.isfinite(float(bid))
+                and float(bid) > 0
+                and int(le.get("halt_stale_streak") or 0) == 0
+                and not le.get("suspected_halt_since_utc")
+            )
+            _c1_guard_on = bool(
+                getattr(settings, "chili_momentum_max_loss_fresh_quote_guard_enabled", True)
+            )
+            _c1_skip_stale = _c1_guard_on and not _c1_fresh_quote
+            if unrealized_pnl <= -max_loss_usd and not _c1_skip_stale:
+                # IQFeed TICK-LEVEL CROSS-CHECK (2026-06-30): on the C1-trigger path ONLY
+                # (a breach is rare — a small indexed read is fine; NOT queried every tick),
+                # cross-check the in-process bid against the freshest IQFeed NBBO mirrored
+                # into momentum_nbbo_spread_tape. If the in-process bid is MATERIALLY below a
+                # FRESH tape bid (adaptive tolerance = mult x the name's recent median spread;
+                # documented-fallback bps when absent), the in-process tick is torn/stale and
+                # the loss is PHANTOM — SKIP C1 this pulse (CELZ-9920: in-process −$148 while
+                # IQFeed showed $4.22+). Complements the binary stale-flag guard above (both
+                # gated by the SAME kill-switch). FAIL-CLOSED toward firing: missing/thin/
+                # confirming tape => not phantom => C1 fires (a real loss is never suppressed).
+                _c1_phantom = False
+                if _c1_guard_on:
+                    try:
+                        _c1_phantom, _c1_iq_dbg = _c1_iqfeed_phantom_loss(
+                            db, sess.symbol, in_process_bid=float(bid),
+                        )
+                    except Exception:
+                        _c1_phantom, _c1_iq_dbg = False, {"checked": False}
+                    if _c1_phantom:
+                        _emit(db, sess, "max_loss_per_trade_phantom_skip", {
+                            "reason": "iqfeed_nbbo_divergence",
+                            "in_process_bid": bid,
+                            "unrealized_pnl": unrealized_pnl,
+                            "cross_check": _c1_iq_dbg,
+                        })
+                if not _c1_phantom:
+                    _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                    _emit(db, sess, "live_bailout", {"reason": "max_loss_per_trade", "unrealized_pnl": unrealized_pnl})
+                    db.flush()
+                    return {"ok": True, "session_id": sess.id, "state": sess.state}
 
         # C1b: HARD MAX-LOSS-PER-TRADE CIRCUIT (#1 profitability lever, 2026-06-17).
         # The 1x C1 check above transitions to BAILOUT, but the bid-relative ladder then
@@ -10243,15 +10389,11 @@ def tick_live_session(
                     if _circuit.get("breach"):
                         le["max_loss_circuit_fired"] = True
                         le["max_loss_circuit_floor_price"] = _circuit["floor_price"]
-                        # GAP 1: a max-loss-circuit fire is a single-trade max-loss rule
-                        # break (the tilt/revenge-prone signature) — arm the NEXT-day
-                        # lockout (no-op unless the flag is on). Best-effort; never affects
-                        # the bailout that follows.
-                        try:
-                            from ..governance import set_next_day_trading_lockout
-                            set_next_day_trading_lockout("max_loss_circuit")
-                        except Exception:
-                            pass
+                        # GAP 1 (DECOUPLED): a #769 max-loss-circuit fire is the bot's own
+                        # mechanical per-trade stop doing its job on ONE position — NOT the
+                        # PSY101 human-tilt signature. It does NOT arm the cross-day lockout.
+                        # Same-day controls (per-broker daily cap / giveback / green-to-red /
+                        # consecutive-loss halt) still bound the rest of the session.
                         # EQUITY-FIRST: the absolute floor + repeg-skip apply to the RH
                         # EQUITY paths only (where the gap-through tail lives) — BOTH the
                         # unofficial robin_stocks rail (robinhood_spot) AND the sanctioned
@@ -10276,6 +10418,39 @@ def tick_live_session(
                         })
                         db.flush()
                         return {"ok": True, "session_id": sess.id, "state": sess.state}
+
+        # EARLY TRAIL-ARM (2026-06-30, PULLBACK-SCALP-ENABLE): a CONFIRMED front-side runner
+        # must reach STATE_LIVE_TRAILING to open the ride+add / micro-reentry path (all 4
+        # add/reload paths — pyramid_add, micropullback_reentry, pullback_add,
+        # flag_breakout_add — gate on st == STATE_LIVE_TRAILING). Today the trail-activation
+        # transition sits AFTER the ENTERED-only no-confirmation bailouts
+        # (instant_bid_above_fill_unconfirmed, bail_on_no_confirmation), which run first each
+        # tick and return early — so a normal entry goes ENTERED -> BAILOUT -> recycle and
+        # NEVER reaches TRAILING => 0 adds (the add path is structurally unreachable). Arm
+        # TRAILING on the SAME adaptive condition (bid >= avg * trail_activate_return) BEFORE
+        # those bailouts can cut. ANTI-REGRESSION (must not hold a loser): arms ONLY when
+        # bid >= avg*trail_activate_return — the position is already in profit ABOVE the
+        # activation band; a position at/below entry is untouched and STILL gets the
+        # no-confirmation cut downstream. The structural stop + the #769 C1b circuit are
+        # evaluated ABOVE this block (every tick) and are NOT gated by it. The add predicates
+        # downstream are fail-closed (paper_execution.pullback_add_decision knife-guard; a
+        # missing front_side_strength/OFI/support => no add) and pyramid_blend re-bases the
+        # #769 circuit to the starter R0, so an add cannot deepen a loss beyond R0. Uses the
+        # adaptive params["trail_activate_return_bps"] (no magic numbers). The existing
+        # post-bailout trail-arm is preserved + idempotent (it guards on st == ENTERED, so it
+        # no-ops once armed here). Flag OFF (default-on kill-switch) => this block is skipped
+        # => byte-identical (trail arms only at its current post-bailout site).
+        if (
+            bool(getattr(settings, "chili_momentum_early_trail_arm_enabled", True))
+            and st == STATE_LIVE_ENTERED
+            and bid is not None
+            and math.isfinite(float(bid))
+            and float(bid) >= avg * trail_activate_return
+        ):
+            _safe_transition(db, sess, STATE_LIVE_TRAILING)
+            _emit(db, sess, "live_trailing_armed", {"bid": bid, "early_arm": True})
+            db.flush()
+            return {"ok": True, "session_id": sess.id, "state": sess.state}
 
         # #2 Breakout-or-bailout fast exit (Ross flat-top): within the early window
         # after a pullback_break entry, if the broken breakout level fails to HOLD on

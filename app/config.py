@@ -2900,6 +2900,18 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_BROKER_TRUTH_LABEL_ENABLED"),
         description="Kill-switch: True => learning consumers read the broker-true label via authoritative_label_for_outcome (reconciled rows use broker PnL/bps; unreconciled are EXCLUDED). Default OFF (legacy field, byte-identical). Flipping ON changes daily-loss/giveback gate inputs — soak deploy-when-flat.",
     )
+    # Replay v3 R1 — append the live_eligible TIME-SERIES to momentum_viability_history
+    # (mig311) on every viability write, so FUTURE replays read the exact recorded
+    # flicker instead of reconstructing it. Default ON: it is cheap (one extra INSERT per
+    # viability tick), risk-free (append-only observability, never touches the live
+    # viability decision), and fail-open (a history-write error is swallowed and never
+    # blocks the live viability upsert). Kill-switch =0 to disable the append entirely
+    # (byte-identical to pre-R1: zero history rows written, the viability upsert unchanged).
+    chili_momentum_viability_history_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VIABILITY_HISTORY_ENABLED"),
+        description="Replay v3 R1: True (default) => append the live_eligible time-series to momentum_viability_history on each viability write (perfect future replay fidelity). Cheap, append-only, fail-open. =0 disables the append (byte-identical, zero history rows).",
+    )
     # ── Extended-hours trading window (Ross trades the pre-market gap-and-go) ──
     # The momentum equity lane is tradeable from premarket_start → afterhours_end ET.
     # Regular session (9:30–16:00 ET) is a fixed exchange fact in market_profile.py;
@@ -5089,6 +5101,58 @@ class Settings(BaseSettings):
         le=6.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_RISK_MULTIPLE"),
         description="K — the circuit fires when unrealized loss <= -(K x structural_risk) and flattens at avg - K*stop_distance. ge=1.0 so the floor can never sit looser than the structural stop.",
+    )
+    # ── C1 PER-TRADE MAX-LOSS FRESH-QUOTE GUARD (2026-06-30, PULLBACK-SCALP-ENABLE) ──
+    # The C1 1x per-trade max-loss check (unrealized_pnl <= -max_loss_per_trade_usd) had NO
+    # fresh-quote guard (unlike the C1b #769 circuit just below it). A torn/stale/zero bid
+    # (bid = float(tick.bid or mid) — falls back to a stale mid) trips a SPURIOUS full
+    # liquidation on a phantom unrealized loss while the real NBBO is fine (CELZ session 9920
+    # force-exited on a phantom unrealized=-$148 while the real bid was >= $4.22 / +18%). This
+    # flag adds the SAME fresh-quote predicate C1b uses (finite bid > 0, halt_stale_streak==0,
+    # no suspected_halt_since_utc): when ON and the quote is NOT fresh, SKIP C1 this pulse (the
+    # structural stop + the fresh-guarded C1b still protect; the next fresh tick re-checks). A
+    # genuine -max_loss on a FRESH bid still fires C1 immediately. Flag OFF = byte-identical
+    # (C1 fires regardless of freshness).
+    chili_momentum_max_loss_fresh_quote_guard_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_FRESH_QUOTE_GUARD_ENABLED"),
+        description="Kill-switch for the fresh-quote guard on the C1 per-trade max-loss check. true (default) = SKIP the C1 force-exit on a provably stale/torn/zero bid (reuses the C1b fresh-quote predicate: finite bid>0, halt_stale_streak==0, no suspected_halt) AND on an IQFeed tick-level NBBO cross-check (in-process bid materially below a fresh momentum_nbbo_spread_tape bid => phantom loss, skip); a genuine -max_loss on a FRESH bid still fires immediately. false = byte-identical legacy (C1 fires regardless of quote freshness). The #769 max-loss circuit + structural stop are untouched.",
+    )
+    # C1 IQFeed phantom-loss cross-check (2026-06-30): on the C1-trigger path ONLY, the
+    # in-process bid is compared to the freshest IQFeed NBBO mirrored into
+    # momentum_nbbo_spread_tape. The divergence tolerance is ADAPTIVE — a multiple of the
+    # name's OWN recent median spread (no fixed bps clock); the multiple is the only knob.
+    chili_momentum_max_loss_phantom_divergence_spread_mult: float = Field(
+        default=3.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_PHANTOM_DIVERGENCE_SPREAD_MULT"),
+        description="C1 IQFeed cross-check: the in-process bid must sit below the fresh IQFeed/tape bid by MORE than (this multiple x the name's recent median spread_bps) to be flagged a PHANTOM loss (=> skip C1). Adaptive (name-relative); ge=1.0 so the tolerance is never tighter than one typical spread.",
+    )
+    # The ONE documented fallback divergence tolerance, used ONLY when the recent tape
+    # spread is unavailable (thin/absent L1) so there is no name-relative scale to adapt to.
+    chili_momentum_max_loss_phantom_divergence_fallback_bps: float = Field(
+        default=100.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_PHANTOM_DIVERGENCE_FALLBACK_BPS"),
+        description="C1 IQFeed cross-check fallback: the divergence tolerance (bps below the fresh tape bid) used ONLY when the recent tape median spread is unavailable. The single documented base — adaptive name-relative scale is preferred when present.",
+    )
+    # ── EARLY TRAIL-ARM (2026-06-30, PULLBACK-SCALP-ENABLE) ──
+    # The 4 add/reload paths (pyramid_add, micropullback_reentry, pullback_add, flag_breakout_add)
+    # are ALL gated on st == STATE_LIVE_TRAILING. A fresh fill lands in STATE_LIVE_ENTERED; the
+    # ENTERED-only no-confirmation bailouts (instant_bid_above_fill_unconfirmed, bail_on_no_
+    # confirmation) run FIRST each tick and return early, so a normal entry goes ENTERED ->
+    # BAILOUT -> recycle and NEVER reaches TRAILING => 0 adds (the Ross-style ride+add / micro-
+    # reentry path is structurally unreachable). When ON, a CONFIRMED thrust (bid >= avg *
+    # trail_activate_return, i.e. already in profit above the adaptive activation band) arms
+    # TRAILING BEFORE those bailouts can cut — opening the add path. ANTI-REGRESSION: arms ONLY
+    # when bid >= avg*trail_activate_return (already in profit); a position at/below entry is
+    # untouched and STILL gets the no-confirmation cut. Uses the existing adaptive
+    # params["trail_activate_return_bps"] (no magic numbers). Flag OFF = byte-identical (trail
+    # arms only at its current post-bailout site).
+    chili_momentum_early_trail_arm_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EARLY_TRAIL_ARM_ENABLED"),
+        description="Kill-switch for arming STATE_LIVE_TRAILING on the adaptive price-rise threshold (bid >= avg*trail_activate_return) BEFORE the ENTERED no-confirmation bailouts. true (default) = a confirmed front-side runner reaches TRAILING and opens the ride+add / micro-reentry path (arms only when already in profit; a loser at/below entry still gets the no-confirmation cut). false = byte-identical (trail arms only at its post-bailout site). Reuses the adaptive trail_activate_return_bps; the structural stop + #769 circuit are untouched.",
     )
     # ── ADAPTIVE SPREAD-COST VETO/DERATE (2026-06-27, DEFAULT OFF = byte-identical) ──
     # Judges the live entry spread RELATIVE to (a) the name's OWN recent typical spread
@@ -8531,6 +8595,44 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_A_SETUP_QUALITY_FLOOR_CHANGE_PCT_MIN"),
         description="Min absolute day-change %% for an A-setup LIVE name; aligned with the Ross change floor (~10%%). CODI (0%%) rejected.",
     )
+    # EXPLOSIVE-PREQUAL SCORE FLOOR (LIVE only; the UPC blocker fix). A +500% low-float
+    # mover scored viability 0.55 — BELOW the impulse_breakout entry bar (0.56,
+    # strategy_params.py:35) — so it never armed while a generic 0.56 bar cleared. This
+    # RAISE-ONLY floor lifts the viability of a GENUINE Ross A-setup (low-float + SIGNED
+    # up-change >= the change floor + RVOL ok) just OVER the default bar so the score
+    # arithmetic stops vetoing the exact name the lane exists to trade. It NEVER lowers a
+    # score and is gated by the SAME hardened explosive conjunction the extreme-vol relax
+    # uses (tradable + spread-ok + affirm-explosive + not-below-floor + still live-eligible)
+    # plus a SIGNED-up A-setup conjunction (fail-CLOSED on missing change so a low-float
+    # CRASHER cannot be lifted). A floored name is coupled to RISK-BOUNDED sizing (sized
+    # DOWN). Default-ON (no dark flags); OFF => byte-identical.
+    chili_momentum_explosive_prequal_floor_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_PREQUAL_FLOOR_ENABLED"),
+        description="Raise-only viability floor that lifts a genuine low-float + signed-up + rvol Ross A-setup just over the impulse_breakout entry bar (the UPC 0.55<0.56 fix). Anti-junk fail-closed, size-down-coupled, RESTRICT-only (never lowers). OFF = byte-identical.",
+    )
+    # ONE documented base margin: how far ABOVE the reference bar to lift a qualifying
+    # name. 0.02 over the 0.56 default bar => 0.58, which clears the impulse_breakout
+    # entry_viability_min in the DEFAULT (no-bump) regime. Reference, not magic.
+    chili_momentum_explosive_prequal_margin: float = Field(
+        default=0.02,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_PREQUAL_MARGIN"),
+        description="Margin lifted ABOVE the reference bar for a qualifying explosive A-setup (0.02 => 0.58 over the 0.56 default bar). ONE documented base.",
+    )
+    # The reference entry bar this floor clears. 0.56 = impulse_breakout
+    # entry_viability_min (strategy_params.py:35), the DEFAULT family bar. NOTE (RISK #1):
+    # the LIVE binding can be RAISED above this (midday-lull +0.05, run-R breaker, families
+    # that bind higher e.g. 0.57/0.60), so floor+margin clears the bar in the DEFAULT /
+    # no-bump impulse_breakout regime, NOT unconditionally — which is acceptable since Ross
+    # sits out the midday lull anyway. Raise via env to track a higher resolved bar.
+    chili_momentum_explosive_prequal_bar_ref: float = Field(
+        default=0.56,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_PREQUAL_BAR_REF"),
+        description="Reference entry bar the prequal floor clears = impulse_breakout entry_viability_min (0.56, strategy_params.py:35), the DEFAULT family bar. Documents the no-bump regime the floor unblocks.",
+    )
     # FIX B (2026-06-23): QUALITY SLOT-PRIORITY TIER in the arm queue. The
     # multiplicative ETF down-weight above leaks (a fresh-ross ETF at ×0.5 still
     # outranks a real company whose ross score went stale -> 0.0; 13 such inversions
@@ -11679,6 +11781,11 @@ class Settings(BaseSettings):
     brain_retention_exit_parity_max_rows_per_sweep: int = 5_000_000
     brain_retention_bracket_reconciliation_days: int = 30
     brain_retention_execution_event_days: int = 180
+    # Replay v3 R1: TTL for the append-only momentum_viability_history (mig311). The
+    # eligibility series is only needed for recent-day replay/incident reconstruction;
+    # 30d keeps the table small (one row per viable name per tick). Pruned by the same
+    # batched _prune_operational_time_log drain the other operational logs use.
+    brain_retention_viability_history_days: int = 30
     brain_retention_fast_snapshot_days: int = 30
     brain_retention_fast_orderbook_days: int = 3
     brain_retention_fast_alert_days: int = 14

@@ -151,10 +151,15 @@ def test_crypto_name_never_carved_out():
 
 
 def test_narrow_spread_top_squeeze_unaffected():
-    """A top-squeeze name with a NARROW spread (under the ceiling) never enters the carve-out
-    block at all -> live_eligible True, NOT marked risk-bounded (no needless size-down)."""
+    """A top-squeeze name with a NARROW spread never enters the carve-out block at all ->
+    live_eligible True, NOT marked risk-bounded (no needless size-down). Uses a genuinely
+    narrow 10bps spread (no wide-spread derate) so the base stays well above the entry bar:
+    at 40bps the >25bps derate dropped the base just under the impulse_breakout bar and the
+    (separate) explosive-prequal score floor correctly lifted + size-down-coupled it, which
+    is the floor working as designed — not the carve-out — but it muddied this test's intent
+    (the carve-out, not the prequal floor)."""
     vr = score_viability(
-        "SQZ", _fam(), _ctx(), _feats(ross_signals={"SQZ": _top_squeeze_signal()}, spread_bps=40.0)
+        "SQZ", _fam(), _ctx(), _feats(ross_signals={"SQZ": _top_squeeze_signal()}, spread_bps=10.0)
     )
     assert vr.live_eligible is True
     assert vr.extreme_vol_risk_bounded is False

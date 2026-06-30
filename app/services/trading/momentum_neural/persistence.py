@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from ....models.trading import (
     MomentumStrategyVariant,
     MomentumSymbolViability,
+    MomentumViabilityHistory,
     TradingAutomationEvent,
     TradingAutomationRuntimeSnapshot,
     TradingAutomationSession,
@@ -58,6 +59,79 @@ def _crypto_viability_gate_active() -> bool:
 
 def _is_usd_crypto_symbol(symbol: str | None) -> bool:
     return "-USD" in str(symbol or "").upper()
+
+
+def _viability_history_enabled() -> bool:
+    """Replay v3 R1 — gate the momentum_viability_history append (default ON; cheap,
+    append-only observability). Fail-safe: any config error => OFF (no append, the
+    viability upsert is byte-identical)."""
+    try:
+        from ....config import settings
+
+        return bool(getattr(settings, "chili_momentum_viability_history_enabled", True))
+    except Exception:
+        return False
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+# Scanner-result keys carrying RVOL / change (mirror distribution_filters._RVOL_KEYS /
+# _CHANGE_KEYS so the history captures the SAME inputs the scorer/floors read).
+_HIST_RVOL_KEYS = ("vol_ratio", "rvol", "volume_ratio")
+_HIST_CHANGE_KEYS = (
+    "daily_change_pct",
+    "change_24h",
+    "change_pct",
+    "todays_change_perc",
+    "gap_pct",
+)
+
+
+def _scorer_inputs_for_history(
+    symbol: str, row: dict[str, Any], features: ExecutionReadinessFeatures
+) -> tuple[Optional[float], Optional[float], Optional[float], Optional[str]]:
+    """Extract (rvol, change_pct, spread_bps, blocked_reason) for the history row from
+    the SAME sources the live scorer reads — features.meta['ross_signals'][symbol] for
+    rvol/change, features.spread_bps for the spread, and the first eligibility-bearing
+    warning for the blocked_reason. Pure read; never raises (fail-open to Nones)."""
+    rvol: Optional[float] = None
+    change_pct: Optional[float] = None
+    try:
+        meta = getattr(features, "meta", None)
+        rsig = meta.get("ross_signals") if isinstance(meta, dict) else None
+        sig = rsig.get(symbol) if isinstance(rsig, dict) else None
+        if isinstance(sig, dict):
+            for k in _HIST_RVOL_KEYS:
+                if k in sig:
+                    rvol = _coerce_float(sig.get(k))
+                    if rvol is not None:
+                        break
+            for k in _HIST_CHANGE_KEYS:
+                if k in sig:
+                    change_pct = _coerce_float(sig.get(k))
+                    if change_pct is not None:
+                        break
+    except (AttributeError, TypeError):
+        pass
+    spread_bps = _coerce_float(getattr(features, "spread_bps", None))
+    blocked_reason: Optional[str] = None
+    try:
+        warnings = row.get("warnings") or []
+        for w in warnings:
+            wl = str(w).lower()
+            if "eligib" in wl or "untradeable" in wl or "not a live setup" in wl or "vetoed" in wl:
+                blocked_reason = str(w)[:120]
+                break
+    except (AttributeError, TypeError):
+        pass
+    return rvol, change_pct, spread_bps, blocked_reason
 
 
 def _strategy_variant_key(family_id: str, version: int) -> tuple[str, str, int]:
@@ -509,6 +583,11 @@ def persist_neural_momentum_tick(
     # ONCE per tick (not per row). The "__aggregate__" row is NEVER crypto, so it is
     # always persisted. flag-OFF / crypto-traded = scores all symbols (legacy).
     _gate_crypto = _crypto_viability_gate_active()
+    # Replay v3 R1 — buffer the live_eligible TIME-SERIES rows to append (bulk-inserted
+    # once after the upsert loop). Built only when the flag is ON; the append itself is
+    # fail-open (a history error never blocks the live viability upsert).
+    _hist_enabled = _viability_history_enabled()
+    _hist_rows: list[dict[str, Any]] = []
     # Deterministic (symbol, variant_id) order — prevents the cross-tick deadlock
     # on the unique index (see _resolve_viability_upserts).
     for symbol, vid, row in _resolve_viability_upserts(db, row_dicts):
@@ -568,6 +647,47 @@ def persist_neural_momentum_tick(
         )
         db.execute(stmt)
         n += 1
+
+        # Replay v3 R1 — record the live_eligible value (+ the scorer inputs to recompute
+        # / audit it) into the append-only history. Cheap (buffered, one bulk INSERT) and
+        # observability-only; the live viability decision above is untouched.
+        if _hist_enabled:
+            _rvol, _chg, _spread, _blocked = _scorer_inputs_for_history(symbol, row, features)
+            _hist_rows.append(
+                {
+                    "symbol": symbol,
+                    "variant_id": vid,
+                    "scope": infer_viability_scope(symbol, explicit=row.get("scope")),
+                    "observed_at": now,
+                    "live_eligible": bool(row.get("live_eligible", False)),
+                    "paper_eligible": bool(row.get("paper_eligible", True)),
+                    "freshness_ts": now,
+                    "viability_score": float(row.get("viability") or 0.0),
+                    "rvol": _rvol,
+                    "change_pct": _chg,
+                    "spread_bps": _spread,
+                    "blocked_reason": _blocked,
+                    "correlation_id": correlation_id,
+                    "source_node_id": source_node_id,
+                    "created_at": now,
+                }
+            )
+
+    # Append the buffered history rows in ONE bulk INSERT. FAIL-OPEN: a history-write
+    # error is swallowed (and the SAVEPOINT rolled back so the live viability upserts
+    # above survive) — observability must never block the live viability update.
+    if _hist_enabled and _hist_rows:
+        try:
+            with db.begin_nested():
+                db.execute(MomentumViabilityHistory.__table__.insert(), _hist_rows)
+        except Exception:
+            _log.debug(
+                "[momentum_neural] viability_history append failed (%d rows) — "
+                "fail-open, viability upserts unaffected",
+                len(_hist_rows),
+                exc_info=True,
+            )
+
     if skipped_crypto:
         _log.debug(
             "[momentum_neural] crypto viability gate skipped %s -USD rows (crypto not traded)",

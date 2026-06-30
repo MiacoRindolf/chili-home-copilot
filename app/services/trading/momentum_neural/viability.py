@@ -257,6 +257,37 @@ def score_viability(
     # a later re-init. Plumbed to the ViabilityResult field + the live_runner size-down.
     _extreme_vol_risk_bounded = False
 
+    # HOIST for the explosive-prequal score floor (applied at viability=max(...) below).
+    # The LEVER-1 explosive block (~line 440) extracts these INSIDE a nested
+    # equity-only / non-empty-signal try-block, so they are NOT in scope on the crypto /
+    # flag-off / empty-signal paths. Hoist them here with SAFE DEFAULTS (values None;
+    # ceil/floors = the documented Ross floors) so the prequal-floor block below NEVER
+    # NameErrors. The LEVER-1 block REBINDS these from the live signal when present; when
+    # it does not run, the prequal A-setup conjunction fails CLOSED (None values), so the
+    # floor is a strict no-op — byte-identical to the pre-floor path.
+    _float_x: float | None = None
+    _rvol_x: float | None = None
+    _chg_x: float | None = None
+    _float_ceil_x: float = float(
+        getattr(
+            settings,
+            "chili_momentum_a_setup_quality_floor_float_ceiling_shares",
+            20_000_000.0,
+        )
+        or 20_000_000.0
+    )
+    _rvol_floor_x: float = float(
+        getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 3.0
+    )
+    _chg_floor_x: float = float(
+        getattr(
+            settings,
+            "chili_momentum_a_setup_quality_floor_change_pct_min",
+            10.0,
+        )
+        or 10.0
+    )
+
     # Ross lane = low-float small-cap COMMON stock. HARD-VETO leveraged/inverse ETPs
     # (SOXS/SQQQ/SOXL + the Tradr/Defiance/T-REX "2X Short XXX" single-stock wave that
     # flooded the lane 2026-06-23: 11 of 18 eligible names were these). They are geared
@@ -437,27 +468,11 @@ def score_viability(
                 # selection-quality reject — _is_genuine_explosive stays False and the
                 # prior blanket extreme-vol block applies (byte-identical when the signal
                 # carries no explosiveness data).
+                # Rebind the hoisted VALUES from the live signal (the floors
+                # _float_ceil_x/_rvol_floor_x/_chg_floor_x are already computed at the
+                # hoist near the top from the SAME settings — single source of truth).
                 _rvol_x, _chg_x, _liq_x, _ = _extract_pillars(_sig_x)
                 _float_x = _first_float(_sig_x, "float_shares")
-                _float_ceil_x = float(
-                    getattr(
-                        settings,
-                        "chili_momentum_a_setup_quality_floor_float_ceiling_shares",
-                        20_000_000.0,
-                    )
-                    or 20_000_000.0
-                )
-                _rvol_floor_x = float(
-                    getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 3.0
-                )
-                _chg_floor_x = float(
-                    getattr(
-                        settings,
-                        "chili_momentum_a_setup_quality_floor_change_pct_min",
-                        10.0,
-                    )
-                    or 10.0
-                )
                 _affirm_explosive = (
                     (
                         _float_x is not None
@@ -914,6 +929,69 @@ def score_viability(
                     warnings.append("Extreme RVOL tail — choppy/crowded (inverted-U roll-off)")
     except (TypeError, ValueError, AttributeError):
         pass
+
+    # EXPLOSIVE-PREQUAL SCORE FLOOR (the UPC blocker fix). A +500% low-float mover scored
+    # viability 0.55 — just BELOW the impulse_breakout entry bar (0.56,
+    # strategy_params.py:35) — so the score arithmetic vetoed the exact name the lane
+    # exists to trade while a generic 0.56 bar cleared. This is a bar-relative RAISE-ONLY
+    # floor (never lowers) that lifts the score of a GENUINE Ross A-setup just OVER the
+    # default bar. It is gated by a HARDENED signed A-setup conjunction so junk cannot ride
+    # it: low-float (float-confirmed, <= ceiling) AND SIGNED up-change >= the change floor
+    # (NOT abs — a low-float CRASHER with extreme rvol fails) AND rvol ok (present >= floor,
+    # OR fail-OPEN only when the up-change already confirmed the mover). It also requires the
+    # SAME _is_genuine_explosive conjunction the extreme-vol relax uses (tradable + spread-ok
+    # + affirm-explosive + not-below-floor) and that the name is STILL live_eligible (never
+    # lift one an upstream HARD gate already rejected). A floored name is coupled to
+    # RISK-BOUNDED sizing (sized DOWN). EQUITY-only; crypto / flag-off / missing-change =>
+    # no-op (byte-identical). RISK #1: the LIVE entry binding can be RAISED above B_ref
+    # (midday-lull +0.05, run-R breaker, families that bind higher), so floor+margin clears
+    # the bar in the DEFAULT / no-bump impulse_breakout regime, NOT unconditionally — which
+    # is acceptable (Ross sits out the midday lull anyway). Kill-switch
+    # CHILI_MOMENTUM_EXPLOSIVE_PREQUAL_FLOOR_ENABLED.
+    _floored = False
+    _prefloor_base = base
+    try:
+        if (
+            bool(getattr(settings, "chili_momentum_explosive_prequal_floor_enabled", True))
+            and _is_genuine_explosive  # tradable + spread-ok + affirm-explosive + not below_explosive_floor
+            and live_eligible  # never lift a name an upstream HARD gate already rejected
+            and "-USD" not in str(symbol or "").upper()
+        ):
+            _lowfloat_ok = (
+                _float_x is not None
+                and _float_x > 0
+                and (_float_ceil_x <= 0 or _float_x <= _float_ceil_x)
+            )
+            _up_ok = (_chg_x is not None and _chg_x >= _chg_floor_x)  # SIGNED up-change (NOT abs)
+            _rvol_ok = (_rvol_x is not None and _rvol_x >= _rvol_floor_x) or (
+                _rvol_x is None and _up_ok
+            )
+            _a_setup = _lowfloat_ok and _up_ok and _rvol_ok  # fail-CLOSED on missing change
+            if _a_setup:
+                B_ref = float(
+                    getattr(settings, "chili_momentum_explosive_prequal_bar_ref", 0.56) or 0.56
+                )
+                m = float(
+                    getattr(settings, "chili_momentum_explosive_prequal_margin", 0.02) or 0.02
+                )
+                _floor_v = min(0.95, B_ref + m)
+                if base < _floor_v:
+                    base = _floor_v  # raise-only; never lowers
+                    _floored = True
+    except (TypeError, ValueError, AttributeError):
+        pass
+    if _floored:
+        _extreme_vol_risk_bounded = True  # couple to size-DOWN
+        logger.info(
+            "[momentum_neural] explosive-prequal floor sym=%s base=%s->%s "
+            "(float=%s rvol=%s change=%s)",
+            symbol,
+            f"{_prefloor_base:.4f}",
+            f"{base:.4f}",
+            f"{_float_x:,.0f}" if _float_x is not None else None,
+            _rvol_x,
+            _chg_x,
+        )
 
     viability = max(0.0, min(1.0, base))
 

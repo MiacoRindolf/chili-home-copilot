@@ -1586,6 +1586,44 @@ class MomentumSymbolViability(Base):
     updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
+class MomentumViabilityHistory(Base):
+    """Append-only TIME-SERIES of the ``live_eligible`` gate (Replay v3 R1, mig311).
+
+    ``MomentumSymbolViability`` carries ``live_eligible`` as a single mutable snapshot
+    column (no history), so the eligibility timeline that produced the UPC TOCTOU
+    flicker is not directly recorded — Replay v3 has to reconstruct it. This table
+    records one row per (symbol, variant_id) PER viability tick going forward so FUTURE
+    replays read the exact recorded series (perfect fidelity, no reconstruction).
+    Append-only + TTL-pruned (data_retention; default 30d) so it cannot balloon."""
+
+    __tablename__ = "momentum_viability_history"
+
+    id: int = Column(BigInteger, primary_key=True, index=True)
+    symbol: str = Column(String(36), nullable=False, index=True)
+    variant_id: int = Column(Integer, nullable=False, index=True)
+    scope: Optional[str] = Column(String(16), nullable=True)
+    observed_at: datetime = Column(DateTime, nullable=False)
+    live_eligible: bool = Column(Boolean, nullable=False)
+    paper_eligible: Optional[bool] = Column(Boolean, nullable=True)
+    freshness_ts: Optional[datetime] = Column(DateTime, nullable=True)
+    viability_score: Optional[float] = Column(Float, nullable=True)
+    rvol: Optional[float] = Column(Float, nullable=True)
+    change_pct: Optional[float] = Column(Float, nullable=True)
+    spread_bps: Optional[float] = Column(Float, nullable=True)
+    blocked_reason: Optional[str] = Column(String(120), nullable=True)
+    correlation_id: Optional[str] = Column(String(64), nullable=True)
+    source_node_id: Optional[str] = Column(String(80), nullable=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_mvh_symbol_observed", "symbol", "observed_at"),
+        Index("ix_mvh_symbol_variant_observed", "symbol", "variant_id", "observed_at"),
+        # (observed_at, id) leading-time index — required by the data_retention TTL
+        # drain (_prune_operational_time_log, require_id_second=True). Mirrors mig311.
+        Index("ix_mvh_observed_id", "observed_at", "id"),
+    )
+
+
 class TradingAutomationSession(Base):
     """Automation runner session (persistence only in Phase 2 — no runner logic here)."""
 
