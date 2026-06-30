@@ -73,6 +73,7 @@ from .paper_execution import (
     class_aware_reward_risk,
     double_top_tighten_decision,
     effective_stop_atr_pct,
+    flag_breakout_add_decision,
     iceberg_seller_score,
     measured_move_exit_enabled,
     measured_move_scale_exit_decision,
@@ -4580,6 +4581,17 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "pullback_add_prev_stop",
     "pullback_add_confirm_strength",
     "pullback_add_confirm_ofi",
+    # ── Ross add-on-flag-breakout leg ──
+    "flag_breakout_add_order_id",
+    "flag_breakout_add_limit_px",
+    "flag_breakout_add_count",
+    "flag_breakout_add_cooldown_until_utc",
+    "flag_breakout_add_pending_R0",
+    "flag_breakout_add_pending_high",
+    "flag_breakout_add_last_high",
+    "flag_breakout_add_prev_stop",
+    "flag_breakout_add_confirm_strength",
+    "flag_breakout_add_confirm_ofi",
     # ── stop / breach / max-loss circuit / excursion markers ──
     "structural_stop_price",
     "structural_stop_atr_pct",
@@ -13235,6 +13247,469 @@ def tick_live_session(
                     # Fail-safe: any pullback-add error is swallowed so the exit path below
                     # ALWAYS runs. The pullback-add NEVER blocks/delays/loosens an exit.
                     _log.debug("[momentum_live] pullback-add block error", exc_info=True)
+
+            # ── ROSS ADD-ON-FLAG-BREAKOUT (the FOURTH held-position add) ─────────
+            # The UP-pyramid adds on a new-HOD + OFI thrust; the micro-pullback re-loads on a
+            # shallow dip-and-curl; the BUY-THE-DIP pullback-add re-loads on a bounce off
+            # support. Ross ALSO adds when a held winner consolidates into a tight BULL FLAG
+            # (a base after the impulse) and then BREAKS the flag's swing high — a CONTINUATION
+            # add at the breakout (which may be the FIRST new high after the base, NOT a fresh
+            # day-HOD pyramid, and NOT a dip-bounce). This is the THIRD-and-a-half distinct add
+            # sub-branch: OWN predicate (flag_breakout_add_decision), OWN counter
+            # (flag_breakout_add_count), OWN kill-switch, OWN in-flight marker
+            # (flag_breakout_add_order_id), OWN cooldown.
+            #
+            # FLAG DETECTION REUSE: bull_flag_confirmation (the SAME detector the fresh-ENTRY
+            # lane uses, entry_gates.py) runs on the HELD position's recent bars. Its ok=True +
+            # debug["pullback_high"] (= the flag swing-high / break level) + debug["pullback_low"]
+            # (= the flag low / structural stop) + debug["above_vwap"] are the flag geometry +
+            # confirmed break. The detector itself enforces the tight-consolidation depth band,
+            # the EMA-9 hold, the light-pullback volume, the anti-chase / backside / L2-hidden-
+            # seller vetoes, the NOT-PARABOLIC extension guard, and the genuine swing-high break
+            # WITH tape — so a sloppy breakdown dressed as a flag never returns ok=True.
+            #
+            # ⭐ FALLING-KNIFE / QUALITY GUARD (identical discipline to the dip-add): the add
+            # fires ONLY when front_side_strength >= an adaptive floor + OFI not collapsing +
+            # above-VWAP-or-reclaiming + a HIGHER base than the prior flag + a GENUINE break
+            # (bid clears the flag top by >= a margin-frac of the flag range, not a 1-tick wick).
+            # FAIL-CLOSED on any missing input ⇒ NO add (bias toward not adding).
+            #
+            # COMPOSES with the other 3: it REFUSES whenever the UP-pyramid OR the micro-pullback
+            # OR the buy-the-dip pullback-add has an add in flight (never two adds on one tick) +
+            # its own cooldown. Re-loads route through pyramid_blend_on_fill +
+            # pyramid_risk_anchor_usd VERBATIM so the #769 max-loss circuit re-bases to the
+            # STARTER R0 (worst-case flag-add risk = max * fraction * R0 on top of the starter).
+            # EQUITY-FIRST (crypto deferred). ADDITIVE: flag OFF ⇒ the whole block is a no-op
+            # (byte-identical). Two phases (resolve-in-flight, trigger-new), both FALL THROUGH
+            # so the stop-breach/exit block below ALWAYS runs this tick. The entire block is in a
+            # try/except that swallows to the fall-through — a flag-add NEVER blocks, delays, or
+            # loosens an exit. This is an ADD lever, NEVER a veto. (docs/DESIGN/MOMENTUM_LANE.md)
+            if bool(getattr(settings, "chili_momentum_flag_breakout_add_enabled", True)):
+                try:
+                    # PHASE 1 — resolve an IN-FLIGHT flag-breakout-add order (mirror the pyramid
+                    # adopt). Blend ONLY on a CONFIRMED fill via the SHARED helper; the circuit
+                    # re-bases to the STARTER R0 (pyramid_risk_anchor_usd). While an order is in
+                    # flight PHASE 2 cannot submit a second (idempotency).
+                    _fba_oid = le.get("flag_breakout_add_order_id")
+                    if _fba_oid:
+                        _fbno, _ = adapter.get_order(str(_fba_oid))
+                        if _fbno is not None and not _order_open(_fbno):
+                            _fba_filled = float(getattr(_fbno, "filled_size", 0) or 0)
+                            if _fba_filled > 0:
+                                _qa_fb = _fba_filled
+                                _Pa_fb = float(
+                                    getattr(_fbno, "average_filled_price", 0) or 0
+                                ) or float(le.get("flag_breakout_add_limit_px") or ask)
+                                _q0fb = float(pos["quantity"])
+                                _a0fb = float(pos["avg_entry_price"])
+                                _R0fb = _float_or_none(le.get("flag_breakout_add_pending_R0"))
+                                _prev_stop_fb = float(pos["stop_price"])
+                                _blend_fb = pyramid_blend_on_fill(
+                                    q0=_q0fb, a0=_a0fb, qa_f=_qa_fb, Pa_f=_Pa_fb,
+                                    stop_px=_prev_stop_fb,
+                                    original_quantity=_float_or_none(pos.get("original_quantity")),
+                                )
+                                _q1fb = _blend_fb["q1"]
+                                _a1fb = _blend_fb["a1"]
+                                _s1fb = _blend_fb["s1"]  # INVARIANT-A: tighten-only (asserted)
+                                pos["avg_entry_price"] = _a1fb
+                                pos["quantity"] = _q1fb
+                                pos["original_quantity"] = _blend_fb["original_quantity"]
+                                pos["notional_usd"] = _q1fb * _a1fb
+                                pos["stop_price"] = _s1fb
+                                stop_px = _s1fb
+                                # Re-base the max-loss circuit to the STARTER R0 (GUARD #1),
+                                # VERBATIM with the pyramid add — adds NEVER inflate the
+                                # per-trade loss budget.
+                                if _R0fb is not None and _R0fb > 0:
+                                    le["pyramid_risk_anchor_usd"] = _R0fb
+                                le["flag_breakout_add_count"] = int(le.get("flag_breakout_add_count") or 0) + 1
+                                _add_fee_fb = _order_total_fees_usd(_fbno) or 0.0
+                                if _add_fee_fb > 0.0:
+                                    le["entry_fee_usd_unbooked"] = (
+                                        float(le.get("entry_fee_usd_unbooked") or 0.0) + _add_fee_fb
+                                    )
+                                # RATCHET the higher-base reference to THIS flag's high so the
+                                # NEXT flag-add must build a HIGHER flag than this one.
+                                _fba_high = _float_or_none(le.get("flag_breakout_add_pending_high"))
+                                if _fba_high is not None and _fba_high > 0:
+                                    le["flag_breakout_add_last_high"] = _fba_high
+                                from datetime import timezone as _tz_fb
+                                _cool_s_fb = max(
+                                    float(getattr(settings, "chili_momentum_flag_breakout_add_cooldown_seconds", 30.0) or 30.0),
+                                    2.0 * float(getattr(settings, "chili_momentum_micropull_bar_seconds", 15) or 15),
+                                )
+                                le["flag_breakout_add_cooldown_until_utc"] = (
+                                    datetime.now(_tz_fb.utc) + timedelta(seconds=_cool_s_fb)
+                                ).replace(tzinfo=None).isoformat()
+                                le.pop("flag_breakout_add_order_id", None)
+                                le.pop("flag_breakout_add_limit_px", None)
+                                le.pop("flag_breakout_add_pending_R0", None)
+                                le.pop("flag_breakout_add_pending_high", None)
+                                le["position"] = pos
+                                _commit_le(sess, le)
+                                _emit(db, sess, "live_flag_breakout_add_fill", {
+                                    "add_qty": _qa_fb, "add_price": _Pa_fb,
+                                    "q0": _q0fb, "a0": _a0fb, "q1": _q1fb, "a1": _a1fb,
+                                    "old_stop": float(le.get("flag_breakout_add_prev_stop") or _s1fb),
+                                    "new_stop": _s1fb, "R0": _R0fb,
+                                    "add_count": le["flag_breakout_add_count"],
+                                    "higher_base": le.get("flag_breakout_add_last_high"),
+                                    "strength": le.get("flag_breakout_add_confirm_strength"),
+                                    "ofi": le.get("flag_breakout_add_confirm_ofi"),
+                                })
+                                le.pop("flag_breakout_add_prev_stop", None)
+                                le.pop("flag_breakout_add_confirm_strength", None)
+                                le.pop("flag_breakout_add_confirm_ofi", None)
+                            else:
+                                # Terminal with NO fill — clear the in-flight marker (a future
+                                # tick may try again). No pos mutation.
+                                le.pop("flag_breakout_add_order_id", None)
+                                le.pop("flag_breakout_add_limit_px", None)
+                                le.pop("flag_breakout_add_pending_R0", None)
+                                le.pop("flag_breakout_add_pending_high", None)
+                                le.pop("flag_breakout_add_prev_stop", None)
+                                le.pop("flag_breakout_add_confirm_strength", None)
+                                le.pop("flag_breakout_add_confirm_ofi", None)
+                                _commit_le(sess, le)
+
+                    # PHASE 2 — TRIGGER a new flag-breakout add (only if none in flight + under
+                    # cap + cooldown elapsed + NO other add in flight). EQUITY-FIRST.
+                    _is_equity_fba = not str(sess.symbol or "").upper().endswith("-USD")
+                    _max_fba = int(getattr(settings, "chili_momentum_flag_breakout_add_max", 2) or 2)
+                    _other_add_in_flight_fb = bool(
+                        le.get("pyramid_order_id")
+                        or le.get("micropullback_reentry_order_id")
+                        or le.get("pullback_add_order_id")
+                    )
+                    if (
+                        st == STATE_LIVE_TRAILING
+                        and not le.get("flag_breakout_add_order_id")
+                    ):
+                        # STARTER structural risk R0 = d0 * q0 (the frozen entry stop_distance *
+                        # the starter qty), funded off the full starter so a post-partial runner
+                        # still sizes the add off the original R.
+                        _es_fb = le.get("entry_sizing") if isinstance(le.get("entry_sizing"), dict) else {}
+                        _d0_fb = _float_or_none(_es_fb.get("stop_distance"))
+                        if _d0_fb is None or _d0_fb <= 0:
+                            _d0_fb = max(0.0, float(avg) - float(pos["stop_price"])) or None
+                        _q0_fb = (
+                            _float_or_none(pos.get("original_quantity"))
+                            or _float_or_none(pos.get("quantity"))
+                            or 0.0
+                        )
+                        _a0_fb = float(pos["avg_entry_price"])
+                        # COOLDOWN.
+                        _cool_active_fb = False
+                        _cool_raw_fb = le.get("flag_breakout_add_cooldown_until_utc")
+                        if _cool_raw_fb:
+                            try:
+                                _cool_active_fb = datetime.utcnow() < datetime.fromisoformat(str(_cool_raw_fb))
+                            except (TypeError, ValueError):
+                                _cool_active_fb = False
+                        # Anti-Ross midday lull (parity with the pyramid / dip-add).
+                        _lull_fb = False
+                        try:
+                            from .market_profile import in_midday_lull as _fba_lull
+                            _lull_fb = bool(_fba_lull(sess.symbol))
+                        except Exception:
+                            _lull_fb = False
+                        # FLAG DETECTION on the held position's recent bars — reuse the SAME
+                        # bull_flag_confirmation the fresh-ENTRY lane uses. ok=True ⇒ a valid,
+                        # confirmed-broken bull flag; debug["pullback_high"] = the flag swing-high
+                        # (break level), debug["pullback_low"] = the flag low (structural stop),
+                        # debug["above_vwap"] = the front-side VWAP read. Fetch the SAME canonical
+                        # 5d frame on the bull-flag entry interval (the detector anchors on it).
+                        _flag_ok = False
+                        _flag_high = None
+                        _flag_low = None
+                        _flag_above_vwap = False
+                        try:
+                            from .entry_gates import bull_flag_confirmation as _fba_flag_fn
+                            _fba_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+                            _fba_raw = _replay_aware_fetch_ohlcv_df(sess.symbol, interval=_fba_iv, period="5d")
+                            _fba_df = _today_session_frame(_fba_raw) if (
+                                _fba_raw is not None and not getattr(_fba_raw, "empty", True)
+                            ) else None
+                            if _fba_df is not None and not getattr(_fba_df, "empty", True):
+                                _flag_ok, _flag_reason, _flag_dbg = _fba_flag_fn(
+                                    _fba_df,
+                                    entry_interval=_fba_iv,
+                                    symbol=sess.symbol,
+                                    live_price=float(ask) if (ask and float(ask) > 0) else float(bid),
+                                    db=db,
+                                )
+                                _flag_high = _float_or_none(_flag_dbg.get("pullback_high"))
+                                _flag_low = _float_or_none(_flag_dbg.get("pullback_low"))
+                                _flag_above_vwap = bool(_flag_dbg.get("above_vwap"))
+                        except Exception:
+                            _flag_ok = False
+                            _flag_high = _flag_low = None
+                            _flag_above_vwap = False
+                        # The PRIOR flag high = the ratcheting base (the new flag must build a
+                        # HIGHER high than): the starter entry / breakout / last flag-add's high
+                        # — whichever is highest — so each flag-add steps the structure UP.
+                        _prior_high_fb = _a0_fb
+                        _bk_fb = _float_or_none(le.get("breakout_level_price"))
+                        if _bk_fb is not None and _bk_fb > _prior_high_fb:
+                            _prior_high_fb = _bk_fb
+                        _last_high_fb = _float_or_none(le.get("flag_breakout_add_last_high"))
+                        if _last_high_fb is not None and _last_high_fb > _prior_high_fb:
+                            _prior_high_fb = _last_high_fb
+                        # ⭐ FALLING-KNIFE GUARD — front-side strength (the JUST-shipped score),
+                        # OFI level+slope, above-VWAP-or-reclaiming, on the SAME canonical today-
+                        # session frame + live OFI/tape reads the ENTRY-side size-tilt uses (one
+                        # source of truth). FAIL-CLOSED: any missing leg ⇒ strength/OFI stays None
+                        # ⇒ flag_breakout_add_decision refuses the add.
+                        _fs_score_fb = None
+                        _fs_ofi_lvl_fb = None
+                        _fs_ofi_slp_fb = None
+                        _above_vwap_fb = bool(_flag_above_vwap)
+                        try:
+                            from .ross_momentum import (
+                                front_side_state as _fba_state_fn,
+                                front_side_strength_score as _fba_strength_fn,
+                            )
+                            from .pipeline import (
+                                _live_flow_slope as _fba_flow_fn,
+                                _live_trade_flow as _fba_tape_fn,
+                            )
+                            _fba_flow = _fba_flow_fn(sess.symbol, db=db)
+                            if isinstance(_fba_flow, dict):
+                                _fs_ofi_lvl_fb = _float_or_none(_fba_flow.get("ofi_level"))
+                                _fs_ofi_slp_fb = _float_or_none(_fba_flow.get("ofi_slope"))
+                            try:
+                                _fba_tape = _fba_tape_fn(sess.symbol, db=db)
+                                _fba_tape = None if _fba_tape is None else float(_fba_tape)
+                            except Exception:
+                                _fba_tape = None
+                            _fba_sess_df = _fba_df
+                            _fs_closes_fb = None
+                            _fs_vwap_dist_fb = None
+                            _fs_range_pos_fb = None
+                            if _fba_sess_df is not None and not getattr(_fba_sess_df, "empty", True):
+                                _fba_state = _fba_state_fn(_fba_sess_df)
+                                _fs_vwap_dist_fb = _float_or_none(getattr(_fba_state, "vwap_dist_sigma", None))
+                                _fs_range_pos_fb = _float_or_none(getattr(_fba_state, "day_range_pos", None))
+                                # above-VWAP OR cleanly RECLAIMING (the flag detector's read OR a
+                                # non-negative vwap_dist). below-VWAP-falling ⇒ knife ⇒ refuse.
+                                _above_vwap_fb = (
+                                    bool(_flag_above_vwap)
+                                    or bool(getattr(_fba_state, "above_vwap", False))
+                                    or (_fs_vwap_dist_fb is not None and _fs_vwap_dist_fb >= 0.0)
+                                )
+                                try:
+                                    _fs_closes_fb = [
+                                        float(c)
+                                        for c in _fba_sess_df["Close"].astype(float).tolist()[-12:]
+                                    ]
+                                except Exception:
+                                    _fs_closes_fb = None
+                            _fs_score_fb = _fba_strength_fn(
+                                closes=_fs_closes_fb,
+                                vwap_dist_sigma=_fs_vwap_dist_fb,
+                                day_range_pos=_fs_range_pos_fb,
+                                ofi_level=_fs_ofi_lvl_fb,
+                                ofi_slope=_fs_ofi_slp_fb,
+                                signed_tape=_fba_tape,
+                            )
+                        except Exception:
+                            _fs_score_fb = None
+                            _fs_ofi_lvl_fb = _fs_ofi_slp_fb = None
+                            # keep the flag detector's own VWAP read as the fallback
+                        # The STRENGTH FLOOR — the documented base, raised to the regime-adaptive
+                        # p25 (the entry-side s_lo) when that distribution is WARM and higher.
+                        _strength_floor_fb = float(
+                            getattr(settings, "chili_momentum_flag_breakout_add_strength_floor", 0.50) or 0.50
+                        )
+                        try:
+                            _fs_adapt_fb = _frontside_adaptive_thresholds()
+                            if _fs_adapt_fb is not None:
+                                _adapt_lo_fb = float(_fs_adapt_fb[0])
+                                if math.isfinite(_adapt_lo_fb) and _adapt_lo_fb > _strength_floor_fb:
+                                    _strength_floor_fb = _adapt_lo_fb
+                        except Exception:
+                            pass
+                        # SHARED pure predicate — the falling-knife-guarded ADD-ON-FLAG-BREAKOUT.
+                        _decn_fb = flag_breakout_add_decision(
+                            enabled=True,  # outer block already gated on the flag
+                            is_equity=_is_equity_fba,
+                            add_count=int(le.get("flag_breakout_add_count") or 0),
+                            max_adds=_max_fba,
+                            in_flight=bool(le.get("flag_breakout_add_order_id")),
+                            other_add_in_flight=_other_add_in_flight_fb,
+                            a0=_a0_fb,
+                            q0=_q0_fb,
+                            d0=_d0_fb,
+                            bid=float(bid),
+                            stop_px=float(stop_px),
+                            flag_confirmed=bool(_flag_ok),
+                            flag_high=_flag_high,
+                            flag_low=_flag_low,
+                            prior_flag_high=_prior_high_fb,
+                            breakout_margin_frac=float(
+                                getattr(settings, "chili_momentum_flag_breakout_add_margin_frac", 0.10) or 0.10
+                            ),
+                            front_side_strength=_fs_score_fb,
+                            strength_floor=_strength_floor_fb,
+                            above_vwap_or_reclaiming=_above_vwap_fb,
+                            ofi_level=_fs_ofi_lvl_fb,
+                            ofi_slope=_fs_ofi_slp_fb,
+                            midday_lull=_lull_fb,
+                            cooldown_active=_cool_active_fb,
+                        )
+                        _R0_fb = _decn_fb.get("R0")
+                        if not _decn_fb.get("fire"):
+                            # Emit only on the INFORMATIVE near-misses (a confirmed flag that a
+                            # guard then refused), not the silent common "no flag geometry" case.
+                            if _flag_ok and _decn_fb.get("reason") not in (
+                                "no_flag_break", "no_flag_structure", "bad_flag_levels",
+                            ):
+                                _emit(db, sess, "live_flag_breakout_add_vetoed", {
+                                    "reason": _decn_fb.get("reason"),
+                                    "strength": (None if _fs_score_fb is None else round(float(_fs_score_fb), 4)),
+                                    "strength_floor": round(float(_strength_floor_fb), 4),
+                                    "ofi_level": _fs_ofi_lvl_fb,
+                                    "ofi_slope": _fs_ofi_slp_fb,
+                                    "above_vwap": bool(_above_vwap_fb),
+                                    "flag_high": _flag_high,
+                                    "flag_low": _flag_low,
+                                    "prior_high": _prior_high_fb,
+                                    "breakout_frac": _decn_fb.get("breakout_frac"),
+                                })
+                        elif not (_R0_fb and _R0_fb > 0):
+                            _emit(db, sess, "live_flag_breakout_add_vetoed", {"reason": "bad_R0"})
+                        else:
+                            # GUARD #4 ADMISSION — the add is a post-entry BUY; refuse it whenever
+                            # a NEW entry would be refused (kill-switch, per-broker + global daily-
+                            # loss, drawdown, position cap, aggregate crypto risk). ABORT THE ADD
+                            # on refusal — NEVER the exit.
+                            _adm_ok_fb, _adm_ev_fb = runner_boundary_risk_ok(
+                                db, sess, expected_move_bps=_expected_move_bps
+                            )
+                            if not _adm_ok_fb:
+                                _emit(db, sess, "live_flag_breakout_add_vetoed", {
+                                    "reason": "risk_admission",
+                                    "severity": _adm_ev_fb.get("severity"),
+                                    "errors": _adm_ev_fb.get("errors"),
+                                })
+                            else:
+                                # SIZE via the SAME machinery as the pyramid / dip-add: the add's
+                                # risk budget = rho * R0 (conservative — a continuation add is
+                                # sized small), at the guarded ask, liquidity-capped on $-vol,
+                                # equity-relative notional ceiling. The add's stop sits just below
+                                # the flag low (_decn_fb["add_stop"]); the risk-first sizer keys
+                                # off the frozen entry ATR so the combined position's worst-case
+                                # stays bounded by R0 (the #769 circuit re-bases to R0 on the blend).
+                                _rho_fb = float(
+                                    getattr(settings, "chili_momentum_flag_breakout_add_risk_fraction", 0.5) or 0.5
+                                )
+                                _budget_fb = _rho_fb * _R0_fb
+                                _fba_ask = float(ask) if (ask and float(ask) > 0) else float(bid)
+                                _fba_guard_ask = _fba_ask * _adaptive_notional_guard_multiplier(
+                                    expected_move_bps=_expected_move_bps
+                                )
+                                _inc_fb = prod.base_increment if prod else 1.0
+                                _mn_fb = prod.base_min_size if prod else 1.0
+                                _atr_fb = _float_or_none(le.get("entry_stop_atr_pct")) or 0.0
+                                _ceil_fb = equity_relative_notional_cap(
+                                    policy_float_cap(
+                                        caps, "max_notional_per_trade_usd",
+                                        settings.chili_momentum_risk_max_notional_per_trade_usd,
+                                    ),
+                                    normalize_execution_family(sess.execution_family),
+                                )
+                                try:
+                                    from .universe import snapshot_dollar_volumes as _fba_dvol_fn
+                                    _fba_dvol = (_fba_dvol_fn([sess.symbol]) or {}).get(
+                                        str(sess.symbol or "").strip().upper()
+                                    )
+                                except Exception:
+                                    _fba_dvol = None
+                                _ceil_fb = liquidity_capped_notional(_ceil_fb, _fba_dvol)
+                                # The add can never be LARGER than the starter (a continuation add
+                                # is sized conservatively): cap the notional ceiling at the
+                                # starter's notional so qty_add <= q0 even if the budget allowed
+                                # more (rho<=1 keeps R bounded; this bounds the SHARE count too).
+                                _starter_notional_fb = _q0_fb * _a0_fb
+                                if _starter_notional_fb > 0:
+                                    _ceil_fb = min(_ceil_fb, _starter_notional_fb)
+                                _qa_fb2, _qa_meta_fb = compute_risk_first_quantity(
+                                    entry_price=_fba_guard_ask,
+                                    atr_pct=_atr_fb,
+                                    max_loss_usd=_budget_fb,
+                                    max_notional_ceiling_usd=_ceil_fb,
+                                    base_increment=_inc_fb,
+                                    base_min_size=_mn_fb,
+                                    stop_atr_mult=float(params.get("stop_atr_mult") or 0.60),
+                                )
+                                if not _qa_fb2 or _qa_fb2 <= 0:
+                                    _emit(db, sess, "live_flag_breakout_add_vetoed", {
+                                        "reason": "size_zero",
+                                        "detail": _qa_meta_fb.get("reason"),
+                                        "budget_usd": round(_budget_fb, 2),
+                                    })
+                                else:
+                                    _fba_limit_str = _fmt_limit_price_buy(_fba_guard_ask)
+                                    _fba_cid = (
+                                        f"chili_ml_fba_{sess.id}_{uuid.uuid4().hex[:12]}"
+                                    )
+                                    try:
+                                        from .market_profile import market_session_now as _fba_sess_now
+                                        _fba_ext = _fba_sess_now(sess.symbol) != "regular"
+                                    except Exception:
+                                        _fba_ext = False
+                                    _fba_res = adapter.place_limit_order_gtc(
+                                        product_id=product_id,
+                                        side="buy",
+                                        base_size=_fmt_base_size(_qa_fb2),
+                                        limit_price=_fba_limit_str,
+                                        client_order_id=_fba_cid,
+                                        extended_hours=_fba_ext,
+                                        time_in_force="gfd",
+                                    ) or {}
+                                    if _fba_res.get("ok") and _fba_res.get("order_id"):
+                                        le["flag_breakout_add_order_id"] = str(_fba_res["order_id"])
+                                        le["flag_breakout_add_limit_px"] = float(_fba_guard_ask)
+                                        le["flag_breakout_add_pending_R0"] = float(_R0_fb)
+                                        le["flag_breakout_add_prev_stop"] = float(stop_px)
+                                        le["flag_breakout_add_pending_high"] = _float_or_none(_flag_high)
+                                        le["flag_breakout_add_confirm_strength"] = (
+                                            None if _fs_score_fb is None else round(float(_fs_score_fb), 4)
+                                        )
+                                        le["flag_breakout_add_confirm_ofi"] = _fs_ofi_lvl_fb
+                                        _commit_le(sess, le)
+                                        _emit(db, sess, "live_flag_breakout_add_fired", {
+                                            "order_id": le["flag_breakout_add_order_id"],
+                                            "client_order_id": _fba_cid,
+                                            "add_qty": float(_qa_fb2),
+                                            "limit_price": _fba_limit_str,
+                                            "R0": float(_R0_fb), "rho": _rho_fb,
+                                            "budget_usd": round(_budget_fb, 2),
+                                            "add_count": int(le.get("flag_breakout_add_count") or 0),
+                                            "flag_high": _flag_high,
+                                            "flag_low": _flag_low,
+                                            "prior_high": _prior_high_fb,
+                                            "breakout_frac": (
+                                                round(float(_decn_fb["breakout_frac"]), 4)
+                                                if _decn_fb.get("breakout_frac") is not None else None
+                                            ),
+                                            "strength": (None if _fs_score_fb is None else round(float(_fs_score_fb), 4)),
+                                            "strength_floor": round(float(_strength_floor_fb), 4),
+                                            "ofi_level": _fs_ofi_lvl_fb,
+                                            "ofi_slope": _fs_ofi_slp_fb,
+                                            "above_vwap": bool(_above_vwap_fb),
+                                            "stop_at_submit": float(stop_px),
+                                        })
+                                    else:
+                                        _emit(db, sess, "live_flag_breakout_add_vetoed", {
+                                            "reason": "submit_failed",
+                                            "error": _fba_res.get("error"),
+                                        })
+                except Exception:
+                    # Fail-safe: any flag-breakout-add error is swallowed so the exit path below
+                    # ALWAYS runs. The flag-add NEVER blocks/delays/loosens an exit.
+                    _log.debug("[momentum_live] flag-breakout-add block error", exc_info=True)
 
         if bid > stop_px and le.pop("stop_breach_pending_utc", None) is not None:
             # breach -> recovery between reads = flicker dodged; clear the marker

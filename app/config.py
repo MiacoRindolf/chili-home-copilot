@@ -5650,6 +5650,59 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ADD_STRENGTH_FLOOR"),
         description="⭐ FALLING-KNIFE GUARD base: the minimum front_side_strength_score for the uptrend to count as INTACT before a pullback-add. ONE documented base (the neutral 0.50 midpoint = a FLOOR); when the regime-adaptive p25 (the entry-side s_lo) is warm and HIGHER, the caller uses that instead. front_side_strength None ⇒ fail-CLOSED (no add). Default 0.50.",
     )
+    # ROSS ADD GAP — ADD-ON-FLAG-BREAKOUT on the HELD position. The FOURTH held-position add:
+    # while holding a winner that consolidated into a tight BULL FLAG (a base after the
+    # impulse), Ross buys the BREAK of the flag's swing high — a CONTINUATION add at the
+    # breakout. DISTINCT from (1) the UP-pyramid (new-HOD + OFI thrust), (2) the micro-pullback
+    # re-load, and (3) the BUY-THE-DIP pullback-add (bounce off support). The flag geometry +
+    # the confirmed break reuse bull_flag_confirmation on the held position's recent bars; this
+    # block has its OWN counter (flag_breakout_add_count), kill-switch, in-flight marker
+    # (flag_breakout_add_order_id), and cooldown. ADDITIVE: composes with — never double-fires
+    # with — the other 3 adds (it refuses when ANY of them has an add in flight). Re-loads route
+    # through pyramid_blend_on_fill + pyramid_risk_anchor_usd VERBATIM so the #769 max-loss
+    # circuit keeps re-basing to the STARTER R0. EQUITY-FIRST (crypto deferred). Default ON (no
+    # dark flags); flag OFF ⇒ byte-identical. ADD lever (more position on a confirmed flag-break),
+    # NEVER a veto. docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_flag_breakout_add_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLAG_BREAKOUT_ADD_ENABLED"),
+        description="Kill-switch for the Ross ADD-ON-FLAG-BREAKOUT (pyramid into a held-position bull-flag BREAK — a continuation add at the flag-top take-out). false = byte-identical (no flag-break add, no pos mutation, no emit, no broker call). Default ON.",
+    )
+    chili_momentum_flag_breakout_add_max: int = Field(
+        default=2,
+        ge=1,
+        le=4,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLAG_BREAKOUT_ADD_MAX"),
+        description="Per-name/per-session cap on flag-breakout adds (bounds total flag-add risk = max * risk_fraction * R0). Separate counter from the UP-pyramid / dip-add for clean attribution. Documented small N.",
+    )
+    chili_momentum_flag_breakout_add_cooldown_seconds: float = Field(
+        default=30.0,
+        ge=0.0,
+        le=600.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLAG_BREAKOUT_ADD_COOLDOWN_SECONDS"),
+        description="Cooldown between flag-breakout adds. PINNED to >= 2 * micropull_bar_seconds (min 30s @ 15s bars) so one break wiggle cannot fire two adds before a new flag re-forms.",
+    )
+    chili_momentum_flag_breakout_add_risk_fraction: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLAG_BREAKOUT_ADD_RISK_FRACTION"),
+        description="rho: each flag-breakout add's structural risk as a fraction of the STARTER R0 (Ross sizes a continuation add conservatively; <=1 keeps the add inside the banked cushion and structurally <= the initial entry). Sized via compute_risk_first_quantity, never a hardcoded block.",
+    )
+    chili_momentum_flag_breakout_add_margin_frac: float = Field(
+        default=0.10,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLAG_BREAKOUT_ADD_MARGIN_FRAC"),
+        description="The breakout-confirmation margin: the live bid must clear the flag high by >= this fraction of the flag RANGE (flag_high - flag_low) for the break to count as a GENUINE take-out (not a 1-tick wick). ONE documented base; range-relative (no fixed-price magic). Default 0.10 (one-tenth of the flag's own range).",
+    )
+    chili_momentum_flag_breakout_add_strength_floor: float = Field(
+        default=0.50,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLAG_BREAKOUT_ADD_STRENGTH_FLOOR"),
+        description="⭐ FALLING-KNIFE GUARD base: the minimum front_side_strength_score for the uptrend to count as INTACT before a flag-breakout add. ONE documented base (the neutral 0.50 midpoint = a FLOOR); when the regime-adaptive p25 (the entry-side s_lo) is warm and HIGHER, the caller uses that instead. front_side_strength None ⇒ fail-CLOSED (no add). Default 0.50.",
+    )
     # ROSS EXIT GAP 1 — "lost VWAP → flatten" on the HELD position. Ross's intraday
     # line-in-the-sand: after entry, if price LOSES session VWAP in a CONFIRMED way he
     # is OUT. The CONFIRMED-LOSS definition (anti-whipsaw, the ONE documented base): the
