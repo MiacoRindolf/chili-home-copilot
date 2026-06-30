@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
 import math
 import statistics
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable, Iterator, Optional
 
 from ....config import settings
 from ..execution_family_registry import EXECUTION_FAMILY_COINBASE_SPOT
@@ -223,6 +225,61 @@ def _stabilize_account_equity(ef: str, eq: float | None) -> float | None:
     return None
 
 
+# ── REPLAY v3 P2 — RECORDED ACCOUNT-EQUITY SEAM (the broker buying-power read) ────
+# ``_account_equity_usd`` is the single source-of-truth for the equity-relative caps and
+# the atomic risk-budget admission (``live_runner.py:9132`` reads it for the fill-boundary
+# budget; ``live_runner.py:9252`` for the crypto ``equity_unavailable`` gate). In prod it
+# hits the BROKER (``get_portfolio`` over the network) — a hidden real-time dep the sim
+# clock / OHLCV seams do not reach (design R2). To replay the FSM hermetically the harness
+# must serve a RECORDED/INJECTED equity basis instead of the network. We mirror the
+# ``live_runner._REPLAY_OHLCV_PROVIDER`` ContextVar pattern EXACTLY: a process-global,
+# async/thread-safe ``ContextVar`` holding an OPTIONAL provider callable. Default is
+# ``None`` — and when it is ``None`` (ALWAYS in prod, since only the replay harness ever
+# sets it) ``_account_equity_usd`` runs the REAL broker read on the EXACT same code path as
+# before, so prod is BYTE-IDENTICAL. The ContextVar resets automatically on block/exception
+# exit, so an injected equity can never leak into a real lane. The provider mirrors the
+# function's own (execution_family, apply_margin_multiple, prefer_equity, prefer_cash_value)
+# signature so a faithful replay can return a venue/flag-specific basis as-of t; a provider
+# may return ``None`` to faithfully reproduce an equity outage (the ``equity_unavailable``
+# reject path). See docs/DESIGN/REPLAY_V3_LIVE_FSM_SIM.md §3.2 / §6 (the equity seam, P2).
+_REPLAY_EQUITY: contextvars.ContextVar[Optional[Callable[..., Optional[float]]]] = (
+    contextvars.ContextVar("_chili_replay_account_equity", default=None)
+)
+
+
+def set_replay_account_equity(
+    provider: Optional[Callable[..., Optional[float]]],
+) -> "contextvars.Token[Optional[Callable[..., Optional[float]]]]":
+    """Install a recorded-equity provider on the seam (replay harness only). Returns the
+    ``contextvars.Token`` so the caller can ``reset_replay_account_equity(token)`` (prefer the
+    ``replay_account_equity`` context manager, which does this for you)."""
+    return _REPLAY_EQUITY.set(provider)
+
+
+def reset_replay_account_equity(
+    token: "contextvars.Token[Optional[Callable[..., Optional[float]]]]",
+) -> None:
+    """Pop the equity provider, restoring the value before the matching set."""
+    _REPLAY_EQUITY.reset(token)
+
+
+@contextlib.contextmanager
+def replay_account_equity(
+    provider: Optional[Callable[..., Optional[float]]],
+) -> Iterator[None]:
+    """Context manager installing ``provider`` as the account-equity source for the block.
+
+    Pure ContextVar push/pop — async/thread-safe, auto-resets on normal exit AND on exception
+    (the ``finally`` always restores the prior value), so an injected equity can never escape
+    the block into prod. Nests correctly. Prod never enters this manager, so prod stays
+    byte-identical. A constant equity is convenient: ``replay_account_equity(lambda **k: 1e5)``."""
+    token = set_replay_account_equity(provider)
+    try:
+        yield
+    finally:
+        reset_replay_account_equity(token)
+
+
 def _account_equity_usd(
     execution_family: str | None = None, *, apply_margin_multiple: bool = True,
     prefer_equity: bool = False, prefer_cash_value: bool = False,
@@ -251,6 +308,20 @@ def _account_equity_usd(
     (the documented failure mode, lines 264-266). Implies prefer_equity semantics
     (stabilized, never margin-inflated). docs/DESIGN/MOMENTUM_LANE.md
     """
+    # REPLAY v3 P2 seam (prod byte-identical): when a recorded-equity provider is installed
+    # (replay harness only — ``None`` ALWAYS in prod) serve the injected basis as-of t with
+    # ZERO broker/network I/O. A provider may return ``None`` to faithfully reproduce an
+    # equity-outage (the ``equity_unavailable`` reject path). Prod never installs one, so the
+    # real broker read below runs on the identical code path.
+    _replay_equity = _REPLAY_EQUITY.get()
+    if _replay_equity is not None:
+        return _replay_equity(
+            execution_family,
+            apply_margin_multiple=apply_margin_multiple,
+            prefer_equity=prefer_equity,
+            prefer_cash_value=prefer_cash_value,
+        )
+
     from ..execution_family_registry import (
         EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
         EXECUTION_FAMILY_ROBINHOOD_SPOT,

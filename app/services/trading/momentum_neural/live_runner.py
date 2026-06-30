@@ -2555,7 +2555,9 @@ def _arm_time_live_eligible_anchor(sess: TradingAutomationSession) -> str | None
     return None
 
 
-def _live_forward_momentum(db: Session, sess: TradingAutomationSession) -> bool | None:
+def _live_forward_momentum(
+    db: Session, sess: TradingAutomationSession, *, as_of: datetime | None = None
+) -> bool | None:
     """Live FORWARD-MOMENTUM read for the eligibility recency-grace: True when the tape is
     being fed UP right now per the codebase's CANONICAL RIDE definition — signed aggressor
     OFI level > 0 AND OFI slope >= 0 (see ``paper_execution.velocity_persistence_ride_lock``
@@ -2565,11 +2567,16 @@ def _live_forward_momentum(db: Session, sess: TradingAutomationSession) -> bool 
     tape. Reuses the SAME ``_live_flow_slope`` read (LEVER 2B / the maturity-widen use) — no
     new datum, no new fetch path. Returns None on thin / stale / crypto tape
     (``_live_flow_slope`` ⇒ None) OR when EITHER OFI leg is missing, so the grace stays
-    conservative (None ⇒ not-True ⇒ BLOCK held)."""
+    conservative (None ⇒ not-True ⇒ BLOCK held).
+
+    ``as_of`` (REPLAY v3 P2) reads the recorded order-flow AS-OF a past instant: the runner
+    passes ``_utcnow()`` (the SIM clock under replay; the real wall clock in prod, where the
+    ``as_of`` default and ``_utcnow()`` are the same wall instant — BYTE-IDENTICAL). The
+    ``_live_flow_slope`` ``as_of`` plumbing already exists (``pipeline.py:671``)."""
     try:
         from .pipeline import _live_flow_slope as _lfs_grace
 
-        fs = _lfs_grace(sess.symbol, db=db)
+        fs = _lfs_grace(sess.symbol, db=db, as_of=as_of)
         if not isinstance(fs, dict):
             return None
         lvl = fs.get("ofi_level")
@@ -2606,7 +2613,14 @@ def runner_boundary_risk_ok(
     if apply_eligibility_grace:
         _recent_elig = _arm_time_live_eligible_anchor(sess)
         if _recent_elig is not None:
-            _fwd_mom = _live_forward_momentum(db, sess)
+            # REPLAY v3 P2: thread the SIM instant into the forward-momentum read ONLY when a
+            # replay clock is active, so the recorded order-flow is read AS-OF t. In prod the
+            # sim clock is unset (``_SIM_NOW`` is None) ⇒ ``as_of=None`` ⇒ the live "now()"
+            # window read — BYTE-IDENTICAL. (Threading a wall-clock ``as_of`` unconditionally
+            # would switch the SQL window ref from DB-now to app-now and add a ``<= as_of``
+            # cap, so it is gated on the replay clock to preserve prod behavior exactly.)
+            _grace_as_of = _SIM_NOW.get()
+            _fwd_mom = _live_forward_momentum(db, sess, as_of=_grace_as_of)
     ev = evaluate_proposed_momentum_automation(
         db,
         user_id=int(sess.user_id),
@@ -2620,6 +2634,52 @@ def runner_boundary_risk_ok(
         live_forward_momentum=_fwd_mom,
     )
     return bool(ev.get("allowed", False)), ev
+
+
+def _entry_live_eligible_ok(
+    db: Session, sess: TradingAutomationSession, via: Any
+) -> bool:
+    """``via.live_eligible`` for the ENTRY-detection / entry-revalidation re-reads, WITH the
+    SAME recency-grace the boundary-risk gate applies (UPC +500% TOCTOU miss).
+
+    The boundary-risk gate (``runner_boundary_risk_ok(apply_eligibility_grace=True)``) tolerates
+    a ``live_eligible`` FLICKER at the entry instant when the name was live-eligible at
+    arm/confirm within the grace window AND forward momentum is present. But the runner ALSO
+    re-reads ``via.live_eligible`` RAW at three downstream entry-detection sites (the
+    ``watching_live`` ``_score_ok``, the ``live_entry_candidate -> live_pending_entry``
+    transition, and the ``live_pending_entry`` pre-submit guard) — and those raw re-reads
+    reverted the entry to ``watching_live`` on the very flicker the gate just tolerated, so the
+    grace could NEVER actually let the name ENTER. This helper closes that gap by REUSING the
+    EXACT same grace evidence + decision (``_arm_time_live_eligible_anchor`` +
+    ``_live_forward_momentum`` + ``risk_evaluator._live_eligible_recency_grace_active``) — it
+    does NOT re-implement the grace.
+
+    FAIL-SAFE + flag-gated: when ``via.live_eligible`` is already True this is a pure pass-through
+    (True). When False, the grace is consulted; with the grace flag OFF (or no anchor / no
+    momentum / out-of-window) it returns False — BYTE-IDENTICAL to the prior raw ``via.live_eligible``
+    read. Only a positive-evidence flicker (recent eligible at arm + forward momentum) returns True."""
+    try:
+        if bool(getattr(via, "live_eligible", False)):
+            return True
+        anchor = _arm_time_live_eligible_anchor(sess)
+        if anchor is None:
+            return False
+        from .risk_evaluator import _live_eligible_recency_grace_active
+        from .risk_policy import MomentumAutomationRiskPolicy
+
+        policy = MomentumAutomationRiskPolicy.from_settings()
+        if not policy.live_eligible_recency_grace_enabled:
+            return False  # flag OFF ⇒ byte-identical to the raw via.live_eligible read
+        fwd = _live_forward_momentum(db, sess, as_of=_SIM_NOW.get())
+        active, _ = _live_eligible_recency_grace_active(
+            policy=policy,
+            recent_live_eligible_at_utc=anchor,
+            live_forward_momentum=fwd,
+        )
+        return bool(active)
+    except Exception:
+        # Any unexpected error ⇒ fall back to the conservative raw read (FAIL-SAFE block).
+        return bool(getattr(via, "live_eligible", False))
 
 
 def _only_transient_freshness_block(ev: dict[str, Any]) -> bool:
@@ -5705,7 +5765,10 @@ def tick_live_session(
             _eff_min = _new_eff
         _score_ok = (
             float(via.viability_score or 0) >= _eff_min
-            and via.live_eligible
+            # live_eligible WITH the recency-grace (UPC TOCTOU): a flicker the boundary gate
+            # tolerates must not be re-blocked here. Flag OFF / no evidence ⇒ raw via.live_eligible
+            # (byte-identical). See _entry_live_eligible_ok.
+            and _entry_live_eligible_ok(db, sess, via)
         )
         # M4.1: require an active momentum-continuation trigger (price > EMA-9 +
         # volume surge) on top of the viability score — Ross enters on confirmed
@@ -7028,7 +7091,9 @@ def tick_live_session(
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
     if st == STATE_LIVE_ENTRY_CANDIDATE:
-        if float(via.viability_score or 0) < float(params["entry_revalidate_floor"]) or not via.live_eligible:
+        # live_eligible re-read WITH the recency-grace (UPC TOCTOU): a flicker the boundary gate
+        # tolerated must not revert the candidate here. Flag OFF / no evidence ⇒ raw via.live_eligible.
+        if float(via.viability_score or 0) < float(params["entry_revalidate_floor"]) or not _entry_live_eligible_ok(db, sess, via):
             _safe_transition(db, sess, STATE_WATCHING_LIVE)
         else:
             _safe_transition(db, sess, STATE_LIVE_PENDING_ENTRY)
@@ -7041,8 +7106,11 @@ def tick_live_session(
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
     if st == STATE_LIVE_PENDING_ENTRY:
+        # live_eligible pre-submit re-read WITH the recency-grace (UPC TOCTOU): a tolerated
+        # flicker must not bounce the pending entry back to watching. Flag OFF / no evidence ⇒
+        # raw via.live_eligible (byte-identical).
         if not le.get("entry_submitted") and (
-            float(via.viability_score or 0) < float(params["entry_revalidate_floor"]) or not via.live_eligible
+            float(via.viability_score or 0) < float(params["entry_revalidate_floor"]) or not _entry_live_eligible_ok(db, sess, via)
         ):
             _safe_transition(db, sess, STATE_WATCHING_LIVE)
             db.flush()

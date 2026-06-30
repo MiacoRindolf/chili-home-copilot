@@ -41,7 +41,9 @@ from ....models.trading import (
     TradingAutomationSession,
 )
 from . import live_runner as lr
+from . import risk_policy as _rp
 from .live_fsm import STATE_QUEUED_LIVE
+from .replay_eligibility import EligibilityReplayer
 from .replay_mock_broker import MockBrokerAdapter, RecordedQuote, make_mock_broker_factory
 
 _log = logging.getLogger(__name__)
@@ -285,12 +287,24 @@ class ReplayV3Driver:
     """Step the REAL ``tick_live_session`` across an event grid with a mock broker + sim clock.
 
     Per grid step (in order, mirroring docs §2.2):
-      1. ``mock.set_clock(t)`` + ``mock.set_quote(symbol, quote@t)`` — broker BBO/fill as-of t.
-      2. ``replay_clock(t)`` — freeze the runner's ``_utcnow()`` chokepoint at t.
-      3. ``replay_ohlcv_provider(provider)`` — serve recorded bars for the in-tick fetches.
-      4. ``tick_live_session(db, sid, adapter_factory=make_mock_broker_factory(mock))``.
+      1. ``eligibility.apply(db, t)`` — write ``live_eligible`` + ``freshness_ts`` AS-OF t (P2;
+         reproduces the flicker) so the unchanged viability read + the real gate see the
+         as-of-t state.
+      2. ``mock.set_clock(t)`` + ``mock.set_quote(symbol, quote@t)`` — broker BBO/fill as-of t.
+      3. ``replay_clock(t)`` — freeze the runner's ``_utcnow()`` chokepoint at t.
+      4. ``replay_ohlcv_provider(provider)`` + ``replay_account_equity(equity_provider)`` —
+         serve recorded bars + a recorded equity basis for the in-tick reads (P2 equity seam).
+      5. ``tick_live_session(db, sid, adapter_factory=make_mock_broker_factory(mock))``.
 
     The FSM advances itself; the driver only records the per-tick state transition + result.
+
+    ``risk_gate_allows`` controls the entry-instant risk path:
+      * ``None`` (P2 default when an ``eligibility`` replayer is supplied): run the GENUINE
+        ``runner_boundary_risk_ok`` → ``evaluate_proposed_momentum_automation`` gate — the
+        live_eligible check + the recency-grace are EXERCISED (the whole point of P2).
+      * ``True`` (P1 back-compat): short-circuit the gate to always-allow (its full DB-seeded
+        eval was out of P1 scope). Only this ONE pre-entry gate is short-circuited; the FSM
+        transitions always run the real code.
     """
 
     def __init__(
@@ -301,14 +315,24 @@ class ReplayV3Driver:
         mock: MockBrokerAdapter,
         ohlcv_provider: Callable[..., Any],
         grid: list[RecordedNbboTick],
-        risk_gate_allows: bool = True,
+        risk_gate_allows: Optional[bool] = None,
+        eligibility: Optional[EligibilityReplayer] = None,
+        equity_provider: Optional[Callable[..., Optional[float]]] = None,
     ) -> None:
         self.db = db
         self.seed = seed
         self.mock = mock
         self.ohlcv_provider = ohlcv_provider
         self.grid = grid
-        self.risk_gate_allows = bool(risk_gate_allows)
+        # P2: when an eligibility replayer is supplied and the caller didn't force the
+        # short-circuit, run the REAL gate (risk_gate_allows stays None). P1 callers pass
+        # risk_gate_allows=True explicitly to keep the short-circuit.
+        if risk_gate_allows is None and eligibility is None:
+            # No eligibility replayer + unspecified gate ⇒ preserve the P1 default (allow).
+            risk_gate_allows = True
+        self.risk_gate_allows = risk_gate_allows
+        self.eligibility = eligibility
+        self.equity_provider = equity_provider
         self._factory = make_mock_broker_factory(mock)
 
     def _session(self) -> Optional[TradingAutomationSession]:
@@ -324,6 +348,10 @@ class ReplayV3Driver:
 
     def step(self, t: datetime, quote: Optional[RecordedQuote]) -> TickTrace:
         """Run ONE tick at instant ``t`` with the recorded ``quote`` (None ⇒ no_bbo)."""
+        # 0) eligibility AS-OF t — write live_eligible + freshness_ts before the tick reads it
+        #    (P2: this is what reproduces the flicker for the REAL gate to evaluate).
+        if self.eligibility is not None:
+            self.eligibility.apply(self.db, t)
         # 1) broker clock + quote
         self.mock.set_clock(t)
         if quote is None:
@@ -331,8 +359,10 @@ class ReplayV3Driver:
         else:
             self.mock.set_quote(self.seed.symbol, quote)
         state_before = self._state()
-        # 2) sim clock + 3) recorded OHLCV provider, both around the unchanged FSM tick.
-        with lr.replay_clock(t), lr.replay_ohlcv_provider(self.ohlcv_provider):
+        # 2) sim clock + 3) recorded OHLCV provider + (P2) recorded equity, around the FSM tick.
+        with lr.replay_clock(t), lr.replay_ohlcv_provider(self.ohlcv_provider), _rp.replay_account_equity(
+            self.equity_provider
+        ):
             result = lr.tick_live_session(
                 self.db, self.seed.session_id, adapter_factory=self._factory
             )
@@ -345,11 +375,13 @@ class ReplayV3Driver:
     def run(self) -> ReplayResult:
         """Step the whole grid and return the end-to-end trace."""
         res = ReplayResult()
-        # Optionally neutralize the full risk gate (its full DB-seeded eval is out of P1
-        # scope; it has its own dedicated parity tests). The driver wraps the REAL FSM either
-        # way — only this ONE pre-entry gate is short-circuited, never the FSM transitions.
+        # P1 back-compat: when risk_gate_allows is True, neutralize the full risk gate (its
+        # full DB-seeded eval was out of P1 scope). P2 leaves it None ⇒ the REAL
+        # runner_boundary_risk_ok → evaluate_proposed_momentum_automation runs, so the
+        # live_eligible check + the recency-grace are genuinely exercised. The driver wraps the
+        # REAL FSM either way — only this ONE pre-entry gate is ever short-circuited.
         _orig_gate = lr.runner_boundary_risk_ok
-        if self.risk_gate_allows:
+        if self.risk_gate_allows is True:
             lr.runner_boundary_risk_ok = lambda *a, **k: (True, {"allowed": True, "replay": True})  # type: ignore[assignment]
         try:
             res.states_visited.append(self._state())

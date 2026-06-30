@@ -41,6 +41,22 @@ _CONCURRENT_STATES = (
 
 
 def _utcnow() -> datetime:
+    # REPLAY v3 P2: route through the SAME sim-clock chokepoint the live runner uses
+    # (``live_runner._SIM_NOW``) so the eligibility recency-grace age, the anchor age, and the
+    # viability-freshness age are all computed against the SIM clock under replay — otherwise
+    # they read the real wall clock and a replayed (historical) snapshot looks hours-stale, the
+    # anchor ages out of the grace window, and the grace can never fire (the entry-instant
+    # TOCTOU could never be reproduced). PROD: ``_SIM_NOW`` is None (only the replay harness
+    # sets it) ⇒ this returns ``datetime.utcnow()`` on the identical path — BYTE-IDENTICAL.
+    # Lazy import avoids the import cycle (live_runner imports this module at top level).
+    try:
+        from .live_runner import _SIM_NOW
+
+        v = _SIM_NOW.get()
+        if v is not None:
+            return v
+    except Exception:
+        pass
     return datetime.utcnow()
 
 
