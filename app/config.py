@@ -2900,6 +2900,18 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_BROKER_TRUTH_LABEL_ENABLED"),
         description="Kill-switch: True => learning consumers read the broker-true label via authoritative_label_for_outcome (reconciled rows use broker PnL/bps; unreconciled are EXCLUDED). Default OFF (legacy field, byte-identical). Flipping ON changes daily-loss/giveback gate inputs — soak deploy-when-flat.",
     )
+    # Replay v3 R1 — append the live_eligible TIME-SERIES to momentum_viability_history
+    # (mig311) on every viability write, so FUTURE replays read the exact recorded
+    # flicker instead of reconstructing it. Default ON: it is cheap (one extra INSERT per
+    # viability tick), risk-free (append-only observability, never touches the live
+    # viability decision), and fail-open (a history-write error is swallowed and never
+    # blocks the live viability upsert). Kill-switch =0 to disable the append entirely
+    # (byte-identical to pre-R1: zero history rows written, the viability upsert unchanged).
+    chili_momentum_viability_history_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VIABILITY_HISTORY_ENABLED"),
+        description="Replay v3 R1: True (default) => append the live_eligible time-series to momentum_viability_history on each viability write (perfect future replay fidelity). Cheap, append-only, fail-open. =0 disables the append (byte-identical, zero history rows).",
+    )
     # ── Extended-hours trading window (Ross trades the pre-market gap-and-go) ──
     # The momentum equity lane is tradeable from premarket_start → afterhours_end ET.
     # Regular session (9:30–16:00 ET) is a fixed exchange fact in market_profile.py;
@@ -11679,6 +11691,11 @@ class Settings(BaseSettings):
     brain_retention_exit_parity_max_rows_per_sweep: int = 5_000_000
     brain_retention_bracket_reconciliation_days: int = 30
     brain_retention_execution_event_days: int = 180
+    # Replay v3 R1: TTL for the append-only momentum_viability_history (mig311). The
+    # eligibility series is only needed for recent-day replay/incident reconstruction;
+    # 30d keeps the table small (one row per viable name per tick). Pruned by the same
+    # batched _prune_operational_time_log drain the other operational logs use.
+    brain_retention_viability_history_days: int = 30
     brain_retention_fast_snapshot_days: int = 30
     brain_retention_fast_orderbook_days: int = 3
     brain_retention_fast_alert_days: int = 14

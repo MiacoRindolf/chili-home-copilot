@@ -20949,6 +20949,73 @@ def _migration_310_iqfeed_depth_ladder_jsonb(conn) -> None:
     )
 
 
+def _migration_311_momentum_viability_history(conn) -> None:
+    """Replay v3 R1 — append-only TIME-SERIES of the ``live_eligible`` gate.
+
+    WHY: ``momentum_symbol_viability`` carries ``live_eligible`` as a SINGLE mutable
+    snapshot column (UNIQUE(symbol, variant_id)) — it has NO history, so the
+    eligibility TIMELINE that produced the UPC 2026-06-29 TOCTOU flicker (eligible at
+    confirm → NOT-eligible at the entry instant) is not directly recorded. Replay v3
+    therefore has to RECONSTRUCT the flicker (event-derived Tier B / scripted Tier C,
+    see docs/DESIGN/REPLAY_V3_LIVE_FSM_SIM.md R1). This append-only table records the
+    ``live_eligible`` value AT EACH viability write going forward, so FUTURE replays
+    need no reconstruction — they read the exact recorded series (perfect fidelity).
+
+    Append-only: ONE row per (symbol, variant_id) per viability tick. Captures the few
+    scorer inputs needed to recompute / audit the verdict (viability_score, rvol,
+    change_pct, spread_bps, blocked_reason) alongside the boolean. Indexed on
+    (symbol, observed_at DESC) for the as-of-t replay read. Bounded by a TTL prune in
+    data_retention.run_retention_policy (``momentum_viability_history`` →
+    ``brain_retention_viability_history_days``, default 30d) — the same batched
+    ``_prune_operational_time_log`` drain the other operational logs use, so it cannot
+    balloon. Naive-UTC TIMESTAMP to match the trading tables. Idempotent.
+    """
+    conn.execute(text(
+        "CREATE TABLE IF NOT EXISTS momentum_viability_history ("
+        " id BIGSERIAL PRIMARY KEY,"
+        " symbol VARCHAR(36) NOT NULL,"
+        " variant_id INTEGER NOT NULL,"
+        " scope VARCHAR(16),"
+        " observed_at TIMESTAMP NOT NULL,"            # naive UTC — the viability write instant
+        " live_eligible BOOLEAN NOT NULL,"
+        " paper_eligible BOOLEAN,"
+        " freshness_ts TIMESTAMP,"                    # the freshness anchor on the row at write
+        # the few scorer inputs needed to recompute / audit the verdict as-of t
+        " viability_score DOUBLE PRECISION,"
+        " rvol DOUBLE PRECISION,"
+        " change_pct DOUBLE PRECISION,"
+        " spread_bps DOUBLE PRECISION,"
+        " blocked_reason VARCHAR(120),"              # first eligibility-bearing warning (audit)
+        " correlation_id VARCHAR(64),"
+        " source_node_id VARCHAR(80),"
+        " created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'utc')"
+        ")"
+    ))
+    # the as-of-t replay read: newest-first per name.
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_mvh_symbol_observed "
+        "ON momentum_viability_history (symbol, observed_at DESC)"
+    ))
+    # per (symbol, variant) series + the retention sweep cutoff scan.
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_mvh_symbol_variant_observed "
+        "ON momentum_viability_history (symbol, variant_id, observed_at DESC)"
+    ))
+    # (observed_at, id) leading-time index — the data_retention TTL drain
+    # (_prune_operational_time_log, require_id_second=True) only runs when this
+    # exists, so the table cannot balloon.
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_mvh_observed_id "
+        "ON momentum_viability_history (observed_at, id)"
+    ))
+    conn.commit()
+    logger.info(
+        "[mig311] ensured momentum_viability_history (append-only live_eligible "
+        "time-series) — Replay v3 R1 perfect-fidelity future eligibility; TTL-pruned "
+        "via data_retention (brain_retention_viability_history_days)"
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -21331,6 +21398,8 @@ MIGRATIONS = [
      _migration_309_momentum_broker_truth_label),
     ("310_iqfeed_depth_ladder_jsonb",
      _migration_310_iqfeed_depth_ladder_jsonb),
+    ("311_momentum_viability_history",
+     _migration_311_momentum_viability_history),
 ]
 
 

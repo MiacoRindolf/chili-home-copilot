@@ -112,6 +112,14 @@ def run_retention_policy(
         batch_size=DEFAULT_OPERATIONAL_LOG_DELETE_BATCH_SIZE,
         dry_run=dry_run,
     )
+    results["viability_history"] = _prune_operational_time_log(
+        db,
+        table="momentum_viability_history",
+        ts_col="observed_at",
+        retain_days=getattr(settings, "brain_retention_viability_history_days", 30),
+        batch_size=DEFAULT_OPERATIONAL_LOG_DELETE_BATCH_SIZE,
+        dry_run=dry_run,
+    )
     results["setup_vitals_history"] = _prune_setup_vitals_history(db, 90, dry_run)
     results["ticker_vitals_stale"] = _prune_stale_ticker_vitals(db, 7, dry_run)
     results["fast_path"] = _prune_fast_path_tables(db, dry_run)
