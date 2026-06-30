@@ -2898,20 +2898,84 @@ def _vertical_chase_ceiling_bps(
         return base_cap
 
 
+def _nohalt_vertical_thrust_strong(
+    *, ofi: float | None, new_high: bool | None,
+    above_vwap: bool | None, rvol: float | None,
+) -> bool:
+    """⭐ FALLING-KNIFE GUARD for the NO-HALT deep vertical chase. Returns True ONLY for
+    a genuinely strong, UP, CONFIRMED-thrust vertical that has NOT halted — the move that
+    actually earns the deep 800bps fill budget without a halt-resume to vouch for it.
+    FAIL-CLOSED (any leg missing / ambiguous ⇒ False ⇒ no deep budget, the abs-cap holds).
+
+    Requires ALL of:
+      • ``ofi > 0``        — buyers are LIFTING the offer (live order-flow imbalance up),
+                             not a one-sided seller / a thin-book offer simply pulled up;
+      • ``new_high``       — price is making a NEW HIGH above the breakout level (the ask is
+                             being EATEN up, the move is progressing — NOT a fade/pullback);
+      • ``above_vwap``     — above VWAP or cleanly reclaiming (a below-VWAP-falling knife
+                             can NEVER unlock the deep budget);
+      • ``rvol`` > floor   — front-side RVOL strength (explosive participation, not a quiet
+                             drift) vs the documented explosive RVOL floor.
+
+    This is the no-halt analogue of the halt-resume vouch: a halt-resume is itself strong
+    evidence; absent it, we demand the full UP/OFI/new-high/above-VWAP/RVOL stack. Pure +
+    side-effect-free. (the standing fill-on-verticals fix — project_momentum_conversion_fixes)"""
+    try:
+        if ofi is None or not math.isfinite(float(ofi)) or float(ofi) <= 0.0:
+            return False  # fail-closed: no confirmed buy-side flow ⇒ knife risk ⇒ no deep budget
+        if new_high is not True:
+            return False  # not making a new high ⇒ a fade/pullback, not an up-vertical
+        if above_vwap is not True:
+            return False  # below-VWAP / falling ⇒ knife ⇒ refuse the deep budget
+        rvol_floor = float(getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 3.0)
+        if rvol is None or not math.isfinite(float(rvol)) or float(rvol) <= rvol_floor:
+            return False  # not explosive participation ⇒ no deep budget
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def _vertical_thrust_confluence(
     *, halt_resume_active: bool, tape_thrust_ok: bool | None,
     squeeze_pct: float | None, rvol: float | None,
+    nohalt_thrust_strong: bool | None = None,
 ) -> float | None:
     """Confirmed-thrust confluence in [0,1] for the vertical chase. Returns None
-    (⇒ no raise, parity) UNLESS this is a recent halt-resume AND the tape is
-    explicitly thrusting (fail-closed: tape None/False ⇒ None). squeeze_pct (centered
-    at 0.5) and RVOL (vs the explosive floor) each add a bounded share. Pure."""
+    (⇒ no raise, parity) UNLESS the tape is explicitly thrusting (fail-closed: tape
+    None/False ⇒ None) AND the move is vouched-for by EITHER:
+      • a recent halt-resume (``halt_resume_active``) — the original unlock; OR
+      • a CONFIRMED no-halt UP-thrust (``nohalt_thrust_strong`` — the knife-guarded
+        OFI>0 + new-high + above-VWAP + RVOL stack from ``_nohalt_vertical_thrust_strong``).
+
+    This DECOUPLES the deep fill-aggression budget from the halt-gate: a genuine no-halt
+    1m new-high vertical now also unlocks the chase ceiling (the standing fill-on-verticals
+    fix), while a fade / below-VWAP / OFI<=0 move stays at the abs-cap (knife guard). The
+    no-halt path starts at its OWN documented floor (``..._nohalt_min_confluence``, default
+    0.6 — above the 0.5 halt floor, because a no-halt vertical must clear a STRONGER bar);
+    the halt path keeps the 0.5 floor. squeeze_pct (centered at 0.5) and RVOL (vs the
+    explosive floor) each add a bounded share on top. Pure + side-effect-free.
+
+    The no-halt unlock is master-flagged (``..._nohalt_thrust_enabled``): flag OFF ⇒ only a
+    halt-resume can unlock ⇒ byte-identical to the prior halt-gated behavior."""
     try:
-        if not halt_resume_active:
-            return None
         if tape_thrust_ok is not True:
             return None  # fail-closed: no thrust confirmation ⇒ no raise
-        score = 0.5  # halt-resume + confirmed tape is the floor of confidence
+        _nohalt_on = bool(
+            getattr(settings, "chili_momentum_vertical_chase_nohalt_thrust_enabled", True)
+        )
+        _nohalt_unlock = bool(_nohalt_on and nohalt_thrust_strong is True)
+        if not (halt_resume_active or _nohalt_unlock):
+            return None  # neither vouch ⇒ no raise (abs-cap holds)
+        if halt_resume_active:
+            score = 0.5  # halt-resume + confirmed tape is the floor of confidence
+        else:
+            # NO-HALT confirmed UP-thrust: its OWN floor (default 0.6 > the 0.5 halt floor)
+            # because absent a halt-resume vouch we demand a genuinely strong UP bar.
+            score = float(
+                getattr(settings, "chili_momentum_vertical_chase_nohalt_min_confluence", 0.6)
+                or 0.6
+            )
+            score = max(0.0, min(1.0, score))
         if squeeze_pct is not None and math.isfinite(float(squeeze_pct)):
             score += max(0.0, min(0.25, (float(squeeze_pct) - 0.5) * 0.5))
         rvol_floor = float(getattr(settings, "chili_momentum_explosive_rvol_floor", 3.0) or 3.0)
@@ -4426,6 +4490,8 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "entry_expected_move_bps",
     "entry_squeeze_pct",
     "entry_rvol",
+    "entry_above_vwap",
+    "entry_vertical_confluence",
     "entry_realized_high",
     "entry_day_range_pct",
     "entry_notional_guard",
@@ -6777,6 +6843,13 @@ def tick_live_session(
             # longer in scope) can thread it into the adaptive spread-cost veto for the
             # RECLAIM carve-out (derate-only + permissive R base for dip/VWAP-reclaims).
             le["entry_trigger_reason"] = _trigger_reason
+            # Stamp above-VWAP for the no-halt vertical-chase knife guard (read on a LATER
+            # FIX-B escalation tick where the trigger debug is out of scope). The gate
+            # already computed it; absent ⇒ None ⇒ the no-halt deep budget fails closed.
+            if isinstance(_pb_debug, dict) and "above_vwap" in _pb_debug:
+                le["entry_above_vwap"] = bool(_pb_debug.get("above_vwap"))
+            else:
+                le.pop("entry_above_vwap", None)
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
             _emit(
@@ -6887,6 +6960,12 @@ def tick_live_session(
                                 le.pop("entry_l2_snapshot", None)
                             le["entry_trigger_reason"] = "tape_confirmed_hold"
                             le.pop("watch_break_level", None)
+                            # above-VWAP for the no-halt vertical-chase knife guard (see the
+                            # break path); absent ⇒ the no-halt deep budget fails closed.
+                            if isinstance(_th_sdbg, dict) and "above_vwap" in _th_sdbg:
+                                le["entry_above_vwap"] = bool(_th_sdbg.get("above_vwap"))
+                            else:
+                                le.pop("entry_above_vwap", None)
                             _commit_le(sess, le)
                             _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
                             _emit(db, sess, "live_entry_tape_hold_fire", {
@@ -7054,6 +7133,12 @@ def tick_live_session(
                                     le.pop("entry_l2_snapshot", None)
                                 le["entry_trigger_reason"] = "momentum_continuation"
                                 le.pop("watch_break_level", None)
+                                # above-VWAP for the no-halt vertical-chase knife guard (see
+                                # the break path); absent ⇒ the no-halt deep budget fails closed.
+                                if isinstance(_mc_dbg, dict) and "above_vwap" in _mc_dbg:
+                                    le["entry_above_vwap"] = bool(_mc_dbg.get("above_vwap"))
+                                else:
+                                    le.pop("entry_above_vwap", None)
                                 _commit_le(sess, le)
                                 _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
                                 _emit(db, sess, "live_entry_momentum_continuation_fire", {
@@ -7432,16 +7517,61 @@ def tick_live_session(
                             # past the ceiling, escalating would only cancel+abandon (worse
                             # than letting the rest-backstop / re-watch handle it). Fail-
                             # closed: only promote when _entry_repeg_price yields a usable px.
-                            # CONFIRMED-THRUST halt-resume vertical: if this is a recent
-                            # halt-resume AND the tape is thrusting past our limit (the very
-                            # push that triggered FIX-B, _fixb_ask_adv), supply a confluence
-                            # so the cumulative ceiling raises toward the HARD vertical cap and
-                            # the resume gap actually fills. Else None ⇒ abs-cap (parity).
+                            # ── DEEP FILL-AGGRESSION UNLOCK (the standing fill-on-verticals
+                            # fix): the deep 800bps chase budget is now DECOUPLED from the
+                            # halt-gate. It unlocks on EITHER (a) a recent halt-resume, OR (b)
+                            # a CONFIRMED no-halt UP-thrust — a genuine 1m new-high vertical
+                            # that never halted. The no-halt unlock is FAIL-CLOSED + KNIFE-
+                            # GUARDED (_nohalt_vertical_thrust_strong): it requires live OFI>0
+                            # (buyers lifting) AND the live ask making a NEW HIGH above the
+                            # breakout level (ask being eaten up) AND above-VWAP-or-reclaiming
+                            # AND RVOL above the explosive floor. A fade / below-VWAP / OFI<=0
+                            # / non-new-high move ⇒ _nohalt_strong False ⇒ abs-cap holds (no
+                            # blind chase). The live OFI is the SAME cheap 15s-window read the
+                            # entry flow-veto uses (no new heavy fetch); new-high reuses the
+                            # already-stamped breakout level; above-VWAP + RVOL are stamped at
+                            # submit. The chased price is STILL risk-first re-sized (fewer
+                            # shares at the worse price, dollar-risk unchanged) + bounded by
+                            # the #769 max-loss circuit. Else None ⇒ abs-cap (parity).
+                            _halt_active = _halt_resume_cooldown_active(le)
+                            _nohalt_ofi = None
+                            try:
+                                from .pipeline import _live_ofi_microprice as _vc_ofi_fn
+                                _nohalt_ofi, _ = _vc_ofi_fn(sess.symbol, db=db)
+                                _nohalt_ofi = None if _nohalt_ofi is None else float(_nohalt_ofi)
+                            except Exception:
+                                _nohalt_ofi = None
+                            # New-high: the live ask is ABOVE the stamped breakout level (the
+                            # offer is being lifted past the trigger high — price progressing
+                            # UP, not fading back). Fail-closed: no level / ask ⇒ not a new high.
+                            _nohalt_bk = _float_or_none(le.get("breakout_level_price"))
+                            _nohalt_new_high = bool(
+                                _nohalt_bk is not None and _nohalt_bk > 0
+                                and _pask is not None and float(_pask) > _nohalt_bk
+                            )
+                            _nohalt_above_vwap = le.get("entry_above_vwap")
+                            _nohalt_strong = _nohalt_vertical_thrust_strong(
+                                ofi=_nohalt_ofi,
+                                new_high=_nohalt_new_high,
+                                above_vwap=(
+                                    bool(_nohalt_above_vwap)
+                                    if _nohalt_above_vwap is not None else None
+                                ),
+                                rvol=le.get("entry_rvol"),
+                            )
                             _vc = _vertical_thrust_confluence(
-                                halt_resume_active=_halt_resume_cooldown_active(le),
+                                halt_resume_active=_halt_active,
                                 tape_thrust_ok=_fixb_ask_adv,
                                 squeeze_pct=le.get("entry_squeeze_pct"),
                                 rvol=le.get("entry_rvol"),
+                                nohalt_thrust_strong=_nohalt_strong,
+                            )
+                            # Unlock reason for the chase event + the repeg loop (halt vouch
+                            # wins when both hold; else the no-halt thrust; else neither).
+                            _vc_unlock = (
+                                "halt_resume" if (_vc is not None and _halt_active)
+                                else "no_halt_thrust" if (_vc is not None and _nohalt_strong)
+                                else "none"
                             )
                             _fixb_rp = _entry_repeg_price(
                                 original_limit_px=float(le.get("entry_original_limit_px") or _lim_px or 0.0),
@@ -7450,12 +7580,27 @@ def tick_live_session(
                                 vertical_confluence=_vc,
                             )
                             if _fixb_rp and _fixb_rp > _lim_px:
+                                # Stash the unlocked confluence so the INLINE repeg loop below
+                                # prices the placed order with the SAME deep ceiling (else the
+                                # loop defaults vertical_confluence=None ⇒ abs-cap ⇒ the deep
+                                # budget would never reach the actual fill). Cleared after use.
+                                le["entry_vertical_confluence"] = (
+                                    None if _vc is None else float(_vc)
+                                )
                                 _emit(db, sess, "entry_runaway_cross_triggered", {
                                     "fix": "B", "bid": _pbid, "ask": _pask,
                                     "limit": _lim_px or None,
                                     "chase_ceiling": _chase_ceiling,
                                     "repeg_target": _fixb_rp,
                                     "repeg_count": int(le.get("entry_repeg_count", 0) or 0),
+                                    "vertical_confluence": (None if _vc is None else round(float(_vc), 4)),
+                                    "vertical_unlock": _vc_unlock,
+                                    "nohalt_ofi": (None if _nohalt_ofi is None else round(_nohalt_ofi, 4)),
+                                    "nohalt_new_high": _nohalt_new_high,
+                                    "nohalt_above_vwap": (
+                                        None if _nohalt_above_vwap is None else bool(_nohalt_above_vwap)
+                                    ),
+                                    "nohalt_strong": _nohalt_strong,
                                 })
                                 _cancel_why = "entry_limit_left_behind"
                             else:
@@ -7585,6 +7730,19 @@ def tick_live_session(
                             _rp_fr = _pfr
                             _rp_iters = 0
                             _rp_did = False
+                            # DEEP-BUDGET HANDOFF (the fill-on-verticals fix): the FIX-B
+                            # escalation above stashed the unlocked thrust confluence (halt-
+                            # resume OR confirmed no-halt UP-thrust) so the ACTUAL placed
+                            # repeg prices off the SAME raised ceiling. Without this the loop
+                            # defaulted vertical_confluence=None ⇒ the abs-cap ⇒ the deep
+                            # budget would never reach the fill (latent: even the halt path
+                            # never applied it to the real order). Consume + clear so it can't
+                            # leak into a later non-vertical repeg. None ⇒ abs-cap (parity).
+                            _rp_vc = le.pop("entry_vertical_confluence", None)
+                            try:
+                                _rp_vc = None if _rp_vc is None else float(_rp_vc)
+                            except (TypeError, ValueError):
+                                _rp_vc = None
                             while (
                                 _cancel_why == "entry_limit_left_behind"
                                 and bool(getattr(settings, "chili_momentum_entry_chase_enabled", True))
@@ -7597,6 +7755,7 @@ def tick_live_session(
                                     original_limit_px=float(le.get("entry_original_limit_px") or _lim_px or 0.0),
                                     live_ask=float(_rp_ask),
                                     expected_move_bps=(float(_emb) if _emb else None),
+                                    vertical_confluence=_rp_vc,
                                 )
                                 _rp_maxn = float((le.get("entry_notional_guard") or {}).get("max_notional_usd") or 0.0)
                                 if not (_rp_new and _rp_new > _lim_px and _rp_maxn > 0):

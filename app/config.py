@@ -6323,6 +6323,16 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_VERTICAL_CHASE_MIN_CONFLUENCE"),
         description="Minimum confirmed-thrust confluence in [0,1] (tape-thrust AND squeeze-fuel AND RVOL, halt-resume-gated) before any raise above the abs_cap is granted. Below this the ceiling stays at the abs_cap. Adaptive: the raise scales linearly from abs_cap@this to max_bps@1.0.",
     )
+    chili_momentum_vertical_chase_nohalt_thrust_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VERTICAL_CHASE_NOHALT_THRUST_ENABLED"),
+        description="Unlock the deep vertical chase-ceiling raise on a CONFIRMED no-halt UP-thrust vertical (a genuine 1m new-high push that never halted), not ONLY inside a halt-resume. The no-halt unlock is FAIL-CLOSED + knife-guarded: it requires ALL of live OFI>0 (buyers lifting) AND price making a NEW HIGH above the breakout level (ask being eaten up) AND above-VWAP-or-reclaiming AND RVOL above the explosive floor — a fade / below-VWAP / OFI<=0 / non-new-high move stays at the abs_cap. The chased price is still risk-first re-sized (dollar-risk unchanged) + bounded by the #769 max-loss circuit. False ⇒ the deep budget stays halt-resume-gated (byte-identical to the prior behavior). Inert while vertical_chase_enabled=False.",
+    )
+    chili_momentum_vertical_chase_nohalt_min_confluence: float = Field(
+        default=0.6, ge=0.0, le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_VERTICAL_CHASE_NOHALT_MIN_CONFLUENCE"),
+        description="Floor share of the thrust confluence granted to a CONFIRMED no-halt UP-thrust vertical (vs the 0.5 halt-resume floor). Set above the halt floor (default 0.6) because a no-halt vertical must clear a genuinely strong, UP, confirmed-thrust bar (OFI>0 + new-high + above-VWAP + RVOL) to earn the deep budget; squeeze-fuel + RVOL still add bounded share on top, capped at 1.0. Inert while vertical_chase_nohalt_thrust_enabled=False.",
+    )
     chili_momentum_risk_max_position_size_base: float = Field(
         default=1_000_000.0,
         ge=0.0,
