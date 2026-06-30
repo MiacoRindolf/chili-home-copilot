@@ -7320,6 +7320,35 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AGENTIC_NON_TRADEABLE_TTL_SEC"),
     )
+    # CONSERVATIVE ASSET-TYPE ARM-SKIP (warrant / non-common-stock, 2026-06-29): 67/72 of the
+    # momentum lane's recurring live_error were PRE-entry no_bbo on thin non-common-stock names
+    # — WARRANTS especially (the "W" 5th-letter class suffix, e.g. RVMDW, appeared 5×). A warrant
+    # has its OWN illiquid / often-untradeable book, so it arms, hits no_bbo/place-error, burns
+    # the single slot, and paints a live_error every pass. With no real asset_type field anywhere
+    # in the candidate/viability data, the TICKER STRUCTURE is the only signal: SKIP at ARM the
+    # names whose ticker unambiguously denotes a warrant/right/unit (explicit .WS/-WT/.U/.R class
+    # suffix, the ``=`` warrant marker, or a 5-letter all-alpha root ending in W). CONSERVATIVE +
+    # crypto-exempt: it NEVER matches a thin-but-quoted COMMON premarket mover (the UPC-class
+    # +500% low-float name — normal 1–4 letter root), which must still arm. A wide spread / low
+    # float is NOT a skip reason. FAIL-OPEN: any uncertainty/error => arm. Flag OFF => byte-
+    # identical (no skip). [[feedback_no_dark_flags]] [[project_momentum_lane]]
+    chili_momentum_asset_type_arm_skip_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ASSET_TYPE_ARM_SKIP_ENABLED"),
+    )
+    # CLEAN PRE-ENTRY DECLINE TERMINAL (2026-06-29): a DETERMINISTIC policy decline at the entry
+    # instant (a known risk-eval BLOCK — no_bbo / not-live-eligible / spread-too-wide / product-
+    # not-tradable — on a name that never held a position) terminalizes as the CLEAN live_cancelled
+    # state, not the alarm-coloured live_error. live_error is then RESERVED for genuine unexpected
+    # failures (zero-fill, place_equity_order isError, missing frozen snapshot), so the REAL errors
+    # stop being buried under decline noise and the reaper churn drops. This NEVER weakens a risk
+    # block — the session still does NOT enter; only the terminal STATE/label changes. live_cancelled
+    # is already terminal across every consumer (focus-set, reaper, feedback learner, busy-set).
+    # Flag OFF => byte-identical legacy (decline => live_error). [[feedback_no_dark_flags]]
+    chili_momentum_clean_decline_terminal_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CLEAN_DECLINE_TERMINAL_ENABLED"),
+    )
     # RANK-DISPLACEMENT (2026-06-17): when arm slots are FULL, evict the worst-ranked
     # truly-inert pre-entry watcher (armed_pending_runner/queued_live ONLY) so a
     # top-ranked NEWCOMER can arm — instead of first-come slots starving the best

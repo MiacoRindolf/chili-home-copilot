@@ -146,6 +146,19 @@ _ALLOWED_LIVE: frozenset[tuple[str, str]] = frozenset(
         (STATE_LIVE_SCALING_OUT, STATE_LIVE_ERROR),
         (STATE_LIVE_TRAILING, STATE_LIVE_ERROR),
         (STATE_LIVE_BAILOUT, STATE_LIVE_ERROR),
+        # CLEAN PRE-ENTRY DECLINE TERMINAL (2026-06-29): a deterministic policy decline at
+        # the entry instant (no_bbo / not-live-eligible / spread-too-wide / product-not-
+        # tradable — a KNOWN risk-eval BLOCK on a name that never held a position) terminalizes
+        # CLEANLY in live_cancelled instead of the alarm-coloured live_error. live_error stays
+        # reserved for genuine unexpected failures (zero-fill, place isError, missing snapshot).
+        # These edges originate ONLY from pre-entry, no-position states, so a decline can never
+        # short-circuit a held position's exit management. live_cancelled is ALREADY terminal
+        # across every consumer (focus-set, reaper, feedback learner, busy-set, canonical
+        # status), so this only changes the terminal LABEL — never whether the session trades.
+        (STATE_ARMED_PENDING_RUNNER, STATE_LIVE_CANCELLED),
+        (STATE_QUEUED_LIVE, STATE_LIVE_CANCELLED),
+        (STATE_WATCHING_LIVE, STATE_LIVE_CANCELLED),
+        (STATE_LIVE_ENTRY_CANDIDATE, STATE_LIVE_CANCELLED),
     }
 )
 

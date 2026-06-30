@@ -1339,6 +1339,75 @@ def _agentic_tradability_blocks_arm(symbol: str | None, now: datetime | None = N
     return _symbol_routes_to_agentic(sym_u)
 
 
+# ── CONSERVATIVE ASSET-TYPE ARM-SKIP (warrant / non-common-stock) ─────────────────────
+# Diagnosis (2026-06-29): 67/72 momentum live_error were PRE-entry no_bbo on thin/non-
+# common-stock names — WARRANTS especially (the "W" 5th-letter class suffix, e.g. RVMDW,
+# appeared 5×). A warrant has its OWN illiquid book and is frequently not tradeable on the
+# equity rail at all, so it arms, hits no_bbo/place-error, and burns the slot + paints a
+# live_error every pass. There is NO real asset_type / instrument-type field anywhere in the
+# candidate / viability / execution-readiness data (investigated: features.py carries only
+# spread_bps / product_tradable; the agentic tradability tool returns session-eligibility,
+# not security class), so the TICKER STRUCTURE is the only available signal. We use it
+# CONSERVATIVELY — ONLY the well-established US class-suffix conventions that unambiguously
+# denote a warrant/right/unit, never a bare 4-letter root, never a wide-spread or low-float
+# COMMON stock. A thin-but-quoted premarket common mover (the UPC-class +500% low-float name)
+# has a normal 1–4 letter root and is NEVER matched here — it still arms.
+#
+# Matched (equity only; crypto -USD/-USDC always exempt):
+#   * explicit punctuation class suffix: ``.WS`` / ``.WT`` / ``-WT`` / ``.W`` / ``-W`` /
+#     ``.U`` / ``-U`` / ``.R`` / ``-R`` / ``=`` (warrant marker on some feeds), and
+#   * a 5-LETTER all-alpha root ending in ``W`` (the standard NASDAQ 5th-letter warrant
+#     class — RVMDW, GXAIW, …). 5th-letter ``R``/``U`` (rights/units) are deliberately NOT
+#     matched on the bare-root form: too many legit commons end in R/U (e.g. CRWV, ININ-style
+#     roots), so we require the explicit punctuation form for those. ``W`` is the only bare
+#     5th-letter we trust, because a 5-letter common ending in W is vanishingly rare and the
+#     warrant case dominates the observed noise.
+_WARRANT_PUNCT_SUFFIXES = (".WS", ".WT", "-WT", ".W", "-W", ".U", "-U", ".R", "-R")
+
+
+def _looks_like_non_common_stock(symbol: str | None) -> bool:
+    """True iff ``symbol`` looks like a WARRANT / right / unit (a non-common-stock the Ross
+    lane should not arm) by US ticker-class convention. CONSERVATIVE + crypto-exempt — see the
+    section header. Pure string logic (no network/DB), so it is cheap and deterministic.
+    FAIL-OPEN: an empty / unparseable symbol returns False (do NOT skip)."""
+    sym_u = str(symbol or "").strip().upper()
+    if not sym_u or "-USD" in sym_u:
+        return False  # crypto pairs are never warrants; empty => fail-open
+    # A warrant marker via the ``=`` convention some feeds use (e.g. ``RVMD=``).
+    if sym_u.endswith("="):
+        return True
+    for suf in _WARRANT_PUNCT_SUFFIXES:
+        if sym_u.endswith(suf):
+            return True
+    # Bare 5-letter all-alpha root ending in W == the standard 5th-letter NASDAQ warrant class.
+    if len(sym_u) == 5 and sym_u.isalpha() and sym_u.endswith("W"):
+        return True
+    return False
+
+
+def _asset_type_arm_skip_enabled() -> bool:
+    """ON by default (no-dark-flags): SKIP structurally-non-common (warrant) names at ARM so
+    the lane stops burning the slot + painting live_error on a name it cannot fill. Flag OFF
+    => byte-identical (no skip). FAIL-SAFE: a settings read error keeps it ON (the safe,
+    noise-reducing default — the matcher itself is conservative + crypto-exempt)."""
+    try:
+        return bool(getattr(settings, "chili_momentum_asset_type_arm_skip_enabled", True))
+    except Exception:
+        return True
+
+
+def _asset_type_blocks_arm(symbol: str | None) -> bool:
+    """ARM-time SKIP gate for non-common-stock (warrant) names. Scoped to EQUITIES (crypto is
+    exempt inside ``_looks_like_non_common_stock``). FAIL-OPEN: flag off / any error => False
+    (let it arm). NEVER matches a thin-but-quoted COMMON premarket mover (normal root)."""
+    if not _asset_type_arm_skip_enabled():
+        return False
+    try:
+        return _looks_like_non_common_stock(symbol)
+    except Exception:
+        return False
+
+
 # ── TIER-2: 24h-tradeability eligibility cache (proactive probe, no-spam) ──────────
 # dict[sym_upper -> (eligible: bool, checked_at)]. TTL = chili_momentum_tradability_cache_sec
 # (base 3600s — eligibility is an instrument property that changes slowly). Probed lazily:
@@ -3596,6 +3665,7 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     out["reap_cooldown_skipped"] = 0
     out["entry_reject_cooldown_skipped"] = 0
     out["agentic_tradability_skipped"] = 0
+    out["asset_type_skipped"] = 0
     # TIER-2 OVERNIGHT: resolve the clock + flags ONCE per pass. When overnight trading is
     # active, proactively probe 24h-eligibility for the equity candidates (batched <=10) so
     # ineligible names are SKIPPED at the gate below — never order-rejected (no spam).
@@ -3648,6 +3718,15 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         if _agentic_tradability_blocks_arm(c.symbol, _utcnow()):
             out["agentic_tradability_skipped"] = out.get("agentic_tradability_skipped", 0) + 1
             logger.info("[momentum_neural] tradability skip sym=%s (non-agentic-tradeable; learn-from-401)", _sym_u)
+            continue
+        # CONSERVATIVE ASSET-TYPE SKIP: a structurally-non-common name (a WARRANT — the RVMDW
+        # "W"-suffix class that paints 67/72 of the no_bbo live_errors) has its own illiquid /
+        # often-untradeable book; it arms, hits no_bbo, and burns the slot every pass. Skip it
+        # here so a FILLABLE common mover gets the slot. CRYPTO-EXEMPT + crucially NEVER matches
+        # a thin-but-quoted COMMON premarket mover (normal 1–4 letter root); FAIL-OPEN.
+        if _asset_type_blocks_arm(c.symbol):
+            out["asset_type_skipped"] = out.get("asset_type_skipped", 0) + 1
+            logger.info("[momentum_neural] asset-type skip sym=%s reason=non_common_stock_warrant", _sym_u)
             continue
         if not _symbol_market_open(c.symbol):
             continue  # equities only during their session; crypto always passes (24/7)

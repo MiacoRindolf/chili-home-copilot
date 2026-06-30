@@ -92,6 +92,7 @@ from .live_fsm import (
     LIVE_RUNNER_RUNNABLE_STATES,
     STATE_ARMED_PENDING_RUNNER,
     STATE_LIVE_BAILOUT,
+    STATE_LIVE_CANCELLED,
     STATE_LIVE_COOLDOWN,
     STATE_LIVE_ENTERED,
     STATE_LIVE_ENTRY_CANDIDATE,
@@ -2339,6 +2340,53 @@ def _safe_transition(db: Session, sess: TradingAutomationSession, new_state: str
 
     if session_terminal_for_feedback(sess.mode or "live", new_state):
         emit_feedback_after_terminal_transition(db, sess)
+
+
+# Pre-entry, no-position states that a DETERMINISTIC policy decline can terminalize
+# cleanly from. A decline reached from any of these never owned capital, so routing it
+# to live_cancelled cannot abandon a live position.
+_PRE_ENTRY_DECLINE_STATES = frozenset(
+    {STATE_ARMED_PENDING_RUNNER, STATE_QUEUED_LIVE, STATE_WATCHING_LIVE, STATE_LIVE_ENTRY_CANDIDATE}
+)
+
+
+def _clean_decline_terminal_enabled() -> bool:
+    """ON by default (no-dark-flags): a deterministic PRE-ENTRY policy decline terminalizes
+    as the CLEAN live_cancelled state, not the alarm-coloured live_error — cutting the
+    recurring live_error noise + reaper churn so the REAL errors (zero-fill, place isError)
+    stand out. Flag OFF => byte-identical legacy (decline => live_error). FAIL-SAFE: any
+    settings read error keeps the change ON (the safe, noise-reducing default)."""
+    try:
+        return bool(getattr(settings, "chili_momentum_clean_decline_terminal_enabled", True))
+    except Exception:
+        return True
+
+
+def _decline_terminal(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    reason: str,
+    detail: dict[str, Any] | None = None,
+) -> None:
+    """Terminalize a DETERMINISTIC pre-entry POLICY decline (a known risk-eval BLOCK —
+    no_bbo / not-live-eligible / spread-too-wide / product-not-tradable — on a name that
+    never held a position) in the CLEAN live_cancelled state with the decline reason
+    recorded, instead of the alarm-coloured live_error.
+
+    This NEVER weakens a risk block: the session still does NOT enter; only the terminal
+    STATE/label changes. live_cancelled is already terminal across every consumer (focus-
+    set, reaper, feedback learner, busy-set, canonical status). When the flag is OFF, or the
+    session is somehow NOT in a pre-entry/no-position state (defensive), it falls back to the
+    legacy live_error so a held position can never be short-circuited by a decline reroute."""
+    if _clean_decline_terminal_enabled() and sess.state in _PRE_ENTRY_DECLINE_STATES:
+        payload: dict[str, Any] = {"reason": reason, "terminal": STATE_LIVE_CANCELLED}
+        if detail:
+            payload.update(detail)
+        _emit(db, sess, "live_declined", payload)
+        _safe_transition(db, sess, STATE_LIVE_CANCELLED)
+        return
+    _safe_transition(db, sess, STATE_LIVE_ERROR)
 
 
 def _arm_time_live_eligible_anchor(sess: TradingAutomationSession) -> str | None:
@@ -5140,7 +5188,11 @@ def tick_live_session(
     if tick is None or tick.mid is None or tick.mid <= 0:
         _emit(db, sess, "live_blocked_by_risk", {"reason": "no_bbo"})
         if sess.state in (STATE_ARMED_PENDING_RUNNER, STATE_QUEUED_LIVE):
-            _safe_transition(db, sess, STATE_LIVE_ERROR)
+            # A persistently quoteless name (thin/non-common-stock — the RVMDW warrant
+            # class) is a DETERMINISTIC policy decline, not a runner error: terminalize
+            # cleanly (live_cancelled) so the recurring no_bbo noise stops masking REAL
+            # errors. Still blocks entry; only the terminal label changes.
+            _decline_terminal(db, sess, reason="no_bbo")
         db.flush()
         return {"ok": True, "blocked": True, "reason": "no_quote"}
 
@@ -5284,7 +5336,16 @@ def tick_live_session(
             if _only_transient_freshness_block(ev):
                 _safe_transition(db, sess, STATE_WATCHING_LIVE)
             else:
-                _safe_transition(db, sess, STATE_LIVE_ERROR)
+                # A persistent risk-eval BLOCK (not-live-eligible / spread-too-wide / a
+                # cap that is not the kill-switch — a DETERMINISTIC policy decline on a
+                # name that never held a position) terminalizes cleanly (live_cancelled),
+                # not as a runner error. Entry is still blocked; only the label changes.
+                _decline_terminal(
+                    db,
+                    sess,
+                    reason="risk_block",
+                    detail={"severity": ev.get("severity"), "errors": ev.get("errors")},
+                )
             db.flush()
             return {"ok": True, "blocked": True, "risk_evaluation": ev}
         if sess.state == STATE_LIVE_PENDING_ENTRY and le.get("entry_order_id") and not le.get("position"):
@@ -5401,8 +5462,10 @@ def tick_live_session(
     except Exception as ex:
         _log.debug("get_product: %s", ex)
     if prod and not prod.tradable_for_spot_momentum():
-        _emit(db, sess, "live_error", {"reason": "product_not_tradable"})
-        _safe_transition(db, sess, STATE_LIVE_ERROR)
+        # A non-tradeable product (e.g. a warrant/non-common-stock the venue won't trade) is
+        # a DETERMINISTIC policy decline. In a pre-entry/no-position state terminalize cleanly
+        # (live_cancelled); _decline_terminal falls back to live_error if somehow held.
+        _decline_terminal(db, sess, reason="product_not_tradable")
         db.flush()
         return {"ok": False, "error": "product_not_tradable"}
 
