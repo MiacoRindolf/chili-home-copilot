@@ -51,6 +51,15 @@ _log = logging.getLogger(__name__)
 _VENUE = "replay_mock"
 
 
+def _float_or_none(v: Any) -> Optional[float]:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass(frozen=True)
 class RecordedQuote:
     """A single recorded NBBO snapshot the mock fills against (as-of the sim clock).
@@ -77,10 +86,17 @@ class RecordedQuote:
 
 @dataclass
 class _RestingOrder:
-    """A deterministically-filled order the runner can poll via ``get_order``.
+    """An order the runner can poll via ``get_order``.
 
-    P0 fills the order IMMEDIATELY at the recorded NBBO (no resting / partials), so
-    ``status`` is terminal (``"filled"``) the moment it is created."""
+    Two fill modes (per the adapter's ``resting_limit_fills`` flag):
+
+      * **immediate** (P0, default): the order fills the moment it is created at the recorded
+        NBBO; ``status`` is terminal (``"filled"``) immediately. ``filled_size == base_size``.
+      * **resting** (P1): a LIMIT order rests ``status="open"`` with ``filled_size == 0`` until
+        a later recorded NBBO CROSSES its limit (buy: ask <= limit; sell: bid >= limit), at
+        which point ``_advance`` flips it to ``"filled"`` (or a partial). An optional
+        ``ack_delay_ticks`` holds the order ``open`` for N quote advances before it is even
+        eligible to cross (exercises the runner's pending-entry ack-poll/timeout path)."""
 
     order_id: str
     client_order_id: Optional[str]
@@ -88,10 +104,15 @@ class _RestingOrder:
     side: str
     order_type: str
     base_size: float
-    fill_price: float
-    fee: float
+    limit_price: Optional[float]
     created_time: str
+    # mutable fill state
     status: str = "filled"
+    filled_size: float = 0.0
+    fill_price: Optional[float] = None
+    fee: float = 0.0
+    ack_delay_remaining: int = 0
+    partial_first_fill: bool = False  # fill base_size/2 first, the remainder on the next cross
 
     def to_normalized(self) -> NormalizedOrder:
         return NormalizedOrder(
@@ -101,8 +122,8 @@ class _RestingOrder:
             side=self.side,
             status=self.status,
             order_type=self.order_type,
-            filled_size=float(self.base_size),
-            average_filled_price=float(self.fill_price),
+            filled_size=float(self.filled_size),
+            average_filled_price=(float(self.fill_price) if self.fill_price is not None else None),
             created_time=self.created_time,
             raw={"venue": _VENUE, "fee": self.fee},
         )
@@ -128,6 +149,10 @@ class MockBrokerAdapter:
         venue_rt_bps: float | None = 0.0,
         max_age_seconds: float = 15.0,
         enabled: bool = True,
+        resting_limit_fills: bool = False,
+        ack_delay_ticks: int = 0,
+        partial_first_fill: bool = False,
+        freshness_mode: str = "sim",
     ) -> None:
         # Injected, per-product recorded NBBO (set as-of the sim clock by the driver).
         self._quotes: dict[str, RecordedQuote] = {}
@@ -140,16 +165,36 @@ class MockBrokerAdapter:
         self._venue_rt_bps = venue_rt_bps
         self._max_age_seconds = float(max_age_seconds)
         self._enabled = bool(enabled)
+        # P1 FIDELITY KNOBS (default OFF ⇒ the P0 immediate-fill model, byte-identical):
+        #  * resting_limit_fills: a LIMIT order RESTS open until the recorded NBBO crosses it.
+        #  * ack_delay_ticks: hold a resting order `open` for N quote advances before it can
+        #    cross (exercises the runner's pending-entry ack-poll/timeout path).
+        #  * partial_first_fill: the first cross fills HALF; the remainder fills on the next
+        #    cross (exercises the runner's partial-entry/partial-exit bookkeeping).
+        self._resting_limit_fills = bool(resting_limit_fills)
+        self._ack_delay_ticks = max(0, int(ack_delay_ticks))
+        self._partial_first_fill = bool(partial_first_fill)
+        # "sim" (P0 contract) | "wall" (P1 driver: quote fresh vs the wall-clock stale gate).
+        self._freshness_mode = "wall" if str(freshness_mode).lower() == "wall" else "sim"
 
     # ── driver-side injection seams (NOT part of the VenueAdapter protocol) ──────────
     def set_clock(self, t: datetime) -> None:
-        """Freeze the broker's quote/fill clock at ``t`` (naive-UTC normalized)."""
+        """Freeze the broker's quote/fill clock at ``t`` (naive-UTC normalized).
+
+        In resting mode this is the tick that ADVANCES resting orders: decrement their
+        ack-delay and re-test the cross against the current per-product quote."""
         if t.tzinfo is not None:
             t = t.astimezone(timezone.utc).replace(tzinfo=None)
         self._clock = t
+        if self._resting_limit_fills:
+            self._advance_resting_orders()
 
     def set_quote(self, product_id: str, quote: RecordedQuote) -> None:
         self._quotes[str(product_id).upper()] = quote
+        if self._resting_limit_fills:
+            # A new quote can satisfy a resting cross immediately (the driver may set the clock
+            # then the quote, or only the quote, between ticks) — re-test on quote arrival too.
+            self._advance_resting_orders(product_id=str(product_id).upper())
 
     def clear_quote(self, product_id: str) -> None:
         """Remove a product's quote ⇒ subsequent reads return ``no_bbo`` (RVMDW path)."""
@@ -162,7 +207,31 @@ class MockBrokerAdapter:
         return q
 
     def _freshness(self) -> FreshnessMeta:
-        # Stamp at the sim clock so the runner's freshness checks compare sim-to-sim.
+        # The freshness STAMP. Two modes (``freshness_mode``):
+        #
+        #   * ``"sim"`` (P0 default): stamp at the sim clock — the documented P0 contract
+        #     (``test_replay_v3_p0`` pins ``retrieved_at_utc == sim clock``). Honest, but see
+        #     the caveat below.
+        #   * ``"wall"`` (the P1 DRIVER uses this): stamp at the REAL wall clock so the quote is
+        #     fresh by construction.
+        #
+        # WHY ``"wall"`` exists (documented hidden real-time dep — design R2/R7): the runner's
+        # stale-quote gate calls ``protocol.is_fresh_enough(meta)`` WITHOUT a ``now=`` override,
+        # so freshness is measured against ``datetime.now(timezone.utc)`` — the WALL clock, NOT
+        # the sim clock (``live_runner._utcnow``). It is the ONE market read the P0/P1 clock seam
+        # does not reach. Stamping a past sim instant would make EVERY replayed quote look stale
+        # and the runner would never leave ``queued_live``. The faithful replay semantics: the
+        # injected quote IS the current quote for THIS step, so it is fresh by construction.
+        # The gate still works in replay — a ``clear_quote``d name returns no_bbo (not stale),
+        # exercising the quoteless decline path. A clean sim-now ``is_fresh_enough`` override
+        # threaded from the runner is the P5 cleanup that makes ``"sim"`` viable end-to-end.
+        if self._freshness_mode == "wall":
+            stamp = datetime.now(timezone.utc)
+            return FreshnessMeta(
+                retrieved_at_utc=stamp,
+                provider_time_utc=None,
+                max_age_seconds=self._max_age_seconds,
+            )
         return FreshnessMeta(
             retrieved_at_utc=self._clock.replace(tzinfo=timezone.utc),
             provider_time_utc=self._clock.replace(tzinfo=timezone.utc),
@@ -225,8 +294,14 @@ class MockBrokerAdapter:
     def list_open_orders(
         self, *, product_id: Optional[str] = None, limit: int = 50
     ) -> tuple[list[NormalizedOrder], FreshnessMeta]:
-        # P0 fills immediately ⇒ nothing rests open.
-        return [], self._freshness()
+        # Immediate-fill (P0): nothing rests open. Resting (P1): the still-``open`` orders.
+        pid = str(product_id).upper() if product_id is not None else None
+        opens = [
+            o.to_normalized()
+            for o in self._orders.values()
+            if o.status == "open" and (pid is None or o.product_id == pid)
+        ]
+        return list(opens[: int(limit)]), self._freshness()
 
     def get_order(self, order_id: str) -> tuple[Optional[NormalizedOrder], FreshnessMeta]:
         o = self._orders.get(str(order_id))
@@ -248,7 +323,11 @@ class MockBrokerAdapter:
         side: str,
         base_size: str,
         client_order_id: Optional[str] = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
+        # ``**kwargs`` tolerates venue-specific extras the runner threads to the REAL adapters
+        # (e.g. time_in_force / overnight / post_only) — the mock ignores them, exactly as a
+        # crypto adapter ignores ``overnight``. Keeps the mock a drop-in across families.
         return self._fill_order(
             product_id=product_id,
             side=side,
@@ -267,6 +346,7 @@ class MockBrokerAdapter:
         limit_price: str,
         client_order_id: Optional[str] = None,
         extended_hours: bool = False,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         return self._fill_order(
             product_id=product_id,
@@ -278,7 +358,12 @@ class MockBrokerAdapter:
         )
 
     def cancel_order(self, order_id: str) -> dict[str, Any]:
-        # Always accept (mirrors protocol.cancel_order). P0 has nothing resting to cancel.
+        # Always accept (mirrors protocol.cancel_order). In resting mode an ``open`` order is
+        # marked ``cancelled`` so a later cross can't fill an order the runner abandoned (the
+        # ack-timeout → re-watch path); a partial keeps its already-filled size.
+        o = self._orders.get(str(order_id))
+        if o is not None and o.status == "open":
+            o.status = "cancelled"
         return {"ok": True, "venue": _VENUE, "order_id": str(order_id), "status": "cancelled"}
 
     def preview_market_order(
@@ -335,47 +420,65 @@ class MockBrokerAdapter:
             }
 
         s = str(side).lower()
-        if s in ("buy", "bid", "long"):
-            # Entry: cross the ask + adverse slippage (REUSE the pure paper math).
-            fill_price = long_entry_fill_price(q.ask, q.mid, self._slippage_bps)
-        else:
-            # Exit: cross the bid − adverse slippage.
-            fill_price = long_exit_fill_price(q.bid, q.mid, self._slippage_bps)
-
-        notional = abs(fill_price * size)
-        fee = roundtrip_fee_usd(
-            notional,
-            self._fee_to_target_ratio,
-            venue_rt_bps=self._venue_rt_bps,
-        )
         order_id = f"{_VENUE}-{next(self._order_seq):08d}"
         created = self._clock.replace(tzinfo=timezone.utc).isoformat()
-        resting = _RestingOrder(
+        _lim = _float_or_none(limit_price)
+
+        # RESTING MODE (P1): a marketable LIMIT does NOT necessarily cross on placement —
+        # it rests ``open`` until a recorded NBBO crosses it. A MARKET order (no limit / the
+        # exit) still crosses immediately. ``ack_delay_ticks`` holds even a crossable limit
+        # ``open`` for N quote advances first (the pending-entry ack window).
+        if self._resting_limit_fills and order_type == "limit":
+            ro = _RestingOrder(
+                order_id=order_id,
+                client_order_id=client_order_id,
+                product_id=str(product_id).upper(),
+                side=s,
+                order_type=order_type,
+                base_size=size,
+                limit_price=_lim,
+                created_time=created,
+                status="open",
+                filled_size=0.0,
+                fill_price=None,
+                fee=0.0,
+                ack_delay_remaining=self._ack_delay_ticks,
+                partial_first_fill=self._partial_first_fill,
+            )
+            self._orders[order_id] = ro
+            # An at-or-through-market limit with no ack delay crosses on THIS placement quote.
+            self._maybe_cross(ro, q)
+            return {
+                "ok": True,
+                "venue": _VENUE,
+                "order_id": order_id,
+                "client_order_id": client_order_id,
+                "status": ro.status,
+                "raw": {
+                    "filled_size": float(ro.filled_size),
+                    "fill_price": (float(ro.fill_price) if ro.fill_price is not None else None),
+                    "fee": float(ro.fee),
+                    "order_type": order_type,
+                    "limit_price": limit_price,
+                },
+            }
+
+        # IMMEDIATE MODE (P0 default; and all MARKET orders even in resting mode): cross now.
+        fill_price = self._cross_price(s, q)
+        ro = _RestingOrder(
             order_id=order_id,
             client_order_id=client_order_id,
             product_id=str(product_id).upper(),
             side=s,
             order_type=order_type,
             base_size=size,
-            fill_price=float(fill_price),
-            fee=float(fee),
+            limit_price=_lim,
             created_time=created,
             status="filled",
         )
-        self._orders[order_id] = resting
-        self._fills.append(
-            NormalizedFill(
-                fill_id=f"{order_id}-f",
-                order_id=order_id,
-                product_id=str(product_id).upper(),
-                side=s,
-                size=float(size),
-                price=float(fill_price),
-                fee=float(fee),
-                trade_time=created,
-                raw={"venue": _VENUE},
-            )
-        )
+        self._orders[order_id] = ro
+        # _book_fill sets filled_size/fill_price/fee + appends the NormalizedFill.
+        self._book_fill(ro, qty=float(size), price=float(fill_price))
         return {
             "ok": True,
             "venue": _VENUE,
@@ -385,11 +488,91 @@ class MockBrokerAdapter:
             "raw": {
                 "fill_price": float(fill_price),
                 "filled_size": float(size),
-                "fee": float(fee),
+                "fee": float(ro.fee),
                 "order_type": order_type,
                 "limit_price": limit_price,
             },
         }
+
+    # ── resting-fill mechanics (P1; zero network, deterministic) ─────────────────────
+    def _cross_price(self, side: str, q: RecordedQuote) -> float:
+        """Fill PRICE for a marketable order against quote ``q`` (REUSE the pure paper math)."""
+        if str(side).lower() in ("buy", "bid", "long"):
+            return long_entry_fill_price(q.ask, q.mid, self._slippage_bps)
+        return long_exit_fill_price(q.bid, q.mid, self._slippage_bps)
+
+    def _limit_crosses(self, ro: _RestingOrder, q: RecordedQuote) -> bool:
+        """A resting LIMIT crosses when the recorded NBBO trades through it: a BUY limit
+        crosses once the ask is at/below the limit; a SELL limit once the bid is at/above it.
+        A limit of ``None`` (defensive) is treated as marketable (always crosses)."""
+        if ro.limit_price is None:
+            return True
+        if ro.side in ("buy", "bid", "long"):
+            return float(q.ask) <= float(ro.limit_price) + 1e-12
+        return float(q.bid) >= float(ro.limit_price) - 1e-12
+
+    def _maybe_cross(self, ro: _RestingOrder, q: Optional[RecordedQuote]) -> None:
+        """Advance one resting order against the current quote: respect the ack delay, then
+        fill (or partial-fill) when the limit crosses. Idempotent on terminal orders."""
+        if ro.status != "open" or q is None or not q.is_valid():
+            return
+        if ro.ack_delay_remaining > 0:
+            ro.ack_delay_remaining -= 1
+            return
+        if not self._limit_crosses(ro, q):
+            return
+        remaining = ro.base_size - ro.filled_size
+        if remaining <= 0:
+            ro.status = "filled"
+            return
+        # PARTIAL: the first cross fills half, leaving the order ``open`` for the next cross.
+        if ro.partial_first_fill and ro.filled_size <= 0 and remaining > 1e-9:
+            half = remaining / 2.0
+            px = self._cross_price(ro.side, q)
+            self._book_fill(ro, qty=half, price=px)
+            ro.status = "open"  # stays resting for the remainder
+            return
+        px = self._cross_price(ro.side, q)
+        self._book_fill(ro, qty=remaining, price=px)
+        ro.status = "filled"
+
+    def _advance_resting_orders(self, *, product_id: Optional[str] = None) -> None:
+        """Re-test every still-``open`` resting order against its product's current quote."""
+        for ro in self._orders.values():
+            if ro.status != "open":
+                continue
+            if product_id is not None and ro.product_id != product_id:
+                continue
+            self._maybe_cross(ro, self._quote_for(ro.product_id))
+
+    def _book_fill(self, ro: _RestingOrder, *, qty: float, price: float) -> None:
+        """Record a (possibly partial) fill on ``ro`` + append a NormalizedFill. Updates the
+        size-weighted average fill price + accrues the proportional fee."""
+        if qty <= 0:
+            return
+        prev_filled = ro.filled_size
+        prev_px = ro.fill_price if ro.fill_price is not None else price
+        new_filled = prev_filled + qty
+        # size-weighted average across partials
+        ro.fill_price = (prev_px * prev_filled + price * qty) / new_filled if new_filled > 0 else price
+        ro.filled_size = new_filled
+        notional = abs(price * qty)
+        ro.fee += roundtrip_fee_usd(
+            notional, self._fee_to_target_ratio, venue_rt_bps=self._venue_rt_bps
+        )
+        self._fills.append(
+            NormalizedFill(
+                fill_id=f"{ro.order_id}-f{len([f for f in self._fills if f.order_id == ro.order_id]) + 1}",
+                order_id=ro.order_id,
+                product_id=ro.product_id,
+                side=ro.side,
+                size=float(qty),
+                price=float(price),
+                fee=float(roundtrip_fee_usd(notional, self._fee_to_target_ratio, venue_rt_bps=self._venue_rt_bps)),
+                trade_time=self._clock.replace(tzinfo=timezone.utc).isoformat(),
+                raw={"venue": _VENUE},
+            )
+        )
 
 
 def make_mock_broker_factory(adapter: MockBrokerAdapter):

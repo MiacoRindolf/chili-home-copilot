@@ -211,6 +211,77 @@ def _now_in_tz(zone: Any) -> datetime:
     return _utcnow().replace(tzinfo=timezone.utc).astimezone(zone)
 
 
+# ── REPLAY v3 P1 — RECORDED-OHLCV PROVIDER SEAM (the one heavy NETWORK read) ──────
+# ``fetch_ohlcv_df`` is the single heavy external read inside ``tick_live_session`` (15m
+# ATR / expected-move / the pullback + volume triggers — ~13 call sites). To replay the
+# FSM hermetically the harness must serve those bars from RECORDED data instead of hitting
+# Massive/Polygon/yfinance. We mirror the ``_SIM_NOW`` clock pattern exactly: a process-
+# global, async/thread-safe ``ContextVar`` holding an OPTIONAL provider callable. Default is
+# ``None`` — and when it is ``None`` (ALWAYS in prod, since only the replay harness ever sets
+# it) ``_replay_aware_fetch_ohlcv_df`` calls the REAL ``fetch_ohlcv_df`` with the EXACT same
+# args on the EXACT same code path as before, so prod is BYTE-IDENTICAL. The ContextVar
+# resets automatically on block/exception exit, so a replay provider can never leak into a
+# real lane. Every in-tick ``fetch_ohlcv_df`` invocation routes through this ONE wrapper.
+# The provider signature mirrors ``fetch_ohlcv_df`` itself:
+#     provider(ticker, *, interval, period) -> pandas.DataFrame
+# See docs/DESIGN/REPLAY_V3_LIVE_FSM_SIM.md §3.2 / §6 (the OHLCV provider seam, P1).
+_REPLAY_OHLCV_PROVIDER: contextvars.ContextVar[Optional[Callable[..., Any]]] = (
+    contextvars.ContextVar("_chili_replay_ohlcv_provider", default=None)
+)
+
+
+def _replay_aware_fetch_ohlcv_df(
+    ticker: str, interval: str = "1d", period: str = "6mo"
+) -> Any:
+    """Route a runner OHLCV read through the replay provider when one is installed, else the
+    real ``fetch_ohlcv_df``.
+
+    PROD (no provider set — ALWAYS): imports + calls the real ``fetch_ohlcv_df(ticker,
+    interval=interval, period=period)`` exactly as the call sites did before this seam — same
+    import, same positional/keyword args, same cache. BYTE-IDENTICAL.
+
+    REPLAY (provider installed): calls ``provider(ticker, interval=interval, period=period)``
+    so the bars come from recorded data with ZERO network I/O. The provider is responsible for
+    serving bars as-of the sim clock (``_utcnow()``)."""
+    provider = _REPLAY_OHLCV_PROVIDER.get()
+    if provider is not None:
+        return provider(ticker, interval=interval, period=period)
+    from ..market_data import fetch_ohlcv_df as _real_fetch_ohlcv_df
+
+    return _real_fetch_ohlcv_df(ticker, interval=interval, period=period)
+
+
+def set_replay_ohlcv_provider(
+    provider: Optional[Callable[..., Any]],
+) -> "contextvars.Token[Optional[Callable[..., Any]]]":
+    """Install a recorded-OHLCV provider on the seam (replay harness only). Returns the
+    ``contextvars.Token`` so the caller can ``reset_replay_ohlcv_provider(token)`` (prefer the
+    ``replay_ohlcv_provider`` context manager, which does this for you)."""
+    return _REPLAY_OHLCV_PROVIDER.set(provider)
+
+
+def reset_replay_ohlcv_provider(
+    token: "contextvars.Token[Optional[Callable[..., Any]]]",
+) -> None:
+    """Pop the OHLCV provider, restoring the value before the matching set."""
+    _REPLAY_OHLCV_PROVIDER.reset(token)
+
+
+@contextlib.contextmanager
+def replay_ohlcv_provider(provider: Optional[Callable[..., Any]]) -> Iterator[None]:
+    """Context manager installing ``provider`` as the runner's OHLCV source for the block.
+
+    Pure ContextVar push/pop — async/thread-safe, auto-resets on normal exit AND on exception
+    (the ``finally`` always restores the prior value), so a replay provider can never escape
+    the block into prod. Nests correctly. Prod never enters this manager, so prod stays
+    byte-identical."""
+    token = set_replay_ohlcv_provider(provider)
+    try:
+        yield
+    finally:
+        reset_replay_ohlcv_provider(token)
+
+
 # ── CHUNK 3 — S4 FAST EXECUTOR: rail-governed calls + RTT measurement ─────────────
 # A process-local exponential-moving-average of the MEASURED rail round-trip time, used
 # by the inline micro-repeg (inter-repeg delay) and the fast ack-poll (poll cadence) so
@@ -416,7 +487,7 @@ def _daily_ctx_cached(symbol: str, *, price: float | None = None) -> Any:
         _key = f"{str(symbol).upper()}|{_day}"
         if _key in _DAILY_CTX_CACHE:
             return _DAILY_CTX_CACHE[_key]
-        from ..market_data import fetch_ohlcv_df as _dc_fetch
+        _dc_fetch = _replay_aware_fetch_ohlcv_df  # replay-aware seam (prod byte-identical)
         from .daily_levels import compute_daily_context as _dc_compute
 
         _lb = int(getattr(settings, "chili_momentum_daily_lookback_days", 20) or 20)
@@ -5280,7 +5351,7 @@ def tick_live_session(
     _adaptive_max_spread: float | None = None
     if _live_entry_quote_gate_applies(sess, le):
         try:
-            from ..market_data import fetch_ohlcv_df
+            fetch_ohlcv_df = _replay_aware_fetch_ohlcv_df  # replay-aware seam (prod byte-identical)
 
             _entry_df = fetch_ohlcv_df(sess.symbol, interval="15m", period="5d")
         except Exception:
@@ -5649,7 +5720,7 @@ def tick_live_session(
         if _score_ok:
             try:
                 from .entry_gates import momentum_pullback_trigger, momentum_volume_confirmation
-                from ..market_data import fetch_ohlcv_df
+                fetch_ohlcv_df = _replay_aware_fetch_ohlcv_df  # replay-aware seam (prod byte-identical)
 
                 _mode = str(getattr(settings, "chili_momentum_entry_trigger_mode", "hybrid") or "hybrid").lower()
                 _interval = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
@@ -6247,7 +6318,7 @@ def tick_live_session(
         ):
             try:
                 from .entry_gates import evaluate_sticky_backside_bench
-                from ..market_data import fetch_ohlcv_df
+                fetch_ohlcv_df = _replay_aware_fetch_ohlcv_df  # replay-aware seam (prod byte-identical)
 
                 _bench_iv = str(
                     getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m"
@@ -6431,7 +6502,7 @@ def tick_live_session(
             and bool(getattr(settings, "chili_momentum_red_candle_entry_block_enabled", False))
         ):
             try:
-                from ..market_data import fetch_ohlcv_df as _rc_fetch
+                _rc_fetch = _replay_aware_fetch_ohlcv_df  # replay-aware seam (prod byte-identical)
 
                 _rc_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
                 _rc_df = _rc_fetch(sess.symbol, interval=_rc_iv, period="5d")
@@ -6705,7 +6776,7 @@ def tick_live_session(
                     if _tape_ok:
                         # (3)+(4) structural hold + not-backside on the SAME entry-interval df.
                         _th_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
-                        from ..market_data import fetch_ohlcv_df as _th_fetch
+                        _th_fetch = _replay_aware_fetch_ohlcv_df  # replay-aware seam (prod byte-identical)
 
                         _th_df = _th_fetch(sess.symbol, interval=_th_iv, period="5d")
                         _th_struct_ok, _th_reason, _th_sdbg = tape_confirmed_hold_trigger(
@@ -6816,7 +6887,7 @@ def tick_live_session(
                         continuation_high_conviction,
                         momentum_continuation_trigger,
                     )
-                    from ..market_data import fetch_ohlcv_df as _mc_fetch
+                    _mc_fetch = _replay_aware_fetch_ohlcv_df  # replay-aware seam (prod byte-identical)
 
                     _mc_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
                     _rvol_now = _latest_rvol(db, sess.symbol)
@@ -7136,7 +7207,7 @@ def tick_live_session(
                 # SHARED helper (parity with replay). Flag chili_momentum_live_capture_features.
                 if bool(getattr(settings, "chili_momentum_live_capture_features", True)):
                     try:
-                        from ..market_data import fetch_ohlcv_df
+                        fetch_ohlcv_df = _replay_aware_fetch_ohlcv_df  # replay-aware seam (prod byte-identical)
                         from .entry_features import capture_entry_features, macro_regime_features
 
                         _cap_df = fetch_ohlcv_df(sess.symbol, interval="15m", period="5d")
@@ -7785,7 +7856,7 @@ def tick_live_session(
                     check_entry_feature_parity as _check_parity,
                 )
                 from ..indicator_core import compute_all_from_df as _pc_compute
-                from ..market_data import fetch_ohlcv_df as _pc_fetch
+                _pc_fetch = _replay_aware_fetch_ohlcv_df  # replay-aware seam (prod byte-identical)
                 _pc_df = _pc_fetch(sess.symbol, "1h", "30d")
                 if _pc_df is not None and not _pc_df.empty:
                     _pc_arrays = _pc_compute(_pc_df, needed=set(_PARITY_FEATURES))
@@ -10426,7 +10497,7 @@ def tick_live_session(
                 if le.get("ema5m_min") == _min_key:
                     _ema5 = _float_or_none(le.get("ema5m_val"))
                 else:
-                    from ..market_data import fetch_ohlcv_df as _e5_fetch
+                    _e5_fetch = _replay_aware_fetch_ohlcv_df  # replay-aware seam (prod byte-identical)
 
                     _df5 = _e5_fetch(sess.symbol, interval="5m", period="1d")
                     if _df5 is not None and len(_df5) >= 9:
@@ -10806,7 +10877,7 @@ def tick_live_session(
                             if le.get("exit_candle1m_min") == _cc_key:
                                 _candle_exh = le.get("exit_candle1m_exh")
                             else:
-                                from ..market_data import fetch_ohlcv_df as _c1_fetch
+                                _c1_fetch = _replay_aware_fetch_ohlcv_df  # replay-aware seam (prod byte-identical)
                                 from .candles import (
                                     topping_tail_from_df,
                                     macd_hist_rollover_from_df,
@@ -11505,7 +11576,7 @@ def tick_live_session(
                             getattr(settings, "chili_momentum_pyramid_discrete_add_enabled", False)
                         ):
                             try:
-                                from ..market_data import fetch_ohlcv_df as _da_fetch
+                                _da_fetch = _replay_aware_fetch_ohlcv_df  # replay-aware seam (prod byte-identical)
                                 from ..indicator_core import compute_all_from_df as _da_compute
                                 from .paper_execution import discrete_pullback_add_trigger as _da_trig
 
@@ -11598,7 +11669,7 @@ def tick_live_session(
                                 _ah_level = None
                                 _ah_atr_pct = None
                                 try:
-                                    from ..market_data import fetch_ohlcv_df as _ah_fetch
+                                    _ah_fetch = _replay_aware_fetch_ohlcv_df  # replay-aware seam (prod byte-identical)
                                     from ..indicator_core import compute_all_from_df as _ah_compute
                                     _ah_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
                                     _ah_df = _ah_fetch(sess.symbol, interval=_ah_iv, period="5d")
