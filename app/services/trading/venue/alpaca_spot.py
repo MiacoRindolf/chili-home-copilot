@@ -65,6 +65,14 @@ def _f(v: Any) -> Optional[float]:
         return None
 
 
+def _opt_bool(v: Any) -> Optional[bool]:
+    """None-preserving bool coercion. Returns None when the field is absent so a
+    missing short signal fails CLOSED at the gate (not silently treated as False)."""
+    if v is None:
+        return None
+    return bool(v)
+
+
 def _norm_status(raw: Any) -> str:
     s = getattr(raw, "value", raw)
     s = str(s or "").strip().lower()
@@ -246,7 +254,16 @@ class AlpacaSpotAdapter:
                 post_only=False, auction_mode=False,
                 base_min_size=min_sz, base_increment=base_inc, price_increment=price_inc,
                 product_type="crypto" if _is_crypto_pid(product_id) else "equity",
-                raw={"fractionable": fractionable, "exchange": str(getattr(a, "exchange", ""))},
+                raw={
+                    "fractionable": fractionable,
+                    "exchange": str(getattr(a, "exchange", "")),
+                    # Short-lane locate-feasibility surfacing (SHORT_SIDE_LANE.md P0).
+                    # Asset-level borrow signals so the short-entry gate can fail-closed
+                    # on a not-shortable / hard-to-borrow name. (None when the SDK/asset
+                    # doesn't expose them — fail-closed at the gate, not here.)
+                    "shortable": _opt_bool(getattr(a, "shortable", None)),
+                    "easy_to_borrow": _opt_bool(getattr(a, "easy_to_borrow", None)),
+                },
             )
             return prod, _fresh(3600.0)
         except Exception as exc:
@@ -334,26 +351,66 @@ class AlpacaSpotAdapter:
             return [], _fresh(5.0)
 
     def place_market_order(self, *, product_id: str, side: str, base_size: str,
-                           client_order_id: Optional[str] = None, **_ignored) -> dict[str, Any]:
-        return self._submit(product_id, side, base_size, client_order_id, limit_price=None)
+                           client_order_id: Optional[str] = None,
+                           position_intent: Optional[str] = None, **_ignored) -> dict[str, Any]:
+        return self._submit(product_id, side, base_size, client_order_id, limit_price=None,
+                            position_intent=position_intent)
 
     def place_limit_order_gtc(self, *, product_id: str, side: str, base_size: str,
                               limit_price: str, client_order_id: Optional[str] = None,
-                              extended_hours: bool = False, **_ignored) -> dict[str, Any]:
+                              extended_hours: bool = False,
+                              position_intent: Optional[str] = None, **_ignored) -> dict[str, Any]:
         return self._submit(product_id, side, base_size, client_order_id,
-                            limit_price=limit_price, extended_hours=bool(extended_hours))
+                            limit_price=limit_price, extended_hours=bool(extended_hours),
+                            position_intent=position_intent)
+
+    def _resolve_position_intent(self, position_intent):
+        """Map the lane's intent string to the alpaca-py ``PositionIntent`` enum.
+
+        The intent DISAMBIGUATES an otherwise-ambiguous ``SELL`` (open-short vs
+        close-long) — the #1 short-lane adapter change (SHORT_SIDE_LANE.md P0):
+
+          - short ENTRY  → ``OrderSide.SELL`` + ``SELL_TO_OPEN``
+          - short COVER  → ``OrderSide.BUY``  + ``BUY_TO_CLOSE``
+          - long open/close keep ``BUY_TO_OPEN`` / ``SELL_TO_CLOSE``.
+
+        ``None`` (the long-lane default) returns ``None`` so the request is built
+        WITHOUT the field — byte-identical to today. Accepts either the enum name
+        (``"sell_to_open"``) or the raw enum.
+        """
+        if position_intent is None:
+            return None
+        try:
+            from alpaca.trading.enums import PositionIntent
+        except Exception:
+            return None
+        if isinstance(position_intent, PositionIntent):
+            return position_intent
+        key = str(position_intent).strip().lower()
+        _MAP = {
+            "buy_to_open": PositionIntent.BUY_TO_OPEN,
+            "buy_to_close": PositionIntent.BUY_TO_CLOSE,
+            "sell_to_open": PositionIntent.SELL_TO_OPEN,
+            "sell_to_close": PositionIntent.SELL_TO_CLOSE,
+        }
+        return _MAP.get(key)
 
     def _submit(self, product_id, side, base_size, client_order_id, *, limit_price,
-                extended_hours: bool = False) -> dict[str, Any]:
+                extended_hours: bool = False, position_intent=None) -> dict[str, Any]:
         sym = _to_symbol(product_id)
         try:
             from alpaca.trading.enums import OrderSide, TimeInForce
             from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
             _side = OrderSide.BUY if str(side).lower() == "buy" else OrderSide.SELL
             qty = float(base_size)
+            # Optional position-intent (short lane). None ⇒ omit the field entirely
+            # so the long-path request is byte-identical to today.
+            _intent = self._resolve_position_intent(position_intent)
+            _intent_kw = {"position_intent": _intent} if _intent is not None else {}
             if _is_crypto_pid(product_id):
                 # Crypto orders: 24/7, no extended-hours concept, and Alpaca
-                # accepts only GTC/IOC TIFs (DAY is rejected).
+                # accepts only GTC/IOC TIFs (DAY is rejected). Crypto cannot be
+                # shorted on Alpaca, so position_intent is never set here.
                 if limit_price is not None:
                     req = LimitOrderRequest(symbol=sym, qty=qty, side=_side,
                                             time_in_force=TimeInForce.GTC,
@@ -374,7 +431,7 @@ class AlpacaSpotAdapter:
                 if extended_hours:
                     req = LimitOrderRequest(symbol=sym, qty=qty, side=_side, time_in_force=TimeInForce.DAY,
                                             limit_price=float(limit_price), client_order_id=client_order_id,
-                                            extended_hours=True)
+                                            extended_hours=True, **_intent_kw)
                 else:
                     # Fractional-qty orders REQUIRE DAY tif on Alpaca (GTC is
                     # rejected) — 25% of twin entries died on this (2026-06-12
@@ -386,18 +443,39 @@ class AlpacaSpotAdapter:
                     except (TypeError, ValueError):
                         pass
                     req = LimitOrderRequest(symbol=sym, qty=qty, side=_side, time_in_force=_tif,
-                                            limit_price=float(limit_price), client_order_id=client_order_id)
+                                            limit_price=float(limit_price), client_order_id=client_order_id,
+                                            **_intent_kw)
             else:
                 req = MarketOrderRequest(symbol=sym, qty=qty, side=_side, time_in_force=TimeInForce.DAY,
-                                         client_order_id=client_order_id)
+                                         client_order_id=client_order_id, **_intent_kw)
             o = _trading_client().submit_order(order_data=req)
-            return {"ok": True, "order_id": str(getattr(o, "id", "") or ""),
-                    "client_order_id": getattr(o, "client_order_id", None) or client_order_id,
-                    "status": _norm_status(getattr(o, "status", None))}
+            res = {"ok": True, "order_id": str(getattr(o, "id", "") or ""),
+                   "client_order_id": getattr(o, "client_order_id", None) or client_order_id,
+                   "status": _norm_status(getattr(o, "status", None))}
+            # Surface the resolved short intent + the broker's signed position-intent
+            # echo so the runner can confirm a short opened/covered as expected.
+            if _intent is not None:
+                res["position_intent"] = str(getattr(_intent, "value", _intent))
+                pi_echo = getattr(o, "position_intent", None)
+                if pi_echo is not None:
+                    res["position_intent_echo"] = str(getattr(pi_echo, "value", pi_echo))
+            return res
         except Exception as exc:
-            logger.warning("[alpaca_spot] submit order failed sym=%s side=%s limit=%s: %s",
-                           sym, side, limit_price, exc)
-            return {"ok": False, "error": str(exc)[:200], "client_order_id": client_order_id}
+            msg = str(exc)
+            # Distinctly surface SSR / borrow-locate rejections so the runner can DEFER
+            # (post an up-bid limit / skip) rather than blind-retry into a venue wall.
+            low = msg.lower()
+            reject_kind = None
+            if ("short" in low and ("restrict" in low or "ssr" in low or "uptick" in low)) or "regulation sho" in low:
+                reject_kind = "ssr"
+            elif "borrow" in low or "locate" in low or "not shortable" in low or "htb" in low:
+                reject_kind = "borrow"
+            logger.warning("[alpaca_spot] submit order failed sym=%s side=%s limit=%s intent=%s reject=%s: %s",
+                           sym, side, limit_price, position_intent, reject_kind, exc)
+            out = {"ok": False, "error": msg[:200], "client_order_id": client_order_id}
+            if reject_kind:
+                out["reject_kind"] = reject_kind
+            return out
 
     def cancel_order(self, order_id: str) -> dict[str, Any]:
         try:
@@ -423,6 +501,11 @@ class AlpacaSpotAdapter:
                     "buying_power": _f(getattr(a, "buying_power", None)),
                     "cash": _f(getattr(a, "cash", None)),
                     "status": str(getattr(getattr(a, "status", None), "value", getattr(a, "status", "")) or ""),
+                    # Short-lane capability surfacing (SHORT_SIDE_LANE.md P0): the lane must
+                    # never arm a short on a cash / no-margin account. multiplier>1 ⇒ margin;
+                    # shorting_enabled is the explicit account capability flag.
+                    "shorting_enabled": _opt_bool(getattr(a, "shorting_enabled", None)),
+                    "multiplier": _f(getattr(a, "multiplier", None)),
                     "paper": _paper()}
         except Exception as exc:
             logger.debug("[alpaca_spot] get_account_snapshot failed: %s", exc)

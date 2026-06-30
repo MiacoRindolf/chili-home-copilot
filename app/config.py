@@ -8642,6 +8642,18 @@ class Settings(BaseSettings):
         default=60.0, ge=1.0, le=600.0,
         validation_alias=AliasChoices("CHILI_ALPACA_QUOTE_MAX_AGE_SECONDS"),
     )
+    # ── Short-side lane (SHORT_SIDE_LANE.md) ──────────────────────────────────
+    # Master gate for the SHORT side on the Alpaca rail. DEFAULT-OFF on purpose:
+    # shorting is asymmetric/dangerous (unbounded squeeze upside) and not yet
+    # wired into the momentum lane (no short triggers until P1+) or soaked, so
+    # paper-first + OFF until proven. OFF ⇒ byte-identical long-only lane. This
+    # is the ONE deliberate dark flag (an un-soaked dangerous capability with no
+    # triggers yet) — unlike the profitable LONG levers, which ship ON.
+    chili_momentum_short_lane_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SHORT_LANE_ENABLED"),
+        description="Master gate for the Alpaca SHORT lane. Default OFF (paper-first, un-soaked, no triggers wired yet). OFF ⇒ byte-identical long-only lane.",
+    )
     # Shake-out learning: how long after an exit to watch the price path to judge
     # whether the thesis would have worked (was the stop too tight?). 30min.
     chili_momentum_post_exit_horizon_seconds: int = Field(
