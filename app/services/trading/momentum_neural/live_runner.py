@@ -10696,6 +10696,188 @@ def tick_live_session(
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
+        # ── ROSS GAP 1: LOST-VWAP → FLATTEN (held position) ──────────────────────
+        # Ross's intraday line-in-the-sand: after entry, if price LOSES session VWAP in
+        # a CONFIRMED way, he is OUT. None of the existing held-position exits (max-loss,
+        # breakout-or-bailout, smart_hold, timestops, topping-tail, trail) compared the
+        # live bid to session VWAP. This is that exit, and it runs for ALL held states
+        # (ENTERED/SCALING_OUT/TRAILING) — Ross loses VWAP right after entry, not only on
+        # a runner — placed AFTER max-loss/breakout-bailout/max-hold and BEFORE the
+        # TRAILING-only chandelier ratchet + the entire add region below.
+        #
+        # ⭐ ANTI-WHIPSAW (the ONE documented confirmed-loss definition): ALL of
+        #   (a) the last CLOSED bar closed BELOW session VWAP (no 1-tick intrabar undercut
+        #       can fire it — a CLOSED bar is required), AND
+        #   (b) the live bid is STILL below VWAP by an ADAPTIVE margin = the name's OWN
+        #       close-vs-VWAP dispersion sigma * margin_sigma (NOT a fixed price), and not
+        #       reclaiming, so a momentary kiss of VWAP does not flatten, AND
+        #   (c) order-flow is NOT positive (the live signed tape / OFI confirms the break;
+        #       None/absent ⇒ "not positive" only because (a)+(b) already prove a closed-
+        #       bar structural loss — fail toward the EXIT).
+        #
+        # ⭐ COMPOSES WITH THE DIP-ADD (no conflict): it PRE-EMPTS the pullback-add block
+        # below — this check runs FIRST and RETURNS on a confirmed loss, so the same tick
+        # can never both add and flatten. A pullback that HOLDS/RECLAIMS VWAP (above_vwap
+        # True / vwap_dist >= 0) is NOT a confirmed loss here, so the dip-add can still
+        # fire on it. The two are mutually exclusive by construction (loss ⇒ flatten+
+        # return; hold/reclaim ⇒ fall through to the dip-add).
+        #
+        # EXIT-only: routes through the BAILOUT machinery (set last_bailout_trigger,
+        # transition to STATE_LIVE_BAILOUT, the next tick flattens) — VERBATIM with the
+        # topping-tail runner exit. INVARIANT-A: an EXIT can flatten but never loosens the
+        # ratchet floor (no stop is moved here). EQUITY + crypto (VWAP is computed lane-
+        # wide). Flag OFF ⇒ byte-identical (no read, no emit). Fail-safe: any error is
+        # swallowed so the exit path below ALWAYS runs.
+        if (
+            bool(getattr(settings, "chili_momentum_lost_vwap_flatten_enabled", True))
+            and st in (STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING)
+            and bid is not None
+            and math.isfinite(float(bid))
+            and float(bid) > 0
+        ):
+            try:
+                from .ross_momentum import front_side_state as _lv_state_fn
+                from .entry_gates import _today_session_frame as _lv_today_frame
+
+                _lv_iv = str(
+                    getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m"
+                )
+                _lv_raw = _replay_aware_fetch_ohlcv_df(sess.symbol, interval=_lv_iv, period="5d")
+                _lv_df = None
+                if _lv_raw is not None and not getattr(_lv_raw, "empty", True):
+                    _lv_df = _lv_today_frame(_lv_raw)
+                if _lv_df is not None and not getattr(_lv_df, "empty", True):
+                    _lv_state = _lv_state_fn(_lv_df)
+                    _lv_vwap = _float_or_none(getattr(_lv_state, "session_vwap", None))
+                    _lv_above = bool(getattr(_lv_state, "above_vwap", False))
+                    _lv_dist = _float_or_none(getattr(_lv_state, "vwap_dist_sigma", None))
+                    # (a) last CLOSED bar close below VWAP.
+                    _lv_last_close = None
+                    try:
+                        _lv_last_close = float(_lv_df["Close"].astype(float).iloc[-1])
+                    except Exception:
+                        _lv_last_close = None
+                    _lv_closed_below = (
+                        _lv_vwap is not None
+                        and _lv_last_close is not None
+                        and _lv_last_close < _lv_vwap
+                    )
+                    # (b) live bid below VWAP by the ADAPTIVE dispersion-sigma margin.
+                    # vwap_dist_sigma is the name's OWN (close-vwap)/sigma at the last bar;
+                    # convert the requested margin (in sigma) into a PRICE margin via the
+                    # implied per-sigma price = |last_close - vwap| / |dist|. When dist is
+                    # absent/zero the price margin is 0 so the closed-bar loss alone still
+                    # requires the bid below VWAP (no fixed-price magnitude introduced).
+                    _lv_margin_sigma = float(
+                        getattr(settings, "chili_momentum_lost_vwap_margin_sigma", 0.25) or 0.25
+                    )
+                    _lv_price_margin = 0.0
+                    if (
+                        _lv_vwap is not None
+                        and _lv_last_close is not None
+                        and _lv_dist is not None
+                        and abs(_lv_dist) > 1e-9
+                    ):
+                        _lv_per_sigma = abs(_lv_last_close - _lv_vwap) / abs(_lv_dist)
+                        _lv_price_margin = _lv_margin_sigma * _lv_per_sigma
+                    _lv_bid_below_margin = (
+                        _lv_vwap is not None
+                        and float(bid) < (_lv_vwap - _lv_price_margin)
+                        and not _lv_above
+                        and not (_lv_dist is not None and _lv_dist >= 0.0)
+                    )
+                    # (c) order-flow NOT positive (live signed tape / OFI confirm).
+                    _lv_flow_pos = False
+                    try:
+                        from .pipeline import (
+                            _live_flow_slope as _lv_flow_fn,
+                            _live_trade_flow as _lv_tape_fn,
+                        )
+
+                        _lv_tape = _lv_tape_fn(sess.symbol, db=db)
+                        if _lv_tape is not None and float(_lv_tape) > 0.0:
+                            _lv_flow_pos = True
+                        _lv_flow = _lv_flow_fn(sess.symbol, db=db)
+                        if isinstance(_lv_flow, dict):
+                            _lv_ofi_lvl = _float_or_none(_lv_flow.get("ofi_level"))
+                            if _lv_ofi_lvl is not None and _lv_ofi_lvl > 0.0:
+                                _lv_flow_pos = True
+                    except Exception:
+                        _lv_flow_pos = False
+                    if _lv_closed_below and _lv_bid_below_margin and not _lv_flow_pos:
+                        le["last_bailout_trigger"] = "lost_vwap_flatten"
+                        _commit_le(sess, le)
+                        _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                        _emit(db, sess, "live_lost_vwap_flatten", {
+                            "reason": "lost_vwap_confirmed",
+                            "bid": float(bid),
+                            "session_vwap": _lv_vwap,
+                            "last_close": _lv_last_close,
+                            "vwap_dist_sigma": _lv_dist,
+                            "price_margin": round(_lv_price_margin, 6),
+                            "margin_sigma": _lv_margin_sigma,
+                            "above_vwap": _lv_above,
+                            "high_water_mark": _float_or_none(pos.get("high_water_mark")),
+                        })
+                        db.flush()
+                        return {"ok": True, "session_id": sess.id, "state": sess.state}
+            except Exception:
+                # Fail-safe: any lost-VWAP read error is swallowed so the exit path below
+                # ALWAYS runs. The flatten NEVER blocks/delays a real stop/exit.
+                _log.debug("[momentum_live] lost-VWAP flatten block error", exc_info=True)
+
+        # ── ROSS GAP 2: LIVE CLOSE-BELOW-STRUCTURE (BOS) EXIT ────────────────────
+        # Ross exits on a confirmed bar CLOSE below structure (the last confirmed swing
+        # low), NOT an intrabar wick. The backtest/paper lane already has
+        # bos_exit_triggered_long (entry_gates.py); the LIVE lane only had the
+        # ATR/chandelier INTRABAR trail. This ports the SAME predicate onto a CLOSED-bar
+        # read (the last bar's CLOSE vs the confirmed swing low), so it fires on a
+        # confirmed close below structure — DISTINCT from the intrabar trail. The two
+        # compose: this is an ADDITIONAL confirmed-close exit; whichever fires first wins
+        # (a confirmed close-below-structure flattens HERE this tick; the intrabar trail
+        # still owns the on-the-way-down chandelier).
+        #
+        # An intrabar WICK below the swing low whose bar CLOSES back above does NOT fire
+        # (the predicate keys off the last CLOSE, not the low). EXIT-only: routes through
+        # the BAILOUT machinery (VERBATIM with topping-tail / lost-VWAP) — no stop is
+        # moved, so INVARIANT-A holds. EQUITY + crypto (the swing-low structure is price-
+        # only). Flag OFF ⇒ byte-identical (no fetch, no emit). Fail-safe: any error is
+        # swallowed so the exit path below ALWAYS runs. Held in ENTERED/TRAILING (not the
+        # bailout/pending-exit states that already sell).
+        if (
+            bool(getattr(settings, "chili_momentum_bos_exit_live_enabled", True))
+            and st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
+        ):
+            try:
+                from .entry_gates import bos_exit_triggered_long as _bos_fn
+
+                _bos_iv = str(
+                    getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m"
+                )
+                _bos_df = _replay_aware_fetch_ohlcv_df(sess.symbol, interval=_bos_iv, period="5d")
+                if _bos_df is not None and not getattr(_bos_df, "empty", True):
+                    _bos_close = float(_bos_df["Close"].astype(float).iloc[-1])
+                    _bos_buf = float(
+                        getattr(settings, "chili_momentum_bos_exit_buffer_pct", 0.003) or 0.003
+                    )
+                    if _bos_fn(_bos_df, current_close=_bos_close, buffer_pct=_bos_buf):
+                        le["last_bailout_trigger"] = "bos_exit_live"
+                        _commit_le(sess, le)
+                        _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                        _emit(db, sess, "live_bos_exit", {
+                            "reason": "close_below_structure",
+                            "bid": float(bid),
+                            "last_close": _bos_close,
+                            "buffer_pct": _bos_buf,
+                            "high_water_mark": _float_or_none(pos.get("high_water_mark")),
+                        })
+                        db.flush()
+                        return {"ok": True, "session_id": sess.id, "state": sess.state}
+            except Exception:
+                # Fail-safe: any BOS read error is swallowed so the exit path below ALWAYS
+                # runs. The BOS exit NEVER blocks/delays a real stop/exit.
+                _log.debug("[momentum_live] live BOS exit block error", exc_info=True)
+
         # Ross runner trail: in TRAILING, ratchet the stop UP to a chandelier off
         # the high-water mark (the same ATR distance the initial stop used), floored
         # at breakeven once the first-target partial de-risked the runner. The stop
