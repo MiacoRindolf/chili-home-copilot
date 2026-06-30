@@ -8543,6 +8543,44 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_A_SETUP_QUALITY_FLOOR_CHANGE_PCT_MIN"),
         description="Min absolute day-change %% for an A-setup LIVE name; aligned with the Ross change floor (~10%%). CODI (0%%) rejected.",
     )
+    # EXPLOSIVE-PREQUAL SCORE FLOOR (LIVE only; the UPC blocker fix). A +500% low-float
+    # mover scored viability 0.55 — BELOW the impulse_breakout entry bar (0.56,
+    # strategy_params.py:35) — so it never armed while a generic 0.56 bar cleared. This
+    # RAISE-ONLY floor lifts the viability of a GENUINE Ross A-setup (low-float + SIGNED
+    # up-change >= the change floor + RVOL ok) just OVER the default bar so the score
+    # arithmetic stops vetoing the exact name the lane exists to trade. It NEVER lowers a
+    # score and is gated by the SAME hardened explosive conjunction the extreme-vol relax
+    # uses (tradable + spread-ok + affirm-explosive + not-below-floor + still live-eligible)
+    # plus a SIGNED-up A-setup conjunction (fail-CLOSED on missing change so a low-float
+    # CRASHER cannot be lifted). A floored name is coupled to RISK-BOUNDED sizing (sized
+    # DOWN). Default-ON (no dark flags); OFF => byte-identical.
+    chili_momentum_explosive_prequal_floor_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_PREQUAL_FLOOR_ENABLED"),
+        description="Raise-only viability floor that lifts a genuine low-float + signed-up + rvol Ross A-setup just over the impulse_breakout entry bar (the UPC 0.55<0.56 fix). Anti-junk fail-closed, size-down-coupled, RESTRICT-only (never lowers). OFF = byte-identical.",
+    )
+    # ONE documented base margin: how far ABOVE the reference bar to lift a qualifying
+    # name. 0.02 over the 0.56 default bar => 0.58, which clears the impulse_breakout
+    # entry_viability_min in the DEFAULT (no-bump) regime. Reference, not magic.
+    chili_momentum_explosive_prequal_margin: float = Field(
+        default=0.02,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_PREQUAL_MARGIN"),
+        description="Margin lifted ABOVE the reference bar for a qualifying explosive A-setup (0.02 => 0.58 over the 0.56 default bar). ONE documented base.",
+    )
+    # The reference entry bar this floor clears. 0.56 = impulse_breakout
+    # entry_viability_min (strategy_params.py:35), the DEFAULT family bar. NOTE (RISK #1):
+    # the LIVE binding can be RAISED above this (midday-lull +0.05, run-R breaker, families
+    # that bind higher e.g. 0.57/0.60), so floor+margin clears the bar in the DEFAULT /
+    # no-bump impulse_breakout regime, NOT unconditionally — which is acceptable since Ross
+    # sits out the midday lull anyway. Raise via env to track a higher resolved bar.
+    chili_momentum_explosive_prequal_bar_ref: float = Field(
+        default=0.56,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_PREQUAL_BAR_REF"),
+        description="Reference entry bar the prequal floor clears = impulse_breakout entry_viability_min (0.56, strategy_params.py:35), the DEFAULT family bar. Documents the no-bump regime the floor unblocks.",
+    )
     # FIX B (2026-06-23): QUALITY SLOT-PRIORITY TIER in the arm queue. The
     # multiplicative ETF down-weight above leaks (a fresh-ross ETF at ×0.5 still
     # outranks a real company whose ross score went stale -> 0.0; 13 such inversions
