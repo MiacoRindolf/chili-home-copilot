@@ -10419,6 +10419,39 @@ def tick_live_session(
                         db.flush()
                         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
+        # EARLY TRAIL-ARM (2026-06-30, PULLBACK-SCALP-ENABLE): a CONFIRMED front-side runner
+        # must reach STATE_LIVE_TRAILING to open the ride+add / micro-reentry path (all 4
+        # add/reload paths — pyramid_add, micropullback_reentry, pullback_add,
+        # flag_breakout_add — gate on st == STATE_LIVE_TRAILING). Today the trail-activation
+        # transition sits AFTER the ENTERED-only no-confirmation bailouts
+        # (instant_bid_above_fill_unconfirmed, bail_on_no_confirmation), which run first each
+        # tick and return early — so a normal entry goes ENTERED -> BAILOUT -> recycle and
+        # NEVER reaches TRAILING => 0 adds (the add path is structurally unreachable). Arm
+        # TRAILING on the SAME adaptive condition (bid >= avg * trail_activate_return) BEFORE
+        # those bailouts can cut. ANTI-REGRESSION (must not hold a loser): arms ONLY when
+        # bid >= avg*trail_activate_return — the position is already in profit ABOVE the
+        # activation band; a position at/below entry is untouched and STILL gets the
+        # no-confirmation cut downstream. The structural stop + the #769 C1b circuit are
+        # evaluated ABOVE this block (every tick) and are NOT gated by it. The add predicates
+        # downstream are fail-closed (paper_execution.pullback_add_decision knife-guard; a
+        # missing front_side_strength/OFI/support => no add) and pyramid_blend re-bases the
+        # #769 circuit to the starter R0, so an add cannot deepen a loss beyond R0. Uses the
+        # adaptive params["trail_activate_return_bps"] (no magic numbers). The existing
+        # post-bailout trail-arm is preserved + idempotent (it guards on st == ENTERED, so it
+        # no-ops once armed here). Flag OFF (default-on kill-switch) => this block is skipped
+        # => byte-identical (trail arms only at its current post-bailout site).
+        if (
+            bool(getattr(settings, "chili_momentum_early_trail_arm_enabled", True))
+            and st == STATE_LIVE_ENTERED
+            and bid is not None
+            and math.isfinite(float(bid))
+            and float(bid) >= avg * trail_activate_return
+        ):
+            _safe_transition(db, sess, STATE_LIVE_TRAILING)
+            _emit(db, sess, "live_trailing_armed", {"bid": bid, "early_arm": True})
+            db.flush()
+            return {"ok": True, "session_id": sess.id, "state": sess.state}
+
         # #2 Breakout-or-bailout fast exit (Ross flat-top): within the early window
         # after a pullback_break entry, if the broken breakout level fails to HOLD on
         # the bid, cut NOW — well inside the structural stop — reusing the BAILOUT

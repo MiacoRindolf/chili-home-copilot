@@ -316,6 +316,101 @@ def test_bail_on_no_confirmation_loser_still_trips():
     ) is False
 
 
+# ===========================================================================
+# FIX 2 — EARLY TRAIL-ARM (arm TRAILING before the ENTERED no-confirmation bailouts)
+# ===========================================================================
+def test_fix2_flag_exists_default_true():
+    assert hasattr(settings, "chili_momentum_early_trail_arm_enabled")
+    assert settings.chili_momentum_early_trail_arm_enabled is True
+
+
+# Pure mirror of the LIVE early-trail-arm gate (live_runner.py "EARLY TRAIL-ARM" block).
+# Returns True iff the runner would transition ENTERED -> TRAILING this pulse.
+def _early_trail_arms(*, st, bid, avg, trail_activate_return, flag_enabled=True) -> bool:
+    return (
+        bool(flag_enabled)
+        and st == "STATE_LIVE_ENTERED"
+        and bid is not None
+        and math.isfinite(float(bid))
+        and float(bid) >= float(avg) * float(trail_activate_return)
+    )
+
+
+def test_fix2_arms_trailing_when_confirmed_in_profit():
+    # avg=4.00, trail_activate_return=1.01 (the ADAPTIVE +100bps band). A confirmed thrust
+    # to bid=4.06 (>= 4.04) arms TRAILING BEFORE any no-confirmation bailout can fire.
+    assert _early_trail_arms(
+        st="STATE_LIVE_ENTERED", bid=4.06, avg=4.00, trail_activate_return=1.01,
+    ) is True
+
+
+def test_fix2_loser_below_entry_does_NOT_arm_and_no_confirmation_STILL_cuts():
+    # ANTI-REGRESSION (must not hold a loser): bid < entry => early-arm does NOT fire ...
+    assert _early_trail_arms(
+        st="STATE_LIVE_ENTERED", bid=3.98, avg=4.00, trail_activate_return=1.01,
+    ) is False
+    # ... and the no-confirmation cut STILL fires for that same loser (the position is cut).
+    assert bail_on_no_confirmation(
+        entry_price=4.00,
+        bid=3.98,
+        high_water_mark=4.00,  # never made a new high above the buffer
+        held_seconds=12.0,
+        min_hold_seconds=8.0,
+        window_seconds=20.0,
+        buffer_bps=10.0,
+        ofi=-0.2,
+    ) is True
+
+
+def test_fix2_at_entry_not_above_band_does_NOT_arm():
+    # At entry exactly (bid == avg, below the activation band) => not in profit => no arm.
+    assert _early_trail_arms(
+        st="STATE_LIVE_ENTERED", bid=4.00, avg=4.00, trail_activate_return=1.01,
+    ) is False
+    # Marginally green but still BELOW the activation band => no arm (only arms ABOVE band).
+    assert _early_trail_arms(
+        st="STATE_LIVE_ENTERED", bid=4.02, avg=4.00, trail_activate_return=1.01,
+    ) is False
+
+
+def test_fix2_flag_off_byte_identical_no_early_arm():
+    # FLAG OFF => the early-arm block is skipped even on a confirmed thrust (byte-identical;
+    # TRAILING only arms at the existing post-bailout site).
+    assert _early_trail_arms(
+        st="STATE_LIVE_ENTERED", bid=4.06, avg=4.00, trail_activate_return=1.01,
+        flag_enabled=False,
+    ) is False
+
+
+# ---------------------------------------------------------------------------
+# FIX 2 — SOURCE-LEVEL placement: the early-arm transition must sit BEFORE the two
+# named ENTERED no-confirmation bailouts, and the existing post-bailout arm must remain.
+# ---------------------------------------------------------------------------
+def test_fix2_source_early_arm_precedes_no_confirmation_bailouts():
+    src = _live_runner_source()
+    assert "chili_momentum_early_trail_arm_enabled" in src
+    early_idx = src.index('"early_arm": True')
+    # The two no-confirmation bailouts the early-arm must pre-empt.
+    above_unconfirmed_idx = src.index('"reason": "instant_bid_above_fill_unconfirmed"')
+    no_confirmation_idx = src.index('"reason": "bail_on_no_confirmation"')
+    assert early_idx < above_unconfirmed_idx, "early-arm must precede instant_bid_above_fill_unconfirmed"
+    assert early_idx < no_confirmation_idx, "early-arm must precede bail_on_no_confirmation"
+    # The early-arm gate is on the SAME adaptive condition as the legacy trail-arm.
+    arm_block = src[early_idx - 400:early_idx + 100]
+    # FIX 2 arms on the SAME adaptive threshold; the code coerces via float(bid) and
+    # is finite-guarded above, so match the threshold expression (not the bare bid form).
+    assert "avg * trail_activate_return" in arm_block
+    assert "STATE_LIVE_TRAILING" in arm_block
+    # The existing POST-bailout trail-arm is preserved + idempotent (guards on ENTERED).
+    assert src.count("if st == STATE_LIVE_ENTERED and bid >= avg * trail_activate_return:") == 1
+
+
+def test_fix2_source_no_magic_reuses_adaptive_trail_activate_return():
+    # trail_activate_return is derived from the adaptive params (no fixed magic number).
+    src = _live_runner_source()
+    assert "trail_activate_return = 1.0 + float(params[\"trail_activate_return_bps\"])" in src
+
+
 # ---------------------------------------------------------------------------
 # py_compile (FIX-touched modules)
 # ---------------------------------------------------------------------------

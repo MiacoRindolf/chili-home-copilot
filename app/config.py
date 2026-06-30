@@ -5136,6 +5136,24 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_PHANTOM_DIVERGENCE_FALLBACK_BPS"),
         description="C1 IQFeed cross-check fallback: the divergence tolerance (bps below the fresh tape bid) used ONLY when the recent tape median spread is unavailable. The single documented base — adaptive name-relative scale is preferred when present.",
     )
+    # ── EARLY TRAIL-ARM (2026-06-30, PULLBACK-SCALP-ENABLE) ──
+    # The 4 add/reload paths (pyramid_add, micropullback_reentry, pullback_add, flag_breakout_add)
+    # are ALL gated on st == STATE_LIVE_TRAILING. A fresh fill lands in STATE_LIVE_ENTERED; the
+    # ENTERED-only no-confirmation bailouts (instant_bid_above_fill_unconfirmed, bail_on_no_
+    # confirmation) run FIRST each tick and return early, so a normal entry goes ENTERED ->
+    # BAILOUT -> recycle and NEVER reaches TRAILING => 0 adds (the Ross-style ride+add / micro-
+    # reentry path is structurally unreachable). When ON, a CONFIRMED thrust (bid >= avg *
+    # trail_activate_return, i.e. already in profit above the adaptive activation band) arms
+    # TRAILING BEFORE those bailouts can cut — opening the add path. ANTI-REGRESSION: arms ONLY
+    # when bid >= avg*trail_activate_return (already in profit); a position at/below entry is
+    # untouched and STILL gets the no-confirmation cut. Uses the existing adaptive
+    # params["trail_activate_return_bps"] (no magic numbers). Flag OFF = byte-identical (trail
+    # arms only at its current post-bailout site).
+    chili_momentum_early_trail_arm_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EARLY_TRAIL_ARM_ENABLED"),
+        description="Kill-switch for arming STATE_LIVE_TRAILING on the adaptive price-rise threshold (bid >= avg*trail_activate_return) BEFORE the ENTERED no-confirmation bailouts. true (default) = a confirmed front-side runner reaches TRAILING and opens the ride+add / micro-reentry path (arms only when already in profit; a loser at/below entry still gets the no-confirmation cut). false = byte-identical (trail arms only at its post-bailout site). Reuses the adaptive trail_activate_return_bps; the structural stop + #769 circuit are untouched.",
+    )
     # ── ADAPTIVE SPREAD-COST VETO/DERATE (2026-06-27, DEFAULT OFF = byte-identical) ──
     # Judges the live entry spread RELATIVE to (a) the name's OWN recent typical spread
     # (rolling p50/p75/p90 over its momentum_nbbo_spread_tape history) and (b) the trade's
