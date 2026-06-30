@@ -9477,6 +9477,24 @@ def tick_live_session(
                 )
             except Exception:
                 pass
+            # AGENTIC-TRADABILITY PRE-FILTER (learn-from-401): if THIS entry-place returned a
+            # per-instrument 401 / not-available-for-agentic-trading on the agentic MCP rail
+            # (CTNT 2026-06-29), record the symbol non-agentic-tradeable so auto-arm SKIPS it
+            # at selection (it will never fill on this rail until RH re-enables it — stop
+            # burning the single slot looping arm->break->401). Scoped to the agentic family;
+            # the matcher excludes whole-rail token-revoked 401s (those are not per-symbol).
+            # Best-effort + flag-gated inside the recorder (flag-off => no-op, byte-identical).
+            try:
+                if str(sess.execution_family or "") == "robinhood_agentic_mcp":
+                    from .auto_arm import (
+                        _record_agentic_non_tradeable,
+                        is_agentic_unauthorized_reject,
+                    )
+
+                    if is_agentic_unauthorized_reject(str(res.get("error") or "")):
+                        _record_agentic_non_tradeable(str(sess.symbol or "").upper())
+            except Exception:
+                pass
             _safe_transition(db, sess, STATE_LIVE_ERROR)
             db.flush()
             return {"ok": False, "error": res.get("error") or "place_failed"}

@@ -7294,6 +7294,32 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_REJECT_COOLDOWN_SEC"),
     )
+    # AGENTIC-TRADABILITY PRE-FILTER (learn-from-401, 2026-06-29): the Robinhood AGENTIC
+    # MCP rail rejects SOME instruments at entry-place with a 401 Unauthorized ("instrument
+    # not available for agentic trading on the isolated CASH account" — CTNT 2026-06-29).
+    # When a place returns that signature, RECORD the symbol as non-agentic-tradeable in a
+    # bounded, TTL'd in-memory set, then SKIP it at ARM so it never becomes a watcher/entry
+    # again — the lane stops wasting the single slot looping arm->break->401 on a name the
+    # rail will never fill, and a FILLABLE mover gets the slot. ADAPTIVE (learns the
+    # untradeable names from the real rejections, no hardcoded list, no per-candidate broker
+    # pre-check), SELF-HEALING (TTL ~1 trading day — tradability can change). Scoped to the
+    # robinhood_agentic_mcp family ONLY (crypto/alpaca have different tradable universes).
+    # FAIL-OPEN: any cache/lookup error lets the name try (the 401 re-catches) — the
+    # pre-filter never starves the lane. Flag-OFF => byte-identical (no recording, no skip).
+    chili_momentum_agentic_tradability_prefilter_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AGENTIC_TRADABILITY_PREFILTER_ENABLED"),
+    )
+    # TTL for the agentic non-tradeable negative cache, seconds. Base 1 trading day
+    # (~6.5h RTH ≈ 23400s; defaulted to a calendar day so an overnight re-arm still sees
+    # the block) — tradability is an instrument property that changes slowly, but CAN
+    # change, so the entry is re-admitted after the TTL. 0 disables the pre-filter
+    # (instant kill-switch, equivalent to the flag off). env-tunable.
+    chili_momentum_agentic_non_tradeable_ttl_sec: float = Field(
+        default=86400.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AGENTIC_NON_TRADEABLE_TTL_SEC"),
+    )
     # RANK-DISPLACEMENT (2026-06-17): when arm slots are FULL, evict the worst-ranked
     # truly-inert pre-entry watcher (armed_pending_runner/queued_live ONLY) so a
     # top-ranked NEWCOMER can arm — instead of first-come slots starving the best

@@ -1199,6 +1199,146 @@ def _write_entry_reject_cooldown(sym_u: str, now: datetime | None = None, *, rea
         pass
 
 
+# ── AGENTIC-TRADABILITY PRE-FILTER (learn-from-401) ────────────────────────────────
+# The Robinhood AGENTIC MCP rail rejects SOME instruments at entry-place with a 401
+# Unauthorized ("instrument not available for agentic trading on the isolated CASH
+# account" — CTNT 2026-06-29). Unlike the entry-reject cooldown (a short, self-healing
+# suitability/session timeout), an agentic-untradeable name will NEVER fill on this rail
+# until RH changes the instrument's eligibility, so it is a SEPARATE, longer-TTL negative
+# cache: arm-time SKIP keeps the name out of the watcher pool entirely (the throughput
+# win — the single slot is never burned looping arm->break->401). LEARN-FROM-401: the set
+# is populated only from REAL place 401s (no per-candidate broker pre-check). Scoped to the
+# robinhood_agentic_mcp family only. Mirrors the bounded-prune pattern of the cooldowns.
+# dict[sym_upper -> recorded_at]. TTL = chili_momentum_agentic_non_tradeable_ttl_sec.
+_AGENTIC_NON_TRADEABLE: dict[str, datetime] = {}
+_AGENTIC_NON_TRADEABLE_MAX = 500
+
+
+def _agentic_non_tradeable_ttl_sec() -> float:
+    try:
+        return float(getattr(settings, "chili_momentum_agentic_non_tradeable_ttl_sec", 86400.0) or 0.0)
+    except (TypeError, ValueError):
+        return 86400.0
+
+
+def _agentic_prefilter_enabled() -> bool:
+    """Flag-OFF => byte-identical (no recording, no skip). Also disabled when the TTL is 0
+    (instant kill-switch). FAIL-OPEN: a settings read error keeps the lane unblocked."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_agentic_tradability_prefilter_enabled", True)):
+            return False
+        return _agentic_non_tradeable_ttl_sec() > 0
+    except Exception:
+        return False
+
+
+def is_agentic_unauthorized_reject(reason: str | None) -> bool:
+    """True iff a place-failure ``reason`` carries the agentic per-instrument 401 / not-
+    available-for-agentic-trading signature.
+
+    Matches the REAL error strings the agentic rail produces (see rh_mcp_client / robinhood_mcp):
+      * the per-instrument isError content path -> ``MCP tool 'place_equity_order' returned
+        isError: API error 401: {...}`` (the same shape as the observed 409 idempotency reject,
+        just status 401 — RH puts the instrument-not-tradeable reason in the body), and
+      * the transport-level 401 -> ``unauthorized — Robinhood Agentic token missing/expired``
+        / ``needs_reauth`` / ``grant_revoked``.
+
+    A bare token-revoked/needs-reauth 401 is a WHOLE-RAIL auth failure (not a per-symbol
+    property), so it is deliberately EXCLUDED here — recording every symbol non-tradeable on a
+    transient token expiry would falsely starve the entire equity lane. We therefore key only
+    on the per-instrument 401 signatures (``401`` co-occurring with an instrument/tradeable/
+    agentic marker, or an explicit not-available-for-agentic phrase)."""
+    low = str(reason or "").lower()
+    if not low:
+        return False
+    # Whole-rail auth failures are NOT a per-symbol property — never learn from them.
+    if "needs_reauth" in low or "grant_revoked" in low or "token missing" in low or "re-auth" in low:
+        return False
+    has_401 = "401" in low or "unauthorized" in low
+    if not has_401:
+        # An explicit eligibility phrase can stand alone without a 401 status.
+        return ("not available for agentic" in low) or ("not eligible for agentic" in low)
+    # A 401 that co-occurs with an instrument/eligibility marker == per-instrument rejection.
+    return any(
+        kw in low
+        for kw in (
+            "instrument", "not available", "not eligible", "not tradeable",
+            "not tradable", "untradeable", "untradable", "agentic", "available for trading",
+        )
+    ) or ("api error 401" in low)  # the place isError content path is always per-instrument
+
+
+def _record_agentic_non_tradeable(sym_u: str, now: datetime | None = None) -> None:
+    """Record ``sym_u`` (UPPER) as non-agentic-tradeable after a real 401 at entry-place so
+    auto-arm skips it (it will never fill on this rail until RH re-enables it). Bounded prune.
+    No-op when the pre-filter is disabled (flag off / TTL 0) so flag-off is byte-identical."""
+    if not sym_u or not _agentic_prefilter_enabled():
+        return
+    now = now or _utcnow()
+    _AGENTIC_NON_TRADEABLE[sym_u] = now
+    if len(_AGENTIC_NON_TRADEABLE) > _AGENTIC_NON_TRADEABLE_MAX:
+        ttl = _agentic_non_tradeable_ttl_sec()
+        _stale = now - timedelta(seconds=ttl)
+        for _k in [k for k, v in _AGENTIC_NON_TRADEABLE.items() if v < _stale]:
+            _AGENTIC_NON_TRADEABLE.pop(_k, None)
+        # Still over the cap after dropping expired entries (a burst of fresh rejects)?
+        # Evict the OLDEST so the bounded store has a hard ceiling (no unbounded growth).
+        while len(_AGENTIC_NON_TRADEABLE) > _AGENTIC_NON_TRADEABLE_MAX:
+            _oldest = min(_AGENTIC_NON_TRADEABLE, key=_AGENTIC_NON_TRADEABLE.get)
+            _AGENTIC_NON_TRADEABLE.pop(_oldest, None)
+
+
+def _agentic_non_tradeable_active(sym_u: str, now: datetime | None = None) -> bool:
+    """True iff ``sym_u`` (UPPER) is currently marked non-agentic-tradeable (recorded within
+    the TTL). FAIL-OPEN: any error => False (let the name try; the 401 re-catches). Self-
+    healing: past the TTL the entry is dropped and the name re-admitted (tradability can
+    change)."""
+    try:
+        if not _agentic_prefilter_enabled():
+            return False
+        at = _AGENTIC_NON_TRADEABLE.get(sym_u)
+        if at is None:
+            return False
+        now = now or _utcnow()
+        if (now - at).total_seconds() >= _agentic_non_tradeable_ttl_sec():
+            _AGENTIC_NON_TRADEABLE.pop(sym_u, None)  # expired -> re-admit
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _symbol_routes_to_agentic(symbol: str | None) -> bool:
+    """True iff ``symbol`` resolves to the robinhood_agentic_mcp execution family RIGHT NOW.
+    The pre-filter is scoped to the agentic family ONLY (crypto/alpaca/robinhood_spot have
+    different tradable universes — a name untradeable on the agentic CASH account is fine on
+    those). FAIL-OPEN: a resolution error returns False (do not skip) so a non-agentic family
+    is never penalized and the lane is never starved by the scoping check itself."""
+    try:
+        from ..execution_family_registry import (
+            EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
+            normalize_execution_family,
+            resolve_execution_family_for_symbol,
+        )
+
+        ef = normalize_execution_family(resolve_execution_family_for_symbol(str(symbol or "")))
+        return ef == EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP
+    except Exception:
+        return False
+
+
+def _agentic_tradability_blocks_arm(symbol: str | None, now: datetime | None = None) -> bool:
+    """ARM-time SKIP gate: True iff ``symbol`` routes to the agentic rail AND is currently
+    marked non-agentic-tradeable. The actual throughput win — a name the rail 401'd never
+    becomes a watcher/entry again until the TTL self-heals. FAIL-OPEN end-to-end."""
+    sym_u = str(symbol or "").strip().upper()
+    if not sym_u:
+        return False
+    if not _agentic_non_tradeable_active(sym_u, now):
+        return False
+    return _symbol_routes_to_agentic(sym_u)
+
+
 # ── TIER-2: 24h-tradeability eligibility cache (proactive probe, no-spam) ──────────
 # dict[sym_upper -> (eligible: bool, checked_at)]. TTL = chili_momentum_tradability_cache_sec
 # (base 3600s — eligibility is an instrument property that changes slowly). Probed lazily:
@@ -3455,6 +3595,7 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     out["crypto_illiquid_skipped"] = 0
     out["reap_cooldown_skipped"] = 0
     out["entry_reject_cooldown_skipped"] = 0
+    out["agentic_tradability_skipped"] = 0
     # TIER-2 OVERNIGHT: resolve the clock + flags ONCE per pass. When overnight trading is
     # active, proactively probe 24h-eligibility for the equity candidates (batched <=10) so
     # ineligible names are SKIPPED at the gate below — never order-rejected (no spam).
@@ -3499,6 +3640,15 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         if _entry_reject_cooldown_active(_sym_u, _utcnow()):
             out["entry_reject_cooldown_skipped"] += 1
             continue  # broker REFUSED this name's entry recently (suitability/untradable) — don't loop on it
+        # AGENTIC-TRADABILITY PRE-FILTER (learn-from-401): a name the agentic MCP rail 401'd
+        # at entry-place ("instrument not available for agentic trading") will never fill on
+        # this rail until RH re-enables it — SKIP it here so it never becomes a watcher/entry
+        # again and the single slot goes to a FILLABLE mover. Scoped to the agentic family
+        # (no penalty to crypto/alpaca/robinhood_spot); self-healing via the TTL; FAIL-OPEN.
+        if _agentic_tradability_blocks_arm(c.symbol, _utcnow()):
+            out["agentic_tradability_skipped"] = out.get("agentic_tradability_skipped", 0) + 1
+            logger.info("[momentum_neural] tradability skip sym=%s (non-agentic-tradeable; learn-from-401)", _sym_u)
+            continue
         if not _symbol_market_open(c.symbol):
             continue  # equities only during their session; crypto always passes (24/7)
         # Crypto liquidity floor (A1): the Ross scorer is blind to executability,
