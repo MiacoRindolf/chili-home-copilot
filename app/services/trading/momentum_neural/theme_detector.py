@@ -49,6 +49,24 @@ THEME_MIN_CLUSTER = 2
 # Kept deliberately small so the detector can never out-vote the real pillars.
 THEME_SYMPATHY_BOOST = 0.05
 
+# ── CROWDED-TAPE CATALYST-SUBSTITUTE (selection-rank; news-pillar P1-absence hold) ──
+# Ross trades SYMPATHY movers: a crowded-tape / high-RVOL name riding a sector/news THEME
+# is a real leadership signal EVEN WITHOUT its own PRIMARY (P1) catalyst. In the news-catalyst
+# selection pillar a name in NONE of the catalyst sets reads ``news_pct=None`` (NEUTRAL — the
+# pillar is omitted for it), so its strong-catalyst peers — carrying a high news percentile —
+# out-rank it on the same RVOL+momentum core: the catalyst-LESS sympathy name is demoted purely
+# on P1-absence. THE FIX (a FLOOR, never an additive boost, never a veto): a genuine THEME member
+# (a keyword-theme sympathy peer of a real leader) that is ALSO a CROWDED high-RVOL name
+# (within-batch RVOL percentile in the top tail) earns a partial news-substitute sub-score — at
+# MOST the "fresh-news-present-but-ungraded" reference (so a real GRADED catalyst leader still
+# out-ranks it, and a NON-mover crowded tape with low RVOL earns nothing). Adaptive (the name's
+# OWN within-batch RVOL percentile — no magic absolute), bounded (capped at the present grade,
+# below strong), selection-only. Below the RVOL tail / not a theme member ⇒ no credit (no-op).
+# The RVOL percentile at/above which a theme member starts earning the substitute. Top ~30% of the
+# batch by relative volume = "crowded tape" (genuinely high participation), not a quiet name that
+# merely happens to share a headline keyword. Overridable; one documented base.
+THEME_CROWDED_RVOL_FLOOR_PCTL = 0.70
+
 # Stop-words stripped from headlines before keyword extraction. Generic finance/news
 # noise that would otherwise mis-cluster unrelated names ("Inc reports stock today").
 _STOPWORDS = frozenset(
@@ -178,3 +196,73 @@ def theme_sympathy_viability_delta(symbol: str, theme_symbols: set[str] | None) 
     if not theme_symbols or "-USD" in str(symbol or "").upper():
         return 0.0
     return _theme_sympathy_boost() if _norm(symbol) in theme_symbols else 0.0
+
+
+def _crowded_rvol_floor_pctl() -> float:
+    """The within-batch RVOL percentile at/above which a theme member starts earning the
+    crowded-tape catalyst-substitute. One documented base, overridable; clamped to [0,1)."""
+    try:
+        v = float(
+            getattr(settings, "chili_momentum_theme_crowded_rvol_floor_pctl",
+                     THEME_CROWDED_RVOL_FLOOR_PCTL)
+        )
+    except (TypeError, ValueError):
+        return THEME_CROWDED_RVOL_FLOOR_PCTL
+    if not (0.0 <= v < 1.0):
+        return THEME_CROWDED_RVOL_FLOOR_PCTL
+    return v
+
+
+def crowded_tape_news_substitute(
+    is_theme_member: bool,
+    rvol_rank_pct: float | None,
+    *,
+    grade_present: float,
+    floor_pctl: float | None = None,
+) -> float | None:
+    """The partial news-catalyst sub-score a CROWDED high-RVOL THEME name earns as a
+    catalyst-SUBSTITUTE when it has NO own primary (P1) catalyst (a Ross sympathy mover).
+
+    Returns ``None`` (no credit — byte-identical no-op) unless BOTH conditions hold:
+      * ``is_theme_member`` — the name is a keyword-theme sympathy peer of a real leader
+        (genuine co-movement on a shared catalyst, not a lone name + noise), AND
+      * ``rvol_rank_pct`` (the name's OWN within-batch RVOL percentile) >= ``floor_pctl``
+        — a CROWDED tape (top-tail relative volume), not a quiet name that merely shares a
+        headline keyword.
+
+    When credited, the sub-score ramps LINEARLY from the 0.5 neutral midpoint up to
+    ``grade_present`` (the "fresh-news-present-but-ungraded" reference) as the RVOL percentile
+    goes ``floor_pctl`` -> 1.0. It is CAPPED at ``grade_present`` (< the strong-grade 0.90), so a
+    genuinely GRADED catalyst leader still out-ranks it and a non-mover crowded tape (low RVOL)
+    earns nothing — the credit can never over-promote junk or demote a real leader. The caller
+    applies it as a FLOOR (``max(...)``) on the name's ``news_catalyst_pct`` only when the name has
+    NO own catalyst grade — so it never lowers a graded name. Adaptive (the name's own within-batch
+    RVOL percentile — no magic absolute RVOL cutoff). Pure / side-effect-free; fail-NEUTRAL to
+    ``None`` on missing / degenerate input (never credits on absent data)."""
+    if not is_theme_member:
+        return None
+    rp = _to_float_local(rvol_rank_pct)
+    if rp is None:
+        return None
+    lo = _crowded_rvol_floor_pctl() if floor_pctl is None else float(floor_pctl)
+    if not (0.0 <= lo < 1.0):
+        return None
+    if rp < lo:
+        return None
+    try:
+        cap = float(grade_present)
+    except (TypeError, ValueError):
+        return None
+    cap = max(0.5, min(1.0, cap))  # the substitute is always >= neutral, capped below strong
+    frac = max(0.0, min(1.0, (rp - lo) / (1.0 - lo))) if lo < 1.0 else 1.0
+    sub = 0.5 + (cap - 0.5) * frac
+    return round(max(0.5, min(cap, sub)), 4)
+
+
+def _to_float_local(v) -> float | None:
+    try:
+        if v is None:
+            return None
+        return float(v)
+    except (TypeError, ValueError):
+        return None

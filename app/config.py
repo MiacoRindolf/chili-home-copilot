@@ -2295,6 +2295,16 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_FUEL_TOP_N"),
         description="Credit-frugality gate: only the top-N explosive low-float candidates (by Ross score, after the explosive floor) get an Ortex short-mechanics fetch. Keeps the Trader plan (1,000 credits/mo, 1 req/s) within budget. 0 ⇒ no fetch.",
     )
+    chili_momentum_theme_crowded_substitute_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_THEME_CROWDED_SUBSTITUTE_ENABLED"),
+        description="CROWDED-TAPE CATALYST-SUBSTITUTE (selection-rank hold for Ross sympathy movers). In the news-catalyst pillar a name in NONE of the catalyst sets reads news_catalyst_pct=None (NEUTRAL in isolation), but its strong-catalyst peers carry a high news percentile and out-rank it on the same RVOL+momentum core, so a catalyst-LESS crowded-tape / high-RVOL THEME name (a Ross sympathy mover) is demoted purely on P1-catalyst absence. When ON, a genuine keyword-THEME member (a sympathy peer of a real leader, from theme_detector.theme_sympathy_symbols) that is ALSO a CROWDED high-RVOL name (its OWN within-batch RVOL percentile >= the crowded floor, default top ~30%) earns a partial news-substitute sub-score FLOORED onto news_catalyst_pct — ramping the 0.5 neutral midpoint up to AT MOST the present/ungraded reference (0.60, below the 0.90 strong grade), so a real GRADED catalyst leader still out-ranks it and a NON-mover crowded tape (low RVOL) earns nothing. A FLOOR applied ONLY to no-own-catalyst names (never lowers a graded name), adaptive (own within-batch RVOL percentile — no magic absolute), bounded, selection-only re-rank — never a veto, never an entry/exit/sizing change. Equity-only. Gated on BOTH the news pillar AND this flag; either OFF / no theme cluster / below the RVOL tail ⇒ BYTE-IDENTICAL ranking.",
+    )
+    chili_momentum_theme_crowded_rvol_floor_pctl: float = Field(
+        default=0.70, ge=0.0, le=0.999,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_THEME_CROWDED_RVOL_FLOOR_PCTL"),
+        description="The within-batch RVOL percentile FLOOR at/above which a keyword-theme member starts earning the crowded-tape catalyst-substitute (0.70 = top ~30% by relative volume = a genuinely CROWDED tape, not a quiet name that merely shares a headline keyword). The substitute sub-score ramps the 0.5 neutral midpoint -> the present grade as the RVOL percentile goes this floor -> 1.0. The ONE documented base for the crowded-tape credit.",
+    )
     chili_momentum_squeeze_quality_floor_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SQUEEZE_QUALITY_FLOOR_ENABLED"),
