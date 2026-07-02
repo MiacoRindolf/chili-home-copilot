@@ -61,6 +61,18 @@ def main() -> None:
     except Exception as _e:
         logger.debug("[scheduler_worker] brain I/O profile log skipped: %s", _e)
 
+    # WAVE-1 FIX-9: DEPLOY BINDING-ASSERT. The scheduler-worker runs the live trade lane
+    # (and is often on a DIFFERENT image than the web app), so it independently reports its
+    # effective critical-setting bindings at startup + hard-fails on drift only when
+    # CHILI_BINDING_ASSERT_STRICT=1. Best-effort — never fails the worker to start.
+    try:
+        from app.config import settings as _bind_cfg
+        from app.services.trading.momentum_neural.binding_assert import run_binding_assert
+
+        run_binding_assert(_bind_cfg)
+    except Exception as _e:
+        logger.warning("[scheduler_worker] binding_assert skipped: %s", _e)
+
     role = _scheduler_worker_role()
 
     # Restore Robinhood sessions only in broker/autotrader-owning scheduler roles.
