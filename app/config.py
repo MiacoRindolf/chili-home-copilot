@@ -4164,6 +4164,31 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_RED_INTRADAY_SIZE_FLOOR"),
         description="GAP 2: minimum size multiplier when deep red intraday (never zeros the order). ONE documented base. Default 0.4, band [0.05,1.0].",
     )
+    # ── COMBINED SIZE-DOWN FLOOR for a genuine front-side A-setup ─────────────────────
+    # The _eff_max_loss multiplier product (live_runner) has a combined CEILING (base x 3.0)
+    # but NO combined FLOOR — unbounded MULTIPLICATIVE STACKING of the ~23 size-DOWN
+    # multipliers (e.g. daily_room 0.40 x midday-sched 0.50 = 0.20) can crush a REAL A-setup's
+    # per-trade risk far below the equity-relative base (CUPR: $122 base -> $24, ~0.18% risk
+    # instead of 1%). This FLOOR RAISES a stacked-down budget back toward the base ONLY for a
+    # confirmed front-side A-setup (above-VWAP + forward OFI + viability cleared its family
+    # floor). It can ONLY RAISE toward base, NEVER above it (it multiplies base by the floor
+    # fraction <= 1.0 and only when the realized aggregate is BELOW the floor) — so the floor
+    # is equity-relative by construction and dollar-risk stays risk-FIRST and <= base (1%
+    # equity). Fail-CLOSED: a non-A-setup keeps today's stacked size-down. The combined x3.0
+    # ceiling, the #769 max-loss circuit, the structural/vol-floored stop, the notional ceiling,
+    # and the per-broker daily-loss cap are ALL untouched. docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_combined_size_floor_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_COMBINED_SIZE_FLOOR_ENABLED"),
+        description="Combined SIZE-DOWN FLOOR: for a genuine front-side A-setup (above-VWAP + forward OFI + viability cleared its family floor), RAISE a stacked-down per-trade budget back toward the equity-relative base so multiplicatively stacked size-down multipliers can't crush a real A-setup's risk far below base. Risk-FIRST: can ONLY raise toward base, NEVER above it. Fail-CLOSED (non-A-setup keeps stacked size-down). KILL-SWITCH: False -> byte-identical. Default ON.",
+    )
+    chili_momentum_combined_size_down_floor: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_COMBINED_SIZE_DOWN_FLOOR"),
+        description="Combined size-down FLOOR fraction: a genuine front-side A-setup never sizes below this fraction of the equity-relative base per-trade risk (it FLOORS the realized aggregate of all size-down multipliers). A documented FLOOR (not a ceiling), equity-relative by construction since it multiplies base_max_loss. ONE documented base. Default 0.5 (never below half the equity-relative base), band [0.0,1.0].",
+    )
     # ── ROSS RISK GAP 3 — ACCOUNT-WIDE CONSECUTIVE-LOSS ARM HALT (tilt rule) ──────────
     # Ross's tilt rule: 2-3 reds in a row = walk away. The streak dial only de-SIZES (never
     # halts), the count day-blocks are PER-SYMBOL, and the account-wide halts are DOLLAR-based
