@@ -3321,6 +3321,32 @@ def _effective_entry_viability_min(
     return min(0.95, float(flat_min) + bump), True, bump
 
 
+def _raise_only_entry_floor(
+    current_eff_min: float, raised_floor_snapshot: float, *, enabled: bool = True
+) -> float:
+    """WAVE-1 FIX-7 SCORE-FLOOR RAISE-ONLY INVARIANT (pure + unit-testable).
+
+    The entry viability floor is composed as ``min(0.95, flat_min + midday_bump +
+    run_r_bump)`` — every risk factor RAISES the bar, none lowers it. This helper is the
+    invariant guard: ``raised_floor_snapshot`` is the fully-raised floor captured
+    IMMEDIATELY after every raise is applied; ``current_eff_min`` is the value about to hit
+    the ``_score_ok`` gate (which a future override could have LOWERED). The guard returns
+    ``max(current, snapshot)`` so the gate floor can NEVER fall below the risk-raised bar
+    (the codex ``ross_audio_starter`` class of override, absent on main). On main the two
+    args are equal, so this is an identity today (byte-identical ``_score_ok``).
+    ``enabled=False`` returns ``current_eff_min`` unchanged (rollback)."""
+    try:
+        cur = float(current_eff_min)
+        snap = float(raised_floor_snapshot)
+    except (TypeError, ValueError):
+        # Fail-safe: an unusable input can never lower the floor — return the caller's
+        # current value UNCHANGED (raw, not re-coerced) so the gate falls back to it.
+        return current_eff_min
+    if not enabled:
+        return cur
+    return max(cur, snap)
+
+
 _INTERVAL_SECONDS: dict[str, float] = {
     "1m": 60.0, "2m": 120.0, "5m": 300.0, "15m": 900.0, "30m": 1800.0,
     "60m": 3600.0, "90m": 5400.0, "1h": 3600.0, "1d": 86400.0,
@@ -5952,6 +5978,18 @@ def tick_live_session(
                     "eff_min": round(_new_eff, 3), "score": round(_vscore, 3),
                 })
             _eff_min = _new_eff
+        # WAVE-1 FIX-7 RAISE-ONLY INTEGRITY: the risk raises (midday de-weight, run-R
+        # deweight) compose LAST and are raise-only. Snapshot the fully-raised floor HERE
+        # (immediately after every raise is applied); the guard clamps the gate's floor to
+        # be NEVER below it — so no override or min() inserted between the bumps and the
+        # _score_ok gate may silently LOWER the risk-raised bar (the codex ross_audio_starter
+        # class; absent on main, guarded here for merges). No-op on main today. OFF => legacy.
+        _raise_only_floor = float(_eff_min)
+        _eff_min = _raise_only_entry_floor(
+            _eff_min,
+            _raise_only_floor,
+            enabled=bool(getattr(settings, "chili_momentum_floor_raise_only_enabled", True)),
+        )
         _score_ok = (
             float(via.viability_score or 0) >= _eff_min
             # live_eligible WITH the recency-grace (UPC TOCTOU): a flicker the boundary gate

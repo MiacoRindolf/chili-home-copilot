@@ -5413,6 +5413,19 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_STOP_RATCHET_STRICT_ENABLED"),
         description="WAVE-1 FIX-5: strict INVARIANT-A — a long position's stop may NEVER decrease within a tick; refresh the cached local base after each write and compose every candidate against the LIVE pos['stop_price']. false = legacy (stale-base) behavior for rollback only.",
     )
+    # WAVE-1 FIX-7 SCORE-FLOOR RAISE-ONLY INTEGRITY. The entry viability floor is
+    # composed as min(0.95, flat_min + midday_bump + run_r_bump) — every risk factor
+    # RAISES the bar, none lowers it. This flag hardens that as an INVARIANT: after all
+    # bumps, the effective floor is clamped to be NEVER below (flat_min + the applied
+    # raises), so no future override / min() inserted between the bump and the gate can
+    # silently lower the run-R-raised bar (the codex ross_audio_starter class of bug,
+    # which is NOT present on main). On main this is a no-op today (composition already
+    # raise-only) — the flag guards against regression on merge. false = no guard.
+    chili_momentum_floor_raise_only_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLOOR_RAISE_ONLY_ENABLED"),
+        description="WAVE-1 FIX-7: enforce the entry viability floor is raise-only — the effective floor may never fall below flat_min plus the applied midday + run-R raises. false = no raise-only clamp (rollback only).",
+    )
     # ── BATCH E ─ management/discipline gaps (each kill-switched; OFF = byte-identical) ──
     #
     # E(1) MULTI-LEVEL SCALE-OUT GRID. Extends the single first-scale into a LADDER: sell
