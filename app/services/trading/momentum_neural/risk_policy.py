@@ -1808,17 +1808,31 @@ def adaptive_reentry_cooldown_seconds(
     except (TypeError, ValueError):
         base = 0
     # reason_mult — profit/target => short re-arm; stop/loss => full base.
-    _profit_reasons = {"target", "first_target", "scale_out", "trail", "runner_target", "profit"}
+    #
+    # WAVE-1 FIX-6 (N3): the realized-return SIGN is AUTHORITATIVE. The prior code
+    # classified via a SUBSTRING reason match ("trail" in "trail_stop") that ALWAYS ran
+    # — so a LOSING trail-stop exit (rb<0) was tagged is_profit=True and got the 0.25x
+    # short cooldown (~112s) instead of the full base loss cooldown, letting the lane
+    # re-arm the same loser seconds later (IPW re-armed 3s after a wrongly-shortened
+    # cooldown -> -$78.62). Now: when rb is known, its sign decides (rb<0 => NOT profit,
+    # full base; rb>0 => profit). Reason-token matching (EXACT token equality on the
+    # underscore-split reason, never substring) is a FALLBACK used ONLY when rb is None.
+    _profit_reasons = {"target", "first_target", "scale_out", "runner_target", "profit"}
     is_profit = False
     try:
         rb = float(last_exit_return_bps) if last_exit_return_bps is not None else None
-        if rb is not None and rb > 0:
-            is_profit = True
     except (TypeError, ValueError):
         rb = None
     _reason = (str(last_exit_reason or "").strip().lower())
-    if any(p in _reason for p in _profit_reasons):
-        is_profit = True
+    if rb is not None:
+        # SIGN authoritative: strictly-positive realized return => profit; else full base.
+        is_profit = rb > 0
+    else:
+        # No realized return available: fall back to EXACT reason-token equality (split on
+        # "_" so "trail_stop" yields {"trail","stop"} and never matches a profit token; a
+        # bare "target"/"scale_out"/"profit"/"first_target"/"runner_target" still counts).
+        _tokens = set(_reason.split("_"))
+        is_profit = bool(_profit_reasons & _tokens) or _reason in _profit_reasons
     reason_mult = float(profit_factor) if is_profit else 1.0
     # vol_mult — clamp(atr_pct / vol_ref, 1/span, span); higher vol => longer.
     vol_mult = 1.0

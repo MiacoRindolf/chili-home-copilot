@@ -89,6 +89,79 @@ def test_fail_neutral():
     assert secs == _BASE
 
 
+# ── WAVE-1 FIX-6 (N3): the realized-return SIGN is authoritative ──────────────
+def test_losing_trail_stop_gets_full_loss_cooldown_not_profit():
+    """THE BUG: a LOSING trail_stop exit (rb<0). The old substring match
+    ("trail" in "trail_stop") tagged it is_profit=True and gave the 0.25x SHORT
+    cooldown, re-arming the same loser in seconds (IPW -$78.62). SIGN-authoritative:
+    rb<0 => is_profit=False => full base loss cooldown."""
+    secs, dbg = adaptive_reentry_cooldown_seconds(
+        base_seconds=_BASE, last_exit_reason="trail_stop",
+        last_exit_return_bps=-42.0, entry_stop_atr_pct=_REF,
+    )
+    assert dbg["is_profit"] is False
+    assert secs == _BASE  # full base (reason_mult 1.0, vol_mult 1.0 at ref ATR)
+
+
+def test_winning_trail_stop_gets_profit_cooldown():
+    """A PROFITABLE trail_stop exit (rb>0) => profit cooldown (0.25x). The sign, not
+    the token, decides — so a genuine winning runner can be re-scalped quickly."""
+    secs, dbg = adaptive_reentry_cooldown_seconds(
+        base_seconds=_BASE, last_exit_reason="trail_stop",
+        last_exit_return_bps=+42.0, entry_stop_atr_pct=_REF,
+    )
+    assert dbg["is_profit"] is True
+    assert secs == round(_BASE * 0.25 * 1.0)
+
+
+def test_sign_overrides_a_profit_token_when_return_is_negative():
+    """Even an explicit profit token ("target") with a NEGATIVE realized return is a
+    LOSS for cooldown purposes — the sign is authoritative (defends against a mislabeled
+    reason on a red exit)."""
+    secs, dbg = adaptive_reentry_cooldown_seconds(
+        base_seconds=_BASE, last_exit_reason="target",
+        last_exit_return_bps=-5.0, entry_stop_atr_pct=_REF,
+    )
+    assert dbg["is_profit"] is False
+    assert secs == _BASE
+
+
+def test_reason_token_fallback_is_exact_not_substring_when_rb_none():
+    """When rb is None the reason-token fallback uses EXACT token equality, not substring.
+    A losing 'trail_stop' with no realized return must NOT be classified profit (the old
+    substring 'trail' in 'trail_stop' bug); a bare profit token still counts."""
+    # trail_stop, rb None => tokens {trail, stop}; no profit token => NOT profit.
+    loss_secs, loss_dbg = adaptive_reentry_cooldown_seconds(
+        base_seconds=_BASE, last_exit_reason="trail_stop",
+        last_exit_return_bps=None, entry_stop_atr_pct=_REF,
+    )
+    assert loss_dbg["is_profit"] is False
+    assert loss_secs == _BASE
+    # scale_out, rb None => the full multi-token profit reason still matches.
+    win_secs, win_dbg = adaptive_reentry_cooldown_seconds(
+        base_seconds=_BASE, last_exit_reason="scale_out",
+        last_exit_return_bps=None, entry_stop_atr_pct=_REF,
+    )
+    assert win_dbg["is_profit"] is True
+    assert win_secs < _BASE
+
+
+def test_parity_when_rb_none_matches_prior_profit_reason_semantics():
+    """Parity: when rb is None, an unambiguous profit reason ('target') is still profit and
+    a stop reason ('stop_loss') is still a loss — the fallback preserves the intended
+    reason semantics for the no-realized-return case."""
+    p_secs, p_dbg = adaptive_reentry_cooldown_seconds(
+        base_seconds=_BASE, last_exit_reason="target",
+        last_exit_return_bps=None, entry_stop_atr_pct=_REF,
+    )
+    l_secs, l_dbg = adaptive_reentry_cooldown_seconds(
+        base_seconds=_BASE, last_exit_reason="stop_loss",
+        last_exit_return_bps=None, entry_stop_atr_pct=_REF,
+    )
+    assert p_dbg["is_profit"] is True and p_secs < _BASE
+    assert l_dbg["is_profit"] is False and l_secs == _BASE
+
+
 # ── reentry_after_stop_allowed ───────────────────────────────────────────────
 def test_under_cap_allowed():
     ok, reason = reentry_after_stop_allowed(
