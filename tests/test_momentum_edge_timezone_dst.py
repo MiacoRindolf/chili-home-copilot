@@ -106,9 +106,12 @@ def test_schedule_window_1430_cutoff_exact_boundary():
     # 14:29 = midday (wide lane), 14:30:00 = late (NO new entries) — the fallback cutoff.
     assert mp.schedule_window_now(now=_et(2026, 6, 15, 14, 29, 59)) == "midday"
     assert mp.schedule_window_now(now=_et(2026, 6, 15, 14, 30, 0)) == "late"
-    # 16:00:00 ends 'late' -> closed.
+    # 16:00:00 ends 'late' -> afterhours (WAVE-1 FIX-8: explicit AH window, sized 0.0).
     assert mp.schedule_window_now(now=_et(2026, 6, 15, 15, 59, 59)) == "late"
-    assert mp.schedule_window_now(now=_et(2026, 6, 15, 16, 0, 0)) == "closed"
+    assert mp.schedule_window_now(now=_et(2026, 6, 15, 16, 0, 0)) == "afterhours"
+    # 19:59 = last afterhours minute (default 20:00 end); 20:00 -> closed.
+    assert mp.schedule_window_now(now=_et(2026, 6, 15, 19, 59, 59)) == "afterhours"
+    assert mp.schedule_window_now(now=_et(2026, 6, 15, 20, 0, 0)) == "closed"
 
 
 def test_schedule_window_dst_transition_days_are_weekends_closed():

@@ -101,10 +101,14 @@ def schedule_window_now(now: datetime | None = None) -> str:
     """Intraday schedule window for the equity lane (2026-06-12 quant pass v2:
     the day's edge is heavily clock-shaped — premarket+open carries the tails,
     midday bleeds, late entries lose). Windows:
-      ``hot``    04:00–10:30 ET  (premarket + open drive)
-      ``midday`` 10:30–14:30 ET  (lull — wide lane off, board half-risk)
-      ``late``   14:30–16:00 ET  (no NEW entries; exits unaffected)
-      ``closed`` otherwise / weekends
+      ``hot``        04:00–10:30 ET  (premarket + open drive)
+      ``midday``     10:30–14:30 ET  (lull — wide lane off, board half-risk)
+      ``late``       14:30–16:00 ET  (no NEW entries; exits unaffected)
+      ``afterhours`` 16:00–afterhours_end ET  (WAVE-1 FIX-8: explicit window so the
+                     sched-mult map fails CLOSED to 0.0 — a 16:00-20:00 ET entry where
+                     is_tradeable_now() is True would otherwise fall through to the map
+                     default and size FULL; 14d AH = 1W/11L −$72.65)
+      ``closed``     otherwise / weekends
     Pure clock policy — the tape-derived regime dials measured WORSE (rejected
     list, pass v2)."""
     ref = now or datetime.now(timezone.utc)
@@ -118,8 +122,14 @@ def schedule_window_now(now: datetime | None = None) -> str:
         return "hot"
     if 10 * 60 + 30 <= mod < 14 * 60 + 30:
         return "midday"
-    if 14 * 60 + 30 <= mod < 16 * 60:
+    if 14 * 60 + 30 <= mod < _REGULAR_CLOSE_MIN:
         return "late"
+    # WAVE-1 FIX-8: the extended after-hours session (16:00 ET → the configured
+    # afterhours_end, default 20:00) is an EXPLICIT window so the sched-mult map can size
+    # it to 0.0 (fail-CLOSED). is_tradeable_now() treats 16:00-20:00 as tradeable, so
+    # without this it would map to the fall-through default and size at FULL risk.
+    if _REGULAR_CLOSE_MIN <= mod < max(_afterhours_end_min(), _REGULAR_CLOSE_MIN):
+        return "afterhours"
     return "closed"
 
 

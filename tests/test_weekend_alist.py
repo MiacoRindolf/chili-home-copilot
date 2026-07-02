@@ -35,7 +35,11 @@ def test_a2_schedule_windows():
     assert schedule_window_now(_at(14, 0)) == "hot"     # 10:00 ET
     assert schedule_window_now(_at(15, 0)) == "midday"  # 11:00 ET
     assert schedule_window_now(_at(18, 45)) == "late"   # 14:45 ET
-    assert schedule_window_now(_at(21, 0)) == "closed"  # 17:00 ET
+    # WAVE-1 FIX-8: 16:00-20:00 ET is now the explicit 'afterhours' window (sized 0.0),
+    # not 'closed' — so the sched-mult map fails CLOSED instead of full-size.
+    assert schedule_window_now(_at(21, 0)) == "afterhours"  # 17:00 ET
+    assert schedule_window_now(_at(23, 0)) == "afterhours"  # 19:00 ET
+    assert schedule_window_now(datetime(2026, 6, 13, 1, 0, tzinfo=timezone.utc)) == "closed"  # 21:00 ET prior day (past AH end)
     assert schedule_window_now(datetime(2026, 6, 13, 14, 0, tzinfo=timezone.utc)) == "closed"  # Saturday
 
 

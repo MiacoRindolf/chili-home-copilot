@@ -57,6 +57,19 @@ if not _under_pytest:
     with schema_startup_lock(engine):
         Base.metadata.create_all(bind=engine)
         run_migrations(engine, lock=False)
+    # WAVE-1 FIX-9: DEPLOY BINDING-ASSERT. Two deploys dropped critical env pins (the 1m
+    # pullback interval = −$137; the R3 flags) with nothing at startup comparing the
+    # EFFECTIVE live binding against the deploy intent. This COMPUTES each live binding
+    # value from settings, logs one line per value + a summary, and (only if
+    # CHILI_BINDING_ASSERT_STRICT=1) hard-fails on drift. Default = warn-loud only, so a
+    # missing manifest entry can never kill prod. Best-effort: never fails startup itself.
+    try:
+        from .config import settings as _settings
+        from .services.trading.momentum_neural.binding_assert import run_binding_assert
+        run_binding_assert(_settings)
+    except Exception:
+        import logging as _blogging
+        _blogging.getLogger(__name__).warning("[binding_assert] failed to run", exc_info=True)
     # 2026-04-28: idle-in-tx watchdog. Backstop for the FractionalBacktest
     # leak that held a session open for 17h and blocked migration 193.
     try:

@@ -3321,6 +3321,32 @@ def _effective_entry_viability_min(
     return min(0.95, float(flat_min) + bump), True, bump
 
 
+def _raise_only_entry_floor(
+    current_eff_min: float, raised_floor_snapshot: float, *, enabled: bool = True
+) -> float:
+    """WAVE-1 FIX-7 SCORE-FLOOR RAISE-ONLY INVARIANT (pure + unit-testable).
+
+    The entry viability floor is composed as ``min(0.95, flat_min + midday_bump +
+    run_r_bump)`` — every risk factor RAISES the bar, none lowers it. This helper is the
+    invariant guard: ``raised_floor_snapshot`` is the fully-raised floor captured
+    IMMEDIATELY after every raise is applied; ``current_eff_min`` is the value about to hit
+    the ``_score_ok`` gate (which a future override could have LOWERED). The guard returns
+    ``max(current, snapshot)`` so the gate floor can NEVER fall below the risk-raised bar
+    (the codex ``ross_audio_starter`` class of override, absent on main). On main the two
+    args are equal, so this is an identity today (byte-identical ``_score_ok``).
+    ``enabled=False`` returns ``current_eff_min`` unchanged (rollback)."""
+    try:
+        cur = float(current_eff_min)
+        snap = float(raised_floor_snapshot)
+    except (TypeError, ValueError):
+        # Fail-safe: an unusable input can never lower the floor — return the caller's
+        # current value UNCHANGED (raw, not re-coerced) so the gate falls back to it.
+        return current_eff_min
+    if not enabled:
+        return cur
+    return max(cur, snap)
+
+
 _INTERVAL_SECONDS: dict[str, float] = {
     "1m": 60.0, "2m": 120.0, "5m": 300.0, "15m": 900.0, "30m": 1800.0,
     "60m": 3600.0, "90m": 5400.0, "1h": 3600.0, "1d": 86400.0,
@@ -5952,6 +5978,18 @@ def tick_live_session(
                     "eff_min": round(_new_eff, 3), "score": round(_vscore, 3),
                 })
             _eff_min = _new_eff
+        # WAVE-1 FIX-7 RAISE-ONLY INTEGRITY: the risk raises (midday de-weight, run-R
+        # deweight) compose LAST and are raise-only. Snapshot the fully-raised floor HERE
+        # (immediately after every raise is applied); the guard clamps the gate's floor to
+        # be NEVER below it — so no override or min() inserted between the bumps and the
+        # _score_ok gate may silently LOWER the risk-raised bar (the codex ross_audio_starter
+        # class; absent on main, guarded here for merges). No-op on main today. OFF => legacy.
+        _raise_only_floor = float(_eff_min)
+        _eff_min = _raise_only_entry_floor(
+            _eff_min,
+            _raise_only_floor,
+            enabled=bool(getattr(settings, "chili_momentum_floor_raise_only_enabled", True)),
+        )
         _score_ok = (
             float(via.viability_score or 0) >= _eff_min
             # live_eligible WITH the recency-grace (UPC TOCTOU): a flicker the boundary gate
@@ -8543,23 +8581,32 @@ def tick_live_session(
         except (TypeError, ValueError):
             _l2_mult = 1.0
         # A2 schedule risk multiplier (quant pass v2, +$3k/3d premarket leg):
-        # hot (04:00–10:30 ET) ×1.5, midday ×0.5, late ×0 (entries blocked at
-        # arm; this is the belt for already-armed sessions). Equities only —
-        # crypto rides its own 24/7 clock. Combined multipliers are capped at
-        # 3× base by the clamp below; the aggregate at-risk cap still governs.
+        # hot (04:00–10:30 ET) ×1.5, midday ×0.5, late ×0, afterhours ×0 (entries blocked
+        # at arm; this is the belt for already-armed sessions). Equities only — crypto
+        # rides its own 24/7 clock. Combined multipliers are capped at 3× base by the
+        # clamp below; the aggregate at-risk cap still governs.
+        #
+        # WAVE-1 FIX-8: the map now covers "afterhours" ×0.0 AND the fall-through default
+        # is 0.0 (fail-CLOSED for ANY unknown window). Previously the default was 1.0, so a
+        # 16:00-20:00 ET after-hours entry (is_tradeable_now() True, schedule_window_now()
+        # "closed" pre-fix) sized at FULL risk (14d AH: 1W/11L −$72.65). Exits untouched.
         _sched_mult = 1.0
         if not str(sess.symbol or "").upper().endswith("-USD"):
             try:
                 from .market_profile import schedule_window_now
 
                 _win = schedule_window_now()
-                _sched_mult = {"hot": 1.5, "midday": 0.5, "late": 0.0}.get(_win, 1.0)
+                _sched_mult = {
+                    "hot": 1.5, "midday": 0.5, "late": 0.0, "afterhours": 0.0,
+                }.get(_win, 0.0)
                 if _sched_mult != 1.0:
                     le["schedule_risk"] = {"window": _win, "mult": _sched_mult}
             except Exception:
-                _sched_mult = 1.0
+                # Fail-CLOSED: a schedule read error must NOT size an entry at full risk.
+                _sched_mult = 0.0
+                _win = "unknown"
         if _sched_mult <= 0.0:
-            _emit(db, sess, "live_entry_wait_late_window", {"window": "late"})
+            _emit(db, sess, "live_entry_wait_late_window", {"window": _win})
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state, "skipped": "late_window"}
         # TIER-2 OVERNIGHT size reduction: a multiplier (base 0.5) on the equity-relative
@@ -10945,16 +10992,29 @@ def tick_live_session(
         admission_via = float(le.get("admission_viability_score") or 0)
         current_via = float(via.viability_score or 0)
         if admission_via > 0 and current_via < admission_via * 0.85:
-            tighter_stop = max(stop_px, avg * 0.995)
-            if tighter_stop > stop_px:
+            # WAVE-1 FIX-5 (B4): compose against the LIVE pos stop (not just the once-per-
+            # tick cached `stop_px`) so a concurrent writer earlier in the tick can't be
+            # undone here, then REFRESH `stop_px` after the write so the trailing chandelier
+            # below composes off the tightened base — never re-loosens it (IREZ 36ms bug).
+            _live_stop_c4 = (
+                float(pos["stop_price"])
+                if bool(getattr(settings, "chili_momentum_stop_ratchet_strict_enabled", True))
+                else stop_px
+            )
+            tighter_stop = max(_live_stop_c4, avg * 0.995)
+            if tighter_stop > _live_stop_c4:
                 pos["stop_price"] = tighter_stop
                 _commit_le(sess, le)
                 _emit(db, sess, "viability_degraded_tighten", {
                     "admission_viability": admission_via,
                     "current_viability": current_via,
-                    "old_stop": stop_px,
+                    "old_stop": _live_stop_c4,
                     "new_stop": tighter_stop,
                 })
+                # INVARIANT-A: refresh the cached base so every later stop writer in this
+                # tick (the trailing ratchet chain) composes off the tightened value.
+                if bool(getattr(settings, "chili_momentum_stop_ratchet_strict_enabled", True)):
+                    stop_px = tighter_stop
 
         if held >= max_hold:
             cid = f"chili_ml_t_{sess.id}_{uuid.uuid4().hex[:12]}"

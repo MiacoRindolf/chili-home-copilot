@@ -5399,6 +5399,33 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_RUN_R_BREAKER_MIN_HISTORY"),
         description="Minimum closed-fill history before the breaker can trigger; below this it fails OPEN (bump 0).",
     )
+    # WAVE-1 FIX-5 (B4) STOPS-ONLY-TIGHTEN INVARIANT-A. A defensive stop-tighten
+    # (the C4 viability-degradation tighten) writes pos["stop_price"] but the
+    # once-per-tick cached `stop_px` local was NOT refreshed, so the later trailing
+    # chandelier composed its candidate against the STALE (looser) base and could
+    # LOWER a just-tightened stop within the same tick (IREZ live-reproduced: tighten
+    # 10.45745 -> loosened to 10.43334 +36ms). The fix refreshes the local base after
+    # every stop write AND composes each candidate against the LIVE pos["stop_price"].
+    # This is a pure INVARIANT-A repair (ratchet-only is already the documented
+    # contract) — the flag exists ONLY for instant rollback, not as a dark gate.
+    chili_momentum_stop_ratchet_strict_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STOP_RATCHET_STRICT_ENABLED"),
+        description="WAVE-1 FIX-5: strict INVARIANT-A — a long position's stop may NEVER decrease within a tick; refresh the cached local base after each write and compose every candidate against the LIVE pos['stop_price']. false = legacy (stale-base) behavior for rollback only.",
+    )
+    # WAVE-1 FIX-7 SCORE-FLOOR RAISE-ONLY INTEGRITY. The entry viability floor is
+    # composed as min(0.95, flat_min + midday_bump + run_r_bump) — every risk factor
+    # RAISES the bar, none lowers it. This flag hardens that as an INVARIANT: after all
+    # bumps, the effective floor is clamped to be NEVER below (flat_min + the applied
+    # raises), so no future override / min() inserted between the bump and the gate can
+    # silently lower the run-R-raised bar (the codex ross_audio_starter class of bug,
+    # which is NOT present on main). On main this is a no-op today (composition already
+    # raise-only) — the flag guards against regression on merge. false = no guard.
+    chili_momentum_floor_raise_only_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FLOOR_RAISE_ONLY_ENABLED"),
+        description="WAVE-1 FIX-7: enforce the entry viability floor is raise-only — the effective floor may never fall below flat_min plus the applied midday + run-R raises. false = no raise-only clamp (rollback only).",
+    )
     # ── BATCH E ─ management/discipline gaps (each kill-switched; OFF = byte-identical) ──
     #
     # E(1) MULTI-LEVEL SCALE-OUT GRID. Extends the single first-scale into a LADDER: sell
