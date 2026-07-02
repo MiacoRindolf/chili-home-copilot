@@ -10954,16 +10954,29 @@ def tick_live_session(
         admission_via = float(le.get("admission_viability_score") or 0)
         current_via = float(via.viability_score or 0)
         if admission_via > 0 and current_via < admission_via * 0.85:
-            tighter_stop = max(stop_px, avg * 0.995)
-            if tighter_stop > stop_px:
+            # WAVE-1 FIX-5 (B4): compose against the LIVE pos stop (not just the once-per-
+            # tick cached `stop_px`) so a concurrent writer earlier in the tick can't be
+            # undone here, then REFRESH `stop_px` after the write so the trailing chandelier
+            # below composes off the tightened base — never re-loosens it (IREZ 36ms bug).
+            _live_stop_c4 = (
+                float(pos["stop_price"])
+                if bool(getattr(settings, "chili_momentum_stop_ratchet_strict_enabled", True))
+                else stop_px
+            )
+            tighter_stop = max(_live_stop_c4, avg * 0.995)
+            if tighter_stop > _live_stop_c4:
                 pos["stop_price"] = tighter_stop
                 _commit_le(sess, le)
                 _emit(db, sess, "viability_degraded_tighten", {
                     "admission_viability": admission_via,
                     "current_viability": current_via,
-                    "old_stop": stop_px,
+                    "old_stop": _live_stop_c4,
                     "new_stop": tighter_stop,
                 })
+                # INVARIANT-A: refresh the cached base so every later stop writer in this
+                # tick (the trailing ratchet chain) composes off the tightened value.
+                if bool(getattr(settings, "chili_momentum_stop_ratchet_strict_enabled", True)):
+                    stop_px = tighter_stop
 
         if held >= max_hold:
             cid = f"chili_ml_t_{sess.id}_{uuid.uuid4().hex[:12]}"

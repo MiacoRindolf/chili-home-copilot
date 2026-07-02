@@ -5399,6 +5399,20 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_RUN_R_BREAKER_MIN_HISTORY"),
         description="Minimum closed-fill history before the breaker can trigger; below this it fails OPEN (bump 0).",
     )
+    # WAVE-1 FIX-5 (B4) STOPS-ONLY-TIGHTEN INVARIANT-A. A defensive stop-tighten
+    # (the C4 viability-degradation tighten) writes pos["stop_price"] but the
+    # once-per-tick cached `stop_px` local was NOT refreshed, so the later trailing
+    # chandelier composed its candidate against the STALE (looser) base and could
+    # LOWER a just-tightened stop within the same tick (IREZ live-reproduced: tighten
+    # 10.45745 -> loosened to 10.43334 +36ms). The fix refreshes the local base after
+    # every stop write AND composes each candidate against the LIVE pos["stop_price"].
+    # This is a pure INVARIANT-A repair (ratchet-only is already the documented
+    # contract) — the flag exists ONLY for instant rollback, not as a dark gate.
+    chili_momentum_stop_ratchet_strict_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STOP_RATCHET_STRICT_ENABLED"),
+        description="WAVE-1 FIX-5: strict INVARIANT-A — a long position's stop may NEVER decrease within a tick; refresh the cached local base after each write and compose every candidate against the LIVE pos['stop_price']. false = legacy (stale-base) behavior for rollback only.",
+    )
     # ── BATCH E ─ management/discipline gaps (each kill-switched; OFF = byte-identical) ──
     #
     # E(1) MULTI-LEVEL SCALE-OUT GRID. Extends the single first-scale into a LADDER: sell
