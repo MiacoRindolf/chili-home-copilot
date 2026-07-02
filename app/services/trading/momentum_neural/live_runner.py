@@ -8543,23 +8543,32 @@ def tick_live_session(
         except (TypeError, ValueError):
             _l2_mult = 1.0
         # A2 schedule risk multiplier (quant pass v2, +$3k/3d premarket leg):
-        # hot (04:00–10:30 ET) ×1.5, midday ×0.5, late ×0 (entries blocked at
-        # arm; this is the belt for already-armed sessions). Equities only —
-        # crypto rides its own 24/7 clock. Combined multipliers are capped at
-        # 3× base by the clamp below; the aggregate at-risk cap still governs.
+        # hot (04:00–10:30 ET) ×1.5, midday ×0.5, late ×0, afterhours ×0 (entries blocked
+        # at arm; this is the belt for already-armed sessions). Equities only — crypto
+        # rides its own 24/7 clock. Combined multipliers are capped at 3× base by the
+        # clamp below; the aggregate at-risk cap still governs.
+        #
+        # WAVE-1 FIX-8: the map now covers "afterhours" ×0.0 AND the fall-through default
+        # is 0.0 (fail-CLOSED for ANY unknown window). Previously the default was 1.0, so a
+        # 16:00-20:00 ET after-hours entry (is_tradeable_now() True, schedule_window_now()
+        # "closed" pre-fix) sized at FULL risk (14d AH: 1W/11L −$72.65). Exits untouched.
         _sched_mult = 1.0
         if not str(sess.symbol or "").upper().endswith("-USD"):
             try:
                 from .market_profile import schedule_window_now
 
                 _win = schedule_window_now()
-                _sched_mult = {"hot": 1.5, "midday": 0.5, "late": 0.0}.get(_win, 1.0)
+                _sched_mult = {
+                    "hot": 1.5, "midday": 0.5, "late": 0.0, "afterhours": 0.0,
+                }.get(_win, 0.0)
                 if _sched_mult != 1.0:
                     le["schedule_risk"] = {"window": _win, "mult": _sched_mult}
             except Exception:
-                _sched_mult = 1.0
+                # Fail-CLOSED: a schedule read error must NOT size an entry at full risk.
+                _sched_mult = 0.0
+                _win = "unknown"
         if _sched_mult <= 0.0:
-            _emit(db, sess, "live_entry_wait_late_window", {"window": "late"})
+            _emit(db, sess, "live_entry_wait_late_window", {"window": _win})
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state, "skipped": "late_window"}
         # TIER-2 OVERNIGHT size reduction: a multiplier (base 0.5) on the equity-relative
