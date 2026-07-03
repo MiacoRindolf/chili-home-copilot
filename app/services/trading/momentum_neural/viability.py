@@ -772,6 +772,31 @@ def score_viability(
     except (TypeError, ValueError, AttributeError):
         pass
 
+    # A10 (Ross CLRO-lesson 2026-07-02): OWN-HEADLINE DILUTION-HISTORY DERATE. A symbol our own
+    # catalyst headlines have flagged as a diluter on >= adaptive-K distinct days in the trailing
+    # window (persisted to momentum_dilution_history) is a WHLR-class serial diluter Ross has
+    # "written off" — a DECAYING soft selection derate, NEVER a hard ban. THE FRESH REVERSE-SPLIT-
+    # SQUEEZE CARVE-OUT MUST STILL WIN: a symbol in TODAY's strong-catalyst set (which folds in the
+    # recent-reverse-split squeeze, pipeline.py) is EXEMPT — a live squeeze overrides the stale
+    # memory. Runs AFTER the strong-catalyst boost above so a real setup always outranks the
+    # memory. No history / read error / flag OFF -> 0.0 (byte-identical). Equity-only.
+    try:
+        if bool(getattr(settings, "chili_momentum_dilution_history_derate_enabled", True)):
+            _meta_a10 = ctx.meta if isinstance(getattr(ctx, "meta", None), dict) else {}
+            _strong_a10 = _meta_a10.get("strong_catalyst_symbols")
+            _is_fresh_squeeze = bool(_strong_a10 and str(symbol or "").strip().upper() in set(_strong_a10))
+            if not _is_fresh_squeeze:  # carve-out: a fresh squeeze / strong catalyst today wins
+                from .dilution_history import dilution_history_derate
+
+                _dil_derate = dilution_history_derate(db, symbol)
+                if _dil_derate > 0:
+                    base -= _dil_derate
+                    warnings.append(
+                        "Serial-diluter history (own dilution headlines) — soft de-ranked (decaying)"
+                    )
+    except (TypeError, ValueError, AttributeError):
+        pass
+
     # FAKE-CATALYST GUARD (Ross AS101/HVM101): a fresh headline that reads as UNVERIFIED /
     # hacked-PR / unsolicited-buyout / rumor / pump earns a SOFT credibility DOWN-WEIGHT (not a
     # hard veto — these names can still run, they just round-trip, so we de-prioritize rather

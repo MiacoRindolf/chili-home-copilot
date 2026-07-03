@@ -4666,6 +4666,29 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_CLASS_RELIABILITY_MIN_SAMPLES"),
         description="A9: minimum labeled per-class outcomes before the adaptive reliability multiplier departs from 1.0. ONE documented base (floor).",
     )
+    # A10 (Ross CLRO-lesson 2026-07-02): OWN-HEADLINE DILUTION-HISTORY MEMORY (WHLR serial-
+    # diluter class). Ross at [04:15]: "many secondary offerings, many reverse splits … I've
+    # written that one off." No corp-actions vendor exists — but catalyst.weak_catalyst_symbols
+    # already flags dilution symbols daily, so we persist OUR OWN observations (mig312,
+    # momentum_dilution_history) and a symbol flagged on >= K distinct days in the trailing
+    # window (K ADAPTIVE relative to the flag-frequency distribution) earns a DECAYING selection
+    # derate — never a hard ban (the fresh reverse-split-squeeze carve-out must still win). No
+    # history => no derate. Default-ON; kill-switch CHILI_MOMENTUM_DILUTION_HISTORY_DERATE_ENABLED=0.
+    chili_momentum_dilution_history_derate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DILUTION_HISTORY_DERATE_ENABLED"),
+        description="A10: persist each day's dilution/weak-flagged symbols (momentum_dilution_history) and apply a DECAYING selection derate to serial diluters (flagged on >= adaptive-K distinct days in the trailing window). Never a hard ban — the fresh reverse-split-squeeze carve-out still wins. No history => no derate. false => no persist read/derate (byte-identical).",
+    )
+    # ONE documented base for A10: the trailing window (calendar days) over which distinct
+    # dilution-flag days are counted. K is ADAPTIVE within this window (relative to the observed
+    # flag-frequency distribution); this window is the single irreducible base.
+    chili_momentum_dilution_history_window_days: int = Field(
+        default=90,
+        ge=7,
+        le=365,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DILUTION_HISTORY_WINDOW_DAYS"),
+        description="A10: trailing window (calendar days) over which distinct dilution-flag DAYS are counted per symbol. The ONE documented base; K (the min distinct-day count that earns a derate) is adaptive within this window.",
+    )
     # Entry trigger mode: "hybrid" (Ross pullback-break on 1m/5m, momentum_volume
     # fallback), "pullback_break" (pullback only), or "momentum_volume" (legacy 15m).
     chili_momentum_entry_trigger_mode: str = Field(
