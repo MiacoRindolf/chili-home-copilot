@@ -120,6 +120,7 @@ ROSS_STYLE_MOMENTUM_BOOL_FLAGS = frozenset(
 )
 ROSS_TIGHT_STOP_SHADOW_DEFAULT_ENABLED = True
 ROSS_TIGHT_STOP_SHADOW_DEFAULT_MIN_REWARD_RISK = 2.0
+ROSS_TIGHT_STOP_STATIC_TARGET_EDGE_SOURCE = "ross_tight_stop_static_target_shadow"
 ROSS_TIGHT_STOP_LEVEL_KEYS: tuple[tuple[str, str], ...] = (
     ("support", "flat_indicators.support"),
     ("vwap", "flat_indicators.vwap"),
@@ -1934,6 +1935,98 @@ def _ross_tight_stop_shadow_plan(
     return snap
 
 
+def _ross_tight_stop_shadow_edge_snapshot(
+    db: Session,
+    alert: BreakoutAlert,
+    *,
+    pat_ctx: dict[str, Any],
+    confidence: float,
+    settings: Any,
+    pattern: ScanPattern | None,
+    reward_fraction: float,
+    stop_loss_fraction: float,
+    cost_fraction: float,
+    geometry_source: str,
+) -> dict[str, Any]:
+    snap: dict[str, Any] = {
+        "used_for_execution": False,
+        "geometry_source": geometry_source,
+        "reward_fraction": round(float(reward_fraction), 8),
+        "stop_loss_fraction": round(float(stop_loss_fraction), 8),
+        "cost_fraction": round(float(cost_fraction), 8),
+    }
+    if reward_fraction <= 0.0 or stop_loss_fraction <= 0.0:
+        snap["reason"] = "invalid_shadow_geometry"
+        return snap
+
+    probability, source, sample_n, details = _pattern_probability(
+        db,
+        alert=alert,
+        pat_ctx=pat_ctx,
+        confidence=confidence,
+        settings=settings,
+        pattern=pattern,
+        reward=reward_fraction,
+        loss=stop_loss_fraction,
+    )
+    edge_math = _expected_edge_components(
+        probability=probability,
+        reward=reward_fraction,
+        loss=stop_loss_fraction,
+        cost_fraction=cost_fraction,
+    )
+    breakeven = edge_math["breakeven_probability"]
+    snap.update(
+        reason="shadow_edge_computed",
+        probability=round(float(probability), 6),
+        probability_source=source,
+        probability_sample_n=sample_n,
+        probability_details=details,
+        expected_reward_fraction=round(float(edge_math["expected_reward"] or 0.0), 8),
+        expected_loss_fraction=round(float(edge_math["expected_loss"] or 0.0), 8),
+        expected_net_fraction=round(float(edge_math["expected_net"] or 0.0), 8),
+        expected_net_pct=round(float(edge_math["expected_net"] or 0.0) * 100.0, 4),
+        breakeven_probability=(
+            round(float(breakeven), 6) if breakeven is not None else None
+        ),
+        probability_edge=(
+            round(float(edge_math["probability_edge"]), 6)
+            if breakeven is not None
+            else None
+        ),
+        reward_risk=(
+            round(float(edge_math["reward_risk"]), 6)
+            if edge_math["reward_risk"] is not None
+            else None
+        ),
+    )
+    return snap
+
+
+def _ross_tight_stop_best_shadow_edge(plan: dict[str, Any]) -> dict[str, Any] | None:
+    computed: list[tuple[str, dict[str, Any]]] = []
+    for key in ("static_target_shadow_edge", "managed_target_shadow_edge"):
+        edge = plan.get(key)
+        if isinstance(edge, dict) and edge.get("reason") == "shadow_edge_computed":
+            computed.append((key, edge))
+    if not computed:
+        return None
+    source_key, edge = max(
+        computed,
+        key=lambda item: float(item[1].get("expected_net_fraction") or -1e9),
+    )
+    return {
+        "source": source_key,
+        "geometry_source": edge.get("geometry_source"),
+        "expected_net_pct": edge.get("expected_net_pct"),
+        "probability": edge.get("probability"),
+        "reward_fraction": edge.get("reward_fraction"),
+        "stop_loss_fraction": edge.get("stop_loss_fraction"),
+        "reward_risk": edge.get("reward_risk"),
+        "used_for_execution": False,
+    }
+
+
 def _alert_confidence_probability(confidence: float, settings: Any) -> tuple[float, dict[str, Any]]:
     raw = _fraction01(confidence, 0.5)
     if raw is None:
@@ -2846,7 +2939,7 @@ def evaluate_entry_edge(
         "expected_net_pct": snap.get("expected_net_pct"),
         "reward_risk": snap.get("reward_risk"),
     }
-    snap["ross_tight_stop_plan"] = _ross_tight_stop_shadow_plan(
+    ross_tight_stop_plan = _ross_tight_stop_shadow_plan(
         alert,
         settings=settings,
         entry_price=e,
@@ -2855,6 +2948,29 @@ def evaluate_entry_edge(
         static_reward_fraction=static_reward,
         static_loss_fraction=static_loss,
     )
+    if ross_tight_stop_plan.get("shadow_candidate_found"):
+        candidate_loss = _finite_float_or_none(
+            ross_tight_stop_plan.get("candidate_stop_loss_fraction")
+        )
+        if candidate_loss is not None and candidate_loss > 0.0:
+            ross_tight_stop_plan["static_target_shadow_edge"] = (
+                _ross_tight_stop_shadow_edge_snapshot(
+                    db,
+                    alert,
+                    pat_ctx=pat_ctx,
+                    confidence=confidence,
+                    settings=settings,
+                    pattern=pattern,
+                    reward_fraction=static_reward,
+                    stop_loss_fraction=candidate_loss,
+                    cost_fraction=cost_fraction,
+                    geometry_source=ROSS_TIGHT_STOP_STATIC_TARGET_EDGE_SOURCE,
+                )
+            )
+            best_shadow_edge = _ross_tight_stop_best_shadow_edge(ross_tight_stop_plan)
+            if best_shadow_edge is not None:
+                ross_tight_stop_plan["best_shadow_edge"] = best_shadow_edge
+    snap["ross_tight_stop_plan"] = ross_tight_stop_plan
 
     managed_reward, managed_loss, managed_geometry = _managed_exit_geometry_from_directional(
         alert=alert,

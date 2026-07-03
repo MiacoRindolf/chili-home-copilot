@@ -1789,7 +1789,10 @@ def test_evaluate_entry_edge_records_shadow_ross_tight_stop_without_execution():
 
     assert not decision.allowed
     assert decision.reason == "execution_stop_loss_too_wide"
+    assert alert.entry_price == 10.0
     assert alert.stop_loss == 4.0
+    assert alert.target_price == 13.0
+    assert decision.snapshot["edge_geometry_source"] != "ross_tight_stop_static_target_shadow"
     plan = decision.snapshot["ross_tight_stop_plan"]
     assert plan["used_for_execution"] is False
     assert plan["reason"] == "shadow_candidate_found"
@@ -1797,6 +1800,15 @@ def test_evaluate_entry_edge_records_shadow_ross_tight_stop_without_execution():
     assert plan["candidate_stop_price"] == 9.0
     assert plan["candidate_stop_loss_fraction"] == pytest.approx(0.1)
     assert plan["candidate_reward_risk"] == pytest.approx(3.0)
+    shadow_edge = plan["static_target_shadow_edge"]
+    assert shadow_edge["used_for_execution"] is False
+    assert shadow_edge["geometry_source"] == "ross_tight_stop_static_target_shadow"
+    assert shadow_edge["reward_fraction"] == pytest.approx(0.3)
+    assert shadow_edge["stop_loss_fraction"] == pytest.approx(0.1)
+    assert shadow_edge["expected_net_pct"] > 0.0
+    assert plan["best_shadow_edge"]["used_for_execution"] is False
+    assert plan["best_shadow_edge"]["source"] == "static_target_shadow_edge"
+    assert decision.snapshot["execution_stop_loss_fraction"] == pytest.approx(0.6)
 
 
 def test_evaluate_entry_edge_shadow_ross_tight_stop_requires_momentum_floor():
@@ -1861,6 +1873,7 @@ def test_evaluate_entry_edge_shadow_ross_tight_stop_requires_momentum_floor():
     assert plan["reason"] == "momentum_context_below_floor"
     assert plan["gap_passed"] is False
     assert plan["volume_ratio_passed"] is False
+    assert "static_target_shadow_edge" not in plan
 
 
 def test_execution_stop_loss_caps_read_typed_env(monkeypatch):
@@ -2277,7 +2290,7 @@ def test_passes_rule_gate_options_skips_underlying_stop_target_validation(
         indicator_snapshot={
             "option_meta": {
                 "strike": 115.0,
-                "expiration": "2026-06-18",
+                "expiration": "2026-09-18",
                 "option_type": "call",
                 "limit_price": 5.40,
                 "quantity": 1,
@@ -2350,7 +2363,7 @@ def test_passes_rule_gate_options_blocks_missing_quote_spread_before_risk(
         indicator_snapshot={
             "option_meta": {
                 "strike": 115.0,
-                "expiration": "2026-06-18",
+                "expiration": "2026-09-18",
                 "option_type": "call",
                 "limit_price": 5.40,
                 "quantity": 1,
@@ -2426,7 +2439,7 @@ def test_passes_rule_gate_options_blocks_missing_complete_greeks(
         indicator_snapshot={
             "option_meta": {
                 "strike": 115.0,
-                "expiration": "2026-06-18",
+                "expiration": "2026-09-18",
                 "option_type": "call",
                 "limit_price": 5.40,
                 "quantity": 1,
@@ -2490,7 +2503,7 @@ def test_passes_rule_gate_options_blocks_budget_book_error(monkeypatch):
         indicator_snapshot={
             "option_meta": {
                 "strike": 115.0,
-                "expiration": "2026-06-18",
+                "expiration": "2026-09-18",
                 "option_type": "call",
                 "limit_price": 5.40,
                 "quantity": 1,
@@ -2571,7 +2584,7 @@ def test_passes_rule_gate_options_blocks_when_target_cannot_pay_premium(
         indicator_snapshot={
             "option_meta": {
                 "strike": 115.0,
-                "expiration": "2026-06-18",
+                "expiration": "2026-09-18",
                 "option_type": "call",
                 "limit_price": 5.40,
                 "quantity": 1,
