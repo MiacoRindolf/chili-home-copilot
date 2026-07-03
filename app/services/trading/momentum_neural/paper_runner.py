@@ -857,6 +857,17 @@ def tick_paper_session(
                 return {"ok": True, "session_id": sess.id, "state": sess.state, "abstained": True}
             decision_packet_id = dec.get("packet_id")
             notional = min(float(dec["allocation"]["recommended_notional"]), max_notional, 250.0)
+            # FIX-16 (B3) PARITY: in pure-liquidity-cap mode the allocator no longer folds the
+            # variant-performance multiplier into recommended_notional (the notional ceiling is
+            # pure). Paper is notional-first (no separate risk budget), so apply the surfaced
+            # multiplier directly to the paper notional here — this keeps paper sizing behavior
+            # continuous with the live risk-budget path. Legacy mode surfaces 1.0 (no-op).
+            try:
+                _paper_perf_mult = float((dec.get("allocation") or {}).get("performance_size_mult", 1.0) or 1.0)
+                if 0.0 < _paper_perf_mult < 1.0:
+                    notional = max(10.0, notional * _paper_perf_mult)
+            except (TypeError, ValueError):
+                pass
         if bool(getattr(settings, "brain_decision_packet_required_for_runners", True)) and decision_packet_id is None:
             _emit(db, sess, "paper_error", {"reason": "decision_packet_required_missing"})
             _safe_transition(db, sess, STATE_ERROR)

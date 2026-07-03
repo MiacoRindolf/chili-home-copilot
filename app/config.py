@@ -2174,6 +2174,22 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_PERFORMANCE_SIZING_ENABLED"),
     )
+    # FIX-16 (B3) — NOTIONAL-CEILING DOUBLE-HAIRCUT. When True (default), the per-trade
+    # notional ceiling that clips the risk-first quantity reverts to a PURE liquidity/BP
+    # cap (the equity-relative notional cap) — the variant-performance size multiplier is
+    # NO LONGER folded into the ceiling (where, being DOWN-only in [0.3,1.0], it silently
+    # cut realized dollar-risk to 8-47% of designed while never being able to add shares —
+    # "arithmetic theater"). Instead perf scales the per-trade RISK BUDGET once (surfaced
+    # as allocation["performance_size_mult"] and applied in the live/paper runner's
+    # _eff_max_loss composition under the SAME base*3.0 clamp). OFF => byte-identical legacy
+    # (perf multiplies the notional ceiling; performance_size_mult surfaced as 1.0 so the
+    # runner never double-applies). The #769 max-loss circuit + structural stop are
+    # untouched. (feedback_adaptive_no_magic, feedback_no_dark_flags, feedback_evolve_not_devolve)
+    chili_momentum_notional_pure_liquidity_cap_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NOTIONAL_PURE_LIQUIDITY_CAP_ENABLED"),
+        description="FIX-16 (B3): True (default) => the per-trade notional ceiling is a PURE liquidity/BP cap (equity-relative), and the variant-performance multiplier scales the RISK BUDGET once instead of double-haircutting the ceiling. OFF => byte-identical legacy (perf folded into the ceiling).",
+    )
     # Block entries when family×regime×session history is clearly negative (queries DB).
     chili_momentum_family_regime_prefilter_enabled: bool = Field(
         default=False,

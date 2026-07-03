@@ -937,9 +937,22 @@ def allocate_momentum_session_entry(
         context="momentum_entry",
         intended_notional_usd=intended_notional,
     )
+    # FIX-16 (B3) — NOTIONAL-CEILING DOUBLE-HAIRCUT. The variant-performance size mult is
+    # DOWN-only ([0.3,1.0]): folded into the notional CEILING it silently clipped the
+    # risk-first qty (which sits well below the ceiling on live scores 0.58-0.73), cutting
+    # realized dollar-risk to 8-47% of designed while never adding shares. When the pure-
+    # liquidity-cap flag is ON we DO NOT fold perf into the ceiling (it stays a pure
+    # liquidity/BP cap); instead we SURFACE performance_size_mult so the runner scales the
+    # per-trade RISK BUDGET once (bounded, composes under the base*3.0 clamp). OFF =>
+    # byte-identical legacy (fold perf into the ceiling; surface 1.0 so no double-apply).
+    performance_size_mult = 1.0
+    _pure_liq_cap = bool(getattr(settings, "chili_momentum_notional_pure_liquidity_cap_enabled", True))
     try:
         perf_mult = _momentum_variant_performance_size_mult(db, int(getattr(variant, "id", 0) or 0))
-        intended_notional = max(10.0, intended_notional * perf_mult)
+        if _pure_liq_cap:
+            performance_size_mult = max(0.0, float(perf_mult))
+        else:
+            intended_notional = max(10.0, intended_notional * perf_mult)
     except Exception:
         pass
     erc_allocation: dict[str, Any] | None = None
@@ -1173,6 +1186,9 @@ def allocate_momentum_session_entry(
         "abstain_reason_code": abstain_code,
         "abstain_reason_text": abstain_text,
         "recommended_notional": intended_notional if proceed else 0.0,
+        # FIX-16: perf multiplier for the runner to scale the RISK BUDGET once (pure-liquidity-cap
+        # mode). Legacy mode leaves this 1.0 (perf already folded into recommended_notional).
+        "performance_size_mult": performance_size_mult,
         "expected_edge_gross": exp["expected_edge_gross"],
         "expected_edge_net": exp["expected_edge_net"],
         "net_edge_authoritative": net_edge_authoritative,

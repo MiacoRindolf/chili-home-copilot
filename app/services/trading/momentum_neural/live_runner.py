@@ -8322,6 +8322,7 @@ def tick_live_session(
             slip_ref = 6.0
 
         decision_packet_id = None
+        _perf_size_mult = 1.0  # FIX-16: default 1.0 when the decision ledger path is disabled
         if bool(getattr(settings, "brain_enable_decision_ledger", True)):
             dec = run_momentum_entry_decision(
                 db,
@@ -8352,6 +8353,14 @@ def tick_live_session(
                 return {"ok": True, "session_id": sess.id, "state": sess.state, "abstained": True}
             decision_packet_id = dec.get("packet_id")
             max_notional = min(float(max_notional), float(dec["allocation"]["recommended_notional"]))
+            # FIX-16 (B3): in pure-liquidity-cap mode the allocator surfaces the variant-
+            # performance multiplier (DOWN-only [0.3,1.0]) here instead of folding it into the
+            # notional ceiling. Apply it ONCE to the per-trade RISK BUDGET below (under the same
+            # base*3.0 clamp). Legacy mode surfaces 1.0 => no double-apply (byte-identical).
+            try:
+                _perf_size_mult = float((dec.get("allocation") or {}).get("performance_size_mult", 1.0) or 1.0)
+            except (TypeError, ValueError):
+                _perf_size_mult = 1.0
         if bool(getattr(settings, "brain_decision_packet_required_for_runners", True)) and decision_packet_id is None:
             _emit(db, sess, "live_error", {"reason": "decision_packet_required_missing"})
             _safe_transition(db, sess, STATE_LIVE_ERROR)
@@ -9175,7 +9184,7 @@ def tick_live_session(
         # whole budget and silently kill the fill. The 3x clamp + max_notional ceiling below are
         # unchanged; a valid product is byte-identical.
         _eff_max_loss = min(
-            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult) * _safe_mult(_daily_room_mult) * _safe_mult(_red_intraday_mult),
+            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult) * _safe_mult(_daily_room_mult) * _safe_mult(_red_intraday_mult) * _safe_mult(_perf_size_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # COMBINED SIZE-DOWN FLOOR for a genuine front-side A-setup (default ON; OFF /
