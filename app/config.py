@@ -3257,6 +3257,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_SECOND_DAY_CONTEXT_ENABLED"),
         description="Kill-switch for the P1 second-day/multi-day continuation selection tilt (equities). false = no day-2 boost, no day-3+ derate; the run/level fields are still surfaced for audit but daily_structure_pct is byte-identical.",
     )
+    chili_momentum_symbol_freshness_tilt_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SYMBOL_FRESHNESS_TILT_ENABLED"),
+        description="A5 (clro-p1) two-signed symbol-freshness SELECTION tilt (equities). Folds a bounded re-rank into daily_structure_pct: FRESH (no recent explosive daily move AND low prior trailing-20d $vol percentile vs the symbol's own trailing year) => positive tilt; STALE (a recent explosive daily move that FADED back below its pre-move base) => negative tilt. TILT only, never a veto; fail-open-to-neutral on thin/NaN history. false => daily_structure_pct byte-identical.",
+    )
     # ── Halt awareness (Ross low-floats halt constantly: LULD circuit breakers) ──
     # A trading HALT is observable as a SUSTAINED quote freeze: the stale_bbo gate
     # already blocks single stale ticks; this many CONSECUTIVE stale-quote ticks on

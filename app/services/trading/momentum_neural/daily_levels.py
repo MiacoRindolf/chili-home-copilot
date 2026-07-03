@@ -56,6 +56,31 @@ _RECENT_IPO_MAX_BARS = 504  # ~2 yr of trading days; the ONE documented IPO-rece
 _SECOND_DAY_TILT = 0.12          # ONE documented base: the day-2 continuation boost / day-3+ derate magnitude
 _SECOND_DAY_RUN_MAX_BARS = 6     # how far back to scan for the consecutive run (bounds the loop; adaptive cap)
 
+# (A5) SYMBOL-FRESHNESS TILT (chili_momentum_symbol_freshness_tilt_enabled). Ross prefers a
+# name with a "somewhat recent reverse split, no big days of volume recently" (FRESH — CLRO)
+# and passes a name that "made a huge move and then sold off" (STALE — DSY). Two-signed SOFT
+# tilt folded into daily_structure_pct. Reuses the lane's OWN existing explosive change-pct
+# floor (ross_momentum.ROSS_ELIGIBILITY_CHANGE_FLOOR_PCT = 10.0) as the "explosive daily move"
+# threshold — NO new magic number. The trailing $-volume window is the SAME 20-day selection
+# window the daily lane already uses; the "own trailing year" baseline reuses the full df.
+#   * FRESH = no explosive daily move within the recency window AND the trailing-20d $vol sits
+#     in a LOW percentile vs the symbol's own trailing-year $vol (quiet, un-exhausted) => +tilt.
+#   * STALE = a recent explosive daily move that FADED (a bar moved >= the floor UP, then price
+#     closed back BELOW that bar's pre-move base) => -tilt.
+# The tilt magnitude reuses _FRESHNESS_TILT (the ONE documented base, symmetric both signs).
+_FRESHNESS_TILT = 0.10           # ONE documented base: the symbol-freshness boost / stale-fade derate magnitude
+_FRESHNESS_STALE_MAX_BARS = 10   # recency window (daily bars) for "recent explosive move" (bounds the scan)
+_FRESHNESS_LOW_VOL_PCTL = 0.40   # trailing-20d $vol at/below this own-year percentile = "quiet / no big recent volume"
+
+# (A7) CONSECUTIVE-RED-DAILIES SOFT DE-RANK — Ross passes a daily chart with "four or five red
+# candles in a row … price clearly coming down." Counts consecutive DOWN closes ending yesterday
+# and folds a SOFT de-rate into daily_structure_pct (SELECTION tilt, NEVER an entry veto — the
+# module docstring guarantee keeps day-2 gapper winners tradable). Derate scales with run length
+# using the existing red-rejection tilt base (_RED_REJECTION_DERATE_BASE); no new flag (folds under
+# chili_momentum_red_rejection_derate_enabled). Fail-open-to-neutral on thin history.
+_RED_REJECTION_DERATE_BASE = 0.15  # the existing red-rejection/derate tilt base (mirrors the (B) block below)
+_RED_RUN_MAX_BARS = 6              # how far back to scan for the consecutive down-close run (bounds the loop)
+
 
 @dataclass(frozen=True)
 class DailyContext:
@@ -92,6 +117,12 @@ class DailyContext:
     day_number_in_run: int | None = None               # consecutive up/elevated daily bars since the catalyst spike (1 = day-1 spike)
     prior_day_close: float | None = None               # yesterday's daily close (the day-2 hold reference)
     prior_week_high: float | None = None               # highest high over the trailing ~5 daily bars (the week's ceiling)
+    # (A5) SYMBOL FRESHNESS (chili_momentum_symbol_freshness_tilt_enabled) — log/audit annotations.
+    days_since_last_explosive_move: int | None = None  # bars since the last daily |move| >= the lane's explosive floor (None = none in window)
+    trailing_dollar_vol_pctl: float | None = None      # [0,1] trailing-20d $vol percentile vs the symbol's own trailing year
+    freshness_tilt_sign: int | None = None             # +1 FRESH boost / -1 STALE-fade derate / 0 neutral (log-only)
+    # (A7) CONSECUTIVE-RED-DAILIES (folds under chili_momentum_red_rejection_derate_enabled).
+    red_run_count: int | None = None                   # consecutive down-closes ending yesterday (0 = none / not down)
 
 
 _NULL = DailyContext(
@@ -325,6 +356,130 @@ def _day_number_in_run(
     return int(run)
 
 
+def _red_run_count(close: Any, *, max_bars: int = _RED_RUN_MAX_BARS) -> int | None:
+    """(A7) Count the consecutive DOWN-close daily bars ending at YESTERDAY (the last COMPLETED
+    bar excluding the still-forming intraday bar at index -1). Ross passes a name showing "four
+    or five red candles in a row … price clearly coming down."
+
+    Walk BACKWARD from bar -2 (yesterday): a bar is "red" when its close < the prior bar's close.
+    Stop at the first non-red bar. Bounded to ``max_bars``. Returns 0 when yesterday was not a
+    down-close, and ``None`` on thin / non-finite data (fail-open ⇒ no derate). Pure; never raises.
+    """
+    try:
+        cv = [float(x) for x in close.values]
+    except Exception:
+        return None
+    n = len(cv)
+    if n < 3:
+        return None  # need at least yesterday + a prior bar to compare (fail-open)
+    cap = max(1, int(max_bars))
+    run = 0
+    # bar -1 is the still-forming intraday bar; the daily RED run ends at yesterday (index n-2).
+    for i in range(n - 2, 0, -1):
+        if run >= cap:
+            break
+        c_cur, c_prev = cv[i], cv[i - 1]
+        if not (math.isfinite(c_cur) and math.isfinite(c_prev)):
+            break
+        if c_cur < c_prev:  # a down close vs the prior bar = a red daily
+            run += 1
+        else:
+            break
+    return int(run)
+
+
+def _symbol_freshness(
+    high: Any,
+    low: Any,
+    close: Any,
+    volume: Any | None,
+    *,
+    explosive_floor_pct: float,
+    recency_bars: int = _FRESHNESS_STALE_MAX_BARS,
+    vol_window: int = 20,
+) -> tuple[int | None, float | None, int]:
+    """(A5) Two-signed symbol-freshness read from the daily OHLCV.
+
+    Returns ``(days_since_last_explosive_move, trailing_dollar_vol_pctl, sign)`` where:
+      * ``days_since_last_explosive_move`` = bars back (from the last COMPLETED bar) to the most
+        recent daily |close-to-close move| >= ``explosive_floor_pct`` (the lane's OWN explosive
+        change-pct floor — reused, no new number); ``None`` when there is none in the window.
+      * ``trailing_dollar_vol_pctl`` = the trailing ``vol_window``-day mean $volume as a percentile
+        vs the symbol's OWN trailing-year ($-vol per bar) history; ``None`` on thin/absent volume.
+      * ``sign`` = +1 FRESH (no recent explosive move AND low prior $vol percentile — quiet, un-
+        exhausted, room to run), -1 STALE (a recent explosive move that FADED back below its
+        pre-move base — spike-and-fade), 0 neutral.
+
+    Pure; fail-OPEN to ``(None, None, 0)`` on thin/NaN history (the module's neutral contract).
+    """
+    try:
+        cv = [float(x) for x in close.values]
+        hv = [float(x) for x in high.values]
+        lv = [float(x) for x in low.values]
+    except Exception:
+        return (None, None, 0)
+    n = len(cv)
+    if n < 3 or not (explosive_floor_pct and math.isfinite(explosive_floor_pct) and explosive_floor_pct > 0):
+        return (None, None, 0)
+    floor_frac = float(explosive_floor_pct) / 100.0
+
+    # (a) days since the last explosive daily move (scan back over the recency window from the
+    #     last COMPLETED bar n-2; index -1 is the still-forming intraday bar). Also record the
+    #     index of that explosive bar so the STALE-fade check can compare against its base.
+    days_since: int | None = None
+    explosive_idx: int | None = None
+    cap = max(1, int(recency_bars))
+    scanned = 0
+    for i in range(n - 2, 0, -1):
+        if scanned >= cap:
+            break
+        c_cur, c_prev = cv[i], cv[i - 1]
+        if not (math.isfinite(c_cur) and math.isfinite(c_prev) and c_prev > 0):
+            scanned += 1
+            continue
+        if abs(c_cur / c_prev - 1.0) >= floor_frac:
+            days_since = (n - 2) - i  # 0 = yesterday itself was explosive
+            explosive_idx = i
+            break
+        scanned += 1
+
+    # (b) trailing-20d mean $vol as a percentile vs the symbol's own trailing-year $vol/bar.
+    dv_pctl: float | None = None
+    if volume is not None:
+        try:
+            vv = [float(x) for x in volume.values]
+            dv = [cv[k] * vv[k] for k in range(n) if math.isfinite(cv[k]) and math.isfinite(vv[k]) and cv[k] > 0 and vv[k] >= 0]
+            w = max(2, int(vol_window))
+            if len(dv) >= w + 2:
+                recent = dv[-w:]
+                recent_mean = sum(recent) / float(len(recent))
+                # own trailing-year baseline = per-bar $vol history (whatever the df carries, up to a year).
+                base = dv[-252:] if len(dv) >= 252 else dv
+                if base:
+                    below = sum(1 for x in base if x <= recent_mean)
+                    dv_pctl = max(0.0, min(1.0, below / float(len(base))))
+        except Exception:
+            dv_pctl = None
+
+    # (c) two-signed sign. STALE dominates FRESH (a recent spike-and-fade is the stronger read).
+    sign = 0
+    # STALE: a recent explosive move that FADED — the current price closed back BELOW the base the
+    # explosive bar launched FROM (its prior-bar close), i.e. the whole move was given back.
+    if explosive_idx is not None and explosive_idx >= 1:
+        try:
+            pre_move_base = cv[explosive_idx - 1]
+            last_completed = cv[n - 2]
+            if math.isfinite(pre_move_base) and math.isfinite(last_completed) and pre_move_base > 0:
+                if last_completed <= pre_move_base:
+                    sign = -1
+        except Exception:
+            pass
+    # FRESH: no recent explosive move in the window AND quiet trailing $vol (low own-year percentile).
+    if sign == 0 and days_since is None and dv_pctl is not None and dv_pctl <= _FRESHNESS_LOW_VOL_PCTL:
+        sign = 1
+    return (days_since, dv_pctl, sign)
+
+
 # ── ENTRY-PATH overhead-supply read (P0) ─────────────────────────────────────────
 # The SELECTION tilts above re-rank a name; these two pure helpers let the ENTRY gate
 # (entry_gates.py) read the SAME daily structure so a breakout TRIGGER is daily-aware:
@@ -403,6 +558,7 @@ def compute_daily_context(
     fresh_catalyst: bool = False,
     entry_context: bool = False,
     second_day_context: bool | None = None,
+    symbol_freshness_tilt: bool | None = None,
 ) -> DailyContext:
     """Daily context from a daily OHLCV df (cols Open/High/Low/Close/Volume).
 
@@ -435,6 +591,18 @@ def compute_daily_context(
     DAY-2 (holding above prior_day_high / prior_day_close), DERATE day-3+ (exhaustion).
     OFF (flag false) ⇒ the run/level fields are still surfaced for log/audit but ``ds`` is
     left byte-identical (the boost/derate is gated on the flag). A re-rank tilt, never a gate.
+
+    ``symbol_freshness_tilt`` (A5; flag ``chili_momentum_symbol_freshness_tilt_enabled``): when
+    True (``None`` ⇒ resolve the live flag lazily), fold a bounded TWO-SIGNED tilt INTO ``ds`` —
+    FRESH (no recent explosive daily move AND low trailing-20d $vol percentile vs the symbol's own
+    trailing year) ⇒ +tilt; STALE (a recent explosive daily move that FADED back below its base)
+    ⇒ -tilt. The freshness fields are surfaced for audit regardless; the ds mutation is gated on
+    the flag. A re-rank tilt, never a gate; fail-open-to-neutral on thin/NaN history.
+
+    (A7) CONSECUTIVE-RED-DAILIES SOFT DE-RANK: folds under the EXISTING
+    ``red_rejection_derate`` flag (no new flag). When that flag is on, a name with N consecutive
+    down-closes ending yesterday gets a SOFT de-rate scaled by run length (never a veto). The
+    ``red_run_count`` field is surfaced for audit regardless.
     """
     if second_day_context is None:
         try:
@@ -442,6 +610,12 @@ def compute_daily_context(
             second_day_context = bool(getattr(_settings, "chili_momentum_second_day_context_enabled", False))
         except Exception:
             second_day_context = False
+    if symbol_freshness_tilt is None:
+        try:
+            from app.config import settings as _settings2  # local import: no top-level dep
+            symbol_freshness_tilt = bool(getattr(_settings2, "chili_momentum_symbol_freshness_tilt_enabled", True))
+        except Exception:
+            symbol_freshness_tilt = False
     n = max(2, int(lookback))
     try:
         if df is None or len(df) < n + 2:
@@ -622,6 +796,45 @@ def compute_daily_context(
         except Exception:
             pass
 
+        # (A5) SYMBOL-FRESHNESS TWO-SIGNED TILT — Ross prefers a FRESH name ("recent reverse
+        # split, no big days of volume recently" — CLRO) and passes a STALE one ("made a huge
+        # move and then sold off" — DSY). Reuses the lane's OWN explosive change-pct floor (no
+        # new number). The freshness fields are surfaced for audit regardless; the ds mutation is
+        # gated on the flag (OFF ⇒ byte-identical). A re-rank tilt, never a gate; fail-open-neutral.
+        days_since_explosive = tdv_pctl = fresh_sign = None
+        try:
+            from .ross_momentum import ROSS_ELIGIBILITY_CHANGE_FLOOR_PCT as _EXP_FLOOR
+        except Exception:
+            _EXP_FLOOR = 10.0
+        try:
+            _vol_series = df["Volume"].astype(float) if "Volume" in df.columns else None
+            days_since_explosive, tdv_pctl, fresh_sign = _symbol_freshness(
+                high, low, close, _vol_series, explosive_floor_pct=float(_EXP_FLOOR), vol_window=n,
+            )
+            if symbol_freshness_tilt and fresh_sign:
+                if fresh_sign > 0:  # FRESH — quiet, un-exhausted, room to run
+                    ds = max(0.0, min(1.0, ds + _FRESHNESS_TILT))
+                elif fresh_sign < 0:  # STALE spike-and-fade — multiplicative derate (never zeroes)
+                    ds = max(0.0, min(1.0, ds * (1.0 - _FRESHNESS_TILT)))
+        except Exception:
+            pass
+
+        # (A7) CONSECUTIVE-RED-DAILIES SOFT DE-RANK — Ross passes "four or five red candles in a
+        # row … price clearly coming down." SOFT selection de-rate scaled by run length; NEVER an
+        # entry veto (the module docstring guarantee keeps day-2 gapper winners tradable). Folds
+        # under the EXISTING red_rejection_derate flag (no new flag). The count is surfaced for
+        # audit regardless; the ds mutation is gated on that flag. Fail-open-neutral on thin history.
+        red_run = None
+        try:
+            red_run = _red_run_count(close)
+            if red_rejection_derate and red_run and red_run >= 2:
+                # adaptive: scale by how long the run is vs the window; cap so it never zeroes.
+                run_norm = min(1.0, red_run / float(max(1, n // 4)))
+                red_derate = _RED_REJECTION_DERATE_BASE * run_norm
+                ds = max(0.0, min(1.0, ds * (1.0 - red_derate)))
+        except Exception:
+            pass
+
         return DailyContext(
             prior_day_high=pdh, prior_day_low=pdl, swing_high_nd=sh, swing_low_nd=sl,
             daily_atr_pct=atr_pct, dist_to_resistance_atr=d_res, dist_to_support_atr=d_sup,
@@ -633,6 +846,9 @@ def compute_daily_context(
             rejection_count=rej_count, rejection_recency_frac=rej_recency,
             is_blue_sky=is_blue, trading_history_days=trade_days, is_recent_ipo=is_ipo,
             day_number_in_run=day_num, prior_day_close=pday_close, prior_week_high=pweek_high,
+            days_since_last_explosive_move=days_since_explosive,
+            trailing_dollar_vol_pctl=tdv_pctl, freshness_tilt_sign=fresh_sign,
+            red_run_count=red_run,
         )
     except Exception:
         return _NULL
