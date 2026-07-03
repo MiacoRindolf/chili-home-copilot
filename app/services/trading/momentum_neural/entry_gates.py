@@ -3341,11 +3341,28 @@ def tape_confirms_hold(
     returns ``(False, ...)``. So a missing tape NEVER produces an early fire — the caller
     keeps waiting on the existing break trigger. Pure read (no writes).
 
-    KILL-SWITCH ``chili_momentum_tape_hold_entry_enabled`` OFF ⇒ ``(False, ...)`` before any
-    I/O, so the early-fire path is byte-identical (the caller never even probes)."""
+    CAPTURE-G1(b) DECOUPLE (2026-07-03): this confirmer now keys on TAPE AVAILABILITY, not on
+    the FIX-C early-fire flag. Previously it short-circuited to ``(False, tape_hold_disabled)``
+    whenever ``chili_momentum_tape_hold_entry_enabled`` was OFF (the deployed default) — which
+    silently made this a hard-False LAST gate for the TWELVE pattern triggers that require it
+    (bull_flag, wedge, absorption_snap, false_break_reclaim, ask_thins_dip, sub_vwap_trap,
+    pulling_away_roc, premarket_pivot_macd, inverse_h&s, cup_and_handle, bottom_reversal) plus
+    the momentum-continuation entry — so those setups could NEVER fire live even though
+    WAVE-4 R4 had flipped cup_and_handle ON as a "proven filler". Two distinct concerns were
+    fused into one flag. Now: the FIX-C EARLY-FIRE path stays governed by
+    ``chili_momentum_tape_hold_entry_enabled`` at its own call sites (live_runner), while THIS
+    inline gate evaluates the executed tape whenever it is dense+healthy and FAILS CLOSED on
+    genuinely missing/thin/stale/crypto tape EXACTLY as before (``signed_tape_accel_features``
+    returns None on <3 ticks / no db / crypto / error ⇒ ``(False, tape_hold_no_data)``). The
+    fail-closed floor is unchanged — a name with no buyers on tape still never fires.
+
+    KILL-SWITCH ``chili_momentum_pattern_tape_gate_enabled`` (default True) ⇒ OFF restores the
+    legacy hard-False short-circuit (the 12 triggers go dark again) for instant rollback."""
     dbg: dict[str, Any] = {"reason": "tape_hold_no_data"}
     try:
-        if not bool(getattr(settings, "chili_momentum_tape_hold_entry_enabled", False)):
+        if not bool(getattr(settings, "chili_momentum_pattern_tape_gate_enabled", True)):
+            # Rollback kill-switch ONLY: OFF reverts to the pre-decouple hard-False behavior
+            # (every dependent trigger's tape gate refuses ⇒ dark), for a one-flag revert.
             dbg["reason"] = "tape_hold_disabled"
             return False, dbg
         if db is None or not symbol:

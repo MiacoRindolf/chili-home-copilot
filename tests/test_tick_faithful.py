@@ -292,14 +292,39 @@ def test_build_micro_bar_df_returns_frame_when_dense(db: Session):
     assert list(df.columns) == ["Open", "High", "Low", "Close", "Volume"]
 
 
-def test_micropull_off_is_default_and_config_present():
-    # default OFF ⇒ live path is byte-identical (the parity contract)
-    assert settings.chili_momentum_micropull_enabled is False
+def test_micropull_on_by_default_and_config_present():
+    # CAPTURE-G1(a) 2026-07-03: micropull flipped ON by default (paired with the 15s
+    # first-pullback interval so the micro-frame first-pullback ARM engages). SVRE
+    # 2026-06-30 replay-verified: micro reaches waiting_for_break at pullback_high=6.89
+    # (Ross's 6.98) where 1m stays pullback_too_deep. The tick-density fail-safe
+    # (test_build_micro_bar_df_falls_back_when_sparse) still protects thin names from
+    # fabricating armable 15s bars.
+    assert settings.chili_momentum_micropull_enabled is True
+    assert settings.chili_momentum_first_pullback_interval == "15s"
     assert 5 <= settings.chili_momentum_micropull_bar_seconds <= 30
     assert settings.chili_momentum_replay_tick_entry_enabled is False
     assert settings.chili_momentum_replay_full_pipeline_enabled is False
     assert settings.chili_momentum_universe_tick_record_enabled is True
     assert 1 <= settings.chili_momentum_universe_tick_retention_days <= 30
+
+
+def test_micropull_thin_tape_cannot_arm_junk_break(db: Session):
+    """CAPTURE-G1(a) explicit fail-safe: even with micropull ON, a genuinely THIN name
+    (only a few 1-min snapshots) resamples to < 10 micro-bars, so _build_micro_bar_df
+    returns None and the live path falls back to the 1m frame — a sparse tape can NEVER
+    fabricate a 15s micro-frame that arms a junk break. Complements the dense case below."""
+    from app.services.trading.momentum_neural.live_runner import _build_micro_bar_df
+
+    _ensure_table(db)
+    base = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=12)
+    # 6 one-per-minute snapshots over 5 min → << the 10-micro-bar floor the trigger needs.
+    rows = [
+        (base + timedelta(minutes=m), 3.55 + m * 0.02, 3.57 + m * 0.02, "massive_snapshot")
+        for m in range(6)
+    ]
+    _seed_tape(db, "THINPM", rows)
+    # too sparse → None → 1m fallback; no armable micro-frame produced.
+    assert _build_micro_bar_df(db, "THINPM", bar_seconds=15) is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

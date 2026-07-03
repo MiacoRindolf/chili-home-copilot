@@ -91,14 +91,31 @@ def _rising_frame(n: int = 30, base: float = 10.0, step: float = 0.05) -> pd.Dat
 #    A missing tape must NEVER produce an early fire.
 # ==============================================================================
 class TestTapeConfirmsHoldFailsClosed:
-    def test_disabled_flag_no_fire_and_no_io(self):
-        # Flag OFF must short-circuit BEFORE any I/O (a raising db must not even be hit).
+    def test_pattern_gate_rollback_flag_no_fire_and_no_io(self):
+        # CAPTURE-G1(b): the ROLLBACK kill-switch chili_momentum_pattern_tape_gate_enabled=False
+        # must short-circuit BEFORE any I/O (a raising db must not even be hit) — the legacy
+        # hard-False (dark) behavior for a one-flag revert.
         ok, dbg = eg.tape_confirms_hold(
             "AAA", db=_RaisingDB(),
-            settings=_S(chili_momentum_tape_hold_entry_enabled=False),
+            settings=_S(chili_momentum_pattern_tape_gate_enabled=False),
         )
         assert ok is False
         assert dbg.get("reason") == "tape_hold_disabled"
+
+    def test_decouple_early_fire_flag_off_still_evaluates_tape(self):
+        # CAPTURE-G1(b) DECOUPLE PROOF: the FIX-C early-fire flag
+        # chili_momentum_tape_hold_entry_enabled being OFF must NO LONGER disable the inline
+        # pattern-trigger tape gate — with the (default-on) pattern gate, a genuinely lifting
+        # tape CONFIRMS even though the early-fire flag is OFF. This is what un-darks the 12
+        # tape-required pattern triggers in production.
+        feats = {"signed_tape_accel": 0.8, "tick_rate": 9.0, "tick_rate_floor": 1.0, "n_ticks": 25}
+        with patch.object(eg, "signed_tape_accel_features", return_value=feats):
+            ok, dbg = eg.tape_confirms_hold(
+                "AAA", db=_EmptyDB(),
+                settings=_S(chili_momentum_tape_hold_entry_enabled=False),
+            )
+        assert ok is True
+        assert dbg["reason"] == "tape_hold_confirmed"
 
     def test_missing_symbol_fails_closed(self):
         ok, _ = eg.tape_confirms_hold(
@@ -176,6 +193,74 @@ class TestTapeConfirmsHoldFailsClosed:
             )
         assert ok is True
         assert dbg["reason"] == "tape_hold_confirmed"
+
+
+# ==============================================================================
+# CAPTURE-G1(b) — the 12 tape-required pattern triggers become REACHABLE.
+#   Every one of these triggers uses tape_confirms_hold as its fail-closed LAST gate.
+#   Before the decouple, chili_momentum_tape_hold_entry_enabled=False (the deployed
+#   default) hard-Falsed that gate ⇒ all 12 could NEVER fire live. After the decouple
+#   the gate keys on TAPE AVAILABILITY: dense+healthy tape ⇒ confirmed (the trigger is
+#   REACHABLE, still tape-gated); missing/thin/stale ⇒ the fail-CLOSED refusal STANDS.
+# ==============================================================================
+class TestTwelveTriggersReachableAfterDecouple:
+    # The 12 triggers whose fail-closed LAST gate is tape_confirms_hold (doc/audit list).
+    TWELVE = (
+        "bull_flag_confirmation", "wedge_break_entry", "absorption_snap_entry",
+        "false_break_reclaim_confirmation", "ask_thins_dip_entry", "sub_vwap_trap_entry",
+        "pulling_away_roc_entry", "premarket_pivot_macd_entry",
+        "inverse_head_shoulders_confirmation", "cup_and_handle_confirmation",
+        "bottom_reversal_confirmation", "momentum_continuation",  # + the continuation entry
+    )
+
+    def test_all_named_triggers_exist(self):
+        # The decoupled gate is the shared dependency of these triggers; guard the list
+        # against a rename silently dropping a trigger off the tape gate.
+        callables = {
+            "bull_flag_confirmation", "wedge_break_entry", "absorption_snap_entry",
+            "false_break_reclaim_confirmation", "ask_thins_dip_entry", "sub_vwap_trap_entry",
+            "pulling_away_roc_entry", "premarket_pivot_macd_entry",
+            "inverse_head_shoulders_confirmation", "cup_and_handle_confirmation",
+            "bottom_reversal_confirmation", "momentum_continuation_trigger",
+        }
+        for name in callables:
+            assert hasattr(eg, name), f"trigger {name} missing (tape-gate dependency changed?)"
+
+    def test_dense_healthy_tape_confirms_regardless_of_early_fire_flag(self):
+        # With DENSE healthy tape the shared gate CONFIRMS whether the FIX-C early-fire flag
+        # is ON or OFF — proving the 12 triggers are reachable independent of that flag.
+        feats = {"signed_tape_accel": 0.9, "tick_rate": 12.0, "tick_rate_floor": 1.0, "n_ticks": 40}
+        for early_flag in (True, False):
+            with patch.object(eg, "signed_tape_accel_features", return_value=feats):
+                ok, dbg = eg.tape_confirms_hold(
+                    "AAA", db=_EmptyDB(),
+                    settings=_S(chili_momentum_tape_hold_entry_enabled=early_flag),
+                )
+            assert ok is True, f"dense tape must confirm (early_flag={early_flag})"
+            assert dbg["reason"] == "tape_hold_confirmed"
+
+    def test_thin_or_missing_tape_still_refuses(self):
+        # The fail-CLOSED floor is UNCHANGED: a missing/thin tape (features None) refuses,
+        # so a name with no buyers on tape can never fire — the discipline is preserved.
+        with patch.object(eg, "signed_tape_accel_features", return_value=None):
+            ok, dbg = eg.tape_confirms_hold(
+                "AAA", db=_EmptyDB(),
+                settings=_S(chili_momentum_tape_hold_entry_enabled=False),
+            )
+        assert ok is False
+        assert dbg["reason"] == "tape_hold_no_data"
+
+    def test_rollback_flag_darkens_all_twelve(self):
+        # The one-flag rollback: pattern_tape_gate_enabled=False restores the hard-False
+        # (dark) gate for ALL dependent triggers, even on a genuinely lifting tape.
+        feats = {"signed_tape_accel": 0.9, "tick_rate": 12.0, "tick_rate_floor": 1.0, "n_ticks": 40}
+        with patch.object(eg, "signed_tape_accel_features", return_value=feats):
+            ok, dbg = eg.tape_confirms_hold(
+                "AAA", db=_EmptyDB(),
+                settings=_S(chili_momentum_pattern_tape_gate_enabled=False),
+            )
+        assert ok is False
+        assert dbg["reason"] == "tape_hold_disabled"
 
 
 # ==============================================================================
