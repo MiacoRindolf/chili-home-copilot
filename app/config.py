@@ -4474,6 +4474,26 @@ class Settings(BaseSettings):
         default="5m",
         validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ENTRY_INTERVAL"),
     )
+    # ── Tick-scalp one-shot latch: placeability gate (STEP-B #12) ──
+    # The tick first-pullback trigger is one-shot (state["fired"] latches so a single
+    # reclaim can't re-buy the same leg). The bug: it CONSUMED the shot even when NO order
+    # could be placed (blocked clock / dark adapter / unpassable spread) — USDE fired ×1,149
+    # while blocked, WHLR/DSY/JEM/CETX stranded. With this ON, the reclaim is only CONSUMED
+    # when the caller confirms the order is actually placeable; a fired-but-no-order tick
+    # REARMS (does not latch) so the very next placeable tick can fire — bounded by the
+    # per-day rearm cap below. OFF => legacy behavior (consume on reclaim regardless).
+    chili_momentum_tick_scalp_placeability_gate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TICK_SCALP_PLACEABILITY_GATE_ENABLED"),
+        description="Consume the tick-scalp one-shot latch ONLY when an order is actually placeable; a fired-but-no-order tick REARMS instead of latching (bounded by the per-day rearm cap). Fixes the blocked-while-fired strand (USDE ×1,149).",
+    )
+    chili_momentum_tick_scalp_max_rearms_per_day: int = Field(
+        default=8,
+        ge=1,
+        le=100,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TICK_SCALP_MAX_REARMS_PER_DAY"),
+        description="Max fired-but-no-order REARMS per symbol/day before the tick-scalp latch consumes anyway (stops an unbounded blocked-spin). The one documented base; a FLOOR the caller can raise per-symbol.",
+    )
     # ── Ross RECENT (post-book) entry-quality refinements (docs/DESIGN/MOMENTUM_LANE.md §8) ──
     # #1 Break-AND-retest: don't buy the raw first break (it wicks out / reverses);
     # wait for the break, a shallow retest of the broken level, and a hold+reclaim.

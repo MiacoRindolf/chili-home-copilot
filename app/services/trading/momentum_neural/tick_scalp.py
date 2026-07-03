@@ -508,6 +508,34 @@ def _quote_price(*, bid: float | None, ask: float | None, mid: float | None) -> 
     return None
 
 
+def _placeability_gate_enabled() -> bool:
+    """Read the STEP-B #12 flag (default True). Import-safe: any failure => ON."""
+    try:
+        from ....config import settings
+
+        return bool(getattr(settings, "chili_momentum_tick_scalp_placeability_gate_enabled", True))
+    except Exception:
+        return True
+
+
+def _tick_scalp_max_rearms_per_day(override: int | None = None) -> int:
+    """Per-day rearm cap (the one documented base = 8; the override is a FLOOR the caller
+    can raise). Import-safe."""
+    base = 8
+    try:
+        from ....config import settings
+
+        base = int(getattr(settings, "chili_momentum_tick_scalp_max_rearms_per_day", 8) or 8)
+    except Exception:
+        base = 8
+    if override is not None:
+        try:
+            return max(1, int(override), base)
+        except (TypeError, ValueError):
+            return max(1, base)
+    return max(1, base)
+
+
 def evaluate_tick_first_pullback(
     *,
     symbol: str,
@@ -522,7 +550,21 @@ def evaluate_tick_first_pullback(
     min_reclaim_bps: float = 8.0,
     stop_buffer_bps: float = 12.0,
     max_hold_seconds: float = 12.0,
+    placeable: bool | None = None,
+    max_rearms_per_day: int | None = None,
 ) -> TickFirstPullbackDecision:
+    """Evaluate the tick-level first-pullback scalp for one quote tick.
+
+    ONE-SHOT LATCH → PLACEABILITY-GATED (STEP-B #12): the reclaim fires once, then the
+    ``fired`` latch blocks any re-buy of the same leg. With the placeability gate ON (flag
+    ``chili_momentum_tick_scalp_placeability_gate_enabled``, default True) the latch is only
+    CONSUMED when the caller passes ``placeable=True`` (market-hours ok + adapter healthy +
+    spread passable — the caller owns those checks). A reclaim that fires while
+    ``placeable=False`` REARMS instead of latching (does not set ``fired``) so the very next
+    placeable tick can fire — bounded by ``max_rearms_per_day`` (the one documented base = 8,
+    override is a FLOOR). Once the rearm cap is hit the latch consumes anyway to stop an
+    unbounded blocked-spin. ``placeable=None`` (or the flag OFF) preserves the legacy
+    consume-on-reclaim behavior for callers not participating in the gate."""
     evidence_ok, evidence_reason, evidence_debug = ross_tick_scalp_evidence_ok(signal)
     existing = dict(state or {})
     if not evidence_ok:
@@ -562,6 +604,11 @@ def evaluate_tick_first_pullback(
             phase = "watching"
 
     now_text = (now_utc or datetime.utcnow()).isoformat()
+    _prev_rearms = existing.get("rearm_count")
+    try:
+        _prev_rearms = int(_prev_rearms) if _prev_rearms is not None else 0
+    except (TypeError, ValueError):
+        _prev_rearms = 0
     next_state = {
         "symbol": str(symbol or "").upper(),
         "phase": phase,
@@ -570,6 +617,8 @@ def evaluate_tick_first_pullback(
         "last_price": round(float(price), 6),
         "last_update_utc": now_text,
     }
+    if _prev_rearms:
+        next_state["rearm_count"] = _prev_rearms  # carry the per-day rearm counter forward
     if signal_price is not None:
         next_state["signal_price"] = round(float(signal_price), 6)
 
@@ -610,8 +659,38 @@ def evaluate_tick_first_pullback(
     had_prior_pullback = prev_phase == "pullback" and prev_low is not None
     tick_uptick = prev_last is None or price > prev_last
     if had_prior_pullback and tick_uptick and price >= reclaim_level:
+        # PLACEABILITY GATE (STEP-B #12): only CONSUME the one-shot latch when an order is
+        # actually placeable. A reclaim fired while blocked (dark adapter / closed clock /
+        # unpassable spread) must NOT strand the trigger in `fired` — it REARMS so the next
+        # placeable tick can fire, bounded by the per-day cap.
+        _gate_on = _placeability_gate_enabled()
+        debug["placeability_gate_enabled"] = bool(_gate_on)
+        debug["placeable"] = placeable
+        if not _gate_on or placeable is None or placeable is True:
+            # Legacy path (gate off / caller not participating) OR confirmed placeable:
+            # consume the latch and fire.
+            next_state["phase"] = "fired"
+            next_state["fired"] = True
+            return TickFirstPullbackDecision(True, TRIGGER_REASON, next_state, debug)
+        # placeable is False and the gate is on: rearm (don't latch) up to the per-day cap.
+        _cap = _tick_scalp_max_rearms_per_day(max_rearms_per_day)
+        _rearms = int(next_state.get("rearm_count", 0) or 0)
+        debug["rearm_count"] = _rearms
+        debug["max_rearms_per_day"] = _cap
+        if _rearms < _cap:
+            next_state["rearm_count"] = _rearms + 1
+            next_state["phase"] = "pullback"  # hold the reclaim-ready state so the next placeable tick fires
+            next_state["last_reject_reason"] = "tick_reclaim_not_placeable_rearmed"
+            debug["rearm_count"] = _rearms + 1
+            return TickFirstPullbackDecision(
+                False, "tick_reclaim_not_placeable_rearmed", next_state, debug
+            )
+        # Cap exhausted: consume the latch anyway so a persistently-blocked name can't spin.
         next_state["phase"] = "fired"
         next_state["fired"] = True
-        return TickFirstPullbackDecision(True, TRIGGER_REASON, next_state, debug)
+        next_state["last_reject_reason"] = "tick_reclaim_rearm_cap_exhausted"
+        return TickFirstPullbackDecision(
+            False, "tick_reclaim_rearm_cap_exhausted", next_state, debug
+        )
 
     return TickFirstPullbackDecision(False, "waiting_for_tick_reclaim", next_state, debug)

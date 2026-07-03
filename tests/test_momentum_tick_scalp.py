@@ -185,6 +185,161 @@ def test_tick_first_pullback_fires_on_reclaim_without_bar_wait() -> None:
     assert second.debug["max_hold_seconds"] == 12.0
 
 
+# ── STEP-B #12: one-shot latch → placeability-gated + rearm-on-no-order ──
+
+def _drive_to_reclaim_ready(signal: dict) -> dict:
+    """Return a tick-scalp state parked in the reclaim-ready pullback (one tick before fire)."""
+    first = evaluate_tick_first_pullback(
+        symbol="CANF",
+        signal=signal,
+        state=None,
+        bid=6.03,
+        ask=6.05,
+        mid=6.04,
+        now_utc=datetime(2026, 7, 1, 11, 5, 0, tzinfo=timezone.utc),
+    )
+    assert first.fire is False
+    assert first.state["phase"] == "pullback"
+    return first.state
+
+
+def test_placeability_gate_blocked_clock_does_not_consume_and_rearms() -> None:
+    """A reclaim fired while NOT placeable (e.g. blocked clock) must NOT latch `fired` —
+    it rearms so the next placeable tick can still fire."""
+    signal = _canf_signal()
+    ready = _drive_to_reclaim_ready(signal)
+
+    blocked = evaluate_tick_first_pullback(
+        symbol="CANF",
+        signal=signal,
+        state=ready,
+        bid=6.08,
+        ask=6.10,
+        mid=6.09,
+        now_utc=datetime(2026, 7, 1, 11, 5, 1, tzinfo=timezone.utc),
+        placeable=False,  # market-hours blocked / adapter dark / spread unpassable
+    )
+
+    assert blocked.fire is False
+    assert blocked.reason == "tick_reclaim_not_placeable_rearmed"
+    assert blocked.state.get("fired") is not True  # NOT consumed
+    assert blocked.state["rearm_count"] == 1
+    assert blocked.debug["placeable"] is False
+    assert blocked.debug["placeability_gate_enabled"] is True
+
+
+def test_placeability_gate_adapter_dark_then_placeable_fires_once() -> None:
+    """After a fired-but-blocked rearm, the next PLACEABLE reclaim tick fires exactly once
+    and consumes the latch."""
+    signal = _canf_signal()
+    ready = _drive_to_reclaim_ready(signal)
+
+    dark = evaluate_tick_first_pullback(
+        symbol="CANF", signal=signal, state=ready,
+        bid=6.08, ask=6.10, mid=6.09,
+        now_utc=datetime(2026, 7, 1, 11, 5, 1, tzinfo=timezone.utc),
+        placeable=False,
+    )
+    assert dark.fire is False
+    assert dark.state.get("fired") is not True
+
+    live = evaluate_tick_first_pullback(
+        symbol="CANF", signal=signal, state=dark.state,
+        bid=6.11, ask=6.13, mid=6.12,
+        now_utc=datetime(2026, 7, 1, 11, 5, 2, tzinfo=timezone.utc),
+        placeable=True,  # adapter healthy now
+    )
+    assert live.fire is True
+    assert live.reason == TRIGGER_REASON
+    assert live.state["fired"] is True
+
+    # Latch consumed: a subsequent tick short-circuits to already_fired.
+    after = evaluate_tick_first_pullback(
+        symbol="CANF", signal=signal, state=live.state,
+        bid=6.14, ask=6.16, mid=6.15,
+        now_utc=datetime(2026, 7, 1, 11, 5, 3, tzinfo=timezone.utc),
+        placeable=True,
+    )
+    assert after.fire is False
+    assert after.reason == "already_fired"
+
+
+def test_placeability_gate_placeable_fires_once_and_consumes() -> None:
+    """placeable=True fires exactly once and latches (no rearm)."""
+    signal = _canf_signal()
+    ready = _drive_to_reclaim_ready(signal)
+
+    fired = evaluate_tick_first_pullback(
+        symbol="CANF", signal=signal, state=ready,
+        bid=6.08, ask=6.10, mid=6.09,
+        now_utc=datetime(2026, 7, 1, 11, 5, 1, tzinfo=timezone.utc),
+        placeable=True,
+    )
+    assert fired.fire is True
+    assert fired.reason == TRIGGER_REASON
+    assert fired.state["fired"] is True
+    assert "rearm_count" not in fired.state  # no rearm on the happy path
+
+
+def test_placeability_gate_rearm_cap_consumes_after_floor(monkeypatch) -> None:
+    """Once the per-day rearm cap is exhausted the latch consumes anyway (no infinite spin).
+
+    The config knob is the documented base/floor; the caller override can only RAISE it.
+    Lower the config base here (the real binding mechanism) so exhaustion is reachable in
+    a short loop, proving the knob binds."""
+    from app.config import settings as _settings
+
+    cap = 2
+    monkeypatch.setattr(_settings, "chili_momentum_tick_scalp_max_rearms_per_day", cap, raising=False)
+
+    signal = _canf_signal()
+    state = _drive_to_reclaim_ready(signal)
+
+    last = None
+    # Each blocked reclaim rearms; after `cap` rearms the next one consumes. Prices uptick
+    # each tick (so tick_uptick holds) but stay well under the pullback high (6.79) so the
+    # state never flips to a fresh thrust — it stays reclaim-ready across the blocked ticks.
+    for i in range(cap):
+        _mid = 6.09 + i * 0.01
+        last = evaluate_tick_first_pullback(
+            symbol="CANF", signal=signal, state=state,
+            bid=_mid - 0.01, ask=_mid + 0.01, mid=_mid,
+            now_utc=datetime(2026, 7, 1, 11, 5, 1 + i, tzinfo=timezone.utc),
+            placeable=False,
+        )
+        assert last.fire is False
+        assert last.reason == "tick_reclaim_not_placeable_rearmed"
+        assert last.state.get("fired") is not True
+        state = last.state
+
+    assert state["rearm_count"] == cap
+    exhausted = evaluate_tick_first_pullback(
+        symbol="CANF", signal=signal, state=state,
+        bid=6.11, ask=6.13, mid=6.12,
+        now_utc=datetime(2026, 7, 1, 11, 5, 9, tzinfo=timezone.utc),
+        placeable=False,
+    )
+    assert exhausted.fire is False
+    assert exhausted.reason == "tick_reclaim_rearm_cap_exhausted"
+    assert exhausted.state["fired"] is True  # consumed to stop the spin
+
+
+def test_placeability_gate_none_preserves_legacy_consume() -> None:
+    """placeable=None (caller not participating) preserves legacy consume-on-reclaim."""
+    signal = _canf_signal()
+    ready = _drive_to_reclaim_ready(signal)
+
+    fired = evaluate_tick_first_pullback(
+        symbol="CANF", signal=signal, state=ready,
+        bid=6.08, ask=6.10, mid=6.09,
+        now_utc=datetime(2026, 7, 1, 11, 5, 1, tzinfo=timezone.utc),
+        # placeable omitted => None
+    )
+    assert fired.fire is True
+    assert fired.reason == TRIGGER_REASON
+    assert fired.state["fired"] is True
+
+
 def test_tick_first_pullback_rejects_non_explosive_large_float_signal() -> None:
     signal = {
         "ticker": "MEH",
