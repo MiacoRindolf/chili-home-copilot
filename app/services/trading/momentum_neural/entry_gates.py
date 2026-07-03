@@ -7694,11 +7694,19 @@ def pullback_break_confirmation(
                 }
             # (B) coil-excluded active-bar mean exemption (recover the window as volume returns).
             if not _coil_exempt:
+                # F5 (capture-g fix): a configured 0.0 must BIND (0.0 disables the coil
+                # exclusion = the strictest setting) — `or 0.5` silently coerced the falsy
+                # 0.0 back to 0.5, making the strict setting unbindable. Explicit None check.
+                _cx_frac_raw = getattr(
+                    settings, "chili_momentum_sustained_coil_range_atr_frac", None
+                )
+                try:
+                    _cx_frac = 0.5 if _cx_frac_raw is None else float(_cx_frac_raw)
+                except (TypeError, ValueError):
+                    _cx_frac = 0.5
                 _active_mean = _sustained_rvol_excluding_coil(
-                    vr, atr, high, low, cur, int(sustain_lookback_bars),
-                    coil_range_atr_frac=float(
-                        getattr(settings, "chili_momentum_sustained_coil_range_atr_frac", 0.5) or 0.5
-                    ),
+                    vr, atr, high, low, cur, _sustain_n,  # same wall-clock-scaled window
+                    coil_range_atr_frac=_cx_frac,
                 )
                 if _active_mean is not None and _active_mean >= float(sustained_rvol_floor):
                     _coil_exempt = True
