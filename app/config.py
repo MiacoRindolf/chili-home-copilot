@@ -2724,6 +2724,23 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_BACKSIDE_VWAP_RECLAIM_ENABLED"),
         description="FIX D: exception to the below-VWAP backside bench — do NOT bench a name that is RECLAIMING VWAP from below with upward momentum (price back above VWAP within chili_momentum_entry_vwap_hold_buffer AND rising vs the prior bar). A name still FALLING below VWAP stays benched. Reuses the existing vwap_hold_buffer (one documented base). KILL-SWITCH: False -> byte-identical (the below_vwap bench latches as before).",
     )
+    # WAVE-4 ITEM-5: JEM STICKY-BENCH VWAP-RECLAIM UN-BENCH. FIX D above only declines to
+    # LATCH a fresh below_vwap bench; once a name is ALREADY benched (any latch reason), the
+    # ONLY un-bench was a genuine NEW HIGH above the benched-at HOD. JEM (2026-07-02) benched,
+    # then at 12:50 reclaimed VWAP from below (8.97->9.06) into the 9.0->9.7 leg — never a new
+    # HOD, so it stayed permanently benched and the whole leg was missed. This adds a SECOND
+    # un-bench: a genuine fresh CROSS-from-below of session VWAP (prior completed close BELOW
+    # VWAP*(1-buffer) AND current px AT/ABOVE VWAP) clears the bench for ALL latch reasons.
+    # It is a CROSS (a state change from below to above), NOT a level test alone — a level test
+    # would un-bench into the 13:24 dump where price merely hovered near VWAP; the cross
+    # preserves that veto while catching the 12:50 reclaim. Reuses the SAME vwap_hold_buffer.
+    # Every downstream capital-protection gate still runs. KILL-SWITCH: False -> byte-identical
+    # (a benched name un-benches only on a new high, exactly as before).
+    chili_momentum_backside_bench_reclaim_unbench_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BACKSIDE_BENCH_RECLAIM_UNBENCH_ENABLED"),
+        description="WAVE-4 ITEM-5: un-bench an ALREADY-benched name on a genuine fresh CROSS-from-below of session VWAP (prior completed close < VWAP*(1-buffer) AND current px >= VWAP) — a CROSS (state change), NOT a level test (a level test would un-bench into a hover-then-dump; the cross catches the 12:50 JEM reclaim into the 9.0->9.7 leg while preserving the 13:24-dump veto). Applies to ALL latch reasons; reuses chili_momentum_entry_vwap_hold_buffer. KILL-SWITCH: False -> byte-identical (a benched name un-benches only on a new high).",
+    )
     # ── BATCH B (FIX 2): HOT-TAPE WICK-RECLAIM entry (HVM101 #008, the extreme-volatility
     # variant of VWAP-reclaim). In HOT/parabolic tape ONLY: a huge rejection candle (large
     # upper wick, high range) -> immediate low-volume flush -> the next bar(s) retrace ~R of

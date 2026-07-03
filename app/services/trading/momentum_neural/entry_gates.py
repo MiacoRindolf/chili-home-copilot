@@ -3174,7 +3174,51 @@ def evaluate_sticky_backside_bench(
                     return False, "unbenched_fresh_hod", None, debug
             except (TypeError, ValueError):
                 pass
-            # still benched (no new high) -> keep the latch, no need to re-confirm backside.
+            # ── WAVE-4 ITEM-5: VWAP-RECLAIM CROSS UN-BENCH (all latch reasons) ───────────
+            # A benched name that makes a genuine fresh CROSS-from-below of session VWAP has
+            # resumed a real leg even without a new HOD (JEM 12:50 8.97->9.06 into 9.0->9.7).
+            # CROSS (state change) not level test: the PRIOR completed close was BELOW
+            # VWAP*(1-buffer) AND the current px is AT/ABOVE VWAP. A level test alone would
+            # un-bench into a hover-then-dump (JEM 13:24); the cross preserves that veto.
+            if bool(getattr(settings, "chili_momentum_backside_bench_reclaim_unbench_enabled", True)):
+                try:
+                    _fs = front_side_state(_sess)
+                    _vwap = getattr(_fs, "session_vwap", None)
+                    _closes = _sess["Close"].astype(float)
+                    if _vwap is not None and float(_vwap) > 0 and len(_closes) >= 2:
+                        _vwap = float(_vwap)
+                        _buf = 0.0
+                        try:
+                            _buf = max(0.0, float(getattr(
+                                settings, "chili_momentum_entry_vwap_hold_buffer", 0.0) or 0.0))
+                        except (TypeError, ValueError):
+                            _buf = 0.0
+                        _prior_close = float(_closes.iloc[-1])   # last COMPLETED bar close
+                        _cur_px = _prior_close
+                        if live_price is not None:
+                            try:
+                                _lp = float(live_price)
+                                if _lp > 0:
+                                    _cur_px = _lp
+                            except (TypeError, ValueError):
+                                pass
+                        # CROSS: prior completed close genuinely BELOW VWAP (past the buffer)
+                        # AND current px at/above VWAP. Both legs required — a name that was
+                        # already at/above VWAP (no fresh cross) STAYS benched (the 13:24 dump).
+                        _was_below = _prior_close < _vwap * (1.0 - _buf)
+                        _now_above = _cur_px >= _vwap * (1.0 - _buf)
+                        if _was_below and _now_above and _cur_px > _prior_close:
+                            debug["unbenched_vwap_reclaim"] = {
+                                "prior_close": round(_prior_close, 6),
+                                "cur_px": round(_cur_px, 6),
+                                "session_vwap": round(_vwap, 6),
+                                "vwap_hold_buffer": round(_buf, 6),
+                                "benched_at_hod": round(float(benched_at_hod), 6),
+                            }
+                            return False, "unbenched_vwap_reclaim", None, debug
+                except (TypeError, ValueError, AttributeError, KeyError, IndexError):
+                    pass  # any error -> keep the sticky latch (safe: never strand on a bug)
+            # still benched (no new high, no VWAP-reclaim cross) -> keep the latch.
             debug["still_benched"] = True
             return True, "benched_backside_sticky", float(benched_at_hod), debug
 

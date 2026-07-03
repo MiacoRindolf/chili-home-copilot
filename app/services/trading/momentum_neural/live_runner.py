@@ -6860,6 +6860,11 @@ def tick_live_session(
                 if _benched:
                     le["benched_backside_hod"] = float(_bench_hod_out) if _bench_hod_out is not None else le.get("benched_backside_hod")
                     if not _prev_benched:
+                        # WAVE-4 ITEM-5(b): PERSIST the bench marker the instant it latches — a
+                        # missing commit on the MARKER MUTATION was the permanent-ban hardener
+                        # (a process restart mid-tick could lose the un-bench that a later commit
+                        # would have carried). Commit each marker state-change atomically here.
+                        _commit_le(sess, le)
                         _emit(db, sess, "live_entry_backside_benched", {
                             "reason": _bench_reason, "benched_at_hod": le.get("benched_backside_hod"),
                             **_bench_dbg,
@@ -6874,9 +6879,14 @@ def tick_live_session(
                             "benched_at_hod": le.get("benched_backside_hod"), **_bench_dbg,
                         })
                 elif _prev_benched:
-                    # MANDATORY UN-BENCH: a genuine new high cleared the bench -> drop the
-                    # marker so the name can be armed/entered again on a fresh leg.
+                    # MANDATORY UN-BENCH: a genuine new high OR (WAVE-4 ITEM-5) a fresh VWAP-
+                    # reclaim CROSS-from-below cleared the bench -> drop the marker so the name
+                    # can be armed/entered again on a fresh leg.
                     le.pop("benched_backside_hod", None)
+                    # WAVE-4 ITEM-5(b): _commit_le IMMEDIATELY after the pop — the missing commit
+                    # is exactly what hardens a permanent ban (the marker survives a restart if the
+                    # drop is never persisted). MUST ship with the VWAP-reclaim un-bench (a).
+                    _commit_le(sess, le)
                     _emit(db, sess, "live_entry_backside_unbenched", {
                         "reason": _bench_reason, **_bench_dbg,
                     })
