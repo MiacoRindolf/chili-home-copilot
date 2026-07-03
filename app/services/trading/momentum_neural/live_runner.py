@@ -4883,6 +4883,36 @@ def _halt_resume_cooldown_seconds() -> float:
         return 120.0
 
 
+def _preserve_resume_dip_reason(
+    *, trigger_ok: bool, pullback_reason: str, resume_dip_reject: str | None,
+) -> str:
+    """R7 (WAVE-4 ITEM-2a) — resolve the primary trigger reason after the pullback re-run.
+
+    When a suspected halt just resumed, ``halt_resume_dip_trigger`` owns the tape (Ross's
+    sanctioned post-resume entry). If it REJECTS, the ladder UNCONDITIONALLY re-runs
+    ``momentum_pullback_trigger``, which clobbers ``_trigger_reason``/``_pb_debug`` — so the
+    resume-dip's actionable "why the resumption dip did not fire" was silently lost.
+
+    Rule: keep the pullback's reason ONLY when it produced a DIFFERENT actionable result —
+    a FIRE (``trigger_ok``) or a TICK-ARMED wait the event loop can act on. Otherwise (the
+    pullback merely produced another inert wait) restore the resume-dip reject as the
+    primary reason — that window belonged to resume-dip. Pure / no side effects.
+
+    ``resume_dip_reject is None`` ⇒ the resume-dip path did not run (no resumed halt) ⇒
+    return the pullback reason unchanged (byte-identical to the pre-R7 behavior)."""
+    if resume_dip_reject is None:
+        return pullback_reason
+    if trigger_ok:
+        return pullback_reason  # a fire is a different, actionable result — keep it.
+    try:
+        from .entry_gates import TICK_ARMED_WAIT_REASONS as _TAWR
+    except Exception:
+        _TAWR = frozenset()
+    if pullback_reason in _TAWR:
+        return pullback_reason  # a tick-armed wait the event loop acts on — keep it.
+    return resume_dip_reject  # another inert wait — restore the resume-dip reject.
+
+
 def _mark_suspected_halt(db, sess, le: dict, tick: Any = None, *, detail: dict | None = None) -> None:
     """Set the suspected-halt marker + all the downstream flags/telemetry ONCE at halt
     onset. Shared by BOTH inference paths — the quote-staleness streak
@@ -6170,6 +6200,9 @@ def tick_live_session(
         # price>EMA-9 + volume) as the fallback. live + on, fallback-safe.
         _trigger_ok, _trigger_reason = True, "score_only"
         _pb_debug = {}
+        # R7 (WAVE-4 ITEM-2b) — per-detector reject map, always defined (the emit reads it
+        # even on the _score_ok=False path). Populated as the trigger ladder runs below.
+        _reject_map: dict[str, Any] = {}
         if _score_ok:
             try:
                 from .entry_gates import momentum_pullback_trigger, momentum_volume_confirmation
@@ -6178,6 +6211,14 @@ def tick_live_session(
                 _mode = str(getattr(settings, "chili_momentum_entry_trigger_mode", "hybrid") or "hybrid").lower()
                 _interval = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
                 _trigger_ok, _trigger_reason = False, "trigger_wait"
+                # R7 (WAVE-4 ITEM-2b) — the wait event carries ONE reason (whatever the LAST
+                # detector to run left in _trigger_reason), so a quiet detector's reject is
+                # invisible and untunable. Accumulate each detector's own reject reason in
+                # _reject_map (detector -> reason) as the ladder runs; surfaced on the
+                # live_entry_trigger_wait payload. Telemetry-only, no behavior change.
+                # R7 (WAVE-4 ITEM-2a) — the resume-dip reject reason, preserved before the
+                # unconditional pullback re-run clobbers _trigger_reason/_pb_debug below.
+                _resume_dip_reject: str | None = None
                 if _mode in ("hybrid", "pullback_break"):
                     try:
                         _df_pb = fetch_ohlcv_df(sess.symbol, interval=_interval, period="5d")
@@ -6201,8 +6242,18 @@ def tick_live_session(
                                         halt_resumed_at_utc=_resumed_at,
                                         halt_level=_float_or_none(le.get("halt_level")),
                                     )
+                                    # R7 (ITEM-2a): PRESERVE the resume-dip reject reason before
+                                    # the pullback re-run overwrites _trigger_reason below. The
+                                    # resume-dip trigger OWNED the tape for this window (Ross's
+                                    # sanctioned post-resume entry); its reject is the actionable
+                                    # "why the resumption dip did not fire" and must not be lost.
+                                    if not _trigger_ok:
+                                        _resume_dip_reject = _trigger_reason
+                                        _reject_map["halt_resume_dip"] = _trigger_reason
                                 except Exception:
                                     _trigger_ok = False
+                                    _resume_dip_reject = "halt_resume_dip_error"
+                                    _reject_map["halt_resume_dip"] = "halt_resume_dip_error"
                             if not _trigger_ok:
                                 # Shared trigger (parity): paper calls the SAME helper, so
                                 # both paths take the identical Ross pullback-break entry
@@ -6235,6 +6286,19 @@ def tick_live_session(
                                 _trigger_ok, _trigger_reason, _pb_debug = momentum_pullback_trigger(
                                     _df_trig, entry_interval=_iv_trig, live_price=_live_px,
                                     symbol=sess.symbol, db=db,
+                                )
+                                # R7 (ITEM-2b): record the pullback-break detector's own reject.
+                                if not _trigger_ok:
+                                    _reject_map["momentum_pullback"] = _trigger_reason
+                                # R7 (ITEM-2a): the pullback re-run above is UNCONDITIONAL after a
+                                # resume-dip reject and clobbers _trigger_reason. Restore the
+                                # resume-dip reject as the primary reason UNLESS the pullback
+                                # produced a DIFFERENT actionable result (a fire, or a tick-armed
+                                # wait the event loop can act on). Pure decision -> testable helper.
+                                _trigger_reason = _preserve_resume_dip_reason(
+                                    trigger_ok=_trigger_ok,
+                                    pullback_reason=_trigger_reason,
+                                    resume_dip_reject=_resume_dip_reject,
                                 )
                             # HVM101 (C): two ADDITIVE entry triggers wired into the SAME
                             # ladder (flag-gated INSIDE each detector). Each returns the
@@ -6276,6 +6340,8 @@ def tick_live_session(
                                                 _pb_debug["big_buyer_bid"] = _bbp[1]
                                         except Exception:
                                             pass
+                                    else:  # R7 (ITEM-2b): record the flush-dip detector reject.
+                                        _reject_map["flush_dip_buy"] = _fd_reason
                                 except Exception:
                                     pass
                             if not _trigger_ok:
@@ -6286,6 +6352,8 @@ def tick_live_session(
                                         _df_trig, entry_interval=_iv_trig, live_price=_live_px,
                                         symbol=sess.symbol,
                                     )
+                                    if not _vr_ok:  # R7 (ITEM-2b): record the vwap-reclaim reject.
+                                        _reject_map["vwap_reclaim"] = _vr_reason
                                     if _vr_ok:
                                         _trigger_ok, _trigger_reason, _pb_debug = _vr_ok, _vr_reason, _vr_debug
                                     elif (
@@ -7503,7 +7571,15 @@ def tick_live_session(
                     _commit_le(sess, le)
             elif le.pop("watch_break_level", None) is not None:
                 _commit_le(sess, le)
-            _emit(db, sess, "live_entry_trigger_wait", {"reason": _trigger_reason})
+            # R7 (WAVE-4 ITEM-2b): attach the per-detector reject map so quiet detectors
+            # become tunable (the single `reason` is only the last detector to run). The
+            # resume-dip reject (ITEM-2a) is preserved in _reject_map["halt_resume_dip"]
+            # AND, when the later pullback produced only another inert wait, as the primary
+            # `reason`. Telemetry-only.
+            _wait_payload: dict[str, Any] = {"reason": _trigger_reason}
+            if _reject_map:
+                _wait_payload["detector_rejects"] = dict(_reject_map)
+            _emit(db, sess, "live_entry_trigger_wait", _wait_payload)
         elif _midday_lull and via.live_eligible and float(via.viability_score or 0) >= _flat_min:
             # Forward A/B observability: this equity WOULD have advanced at the flat
             # viability bar but the midday de-weight held it back. Lets the operator
