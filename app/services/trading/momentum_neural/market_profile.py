@@ -8,7 +8,7 @@ fact; the pre-market start and after-hours end are the only tunable bounds (conf
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from ....config import settings
@@ -345,10 +345,87 @@ def is_sample_session_now(symbol: str | None, *, now: datetime | None = None) ->
     return False
 
 
-def market_open_now(symbol: str | None, *, now: datetime | None = None) -> bool:
-    """True only during the REGULAR session (9:30–16:00 ET) — used for display/labels.
-    For the trade/arm/entry decision use ``is_tradeable_now`` (extended-hours aware)."""
-    return market_session_now(symbol, now=now) == "regular"
+def _next_regular_open_utc(local: datetime, *, allow_extended_hours: bool = False) -> datetime:
+    """The next weekday session open (regular 09:30 ET, or premarket start when
+    ``allow_extended_hours``) at/after ``local`` (an America/New_York datetime), as UTC."""
+    open_min = min(_premarket_start_min(), _REGULAR_OPEN_MIN) if allow_extended_hours else _REGULAR_OPEN_MIN
+    days_ahead = 0
+    while True:
+        candidate_date = local.date() + timedelta(days=days_ahead)
+        candidate_local = datetime(
+            candidate_date.year,
+            candidate_date.month,
+            candidate_date.day,
+            tzinfo=_NY_TZ,
+        ) + timedelta(minutes=open_min)
+        if candidate_local.weekday() < 5 and candidate_local > local:
+            return candidate_local.astimezone(timezone.utc)
+        days_ahead += 1
+
+
+def market_session_for_symbol(
+    symbol: str | None,
+    *,
+    now: datetime | None = None,
+    allow_extended_hours: bool = False,
+) -> dict[str, object]:
+    """Tradability descriptor for callers that explicitly choose extended hours.
+
+    Returns ``{asset_class, market_session, is_tradable, deferred_until_utc}``. Equities
+    are tradable in the regular session always, and in premarket/afterhours only when
+    ``allow_extended_hours`` — matching the lane's extended-session reality. Crypto is
+    always tradable. ``deferred_until_utc`` is the next session open when not tradable."""
+    if asset_class_for_symbol(symbol) == "crypto":
+        return {
+            "asset_class": "crypto",
+            "market_session": "crypto_24_7",
+            "is_tradable": True,
+            "deferred_until_utc": None,
+        }
+
+    ref = now or datetime.now(timezone.utc)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    local = ref.astimezone(_NY_TZ)
+    session = market_session_now(symbol, now=ref)
+    session_name = {
+        "premarket": "pre_market",
+        "regular": "regular_hours",
+        "afterhours": "post_market",
+    }.get(session, "closed_weekend" if local.weekday() >= 5 else "closed_overnight")
+    is_tradable = session == "regular" or (
+        allow_extended_hours and session in {"premarket", "afterhours"}
+    )
+    return {
+        "asset_class": "stock",
+        "market_session": session_name,
+        "is_tradable": is_tradable,
+        "deferred_until_utc": (
+            None
+            if is_tradable
+            else _next_regular_open_utc(
+                local, allow_extended_hours=allow_extended_hours
+            ).isoformat()
+        ),
+    }
+
+
+def market_open_now(
+    symbol: str | None,
+    *,
+    now: datetime | None = None,
+    allow_extended_hours: bool = False,
+) -> bool:
+    """True during the REGULAR session (9:30–16:00 ET); with ``allow_extended_hours``,
+    also True in premarket/afterhours. For the trade/arm/entry decision use
+    ``is_tradeable_now`` (always extended-hours aware)."""
+    return bool(
+        market_session_for_symbol(
+            symbol,
+            now=now,
+            allow_extended_hours=allow_extended_hours,
+        )["is_tradable"]
+    )
 
 
 def minutes_since_regular_open(symbol: str | None, *, now: datetime | None = None) -> float | None:

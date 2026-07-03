@@ -2996,6 +2996,37 @@ def _probe_candidate(symbol: str) -> tuple[bool, str, Any]:
     return fires, reason, _candidate_freshness(symbol)
 
 
+def _candidate_ross_tick_evidence(
+    candidate: MomentumSymbolViability,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Ross/5-Pillars evidence check for an equity auto-arm candidate.
+
+    Reads the name's OWN persisted scanner payload (execution_readiness_json →
+    ross_signals) and grades it against the shape-based tick-scalp evidence gate.
+    Pure + non-network: the scanner signal is already on the viability row, so a
+    genuine Ross A-setup can be WATCHED without an OHLCV probe. Fail-closed on any
+    error (returns not-ok) — the network probe wave still runs for these names."""
+    try:
+        from .tick_scalp import ross_signal_for_symbol, ross_tick_scalp_evidence_ok
+
+        signal = ross_signal_for_symbol(candidate.execution_readiness_json, candidate.symbol)
+        ok, reason, debug = ross_tick_scalp_evidence_ok(signal)
+        return bool(ok), str(reason or ""), dict(debug or {})
+    except Exception as exc:
+        return False, "ross_evidence_error", {"error": str(exc)[:160]}
+
+
+def _candidate_tick_scalp_watch_reason(candidate: MomentumSymbolViability) -> str | None:
+    """Fast non-network auto-arm reason for Ross/5-Pillars tick-scalp candidates.
+
+    Returns the WATCH reason (``tick_first_pullback_watch``) when the candidate's
+    persisted scanner evidence clears the shape gate, else None. Used to short-circuit
+    the OHLCV probe wave for names that already prove an explosive Ross setup — the
+    live runner still confirms the actual tick pullback/reclaim before any order."""
+    ok, reason, _ = _candidate_ross_tick_evidence(candidate)
+    return reason if ok else None
+
+
 def _known_fresh(fresh: Any) -> bool:
     """True only when we POSITIVELY know the name is in a fresh up-impulse (so it is a
     worthwhile name to WATCH). Unknown freshness (None) is NOT watched proactively —
@@ -3832,9 +3863,19 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         )
         _budget = _probe_time_budget()
         _results: dict[str, tuple[bool, str, Any]] = {}
+        # Fast non-network tick-scalp WATCH short-circuit (STEP-A #11 wiring seam): a name
+        # whose OWN persisted Ross/5-Pillars scanner evidence already clears the shape gate
+        # is watch-armable WITHOUT an OHLCV probe — the live runner's tick FSM confirms the
+        # actual pullback/reclaim before any order. This lets a genuine explosive A-setup
+        # (CANF/JEM-class) reach the tick lane even when the OHLCV probe wave times out.
+        for c in eligible:
+            _fast_reason = _candidate_tick_scalp_watch_reason(c)
+            if _fast_reason:
+                _results[c.symbol] = (True, _fast_reason, None)
+        _probe_candidates = [c for c in eligible if c.symbol not in _results]
         _ex = concurrent.futures.ThreadPoolExecutor(max_workers=_workers)
         try:
-            _futs = {_ex.submit(_probe_candidate, c.symbol): c.symbol for c in eligible}
+            _futs = {_ex.submit(_probe_candidate, c.symbol): c.symbol for c in _probe_candidates}
             # Bound the whole wave by wall-clock so a WIDE candidate net never pushes a pass
             # past the scheduler cadence: arm from whatever COMPLETED within the budget;
             # un-probed names defer to the next tick. This is what lets a fresh #11+ name
@@ -3854,7 +3895,7 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             import time as _time
 
             _deadline = _time.monotonic() + _budget
-            for c in eligible:
+            for c in _probe_candidates:
                 if _time.monotonic() >= _deadline:
                     break
                 if c.symbol not in _results:
