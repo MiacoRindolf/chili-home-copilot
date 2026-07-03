@@ -606,6 +606,198 @@ def evaluate_green_to_red_halt(
     }
 
 
+def _defensive_trail_candidate_for_session(
+    sess: TradingAutomationSession,
+) -> tuple[float | None, float | None, float | None, dict[str, Any]]:
+    """A2: the target position's OWN most-defensive ALREADY-COMPUTED trail candidate, computed
+    from ITS stored snapshot fields (high_water_mark, avg_entry_price, current stop, the entry
+    ATR frozen at fill) via the SAME ``cushion_adaptive_trail_stop`` helper the exit machinery
+    uses — NEVER an invented breakeven. "Most defensive" = the TIGHTEST band (floor bps, patience
+    0), so it strictly reduces at-risk under INVARIANT-A.
+
+    Returns ``(candidate_stop, current_stop, freed_usd, meta)`` where ``freed_usd`` = the at-risk
+    reduction (qty * max(0, candidate - current)) if the candidate is strictly tighter, else 0.0.
+    FAIL-CLOSED: any missing field / non-tightening candidate => ``(None, None, 0.0, ...)`` so the
+    caller grants NO displacement (a plain block). Pure read of the stored snapshot; enqueues
+    nothing (the caller writes the request)."""
+    try:
+        snap = sess.risk_snapshot_json or {}
+        le = snap.get("momentum_live_execution") if isinstance(snap, dict) else None
+        pos = (le or {}).get("position") if isinstance(le, dict) else None
+        if not isinstance(pos, dict):
+            return None, None, 0.0, {"reason": "no_position"}
+        qty = float(pos.get("quantity") or 0.0)
+        entry = float(pos.get("avg_entry_price") or 0.0)
+        cur_stop = float(pos.get("stop_price") or 0.0)
+        hwm = float(pos.get("high_water_mark") or entry or 0.0)
+        if qty <= 0 or entry <= 0 or cur_stop <= 0:
+            return None, None, 0.0, {"reason": "degenerate_position"}
+        # The entry ATR frozen at fill (the SAME datum the position's own trail reads). No
+        # invented number: if it is missing we CANNOT compute the existing trail => fail closed.
+        atr_pct = None
+        for k in ("entry_stop_atr_pct", "atr_pct", "entry_atr_pct"):
+            v = le.get(k) if isinstance(le, dict) else None
+            if v is None and isinstance(pos, dict):
+                v = pos.get(k)
+            try:
+                if v is not None and float(v) > 0:
+                    atr_pct = float(v)
+                    break
+            except (TypeError, ValueError):
+                continue
+        if atr_pct is None:
+            return None, None, 0.0, {"reason": "no_entry_atr"}
+        try:
+            from .paper_execution import cushion_adaptive_trail_stop
+
+            stop_atr_mult = float(getattr(settings, "chili_momentum_stop_atr_mult", 0.60) or 0.60)
+            # MOST-DEFENSIVE = the tightest band: zero cushion (day_realized 0, position_risk
+            # the entry risk unit) => patience 0 => floor-bps trail off the high-water mark. The
+            # helper ratchets max(current_stop, breakeven_floor, trailed) — INVARIANT-A safe.
+            candidate = float(
+                cushion_adaptive_trail_stop(
+                    high_water_mark=hwm,
+                    entry_price=entry,
+                    atr_pct=atr_pct,
+                    stop_atr_mult=stop_atr_mult,
+                    day_realized_usd=0.0,
+                    position_risk_usd=max(1e-9, (entry - cur_stop) * qty),
+                    breakeven_floor=cur_stop,  # never below the live stop (INVARIANT-A)
+                    current_stop=cur_stop,
+                    side_long=True,
+                )
+            )
+        except Exception:
+            return None, None, 0.0, {"reason": "trail_compute_failed"}
+        # INVARIANT-A: compose max(candidate, current). Only a STRICTLY tighter candidate frees risk.
+        composed = max(candidate, cur_stop)
+        freed = max(0.0, (composed - cur_stop)) * qty
+        if composed <= cur_stop or freed <= 0.0:
+            return None, None, 0.0, {"reason": "candidate_not_tighter", "candidate": round(candidate, 6)}
+        return (
+            composed,
+            cur_stop,
+            freed,
+            {
+                "candidate_stop": round(composed, 6),
+                "current_stop": round(cur_stop, 6),
+                "freed_usd": round(freed, 2),
+                "qty": qty,
+                "high_water_mark": round(hwm, 6),
+                "atr_pct": round(atr_pct, 6),
+            },
+        )
+    except Exception:
+        return None, None, 0.0, {"reason": "error_fail_closed"}
+
+
+def _enqueue_risk_envelope_displacement(
+    db: Session,
+    *,
+    user_id: int,
+    candidate_symbol: str,
+    execution_family: str,
+    planned_risk_usd: float,
+    open_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """A2: when the aggregate-open-risk cap blocks a TOP-RANKED candidate, enqueue a stop-TIGHTEN
+    on the LARGEST at-risk open position to ITS OWN most-defensive trail candidate so the NEXT
+    candidate tick admits against the freed envelope. THIS tick still blocks (the caller does not
+    admit). The tighten is APPLIED by that position's own next live tick (it reads the enqueued
+    request and composes max(candidate, current) — INVARIANT-A), so the displacement expresses
+    itself through the exit machinery that already owns the stop; this never force-liquidates.
+
+    FAIL-CLOSED at every step: flag off / candidate not the #1 top-ranked name / no at-risk
+    position / the position's own defensive candidate cannot free >= the planned risk => returns
+    ``{"enqueued": False, ...}`` and the caller keeps the plain block (byte-identical to today).
+    """
+    meta: dict[str, Any] = {"enqueued": False}
+    if not bool(getattr(settings, "chili_momentum_risk_envelope_displacement_enabled", True)):
+        meta["reason"] = "disabled"
+        return meta
+    cand = str(candidate_symbol or "").strip().upper()
+    if not cand:
+        meta["reason"] = "no_candidate_symbol"
+        return meta
+    # A1 top-rank predicate reuse: only the #1 freshness-valid live-eligible name (score >= p90)
+    # earns a displacement. FAIL-CLOSED on an unreadable rank.
+    try:
+        from .risk_policy import _top_ranked_live_eligible_symbol
+
+        _crypto = cand.endswith("-USD")
+        top_sym, top_score, p90, rank_meta = _top_ranked_live_eligible_symbol(db, crypto=_crypto)
+    except Exception:
+        meta["reason"] = "rank_read_failed"
+        return meta
+    meta["rank"] = rank_meta
+    if top_sym is None or top_score is None or p90 is None:
+        meta["reason"] = "rank_unreadable"
+        return meta
+    if cand != top_sym or float(top_score) < float(p90):
+        meta["reason"] = "not_top_ranked"
+        return meta
+    # Largest at-risk open position first (the two dying IPW losers on 07-02).
+    rows = sorted(
+        [r for r in (open_rows or []) if isinstance(r, dict) and float(r.get("at_risk_usd") or 0.0) > 0.0],
+        key=lambda r: float(r.get("at_risk_usd") or 0.0),
+        reverse=True,
+    )
+    if not rows:
+        meta["reason"] = "no_at_risk_position"
+        return meta
+    for row in rows:
+        try:
+            sess_id = int(row.get("session_id"))
+        except (TypeError, ValueError):
+            continue
+        target = (
+            db.query(TradingAutomationSession)
+            .filter(TradingAutomationSession.id == sess_id)
+            .first()
+        )
+        if target is None:
+            continue
+        candidate_stop, current_stop, freed, cand_meta = _defensive_trail_candidate_for_session(target)
+        if candidate_stop is None or freed < float(planned_risk_usd):
+            # This position's most-defensive candidate can't free enough — try the next-largest.
+            continue
+        # ENQUEUE: write the tighten request onto the target session's snapshot. The target's OWN
+        # next live tick reads `pending_risk_displacement_tighten` and composes max(candidate,
+        # current) under INVARIANT-A. We do NOT mutate the live stop here (single-writer: the
+        # position owns its stop); we only request the tighten it will apply itself.
+        try:
+            snap = dict(target.risk_snapshot_json or {})
+            le = dict(snap.get("momentum_live_execution") or {})
+            le["pending_risk_displacement_tighten"] = {
+                "candidate_stop": float(candidate_stop),
+                "enqueued_at_utc": _utcnow().isoformat(),
+                "for_candidate": cand,
+                "freed_usd": round(float(freed), 2),
+            }
+            snap["momentum_live_execution"] = le
+            target.risk_snapshot_json = snap
+            from sqlalchemy.orm.attributes import flag_modified
+
+            flag_modified(target, "risk_snapshot_json")
+            db.flush()
+        except Exception:
+            meta["reason"] = "enqueue_write_failed"
+            return meta
+        meta.update(
+            {
+                "enqueued": True,
+                "reason": "displacement_enqueued",
+                "target_session_id": sess_id,
+                "target_symbol": row.get("symbol"),
+                "planned_risk_usd": round(float(planned_risk_usd), 2),
+                **cand_meta,
+            }
+        )
+        return meta
+    meta["reason"] = "no_position_frees_enough"
+    return meta
+
+
 def evaluate_proposed_momentum_automation(
     db: Session,
     *,
@@ -1233,6 +1425,32 @@ def evaluate_proposed_momentum_automation(
                 except Exception:
                     _planned = 0.0
                 _ok_agg = (_open_risk + _planned) <= _agg_cap
+                _agg_detail = {
+                    "open_risk_usd": round(_open_risk, 2),
+                    "planned_risk_usd": round(_planned, 2),
+                    "cap_usd": round(_agg_cap, 2),
+                    "positions": _open_rows,
+                }
+                # ── A2 QUALITY-RANKED RISK-ENVELOPE DISPLACEMENT ──────────────────────
+                # The cap blocks. If this candidate is the #1 top-ranked live-eligible mover
+                # (CLRO-class), enqueue a stop-TIGHTEN on the largest at-risk open position to
+                # ITS OWN most-defensive trail candidate so the NEXT candidate tick admits
+                # against the freed envelope. THIS tick STILL BLOCKS (we do not flip _ok_agg).
+                # FAIL-CLOSED: non-top-ranked / no candidate level / frees < planned => nothing
+                # enqueued, byte-identical block. Never touches this candidate's block result.
+                if not _ok_agg and _planned > 0:
+                    try:
+                        _disp = _enqueue_risk_envelope_displacement(
+                            db,
+                            user_id=user_id,
+                            candidate_symbol=sym,
+                            execution_family=ef,
+                            planned_risk_usd=_planned,
+                            open_rows=_open_rows,
+                        )
+                        _agg_detail["displacement"] = _disp
+                    except Exception:
+                        _agg_detail["displacement"] = {"enqueued": False, "reason": "error"}
                 checks.append(
                     _check(
                         "aggregate_open_risk_cap",
@@ -1242,12 +1460,7 @@ def evaluate_proposed_momentum_automation(
                             f"Open at-risk ${_open_risk:,.0f} + planned ${_planned:,.0f} "
                             f"vs cap ${_agg_cap:,.0f} ({_agg_pct:.1%} of equity)."
                         ),
-                        detail={
-                            "open_risk_usd": round(_open_risk, 2),
-                            "planned_risk_usd": round(_planned, 2),
-                            "cap_usd": round(_agg_cap, 2),
-                            "positions": _open_rows,
-                        },
+                        detail=_agg_detail,
                     )
                 )
     except Exception:

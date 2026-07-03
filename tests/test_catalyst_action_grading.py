@@ -19,7 +19,10 @@ from app.services.trading.momentum_neural.catalyst import (
     _dollar_boost_frac,
     _parse_dollar_amount,
     action_dollar_grade_delta,
+    catalyst_action_class,
+    catalyst_class_reliability_multiplier,
     catalyst_grade_selection_delta,
+    CATALYST_ACTION_CLASSES,
     _ACTION_COMPLETENESS_TILT_FRAC,
     _DOLLAR_BOOST_STRONG_FRAC,
     _DOLLAR_BOOST_MODERATE_FRAC,
@@ -197,3 +200,63 @@ def test_crypto_always_zero():
     assert catalyst_grade_selection_delta(
         "BTC-USD", strong_symbols={"BTC"}, action_deltas={"BTC": 1.0}
     ) == 0.0
+
+
+# ── A9: MERGER-class reliability notch (Ross CLRO-lesson: "merger agreements ... don't always") ──
+
+
+def test_merger_headline_still_grades_completed():
+    # A merger / definitive agreement is STILL a completed action (+1) — byte-identical grade.
+    assert _action_completeness_grade("Acme signed a merger agreement") == 1
+    assert _action_completeness_grade("BigCo enters definitive agreement to combine") == 1
+    assert _action_completeness_grade("Target completes merger with Acquirer") == 1
+
+
+def test_merger_class_label_emitted():
+    assert catalyst_action_class("Acme signed a merger agreement") == "merger"
+    assert catalyst_action_class("BigCo enters definitive agreement") == "merger"
+    assert catalyst_action_class("Target completes merger with Acquirer") == "merger"
+
+
+def test_other_action_class_labels():
+    assert catalyst_action_class("Acme to acquire Beta Corp") == "acquisition"
+    assert catalyst_action_class("Acme receives FDA approval") == "approval"
+    assert catalyst_action_class("Acme awarded a government contract") == "contract"
+    assert catalyst_action_class("Board approves pursuit of a stake") == "tentative"
+    assert catalyst_action_class("Acme reports Q2 earnings") == "none"
+    assert catalyst_action_class("") == "none"
+    assert catalyst_action_class(None) == "none"
+    # every emitted label is a member of the declared class set
+    for title in (
+        "Acme signed a merger agreement", "Acme to acquire Beta", "Acme receives FDA approval",
+        "Acme awarded a contract", "Board explores alternatives", "Acme reports earnings",
+    ):
+        assert catalyst_action_class(title) in CATALYST_ACTION_CLASSES
+
+
+def test_merger_reliability_multiplier_is_exactly_one_without_samples():
+    # Ross's n=1 merger: NO labeled history => the class multiplier is EXACTLY 1.0
+    # (byte-identical grade until the class is trained). FAIL direction: no history => 1.0.
+    assert catalyst_class_reliability_multiplier("merger") == 1.0
+    assert catalyst_class_reliability_multiplier("acquisition") == 1.0
+    # non-named classes are never reliability-scaled
+    assert catalyst_class_reliability_multiplier("none") == 1.0
+    assert catalyst_class_reliability_multiplier("other") == 1.0
+
+
+def test_merger_delta_byte_identical_until_trained():
+    # A merger headline's grade is byte-identical to the raw completed-action grade because
+    # the reliability multiplier is exactly 1.0 (no samples yet).
+    tilt = _catalyst_tilt()
+    d = action_dollar_grade_delta("Acme signed a merger agreement")  # completed, no dollar
+    assert d == round(tilt * _ACTION_COMPLETENESS_TILT_FRAC, 6)
+    assert d > 0
+
+
+def test_class_reliability_flag_off_is_one():
+    orig = settings.chili_momentum_catalyst_class_reliability_enabled
+    try:
+        settings.chili_momentum_catalyst_class_reliability_enabled = False
+        assert catalyst_class_reliability_multiplier("merger") == 1.0
+    finally:
+        settings.chili_momentum_catalyst_class_reliability_enabled = orig

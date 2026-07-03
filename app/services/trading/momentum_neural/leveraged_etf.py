@@ -45,12 +45,44 @@ def is_leveraged_etf_name(name: Optional[str]) -> bool:
     return any(t in low for t in _LEV_WORDS)
 
 
+# A8 (Ross CLRO-lesson 2026-07-02) — REIT / closed-end-fund NAME tokens. A REIT or a
+# closed-end fund is a yield/portfolio vehicle, NOT the low-float operating-company
+# squeeze the Ross lane trades (Ross passed "Wheeler Real Estate Investment Trust" at a
+# glance; CHILI wasted a watch slot arming WHLR). " reit" is word-BOUNDED so it never
+# matches inside an ordinary word. We deliberately do NOT flag plain equities that merely
+# hold real estate ("Realty Income Corp" is a REIT-structured operating company by charter
+# but its NAME carries no fund/trust token, so it is NOT demoted — the filter keys on the
+# stated STRUCTURE token, not the sector).
+_FUND_WORDS = (
+    "real estate investment trust",
+    "closed-end fund",
+    "closed end fund",
+)
+# " reit" bounded as a standalone token (leading space + word boundary) — matches
+# "... REIT" / "... Reit Inc" but never a substring of another word.
+_REIT_TOKEN = re.compile(r"(?<![A-Za-z0-9])reit(?![A-Za-z0-9])", re.IGNORECASE)
+
+
+def is_excluded_fund_name(name: Optional[str]) -> bool:
+    """True if the instrument NAME is a REIT / closed-end fund by its structural naming
+    token. Pure + side-effect-free. Conservative token match: an explicit fund/trust
+    phrase OR the word-bounded ``REIT`` token. Fail-open (False) on a missing/empty name
+    so a real mover with an unresolved name is never demoted."""
+    if not name or not isinstance(name, str):
+        return False
+    low = name.lower()
+    if any(t in low for t in _FUND_WORDS):
+        return True
+    return bool(_REIT_TOKEN.search(name))
+
+
 # Symbol->bool cache. Instrument type is static, so a long TTL + hard size cap (CLAUDE.md
 # requires both). On overflow the whole cache clears (cheap; repopulates from the 24h
 # fundamentals cache).
 _CACHE: dict[str, tuple[bool, float]] = {}
 _CACHE_TTL_SEC = 86_400.0
 _CACHE_MAX = 4096
+_FUND_CACHE: dict[str, tuple[bool, float]] = {}
 
 
 def symbol_is_leveraged_etf(symbol: Optional[str]) -> bool:
@@ -78,4 +110,33 @@ def symbol_is_leveraged_etf(symbol: Optional[str]) -> bool:
     if len(_CACHE) >= _CACHE_MAX:
         _CACHE.clear()
     _CACHE[s] = (res, now)
+    return res
+
+
+def symbol_is_excluded_fund(symbol: Optional[str]) -> bool:
+    """A8: resolve a symbol's instrument NAME (via the 24h-cached get_fundamentals) and
+    classify it as a REIT / closed-end fund. Equity-only (crypto ``-USD`` never a fund).
+    Fail-OPEN (False) on any miss so a real mover is never wrongly demoted. Non-blocking:
+    get_fundamentals is 24h-cached + rate-limit-breaker-guarded (returns None under
+    pressure -> classifies False). Its own cache (separate from the leveraged-ETF cache)."""
+    if not symbol:
+        return False
+    s = str(symbol).strip().upper()
+    if not s or s.endswith("-USD"):
+        return False
+    now = _time.monotonic()
+    hit = _FUND_CACHE.get(s)
+    if hit is not None and (now - hit[1]) < _CACHE_TTL_SEC:
+        return hit[0]
+    res = False
+    try:
+        from ...yf_session import get_fundamentals
+
+        fund = get_fundamentals(s) or {}
+        res = is_excluded_fund_name(fund.get("short_name"))
+    except Exception:
+        res = False
+    if len(_FUND_CACHE) >= _CACHE_MAX:
+        _FUND_CACHE.clear()
+    _FUND_CACHE[s] = (res, now)
     return res

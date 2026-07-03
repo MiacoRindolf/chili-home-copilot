@@ -1207,3 +1207,136 @@ def test_repeg_excluded_for_crypto_symbol(monkeypatch, db: Session) -> None:
     assert out.get("pending") != "entry_repegged", out   # no chase on crypto
     ad.place_limit_order_gtc.assert_not_called()
     assert sess.state == STATE_WATCHING_LIVE              # safe re-watch
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# A4 — MID-MOVE ELIGIBILITY-FLIP RE-SCORE (Ross CLRO-lesson 2026-07-02)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from types import SimpleNamespace as _NS  # noqa: E402
+
+from app.services.trading.momentum_neural import live_runner as _lr  # noqa: E402
+from app.services.trading.momentum_neural.live_fsm import (  # noqa: E402
+    STATE_ARMED_PENDING_RUNNER as _ARMED,
+)
+
+
+def _elig_only_ev() -> dict:
+    """A boundary-risk ev whose ONLY failing check is live_eligible (the A4 allow-set)."""
+    return {"checks": [
+        {"id": "live_eligible", "ok": False},
+        {"id": "kill_switch", "ok": True},
+    ], "severity": "block"}
+
+
+def _hard_block_ev() -> dict:
+    """A boundary-risk ev with a REAL risk block (must NEVER be re-scored)."""
+    return {"checks": [
+        {"id": "live_eligible", "ok": False},
+        {"id": "aggregate_open_risk_cap", "ok": False},
+    ], "severity": "block"}
+
+
+def _reset_a4_rate_limit() -> None:
+    _lr._A4_RESCORE_LAST.clear()
+
+
+def _armed_sess() -> _NS:
+    return _NS(id=1, symbol="CLRO", state=_ARMED, user_id=1)
+
+
+def test_a4_rescores_eligibility_only_block_when_running_up(monkeypatch, db: Session) -> None:
+    _reset_a4_rate_limit()
+    monkeypatch.setattr(settings, "chili_momentum_eligibility_block_rescore_enabled", True, raising=False)
+    monkeypatch.setattr(_lr, "_live_forward_momentum", lambda *a, **k: True)  # running-up
+    monkeypatch.setattr(_lr, "_emit", lambda *a, **k: None)
+    calls = {"n": 0}
+
+    def _fake_tick(_db, meta=None):
+        calls["n"] += 1
+        assert meta and meta.get("tickers") == ["CLRO"]
+        return {"ok": True}
+
+    monkeypatch.setattr("app.services.trading.momentum_neural.pipeline.run_momentum_neural_tick", _fake_tick)
+    monkeypatch.setattr("app.services.trading.momentum_neural.nbbo_tape.tape_inter_row_gap_p50_seconds", lambda *a, **k: 3.0)
+    did = _lr._maybe_rescore_eligibility_block(db, _armed_sess(), _elig_only_ev())
+    assert did is True
+    assert calls["n"] == 1
+
+
+def test_a4_no_rescore_on_hard_risk_block(monkeypatch, db: Session) -> None:
+    _reset_a4_rate_limit()
+    monkeypatch.setattr(settings, "chili_momentum_eligibility_block_rescore_enabled", True, raising=False)
+    monkeypatch.setattr(_lr, "_live_forward_momentum", lambda *a, **k: True)
+    calls = {"n": 0}
+    monkeypatch.setattr("app.services.trading.momentum_neural.pipeline.run_momentum_neural_tick",
+                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1))
+    did = _lr._maybe_rescore_eligibility_block(db, _armed_sess(), _hard_block_ev())
+    assert did is False
+    assert calls["n"] == 0  # a real risk block is NEVER re-scored
+
+
+def test_a4_no_rescore_when_not_running_up(monkeypatch, db: Session) -> None:
+    _reset_a4_rate_limit()
+    monkeypatch.setattr(settings, "chili_momentum_eligibility_block_rescore_enabled", True, raising=False)
+    monkeypatch.setattr(_lr, "_live_forward_momentum", lambda *a, **k: None)  # thin/falling tape
+    calls = {"n": 0}
+    monkeypatch.setattr("app.services.trading.momentum_neural.pipeline.run_momentum_neural_tick",
+                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1))
+    did = _lr._maybe_rescore_eligibility_block(db, _armed_sess(), _elig_only_ev())
+    assert did is False
+    assert calls["n"] == 0  # not running-up => fail-closed, block stands
+
+
+def test_a4_rate_limited_to_cadence(monkeypatch, db: Session) -> None:
+    _reset_a4_rate_limit()
+    monkeypatch.setattr(settings, "chili_momentum_eligibility_block_rescore_enabled", True, raising=False)
+    monkeypatch.setattr(_lr, "_live_forward_momentum", lambda *a, **k: True)
+    monkeypatch.setattr(_lr, "_emit", lambda *a, **k: None)
+    calls = {"n": 0}
+    monkeypatch.setattr("app.services.trading.momentum_neural.pipeline.run_momentum_neural_tick",
+                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1) or {"ok": True})
+    monkeypatch.setattr("app.services.trading.momentum_neural.nbbo_tape.tape_inter_row_gap_p50_seconds", lambda *a, **k: 10.0)
+    s = _armed_sess()
+    assert _lr._maybe_rescore_eligibility_block(db, s, _elig_only_ev()) is True
+    # a second call within the cadence is throttled (no second re-score).
+    assert _lr._maybe_rescore_eligibility_block(db, s, _elig_only_ev()) is False
+    assert calls["n"] == 1
+
+
+def test_a4_flag_off_no_rescore(monkeypatch, db: Session) -> None:
+    _reset_a4_rate_limit()
+    monkeypatch.setattr(settings, "chili_momentum_eligibility_block_rescore_enabled", False, raising=False)
+    monkeypatch.setattr(_lr, "_live_forward_momentum", lambda *a, **k: True)
+    calls = {"n": 0}
+    monkeypatch.setattr("app.services.trading.momentum_neural.pipeline.run_momentum_neural_tick",
+                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1))
+    did = _lr._maybe_rescore_eligibility_block(db, _armed_sess(), _elig_only_ev())
+    assert did is False
+    assert calls["n"] == 0
+
+
+def test_a4_crypto_symbol_never_rescored(monkeypatch, db: Session) -> None:
+    _reset_a4_rate_limit()
+    monkeypatch.setattr(settings, "chili_momentum_eligibility_block_rescore_enabled", True, raising=False)
+    monkeypatch.setattr(_lr, "_live_forward_momentum", lambda *a, **k: True)
+    calls = {"n": 0}
+    monkeypatch.setattr("app.services.trading.momentum_neural.pipeline.run_momentum_neural_tick",
+                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1))
+    s = _NS(id=2, symbol="BTC-USD", state=_ARMED, user_id=1)
+    did = _lr._maybe_rescore_eligibility_block(db, s, _elig_only_ev())
+    assert did is False
+    assert calls["n"] == 0  # equity lane only
+
+
+def test_a4_watching_state_not_rescored(monkeypatch, db: Session) -> None:
+    _reset_a4_rate_limit()
+    monkeypatch.setattr(settings, "chili_momentum_eligibility_block_rescore_enabled", True, raising=False)
+    monkeypatch.setattr(_lr, "_live_forward_momentum", lambda *a, **k: True)
+    calls = {"n": 0}
+    monkeypatch.setattr("app.services.trading.momentum_neural.pipeline.run_momentum_neural_tick",
+                        lambda *a, **k: calls.__setitem__("n", calls["n"] + 1))
+    s = _NS(id=3, symbol="CLRO", state=STATE_WATCHING_LIVE, user_id=1)
+    did = _lr._maybe_rescore_eligibility_block(db, s, _elig_only_ev())
+    assert did is False
+    assert calls["n"] == 0  # only ARMED/QUEUED are re-scored here

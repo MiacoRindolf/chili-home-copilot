@@ -8,7 +8,7 @@ import logging
 import math
 import statistics
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterator, Optional
 
 from ....config import settings
@@ -1048,11 +1048,194 @@ def _count_real_entries_today(db: Any, *, execution_family: str | None) -> int:
         return 0
 
 
+def _count_symbol_episodes_today(
+    db: Any, *, execution_family: str | None
+) -> tuple[int, set[str], dict[str, Any]]:
+    """A1(a) SYMBOL-EPISODE count for the quality-aware trade budget.
+
+    Ross spent 3 trades on ONE name (CLRO) for +$8,917; CHILI's raw FIFO trade budget
+    (``_count_real_entries_today``) charged each same-symbol churn as a separate 'trade',
+    burning the 5/5 ceiling on B-names. The budget should measure DISTINCT-SYMBOL EPISODES,
+    not raw entries: all same-day REAL entries into ONE symbol = ONE episode, and a symbol
+    whose banked realized PnL today is > 0 costs 0 for a re-entry (a green round banked =>
+    re-entry free — you EARNED the right to press the winner).
+
+    Returns ``(episode_count, green_banked_symbols, meta)`` where:
+      * ``episode_count`` = distinct symbols with >= 1 REAL entered outcome today, MINUS the
+        green-banked symbols (green symbols cost 0),
+      * ``green_banked_symbols`` = UPPER symbols whose today net realized PnL is > 0,
+      * ``meta`` = instrumentation (raw distinct symbols, per-symbol banked pnl).
+
+    Read-only, indexed (execution_family, terminal_at). Uses ``is_real_entry_outcome`` so
+    never-entered churn (cancel/no-fill) is not counted. FAIL-OPEN: any error returns
+    ``(0, set(), ...)`` so the gate never blocks on thin/bad data (byte-identical to today)."""
+    if db is None or not execution_family:
+        return 0, set(), {"reason": "no_input"}
+    try:
+        from ....models.trading import MomentumAutomationOutcome
+        from .outcome_labels import is_real_entry_outcome
+
+        start_utc, end_utc = _et_day_bounds_utc(days_ago=0)
+        rows = (
+            db.query(
+                MomentumAutomationOutcome.symbol,
+                MomentumAutomationOutcome.outcome_class,
+                MomentumAutomationOutcome.realized_pnl_usd,
+            )
+            .filter(
+                MomentumAutomationOutcome.execution_family == execution_family,
+                MomentumAutomationOutcome.mode == "live",
+                MomentumAutomationOutcome.terminal_at >= start_utc,
+                MomentumAutomationOutcome.terminal_at < end_utc,
+            )
+            .all()
+        )
+        # Sum today's REAL realized PnL per symbol (a green-banked symbol re-entry is free).
+        banked: dict[str, float] = {}
+        entered_syms: set[str] = set()
+        for sym, oc, pnl in rows:
+            if not is_real_entry_outcome(oc):
+                continue
+            s = str(sym or "").strip().upper()
+            if not s:
+                continue
+            entered_syms.add(s)
+            if pnl is not None:
+                try:
+                    banked[s] = banked.get(s, 0.0) + float(pnl)
+                except (TypeError, ValueError):
+                    continue
+        green_banked = {s for s, p in banked.items() if p > 0.0}
+        # Episodes charged = distinct entered symbols that are NOT green-banked. A symbol
+        # that banked green today costs 0 (re-entry free); a red / flat symbol costs 1.
+        episode_count = len(entered_syms - green_banked)
+        return (
+            episode_count,
+            green_banked,
+            {
+                "distinct_symbols": len(entered_syms),
+                "distinct_symbol_list": sorted(entered_syms),
+                "green_banked_symbols": sorted(green_banked),
+                "charged_episodes": episode_count,
+            },
+        )
+    except Exception:
+        logger.debug("[momentum_neural] symbol-episode count read failed", exc_info=True)
+        return 0, set(), {"reason": "error_fail_open"}
+
+
+def _wildcard_dominant_symbol(db: Any) -> str | None:
+    """A3: the WILDCARD-regime dominant symbol (UPPER), or None when not in a wildcard regime /
+    flag OFF / unreadable breadth (fail-closed to neutral). Reused by the A1/A2 top-rank
+    predicate — in a wildcard regime the lone mover is the top-rank beneficiary. Never raises."""
+    try:
+        from .breadth_regime import compute_breadth_regime
+
+        reg = compute_breadth_regime(db)
+        if reg.is_wildcard and reg.dominant_symbol:
+            return str(reg.dominant_symbol).upper()
+    except Exception:
+        logger.debug("[momentum_neural] wildcard dominant-symbol read failed", exc_info=True)
+    return None
+
+
+def _top_ranked_live_eligible_symbol(
+    db: Any, *, crypto: bool = False
+) -> tuple[str | None, float | None, float | None, dict[str, Any]]:
+    """A1(b) the current #1 freshness-valid live_eligible symbol + its score + the within-day
+    p90 of the live_eligible score distribution.
+
+    The load-bearing half of A1: episode-counting alone still yields 5/5 on a churny day, so
+    the #1-ranked mover (CLRO on 07-02) must be able to clear a full ceiling. Reads
+    ``momentum_symbol_viability`` (scope=symbol, live_eligible, freshness-valid within the
+    live risk gate), dedupes to the best score per distinct symbol, and returns:
+      * ``top_symbol`` (UPPER) = the max-score fresh live-eligible symbol,
+      * ``top_score``,
+      * ``p90`` = the 90th percentile of the distinct-symbol score distribution (adaptive
+        within-day percentile — NO new magic number),
+      * ``meta``.
+
+    FAIL-CLOSED for the exemption: any error / empty board => ``(None, None, None, ...)`` so
+    the caller grants NO exemption (the ceiling stands). ``crypto`` filters to / out ``-USD``
+    so the equity lane ranks against equities only."""
+    meta: dict[str, Any] = {}
+    if db is None:
+        return None, None, None, {"reason": "no_db"}
+    try:
+        from ....models.trading import MomentumSymbolViability
+
+        max_age = float(
+            getattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0
+        )
+        cutoff = datetime.utcnow() - timedelta(seconds=max_age)
+        q = db.query(
+            MomentumSymbolViability.symbol, MomentumSymbolViability.viability_score
+        ).filter(
+            MomentumSymbolViability.scope == "symbol",
+            MomentumSymbolViability.live_eligible.is_(True),
+            MomentumSymbolViability.freshness_ts >= cutoff,
+        )
+        if crypto:
+            q = q.filter(MomentumSymbolViability.symbol.like("%-USD%"))
+        else:
+            q = q.filter(~MomentumSymbolViability.symbol.like("%-USD%"))
+        rows = q.all()
+        if not rows:
+            return None, None, None, {"reason": "empty_board"}
+        # Best score per distinct symbol (a symbol has many variant rows).
+        best: dict[str, float] = {}
+        for sym, score in rows:
+            s = str(sym or "").strip().upper()
+            if not s:
+                continue
+            try:
+                sc = float(score or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if s not in best or sc > best[s]:
+                best[s] = sc
+        if not best:
+            return None, None, None, {"reason": "no_scored_symbols"}
+        top_symbol = max(best, key=lambda k: best[k])
+        top_score = best[top_symbol]
+        # Within-day p90 of the distinct-symbol live_eligible score distribution.
+        scores = sorted(best.values())
+        p90 = _percentile(scores, 0.90)
+        meta = {
+            "n_eligible": len(best),
+            "top_symbol": top_symbol,
+            "top_score": round(top_score, 4),
+            "p90_score": None if p90 is None else round(p90, 4),
+        }
+        return top_symbol, top_score, p90, meta
+    except Exception:
+        logger.debug("[momentum_neural] top-rank read failed", exc_info=True)
+        return None, None, None, {"reason": "error_fail_closed"}
+
+
+def _percentile(sorted_vals: list[float], q: float) -> float | None:
+    """Linear-interpolated percentile of an ASCENDING-sorted list. ``q`` in [0,1]. None on
+    empty input. A single value returns itself. Pure; no numpy dependency."""
+    if not sorted_vals:
+        return None
+    n = len(sorted_vals)
+    if n == 1:
+        return float(sorted_vals[0])
+    pos = max(0.0, min(1.0, float(q))) * (n - 1)
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return float(sorted_vals[lo])
+    frac = pos - lo
+    return float(sorted_vals[lo] * (1.0 - frac) + sorted_vals[hi] * frac)
+
+
 def daily_trade_count_budget_decision(
     db: Any,
     *,
     execution_family: str | None,
     open_entry_count: int = 0,
+    symbol: str | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """ADAPTIVE per-day entry-COUNT budget (SCAL101 '5 trades/day A+ cap', generalized).
 
@@ -1068,8 +1251,19 @@ def daily_trade_count_budget_decision(
 
     TIGHTEN when expectancy degrades (a losing recent window halves toward 0.5 -> fewer
     entries -> stop bleeding into a bad regime), LOOSEN when hot (banked cushion + a winning
-    window -> let the best regime run). DENY a NEW entry once today's REAL ENTERED count
+    window -> let the best regime run). DENY a NEW entry once today's charged count
     (terminated today + currently-open/in-flight) reaches the ceiling.
+
+    A1 (Ross CLRO-lesson 2026-07-02): the count is now QUALITY-AWARE, not blind FIFO.
+      * (a) EPISODE COUNTING — all same-day REAL entries into ONE symbol = ONE episode
+        (``_count_symbol_episodes_today``); a symbol that BANKED GREEN today costs 0 for a
+        re-entry (green round banked => press the winner free). This alone still yields 5/5
+        on a churny day, so:
+      * (b) TOP-RANK EXEMPTION — if ``symbol`` IS the current #1 freshness-valid live-eligible
+        name AND its score >= today's within-day p90 of the live-eligible score distribution
+        (adaptive percentile, no new magic number), ALLOW with reason ``top_rank_exempt`` — the
+        #1 mover gets its OWN episode sub-budget = the SAME documented base. FAIL-CLOSED on the
+        exemption: unreadable rank / not #1 / below p90 => no exemption, the ceiling stands.
 
     Returns ``(allowed, meta)``. ADDITIVE / FAIL-OPEN: flag OFF, no db, no execution_family,
     a degenerate base, or any error => ``(True, ...)`` so the caller is byte-identical to
@@ -1114,18 +1308,28 @@ def daily_trade_count_budget_decision(
             ceil_x = 1.0
         raw_ceiling = base * heat_mult * exp_mult
         ceiling = int(max(base, min(round(raw_ceiling), int(round(base * ceil_x)))))
-        entered = _count_real_entries_today(db, execution_family=execution_family)
+        # A1(a) EPISODE COUNTING: distinct-symbol episodes (green-banked symbols free), NOT
+        # raw FIFO entries — same-symbol churn no longer burns the ceiling. The green-banked
+        # set also means THIS candidate's own symbol re-entry is free if it banked green today.
+        episodes, green_banked, ep_meta = _count_symbol_episodes_today(
+            db, execution_family=execution_family
+        )
         try:
             open_ct = max(0, int(open_entry_count))
         except (TypeError, ValueError):
             open_ct = 0
-        used = entered + open_ct
+        _cand_sym = str(symbol or "").strip().upper()
+        # A green-banked re-entry into THIS candidate's own symbol costs 0 (the episode is
+        # already banked green; pressing the winner is free). Open/in-flight for a green-banked
+        # symbol is likewise already inside its free episode.
+        _cand_is_green_banked = bool(_cand_sym) and _cand_sym in green_banked
+        used = episodes + open_ct
         allowed = used < ceiling
         meta = {
             "allowed": allowed,
             "ceiling": ceiling,
             "base": base,
-            "entered_today": entered,
+            "episodes_today": episodes,
             "open_inflight": open_ct,
             "used": used,
             "heat_mult": round(heat_mult, 3),
@@ -1133,10 +1337,76 @@ def daily_trade_count_budget_decision(
             "expectancy_mult": round(exp_mult, 3),
             "win_rate": round(win_rate, 3) if win_rate is not None else None,
             "n_expectancy": n_exp,
+            "candidate_symbol": _cand_sym or None,
+            "candidate_green_banked": _cand_is_green_banked,
+            **ep_meta,
         }
-        if not allowed:
-            meta["reason"] = "daily_trade_count_budget_reached"
-        return allowed, meta
+        # A green-banked re-entry into the candidate's own symbol is always allowed (free).
+        if _cand_is_green_banked:
+            meta["allowed"] = True
+            meta["reason"] = "green_banked_reentry_free"
+            return True, meta
+        if allowed:
+            return True, meta
+        # ── A1(b) TOP-RANK EXEMPTION (the load-bearing half) ──────────────────────────
+        # The ceiling is reached, but the #1 freshness-valid live-eligible mover with a
+        # top-percentile score gets its OWN episode sub-budget = the SAME documented base
+        # (so the CLRO-class name is never denied while B-names churned the ceiling).
+        # FAIL-CLOSED: any read failure / not-#1 / below-p90 => the plain block stands.
+        meta["reason"] = "daily_trade_count_budget_reached"
+        if not bool(
+            getattr(settings, "chili_momentum_trade_budget_top_rank_exempt_enabled", True)
+        ):
+            return False, meta
+        if not _cand_sym:
+            meta["exempt"] = False
+            meta["exempt_reason"] = "no_candidate_symbol"
+            return False, meta
+        _crypto = _cand_sym.endswith("-USD")
+        top_sym, top_score, p90, rank_meta = _top_ranked_live_eligible_symbol(
+            db, crypto=_crypto
+        )
+        meta["rank"] = rank_meta
+        # Fail-closed: rank unreadable / no p90 / not the #1 name / below the within-day p90.
+        if top_sym is None or top_score is None or p90 is None:
+            meta["exempt"] = False
+            meta["exempt_reason"] = "rank_unreadable"
+            return False, meta
+        if _cand_sym != top_sym:
+            # A3 REUSE: the wildcard breadth regime's DOMINANT symbol IS the top-rank
+            # beneficiary even when a razor-thin score gap makes another row the raw #1 —
+            # in a wildcard regime the lone mover is the name to concentrate on. Fail-closed:
+            # no wildcard / not the dominant name => the plain not-top-ranked block stands.
+            _wc_dom = _wildcard_dominant_symbol(db)
+            if _wc_dom and _cand_sym == _wc_dom:
+                meta["exempt"] = True
+                meta["exempt_reason"] = "wildcard_dominant_exempt"
+                meta["exempt_sub_budget"] = base
+                meta["reason"] = "top_rank_exempt"
+                meta["allowed"] = True
+                return True, meta
+            meta["exempt"] = False
+            meta["exempt_reason"] = "not_top_ranked"
+            return False, meta
+        if float(top_score) < float(p90):
+            meta["exempt"] = False
+            meta["exempt_reason"] = "below_within_day_p90"
+            return False, meta
+        # The #1 mover gets its OWN episode sub-budget = the SAME base. Its own charged
+        # episodes = the count of PRIOR entered-but-not-green episodes into THIS symbol,
+        # which is at most 1 (one distinct symbol) — always < base (base >= 1). So the #1
+        # name always clears its own base sub-budget: allow. Instrumented for the live
+        # binding read (report_binding_not_defaults).
+        _own_prior_episode = 1 if _cand_sym in {
+            str(s).strip().upper() for s in ep_meta.get("distinct_symbol_list", [])
+        } else 0
+        meta["exempt"] = True
+        meta["exempt_reason"] = "top_rank_exempt"
+        meta["exempt_sub_budget"] = base
+        meta["exempt_sub_used"] = min(_own_prior_episode, base)
+        meta["reason"] = "top_rank_exempt"
+        meta["allowed"] = True
+        return True, meta
     except Exception:
         return True, {"reason": "error_fail_open"}
 

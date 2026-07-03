@@ -2005,6 +2005,19 @@ def run_momentum_neural_tick(
     except Exception:
         _weak = set()
 
+    # A10 (Ross CLRO-lesson 2026-07-02): PERSIST today's dilution/weak-flagged symbols into
+    # momentum_dilution_history (own-headline serial-diluter memory). One idempotent row per
+    # (symbol, observed_day); a symbol flagged on >= adaptive-K distinct days earns a DECAYING
+    # selection derate downstream (score_viability), never a hard ban. Fail-open (best-effort;
+    # never breaks the tick). Flag OFF / empty -> no write.
+    if _weak:
+        try:
+            from .dilution_history import persist_dilution_flags
+
+            persist_dilution_flags(db, _weak, correlation_id=correlation_id)
+        except Exception:
+            _log.debug("[pipeline] dilution-history persist failed", exc_info=True)
+
     # SS101 low-float-squeeze BOOST: the recent-reverse-split names that EARNED the de-boost
     # exemption are folded into the STRONG set so the EXISTING catalyst grade delta carries the
     # boost (viability needs no change). Empty / flag OFF / context absent -> no addition

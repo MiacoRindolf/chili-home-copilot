@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from sqlalchemy import (
@@ -1621,6 +1621,34 @@ class MomentumViabilityHistory(Base):
         # (observed_at, id) leading-time index — required by the data_retention TTL
         # drain (_prune_operational_time_log, require_id_second=True). Mirrors mig311.
         Index("ix_mvh_observed_id", "observed_at", "id"),
+    )
+
+
+class MomentumDilutionHistory(Base):
+    """A10 (Ross CLRO-lesson 2026-07-02) — own-headline serial-diluter memory (mig312).
+
+    ``catalyst.weak_catalyst_symbols`` flags dilution/compliance/legal symbols DAILY; this
+    append-only table PERSISTS one row per (symbol, observed_day) so a symbol flagged on
+    >= K distinct days in the trailing window earns a DECAYING selection derate (never a hard
+    ban — the fresh reverse-split-squeeze carve-out still wins). UNIQUE(symbol, observed_day)
+    makes a repeated same-day write idempotent (ON CONFLICT DO NOTHING at the call site)."""
+
+    __tablename__ = "momentum_dilution_history"
+
+    id: int = Column(BigInteger, primary_key=True, index=True)
+    symbol: str = Column(String(36), nullable=False, index=True)
+    observed_day: date = Column(Date, nullable=False)
+    observed_at: datetime = Column(DateTime, nullable=False)
+    flag_reason: Optional[str] = Column(String(64), nullable=True)
+    correlation_id: Optional[str] = Column(String(64), nullable=True)
+    source_node_id: Optional[str] = Column(String(80), nullable=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "observed_day", name="uq_momentum_dilution_history_sym_day"),
+        Index("ix_mdh_symbol_day", "symbol", "observed_day"),
+        # (observed_at, id) leading-time index — lets the data_retention TTL drain sweep it.
+        Index("ix_mdh_observed_id", "observed_at", "id"),
     )
 
 

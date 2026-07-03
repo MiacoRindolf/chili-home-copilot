@@ -11,7 +11,7 @@ from sqlalchemy import desc
 from ....config import settings
 from .context import MomentumRegimeContext, VolatilityRegime
 from .features import ExecutionReadinessFeatures
-from .leveraged_etf import symbol_is_leveraged_etf
+from .leveraged_etf import symbol_is_excluded_fund, symbol_is_leveraged_etf
 from .variants import MomentumStrategyFamily
 
 if TYPE_CHECKING:
@@ -312,6 +312,17 @@ def score_viability(
             rationale=f"{symbol}: leveraged/inverse ETF — excluded from Ross momentum lane (low-float common only)",
             warnings=("Leveraged/inverse ETF vetoed from momentum lane",),
         )
+
+    # A8 (Ross CLRO-lesson 2026-07-02): REIT / closed-end-fund NAME structures. Unlike
+    # the leveraged-ETF HARD veto above, this is a soft DOWN-WEIGHT (score derate) — a
+    # real low-float mover still outranks it, but a fund/trust vehicle no longer wastes a
+    # watch slot (Ross passed WHLR "Wheeler Real Estate Investment Trust" at a glance;
+    # CHILI armed it at 5:50 ET). Reuses the adaptive name classifier (no hardcoded list);
+    # fail-open there (a fundamentals miss classifies False) so a real mover is never
+    # wrongly demoted. Default-ON; kill-switch CHILI_MOMENTUM_EXCLUDE_FUND_STRUCTURES=0.
+    if bool(getattr(settings, "chili_momentum_exclude_fund_structures_enabled", True)) and symbol_is_excluded_fund(symbol):
+        base -= 0.12
+        warnings.append("REIT / closed-end fund structure — down-weighted from Ross momentum lane")
 
     if spread_bps is not None:
         # DERATE the score for wider spreads (tighter books rank higher) but do NOT
@@ -758,6 +769,31 @@ def score_viability(
                 elif _grade_delta > 0:
                     base += _grade_delta
                     warnings.append("Strong catalyst (FDA/M&A/contract) — Ross-style")
+    except (TypeError, ValueError, AttributeError):
+        pass
+
+    # A10 (Ross CLRO-lesson 2026-07-02): OWN-HEADLINE DILUTION-HISTORY DERATE. A symbol our own
+    # catalyst headlines have flagged as a diluter on >= adaptive-K distinct days in the trailing
+    # window (persisted to momentum_dilution_history) is a WHLR-class serial diluter Ross has
+    # "written off" — a DECAYING soft selection derate, NEVER a hard ban. THE FRESH REVERSE-SPLIT-
+    # SQUEEZE CARVE-OUT MUST STILL WIN: a symbol in TODAY's strong-catalyst set (which folds in the
+    # recent-reverse-split squeeze, pipeline.py) is EXEMPT — a live squeeze overrides the stale
+    # memory. Runs AFTER the strong-catalyst boost above so a real setup always outranks the
+    # memory. No history / read error / flag OFF -> 0.0 (byte-identical). Equity-only.
+    try:
+        if bool(getattr(settings, "chili_momentum_dilution_history_derate_enabled", True)):
+            _meta_a10 = ctx.meta if isinstance(getattr(ctx, "meta", None), dict) else {}
+            _strong_a10 = _meta_a10.get("strong_catalyst_symbols")
+            _is_fresh_squeeze = bool(_strong_a10 and str(symbol or "").strip().upper() in set(_strong_a10))
+            if not _is_fresh_squeeze:  # carve-out: a fresh squeeze / strong catalyst today wins
+                from .dilution_history import dilution_history_derate
+
+                _dil_derate = dilution_history_derate(db, symbol)
+                if _dil_derate > 0:
+                    base -= _dil_derate
+                    warnings.append(
+                        "Serial-diluter history (own dilution headlines) — soft de-ranked (decaying)"
+                    )
     except (TypeError, ValueError, AttributeError):
         pass
 

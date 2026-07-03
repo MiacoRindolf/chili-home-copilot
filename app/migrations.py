@@ -21016,6 +21016,50 @@ def _migration_311_momentum_viability_history(conn) -> None:
     )
 
 
+def _migration_312_momentum_dilution_history(conn) -> None:
+    """A10 (Ross CLRO-lesson 2026-07-02) — OWN-HEADLINE DILUTION-HISTORY MEMORY.
+
+    WHY: Ross has "written off" serial diluters ("many secondary offerings, many reverse
+    splits") — WHLR-class names. No corp-actions vendor exists, but
+    ``catalyst.weak_catalyst_symbols`` already flags dilution/compliance/legal symbols
+    DAILY (stored transiently in the pipeline meta). This append-only table PERSISTS those
+    daily observations so a symbol flagged on >= K distinct days in the trailing window earns
+    a DECAYING selection derate (never a hard ban — the fresh reverse-split-squeeze carve-out
+    still wins). One row per (symbol, observed_day); UNIQUE(symbol, observed_day) so a repeated
+    write within a day is idempotent (ON CONFLICT DO NOTHING at the call site). Indexed on
+    (symbol, observed_day DESC) for the trailing-window count read. Naive-UTC to match the
+    trading tables. Idempotent (CREATE ... IF NOT EXISTS).
+    """
+    conn.execute(text(
+        "CREATE TABLE IF NOT EXISTS momentum_dilution_history ("
+        " id BIGSERIAL PRIMARY KEY,"
+        " symbol VARCHAR(36) NOT NULL,"
+        " observed_day DATE NOT NULL,"               # the trading DAY the flag was observed (naive UTC date)
+        " observed_at TIMESTAMP NOT NULL,"           # the write instant (audit)
+        " flag_reason VARCHAR(64),"                  # 'weak_catalyst' (dilution/compliance/legal) — the class
+        " correlation_id VARCHAR(64),"
+        " source_node_id VARCHAR(80),"
+        " created_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'utc'),"
+        " CONSTRAINT uq_momentum_dilution_history_sym_day UNIQUE (symbol, observed_day)"
+        ")"
+    ))
+    # the trailing-window per-symbol count read: newest day first.
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_mdh_symbol_day "
+        "ON momentum_dilution_history (symbol, observed_day DESC)"
+    ))
+    # (observed_at, id) leading-time index — lets the data_retention TTL drain sweep it.
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_mdh_observed_id "
+        "ON momentum_dilution_history (observed_at, id)"
+    ))
+    conn.commit()
+    logger.info(
+        "[mig312] ensured momentum_dilution_history (A10 own-headline serial-diluter memory; "
+        "decaying selection derate — never a hard ban; carve-out for fresh reverse-split squeeze)"
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -21400,6 +21444,8 @@ MIGRATIONS = [
      _migration_310_iqfeed_depth_ladder_jsonb),
     ("311_momentum_viability_history",
      _migration_311_momentum_viability_history),
+    ("312_momentum_dilution_history",
+     _migration_312_momentum_dilution_history),
 ]
 
 

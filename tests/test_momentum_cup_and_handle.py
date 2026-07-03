@@ -821,3 +821,117 @@ class TestCupAndHandleFlagAndFailOpen:
         assert reason == "cup_and_handle_disabled"
         caf.assert_not_called()
         atr.assert_not_called()
+
+
+# ───────────────────── A6: TOPPING-TAIL ANTICIPATORY EARLY FIRE ──────────────────────────
+# Ross's biggest challenge winner: "jumped in a little early to anticipate the breakthrough …
+# these were BOTH topping tails … got in as volume started to pick up." When BOTH rim-high
+# bars are topping tails, fire EARLY on a live uptick through handle_low x (1 + min_reclaim_bps)
+# + the volume-surge leg, BEFORE a full new high above the rim. Every guard still runs ahead;
+# tape is the last fail-closed gate. Stop UNCHANGED (handle low).
+
+# A live price above the handle-low reclaim level (9.70 x 1.0008 ~= 9.7078) but BELOW the rim
+# (10.00) — proves the fire is EARLY (anticipatory), not the standard rim/tick break.
+_ANTICIPATORY_LIVE_PX = 9.85
+
+
+def _cup_handle_topping_tail_df() -> pd.DataFrame:
+    """The clean-cup geometry, but the TWO rim bars (idx 3, idx 7) are TOPPING TAILS: a long
+    upper wick (High at the rim) with the body pinned near the bar's low. High/Low geometry is
+    UNCHANGED (so the swing-pivot double top is identical); only Open/Close move down into a
+    small low body -> is_topping_tail(o,h,l,c) True on both rims."""
+    df = _cup_handle_df()
+    # idx 3: High=10.00, Low=9.60 -> body near the low (o=9.63,c=9.65) -> upper wick 0.35 dominates.
+    df.loc[3, "Open"], df.loc[3, "Close"] = 9.63, 9.65
+    # idx 7: High=10.00, Low=9.70 -> body near the low (o=9.73,c=9.75) -> upper wick 0.25 dominates.
+    df.loc[7, "Open"], df.loc[7, "Close"] = 9.73, 9.75
+    # keep the break bar (idx 12) from making a NEW HIGH so ONLY the anticipatory path can fire.
+    df.loc[12, "High"] = _RIM - 0.01
+    return df
+
+
+class TestCupAndHandleAnticipatoryToppingTail:
+    def test_topping_tail_rims_fire_early_pre_break(self):
+        """BOTH rim bars are topping tails + a live uptick through the handle-low reclaim level
+        (below the rim) + volume surge + tape -> EARLY FIRE, before any new high. Stop == handle
+        low; entry-side is the anticipatory reclaim (NOT a rim/tick break)."""
+        df = _cup_handle_topping_tail_df()
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards():
+            _base_settings(ms)
+            ms.chili_momentum_cup_handle_anticipatory_enabled = True
+            ms.chili_momentum_tick_first_pullback_min_reclaim_bps = 8.0
+            ok, reason, dbg = cup_and_handle_confirmation(
+                df, entry_interval="5m", symbol="TEST", db=MagicMock(),
+                live_price=_ANTICIPATORY_LIVE_PX,
+            )
+        assert ok is True, f"topping-tail anticipatory must fire, got {reason} dbg={dbg}"
+        assert reason == "cup_and_handle_anticipatory_topping_tail"
+        assert dbg.get("rim_both_topping_tails") is True
+        assert dbg.get("anticipatory_topping_tail") is True
+        # fired BELOW the rim (early), and the stop is the unchanged handle low.
+        assert _ANTICIPATORY_LIVE_PX < _RIM
+        assert dbg["pullback_low"] == pytest.approx(_HANDLE_LOW, abs=1e-6)
+
+    def test_no_topping_tails_waits(self):
+        """Rim bars are NOT topping tails -> no early path; with no new high the gate WAITS
+        (falls through to the rim-break path, which returns waiting_for_break)."""
+        df = _cup_handle_df()  # standard rims (Close = midpoint, NOT topping tails)
+        df.loc[12, "High"] = _RIM - 0.01  # no completed-bar break
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards():
+            _base_settings(ms)
+            ms.chili_momentum_cup_handle_anticipatory_enabled = True
+            ms.chili_momentum_tick_first_pullback_min_reclaim_bps = 8.0
+            ok, reason, dbg = cup_and_handle_confirmation(
+                df, entry_interval="5m", symbol="TEST", db=MagicMock(),
+                live_price=_ANTICIPATORY_LIVE_PX,  # below the rim -> no tick break either
+            )
+        assert ok is False, f"no topping tails must not early-fire, got {reason} dbg={dbg}"
+        assert reason == "waiting_for_break"
+        assert dbg.get("rim_both_topping_tails") in (False, None)
+
+    def test_reclaim_without_tape_no_fire(self):
+        """Topping-tail rims + reclaim + volume but tape UNCONFIRMED -> NO early fire (tape is
+        the last fail-closed gate); with no new high the gate then WAITS."""
+        df = _cup_handle_topping_tail_df()
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards() as g:
+            _base_settings(ms)
+            ms.chili_momentum_cup_handle_anticipatory_enabled = True
+            ms.chili_momentum_tick_first_pullback_min_reclaim_bps = 8.0
+            g.mocks[f"{_GATES}.tape_confirms_hold"].return_value = (False, {"reason": "tape_hold_disabled"})
+            ok, reason, dbg = cup_and_handle_confirmation(
+                df, entry_interval="5m", symbol="TEST", db=MagicMock(),
+                live_price=_ANTICIPATORY_LIVE_PX,
+            )
+        assert ok is False, f"no tape must block the early fire, got {reason} dbg={dbg}"
+        assert dbg.get("rim_both_topping_tails") is True
+        assert reason == "waiting_for_break"  # fell through (no new high)
+
+    def test_flag_off_is_byte_identical(self):
+        """Flag OFF -> the anticipatory path never runs; with topping-tail rims + a below-rim
+        live price the gate behaves EXACTLY as the rim-break-only path (waiting_for_break)."""
+        df = _cup_handle_topping_tail_df()
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards():
+            _base_settings(ms)
+            ms.chili_momentum_cup_handle_anticipatory_enabled = False
+            ok, reason, dbg = cup_and_handle_confirmation(
+                df, entry_interval="5m", symbol="TEST", db=MagicMock(),
+                live_price=_ANTICIPATORY_LIVE_PX,
+            )
+        assert ok is False
+        assert reason == "waiting_for_break"
+        assert "rim_both_topping_tails" not in dbg  # the anticipatory block never executed
+
+    def test_reclaim_below_level_no_early_fire(self):
+        """Topping-tail rims but the live price is at/below the handle-low reclaim level (no
+        uptick through it) -> no early fire (waits)."""
+        df = _cup_handle_topping_tail_df()
+        with patch(f"{_GATES}.settings") as ms, _PassAllGuards():
+            _base_settings(ms)
+            ms.chili_momentum_cup_handle_anticipatory_enabled = True
+            ms.chili_momentum_tick_first_pullback_min_reclaim_bps = 8.0
+            ok, reason, dbg = cup_and_handle_confirmation(
+                df, entry_interval="5m", symbol="TEST", db=MagicMock(),
+                live_price=_HANDLE_LOW - 0.05,  # below the reclaim level
+            )
+        assert ok is False
+        assert reason == "waiting_for_break"

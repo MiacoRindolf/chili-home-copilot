@@ -2640,6 +2640,52 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_TRADE_COUNT_BUDGET_ENABLED"),
         description="Adaptive per-day A+ entry-count ceiling — cap the number of fresh entries per session (discipline / overtrading guard).",
     )
+    # A1(b) (Ross CLRO-lesson 2026-07-02): TOP-RANK EXEMPTION for the trade-count budget.
+    # Ross spent 3 trades on ONE name (CLRO) for +$8,917 while CHILI's 5/5 FIFO budget denied
+    # 98 CLRO candidates (used on B-names). Episode-counting alone still yields 5/5 on a churny
+    # day, so the #1 freshness-valid live-eligible mover whose score >= today's within-day p90
+    # gets its OWN episode sub-budget = the SAME base — the CLRO-class name is never blocked
+    # while B-names churn the ceiling. FAIL-CLOSED: unreadable rank / not-#1 / below-p90 => no
+    # exemption (the ceiling stands). Default-ON; kill-switch
+    # CHILI_MOMENTUM_TRADE_BUDGET_TOP_RANK_EXEMPT_ENABLED=0.
+    chili_momentum_trade_budget_top_rank_exempt_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TRADE_BUDGET_TOP_RANK_EXEMPT_ENABLED"),
+        description="A1(b): the #1 freshness-valid live-eligible symbol (score >= within-day p90) gets its OWN episode sub-budget = the same base when the trade-count ceiling is reached. Fail-closed on unreadable rank. OFF => the ceiling is a hard block (no exemption).",
+    )
+    # A2 (Ross CLRO-lesson 2026-07-02): QUALITY-RANKED RISK-ENVELOPE DISPLACEMENT. On 07-02
+    # two dying IPW losers pinned the whole 3%-of-equity aggregate risk envelope (726 blocks)
+    # through CLRO's curl. When the aggregate-open-risk cap blocks a TOP-RANKED candidate (A1's
+    # top-rank predicate), enqueue a stop-TIGHTEN on the largest at-risk open position to that
+    # position's OWN already-computed most-defensive trail candidate (never an invented
+    # breakeven; INVARIANT-A compose max(candidate, current) — stops only tighten). THIS tick
+    # still blocks (no simultaneous act); the position's next tick applies the tighten and the
+    # freed envelope admits the NEXT candidate tick. FAIL-CLOSED everywhere: no candidate level
+    # / frees < planned / non-top-ranked => plain block, byte-identical to today. Default-ON;
+    # kill-switch CHILI_MOMENTUM_RISK_ENVELOPE_DISPLACEMENT_ENABLED=0.
+    # NOTE (sequencing): commit 0276285 (basis-independent slots) is NOT yet in main 888198e —
+    # A2 composes with the CURRENT main aggregate-risk accounting; reconcile when 0276285 lands.
+    chili_momentum_risk_envelope_displacement_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_ENVELOPE_DISPLACEMENT_ENABLED"),
+        description="A2: when the aggregate-open-risk cap blocks a TOP-RANKED candidate, enqueue a stop-TIGHTEN on the largest at-risk open position to its own most-defensive trail candidate (INVARIANT-A max(candidate,current)); this tick still blocks, the next admits against the freed envelope. Fail-closed: no candidate level / frees < planned / non-top-ranked => plain block. OFF => byte-identical.",
+    )
+    # A4 (Ross CLRO-lesson 2026-07-02): MID-MOVE ELIGIBILITY-FLIP RE-SCORE. On 07-02 621x
+    # "Not live-eligible per neural viability" covered Ross's ENTIRE CLRO window; the flip
+    # landed ~60-90s after the top. main already has the tape-delta ignite feeder, but it only
+    # fires on >=10%/5min crossers — CLRO's SLOW 15-min curl (~2.7%/5min) slipped under it. A4
+    # closes that hole: at a viability block whose ONLY failing checks are live_eligible /
+    # viability_freshness, when the session is ARMED and its own tick evidence shows running-up
+    # continuation (signed OFI level>0 AND slope>=0), invoke the SAME single-symbol re-score the
+    # tape-delta feeder uses (run_momentum_neural_tick, freshness_ts=now), rate-limited per
+    # symbol to the adaptive tape cadence (clamp of tape_inter_row_gap_p50). FAIL-CLOSED: a
+    # re-score error => the block stands; never force eligibility. Default-ON; kill-switch
+    # CHILI_MOMENTUM_ELIGIBILITY_BLOCK_RESCORE_ENABLED=0.
+    chili_momentum_eligibility_block_rescore_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ELIGIBILITY_BLOCK_RESCORE_ENABLED"),
+        description="A4: at an eligibility-only viability block on an ARMED, running-up session, invoke the same single-symbol re-score the tape-delta feeder uses (freshness_ts=now), rate-limited per symbol to the adaptive tape cadence. Fail-closed: re-score error => block stands; never force eligibility. OFF => byte-identical (no re-score).",
+    )
     chili_momentum_prior_day_pnl_damper_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_PRIOR_DAY_PNL_DAMPER_ENABLED"),
@@ -3210,6 +3256,11 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SECOND_DAY_CONTEXT_ENABLED"),
         description="Kill-switch for the P1 second-day/multi-day continuation selection tilt (equities). false = no day-2 boost, no day-3+ derate; the run/level fields are still surfaced for audit but daily_structure_pct is byte-identical.",
+    )
+    chili_momentum_symbol_freshness_tilt_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SYMBOL_FRESHNESS_TILT_ENABLED"),
+        description="A5 (clro-p1) two-signed symbol-freshness SELECTION tilt (equities). Folds a bounded re-rank into daily_structure_pct: FRESH (no recent explosive daily move AND low prior trailing-20d $vol percentile vs the symbol's own trailing year) => positive tilt; STALE (a recent explosive daily move that FADED back below its pre-move base) => negative tilt. TILT only, never a veto; fail-open-to-neutral on thin/NaN history. false => daily_structure_pct byte-identical.",
     )
     # ── Halt awareness (Ross low-floats halt constantly: LULD circuit breakers) ──
     # A trading HALT is observable as a SUSTAINED quote freeze: the stale_bbo gate
@@ -4572,6 +4623,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_CUP_AND_HANDLE_MAX_HANDLE_BARS"),
         description="Batch C: cup-and-handle handle length — the handle is at most this many completed bars (the shallow pullback after the second top, before the breaking bar). ONE documented handle-length base knob.",
     )
+    chili_momentum_cup_handle_anticipatory_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CUP_HANDLE_ANTICIPATORY_ENABLED"),
+        description="A6 (clro-p1) cup-and-handle TOPPING-TAIL ANTICIPATORY early-fire variant. When BOTH rim-high bars are topping tails (is_topping_tail), allow an EARLY fire on a live uptick through handle_low x (1 + the SAME min_reclaim_bps base tick_scalp uses) AND the existing volume-surge leg — Ross: 'jumped in a little early to anticipate the breakthrough … these were BOTH topping tails … got in as volume started to pick up.' Stop unchanged (handle low). ALL existing guards (backside/front-side, extension, L2 seller veto, tape-required) stay ahead of the fire. Fail-closed on unreadable rim-bar wick geometry => rim-break only. false => byte-identical to the rim-break-only path.",
+    )
     # E2 — CATALYST GRADING + WEAK HARD GATE. weak_catalyst_symbols() (dilution/compliance/
     # legal) existed only as a soft viability de-boost; it never gated the arm queue. Ross
     # DISTRUSTS weak catalysts (fade predictors) and favors STRONG (FDA/M&A/contract). When
@@ -4587,6 +4643,51 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_ACTION_GRADING_ENABLED"),
         description="Ross-batch2 QUCY-vs-ILLR lesson: grade a STRONG catalyst higher/lower by HEADLINE VERB QUALITY + DOLLAR AMOUNT. Completed-action verbs (acquires/signed/definitive agreement/awarded) BOOST; tentative/pursuit verbs (approves pursuit/explores/letter of intent) DE-BOOST (the +24%-fade class); a headline dollar amount ($400M) ADDS a boost scaled adaptively vs market cap (else >= $100M strong / >= $10M moderate). Fail-closed: no verb/dollar signal -> unchanged. KILL-SWITCH: False -> byte-identical.",
+    )
+    # A9 (Ross CLRO-lesson 2026-07-02): MERGER-class reliability notch. Ross at [04:43]:
+    # "merger agreements can work. They don't always." Split a MERGER sub-class out of the
+    # completed-action grader + emit the class label on EVERY graded headline NOW
+    # (instrumentation first). The per-class reliability MULTIPLIER is ADAPTIVE from our own
+    # labeled follow-through history once >= N samples exist, else EXACTLY 1.0 — so behavior
+    # is byte-identical to today until the class has enough labeled outcomes to earn a
+    # weight. FAIL direction: no history => 1.0. Default-ON; kill-switch
+    # CHILI_MOMENTUM_CATALYST_CLASS_RELIABILITY_ENABLED=0.
+    chili_momentum_catalyst_class_reliability_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_CLASS_RELIABILITY_ENABLED"),
+        description="A9: split a MERGER sub-class out of the completed-action grader + emit the class label on every graded headline. Per-class reliability multiplier is ADAPTIVE from labeled history once >= N samples, else EXACTLY 1.0 (identical until trained). OFF => label still emitted, multiplier always 1.0.",
+    )
+    # ONE documented base: minimum labeled per-class samples before an adaptive reliability
+    # multiplier is trusted (below this the class multiplier is exactly 1.0). A FLOOR, not a
+    # magic tuning ceiling.
+    chili_momentum_catalyst_class_reliability_min_samples: int = Field(
+        default=20,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_CLASS_RELIABILITY_MIN_SAMPLES"),
+        description="A9: minimum labeled per-class outcomes before the adaptive reliability multiplier departs from 1.0. ONE documented base (floor).",
+    )
+    # A10 (Ross CLRO-lesson 2026-07-02): OWN-HEADLINE DILUTION-HISTORY MEMORY (WHLR serial-
+    # diluter class). Ross at [04:15]: "many secondary offerings, many reverse splits … I've
+    # written that one off." No corp-actions vendor exists — but catalyst.weak_catalyst_symbols
+    # already flags dilution symbols daily, so we persist OUR OWN observations (mig312,
+    # momentum_dilution_history) and a symbol flagged on >= K distinct days in the trailing
+    # window (K ADAPTIVE relative to the flag-frequency distribution) earns a DECAYING selection
+    # derate — never a hard ban (the fresh reverse-split-squeeze carve-out must still win). No
+    # history => no derate. Default-ON; kill-switch CHILI_MOMENTUM_DILUTION_HISTORY_DERATE_ENABLED=0.
+    chili_momentum_dilution_history_derate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DILUTION_HISTORY_DERATE_ENABLED"),
+        description="A10: persist each day's dilution/weak-flagged symbols (momentum_dilution_history) and apply a DECAYING selection derate to serial diluters (flagged on >= adaptive-K distinct days in the trailing window). Never a hard ban — the fresh reverse-split-squeeze carve-out still wins. No history => no derate. false => no persist read/derate (byte-identical).",
+    )
+    # ONE documented base for A10: the trailing window (calendar days) over which distinct
+    # dilution-flag days are counted. K is ADAPTIVE within this window (relative to the observed
+    # flag-frequency distribution); this window is the single irreducible base.
+    chili_momentum_dilution_history_window_days: int = Field(
+        default=90,
+        ge=7,
+        le=365,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DILUTION_HISTORY_WINDOW_DAYS"),
+        description="A10: trailing window (calendar days) over which distinct dilution-flag DAYS are counted per symbol. The ONE documented base; K (the min distinct-day count that earns a derate) is adaptive within this window.",
     )
     # Entry trigger mode: "hybrid" (Ross pullback-break on 1m/5m, momentum_volume
     # fallback), "pullback_break" (pullback only), or "momentum_volume" (legacy 15m).
@@ -7927,6 +8028,19 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SYMBOL_OF_DAY_FOCUS_ENABLED"),
     )
+    # A3 (Ross CLRO-lesson 2026-07-02): SCANNER-BREADTH WILDCARD REGIME. When the scanner is
+    # DEAD (bottom-decile breadth vs the trailing-20-session same-time-of-day p20) but ONE mover
+    # dominates (dominance >= its own trailing percentile) — the wildcard effect ("one stock
+    # squeezes for lack of anything else") — CONCENTRATE the lane on that leader: rank-boost +
+    # hoist + eviction-protect the dominant watch slot, and size-tilt DOWN B-grade admissions
+    # (tilt, never veto). A pre-holiday day feeds the low-breadth PRIOR as a size/trail deweight.
+    # FAIL-CLOSED for the up-weights: unreadable breadth => neutral, zero effects. ONE documented
+    # base = the breadth percentile floor (p20). Default-ON; kill-switch =0.
+    chili_momentum_wildcard_breadth_regime_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WILDCARD_BREADTH_REGIME_ENABLED"),
+        description="A3: detect the wildcard breadth regime (dead scanner + one dominant mover) and concentrate slots/size on the leader — rank-boost/hoist/eviction-protect the dominant name + B-grade size-tilt DOWN + pre-holiday breadth-prior deweight. Tilt, never veto. Fail-closed to neutral on unreadable breadth. false => byte-identical.",
+    )
     # The ONE adaptive base knob: minimum CURRENT-viability-score gap a newcomer must
     # STRICTLY exceed over the worst inert victim to displace it (hysteresis). Derived
     # as a score-gap margin within the live batch — not a fixed per-class number. Raise
@@ -8842,6 +8956,19 @@ class Settings(BaseSettings):
     chili_momentum_exclude_leveraged_etfs: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXCLUDE_LEVERAGED_ETFS"),
+    )
+    # A8 (Ross CLRO-lesson, 2026-07-02): REIT / closed-end-fund NAME token in the
+    # structural selection filter. Ross passed "Wheeler Real Estate Investment Trust" at
+    # a glance ("Not interested"); CHILI armed WHLR at 5:50 ET (a wasted watch slot). A
+    # REIT / closed-end fund is not the low-float company squeeze the lane trades. Unlike
+    # the leveraged-ETF HARD veto above, this is a soft DOWN-WEIGHT (score derate) at the
+    # same viability site — a real mover still outranks it, but junk fund structures no
+    # longer waste a slot. Fail-OPEN (False) on a name miss so a real mover is never
+    # wrongly demoted. Default-ON; kill-switch CHILI_MOMENTUM_EXCLUDE_FUND_STRUCTURES=0.
+    chili_momentum_exclude_fund_structures_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXCLUDE_FUND_STRUCTURES_ENABLED"),
+        description="A8: DOWN-WEIGHT (not ban) REIT / closed-end-fund named structures in the momentum selection score. Fail-open on a name miss. OFF => byte-identical (no derate).",
     )
     # A-SETUP QUALITY FLOOR (2026-06-26): the 'puro talo' root — the lane had NO
     # quality floor, so it armed/traded ANYTHING that fired a trigger -> B/C junk and
