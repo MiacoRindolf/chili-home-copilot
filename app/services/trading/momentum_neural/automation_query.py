@@ -169,6 +169,20 @@ LIMITATIONS_NOTE = (
 )
 
 
+def _rh_venue_unavailable_detail(execution_family: str | None) -> dict[str, Any]:
+    """STEP-D #14 telemetry: for the RH Agentic rail, the reason it is currently dark
+    (auth error / transport reason / remaining outage latch). Empty for other families or
+    when the rail is healthy. Best-effort — never raises into the caller."""
+    try:
+        if str(execution_family or "") != "robinhood_agentic_mcp":
+            return {}
+        from ..venue.robinhood_mcp import venue_unavailable_detail
+
+        return venue_unavailable_detail() or {}
+    except Exception:
+        return {}
+
+
 def _tables_present(db: Session) -> bool:
     try:
         bind = db.get_bind()
@@ -1842,7 +1856,13 @@ def _flatten_live_session_for_stop(sess: TradingAutomationSession) -> dict[str, 
     except ExecutionFamilyNotImplementedError:
         return {"ok": False, "error": "execution_family_not_implemented"}
     if not adapter.is_enabled():
-        return {"ok": False, "error": "live_adapter_unavailable"}
+        return {
+            "ok": False,
+            "error": "live_adapter_unavailable",
+            # STEP-D #14: surface WHY the rail is dark (auth error / transport reason /
+            # remaining latch) so a venue-unavailable read is diagnosable, not opaque.
+            "venue_unavailable_detail": _rh_venue_unavailable_detail(ef),
+        }
 
     if entry_order_id and not isinstance(pos, dict):
         adapter.cancel_order(str(entry_order_id))

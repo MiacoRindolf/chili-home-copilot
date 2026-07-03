@@ -3506,6 +3506,15 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_ROBINHOOD_AGENTIC_MCP_REVIEW_BEFORE_PLACE"),
     )
+    # STEP-D #14: a frequent scheduler job calls the RH Agentic rail's is_enabled() (which
+    # runs ensure_authable + refreshes the token cache) so the auth cache never goes COLD at
+    # the open — the RH-dark-at-open flap class (dark 74 min over today's best window). OFF
+    # => no keep-warm probe (the cache warms lazily on first entry, the old behavior).
+    chili_robinhood_agentic_probe_keepwarm_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_ROBINHOOD_AGENTIC_PROBE_KEEPWARM_ENABLED"),
+        description="Keep the RH Agentic rail's auth cache warm via a lightweight periodic is_enabled()/auth probe wired into a frequent scheduler job, so the cache never goes cold at the open.",
+    )
     # Which rail equities route to: "robinhood_spot" (default, unofficial robin_stocks) or
     # "robinhood_agentic_mcp" (sanctioned rail; trades the isolated Agentic account). A
     # conscious account-routing choice — only takes effect when a token is also present.

@@ -1034,6 +1034,24 @@ def _run_nbbo_spread_prune_job():
     run_scheduler_job_guarded("momentum_nbbo_prune", _work)
 
 
+def _run_rh_agentic_keepwarm_job():
+    """STEP-D #14 KEEP-WARM: probe the RH Agentic rail's is_enabled() on a frequent cadence
+    so the auth cache never goes COLD at the open (the RH-dark-at-open flap class). The probe
+    runs ensure_authable + refreshes the token cache; best-effort inside the adapter. Flag
+    ``chili_robinhood_agentic_probe_keepwarm_enabled`` (default True) gates it."""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        if not getattr(_settings, "chili_robinhood_agentic_probe_keepwarm_enabled", True):
+            return
+        from .trading.venue.robinhood_mcp import probe_keepwarm
+        res = probe_keepwarm()
+        if res.get("ok") and res.get("enabled") is False:
+            logger.info("[scheduler] rh_agentic keep-warm probe: rail DARK detail=%s", res.get("detail"))
+
+    run_scheduler_job_guarded("rh_agentic_keepwarm", _work)
+
+
 # Change-only dedupe for auto-arm SKIP logging: the arm pass runs every 30s, so
 # logging every no-trade tick would audit-spam. We surface a compact line only
 # when the skip decision's SHAPE shifts — making "why isn't the Ross lane
@@ -6755,6 +6773,23 @@ def start_scheduler():
                 max_instances=1,
                 coalesce=True,
                 next_run_time=datetime.now() + timedelta(seconds=130),
+            )
+
+        # STEP-D #14 KEEP-WARM: keep the RH Agentic rail's auth cache warm every 30s so it
+        # never goes cold at the open (the RH-dark-at-open flap class). Cheap best-effort
+        # probe; gated by chili_robinhood_agentic_probe_keepwarm_enabled (default True).
+        if include_momentum_exec and getattr(
+            settings, "chili_robinhood_agentic_probe_keepwarm_enabled", True
+        ):
+            _scheduler.add_job(
+                _run_rh_agentic_keepwarm_job,
+                trigger=IntervalTrigger(seconds=30),
+                id="rh_agentic_keepwarm",
+                name="RH Agentic rail auth keep-warm probe (every 30s)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=25),
             )
 
         # Shake-out learning: label closed momentum trades vs their post-exit path
