@@ -8609,6 +8609,29 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_CANCEL_ON_CONFIRM_BLOCK_ENABLED"),
         description="Cancel the begin-created live_arm_pending session when confirm_live_arm is blocked. false = leave it for the TTL reaper (legacy).",
     )
+    # FIX-18 (B1) — ZOMBIE-WALL TTL on the begin_live_arm DEDUPE. A transient confirm
+    # failure strands a live_arm_pending session; the begin_live_arm dedupe then returns it
+    # as "already active" forever, blocking re-arm of the SAME symbol for hours (80 zombies/
+    # 7d, median 6.6h; JEM x3 on 06-30). When True (default) the dedupe treats a
+    # live_arm_pending session OLDER than the TTL below as DEAD: it terminalizes it
+    # (live_arm_expired) and allows the new arm to proceed. ONLY live_arm_pending is
+    # affected — a genuinely-active session (watching_live/entered/etc.) is NEVER expired,
+    # and a FRESH pending (younger than the TTL) still dedupes (no double-arm). OFF =>
+    # byte-identical legacy (any non-terminal session dedupes forever).
+    chili_momentum_arm_pending_ttl_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ARM_PENDING_TTL_ENABLED"),
+        description="FIX-18 (B1): True (default) => the begin_live_arm dedupe terminalizes an EXPIRED live_arm_pending (older than the TTL) as live_arm_expired and allows re-arm. OFF => legacy (dedupe forever).",
+    )
+    # Adaptive TTL (seconds) for a live_arm_pending session in the dedupe. Base ~ a small
+    # multiple of the typical confirm latency (confirm normally lands same auto-arm tick, so
+    # 120s = ~2x a generous latency budget). ONE documented base (feedback_adaptive_no_magic);
+    # a stranded pending older than this is a zombie and is recycled.
+    chili_momentum_arm_pending_ttl_seconds: float = Field(
+        default=120.0,
+        ge=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ARM_PENDING_TTL_SECONDS"),
+    )
     # (C) STALE-SESSION REAPER: a SAFE BOUNDED sweep (runs inside the existing
     # auto-arm pass, NOT a parallel loop) that terminalizes dead-but-lingering
     # sessions: (1) live_error past the TTL, (2) live_bailout past the TTL whose
