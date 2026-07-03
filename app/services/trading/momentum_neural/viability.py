@@ -735,6 +735,10 @@ def score_viability(
             _weak_g = _meta2.get("weak_catalyst_symbols")
             _strong_g = _meta2.get("strong_catalyst_symbols")
             _fake_g = _meta2.get("fake_catalyst_symbols")
+            # Ross-batch2 QUCY-vs-ILLR: {ticker: action/dollar delta} refines the STRONG boost
+            # (completed-action/big-dollar +, tentative/pursuit -). Absent/flag-OFF -> None ->
+            # byte-identical strong boost.
+            _action_g = _meta2.get("catalyst_action_deltas")
             if _weak_g or _strong_g or _fake_g:
                 from .catalyst import catalyst_grade_selection_delta
 
@@ -743,6 +747,7 @@ def score_viability(
                     weak_symbols=set(_weak_g) if _weak_g else None,
                     strong_symbols=set(_strong_g) if _strong_g else None,
                     fake_symbols=set(_fake_g) if _fake_g else None,
+                    action_deltas=dict(_action_g) if isinstance(_action_g, dict) and _action_g else None,
                 )
                 if _grade_delta < 0:
                     base += _grade_delta

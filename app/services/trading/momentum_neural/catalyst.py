@@ -697,6 +697,206 @@ def strong_catalyst_symbols() -> set[str]:
         return set()
 
 
+# ── ACTION-COMPLETENESS + DOLLAR-AMOUNT catalyst grading (Ross QUCY-vs-ILLR lesson) ──────
+# Batch-2 audit (project_ws/AgentOps/ross_video_evidence/AUDIT_REPORT_BATCH2.md, row #9):
+# QUCY "board APPROVES PURSUIT of a SpaceX stake" popped +24% and faded; ILLR "$400M SpaceX
+# treasury / TO ACQUIRE" ran ~+790%. The dividing line is the HEADLINE VERB QUALITY and the
+# DOLLAR AMOUNT, not the topic. Two orthogonal signals grade a STRONG-typed catalyst higher
+# or lower WITHIN its type:
+#   (a) COMPLETED-ACTION verbs ("acquires / acquired / signs / signed / awarded / receives
+#       approval / enters agreement / closes / definitive agreement / merger agreement") =>
+#       a real, done deal => BOOST.
+#   (b) TENTATIVE / pursuit verbs ("approves pursuit / explores / evaluates / intends to /
+#       plans to / letter of intent / considering / proposes / may / seeks / in discussions")
+#       => intent, not action => NO boost or a small DE-BOOST (the QUCY pop-and-fade class).
+#   (c) DOLLAR-AMOUNT in the headline ($400M class) => an additional BOOST scaled by magnitude,
+#       ADAPTIVE relative to the symbol's market cap when known, else a documented base tier
+#       (>= $100M strong, >= $10M moderate).
+# FAIL-CLOSED: a headline with NO completed/tentative verb AND no dollar amount grades 0 (the
+# STRONG boost is unchanged) — so a plain PR is byte-identical to the flag-off path. ONE flag
+# ``chili_momentum_catalyst_action_grading_enabled`` (default True). No magic constants beyond
+# the documented dollar tiers + the multiplier bases below.
+
+# COMPLETED-ACTION verbs — a DONE (or contractually committed) deal. Present/past tense +
+# "definitive"/"merger agreement" (a signed contract, not an exploration).
+_COMPLETED_ACTION_KEYWORDS = (
+    "acquires", "to acquire", "acquired", "acquisition of", "signs", "signed", "signs agreement",
+    "awarded", "wins contract", "wins award", "receives approval", "receives fda approval",
+    "receives clearance", "granted approval", "enters agreement", "enters into agreement",
+    "enters definitive", "definitive agreement", "merger agreement", "closes", "closing of",
+    "completes acquisition", "completes merger", "completed", "finalizes", "finalized",
+    "executes agreement", "secures contract", "secures order", "purchase agreement",
+    "receives order", "receives purchase order",
+)
+
+# TENTATIVE / pursuit verbs — INTENT, not a done deal (the QUCY "approves pursuit" fade class).
+_TENTATIVE_ACTION_KEYWORDS = (
+    "approves pursuit", "pursuit of", "explores", "exploring", "evaluates", "evaluating",
+    "intends to", "intention to", "plans to", "planning to", "letter of intent",
+    "considering", "considers", "proposes", "proposal to", "proposed", "seeks to",
+    "in discussions", "in talks", "may acquire", "potential acquisition", "weighing",
+    "review of strategic", "strategic alternatives", "non-binding", "expression of interest",
+    "preliminary", "aims to", "looks to",
+)
+
+# The magnitude of the action-completeness tilt, expressed as a fraction of the catalyst tilt
+# (same scale family as the strong half-tilt). ONE documented base each; completed BOOSTS,
+# tentative DE-BOOSTS by the same magnitude (symmetric, conservative).
+_ACTION_COMPLETENESS_TILT_FRAC = 0.5   # of _catalyst_tilt() — a completed action is a real +
+# Dollar-amount tiers (documented BASE when market cap is unknown; a FLOOR, not a magic ceiling
+# — the adaptive market-cap ratio path below supersedes these when cap is available). Dollars.
+_DOLLAR_TIER_STRONG = 100_000_000.0    # >= $100M => strong dollar boost
+_DOLLAR_TIER_MODERATE = 10_000_000.0   # >= $10M  => moderate dollar boost
+# The dollar-boost magnitudes (fraction of the catalyst tilt). Strong tier == the completed
+# action magnitude; moderate == half of it (graduated, no new scale).
+_DOLLAR_BOOST_STRONG_FRAC = 0.5
+_DOLLAR_BOOST_MODERATE_FRAC = 0.25
+# ADAPTIVE dollar-vs-market-cap: a deal worth >= this fraction of the symbol's market cap is a
+# material, needle-moving catalyst (a $400M deal on a $200M-cap micro-float dwarfs the company)
+# => the STRONG dollar boost regardless of the absolute tier. ONE documented base.
+_DOLLAR_MATERIAL_CAP_FRAC = 0.10       # deal >= 10% of market cap => material => strong boost
+
+# "$400 million", "$400M", "$1.2 billion", "$400,000,000" — capture the number + optional unit.
+_DOLLAR_AMOUNT_RE = re.compile(
+    r"\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(billion|bn|million|mm|m|thousand|k|b)?\b",
+    re.IGNORECASE,
+)
+_DOLLAR_UNIT_MULT = {
+    "billion": 1e9, "bn": 1e9, "b": 1e9,
+    "million": 1e6, "mm": 1e6, "m": 1e6,
+    "thousand": 1e3, "k": 1e3,
+    "": 1.0,
+}
+
+
+def _catalyst_action_grading_enabled() -> bool:
+    """Kill-switch for the action-completeness + dollar-amount grading. Default True (no dark
+    flags: the QUCY-vs-ILLR lesson ships live + on). Flag OFF => the delta is always 0 =>
+    byte-identical to the pre-batch-2 grade."""
+    return bool(getattr(settings, "chili_momentum_catalyst_action_grading_enabled", True))
+
+
+def _action_completeness_grade(title: str) -> int:
+    """+1 when a headline states a COMPLETED / committed action (acquires / signed / awarded /
+    definitive agreement — the ILLR '$400M to acquire' class), -1 when it is TENTATIVE / a
+    pursuit (approves pursuit / explores / letter of intent — the QUCY fade class), 0 when
+    neither verb class is present. TENTATIVE DOMINATES a co-occurring completed word (a headline
+    that says both 'proposes' and 'agreement' is still intent) — the pursuit language is the
+    tell. Pure; fail-closed to 0 (an unreadable title never tilts)."""
+    t = str(title or "").lower()
+    if not t:
+        return 0
+    tentative = any(k in t for k in _TENTATIVE_ACTION_KEYWORDS)
+    completed = any(k in t for k in _COMPLETED_ACTION_KEYWORDS)
+    if tentative:
+        return -1   # pursuit language dominates — intent, not action
+    if completed:
+        return 1
+    return 0
+
+
+def _parse_dollar_amount(title: str) -> float | None:
+    """The LARGEST dollar figure stated in a headline, in dollars ("$400 million" -> 4.0e8,
+    "$1.2B" -> 1.2e9, "$400,000,000" -> 4.0e8). Returns the MAX match (the headline's headline
+    number is usually the deal size). None when no dollar figure is present. Pure; fail-closed."""
+    t = str(title or "")
+    if "$" not in t:
+        return None
+    best: float | None = None
+    for m in _DOLLAR_AMOUNT_RE.finditer(t):
+        raw = m.group(1).replace(",", "")
+        unit = (m.group(2) or "").lower()
+        try:
+            val = float(raw) * _DOLLAR_UNIT_MULT.get(unit, 1.0)
+        except (TypeError, ValueError):
+            continue
+        if val > 0 and (best is None or val > best):
+            best = val
+    return best
+
+
+def _dollar_boost_frac(dollars: float | None, market_cap: float | None) -> float:
+    """The dollar-amount boost as a fraction of the catalyst tilt, ADAPTIVE to market cap.
+
+      * deal >= _DOLLAR_MATERIAL_CAP_FRAC of a KNOWN market cap => strong boost (material to the
+        company — the low-float amplifier),
+      * else absolute tiers: >= $100M => strong, >= $10M => moderate, else 0.
+
+    No dollar figure => 0. Pure; fail-closed (unknown cap simply falls back to the absolute
+    tiers — a missing cap never invents or strips a boost)."""
+    if not dollars or dollars <= 0:
+        return 0.0
+    try:
+        if market_cap and float(market_cap) > 0 and dollars >= _DOLLAR_MATERIAL_CAP_FRAC * float(market_cap):
+            return _DOLLAR_BOOST_STRONG_FRAC
+    except (TypeError, ValueError):
+        pass
+    if dollars >= _DOLLAR_TIER_STRONG:
+        return _DOLLAR_BOOST_STRONG_FRAC
+    if dollars >= _DOLLAR_TIER_MODERATE:
+        return _DOLLAR_BOOST_MODERATE_FRAC
+    return 0.0
+
+
+def action_dollar_grade_delta(title: str, *, market_cap: float | None = None) -> float:
+    """Additive viability delta from ONE headline's action-completeness + dollar magnitude.
+
+    ``= _catalyst_tilt() * (completeness_frac + dollar_frac)`` where:
+      * completeness_frac = +_ACTION_COMPLETENESS_TILT_FRAC (completed action),
+                            -_ACTION_COMPLETENESS_TILT_FRAC (tentative / pursuit),
+                            0 (neither),
+      * dollar_frac       = the ``_dollar_boost_frac`` tier (>=0; only ADDS — a big dollar
+                            number never turns a tentative headline positive on its own, but a
+                            tentative headline's dollar boost is still capped by the negative
+                            completeness so the NET can stay <= 0 for a pure pursuit-with-a-number).
+
+    A pure pursuit headline WITH a dollar amount (e.g. "board approves pursuit ... potential
+    $500M") nets to ``tilt * (-0.5 + dollar_frac)`` — still <= 0 unless the number is material,
+    reflecting that intent + a big number is Ross's exact pop-and-fade trap. FAIL-CLOSED: no
+    verb signal AND no dollar => 0 (byte-identical to the flag-off path). Flag OFF => 0. Pure."""
+    if not _catalyst_action_grading_enabled():
+        return 0.0
+    comp = _action_completeness_grade(title)
+    dollars = _parse_dollar_amount(title)
+    dfrac = _dollar_boost_frac(dollars, market_cap)
+    if comp == 0 and dfrac == 0.0:
+        return 0.0
+    total_frac = (comp * _ACTION_COMPLETENESS_TILT_FRAC) + dfrac
+    return round(_catalyst_tilt() * total_frac, 6)
+
+
+def action_grade_deltas_by_symbol(
+    *, market_caps: dict[str, float] | None = None
+) -> dict[str, float]:
+    """``{normalized_ticker: action_dollar_grade_delta}`` for every fresh-news headline whose
+    action-completeness or dollar signal is non-zero. Same title-carrying fetch the strong/weak
+    graders use (no new feed). ``market_caps`` (optional, ``{ticker: cap}``) enables the adaptive
+    dollar-vs-cap materiality read; absent => absolute dollar tiers only. When a symbol has
+    MULTIPLE fresh headlines, the one with the largest-magnitude delta wins (the biggest signal —
+    a definitive $400M deal dominates a same-name boilerplate PR). Flag OFF / no feed => empty
+    (byte-identical). Fail-open."""
+    if not _catalyst_action_grading_enabled():
+        return {}
+    try:
+        from ...massive_client import get_recent_news_items
+
+        items = get_recent_news_items(max_age_min=_news_catalyst_max_age_min()) or []
+    except Exception:
+        logger.debug("[catalyst] action-grade fetch failed", exc_info=True)
+        return {}
+    caps = market_caps or {}
+    out: dict[str, float] = {}
+    for tk, title in items:
+        sym = _norm(tk)
+        cap = caps.get(sym) or caps.get(str(tk or "").upper())
+        d = action_dollar_grade_delta(title, market_cap=cap)
+        if d == 0.0:
+            continue
+        if sym not in out or abs(d) > abs(out[sym]):
+            out[sym] = d
+    return out
+
+
 # ── FIX E: PER-TICKER catalyst-news repair for the IN-PLAY movers ───────────────────────
 # The global-firehose accessors (all/strong/weak — get_recent_news_items) bury low-float
 # micro-caps under large-cap news, so a Ross mover with a real catalyst goes UNTAGGED (0/11
@@ -871,6 +1071,7 @@ def catalyst_grade_selection_delta(
     weak_symbols: set[str] | None = None,
     strong_symbols: set[str] | None = None,
     fake_symbols: set[str] | None = None,
+    action_deltas: dict[str, float] | None = None,
 ) -> float:
     """E2 catalyst-GRADE viability delta for SELECTION (gap #12, build_order #3) — distinct
     from the regime-aware ``catalyst_viability_delta`` (which boosts ANY catalyst). Grades
@@ -890,6 +1091,16 @@ def catalyst_grade_selection_delta(
     name that is both diluting and rumored is the stronger fade). ``fake_symbols`` defaults None,
     so an absent set leaves this function byte-identical to its prior behavior.
 
+    ACTION-COMPLETENESS + DOLLAR grade (Ross-batch2 QUCY-vs-ILLR): ``action_deltas`` (from
+    ``action_grade_deltas_by_symbol`` — ``{normalized_ticker: delta}``) refines the STRONG
+    boost by HEADLINE VERB QUALITY + DOLLAR AMOUNT. A completed-action / big-dollar headline
+    (ILLR "$400M to acquire") ADDS a positive delta on top of the strong half-tilt; a tentative /
+    pursuit headline (QUCY "approves pursuit") ADDS a negative delta — even if the name matched a
+    STRONG keyword, its pursuit language nets it toward neutral/de-boost. The action delta applies
+    only to STRONG-graded names (weak/fake dominance short-circuits first, unchanged) so a diluting
+    or rumored headline never gets an action boost. ``action_deltas`` absent / flag OFF (the map is
+    empty) -> byte-identical to the prior strong-boost path.
+
     Pure + fail-open. The CALLER decides whether a negative delta also drops live
     eligibility (the hard gate) — this only returns the magnitude."""
     if "-USD" in str(symbol or "").upper():
@@ -904,7 +1115,16 @@ def catalyst_grade_selection_delta(
         if bool(getattr(settings, "chili_momentum_fake_catalyst_guard_enabled", True)):
             return 0.0
     if strong_symbols and sym in strong_symbols:
-        return _catalyst_tilt() * 0.5
+        base = _catalyst_tilt() * 0.5
+        # QUCY-vs-ILLR action/dollar refinement (only on STRONG names, only when the map carries
+        # a signal for this symbol; absent/empty -> byte-identical strong boost).
+        _act = (action_deltas or {}).get(sym) if action_deltas else None
+        if _act:
+            try:
+                return round(base + float(_act), 6)
+            except (TypeError, ValueError):
+                return base
+        return base
     return 0.0
 
 
