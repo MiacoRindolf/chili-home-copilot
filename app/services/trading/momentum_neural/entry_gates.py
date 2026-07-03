@@ -7403,12 +7403,28 @@ def pullback_break_confirmation(
             pass  # thin / non-datetime frame -> fail-open (1m-fast preserved)
 
     # Volume spike on the trigger (break / reclaim) bar.
+    # F1 (capture-g fix): NEVER manufacture a concrete 0.0 from a missing/all-NaN volume
+    # frame. The 15s micro frame carries NaN volume wherever the trade tape doesn't cover a
+    # bucket (volume UNKNOWN); the old fallback turned an all-NaN/zero-avg frame into
+    # vol_ratio=0.0 — a concrete "dead bar" that failed EVERY volume gate below CLOSED
+    # (break_low_volume / faded_volume_no_sustain / the E3 rvol floor), the exact opposite
+    # of the documented missing-volume fail-OPEN intent. Now: unknown stays None and each
+    # volume gate below skips (fail-OPEN) on None; a genuine 0-volume bar INSIDE trade-tape
+    # coverage still computes a real 0.0 ratio via vr and still blocks (fail-closed kept).
     vol_ratio = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
+    if vol_ratio is not None and vol_ratio != vol_ratio:  # NaN -> UNKNOWN
+        vol_ratio = None
     if vol_ratio is None:
-        w = vol.tail(21)
-        avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
-        vol_ratio = (float(vol.iloc[-1]) / avg) if avg > 0 else 0.0
-    debug["vol_ratio"] = round(vol_ratio, 2)
+        try:
+            w = vol.tail(21)
+            _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
+            _last_v = float(vol.iloc[-1])
+            if _avg == _avg and _avg > 0 and _last_v == _last_v:
+                vol_ratio = _last_v / _avg
+            # else: volume UNKNOWN (all-NaN frame / zero average) -> stays None (fail-OPEN)
+        except (TypeError, ValueError, IndexError):
+            vol_ratio = None
+    debug["vol_ratio"] = None if vol_ratio is None else round(vol_ratio, 2)
 
     # RED-VOLUME EXHAUSTION VETO (AS101/HVM101 "first sign of weakness"). A trigger bar
     # that closes RED (close<open) WHILE printing the session's MAX volume AND a NEW
@@ -7485,7 +7501,15 @@ def pullback_break_confirmation(
                 return False, "below_explosive_floor_rvol", debug
             # Day-change %: session open (first bar) -> current close. Fail-open if the
             # frame is empty or the open is non-positive.
-            if len(df) >= 1:
+            # F1 (capture-g fix): the day-change floor needs SESSION-OPEN context. A
+            # sub-minute MICRO frame (entry_interval like '15s') spans only the recent
+            # lookback window (~30 min), so its first bar is NOT the session open —
+            # computing "day change" from it misreads a 30-min window as the whole day
+            # and would block every micro-frame break. Skip the day-change leg on a
+            # sub-minute frame (fail-open); the 1m/5m day frames keep the check.
+            _iv_str = str(entry_interval or "").strip().lower()
+            _is_micro_frame = _iv_str.endswith("s") and not _iv_str.endswith("ms")
+            if len(df) >= 1 and not _is_micro_frame:
                 _sess_open = float(df["Open"].iloc[0])
                 if _sess_open > 0:
                     _daily_change_pct = (float(close.iloc[cur]) - _sess_open) / _sess_open * 100.0
@@ -7563,7 +7587,9 @@ def pullback_break_confirmation(
                 "effective_floor": round(_bv_relaxed, 3),
             }
             _vol_floor = _bv_relaxed
-    if not _tick_break and vol_ratio < _vol_floor:
+    # F1: vol_ratio None = volume UNKNOWN (micro frame outside trade-tape coverage) -> the
+    # per-bar spike gate fails OPEN (documented); a real computed ratio still gates as before.
+    if not _tick_break and vol_ratio is not None and vol_ratio < _vol_floor:
         return False, "break_low_volume", debug
 
     # #3 Sustaining-volume gate (the ESTR guardrail): the move must STILL be carried
@@ -7574,7 +7600,33 @@ def pullback_break_confirmation(
     # a deep-retrace bounce with unknowable volume support is the textbook
     # dead-cat trap, so that one path fails CLOSED.
     if require_sustained_volume:
-        sustained = _sustained_rvol(vr, cur, int(sustain_lookback_bars))
+        # F1 (capture-g fix, acceptance follow-through): the sustain window is a WALL-CLOCK
+        # design — N bars of the BASE entry interval span the impulse+pullback (the "faded
+        # 24h mover" read needs ~minutes of context). The lookback is a BAR COUNT, so on the
+        # 15s micro frame 5 buckets = only 75 SECONDS — i.e. exactly the quiet pullback
+        # itself — and EVERY pullback break read as "faded" by construction (SVRE 06-30
+        # 12:45:46Z tick-break at Ross's 6.88: mean 0.78 over 75s, vs the designed 5-minute
+        # span). On a SUB-MINUTE frame, convert the configured bar count to the SAME
+        # wall-clock span via the base pullback interval (reuses _orb_bar_count — the ORB
+        # "derive bars from minutes" precedent; no new knob). Non-micro frames keep the raw
+        # count (byte-identical).
+        _sustain_n = int(sustain_lookback_bars)
+        _iv_sus = str(entry_interval or "").strip().lower()
+        if _iv_sus.endswith("s") and not _iv_sus.endswith("ms"):
+            _base_iv_sus = str(
+                getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m"
+            ).strip().lower()
+            _base_min = 1
+            try:
+                if _base_iv_sus.endswith("m"):
+                    _base_min = max(1, int(_base_iv_sus[:-1] or 1))
+                elif _base_iv_sus.endswith("h"):
+                    _base_min = max(1, int(_base_iv_sus[:-1] or 1) * 60)
+            except (TypeError, ValueError):
+                _base_min = 1
+            _sustain_n = _orb_bar_count(entry_interval, _sustain_n * _base_min)
+            debug["sustain_lookback_effective_bars"] = _sustain_n
+        sustained = _sustained_rvol(vr, cur, _sustain_n)
         # CAPTURE-G2 COIL-EXEMPT (2026-07-03): the N-bar sustain MEAN includes the quiet
         # coil bars that precede a dry-coil premarket break (JEM 06-30 12:59Z class), so the
         # break tick is mathematically < 1.0 BY CONSTRUCTION — the setup is structurally

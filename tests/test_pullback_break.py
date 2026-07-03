@@ -233,6 +233,28 @@ def test_sustaining_volume_off_lets_faded_through(monkeypatch) -> None:
     assert reason == "pullback_break_ok"
 
 
+# ── capture-g fix F1: UNKNOWN volume (NaN frame) fails the volume gates OPEN ────
+
+def test_unknown_volume_frame_fails_open_not_break_low_volume(monkeypatch) -> None:
+    """F1: a frame whose Volume is all-NaN (the 15s micro frame outside trade-tape coverage)
+    means volume is UNKNOWN — the documented fail-OPEN case. The old fallback manufactured
+    vol_ratio=0.0 (a concrete dead bar) and killed every completed-bar fire at
+    break_low_volume; now the spike/sustain gates SKIP on None and the canonical shallow-
+    pullback break still fires on its price structure."""
+    _isolate_trigger_logic(monkeypatch)
+    rows = [_base(100.0) for _ in range(14)]
+    rows += [_base(c) for c in (102.0, 104.0, 106.0, 108.0, 110.0)]
+    rows += [_base(109.0, 800.0), _base(108.5, 800.0)]
+    rows.append((110.6, 111.2, 109.6, 3200.0))
+    df = _df(rows)
+    df["Volume"] = float("nan")  # volume UNKNOWN everywhere (no trade-tape coverage)
+    ok, reason, dbg = pullback_break_confirmation(df, entry_interval="5m")
+    assert reason != "break_low_volume", (reason, dbg)
+    assert reason != "faded_volume_no_sustain", (reason, dbg)
+    assert ok is True, (reason, dbg)
+    assert dbg.get("vol_ratio") is None  # honest: unknown, not a manufactured 0.0
+
+
 # ── CAPTURE-G2: dry-coil break coil-exempt on the sustained-volume gate ─────────
 # The coil-DEPRESSED sustain mean is a FORMING/tick-break phenomenon (a completed explosive
 # bar's own volume lifts the 5-bar mean above the floor by construction). The two exemption

@@ -131,8 +131,33 @@ def test_resample_micro_bars_ohlc_bucketing():
     assert df["Open"].iloc[0] == pytest.approx(10.00, abs=1e-6)
     assert df["High"].iloc[0] >= df["Low"].iloc[0]
     assert df["Close"].iloc[-1] > df["Open"].iloc[0]  # rose across the window
-    # honest non-fabricated volume
-    assert (df["Volume"] == 0.0).all()
+    # F1 (capture-g fix): NO trade tape supplied -> volume is UNKNOWN (NaN, the gates'
+    # documented fail-OPEN case), never a fabricated concrete 0.0 (which read as a dead
+    # bar and failed every volume gate on the micro frame CLOSED).
+    assert df["Volume"].isna().all()
+
+
+def test_resample_micro_bars_real_trade_volume_join():
+    """F1: trade prints supply REAL per-bucket volume; a quiet bucket INSIDE the trade-tape
+    span is a genuine 0.0; buckets OUTSIDE the span stay NaN (unknown)."""
+    t0 = datetime(2026, 6, 15, 14, 30, 0, tzinfo=timezone.utc)
+    rows = [(t0 + timedelta(seconds=i), 10.0 + i * 0.01 - 0.005, 10.0 + i * 0.01 + 0.005) for i in range(60)]
+    # prints only in buckets 0 and 2 (bucket 1 = genuinely quiet IN-span; bucket 3 = after
+    # the last print = outside the trade-tape span -> unknown).
+    trades = [
+        (t0 + timedelta(seconds=2), 500.0),
+        (t0 + timedelta(seconds=7), 300.0),
+        (t0 + timedelta(seconds=33), 1200.0),
+    ]
+    df = _resample_micro_bars(rows, bar_seconds=15, trade_rows=trades)
+    assert len(df) == 4
+    assert df["Volume"].iloc[0] == pytest.approx(800.0)     # 500 + 300
+    assert df["Volume"].iloc[1] == pytest.approx(0.0)       # quiet bucket IN-span -> real 0
+    assert df["Volume"].iloc[2] == pytest.approx(1200.0)
+    assert df["Volume"].iloc[3] != df["Volume"].iloc[3]     # NaN: outside trade-tape span
+    # garbage trade rows never raise and never fabricate volume
+    df2 = _resample_micro_bars(rows, bar_seconds=15, trade_rows=[("x", None), None, 42])
+    assert df2["Volume"].isna().all()
 
 
 def test_resample_micro_bars_sparse_yields_no_fireable_frame():
@@ -141,9 +166,38 @@ def test_resample_micro_bars_sparse_yields_no_fireable_frame():
     assert _resample_micro_bars([(t0, 10.0, 10.1)], 15).empty
     # zero rows → empty
     assert _resample_micro_bars([], 15).empty
-    # a handful of 1/min rows → far fewer than the trigger's len<10 floor → no-fire
+    # F6: a handful of 1/min rows = only 5 REAL populated buckets — below the builder's
+    # 10-real-bucket density floor → empty → 1m fallback. (The frame LENGTH is no longer
+    # the density measure: gap buckets are now materialized as flat bars, so a naked len
+    # check would count manufactured bars.)
     rows = [(t0 + timedelta(minutes=m), 10.0 + m * 0.1, 10.1 + m * 0.1) for m in range(5)]
-    assert len(_resample_micro_bars(rows, 15)) < 10
+    assert _resample_micro_bars(rows, 15, min_real_buckets=10).empty
+
+
+def test_resample_micro_bars_sporadic_tape_gap_free_not_time_compressed():
+    """F6: sporadic tape must NOT present as consecutive 15s bars (time-compressed junk
+    geometry). Gap buckets are materialized as FLAT bars at the prior close, so bar spacing
+    is honest wall-clock spacing; the density floor counts REAL buckets only."""
+    t0 = datetime(2026, 6, 15, 14, 30, 0, tzinfo=timezone.utc)
+    # 12 quotes at ~1/2.5min over 30 min → 12 REAL buckets spread across ~110 15s buckets.
+    rows = []
+    for m in range(12):
+        ts = t0 + timedelta(seconds=150 * m)
+        rows.append((ts, 10.0 + m * 0.05, 10.02 + m * 0.05))
+        rows.append((ts + timedelta(seconds=3), 10.005 + m * 0.05, 10.025 + m * 0.05))
+    df = _resample_micro_bars(rows, 15, min_real_buckets=10)
+    # 12 real buckets clears the floor; the frame is GAP-FREE (every 15s bucket in span)
+    assert not df.empty
+    span_buckets = int((150 * 11) / 15) + 1
+    assert len(df) == span_buckets  # ~111 bars, not 12 compressed ones
+    # index is strictly 15s-spaced (no holes)
+    deltas = df.index.to_series().diff().dropna().dt.total_seconds().unique()
+    assert list(deltas) == [15.0]
+    # a filled gap bar is FLAT at the prior close (no fabricated range)
+    gap_bar = df.iloc[1]  # bucket right after the first real quote pair
+    assert gap_bar["Open"] == gap_bar["High"] == gap_bar["Low"] == gap_bar["Close"]
+    # and with a floor above the real-bucket count, the same tape yields EMPTY (fallback)
+    assert _resample_micro_bars(rows, 15, min_real_buckets=13).empty
 
 
 def test_resample_micro_bars_never_raises_on_malformed():

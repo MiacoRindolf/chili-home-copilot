@@ -3702,14 +3702,40 @@ def _micro_bar_df_from_session(db, symbol: str, *, bar_seconds: int, lookback_mi
     ).fetchall()
     if not rows or len(rows) < 2:
         return None
+    # F1 (capture-g fix): REAL per-bucket volume from the trade tape (iqfeed_trade_ticks
+    # prints carry size), bucket-aggregated in SQL so a squeeze window's 100k+ prints come
+    # back as ~lookback/bar_seconds rows. Exception-TOLERANT: a missing table / read error
+    # degrades to trade_rows=None ⇒ the resampler writes NaN volume (= UNKNOWN ⇒ the volume
+    # gates' documented fail-OPEN path), never a fabricated 0.0 and never a failed build.
+    trade_rows = None
+    try:
+        _trows = db.execute(
+            _text(
+                "SELECT to_timestamp(floor(extract(epoch FROM observed_at) / :bs) * :bs) "
+                "       AT TIME ZONE 'utc' AS bucket, SUM(size) AS vol "
+                "FROM iqfeed_trade_ticks "
+                "WHERE symbol = :s AND observed_at >= :since AND size > 0 "
+                "GROUP BY 1 ORDER BY 1"
+            ),
+            {"s": str(symbol).upper(), "since": since, "bs": int(bar_seconds)},
+        ).fetchall()
+        if _trows:
+            trade_rows = [(r[0], float(r[1])) for r in _trows]
+    except Exception:
+        trade_rows = None  # degrade to NaN volume (fail-OPEN), never break the micro build
     df = _resample_micro_bars(
-        [(r[0], float(r[1]), float(r[2])) for r in rows], bar_seconds=bar_seconds
+        [(r[0], float(r[1]), float(r[2])) for r in rows],
+        bar_seconds=bar_seconds,
+        trade_rows=trade_rows,
+        # F6 (capture-g fix): the trigger needs >=10 bars; the floor now counts REAL
+        # populated buckets (buckets with an actual quote), NOT flat-filled gap bars —
+        # a sporadic tape (e.g. 1/min snapshots over 30 min) can no longer satisfy the
+        # density floor with manufactured bars. Below the floor ⇒ empty ⇒ 1m fallback.
+        min_real_buckets=10,
     )
-    # The trigger needs >=10 bars to evaluate (pullback_break_confirmation's own
-    # ``len(df) < 10`` floor). A name with only 1-min snapshots resamples to far
-    # fewer micro-bars, so this is exactly the SUPERSET/FAIL-SAFE boundary: too
-    # sparse ⇒ return None ⇒ the caller uses the 1m df (byte-identical). Enforcing
-    # the floor HERE keeps the density decision in one place.
+    # SUPERSET/FAIL-SAFE boundary: too sparse ⇒ None ⇒ the caller uses the 1m df
+    # (byte-identical). The real-bucket density decision lives in the resampler (F6);
+    # this keeps only the defensive empty check.
     if df is None or getattr(df, "empty", True) or len(df) < 10:
         return None
     return df
