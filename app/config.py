@@ -2639,6 +2639,36 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_PRIOR_DAY_PNL_DAMPER_ENABLED"),
         description="Size-DOWN the session after an outlier prior-day PnL (revert toward baseline risk after a big win/loss).",
     )
+    # FIX-17 — DAY-OPEN RISK RAMP. Today the red-day reducer cuts size only AFTER a loss has
+    # already landed (IPW -$137: the FIRST trades consumed 2.4x what later trades were then
+    # allowed). Ramp the FIRST N real entries of the ET day: they share an adaptive fraction
+    # of the day's risk envelope (size-DOWN), climbing back to full by entry N OR the moment
+    # the day's realized start goes GREEN (then the cushion ladder takes over). N and the
+    # fraction TILT off the recent daily-PnL volatility (reuse _prior_session_pnl_over_equity
+    # + the daily-loss-cap machinery). Sizing-only — exits untouched. Fail-OPEN to full size
+    # when history is unavailable. OFF => byte-identical (mult 1.0).
+    # (feedback_adaptive_no_magic, feedback_no_dark_flags)
+    chili_momentum_day_open_risk_ramp_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAY_OPEN_RISK_RAMP_ENABLED"),
+        description="FIX-17: True (default) => the first N real entries of the ET day share an adaptive fraction of the day's risk envelope (size-DOWN, ramps to full by entry N or a green realized start). Sizing-only; exits untouched. OFF => 1.0.",
+    )
+    # ONE documented base: the size fraction the FIRST entry of the day gets (before the
+    # volatility tilt). Reference point = a FLOOR the ramp climbs FROM, not a ceiling.
+    chili_momentum_day_open_ramp_fraction_base: float = Field(
+        default=0.5,
+        ge=0.1,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAY_OPEN_RAMP_FRACTION_BASE"),
+    )
+    # ONE documented base: how many of the day's first entries the ramp spans (before the
+    # volatility tilt). The ramp releases at entry N (or earlier on a green start).
+    chili_momentum_day_open_ramp_entries_base: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_DAY_OPEN_RAMP_ENTRIES_BASE"),
+    )
     chili_momentum_vwap_reclaim_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_VWAP_RECLAIM_ENABLED"),

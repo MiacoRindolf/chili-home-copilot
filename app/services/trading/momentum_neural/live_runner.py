@@ -8524,6 +8524,7 @@ def tick_live_session(
         # cold or after 3 straight losses. Bounds [0.5, 1.5]; fail-neutral 1.0.
         from .risk_policy import (
             cushion_risk_multiplier,
+            day_open_risk_ramp_multiplier,
             green_day_graduation_multiplier,
             prior_day_pnl_damper_multiplier,
             streak_risk_multiplier,
@@ -8592,6 +8593,17 @@ def tick_live_session(
         _prior_day_mult, _prior_day_meta = prior_day_pnl_damper_multiplier(db, execution_family=ef)
         if _prior_day_mult < 1.0:
             le["prior_day_pnl_damper"] = _prior_day_meta
+        # FIX-17 DAY-OPEN RISK RAMP (ENTRIES ONLY): the first N real entries of the ET day
+        # share an ADAPTIVE fraction of the day's risk envelope so the first shots can't pre-
+        # spend what the red-day reducer would only later claw back (IPW -$137). Size-DOWN
+        # only, releases at entry N OR a green realized start. This is the ENTRY-fill path
+        # (held states never consult it) — it CANNOT delay/shrink an exit. Composes under the
+        # 3x clamp below. Fail-OPEN / flag OFF => 1.0 (byte-identical).
+        _day_open_ramp_mult, _day_open_ramp_meta = day_open_risk_ramp_multiplier(
+            db, execution_family=ef
+        )
+        if _day_open_ramp_mult < 1.0:
+            le["day_open_risk_ramp"] = _day_open_ramp_meta
         # B2 ask-heavy book size-down (2026-06-12 entry study: imbalance5 <
         # -0.4 at the decision tick = 71% of chronic-late entries vs 29%,
         # Cliff's d -0.31). The L2 snapshot is already taken at candidate
@@ -9184,7 +9196,7 @@ def tick_live_session(
         # whole budget and silently kill the fill. The 3x clamp + max_notional ceiling below are
         # unchanged; a valid product is byte-identical.
         _eff_max_loss = min(
-            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult) * _safe_mult(_daily_room_mult) * _safe_mult(_red_intraday_mult) * _safe_mult(_perf_size_mult),
+            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult) * _safe_mult(_daily_room_mult) * _safe_mult(_red_intraday_mult) * _safe_mult(_perf_size_mult) * _safe_mult(_day_open_ramp_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # COMBINED SIZE-DOWN FLOOR for a genuine front-side A-setup (default ON; OFF /

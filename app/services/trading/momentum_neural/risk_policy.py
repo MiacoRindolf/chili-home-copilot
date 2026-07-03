@@ -1356,6 +1356,106 @@ def prior_day_pnl_damper_multiplier(
         return 1.0, {"damper_mult": 1.0, "reason": "error_fail_neutral"}
 
 
+def day_open_risk_ramp_multiplier(
+    db: Any, *, execution_family: str | None
+) -> tuple[float, dict[str, Any]]:
+    """FIX-17 — DAY-OPEN RISK RAMP (ENTRIES ONLY): the first N real entries of the ET day
+    share an ADAPTIVE fraction of the day's risk envelope, so the first shots can't pre-spend
+    what the red-day reducer would only later claw back (IPW -$137: the first trades consumed
+    2.4x the later allowance).
+
+      entries_today = real ENTERED live trades that terminated today (this lane)
+      released      = entries_today >= N  OR  today's realized start is already GREEN
+                      (then the cushion ladder owns the climb — this is a no-op)
+      mult          = frac + (1 - frac) * (entries_today / N)      # linear ramp to 1.0
+                      clamp to [frac, 1.0] (size-DOWN only; never sizes up)
+
+    Both the starting ``frac`` and the span ``N`` TILT off the recent daily-PnL volatility
+    (the SAME trailing daily PnL/equity sample the prior-day damper uses): a HIGH-variance
+    lane opens more conservatively (lower frac, longer N); a calm lane barely throttles.
+    ``chili_momentum_day_open_ramp_fraction_base`` and ``..._entries_base`` are the ONE
+    documented base each (FLOORS the ramp climbs from, not scattered caps).
+
+    Sizing-only — this is the ENTRY-fill path (held states never consult it), so it can NEVER
+    delay/shrink an exit. Composes multiplicatively under the runner's base*3.0 clamp; the
+    daily-loss cap + drawdown breaker still bound the downside. FAIL-OPEN: flag OFF / no
+    history / any error => ``(1.0, ...)`` (full size, byte-identical). Read-only, lookahead-
+    free. docs/DESIGN/MOMENTUM_LANE.md [[project_profitability_levers]]"""
+    if not bool(getattr(settings, "chili_momentum_day_open_risk_ramp_enabled", True)):
+        return 1.0, {"reason": "disabled"}
+    if db is None or not execution_family:
+        return 1.0, {"reason": "no_input"}
+    try:
+        frac_base = float(getattr(settings, "chili_momentum_day_open_ramp_fraction_base", 0.5) or 0.5)
+        n_base = int(getattr(settings, "chili_momentum_day_open_ramp_entries_base", 3) or 3)
+        if not (0.1 <= frac_base <= 1.0):
+            frac_base = 0.5
+        if n_base < 1:
+            n_base = 3
+
+        # RELEASE EARLY on a green realized start — the cushion ladder then owns the climb.
+        try:
+            from ..governance import global_realized_pnl_today_et
+
+            day = global_realized_pnl_today_et(db)
+            realized_today = float(day.get("total_usd") or 0.0)
+        except Exception:
+            realized_today = 0.0
+        if realized_today > 0.0:
+            return 1.0, {"reason": "green_start_released", "day_realized_usd": round(realized_today, 2)}
+
+        # ADAPTIVE tilt off recent daily-PnL volatility (trailing daily PnL/equity stdev).
+        # High variance => open MORE conservatively (lower frac, longer N). Neutral tilt (1.0)
+        # when history is too thin to measure — the documented base then binds (fail-open to base).
+        lookback = int(getattr(settings, "chili_momentum_prior_day_damper_lookback_days", 20) or 20)
+        _prior, sample = _prior_session_pnl_over_equity(
+            db, execution_family=execution_family, lookback_days=lookback
+        )
+        vol = None
+        if sample and len(sample) >= 5:
+            try:
+                _s = statistics.pstdev(sample)
+                vol = _s if (math.isfinite(_s) and _s > 0) else None
+            except statistics.StatisticsError:
+                vol = None
+        # Tilt: scale by vol relative to a documented per-trade risk reference (loss fraction
+        # of equity). vol_ratio > 1 => throttle harder; < 1 => barely throttle. Bounded so a
+        # single wild day can't zero out the ramp.
+        loss_frac_ref = float(getattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.01) or 0.01)
+        frac = frac_base
+        n = n_base
+        vol_ratio = None
+        if vol is not None and loss_frac_ref > 0:
+            vol_ratio = max(0.5, min(2.0, vol / loss_frac_ref))
+            # More vol -> lower starting fraction (down to half the base) and a longer ramp.
+            frac = max(0.1, min(1.0, frac_base / vol_ratio))
+            n = max(1, min(20, int(round(n_base * vol_ratio))))
+
+        entries_today = _count_real_entries_today(db, execution_family=execution_family)
+        if entries_today >= n:
+            return 1.0, {
+                "reason": "ramp_complete",
+                "entries_today": entries_today,
+                "n": n,
+                "frac": round(frac, 4),
+            }
+        mult = frac + (1.0 - frac) * (float(entries_today) / float(n))
+        mult = max(frac, min(1.0, mult))
+        return mult, {
+            "ramp_mult": round(mult, 4),
+            "entries_today": entries_today,
+            "n": n,
+            "frac_base": round(frac_base, 4),
+            "frac": round(frac, 4),
+            "vol": round(vol, 6) if vol is not None else None,
+            "vol_ratio": round(vol_ratio, 4) if vol_ratio is not None else None,
+            "day_realized_usd": round(realized_today, 2),
+            "n_sample": len(sample) if sample else 0,
+        }
+    except Exception:
+        return 1.0, {"ramp_mult": 1.0, "reason": "error_fail_open"}
+
+
 def consecutive_green_days(
     db: Any, *, execution_family: str | None, lookback_days: int = 30
 ) -> tuple[int, dict[str, Any]]:
