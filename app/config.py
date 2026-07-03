@@ -11601,6 +11601,30 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_PORTFOLIO_DD_BREAKER_ENABLED"),
     )
+    # FIX-DD — DRAWDOWN-CALC DENOMINATOR. The 5/30-day + MTM drawdown-% trips divide the
+    # rolling realized PnL by a `capital` basis passed by the caller. A contaminated caller
+    # basis (~$19.5 instead of the real ~$13k account equity) inflated a -$76 loss to
+    # "-389.7%" and re-tripped the breaker TWICE (trading_risk_state ids 151-154 class).
+    # When True (default) the drawdown-% denominator is resolved from the SAME real account-
+    # equity source the sizing uses (equity_relative_* machinery, prefer_equity/cash-value),
+    # falling back to the passed `capital` only when it clears the sane floor below; if
+    # NEITHER is available the % trips are SKIPPED (fail-closed on the %, never divide by a
+    # garbage base) while the absolute-dollar breakers stay intact. OFF => byte-identical
+    # legacy (trust the passed `capital`). (feedback_report_binding_not_defaults, Hard Rule 2)
+    chili_drawdown_breaker_real_equity_denominator_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_DRAWDOWN_BREAKER_REAL_EQUITY_DENOMINATOR_ENABLED"),
+        description="FIX-DD: True (default) => the drawdown-% denominator is the REAL account-equity basis (equity_relative_* source), fail-closed skip of the % trip when equity is unavailable and the passed capital is below the sane floor. OFF => legacy (trust the passed capital).",
+    )
+    # Sane-equity floor (USD) below which a passed `capital` basis is treated as contaminated
+    # and NOT used as a drawdown-% denominator. ONE documented base; the real account is
+    # ~$13k, so a basis under this floor is garbage (the $19.5 false-trip). Reference point =
+    # a FLOOR, not a ceiling (feedback_adaptive_no_magic).
+    chili_drawdown_breaker_min_equity_basis_usd: float = Field(
+        default=1_000.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_DRAWDOWN_BREAKER_MIN_EQUITY_BASIS_USD"),
+    )
     # Live-blocking gate. When enabled=True AND live=True, a tripped
     # breaker BLOCKS the entry at the venue-adapter boundary and in the
     # momentum arm path. When enabled=True AND live=False it runs in
