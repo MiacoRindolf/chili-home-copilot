@@ -7067,7 +7067,24 @@ def pullback_break_confirmation(
     # keeps the 5m path byte-identical to before. None ⇒ no constraint (run on whatever
     # df is given), which is the path the unit tests + the 1m runner take.
     _fp_iv = first_pullback_interval if first_pullback_interval is not None else entry_interval
-    if _fp_on and str(_fp_iv) == str(entry_interval):
+    # F2 (capture-g fix): with the micropull default flip the CONFIGURED first-pullback
+    # interval is '15s', but the live runner FALLS BACK to the base-interval frame whenever
+    # the micro build is unavailable (sparse tape, or the trade bridge's documented
+    # silent-hang). A strict '15s' == '1m' match made Ross's EARLIEST entry silently vanish
+    # on exactly the degraded path (and broke live-vs-replay parity —
+    # counterfactual_replay passes fp_interval=entry_interval). The branch therefore ALSO
+    # arms when (a) the configured first-pullback interval is SUB-MINUTE (the micro config
+    # is what created the mismatch) AND (b) the entry frame is the base pullback interval
+    # (the live runner's fallback frame by construction) — i.e. the fallback frame behaves
+    # exactly as pre-flip. Non-micro mismatches (e.g. fp '1m' vs a 5m df) keep the original
+    # skip contract byte-identical (test_flag_off_is_byte_identical).
+    _fp_iv_s = str(_fp_iv).strip().lower()
+    _fp_is_micro = _fp_iv_s.endswith("s") and not _fp_iv_s.endswith("ms")
+    _fp_base_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+    if _fp_on and (
+        str(_fp_iv) == str(entry_interval)
+        or (_fp_is_micro and str(entry_interval) == _fp_base_iv)
+    ):
         _fpv, _fp_high, _fp_low, _fp_dbg = first_pullback_break(
             df,
             symbol=symbol,
