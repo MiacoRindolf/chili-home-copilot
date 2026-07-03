@@ -4601,6 +4601,69 @@ def _merge_equity_refresh_universe(ross_tickers, active_session_symbols) -> list
     return sorted(screened | active_eq)
 
 
+def _momentum_viability_refresh_interval_seconds(settings_obj) -> int:
+    """Refresh inside the risk gate's own viability freshness window."""
+    try:
+        max_age = float(
+            getattr(settings_obj, "chili_momentum_risk_viability_max_age_seconds", 600.0)
+        )
+    except (TypeError, ValueError):
+        max_age = 600.0
+    return max(60, int(max_age / 2))
+
+
+def _momentum_event_startup_delay_seconds(settings_obj) -> float:
+    """First prewarm delay for selector/tape jobs."""
+    return 0.0
+
+
+def _register_momentum_selection_prewarm_jobs(
+    scheduler: BackgroundScheduler,
+    settings_obj,
+) -> None:
+    """Register selector freshness jobs for the isolated momentum-exec role."""
+    cvr_secs = _momentum_viability_refresh_interval_seconds(settings_obj)
+    first_run = datetime.now() + timedelta(
+        seconds=_momentum_event_startup_delay_seconds(settings_obj)
+    )
+    scheduler.add_job(
+        _run_crypto_viability_refresh_job,
+        trigger=IntervalTrigger(seconds=cvr_secs),
+        id="crypto_viability_refresh",
+        name="Crypto viability refresh (live venue feed, ~half freshness gate, 24/7)",
+        replace_existing=True,
+        max_instances=1,
+        next_run_time=first_run,
+    )
+    scheduler.add_job(
+        _run_equity_viability_refresh_job,
+        trigger=IntervalTrigger(seconds=cvr_secs),
+        id="equity_viability_refresh",
+        name="Equity viability refresh watchdog/backfill (Ross universe, event path primary)",
+        replace_existing=True,
+        max_instances=1,
+        next_run_time=first_run,
+    )
+    if bool(getattr(settings_obj, "chili_momentum_event_select_primary_enabled", True)):
+        try:
+            tdi_floor = float(
+                getattr(settings_obj, "chili_momentum_tape_delta_min_seconds", 5.0) or 5.0
+            )
+        except (TypeError, ValueError):
+            tdi_floor = 5.0
+        scheduler.add_job(
+            _run_tape_delta_ignite_job,
+            trigger=IntervalTrigger(seconds=max(1.0, tdi_floor)),
+            id="tape_delta_ignite",
+            name="S1 tape-delta event feeder (cold mover -> viability in ~5-15s)",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=5,
+            next_run_time=first_run,
+        )
+
+
 def _run_equity_viability_refresh_job():
     """Equity PARITY with crypto: refresh equity momentum viability on its OWN fast
     job at the SAME cadence as the crypto venue feed (``_run_crypto_viability_refresh_job``),
@@ -6486,6 +6549,11 @@ def start_scheduler():
                     max_instances=1,
                     next_run_time=datetime.now() + timedelta(seconds=35),
                 )
+
+        # Momentum-exec-only is the isolated live Ross lane. It must own selector
+        # prewarm/freshness instead of depending on a separate heavy worker.
+        if include_momentum_exec and not include_heavy:
+            _register_momentum_selection_prewarm_jobs(_scheduler, settings)
 
         # FIX 45a (2026-04-29): autotrader tick + monitor carved out under
         # their own flag so the autotrader-worker container can register them

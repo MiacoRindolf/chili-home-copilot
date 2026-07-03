@@ -382,6 +382,31 @@ def test_scheduler_none_role_disables_apscheduler(monkeypatch):
         monkeypatch.setattr(settings, "chili_scheduler_role", ROLE_ALL)
 
 
+def test_momentum_exec_prewarm_registers_viability_refresh_jobs(monkeypatch):
+    from app.services import trading_scheduler
+
+    class _FakeScheduler:
+        def __init__(self):
+            self.jobs = []
+
+        def add_job(self, fn, **kwargs):
+            self.jobs.append((fn, kwargs))
+
+    fake = _FakeScheduler()
+    monkeypatch.setattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_event_select_primary_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_tape_delta_min_seconds", 5.0, raising=False)
+
+    trading_scheduler._register_momentum_selection_prewarm_jobs(fake, settings)
+
+    job_ids = {kwargs["id"] for _fn, kwargs in fake.jobs}
+    assert {"crypto_viability_refresh", "equity_viability_refresh", "tape_delta_ignite"} <= job_ids
+    intervals = {kwargs["id"]: kwargs["trigger"].interval.total_seconds() for _fn, kwargs in fake.jobs}
+    assert intervals["crypto_viability_refresh"] == 300.0
+    assert intervals["equity_viability_refresh"] == 300.0
+    assert intervals["tape_delta_ignite"] == 5.0
+
+
 def test_scheduler_all_emits_heartbeat_by_default_unless_env_disables(monkeypatch):
     """CHILI_SCHEDULER_ROLE=all registers heartbeat unless env explicitly disables it."""
     from app.services.trading_scheduler import get_scheduler_info, start_scheduler, stop_scheduler
