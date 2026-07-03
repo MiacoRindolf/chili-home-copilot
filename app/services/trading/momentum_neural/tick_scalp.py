@@ -580,8 +580,19 @@ def evaluate_tick_first_pullback(
         return TickFirstPullbackDecision(False, "already_fired", existing, evidence_debug)
 
     signal_price = _first_num(signal or {}, "price", "last_price", "alert_price", "hod_price", "close")
+    # FIX-19(d): anchor the pullback high to the TRUE session high (incl. premarket), not just
+    # the watch-start signal price. The signal already carries a tracked session/day high — if
+    # the real HOD is above the watch-start price, a pullback measured from the lower signal
+    # price UNDER-reads its depth (a real deep flush looks shallow). Fold the tracked session
+    # high into the running max so the depth is measured from the genuine top. Fail-open: no
+    # session-high field ⇒ unchanged (byte-identical to the signal_price anchor).
+    session_high = _first_num(
+        signal or {}, "session_high", "premarket_high", "day_high", "hod", "hod_price", "high"
+    )
     prev_high = _num(existing.get("high"))
-    high = max(v for v in (prev_high, signal_price, price) if v is not None and v > 0)
+    high = max(
+        v for v in (prev_high, signal_price, session_high, price) if v is not None and v > 0
+    )
     prev_phase = str(existing.get("phase") or "watching")
     prev_low = _num(existing.get("pullback_low"))
     prev_last = _num(existing.get("last_price"))

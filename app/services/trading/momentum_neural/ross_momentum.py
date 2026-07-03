@@ -1242,6 +1242,7 @@ def front_side_state(
     retrace_veto: float = 0.66,
     ext_sigma: float = 2.0,
     rollover_min_range_frac: float = 0.02,
+    live_price: float | None = None,
 ) -> FrontSideState:
     """Front-side vs backside lifecycle read of TODAY's session move (the QXL/NXTS fix).
 
@@ -1290,6 +1291,23 @@ def front_side_state(
         return _unknown("insufficient_bars", bars=n)
     last = closes[-1]
     hod, lod, sess_open = max(highs), min(lows), closes[0]
+    # FIX-19(a) STALE-CLOSE BLEND: front/back-side position (range_pos, VWAP position, retrace)
+    # is computed off the LAST COMPLETED CLOSE, which lags the live tape on a fast thrust. When
+    # a fresher LIVE tick is supplied, use it as `last` for the POSITION reads and extend the
+    # session HOD/LOD to include it (a live new-high is reflected immediately). The completed-
+    # bar STRUCTURE (rollover / lower-high) still uses the bars — a live wick must not fabricate
+    # a rollover. Fail-OPEN: no / invalid live_price ⇒ use the close (byte-identical).
+    _live_used = False
+    try:
+        if live_price is not None:
+            lp = float(live_price)
+            if math.isfinite(lp) and lp > 0:
+                last = lp
+                hod = max(hod, lp)
+                lod = min(lod, lp)
+                _live_used = True
+    except (TypeError, ValueError):
+        _live_used = False
     rng = hod - lod
     if not (rng > 0) or last <= 0:
         return _unknown("no_range", hod=hod, lod=lod)
@@ -1324,11 +1342,16 @@ def front_side_state(
     # (HOD on the last bar, or only a wick below) is NEVER rolled_over -> NEVER chasing_top, so a
     # clean front-side thrust to a new high is kept even when extended. Pure structure, range-
     # relative (no fixed-price magnitude) -> not the brittle ext_sigma-bump path.
-    hod_idx = max(i for i in range(n) if highs[i] == hod)
+    # FIX-19(a): when the LIVE tick set the HOD (above every completed bar high) the high is
+    # on the most-recent (live) point — a fresh new high, NEVER rolled over. Guard the bar
+    # lookup so it never hits an empty sequence in that case.
+    _bar_hod_idxs = [i for i in range(n) if highs[i] == hod]
     rolled_over = False
-    if hod_idx < (n - 1):
-        post_hod_high = max(highs[hod_idx + 1:])
-        rolled_over = ((hod - post_hod_high) / rng) > float(rollover_min_range_frac)
+    if _bar_hod_idxs:
+        hod_idx = max(_bar_hod_idxs)
+        if hod_idx < (n - 1):
+            post_hod_high = max(highs[hod_idx + 1:])
+            rolled_over = ((hod - post_hod_high) / rng) > float(rollover_min_range_frac)
     chasing_top = (day_range_pos >= float(top_range_pct)
                    and dist_sigma is not None and dist_sigma >= float(ext_sigma)
                    and rolled_over)
@@ -1351,7 +1374,8 @@ def front_side_state(
         retrace_from_hod=round(retrace_from_hod, 4), day_range_pos=round(day_range_pos, 4),
         reason=reason,
         debug={"hod": round(hod, 6), "lod": round(lod, 6), "open": round(sess_open, 6),
-               "last": round(last, 6), "rolled_over": bool(rolled_over)},
+               "last": round(last, 6), "rolled_over": bool(rolled_over),
+               "live_price_used": bool(_live_used)},
     )
 
 

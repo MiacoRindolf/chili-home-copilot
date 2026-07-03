@@ -6680,8 +6680,25 @@ def tick_live_session(
                         "trigger_ok": bool(_trigger_ok),
                         **_bench_dbg,
                     })
-            except Exception:
-                pass  # fail-open: any error -> no bench change (never strand a name)
+            except Exception as _bench_exc:
+                # FIX-19(b): keep FAIL-OPEN (any error -> no bench change, never strand a name)
+                # but EMIT a counted instrumentation event instead of a silent bare pass — a
+                # backside-bench read that keeps throwing was invisible (the QXL/NXTS chase-guard
+                # class), so surface it (rate-countable, per-symbol) for the operator.
+                _bench_err_n = int(le.get("backside_bench_error_count") or 0) + 1
+                le["backside_bench_error_count"] = _bench_err_n
+                try:
+                    _emit(db, sess, "live_entry_backside_bench_error", {
+                        "error": str(_bench_exc)[:200],
+                        "error_type": type(_bench_exc).__name__,
+                        "count": _bench_err_n,
+                    })
+                except Exception:
+                    pass  # the instrumentation emit itself must never break the fill path
+                _log.warning(
+                    "[momentum_live] sticky backside-bench read failed sym=%s (fail-open, count=%d): %s",
+                    sess.symbol, _bench_err_n, _bench_exc,
+                )
         # GAP 1 + GAP 2 (Warrior re-audit) — HALT-CHAIN RISK GATE + RESUMPTION SIZE
         # MODIFIER, applied ONLY to a halt-resume-dip entry that fired (it shares ALL the
         # existing chase-guards — the bench veto above, the bid-prop confirmer + opening-
@@ -9046,7 +9063,9 @@ def tick_live_session(
                         from .entry_gates import _today_session_frame as _fs_today_frame
                         from .ross_momentum import front_side_state as _fs_state_fn
                         _fs_sess_df = _fs_today_frame(_entry_df)
-                        _fs_state = _fs_state_fn(_fs_sess_df)
+                        # FIX-19(a): blend the LIVE mid tick (fresher than the last completed
+                        # close) into the front-side position read. Fail-open to close if no tick.
+                        _fs_state = _fs_state_fn(_fs_sess_df, live_price=_float_or_none(mid))
                         _fs_vwap_dist = _float_or_none(getattr(_fs_state, "vwap_dist_sigma", None))
                         _fs_range_pos = _float_or_none(getattr(_fs_state, "day_range_pos", None))
                         try:
@@ -9984,23 +10003,65 @@ def tick_live_session(
             bool(getattr(settings, "chili_momentum_entry_flow_veto_explosive_exempt", False))
             and _session_is_explosive(via)
         )
-        if _entry_flow_veto(_fv_ofi, _fv_tf, settings, explosive=_fv_explosive):
+        _fv_instant = _entry_flow_veto(_fv_ofi, _fv_tf, settings, explosive=_fv_explosive)
+        # FIX-19(c) STICKY FLOW VETO: the per-tick veto forgets INSTANTLY, so ONE spoofy
+        # non-negative print could flip a real-selling veto and fire the buy 53s later. Latch
+        # the veto and only RELEASE it once flow has stayed non-veto across a rolling window.
+        # A tick where flow is CLEAR starts (or continues) the release timer; a re-veto resets
+        # it. Sticky-veto = latched AND the clear timer hasn't yet spanned the window. OFF /
+        # no latch => byte-identical (the instantaneous veto alone gates). Fail-open on error.
+        _fv_veto = _fv_instant
+        _fv_sticky = False
+        if bool(getattr(settings, "chili_momentum_sticky_flow_veto_enabled", True)):
+            try:
+                _fv_now = _utcnow().timestamp()
+                _fv_window = float(getattr(settings, "chili_momentum_sticky_flow_veto_window_sec", 20.0) or 20.0)
+                _fv_latched = bool(le.get("flow_veto_latched"))
+                if _fv_instant:
+                    # (Re)latch and reset the release timer — selling is active this tick.
+                    le["flow_veto_latched"] = True
+                    le.pop("flow_veto_clear_since", None)
+                    _fv_veto = True
+                elif _fv_latched:
+                    # Latched but this tick is clear: run the release timer over the window.
+                    _clear_since = _float_or_none(le.get("flow_veto_clear_since"))
+                    if _clear_since is None:
+                        le["flow_veto_clear_since"] = _fv_now
+                        _clear_since = _fv_now
+                    if (_fv_now - float(_clear_since)) >= _fv_window:
+                        # Flow has stayed non-veto for the full window — release the latch.
+                        le.pop("flow_veto_latched", None)
+                        le.pop("flow_veto_clear_since", None)
+                        _fv_veto = False
+                    else:
+                        # Still inside the release window — keep vetoing (sticky).
+                        _fv_veto = True
+                        _fv_sticky = True
+            except Exception:
+                # Fail-open to the instantaneous verdict (never strand a name on a latch bug).
+                _fv_veto = _fv_instant
+        if _fv_veto:
             _log.info(
-                "[momentum_neural] entry FLOW-VETO %s: OFI=%s trade_flow=%s — deferring buy into selling",
-                sess.symbol, _fv_ofi, _fv_tf,
+                "[momentum_neural] entry FLOW-VETO %s: OFI=%s trade_flow=%s sticky=%s — deferring buy into selling",
+                sess.symbol, _fv_ofi, _fv_tf, _fv_sticky,
             )
             _emit(db, sess, "live_entry_flow_veto", {
                 "ofi": round(_fv_ofi, 4) if _fv_ofi is not None else None,
                 "trade_flow": round(_fv_tf, 4) if _fv_tf is not None else None,
                 "ofi_thr": float(getattr(settings, "chili_momentum_entry_flow_veto_ofi", -0.6)),
                 "trade_flow_thr": float(getattr(settings, "chili_momentum_entry_flow_veto_trade_flow", -0.25)),
+                "sticky": bool(_fv_sticky),
             })
+            _commit_le(sess, le)
             _safe_transition(db, sess, STATE_WATCHING_LIVE)
             db.flush()
             return {
                 "ok": True, "session_id": sess.id, "state": sess.state,
                 "skipped": "entry_flow_veto",
             }
+        # Flow cleared the (possibly sticky) veto this tick — persist the released latch state.
+        if bool(getattr(settings, "chili_momentum_sticky_flow_veto_enabled", True)):
+            _commit_le(sess, le)
         # ── ENTRY-EXTENSION (chase) VETO: never BUY this exact tick when the entry sits
         # too far ABOVE the breakout level (bought near a local top after the move ran;
         # 06-24 RUN +19.9% / PLSM +33.8% above the break). Cap is ADAPTIVE to volatility

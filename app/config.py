@@ -2226,10 +2226,16 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FLOAT_ROTATION_TILT_ENABLED"),
         description="Volume/float rotation sustainability tilt (>=~5x EOD): reward names rotating their float multiple times as a fuel-remaining signal.",
     )
+    # FIX-19(d): flipped default False -> True. The fixed 1800bps pullback ceiling sailed
+    # under real 1308/1365bps depths (it never bit), so the adaptive Ross retrace ceiling is
+    # now ON by default. It is calm-ONLY tightening + ATR%-WIDENING (explosive/volatile names
+    # KEEP the deeper tolerance, hard-capped 0.75), so it CANNOT re-introduce the documented
+    # explosive-name 0-fills regression — it only tightens calm names toward Ross's ~50%-of-
+    # prior-candle. (feedback_adaptive_no_magic, feedback_no_dark_flags)
     chili_momentum_adaptive_pullback_depth_ceiling_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_PULLBACK_DEPTH_CEILING_ENABLED"),
-        description="Adaptive Ross retrace ceiling on the bull-flag IMPULSE-relative axis. OFF (default) ⇒ byte-identical to the current vol-aware flag ceiling. ON ⇒ CALM-only tightening toward Ross's ~50%-of-prior-candle (calm atr_pct≈0.01 ⇒ ceiling≈0.515, tighter than the current 0.70) while WIDENING with the name's own ATR% so EXPLOSIVE/volatile names keep the deeper tolerance (atr_pct≈0.05 ⇒ ≈0.575; hard-capped 0.75). Reuses the single documented base (_VOL_SHALLOW_BASE/_VOL_SHALLOW_ATR_MULT) — no fixed per-name magic. THE TRAP: tightening WITHOUT adaptation cuts explosive-name entries (the documented 0-fills regression — explosive names normally pull deeper), so this is calm-ONLY + ATR%-widening.",
+        description="Adaptive Ross retrace ceiling on the bull-flag IMPULSE-relative axis. FIX-19(d): default flipped to ON (the fixed 1800bps ceiling never bit under real ~1300bps depths). ON ⇒ CALM-only tightening toward Ross's ~50%-of-prior-candle (calm atr_pct≈0.01 ⇒ ceiling≈0.515, tighter than the current 0.70) while WIDENING with the name's own ATR% so EXPLOSIVE/volatile names keep the deeper tolerance (atr_pct≈0.05 ⇒ ≈0.575; hard-capped 0.75). Reuses the single documented base (_VOL_SHALLOW_BASE/_VOL_SHALLOW_ATR_MULT) — no fixed per-name magic. OFF ⇒ byte-identical to the current vol-aware flag ceiling. THE TRAP: tightening WITHOUT adaptation cuts explosive-name entries (the documented 0-fills regression — explosive names normally pull deeper), so this is calm-ONLY + ATR%-widening.",
     )
     # ── Ross re-audit SELECTION tilts (each kill-switched DEFAULT-OFF = byte-identical) ──
     # Four MEASURED selection-side tilts from the 2026-06-26 Warrior-courses re-audit. Each is a
@@ -7972,6 +7978,26 @@ class Settings(BaseSettings):
         le=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_FLOW_VETO_TRADE_FLOW_STRONG"),
         description="Entry-time flow veto STRONG-tape OR-leg: executed-tape trade_flow (signed [-1,1]) at/below this STRONG-negative bar vetoes the buy ALONE, regardless of OFI (06-24 RUN: ofi=+0.5 mild buy but trade_flow=-0.63 strong executed selling — the strict AND-leg missed it). -0.5 is a strong bar (most healthy entries have trade_flow > -0.5). Only consulted with chili_momentum_entry_flow_veto_enabled on; trade_flow None = no veto, byte-identical.",
+    )
+    # FIX-19(c) STICKY FLOW VETO. The per-tick flow veto forgets INSTANTLY: a real-selling
+    # veto clears the moment ONE tick reads non-negative flow, so a single spoofy imbalance
+    # print can flip a genuine-selling veto and fire the buy 53s later. When True (default),
+    # once the flow veto LATCHES it PERSISTS until flow has cleared the veto for a short
+    # rolling window (chili_momentum_sticky_flow_veto_window_sec, ONE documented base) —
+    # measured by consecutive non-veto flow reads spanning the window. A single positive
+    # print no longer releases a real-selling veto. Sizing/timing only (defers the buy; the
+    # exit path is never consulted). OFF => byte-identical (the veto forgets per tick).
+    chili_momentum_sticky_flow_veto_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STICKY_FLOW_VETO_ENABLED"),
+        description="FIX-19(c): True (default) => a latched entry flow-veto persists until flow is non-negative across a rolling window (one spoofy print can't release a real-selling veto). OFF => the veto forgets per tick (legacy).",
+    )
+    # Rolling window (seconds) the flow must stay non-veto before a latched sticky flow-veto
+    # releases. ONE documented base (~ a few tick cadences); a longer window = stickier.
+    chili_momentum_sticky_flow_veto_window_sec: float = Field(
+        default=20.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STICKY_FLOW_VETO_WINDOW_SEC"),
     )
     # ── Entry-EXTENSION (chase) veto ─────────────────────────────────────────────
     # Defer the buy when the entry sits too far ABOVE the breakout level (bought near a
