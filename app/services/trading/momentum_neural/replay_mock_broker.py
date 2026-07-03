@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import itertools
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -49,6 +49,55 @@ from .paper_execution import (
 _log = logging.getLogger(__name__)
 
 _VENUE = "replay_mock"
+
+# ── STEP-2 REALISTIC FILL MODEL — documented base constants ──────────────────────────
+#
+# These are the ONE-documented-setting bases (the reference FLOORS, per
+# [[feedback_adaptive_no_magic]]): the driver may override any of them with an
+# adaptive/recorded value (e.g. the per-day printed-volume series, the per-venue
+# measured ack-latency percentiles). They exist so a mock constructed with NO driver
+# feed still fills conservatively and never fills through an empty tape.
+#
+# (b) FILL-VOLUME REALISM — cumulative fill ≤ this fraction of the recorded printed
+#     volume at-or-through the limit during the order's live window. 0.25 = we assume the
+#     replayed order can capture at most 25 % of the shares that actually printed at or
+#     through its price while it rested. A conservative participation cap; partial fills
+#     result when the printed volume is thin relative to the order size.
+DEFAULT_VOLUME_PARTICIPATION_FRAC = 0.25
+#
+# (c) ACK/LATENCY — the observed distribution of real place→fill latencies measured from
+#     ``trading_automation_events`` (live_entry_submitted → live_entry_filled), 2026-07-02
+#     live DB: n=218 sessions, plausible (0-60 s) window median ≈ 10.1 s, p25 ≈ 6.3 s,
+#     p75 ≈ 27.9 s (full-sample median 12.7 s; a long tail to broker-timeout is excluded
+#     from the ack model). The documented FALLBACK BASE ack latency when the driver
+#     supplies no measured distribution is this median. The driver's
+#     ``set_latency_distribution`` overrides it with the recomputed per-run percentiles.
+DEFAULT_ACK_LATENCY_SECONDS = 10.0
+DEFAULT_ACK_LATENCY_P25_SECONDS = 6.3
+DEFAULT_ACK_LATENCY_P75_SECONDS = 27.9
+
+
+class FillMode:
+    """The explicit conservative/optimistic fill-realism mode (STEP-2 (e)).
+
+    * ``CONSERVATIVE`` (DEFAULT): fills cross the ADVERSE side (buy at ask+slip, sell at
+      bid−slip), are VOLUME-CAPPED against the recorded printed volume (partial fills when
+      the tape is thin), and pay the full ack latency. This is the floor the operator
+      trusts for a lower-bound PnL estimate — it never over-credits a fill the tape could
+      not have supplied.
+    * ``OPTIMISTIC``: fills cross at the FAVORABLE mid (no adverse slippage), are NOT
+      volume-capped (assume full size available), and pay a shorter ack latency. This is
+      the upper-bound of the PnL band. It is still bounded by the recorded quote (no
+      fill-through-empty-tape), so even optimistic mode is honest about a quoteless name.
+    """
+
+    CONSERVATIVE = "conservative"
+    OPTIMISTIC = "optimistic"
+
+    @staticmethod
+    def normalize(value: Any) -> str:
+        v = str(value).strip().lower() if value is not None else FillMode.CONSERVATIVE
+        return FillMode.OPTIMISTIC if v == FillMode.OPTIMISTIC else FillMode.CONSERVATIVE
 
 
 def _float_or_none(v: Any) -> Optional[float]:
@@ -113,6 +162,12 @@ class _RestingOrder:
     fee: float = 0.0
     ack_delay_remaining: int = 0
     partial_first_fill: bool = False  # fill base_size/2 first, the remainder on the next cross
+    # STEP-2 volume-cap bookkeeping: the cumulative printed volume at-or-through this
+    # order's limit that has been OBSERVED while the order was resting (advanced by the
+    # driver via ``set_printed_volume`` between ticks). The order's cumulative fill is
+    # capped at ``volume_participation_frac × observed_printed_volume``.
+    observed_printed_volume: float = 0.0
+    volume_participation_frac: float = 1.0  # 1.0 ⇒ uncapped (P0/P1 backward-compat)
 
     def to_normalized(self) -> NormalizedOrder:
         return NormalizedOrder(
@@ -153,6 +208,11 @@ class MockBrokerAdapter:
         ack_delay_ticks: int = 0,
         partial_first_fill: bool = False,
         freshness_mode: str = "sim",
+        # ── STEP-2 realistic fill model ──────────────────────────────────────────────
+        fill_mode: str = FillMode.CONSERVATIVE,
+        volume_cap_enabled: bool = False,
+        volume_participation_frac: float = DEFAULT_VOLUME_PARTICIPATION_FRAC,
+        optimistic_slippage_bps: float = 0.0,
     ) -> None:
         # Injected, per-product recorded NBBO (set as-of the sim clock by the driver).
         self._quotes: dict[str, RecordedQuote] = {}
@@ -176,6 +236,30 @@ class MockBrokerAdapter:
         self._partial_first_fill = bool(partial_first_fill)
         # "sim" (P0 contract) | "wall" (P1 driver: quote fresh vs the wall-clock stale gate).
         self._freshness_mode = "wall" if str(freshness_mode).lower() == "wall" else "sim"
+        # ── STEP-2 realistic fill model state ────────────────────────────────────────
+        # (e) explicit conservative/optimistic mode. Conservative = adverse-side crossing
+        #     + volume cap + full ack latency (the trustworthy lower bound). Optimistic =
+        #     favorable mid + no volume cap + shorter latency (the upper bound).
+        self._fill_mode = FillMode.normalize(fill_mode)
+        # (b) fill-VOLUME realism. When enabled, a resting order's cumulative fill is capped
+        #     at ``volume_participation_frac × observed_printed_volume`` (the printed volume
+        #     at-or-through its limit while it rested, fed by ``set_printed_volume``). Default
+        #     OFF ⇒ P0/P1 backward-compat (uncapped). Optimistic mode also bypasses the cap.
+        self._volume_cap_enabled = bool(volume_cap_enabled) and self._fill_mode == FillMode.CONSERVATIVE
+        self._volume_participation_frac = max(0.0, float(volume_participation_frac))
+        # OPTIMISTIC slippage: 0.0 (mid-favorable) by default. Kept separate so a run can be
+        # deliberately optimistic-but-not-free.
+        self._optimistic_slippage_bps = float(optimistic_slippage_bps)
+        # (c) ack/latency: the driver may install a measured distribution via
+        #     ``set_latency_distribution`` (percentile seconds). Absent one, the documented
+        #     fallback base (module constants) is used to derive a per-order ack-delay.
+        self._ack_latency_seconds: float = (
+            DEFAULT_ACK_LATENCY_SECONDS
+            if self._fill_mode == FillMode.CONSERVATIVE
+            else DEFAULT_ACK_LATENCY_P25_SECONDS
+        )
+        # Per-product printed-volume observed while an order rests (advanced by the driver).
+        self._printed_volume_pending: dict[str, float] = {}
 
     # ── driver-side injection seams (NOT part of the VenueAdapter protocol) ──────────
     def set_clock(self, t: datetime) -> None:
@@ -199,6 +283,53 @@ class MockBrokerAdapter:
     def clear_quote(self, product_id: str) -> None:
         """Remove a product's quote ⇒ subsequent reads return ``no_bbo`` (RVMDW path)."""
         self._quotes.pop(str(product_id).upper(), None)
+
+    # ── STEP-2 realistic-fill driver seams (NOT part of the VenueAdapter protocol) ────
+    def set_printed_volume(self, product_id: str, printed_volume: float) -> None:
+        """Feed the recorded printed volume that traded AT-OR-THROUGH a resting order's
+        limit during THIS advance window (from ``iqfeed_trade_ticks`` prints the driver
+        selected as-of ``t`` with ``price <= ask``/``>= bid`` and inside the limit). The
+        volume-cap fill model consumes it: each still-``open`` order for the product accrues
+        this volume, and its cumulative fill is capped at ``frac × observed_printed_volume``.
+
+        Additive across advances — the driver passes the INCREMENT since the last advance
+        (or the full at-or-through-limit volume for a single-advance immediate order)."""
+        pid = str(product_id).upper()
+        inc = max(0.0, float(printed_volume))
+        self._printed_volume_pending[pid] = self._printed_volume_pending.get(pid, 0.0) + inc
+        # accrue onto every resting order for this product, then re-test the cross/cap
+        for ro in self._orders.values():
+            if ro.status == "open" and ro.product_id == pid:
+                ro.observed_printed_volume += inc
+        if self._resting_limit_fills:
+            self._advance_resting_orders(product_id=pid)
+
+    def set_latency_distribution(
+        self,
+        *,
+        median_seconds: Optional[float] = None,
+        p25_seconds: Optional[float] = None,
+        p75_seconds: Optional[float] = None,
+    ) -> None:
+        """Install the MEASURED place→fill latency distribution (percentile seconds) the
+        driver recomputed from ``trading_automation_events`` for this run. Conservative mode
+        uses the median (the trustworthy central latency); optimistic uses p25 (fast fills).
+        Absent this call the documented fallback base (module constants) applies."""
+        if self._fill_mode == FillMode.CONSERVATIVE:
+            base = median_seconds if median_seconds is not None else DEFAULT_ACK_LATENCY_SECONDS
+        else:
+            base = p25_seconds if p25_seconds is not None else DEFAULT_ACK_LATENCY_P25_SECONDS
+        self._ack_latency_seconds = max(0.0, float(base))
+
+    def ack_delay_ticks_for(self, tick_seconds: float) -> int:
+        """Convert the mode's ack latency (seconds) into an integer number of quote
+        advances for a grid whose median spacing is ``tick_seconds``. Deterministic (round
+        half-up), never negative. Used by the driver to set ``ack_delay_ticks`` per run so
+        the pending-entry ack window reflects the REAL measured broker latency rather than a
+        magic constant."""
+        if tick_seconds is None or float(tick_seconds) <= 0:
+            return 0
+        return max(0, int(self._ack_latency_seconds / float(tick_seconds) + 0.5))
 
     def _quote_for(self, product_id: str) -> Optional[RecordedQuote]:
         q = self._quotes.get(str(product_id).upper())
@@ -429,10 +560,11 @@ class MockBrokerAdapter:
         # exit) still crosses immediately. ``ack_delay_ticks`` holds even a crossable limit
         # ``open`` for N quote advances first (the pending-entry ack window).
         if self._resting_limit_fills and order_type == "limit":
+            pid_u = str(product_id).upper()
             ro = _RestingOrder(
                 order_id=order_id,
                 client_order_id=client_order_id,
-                product_id=str(product_id).upper(),
+                product_id=pid_u,
                 side=s,
                 order_type=order_type,
                 base_size=size,
@@ -444,6 +576,13 @@ class MockBrokerAdapter:
                 fee=0.0,
                 ack_delay_remaining=self._ack_delay_ticks,
                 partial_first_fill=self._partial_first_fill,
+                # STEP-2 (b): stamp the participation cap onto the order (1.0 ⇒ uncapped when
+                # volume-capping is off). Seed the observed-printed-volume with whatever has
+                # already been fed for this product this window.
+                volume_participation_frac=(
+                    self._volume_participation_frac if self._volume_cap_enabled else 1.0
+                ),
+                observed_printed_volume=self._printed_volume_pending.get(pid_u, 0.0),
             )
             self._orders[order_id] = ro
             # An at-or-through-market limit with no ack delay crosses on THIS placement quote.
@@ -496,8 +635,21 @@ class MockBrokerAdapter:
 
     # ── resting-fill mechanics (P1; zero network, deterministic) ─────────────────────
     def _cross_price(self, side: str, q: RecordedQuote) -> float:
-        """Fill PRICE for a marketable order against quote ``q`` (REUSE the pure paper math)."""
-        if str(side).lower() in ("buy", "bid", "long"):
+        """Fill PRICE for a marketable order against quote ``q`` (REUSE the pure paper math).
+
+        STEP-2 mode-aware:
+          * CONSERVATIVE — cross the ADVERSE side: buy at ask + slip, sell at bid − slip.
+          * OPTIMISTIC   — cross at the FAVORABLE MID (buy at mid + optimistic_slip, sell at
+            mid − optimistic_slip). Still bounded by the recorded quote (mid is inside the
+            spread), so optimistic is generous but NEVER prices outside the recorded book."""
+        is_buy = str(side).lower() in ("buy", "bid", "long")
+        if self._fill_mode == FillMode.OPTIMISTIC:
+            # Favorable: fill at the recorded mid (± a small optional optimistic slip).
+            if is_buy:
+                return long_entry_fill_price(q.mid, q.mid, self._optimistic_slippage_bps)
+            return long_exit_fill_price(q.mid, q.mid, self._optimistic_slippage_bps)
+        # Conservative (default): adverse-side crossing.
+        if is_buy:
             return long_entry_fill_price(q.ask, q.mid, self._slippage_bps)
         return long_exit_fill_price(q.bid, q.mid, self._slippage_bps)
 
@@ -511,9 +663,22 @@ class MockBrokerAdapter:
             return float(q.ask) <= float(ro.limit_price) + 1e-12
         return float(q.bid) >= float(ro.limit_price) - 1e-12
 
+    def _volume_cap_available(self, ro: _RestingOrder) -> Optional[float]:
+        """STEP-2 (b): the additional qty this order may fill given the printed volume it has
+        observed at-or-through its limit. Returns ``None`` when volume-capping is not active
+        for this order (⇒ no cap, P0/P1 behavior). When active, returns
+        ``max(0, frac × observed_printed_volume − already_filled)`` — a partial results when
+        the tape was thin, and 0 (no fill) when NO volume printed through the limit yet
+        (the no-fill-through-empty-tape property)."""
+        if not self._volume_cap_enabled or ro.volume_participation_frac >= 1.0:
+            return None
+        allowed_total = ro.volume_participation_frac * float(ro.observed_printed_volume)
+        return max(0.0, allowed_total - float(ro.filled_size))
+
     def _maybe_cross(self, ro: _RestingOrder, q: Optional[RecordedQuote]) -> None:
         """Advance one resting order against the current quote: respect the ack delay, then
-        fill (or partial-fill) when the limit crosses. Idempotent on terminal orders."""
+        fill (or partial-fill) when the limit crosses, capped by the observed printed volume.
+        Idempotent on terminal orders."""
         if ro.status != "open" or q is None or not q.is_valid():
             return
         if ro.ack_delay_remaining > 0:
@@ -524,6 +689,19 @@ class MockBrokerAdapter:
         remaining = ro.base_size - ro.filled_size
         if remaining <= 0:
             ro.status = "filled"
+            return
+        # STEP-2 (b) VOLUME CAP: never fill more than frac × printed-volume-through-limit.
+        cap = self._volume_cap_available(ro)
+        if cap is not None:
+            fillable = min(remaining, cap)
+            if fillable <= 1e-9:
+                # No (more) printed volume available through the limit yet ⇒ stay open,
+                # accrue on later advances. This is the no-fill-through-empty-tape guarantee.
+                return
+            px = self._cross_price(ro.side, q)
+            self._book_fill(ro, qty=fillable, price=px)
+            # terminal only once the FULL size is filled; else keep resting for more volume
+            ro.status = "filled" if (ro.base_size - ro.filled_size) <= 1e-9 else "open"
             return
         # PARTIAL: the first cross fills half, leaving the order ``open`` for the next cross.
         if ro.partial_first_fill and ro.filled_size <= 0 and remaining > 1e-9:
