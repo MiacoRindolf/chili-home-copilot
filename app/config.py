@@ -6953,6 +6953,19 @@ class Settings(BaseSettings):
         ge=30.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_VIABILITY_MAX_AGE_SECONDS"),
     )
+    # WAVE-4 ITEM-6(b): ARM-TIME MINIMUM-REMAINING-BUDGET viability refresh. At confirm, a
+    # viability row whose age is already past HALF the max-age (600s) has < 0.5x the budget
+    # left, so the entry could go stale mid-tick (DXST confirmed at 537s/600s and died). When
+    # ON, if the age at confirm > 0.5 x chili_momentum_risk_viability_max_age_seconds, inline
+    # re-score the ONE symbol via the existing pipeline seam (run_momentum_neural_tick) and
+    # confirm ONLY on the fresh score — NEVER blind-touch freshness_ts (that would fake
+    # freshness without re-validating live-eligibility). Reuses the ONE documented 600s base.
+    # KILL-SWITCH: False -> confirm uses the row as-is (byte-identical to pre-ITEM-6).
+    chili_momentum_arm_time_viability_refresh_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ARM_TIME_VIABILITY_REFRESH_ENABLED"),
+        description="WAVE-4 ITEM-6(b): at confirm_live_arm, if the viability row age > 0.5 x chili_momentum_risk_viability_max_age_seconds, inline re-score the symbol via run_momentum_neural_tick and confirm only on the FRESH score (never blind-touch freshness_ts). Ensures a minimum-REMAINING freshness budget at arm time (DXST died at 537s/600s). KILL-SWITCH: False -> confirm uses the row as-is (byte-identical).",
+    )
     chili_momentum_risk_stale_market_data_max_age_sec: float = Field(
         default=30.0,
         ge=1.0,

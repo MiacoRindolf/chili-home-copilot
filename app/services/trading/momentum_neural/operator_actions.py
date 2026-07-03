@@ -593,6 +593,49 @@ def confirm_live_arm(
     if not row or not row.live_eligible:
         return {"ok": False, "error": "no_longer_eligible", "message": "Strategy is no longer live-eligible."}
 
+    # WAVE-4 ITEM-6(b) — ARM-TIME MINIMUM-REMAINING-BUDGET refresh. A viability row already
+    # past HALF the max-age has < 0.5x the freshness budget left, so the entry can go stale
+    # mid-tick (DXST confirmed at 537s/600s and died). Inline re-score the ONE symbol via the
+    # existing pipeline seam and RE-READ the row, so we confirm on a FRESH score — never
+    # blind-touch freshness_ts (that fakes freshness without re-validating live-eligibility).
+    if bool(getattr(settings, "chili_momentum_arm_time_viability_refresh_enabled", True)):
+        try:
+            _max_age = float(getattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0)
+            _ft = getattr(row, "freshness_ts", None)
+            _age = (_utcnow() - _ft).total_seconds() if isinstance(_ft, datetime) else None
+            if _age is not None and _age > 0.5 * _max_age:
+                from .pipeline import run_momentum_neural_tick
+
+                run_momentum_neural_tick(db, meta={"tickers": [sess.symbol]})
+                db.expire(row)  # force a re-read of the just-refreshed row
+                row = (
+                    db.query(MomentumSymbolViability)
+                    .filter(
+                        MomentumSymbolViability.symbol == sess.symbol,
+                        MomentumSymbolViability.variant_id == sess.variant_id,
+                    )
+                    .one_or_none()
+                )
+                # Confirm ONLY on a fresh, still-eligible score. A re-score that dropped the
+                # name below live-eligibility (or failed to write a row) BLOCKS the confirm —
+                # we never arm on a stale row we could not refresh.
+                if not row or not row.live_eligible:
+                    return {
+                        "ok": False,
+                        "error": "no_longer_eligible",
+                        "message": "Strategy is no longer live-eligible after the arm-time viability refresh.",
+                    }
+                _ft2 = getattr(row, "freshness_ts", None)
+                _age2 = (_utcnow() - _ft2).total_seconds() if isinstance(_ft2, datetime) else None
+                if _age2 is not None and _age2 > _max_age:
+                    return {
+                        "ok": False,
+                        "error": "viability_stale",
+                        "message": "Viability could not be refreshed within the freshness budget; not confirming.",
+                    }
+        except Exception:
+            _log.debug("[operator_actions] arm-time viability refresh skipped", exc_info=True)
+
     if user_id is None:
         return {"ok": False, "error": "user_required", "message": "Paired user required."}
     from ..portfolio_allocator import build_session_allocation_decision
