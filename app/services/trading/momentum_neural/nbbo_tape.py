@@ -315,6 +315,86 @@ def prune_nbbo_tape(db: Session, *, retention_days: Optional[int] = None) -> dic
         return {"ok": False, "error": str(exc)[:120]}
 
 
+def _tape_running_up_records(db: Session, *, now_utc: Optional[datetime] = None) -> list[dict[str, Any]]:
+    """Return recent NBBO running-up records with enough evidence to persist.
+
+    The older ``tape_running_up_symbols`` API returned only bare symbols. That was
+    enough to refresh viability, but it dropped the Ross/tape payload the auto-arm
+    gate needs to distinguish a real ignition from a generic ticker refresh.
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    lookback_min = float(getattr(settings, "chili_momentum_running_up_lookback_min", 5.0) or 5.0)
+    min_pct = float(getattr(settings, "chili_momentum_running_up_min_pct", 3.0) or 3.0)
+    max_symbols = int(getattr(settings, "chili_momentum_running_up_max_symbols", 6) or 6)
+    _MIN_SAMPLES = 3  # one stale print must not read as a burst
+    try:
+        rows = db.execute(
+            text(
+                "WITH recent AS ("
+                "  SELECT symbol, mid, day_volume,"
+                "         row_number() OVER (PARTITION BY symbol ORDER BY observed_at ASC) rn_a,"
+                "         row_number() OVER (PARTITION BY symbol ORDER BY observed_at DESC) rn_d,"
+                "         count(*) OVER (PARTITION BY symbol) n"
+                "  FROM momentum_nbbo_spread_tape"
+                "  WHERE observed_at >= :since AND mid > 0 AND symbol NOT LIKE '%-USD'"
+                ") "
+                "SELECT a.symbol, a.mid AS first_mid, d.mid AS last_mid, d.day_volume AS last_vol "
+                "FROM recent a JOIN recent d ON d.symbol = a.symbol AND d.rn_d = 1 "
+                "WHERE a.rn_a = 1 AND a.n >= :min_n"
+            ),
+            {
+                "since": (now_utc.replace(tzinfo=None) - timedelta(minutes=lookback_min)),
+                "min_n": _MIN_SAMPLES,
+            },
+        ).fetchall()
+    except Exception as exc:
+        logger.debug("[nbbo_tape] running-up read failed: %s", exc)
+        return []
+
+    bursts: list[tuple[float, dict[str, Any]]] = []
+    for sym, first_mid, last_mid, last_vol in rows:
+        f, l = _f(first_mid), _f(last_mid)
+        if f is None or l is None or f <= 0:
+            continue
+        pct = (l - f) / f * 100.0
+        if pct >= min_pct:
+            bursts.append(
+                (
+                    pct,
+                    {
+                        "symbol": str(sym).strip().upper(),
+                        "move_pct": round(pct, 4),
+                        "last_mid": l,
+                        "day_volume": _f(last_vol),
+                    },
+                )
+            )
+    bursts.sort(key=lambda item: item[0], reverse=True)
+    return [rec for _, rec in bursts[:max_symbols]]
+
+
+def tape_running_up_signal_map(db: Session, *, now_utc: Optional[datetime] = None) -> dict[str, dict[str, Any]]:
+    """Ross running-up candidates as persistable scanner/ignition signals."""
+    out: dict[str, dict[str, Any]] = {}
+    for rec in _tape_running_up_records(db, now_utc=now_utc):
+        sym = str(rec.get("symbol") or "").strip().upper()
+        if not sym:
+            continue
+        sig: dict[str, Any] = {
+            "ticker": sym,
+            "direction": "long",
+            "todays_change_perc": float(rec.get("move_pct") or 0.0),
+            "signal_type": "running_up_ignite",
+            "source": "tape_delta_ignite",
+        }
+        if rec.get("last_mid") is not None:
+            sig["price"] = float(rec["last_mid"])
+        if rec.get("day_volume") is not None:
+            sig["volume"] = float(rec["day_volume"])
+        out[sym] = sig
+    return out
+
+
 def tape_running_up_symbols(db: Session, *, now_utc: Optional[datetime] = None) -> list[str]:
     """Ross's "Running Up" scanner, rebuilt from our own NBBO tape: symbols whose
     MID price burst over the last few minutes — regardless of day change.
@@ -330,47 +410,7 @@ def tape_running_up_symbols(db: Session, *, now_utc: Optional[datetime] = None) 
     Returns burst symbols, fastest first, bounded by the max-symbols knob.
     Best-effort: returns [] on any failure.
     """
-    now_utc = now_utc or datetime.now(timezone.utc)
-    lookback_min = float(getattr(settings, "chili_momentum_running_up_lookback_min", 5.0) or 5.0)
-    min_pct = float(getattr(settings, "chili_momentum_running_up_min_pct", 3.0) or 3.0)
-    max_symbols = int(getattr(settings, "chili_momentum_running_up_max_symbols", 6) or 6)
-    _MIN_SAMPLES = 3  # one stale print must not read as a burst
-    try:
-        rows = db.execute(
-            text(
-                "WITH recent AS ("
-                "  SELECT symbol, mid,"
-                "         row_number() OVER (PARTITION BY symbol ORDER BY observed_at ASC) rn_a,"
-                "         row_number() OVER (PARTITION BY symbol ORDER BY observed_at DESC) rn_d,"
-                "         count(*) OVER (PARTITION BY symbol) n"
-                "  FROM momentum_nbbo_spread_tape"
-                "  WHERE observed_at >= :since AND mid > 0 AND symbol NOT LIKE '%-USD'"
-                ") "
-                "SELECT a.symbol, a.mid AS first_mid, d.mid AS last_mid "
-                "FROM recent a JOIN recent d ON d.symbol = a.symbol AND d.rn_d = 1 "
-                "WHERE a.rn_a = 1 AND a.n >= :min_n"
-            ),
-            {
-                "since": (now_utc.replace(tzinfo=None) - timedelta(minutes=lookback_min)),
-                "min_n": _MIN_SAMPLES,
-            },
-        ).fetchall()
-    except Exception as exc:
-        logger.debug("[nbbo_tape] running-up read failed: %s", exc)
-        return []
-    bursts: list[tuple[float, str]] = []
-    for sym, first_mid, last_mid in rows:
-        try:
-            f, l = float(first_mid), float(last_mid)
-        except (TypeError, ValueError):
-            continue
-        if f <= 0:
-            continue
-        pct = (l - f) / f * 100.0
-        if pct >= min_pct:
-            bursts.append((pct, str(sym).upper()))
-    bursts.sort(reverse=True)
-    return [s for _, s in bursts[:max_symbols]]
+    return [str(rec["symbol"]) for rec in _tape_running_up_records(db, now_utc=now_utc)]
 
 
 def _ross_threshold_crossed(
