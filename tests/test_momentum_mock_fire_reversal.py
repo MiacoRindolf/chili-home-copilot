@@ -298,23 +298,31 @@ class TestSubVwapTrapMockFire:
 
 
 # ════════════════════════════════════════════════════════════════════════════════════════
-#  (4) red_to_green_confirmation  — Ross red-to-green open reclaim
+#  (4) red_to_green_confirmation  — Ross red-to-green PRIOR-CLOSE reclaim (R8 / WAVE-4 ITEM-3)
 #  Inline gate on the session frame. FIRE = "red_to_green". Mocks: compute_all_from_df,
-#  candles.is_bounce_curl_candle, _detect_back_side, _l2_entry_veto. _bottoming_tail runs real.
-#  Single-session frame (default index) so _today_session_frame returns it unchanged; the
-#  session OPEN = first bar open, the red low = the session low.
+#  candles.is_bounce_curl_candle, _detect_back_side, _l2_entry_veto, _prior_day_close.
+#  _bottoming_tail runs real. Single-session frame (default index) so _today_session_frame
+#  returns it unchanged. R8: the ANCHOR is the PRIOR-DAY CLOSE (not the intraday session open).
 # ════════════════════════════════════════════════════════════════════════════════════════
 
+_R2G_PRIOR_CLOSE = 10.00  # the prior-day close = Ross's red->green anchor
+
+
 def _red_to_green_df() -> pd.DataFrame:
-    """The session opened at 10.00, traded RED below the open (session low 9.40), the prior bar
-    closed red (9.55 < 10.00), then the cur bar reclaims the open with a bottoming-tail curl
-    (close 10.10, low 9.60 wick).  cur=4."""
+    """GAPPER red-to-green: the prior-day close was 10.00; the name gapped DOWN and opened at
+    9.55 (already red on the day), traded to a session low 9.40, the prior bar closed red
+    (9.55 < 10.00 prior close), then the cur bar reclaims the PRIOR CLOSE (10.00) with a
+    bottoming-tail curl (close 10.10, low 9.60 wick).  cur=4.
+
+    Note the SESSION OPEN (9.55) was NEVER below where the name traded — a session-open cross
+    alone is NOT a red-to-green (the name is still red vs the prior close). Only the reclaim
+    of the prior CLOSE (10.00) flips it green on the day."""
     bars = [
-        (10.00, 10.05, 9.90, 9.95),   # 0  session open = 10.00 (closes red)
-        (9.95, 9.98, 9.60, 9.70),     # 1  red
-        (9.70, 9.75, 9.40, 9.50),     # 2  red (session low 9.40)
-        (9.50, 9.65, 9.45, 9.55),     # 3  red (prev_close 9.55 < open 10.00)
-        (10.05, 10.30, 9.55, 10.10),  # 4  cur = reclaim the open, bottoming-tail curl
+        (9.55, 9.60, 9.50, 9.52),     # 0  session open = 9.55 (gapped down, red vs prior close 10.00)
+        (9.52, 9.58, 9.45, 9.50),     # 1  red
+        (9.50, 9.55, 9.40, 9.48),     # 2  red (session low 9.40)
+        (9.48, 9.65, 9.45, 9.55),     # 3  red (prev_close 9.55 < prior close 10.00)
+        (10.05, 10.30, 9.55, 10.10),  # 4  cur = reclaim the PRIOR CLOSE 10.00, bottoming-tail curl
     ]
     return _rows(bars)
 
@@ -333,14 +341,15 @@ def _r2g_arrays(n: int = 5) -> dict:
 
 
 class TestRedToGreenMockFire:
-    def test_positive_clean_red_to_green_fires(self):
-        """Red session reclaiming the open on a bottoming-tail curl + volume -> FIRES
-        ``red_to_green``; entry = open level, stop = session low."""
+    def test_positive_gapper_reclaims_prior_close_fires(self):
+        """R8: a red (gapped-down) session reclaiming the PRIOR-DAY CLOSE on a bottoming-tail
+        curl + volume -> FIRES ``red_to_green``; entry = prior close, stop = session low."""
         df = _red_to_green_df()
         with patch(f"{_GATES}.settings") as ms, \
                 patch(f"{_GATES}.compute_all_from_df", return_value=_r2g_arrays()), \
                 patch(f"{_GATES}._detect_back_side", return_value=(False, "front_side")), \
                 patch(f"{_GATES}._l2_entry_veto", return_value=None), \
+                patch(f"{_GATES}._prior_day_close", return_value=_R2G_PRIOR_CLOSE), \
                 patch(f"{_CANDLES}.is_bounce_curl_candle", return_value=True):
             _r2g_settings(ms)
             ok, reason, dbg = red_to_green_confirmation(
@@ -348,8 +357,52 @@ class TestRedToGreenMockFire:
             )
         assert ok is True, f"clean red-to-green must fire, got {reason} dbg={dbg}"
         assert reason == "red_to_green"
-        assert dbg["pullback_high"] == pytest.approx(10.00, abs=1e-6)  # open level = entry
-        assert dbg["pullback_low"] == pytest.approx(9.40, abs=1e-6)    # session low = stop
+        assert dbg["prior_close"] == pytest.approx(10.00, abs=1e-6)     # anchor = prior close
+        assert dbg["pullback_high"] == pytest.approx(10.00, abs=1e-6)   # prior close = entry
+        assert dbg["pullback_low"] == pytest.approx(9.40, abs=1e-6)     # session low = stop
+
+    def test_session_open_cross_alone_does_not_fire(self):
+        """R8 PARITY: crossing the intraday SESSION OPEN (9.55) while STILL below the prior
+        close (10.00) is NOT a red-to-green — the name is still red on the day. With the cur
+        bar closing at 9.70 (above the 9.55 open but below the 10.00 prior close), the gate
+        ARMS a tick-watch at the prior close (waiting_for_reclaim), it does NOT fire."""
+        bars = [
+            (9.55, 9.60, 9.50, 9.52),
+            (9.52, 9.58, 9.45, 9.50),
+            (9.50, 9.55, 9.40, 9.48),
+            (9.48, 9.65, 9.45, 9.55),     # prev_close 9.55 < prior close 10.00 (still red)
+            (9.75, 9.80, 9.30, 9.70),     # cur: bottoming-tail curl, closes 9.70 (above 9.55 open, below 10.00 prior close)
+        ]
+        df = _rows(bars)
+        with patch(f"{_GATES}.settings") as ms, \
+                patch(f"{_GATES}.compute_all_from_df", return_value=_r2g_arrays()), \
+                patch(f"{_GATES}._detect_back_side", return_value=(False, "front_side")), \
+                patch(f"{_GATES}._l2_entry_veto", return_value=None), \
+                patch(f"{_GATES}._prior_day_close", return_value=_R2G_PRIOR_CLOSE), \
+                patch(f"{_CANDLES}.is_bounce_curl_candle", return_value=True):
+            _r2g_settings(ms)
+            ok, reason, dbg = red_to_green_confirmation(
+                df, entry_interval="5m", symbol="TEST", db=MagicMock(),
+            )
+        assert ok is False, f"a session-open cross below the prior close must NOT fire: {reason}"
+        assert reason == "waiting_for_reclaim"  # armed at the PRIOR CLOSE, not fired at the open
+
+    def test_no_prior_close_fails_closed_skips(self):
+        """R8: prior close unavailable -> FAIL-CLOSED skip (never fall back to the intraday
+        open). The reclaim that WOULD fire on the open must not fire when the anchor is gone."""
+        df = _red_to_green_df()
+        with patch(f"{_GATES}.settings") as ms, \
+                patch(f"{_GATES}.compute_all_from_df", return_value=_r2g_arrays()), \
+                patch(f"{_GATES}._detect_back_side", return_value=(False, "front_side")), \
+                patch(f"{_GATES}._l2_entry_veto", return_value=None), \
+                patch(f"{_GATES}._prior_day_close", return_value=None), \
+                patch(f"{_CANDLES}.is_bounce_curl_candle", return_value=True):
+            _r2g_settings(ms)
+            ok, reason, dbg = red_to_green_confirmation(
+                df, entry_interval="5m", symbol="TEST", db=MagicMock(),
+            )
+        assert ok is False
+        assert reason == "red_to_green_no_prior_close"
 
     def test_negative_backside_no_fire(self):
         """The anti-chase backside veto trips (rolled-over MACD/EMA = a bear-flag relief pop)
@@ -359,6 +412,7 @@ class TestRedToGreenMockFire:
                 patch(f"{_GATES}.compute_all_from_df", return_value=_r2g_arrays()), \
                 patch(f"{_GATES}._detect_back_side", return_value=(True, "ema9_below_ema20")), \
                 patch(f"{_GATES}._l2_entry_veto", return_value=None), \
+                patch(f"{_GATES}._prior_day_close", return_value=_R2G_PRIOR_CLOSE), \
                 patch(f"{_CANDLES}.is_bounce_curl_candle", return_value=True):
             _r2g_settings(ms)
             ok, reason, dbg = red_to_green_confirmation(

@@ -73,6 +73,7 @@ _PROMOTABLE_PAPER_STATES = frozenset(
         STATE_COOLDOWN,
     }
 )
+STATE_LIVE_ARM_EXPIRED = "live_arm_expired"  # FIX-18: a zombie live_arm_pending, terminalized
 _TERMINAL_OPERATOR_STATES = frozenset(
     {
         STATE_CANCELLED,
@@ -83,8 +84,34 @@ _TERMINAL_OPERATOR_STATES = frozenset(
         "live_finished",
         "live_cancelled",
         "live_error",
+        STATE_LIVE_ARM_EXPIRED,
     }
 )
+
+
+def _arm_pending_ttl_expired(row: TradingAutomationSession) -> bool:
+    """FIX-18 (B1) — is this live_arm_pending session a stranded ZOMBIE past the dedupe TTL?
+
+    A transient confirm failure strands a live_arm_pending session; without this the
+    begin_live_arm dedupe returns it as "already active" for hours, blocking re-arm of the
+    SAME symbol (80 zombies/7d, median 6.6h). Only live_arm_pending is eligible (a
+    genuinely-active session is never expired). Age is measured off created_at (when the arm
+    token was minted). Flag OFF / fresh pending / no timestamp => not expired (fresh dedupes,
+    byte-identical legacy).
+    """
+    if not bool(getattr(settings, "chili_momentum_arm_pending_ttl_enabled", True)):
+        return False
+    if row.state != STATE_LIVE_ARM_PENDING:
+        return False
+    created = getattr(row, "created_at", None)
+    if not isinstance(created, datetime):
+        return False
+    try:
+        ttl = float(getattr(settings, "chili_momentum_arm_pending_ttl_seconds", 120.0) or 120.0)
+    except (TypeError, ValueError):
+        ttl = 120.0
+    age_sec = (_utcnow() - created).total_seconds()
+    return age_sec > ttl
 
 
 def _utcnow() -> datetime:
@@ -349,6 +376,34 @@ def begin_live_arm(
     )
     for row in existing:
         if row.state not in _TERMINAL_OPERATOR_STATES:
+            # FIX-18 (B1) ZOMBIE-WALL TTL: a live_arm_pending stranded by a transient confirm
+            # failure would dedupe forever, blocking re-arm of the SAME symbol for hours.
+            # Terminalize an EXPIRED pending (live_arm_expired) and fall through to re-arm.
+            # A genuinely-active session or a FRESH pending still dedupes (no double-arm).
+            if _arm_pending_ttl_expired(row):
+                row.state = STATE_LIVE_ARM_EXPIRED
+                row.ended_at = _utcnow()
+                row.updated_at = _utcnow()
+                append_trading_automation_event(
+                    db,
+                    row.id,
+                    "live_arm_expired",
+                    {
+                        "reason": "arm_pending_ttl",
+                        "symbol": sym,
+                        "variant_id": int(variant_id),
+                        "age_sec": round((_utcnow() - row.created_at).total_seconds(), 1),
+                    },
+                    correlation_id=getattr(row, "correlation_id", None),
+                    source_node_id="momentum_operator_api",
+                )
+                _log.warning(
+                    "[operator_actions] terminalized zombie live_arm_pending session=%s "
+                    "symbol=%s (age>%ss) -> live_arm_expired; allowing re-arm",
+                    int(row.id), sym,
+                    getattr(settings, "chili_momentum_arm_pending_ttl_seconds", 120.0),
+                )
+                continue
             snap = row.risk_snapshot_json if isinstance(row.risk_snapshot_json, dict) else {}
             return {
                 "ok": True,
@@ -537,6 +592,49 @@ def confirm_live_arm(
     )
     if not row or not row.live_eligible:
         return {"ok": False, "error": "no_longer_eligible", "message": "Strategy is no longer live-eligible."}
+
+    # WAVE-4 ITEM-6(b) — ARM-TIME MINIMUM-REMAINING-BUDGET refresh. A viability row already
+    # past HALF the max-age has < 0.5x the freshness budget left, so the entry can go stale
+    # mid-tick (DXST confirmed at 537s/600s and died). Inline re-score the ONE symbol via the
+    # existing pipeline seam and RE-READ the row, so we confirm on a FRESH score — never
+    # blind-touch freshness_ts (that fakes freshness without re-validating live-eligibility).
+    if bool(getattr(settings, "chili_momentum_arm_time_viability_refresh_enabled", True)):
+        try:
+            _max_age = float(getattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0)
+            _ft = getattr(row, "freshness_ts", None)
+            _age = (_utcnow() - _ft).total_seconds() if isinstance(_ft, datetime) else None
+            if _age is not None and _age > 0.5 * _max_age:
+                from .pipeline import run_momentum_neural_tick
+
+                run_momentum_neural_tick(db, meta={"tickers": [sess.symbol]})
+                db.expire(row)  # force a re-read of the just-refreshed row
+                row = (
+                    db.query(MomentumSymbolViability)
+                    .filter(
+                        MomentumSymbolViability.symbol == sess.symbol,
+                        MomentumSymbolViability.variant_id == sess.variant_id,
+                    )
+                    .one_or_none()
+                )
+                # Confirm ONLY on a fresh, still-eligible score. A re-score that dropped the
+                # name below live-eligibility (or failed to write a row) BLOCKS the confirm —
+                # we never arm on a stale row we could not refresh.
+                if not row or not row.live_eligible:
+                    return {
+                        "ok": False,
+                        "error": "no_longer_eligible",
+                        "message": "Strategy is no longer live-eligible after the arm-time viability refresh.",
+                    }
+                _ft2 = getattr(row, "freshness_ts", None)
+                _age2 = (_utcnow() - _ft2).total_seconds() if isinstance(_ft2, datetime) else None
+                if _age2 is not None and _age2 > _max_age:
+                    return {
+                        "ok": False,
+                        "error": "viability_stale",
+                        "message": "Viability could not be refreshed within the freshness budget; not confirming.",
+                    }
+        except Exception:
+            _log.debug("[operator_actions] arm-time viability refresh skipped", exc_info=True)
 
     if user_id is None:
         return {"ok": False, "error": "user_required", "message": "Paired user required."}

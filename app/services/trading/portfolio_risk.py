@@ -1772,6 +1772,57 @@ def _assert_portfolio_breaker_ok(
         return True, None
 
 
+def _resolve_drawdown_denominator(capital: float) -> float | None:
+    """FIX-DD — resolve the REAL account-equity basis for drawdown-% trips.
+
+    A contaminated caller basis (~$19.5 vs the real ~$13k) inflated a -$76 loss to
+    "-389.7%" and re-tripped the breaker twice. Reuse the SAME account-equity source the
+    sizing uses (equity_relative_* machinery) as the percentage denominator; fall back to
+    the passed ``capital`` only when it clears the sane floor. Returns ``None`` when NEITHER
+    a real equity read NOR a sane passed basis is available — the caller then SKIPS the %
+    trip (fail-closed on the %, never divide by a garbage base). Flag OFF => legacy (always
+    return the passed ``capital``).
+    """
+    try:
+        from ...config import settings as _s_dd
+        enabled = bool(
+            getattr(_s_dd, "chili_drawdown_breaker_real_equity_denominator_enabled", True)
+        )
+    except Exception:
+        enabled = False
+    cap = _float_or_none(capital)
+    if not enabled:
+        return cap if (cap is not None and cap > 0) else None
+    try:
+        floor = float(getattr(_s_dd, "chili_drawdown_breaker_min_equity_basis_usd", 1_000.0) or 0.0)
+    except Exception:
+        floor = 1_000.0
+    # Real account equity (stable total-equity / cash-value basis) for the equity lane —
+    # the SAME source equity_relative_* sizing reads. Never margin-inflated.
+    real_equity: float | None = None
+    try:
+        from .momentum_neural.risk_policy import _account_equity_usd
+
+        real_equity = _account_equity_usd(
+            "robinhood_spot", apply_margin_multiple=False, prefer_cash_value=True
+        )
+    except Exception:
+        real_equity = None
+    if real_equity is not None and real_equity > 0:
+        return float(real_equity)
+    # No real equity read: use the passed basis only if it is sane (>= floor). A garbage
+    # sub-floor basis (the $19.5 contamination) returns None => the % trip is SKIPPED.
+    if cap is not None and cap >= floor:
+        return cap
+    logger.warning(
+        "[circuit_breaker] drawdown-%% denominator unavailable "
+        "(real_equity=%s, passed_capital=%s < floor=%.0f) — SKIPPING the %% trip "
+        "(fail-closed; absolute-dollar breakers still active)",
+        real_equity, cap, floor,
+    )
+    return None
+
+
 def check_drawdown_breaker(
     db: Session,
     user_id: int | None,
@@ -1802,10 +1853,17 @@ def check_drawdown_breaker(
     except Exception:
         logger.debug("[circuit_breaker] Unrealized P&L computation failed", exc_info=True)
 
-    unrealized_pct = (unrealized_pnl / capital * 100) if capital > 0 else 0
+    # FIX-DD — the drawdown-% denominator is the REAL account-equity basis (not a possibly
+    # contaminated caller `capital`). None => equity unavailable AND the passed basis is
+    # sub-floor garbage: SKIP every % trip (fail-closed) while the absolute-dollar breakers
+    # below stay active. Flag OFF => this returns the passed `capital` (legacy).
+    dd_denom = _resolve_drawdown_denominator(capital)
+    _dd_pct_active = dd_denom is not None and dd_denom > 0
+
+    unrealized_pct = (unrealized_pnl / dd_denom * 100) if _dd_pct_active else 0
 
     # Trip immediately if unrealized loss exceeds 30-day threshold
-    if unrealized_pct < -limits.max_30day_dd_pct:
+    if _dd_pct_active and unrealized_pct < -limits.max_30day_dd_pct:
         _breaker_tripped = True
         _breaker_reason = (
             f"Unrealized MTM drawdown {unrealized_pct:.1f}% "
@@ -1830,9 +1888,9 @@ def check_drawdown_breaker(
     recent_5d = _breaker_trade_filter(q5).all()
     pnl_5d_realized = _sum_trade_realized_pnl(recent_5d)
     pnl_5d_total = pnl_5d_realized + unrealized_pnl
-    pnl_5d_pct = (pnl_5d_total / capital * 100) if capital > 0 else 0
+    pnl_5d_pct = (pnl_5d_total / dd_denom * 100) if _dd_pct_active else 0
 
-    if pnl_5d_pct < -limits.max_5day_dd_pct:
+    if _dd_pct_active and pnl_5d_pct < -limits.max_5day_dd_pct:
         _breaker_tripped = True
         _breaker_reason = (
             f"5-day drawdown {pnl_5d_pct:.1f}% (realized={pnl_5d_realized:.0f}, "
@@ -1857,9 +1915,9 @@ def check_drawdown_breaker(
     recent_30d = _breaker_trade_filter(q30).all()
     pnl_30d_realized = _sum_trade_realized_pnl(recent_30d)
     pnl_30d_total = pnl_30d_realized + unrealized_pnl
-    pnl_30d_pct = (pnl_30d_total / capital * 100) if capital > 0 else 0
+    pnl_30d_pct = (pnl_30d_total / dd_denom * 100) if _dd_pct_active else 0
 
-    if pnl_30d_pct < -limits.max_30day_dd_pct:
+    if _dd_pct_active and pnl_30d_pct < -limits.max_30day_dd_pct:
         _breaker_tripped = True
         _breaker_reason = (
             f"30-day drawdown {pnl_30d_pct:.1f}% (realized={pnl_30d_realized:.0f}, "

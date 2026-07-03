@@ -1034,6 +1034,24 @@ def _run_nbbo_spread_prune_job():
     run_scheduler_job_guarded("momentum_nbbo_prune", _work)
 
 
+def _run_rh_agentic_keepwarm_job():
+    """STEP-D #14 KEEP-WARM: probe the RH Agentic rail's is_enabled() on a frequent cadence
+    so the auth cache never goes COLD at the open (the RH-dark-at-open flap class). The probe
+    runs ensure_authable + refreshes the token cache; best-effort inside the adapter. Flag
+    ``chili_robinhood_agentic_probe_keepwarm_enabled`` (default True) gates it."""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        if not getattr(_settings, "chili_robinhood_agentic_probe_keepwarm_enabled", True):
+            return
+        from .trading.venue.robinhood_mcp import probe_keepwarm
+        res = probe_keepwarm()
+        if res.get("ok") and res.get("enabled") is False:
+            logger.info("[scheduler] rh_agentic keep-warm probe: rail DARK detail=%s", res.get("detail"))
+
+    run_scheduler_job_guarded("rh_agentic_keepwarm", _work)
+
+
 # Change-only dedupe for auto-arm SKIP logging: the arm pass runs every 30s, so
 # logging every no-trade tick would audit-spam. We surface a compact line only
 # when the skip decision's SHAPE shifts — making "why isn't the Ross lane
@@ -3523,6 +3541,38 @@ def _equity_movers_for_ross_bridge(sweep_out: dict) -> list[dict]:
     return out
 
 
+def _active_equity_session_symbols(db: "Session") -> list[str]:
+    """WAVE-4 ITEM-6(a) — the DISTINCT equity symbols of ACTIVE (runnable) live automation
+    sessions. These are the names the lane is actively WATCHING/HOLDING; they must be
+    re-scored into viability EVERY refresh cycle even when the scanners emit no signal for
+    them (a consolidating watched name rotates OUT of the mover list -> stale-while-watched
+    -> the 600s freshness gate strangles the entry; DXST died at age 537s/600s). Best-effort:
+    [] on any error. Crypto (``-USD``) is excluded — it has its own venue feed."""
+    try:
+        from .trading.momentum_neural.live_fsm import LIVE_RUNNER_RUNNABLE_STATES
+        from ..models.trading import TradingAutomationSession
+
+        rows = (
+            db.query(TradingAutomationSession.symbol)
+            .filter(
+                TradingAutomationSession.mode == "live",
+                TradingAutomationSession.state.in_(LIVE_RUNNER_RUNNABLE_STATES),
+                ~TradingAutomationSession.symbol.like("%-USD"),
+            )
+            .distinct()
+            .all()
+        )
+        out: list[str] = []
+        for (_sym,) in rows:
+            _su = str(_sym or "").strip().upper()
+            if _su and _su not in out:
+                out.append(_su)
+        return out
+    except Exception:
+        logger.debug("[scheduler] active-equity-session symbol read failed", exc_info=True)
+        return []
+
+
 def _bridge_scanner_to_viability(
     db: "Session",
     results: list[dict],
@@ -3693,24 +3743,7 @@ def _bridge_scanner_to_viability(
     # +$782 on the same chart (also killed UEC today and AAOG on 06-10). Active
     # live sessions' symbols are ALWAYS pinned into the refresh batch.
     try:
-        from .trading.momentum_neural.live_fsm import LIVE_RUNNER_RUNNABLE_STATES
-        from ..models.trading import TradingAutomationSession
-
-        _armed_rows = (
-            db.query(TradingAutomationSession.symbol)
-            .filter(
-                TradingAutomationSession.mode == "live",
-                TradingAutomationSession.state.in_(LIVE_RUNNER_RUNNABLE_STATES),
-                ~TradingAutomationSession.symbol.like("%-USD"),
-            )
-            .distinct()
-            .all()
-        )
-        _pins = []
-        for (_sym,) in _armed_rows:
-            _su = str(_sym or "").strip().upper()
-            if _su and _su not in _pins:
-                _pins.append(_su)
+        _pins = _active_equity_session_symbols(db)
         if _pins:
             # PREPEND the pins: the downstream pipeline caps symbols at 32, so
             # armed names must sit at the HEAD of the list to survive the cut.
@@ -4673,8 +4706,23 @@ def _run_equity_viability_refresh_job():
         scan_db.close()
 
     movers = _equity_movers_for_ross_bridge(sweep)
+    # WAVE-4 ITEM-6(a): even with NO scanner movers, an ACTIVE watched/held session must still
+    # be re-scored (the pin inside _bridge_scanner_to_viability keeps its viability fresh). The
+    # old `if not movers: return` skipped the whole bridge on an empty scan, so a consolidating
+    # watched name (rotated out of the mover list) went stale-while-watched and died (DXST at
+    # 537s/600s). Run the bridge when EITHER movers OR active-session symbols exist.
     if not movers:
-        return
+        _actives_probe_db = SessionLocal()
+        try:
+            _have_actives = bool(_active_equity_session_symbols(_actives_probe_db))
+        finally:
+            try:
+                _actives_probe_db.rollback()
+            except Exception:
+                pass
+            _actives_probe_db.close()
+        if not _have_actives:
+            return
     write_db = SessionLocal()  # FRESH connection for the write (the scan's may be dead)
     try:
         _bridge_scanner_to_viability(write_db, movers, source="equity_viability_refresh")
@@ -6755,6 +6803,23 @@ def start_scheduler():
                 max_instances=1,
                 coalesce=True,
                 next_run_time=datetime.now() + timedelta(seconds=130),
+            )
+
+        # STEP-D #14 KEEP-WARM: keep the RH Agentic rail's auth cache warm every 30s so it
+        # never goes cold at the open (the RH-dark-at-open flap class). Cheap best-effort
+        # probe; gated by chili_robinhood_agentic_probe_keepwarm_enabled (default True).
+        if include_momentum_exec and getattr(
+            settings, "chili_robinhood_agentic_probe_keepwarm_enabled", True
+        ):
+            _scheduler.add_job(
+                _run_rh_agentic_keepwarm_job,
+                trigger=IntervalTrigger(seconds=30),
+                id="rh_agentic_keepwarm",
+                name="RH Agentic rail auth keep-warm probe (every 30s)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=25),
             )
 
         # Shake-out learning: label closed momentum trades vs their post-exit path

@@ -195,3 +195,131 @@ def test_data_session_open_is_derived_from_entry_window(monkeypatch) -> None:
     # lead knob respected; never below midnight
     monkeypatch.setattr(_settings, "chili_momentum_selection_prep_lead_min", 300, raising=False)
     assert _data_session_open_min() == 0
+
+
+# ── STEP-C #13: early-unlock recalibration (gap-OR-velocity + adaptive N) ─────
+
+class _FakeRows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchall(self):
+        return self._rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
+class _FakeSession:
+    """Stand-in SessionLocal() whose execute() returns pre-baked rows (no real DB)."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def execute(self, *_a, **_k):
+        return _FakeRows(self._rows)
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        pass
+
+
+def _patch_first_mover_db(monkeypatch, rows):
+    import app.db as _db
+
+    monkeypatch.setattr(_db, "SessionLocal", lambda: _FakeSession(rows))
+
+
+def _patch_prior_close(monkeypatch, prior_close_by_sym):
+    snap = [
+        {"ticker": sym, "prevDay": {"c": pc}}
+        for sym, pc in prior_close_by_sym.items()
+    ]
+    monkeypatch.setattr(massive_client, "get_full_market_snapshot", lambda **k: snap)
+
+
+def test_early_unlock_overnight_gapper_with_flat_tape_qualifies(monkeypatch) -> None:
+    """A +40% overnight gapper prints a FLAT 5-min tape (first_mid ~= last_mid) — the
+    velocity-only test structurally never passed it. With the GAP axis it qualifies off
+    gap-vs-prior-close (5.60 vs a 4.00 prior close = +40%)."""
+    from app.services.trading.momentum_neural.nbbo_tape import early_premarket_first_mover
+
+    now = datetime(2026, 6, 9, 9, 0, tzinfo=timezone.utc)  # inside the window
+    fresh_row = now.replace(tzinfo=None)  # freshest row is "now" (well within freshness_sec)
+    # first_mid == last_mid => 0% trailing velocity; but mid 5.60 vs prior close 4.00 = +40%.
+    rows = [("GAPR", 5.60, 5.60, fresh_row, fresh_row)]
+    _patch_first_mover_db(monkeypatch, rows)
+    _patch_prior_close(monkeypatch, {"GAPR": 4.00})
+
+    first_at, n, lead, pct = early_premarket_first_mover(
+        now_utc=now, window_min=5.0, min_move_pct=5.0, freshness_sec=30.0, gap_floor_pct=5.0,
+    )
+    assert n == 1
+    assert lead == "GAPR"
+    assert pct == 40.0  # ranked by the stronger (gap) axis
+
+
+def test_early_unlock_flat_non_gapper_does_not_qualify(monkeypatch) -> None:
+    """A flat name (tiny velocity AND a tiny gap vs prior close) must NOT qualify."""
+    from app.services.trading.momentum_neural.nbbo_tape import early_premarket_first_mover
+
+    now = datetime(2026, 6, 9, 9, 0, tzinfo=timezone.utc)
+    fresh_row = now.replace(tzinfo=None)
+    rows = [("FLAT", 5.00, 5.01, fresh_row, fresh_row)]  # +0.2% velocity
+    _patch_first_mover_db(monkeypatch, rows)
+    _patch_prior_close(monkeypatch, {"FLAT": 4.98})  # 5.01 vs 4.98 = +0.6% gap
+
+    first_at, n, lead, pct = early_premarket_first_mover(
+        now_utc=now, window_min=5.0, min_move_pct=5.0, freshness_sec=30.0, gap_floor_pct=5.0,
+    )
+    assert first_at is None
+    assert n == 0
+    assert lead is None
+
+
+def test_early_unlock_velocity_axis_still_qualifies_without_prior_close(monkeypatch) -> None:
+    """Velocity axis unchanged: a live runner (+10% over the window) qualifies even when the
+    prior-close snapshot is unavailable (gap axis degrades to velocity-only, fail-open)."""
+    from app.services.trading.momentum_neural.nbbo_tape import early_premarket_first_mover
+
+    now = datetime(2026, 6, 9, 9, 0, tzinfo=timezone.utc)
+    fresh_row = now.replace(tzinfo=None)
+    rows = [("RUNR", 5.00, 5.50, fresh_row, fresh_row)]  # +10% trailing velocity
+    _patch_first_mover_db(monkeypatch, rows)
+    monkeypatch.setattr(massive_client, "get_full_market_snapshot", lambda **k: [])  # no prior close
+
+    first_at, n, lead, pct = early_premarket_first_mover(
+        now_utc=now, window_min=5.0, min_move_pct=5.0, freshness_sec=30.0, gap_floor_pct=5.0,
+    )
+    assert n == 1
+    assert lead == "RUNR"
+    assert pct == 10.0
+
+
+def test_early_unlock_adaptive_n_clamps_configured_min_movers_to_coverage(monkeypatch) -> None:
+    """ADAPTIVE N: the configured min-movers is a CEILING. With only 2 concurrent movers on
+    the tape (coverage p75 = 2) a configured 3-bar clamps to 2, so a 2-mover day unlocks —
+    the exact premarket-zero fix (max concurrent was 2, the 3-bar was structurally dead)."""
+    import app.services.trading.momentum_neural.market_profile as mp
+    import app.services.trading.momentum_neural.nbbo_tape as nt
+    from app.config import settings as _settings
+
+    monkeypatch.setattr(_settings, "chili_momentum_premarket_start_et", "07:00", raising=False)
+    monkeypatch.setattr(_settings, "chili_momentum_early_premarket_enabled", True, raising=False)
+    monkeypatch.setattr(_settings, "chili_momentum_early_premarket_min_movers", 3, raising=False)
+
+    # Two qualifying movers surfaced at 04:20 ET; coverage p75 = 2.
+    monkeypatch.setattr(
+        nt, "early_premarket_first_mover",
+        lambda **k: (datetime(2026, 6, 9, 8, 20, tzinfo=timezone.utc), 2, "AAA", 22.0),
+    )
+    monkeypatch.setattr(nt, "early_premarket_mover_coverage_p75", lambda **k: 2)
+
+    # 05:00 ET, before the 07:00 fixed start — only unlocks if the 2 movers clear the bar.
+    ok, first, detail = mp.early_premarket_unlocked(now=datetime(2026, 6, 9, 9, 0, tzinfo=timezone.utc))
+    assert ok is True
+    assert detail["min_movers"] == 2  # clamped from configured 3
+    assert detail["configured_min_movers"] == 3
+    assert detail["coverage_p75"] == 2

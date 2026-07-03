@@ -1545,6 +1545,28 @@ def _resolve_is_ssr(symbol: str | None) -> bool:
         return False
 
 
+def _prior_day_close(symbol: str | None) -> float | None:
+    """R8 (WAVE-4 ITEM-3) — the PRIOR-DAY CLOSE for an equity name (Ross's red-to-green
+    anchor). Reuses the cached Massive last-quote (``prevDay.c`` -> ``previous_close``), the
+    same source ``_resolve_is_ssr`` reads. FAIL-CLOSED to ``None`` on crypto / missing data /
+    any error — the caller then SKIPS (does not fall back to the session open, which is the
+    bug R8 fixes: reclaiming the intraday open is not a red-to-green)."""
+    try:
+        s = (symbol or "").strip().upper()
+        if not s or s.endswith("-USD") or "-" in s or "/" in s:
+            return None
+        from ...massive_client import get_last_quote
+
+        q = get_last_quote(s)
+        if not isinstance(q, dict):
+            return None
+        pc = q.get("previous_close") or q.get("prev_close")
+        pc = float(pc) if pc is not None else None
+        return pc if (pc is not None and pc > 0) else None
+    except Exception:
+        return None
+
+
 def _l2_entry_veto(
     symbol: str | None, *, db: Any = None, l2_as_of: Any = None, is_ssr: bool | None = False,
 ) -> tuple[str, dict[str, Any]] | None:
@@ -3152,7 +3174,51 @@ def evaluate_sticky_backside_bench(
                     return False, "unbenched_fresh_hod", None, debug
             except (TypeError, ValueError):
                 pass
-            # still benched (no new high) -> keep the latch, no need to re-confirm backside.
+            # ── WAVE-4 ITEM-5: VWAP-RECLAIM CROSS UN-BENCH (all latch reasons) ───────────
+            # A benched name that makes a genuine fresh CROSS-from-below of session VWAP has
+            # resumed a real leg even without a new HOD (JEM 12:50 8.97->9.06 into 9.0->9.7).
+            # CROSS (state change) not level test: the PRIOR completed close was BELOW
+            # VWAP*(1-buffer) AND the current px is AT/ABOVE VWAP. A level test alone would
+            # un-bench into a hover-then-dump (JEM 13:24); the cross preserves that veto.
+            if bool(getattr(settings, "chili_momentum_backside_bench_reclaim_unbench_enabled", True)):
+                try:
+                    _fs = front_side_state(_sess)
+                    _vwap = getattr(_fs, "session_vwap", None)
+                    _closes = _sess["Close"].astype(float)
+                    if _vwap is not None and float(_vwap) > 0 and len(_closes) >= 2:
+                        _vwap = float(_vwap)
+                        _buf = 0.0
+                        try:
+                            _buf = max(0.0, float(getattr(
+                                settings, "chili_momentum_entry_vwap_hold_buffer", 0.0) or 0.0))
+                        except (TypeError, ValueError):
+                            _buf = 0.0
+                        _prior_close = float(_closes.iloc[-1])   # last COMPLETED bar close
+                        _cur_px = _prior_close
+                        if live_price is not None:
+                            try:
+                                _lp = float(live_price)
+                                if _lp > 0:
+                                    _cur_px = _lp
+                            except (TypeError, ValueError):
+                                pass
+                        # CROSS: prior completed close genuinely BELOW VWAP (past the buffer)
+                        # AND current px at/above VWAP. Both legs required — a name that was
+                        # already at/above VWAP (no fresh cross) STAYS benched (the 13:24 dump).
+                        _was_below = _prior_close < _vwap * (1.0 - _buf)
+                        _now_above = _cur_px >= _vwap * (1.0 - _buf)
+                        if _was_below and _now_above and _cur_px > _prior_close:
+                            debug["unbenched_vwap_reclaim"] = {
+                                "prior_close": round(_prior_close, 6),
+                                "cur_px": round(_cur_px, 6),
+                                "session_vwap": round(_vwap, 6),
+                                "vwap_hold_buffer": round(_buf, 6),
+                                "benched_at_hod": round(float(benched_at_hod), 6),
+                            }
+                            return False, "unbenched_vwap_reclaim", None, debug
+                except (TypeError, ValueError, AttributeError, KeyError, IndexError):
+                    pass  # any error -> keep the sticky latch (safe: never strand on a bug)
+            # still benched (no new high, no VWAP-reclaim cross) -> keep the latch.
             debug["still_benched"] = True
             return True, "benched_backside_sticky", float(benched_at_hod), debug
 
@@ -8548,25 +8614,32 @@ def red_to_green_confirmation(
 ) -> tuple[bool, str, dict[str, Any]]:
     """Ross RED-TO-GREEN reclaim (Batch D; flag ``chili_momentum_red_to_green_entry_enabled``).
 
-    A name trading RED (below the session OPEN level) that RECLAIMS the open with a
-    bottoming-tail / reversal bar + volume is the textbook red-to-green long: the move back
-    through the open flips intraday sentiment green, and the session (red) low is the tight
-    structural stop. Entry = the OPEN-level reclaim ("a couple cents under" the open, mirroring
-    the breakout family); stop = the session low (the red low).
+    A name trading RED (below the PRIOR-DAY CLOSE) that RECLAIMS that prior close with a
+    bottoming-tail / reversal bar + volume is the textbook red-to-green long: Ross's
+    red-to-green is crossing the PREVIOUS DAY'S CLOSE (the level that flips the name green
+    ON THE DAY), not merely reclaiming today's intraday open. The move back through the prior
+    close flips daily sentiment green; the session (red) low is the tight structural stop.
+    Entry = the PRIOR-CLOSE reclaim ("a couple cents under" it, mirroring the breakout
+    family); stop = the session low (the red low).
+
+    R8 (WAVE-4 ITEM-3): the anchor is the PRIOR-DAY CLOSE (``_prior_day_close`` off the
+    cached Massive ``prevDay.c``), FAIL-CLOSED — if the prior close is unavailable we SKIP
+    (do NOT fall back to the intraday session open; reclaiming the open is not a
+    red-to-green and was the bug this fixes).
 
     Reuses the bottoming-tail (``_bottoming_tail``) + the dipbuy reversal machinery (the
     ``is_bounce_curl_candle`` per-bar conviction + the ``_dipbuy_tick_thrust_ok`` /
     ``_premarket_tickbreak_confirmed`` tick-break contract).
 
-    OPEN LEVEL: the session open = the first COMPLETED bar's open on today's session frame
-    (the price the name opened at). NO LOOKAHEAD: the open + the red low are read from
-    COMPLETED bars; the only intrabar use is the live tick reclaiming the open level.
+    NO LOOKAHEAD: the prior close is a completed prior-session level; the red low is read
+    from COMPLETED bars; the only intrabar use is the live tick reclaiming the prior close.
 
-    GUARDS: the name must currently BE red (price below the open before/at the reclaim — a
-    name already green has no red-to-green to make), the reversal bar must be a bottoming-tail
-    bounce-curl, and the reclaim needs a volume spike. ANTI-CHASE backside veto reused.
-    ADDITIVE: flag OFF / thin (<3 bars) / not red / no reversal -> ``(False, reason, {...})``
-    with NO side effects; fail-OPEN on any error. docs/DESIGN/MOMENTUM_LANE.md"""
+    GUARDS: the name must currently BE red (below the prior close before/at the reclaim — a
+    name already green above the prior close has no red-to-green to make), the reversal bar
+    must be a bottoming-tail bounce-curl, and the reclaim needs a volume spike. ANTI-CHASE
+    backside veto reused. ADDITIVE: flag OFF / thin (<3 bars) / no prior close / not red /
+    no reversal -> ``(False, reason, {...})`` with NO side effects; fail-OPEN on any error.
+    docs/DESIGN/MOMENTUM_LANE.md"""
     debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "red_to_green"}
     try:
         if not bool(getattr(settings, "chili_momentum_red_to_green_entry_enabled", True)):
@@ -8586,14 +8659,13 @@ def red_to_green_confirmation(
         close = df["Close"].astype(float)
         vol = df["Volume"].astype(float)
 
-        # ── OPEN LEVEL = the session's FIRST completed bar open (price it opened at) ─────
-        try:
-            open_level = float(sess["Open"].astype(float).iloc[0])
-        except (TypeError, ValueError, KeyError, IndexError):
-            return False, "red_to_green_no_open", debug
-        if not (open_level > 0):
-            return False, "red_to_green_bad_open", debug
-        debug["open_level"] = round(open_level, 6)
+        # ── ANCHOR = the PRIOR-DAY CLOSE (Ross's red-to-green level). FAIL-CLOSED: no prior
+        # close -> SKIP (never fall back to the intraday open — that is not a red-to-green). ──
+        prior_close = _prior_day_close(symbol)
+        if prior_close is None or not (prior_close > 0):
+            return False, "red_to_green_no_prior_close", debug
+        anchor = float(prior_close)
+        debug["prior_close"] = round(anchor, 6)
 
         # The session (red) LOW = the lowest low so far today = the structural stop. Built
         # from COMPLETED bars (the forming bar's low can only be lower -> the stop only
@@ -8602,15 +8674,17 @@ def red_to_green_confirmation(
             sess_low = float(sess["Low"].astype(float).min())
         except (TypeError, ValueError, KeyError):
             return False, "red_to_green_no_low", debug
-        if not (0.0 < sess_low < open_level):
-            return False, "red_to_green_not_red_structure", debug   # never traded red below the open
+        # RED STRUCTURE: the name must have traded BELOW the prior close today (a red day so
+        # far) for there to be a red->green to make.
+        if not (0.0 < sess_low < anchor):
+            return False, "red_to_green_not_red_structure", debug   # never traded red below the prior close
         debug["session_low"] = round(sess_low, 6)
 
-        # ── The name must currently BE red: the PRIOR (completed) bar closed below the open
-        # (it has been trading red), so reclaiming the open NOW is the red->green flip. A
-        # name already green above the open has no red-to-green to make. ──────────────────
+        # ── The name must currently BE red: the PRIOR (completed) bar closed below the prior
+        # CLOSE (it has been trading red on the day), so reclaiming the prior close NOW is the
+        # red->green flip. A name already green above the prior close has no red-to-green. ──
         prev_close = float(close.iloc[cur - 1])
-        if prev_close >= open_level:
+        if prev_close >= anchor:
             debug["prev_close"] = round(prev_close, 6)
             return False, "red_to_green_already_green", debug
 
@@ -8641,7 +8715,7 @@ def red_to_green_confirmation(
         if not is_bounce_curl_candle(c_o, c_h, c_l, c_c):
             return False, "red_to_green_weak_curl", debug
 
-        level = open_level   # the reclaim level = the session open
+        level = anchor       # the reclaim level = the PRIOR-DAY CLOSE (Ross's red->green)
         stop = sess_low      # the structural stop = the red (session) low
 
         # ── ANTI-CHASE backside veto (reused, fail-OPEN) ───────────────────────────────
@@ -8663,7 +8737,7 @@ def red_to_green_confirmation(
         debug["pullback_high"] = float(level)
         debug["pullback_low"] = float(stop)
 
-        # ── TICK-BREAK: the live ask reclaiming the OPEN level (red->green flip tick) ───
+        # ── TICK-BREAK: the live ask reclaiming the PRIOR CLOSE (red->green flip tick) ──
         if (
             live_price is not None and float(live_price) > 0
             and float(live_price) > level
@@ -8679,12 +8753,12 @@ def red_to_green_confirmation(
             debug["live_price"] = float(live_price)
             return True, "red_to_green_tick_ok", debug
 
-        # not reclaimed on a completed bar yet -> ARM a tick-watch at the open level.
+        # not reclaimed on a completed bar yet -> ARM a tick-watch at the prior close.
         cur_close = float(close.iloc[cur])
         if cur_close <= level:
             return False, "waiting_for_reclaim", debug
 
-        # a completed bar reclaimed the open -> require a VOLUME SPIKE (a real reclaim).
+        # a completed bar reclaimed the prior close -> require a VOLUME SPIKE (a real reclaim).
         vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
         vol_ratio = None
         try:

@@ -8,7 +8,7 @@ fact; the pre-market start and after-hours end are the only tunable bounds (conf
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from ....config import settings
@@ -252,16 +252,49 @@ def early_premarket_unlocked(now: datetime | None = None) -> tuple[bool, int | N
     try:
         from .nbbo_tape import early_premarket_first_mover
 
-        first_at_utc, n_movers, lead_sym, lead_pct = early_premarket_first_mover(
-            now_utc=ref.astimezone(timezone.utc),
-            window_min=float(window_min),
-            min_move_pct=float(_MIN_ABS_CHANGE_PCT),
-            freshness_sec=30.0,
-        )
+        _now_utc = ref.astimezone(timezone.utc)
+        try:
+            first_at_utc, n_movers, lead_sym, lead_pct = early_premarket_first_mover(
+                now_utc=_now_utc,
+                window_min=float(window_min),
+                min_move_pct=float(_MIN_ABS_CHANGE_PCT),
+                freshness_sec=30.0,
+                # GAP axis (STEP-C #13): a name gapped >= the same mover floor vs prior close
+                # qualifies even with a flat trailing tape (the overnight gapper).
+                gap_floor_pct=float(_MIN_ABS_CHANGE_PCT),
+            )
+        except TypeError:
+            # Back-compat: a caller/test that stubbed early_premarket_first_mover without the
+            # new gap_floor_pct kwarg — fall back to the velocity-only signature.
+            first_at_utc, n_movers, lead_sym, lead_pct = early_premarket_first_mover(
+                now_utc=_now_utc,
+                window_min=float(window_min),
+                min_move_pct=float(_MIN_ABS_CHANGE_PCT),
+                freshness_sec=30.0,
+            )
     except Exception:
         return False, None, {"reason": "tape_read_error"}
-    if first_at_utc is None or n_movers < min_movers:
-        return False, None, {"reason": "insufficient_movers", "n_movers": n_movers}
+    # ADAPTIVE N (STEP-C #13): the configured min-movers is a CEILING, not a floor. Clamp it
+    # to what the sampler is actually surfacing (p75 of concurrent distinct movers) so a 3-bar
+    # isn't structurally dead on a day the tape only ever carried 2. Coverage unavailable (or
+    # the reader stubbed out) => keep the configured value (fail toward the strict bar).
+    effective_min_movers = min_movers
+    _coverage_p75: int | None = None
+    try:
+        from .nbbo_tape import early_premarket_mover_coverage_p75
+
+        _coverage_p75 = early_premarket_mover_coverage_p75(now_utc=_now_utc)
+        if _coverage_p75 is not None:
+            effective_min_movers = min(min_movers, max(1, int(_coverage_p75)))
+    except Exception:
+        pass
+    if first_at_utc is None or n_movers < effective_min_movers:
+        return False, None, {
+            "reason": "insufficient_movers",
+            "n_movers": n_movers,
+            "min_movers": effective_min_movers,
+            "configured_min_movers": min_movers,
+        }
     first_local = first_at_utc.astimezone(_NY_TZ)
     first_mod = max(_EXCHANGE_EXT_OPEN_MIN, first_local.hour * 60 + first_local.minute)
     return True, first_mod, {
@@ -269,6 +302,9 @@ def early_premarket_unlocked(now: datetime | None = None) -> tuple[bool, int | N
         "lead_symbol": lead_sym,
         "lead_pct": lead_pct,
         "first_mover_min": first_mod,
+        "min_movers": effective_min_movers,
+        "configured_min_movers": min_movers,
+        "coverage_p75": _coverage_p75,
     }
 
 
@@ -345,10 +381,87 @@ def is_sample_session_now(symbol: str | None, *, now: datetime | None = None) ->
     return False
 
 
-def market_open_now(symbol: str | None, *, now: datetime | None = None) -> bool:
-    """True only during the REGULAR session (9:30–16:00 ET) — used for display/labels.
-    For the trade/arm/entry decision use ``is_tradeable_now`` (extended-hours aware)."""
-    return market_session_now(symbol, now=now) == "regular"
+def _next_regular_open_utc(local: datetime, *, allow_extended_hours: bool = False) -> datetime:
+    """The next weekday session open (regular 09:30 ET, or premarket start when
+    ``allow_extended_hours``) at/after ``local`` (an America/New_York datetime), as UTC."""
+    open_min = min(_premarket_start_min(), _REGULAR_OPEN_MIN) if allow_extended_hours else _REGULAR_OPEN_MIN
+    days_ahead = 0
+    while True:
+        candidate_date = local.date() + timedelta(days=days_ahead)
+        candidate_local = datetime(
+            candidate_date.year,
+            candidate_date.month,
+            candidate_date.day,
+            tzinfo=_NY_TZ,
+        ) + timedelta(minutes=open_min)
+        if candidate_local.weekday() < 5 and candidate_local > local:
+            return candidate_local.astimezone(timezone.utc)
+        days_ahead += 1
+
+
+def market_session_for_symbol(
+    symbol: str | None,
+    *,
+    now: datetime | None = None,
+    allow_extended_hours: bool = False,
+) -> dict[str, object]:
+    """Tradability descriptor for callers that explicitly choose extended hours.
+
+    Returns ``{asset_class, market_session, is_tradable, deferred_until_utc}``. Equities
+    are tradable in the regular session always, and in premarket/afterhours only when
+    ``allow_extended_hours`` — matching the lane's extended-session reality. Crypto is
+    always tradable. ``deferred_until_utc`` is the next session open when not tradable."""
+    if asset_class_for_symbol(symbol) == "crypto":
+        return {
+            "asset_class": "crypto",
+            "market_session": "crypto_24_7",
+            "is_tradable": True,
+            "deferred_until_utc": None,
+        }
+
+    ref = now or datetime.now(timezone.utc)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    local = ref.astimezone(_NY_TZ)
+    session = market_session_now(symbol, now=ref)
+    session_name = {
+        "premarket": "pre_market",
+        "regular": "regular_hours",
+        "afterhours": "post_market",
+    }.get(session, "closed_weekend" if local.weekday() >= 5 else "closed_overnight")
+    is_tradable = session == "regular" or (
+        allow_extended_hours and session in {"premarket", "afterhours"}
+    )
+    return {
+        "asset_class": "stock",
+        "market_session": session_name,
+        "is_tradable": is_tradable,
+        "deferred_until_utc": (
+            None
+            if is_tradable
+            else _next_regular_open_utc(
+                local, allow_extended_hours=allow_extended_hours
+            ).isoformat()
+        ),
+    }
+
+
+def market_open_now(
+    symbol: str | None,
+    *,
+    now: datetime | None = None,
+    allow_extended_hours: bool = False,
+) -> bool:
+    """True during the REGULAR session (9:30–16:00 ET); with ``allow_extended_hours``,
+    also True in premarket/afterhours. For the trade/arm/entry decision use
+    ``is_tradeable_now`` (always extended-hours aware)."""
+    return bool(
+        market_session_for_symbol(
+            symbol,
+            now=now,
+            allow_extended_hours=allow_extended_hours,
+        )["is_tradable"]
+    )
 
 
 def minutes_since_regular_open(symbol: str | None, *, now: datetime | None = None) -> float | None:

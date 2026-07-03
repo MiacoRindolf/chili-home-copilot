@@ -62,6 +62,164 @@ def _is_rate_limit_exc(exc: Exception) -> bool:
         or "too many requests" in low
     )
 
+
+# ── STEP-D #14: RH rail transport-outage latch + half-open + keep-warm telemetry ──
+# The Agentic rail can go DARK at the open (auth cache cold / transport 5xx/timeout flap).
+# The 4-min open flap class stranded the whole entry batch. A module-level (process-wide,
+# all adapter instances share it) latch:
+#   * records a transport outage with bounded backoff so the batch stops hammering a dead
+#     rail every tick;
+#   * HALF-OPEN: when the latch EXPIRES, exactly ONE single-flight probe is let through
+#     instead of re-opening the whole batch off a single failure — success clears the latch,
+#     failure re-latches (so N callers don't each re-trip it);
+#   * carries the failure DETAIL (auth error / transport reason / remaining latch) so the
+#     venue-unavailable event payloads can explain WHY the rail is dark.
+import threading as _threading
+import time as _time
+
+_RAIL_TRANSPORT_OUTAGE_UNTIL = 0.0            # monotonic deadline; 0 => no active latch
+_RAIL_TRANSPORT_OUTAGE_REASON = ""            # short reason string for the current latch
+_RAIL_LAST_UNAVAILABLE_DETAIL: dict[str, Any] = {}  # richest telemetry for the last dark read
+_RAIL_HALF_OPEN_INFLIGHT = False              # single-flight guard for the half-open probe
+_RAIL_OUTAGE_STREAK = 0                       # consecutive outages -> backoff growth
+_RAIL_LATCH_LOCK = _threading.Lock()
+
+_RAIL_OUTAGE_BASE_SEC = 5.0                   # the one documented base backoff (FLOOR)
+_RAIL_OUTAGE_MAX_SEC = 60.0                   # cap so a recovered rail is retried within a minute
+
+
+def _is_transport_outage_exc(exc: Exception) -> bool:
+    """True iff ``exc`` is a TRANSIENT transport/connectivity failure of the rail (5xx /
+    timeout / connection reset / refresh-transport) — the flap class the latch guards.
+    A rate-limit (429) is NOT a transport outage (the governor owns backoff there); an
+    unrecoverable auth (NeedsReauth) is NOT either (is_enabled reports disabled directly)."""
+    if isinstance(exc, NeedsReauth):
+        return False
+    if _is_rate_limit_exc(exc):
+        return False
+    code = str(getattr(exc, "code", "") or "").lower()
+    if code in ("refresh_transport", "redirect", "bad_scheme", "bad_host", "session_expired"):
+        return True
+    if code.startswith("refresh_http_5") or (code.startswith("http_5")):
+        return True
+    low = str(exc or "").lower()
+    return any(
+        tok in low
+        for tok in ("timeout", "timed out", "connection", "connreset", "reset by peer",
+                    "unreachable", "temporarily unavailable", "502", "503", "504")
+    )
+
+
+def _rail_outage_backoff_seconds() -> float:
+    """Exponential backoff off the consecutive-outage streak, clamped to [base, max]."""
+    streak = max(1, int(_RAIL_OUTAGE_STREAK))
+    delay = _RAIL_OUTAGE_BASE_SEC * (2 ** (streak - 1))
+    return max(_RAIL_OUTAGE_BASE_SEC, min(_RAIL_OUTAGE_MAX_SEC, delay))
+
+
+def _rail_transport_outage_remaining() -> float:
+    return max(0.0, _RAIL_TRANSPORT_OUTAGE_UNTIL - _time.monotonic())
+
+
+def _record_rail_transport_outage(exc: Exception) -> None:
+    """Latch a transport outage with bounded backoff. Process-wide; the deadline only ever
+    extends forward so concurrent recorders can't shorten an existing latch."""
+    global _RAIL_TRANSPORT_OUTAGE_UNTIL, _RAIL_TRANSPORT_OUTAGE_REASON, _RAIL_OUTAGE_STREAK
+    global _RAIL_LAST_UNAVAILABLE_DETAIL
+    with _RAIL_LATCH_LOCK:
+        _RAIL_OUTAGE_STREAK += 1
+        until = _time.monotonic() + _rail_outage_backoff_seconds()
+        if until > _RAIL_TRANSPORT_OUTAGE_UNTIL:
+            _RAIL_TRANSPORT_OUTAGE_UNTIL = until
+        _RAIL_TRANSPORT_OUTAGE_REASON = (str(getattr(exc, "code", "") or "") or str(exc or ""))[:120]
+        _RAIL_LAST_UNAVAILABLE_DETAIL = {
+            "kind": "transport_outage",
+            "reason": _RAIL_TRANSPORT_OUTAGE_REASON,
+            "outage_streak": _RAIL_OUTAGE_STREAK,
+            "latch_remaining_sec": round(_rail_transport_outage_remaining(), 3),
+        }
+
+
+def _clear_rail_transport_outage() -> None:
+    """A successful probe/call clears the latch and resets the streak + telemetry."""
+    global _RAIL_TRANSPORT_OUTAGE_UNTIL, _RAIL_TRANSPORT_OUTAGE_REASON, _RAIL_OUTAGE_STREAK
+    global _RAIL_LAST_UNAVAILABLE_DETAIL
+    with _RAIL_LATCH_LOCK:
+        _RAIL_TRANSPORT_OUTAGE_UNTIL = 0.0
+        _RAIL_TRANSPORT_OUTAGE_REASON = ""
+        _RAIL_OUTAGE_STREAK = 0
+        _RAIL_LAST_UNAVAILABLE_DETAIL = {}
+
+
+def _set_last_unavailable_detail(detail: dict[str, Any]) -> None:
+    """Record the richest telemetry for the last dark read (auth error / transport reason)."""
+    global _RAIL_LAST_UNAVAILABLE_DETAIL
+    with _RAIL_LATCH_LOCK:
+        _RAIL_LAST_UNAVAILABLE_DETAIL = dict(detail)
+
+
+def _half_open_try_acquire() -> bool:
+    """Single-flight gate for the half-open probe: when the latch has EXPIRED, exactly one
+    caller acquires the right to probe; the rest stay blocked until it resolves. Returns
+    True to the single acquirer, False to everyone else (and while the latch is still hot)."""
+    global _RAIL_HALF_OPEN_INFLIGHT
+    with _RAIL_LATCH_LOCK:
+        if _rail_transport_outage_remaining() > 0.0:
+            return False  # latch still hot — no probe
+        if _RAIL_HALF_OPEN_INFLIGHT:
+            return False  # another caller is already probing
+        _RAIL_HALF_OPEN_INFLIGHT = True
+        return True
+
+
+def _half_open_release() -> None:
+    global _RAIL_HALF_OPEN_INFLIGHT
+    with _RAIL_LATCH_LOCK:
+        _RAIL_HALF_OPEN_INFLIGHT = False
+
+
+def rail_transport_outage_active() -> bool:
+    """True iff a transport-outage latch is currently hot (public read for gates)."""
+    return _rail_transport_outage_remaining() > 0.0
+
+
+def venue_unavailable_detail() -> dict[str, Any]:
+    """Telemetry for the last venue-unavailable read: {kind, reason, latch_remaining_sec,
+    outage_streak, ...}. Empty when the rail is healthy. Callers attach this to the
+    venue-unavailable event payloads so a dark rail is DIAGNOSABLE, not opaque."""
+    detail = dict(_RAIL_LAST_UNAVAILABLE_DETAIL)
+    if detail:
+        detail["latch_remaining_sec"] = round(_rail_transport_outage_remaining(), 3)
+        detail["latch_active"] = _rail_transport_outage_remaining() > 0.0
+    return detail
+
+
+def probe_keepwarm() -> dict[str, Any]:
+    """KEEP-WARM entrypoint for a frequent scheduler job (flag
+    ``chili_robinhood_agentic_probe_keepwarm_enabled``, default True). Calls the default
+    adapter's ``is_enabled()`` — which runs ``ensure_authable()`` and refreshes the token
+    cache if needed — so the auth cache never goes COLD at the open (the RH-dark-at-open
+    class). Best-effort; returns a small summary. Flag OFF => no-op."""
+    try:
+        from ....config import settings
+
+        if not bool(getattr(settings, "chili_robinhood_agentic_probe_keepwarm_enabled", True)):
+            return {"ok": True, "skipped": "flag_off"}
+    except Exception:
+        pass
+    try:
+        adapter = RobinhoodAgenticMcpAdapter()
+        enabled = bool(adapter.is_enabled())
+        return {
+            "ok": True,
+            "enabled": enabled,
+            "latch_active": rail_transport_outage_active(),
+            "detail": venue_unavailable_detail() if not enabled else {},
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:160]}
+
+
 # ── Tool map (finalized 2026-06-19 against the real RH Agentic schema) ────────────
 # Capability -> ordered keyword groups; a tool matches a capability if its name (lower)
 # contains every keyword in any one group. Override per-capability with an explicit name
@@ -233,21 +391,69 @@ class RobinhoodAgenticMcpAdapter(VenueAdapter):
         # (NeedsReauth), or a pinned account that is NOT agentic-allowed all report
         # DISABLED. A TRANSIENT refresh error (still within token expiry) stays
         # enabled (ensure_authable swallows it).
+        #
+        # STEP-D #14 TRANSPORT-OUTAGE LATCH + HALF-OPEN: while a transport-outage latch is
+        # HOT, report DISABLED WITHOUT hammering the dead rail (records telemetry). When the
+        # latch EXPIRES, exactly ONE single-flight probe is let through (half-open) — its
+        # result clears or re-latches the outage for everyone.
         try:
             client = self._get_client()
         except Exception:
             return False
         try:
             if not client.has_token():
+                _set_last_unavailable_detail({"kind": "no_token", "reason": "no_token"})
                 return False
             if self._pin_invalid:
+                _set_last_unavailable_detail({"kind": "pin_invalid", "reason": "non_agentic_account"})
                 return False
-            client.ensure_authable()
-            return True
         except NeedsReauth:
+            _set_last_unavailable_detail({"kind": "needs_reauth", "reason": "needs_reauth"})
             return False
         except Exception:
             return False
+
+        # Transport-outage latch gate. Hot latch => disabled unless we win the half-open probe.
+        if rail_transport_outage_active():
+            if not _half_open_try_acquire():
+                _set_last_unavailable_detail({
+                    "kind": "transport_outage",
+                    "reason": _RAIL_TRANSPORT_OUTAGE_REASON,
+                    "latch_remaining_sec": round(_rail_transport_outage_remaining(), 3),
+                    "outage_streak": _RAIL_OUTAGE_STREAK,
+                })
+                return False
+        elif _rail_transport_outage_remaining() <= 0.0 and _RAIL_TRANSPORT_OUTAGE_UNTIL > 0.0:
+            # Latch just expired — take the single-flight half-open probe if available.
+            if not _half_open_try_acquire():
+                return False
+        else:
+            # No latch at all: normal path (no half-open bookkeeping).
+            try:
+                client.ensure_authable()
+                return True
+            except NeedsReauth:
+                _set_last_unavailable_detail({"kind": "needs_reauth", "reason": "needs_reauth"})
+                return False
+            except Exception as exc:
+                if _is_transport_outage_exc(exc):
+                    _record_rail_transport_outage(exc)
+                return False
+
+        # Half-open single-flight probe: we hold the token; resolve the outage for everyone.
+        try:
+            client.ensure_authable()
+            _clear_rail_transport_outage()
+            return True
+        except NeedsReauth:
+            _set_last_unavailable_detail({"kind": "needs_reauth", "reason": "needs_reauth"})
+            return False
+        except Exception as exc:
+            if _is_transport_outage_exc(exc):
+                _record_rail_transport_outage(exc)
+            return False
+        finally:
+            _half_open_release()
 
     # ── tool resolution (capability matching over a live tools/list) ────
 
