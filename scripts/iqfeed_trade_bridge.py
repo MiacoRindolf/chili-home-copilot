@@ -46,6 +46,13 @@ DB_URL = os.environ.get("DATABASE_URL", "postgresql://chili:chili@localhost:5433
 FLUSH_INTERVAL_S = 1.0                   # batch-insert cadence
 REFRESH_S = 20.0                         # live-session symbol refresh cadence
 STICKY_RESUBSCRIBE = os.environ.get("CHILI_IQFEED_STICKY_RESUBSCRIBE", "1") != "0"
+# CAPTURE-G3: event-driven subscribe-on-first-alert. The app container writes a subscribe HINT
+# to momentum_bridge_subscribe_requests the instant a name first ignites; this bridge FAST-POLLS
+# that table (much shorter than REFRESH_S) and subscribes immediately, additively to the normal
+# refresh set — closing the ~2.7-min Gate-0 blind window on sub-2-min squeezes (VWAV 2026-06-30).
+SUBSCRIBE_ON_ALERT = os.environ.get("CHILI_MOMENTUM_BRIDGE_SUBSCRIBE_ON_ALERT_ENABLED", "1").strip().lower() not in ("0", "false", "no")
+SUBSCRIBE_FAST_POLL_S = float(os.environ.get("IQFEED_SUBSCRIBE_FAST_POLL_S", "3") or 3)   # first-alert -> subscribed target
+SUBSCRIBE_FRESH_WINDOW_S = float(os.environ.get("IQFEED_SUBSCRIBE_FRESH_WINDOW_S", "180") or 180)  # honor only recent hints
 # --- Version-agnostic-backtest coverage (STEP 0): watch the ELIGIBLE-MOVER universe (the names ANY momentum
 # version could pick — ranked by explosiveness), not just armed names, so a backtest of a NEW version has
 # prints to fill against. The working cap is SELF-DISCOVERED: start at WATCH_HARD_MAX, HALVE on an IQFeed
@@ -75,6 +82,22 @@ CREATE TABLE IF NOT EXISTS iqfeed_trade_ticks (
     source VARCHAR(24) NOT NULL DEFAULT 'iqfeed_l1'
 );
 CREATE INDEX IF NOT EXISTS ix_iqfeed_trades_sym_at ON iqfeed_trade_ticks (symbol, observed_at DESC);
+"""
+
+# CAPTURE-G3: the event-driven subscribe-on-first-alert coordination table (created here too so
+# the bridge runs standalone; app-side it is migration 313). A pure subscription HINT, never a
+# trading table. Idempotent.
+SUBSCRIBE_DDL = """
+CREATE TABLE IF NOT EXISTS momentum_bridge_subscribe_requests (
+    id BIGSERIAL PRIMARY KEY,
+    symbol VARCHAR(16) NOT NULL,
+    requested_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'utc'),
+    reason VARCHAR(32),
+    source_node_id VARCHAR(80),
+    correlation_id VARCHAR(64)
+);
+CREATE INDEX IF NOT EXISTS ix_mbsr_requested_at ON momentum_bridge_subscribe_requests (requested_at DESC);
+CREATE INDEX IF NOT EXISTS ix_mbsr_requested_id ON momentum_bridge_subscribe_requests (requested_at, id);
 """
 
 INS = sa.text(
@@ -194,6 +217,33 @@ def _eligible_symbols(limit: int) -> list[str]:
         return []
 
 
+def _alert_symbols(fresh_window_s: float) -> list[str]:
+    """CAPTURE-G3 fast path: the symbols the app container flagged for IMMEDIATE subscription
+    (first-alert hints written to momentum_bridge_subscribe_requests within the fresh window).
+    Empty on any error / missing table so the bridge degrades to its normal poll cadence.
+
+    F8 (capture-g fix): NEWEST-FIRST — ordered by each symbol's freshest hint DESC, mirroring
+    the unit-tested select_fresh_subscribe_symbols contract (bridge_subscribe.py). The fast
+    poll breaks at the adaptive watch cap, so ordering decides WHO gets the last slot: an
+    unordered DISTINCT let an arbitrary/stale hint take it while the 2s-old igniting mover
+    was skipped. Now the cap keeps the FRESHEST movers."""
+    try:
+        with engine.connect() as c:
+            rows = c.execute(sa.text(
+                "SELECT symbol FROM ("
+                "  SELECT symbol, max(requested_at) AS freshest "
+                "  FROM momentum_bridge_subscribe_requests "
+                "  WHERE requested_at > (now() at time zone 'utc') - make_interval(secs => :w) "
+                "    AND symbol NOT LIKE '%-USD' "
+                "  GROUP BY symbol"
+                ") q ORDER BY freshest DESC"
+            ), {"w": float(fresh_window_s)}).fetchall()
+        return [str(r[0]).upper() for r in rows]
+    except Exception as e:
+        log.debug("alert-subscribe query failed: %s", e)
+        return []
+
+
 def _parse_l1(line: str) -> None:
     """Parse one L1 update frame ('Q'/'P') under IQFeed's DEFAULT 6.2 layout; record a row only on a
     GENUINELY NEW trade (Most-Recent-Trade-Time advanced) with a positive size (quote-only updates
@@ -268,8 +318,31 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
     global running, _max_watch, _limit_hit
     last_refresh = 0.0
     last_prune = 0.0
+    last_fast_sub = 0.0
     while running and (deadline is None or time.monotonic() < deadline):
         time.sleep(FLUSH_INTERVAL_S)
+        # CAPTURE-G3 FAST PATH: subscribe first-alert names IMMEDIATELY (short poll), additive to
+        # the slow REFRESH_S set below — closes the ~2.7-min Gate-0 blind window. Runs BEFORE the
+        # slow refresh so a fresh mover is watched within ~SUBSCRIBE_FAST_POLL_S of its first alert.
+        # Never unwatches (only the slow refresh reconciles the full target set); respects the
+        # adaptive watch cap so it can't blow past an IQFeed symbol limit.
+        if (
+            SUBSCRIBE_ON_ALERT
+            and not forced_syms                     # explicit CLI symbols -> no dynamic subscribe
+            and time.monotonic() - last_fast_sub >= SUBSCRIBE_FAST_POLL_S
+        ):
+            last_fast_sub = time.monotonic()
+            try:
+                for sym in _alert_symbols(SUBSCRIBE_FRESH_WINDOW_S):
+                    if sym in watched:
+                        continue
+                    if len(watched) >= _max_watch:  # respect the adaptive cap (rail-governor)
+                        break
+                    _send(f"w{sym}")
+                    watched.add(sym)
+                    log.info("watching trades (fast-alert): %s", sym)
+            except Exception as e:
+                log.debug("fast-alert subscribe failed: %s", e)
         # retention prune (the exit_parity_log bloat lesson): a rolling research window, not an archive
         if time.monotonic() - last_prune >= 3600.0:
             try:
@@ -280,6 +353,18 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
                         {"d": int(RETENTION_DAYS)})
             except Exception as e:
                 log.debug("retention prune failed: %s", e)
+            # F7 (capture-g fix): drain the subscribe-hint coordination table too — hints are
+            # only meaningful for the ~180s fresh window; without a sweep the table grew
+            # unbounded (the mig313 docstring promised a retention sweep — this makes it
+            # true). Own transaction + own try so a missing table (pre-mig-313 env) can
+            # never roll back the tick prune above.
+            try:
+                with engine.begin() as c:
+                    c.execute(sa.text(
+                        "DELETE FROM momentum_bridge_subscribe_requests "
+                        "WHERE requested_at < (now() at time zone 'utc') - make_interval(hours => 48)"))
+            except Exception as e:
+                log.debug("subscribe-requests prune failed: %s", e)
             last_prune = time.monotonic()
         if time.monotonic() - last_refresh >= REFRESH_S:
             if _limit_hit:                          # adaptive: IQFeed signalled its symbol limit -> back off
@@ -290,9 +375,18 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
                 target = forced_syms
             else:
                 armed = _live_symbols()             # armed/live names: ALWAYS watched (load-bearing for live)
-                room = max(0, _max_watch - len(armed))
-                movers = [s for s in _eligible_symbols(_max_watch) if s not in armed][:room]
-                target = armed | set(movers)
+                # F4 (capture-g fix): UNION the fresh first-alert hints into the slow-refresh
+                # target. Without this the refresh rebuilt target = armed | eligible-movers
+                # ONLY, so a fast-subscribed alert name that missed the eligibility cut was
+                # UNWATCHED <=20s after the 3s poll added it — then re-added on the next fast
+                # poll (hint fresh 180s): a watch FLAP that left tape gaps mid-squeeze and,
+                # via _last_trade.pop on unwatch, DUPLICATE prints on re-add. A fresh-hint
+                # name now stays watched for its whole hint window.
+                alerts = set(_alert_symbols(SUBSCRIBE_FRESH_WINDOW_S)) if SUBSCRIBE_ON_ALERT else set()
+                base = armed | alerts
+                room = max(0, _max_watch - len(base))
+                movers = [s for s in _eligible_symbols(_max_watch) if s not in base][:room]
+                target = base | set(movers)
             for sym in target - watched:
                 _send(f"w{sym}")                # Level-1 watch -> Q/P updates with Last + Last Size
                 watched.add(sym)
@@ -357,6 +451,11 @@ def main() -> None:
         for stmt in DDL.strip().split(";"):
             if stmt.strip():
                 c.execute(sa.text(stmt))
+        # CAPTURE-G3: ensure the subscribe-on-alert coordination table exists (standalone-safe).
+        if SUBSCRIBE_ON_ALERT:
+            for stmt in SUBSCRIBE_DDL.strip().split(";"):
+                if stmt.strip():
+                    c.execute(sa.text(stmt))
     while deadline is None or time.monotonic() < deadline:
         try:
             sock = socket.create_connection((HOST, PORT), timeout=10)

@@ -242,6 +242,47 @@ def test_fire_through_confirmation_yields_first_pullback_reason():
     assert dbg.get("pullback_low") is not None and dbg.get("pullback_high") is not None
 
 
+# ── capture-g fix F2: the 1m FALLBACK frame keeps the first-pullback branch ────
+
+def test_micro_config_fallback_frame_keeps_first_pullback(monkeypatch):
+    """F2: micropull configured ('15s' first-pullback interval) + the micro frame
+    UNAVAILABLE (sparse tape / bridge silent-hang) ⇒ the live runner evaluates the BASE
+    (1m) fallback frame. The first-pullback branch must still arm there — pre-flip parity —
+    instead of silently vanishing on exactly the degraded path ('15s' != '1m')."""
+    monkeypatch.setattr(settings, "chili_momentum_entry_first_pullback_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_pullback_entry_interval", "1m")
+    df = _explosive_first_pullback_df()
+    # pre-flip baseline: fp interval '1m' on the 1m frame (the old default behavior).
+    baseline = pullback_break_confirmation(
+        df, entry_interval="1m", require_retest=True, first_pullback_interval="1m",
+    )
+    # post-flip degraded path: fp interval '15s' (micro config) but the frame is the 1m
+    # fallback — MUST behave exactly as the pre-flip baseline (branch arms + fires).
+    fallback = pullback_break_confirmation(
+        df, entry_interval="1m", require_retest=True, first_pullback_interval="15s",
+    )
+    assert fallback == baseline
+    ok, reason, dbg = fallback
+    assert ok is True, (reason, dbg)
+    assert dbg.get("pattern") == "first_pullback"
+
+
+def test_non_micro_interval_mismatch_still_skips(monkeypatch):
+    """F2 guard-rail: a NON-micro mismatch (fp '1m' vs a 5m df) keeps the original skip
+    contract — the base-interval extension only applies when the configured fp interval is
+    sub-minute (the micro config is what created the mismatch)."""
+    monkeypatch.setattr(settings, "chili_momentum_entry_first_pullback_enabled", True)
+    monkeypatch.setattr(settings, "chili_momentum_pullback_entry_interval", "5m")
+    df = _explosive_first_pullback_df()
+    monkeypatch.setattr(settings, "chili_momentum_entry_first_pullback_enabled", False)
+    off = pullback_break_confirmation(df, entry_interval="5m", require_retest=True)
+    monkeypatch.setattr(settings, "chili_momentum_entry_first_pullback_enabled", True)
+    on_mismatch = pullback_break_confirmation(
+        df, entry_interval="5m", require_retest=True, first_pullback_interval="1m",
+    )
+    assert on_mismatch == off  # '1m' is not micro -> no base-iv extension -> skipped
+
+
 # ── (d) ARM -> waiting_for_first_pullback_break tick routing ──────────────────
 
 def test_arm_reason_in_shared_tick_tuple():

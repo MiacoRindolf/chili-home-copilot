@@ -179,6 +179,58 @@ def _sustained_rvol(vr: list[Any], cur: int, lookback: int) -> float | None:
     return sum(ratios) / len(ratios)
 
 
+def _sustained_rvol_excluding_coil(
+    vr: list[Any], atr: list[Any], high: Any, low: Any, cur: int, lookback: int,
+    *, coil_range_atr_frac: float = 0.5,
+) -> float | None:
+    """CAPTURE-G2: mean per-bar rel-vol over the last ``lookback`` bars but DROPPING the
+    identified low-range COIL bars — a bar whose range (``high-low``) is below
+    ``coil_range_atr_frac`` x its ATR is a structural coil bar (a dead, tight consolidation
+    candle), not an active trading bar, and its depressed rel-vol should not count against a
+    genuine break's sustain. This is the tape-faithful "compute the sustain mean EXCLUDING
+    coil bars" recovery for a dry-coil premarket break (JEM 06-30 class): as real volume
+    returns, the ACTIVE-bar mean clears the floor even while the coil-inclusive mean is still
+    depressed. Returns ``None`` on < 2 remaining active samples (⇒ the caller keeps the
+    coil-inclusive gate — never a free pass on a genuinely quiet tape). Pure; no I/O.
+
+    ``high`` / ``low`` are the pandas Close/High/Low series the caller already holds (indexed
+    by bar position); ``atr`` is the ATR array from ``compute_all_from_df``.
+    """
+    start = max(0, cur - max(1, int(lookback)) + 1)
+    ratios: list[float] = []
+    try:
+        _frac = float(coil_range_atr_frac)
+    except (TypeError, ValueError):
+        _frac = 0.5
+    if _frac < 0.0:
+        _frac = 0.0
+    for i in range(start, cur + 1):
+        # identify + DROP a low-range coil bar (range < frac x ATR). A missing/zero ATR
+        # cannot classify the bar as coil ⇒ it is KEPT (fail-toward the stricter inclusive mean).
+        try:
+            _a = float(atr[i]) if (0 <= i < len(atr) and atr[i] is not None) else None
+        except (TypeError, ValueError):
+            _a = None
+        try:
+            _rng = float(high.iloc[i]) - float(low.iloc[i])
+        except (TypeError, ValueError, IndexError):
+            _rng = None
+        if _a is not None and _a > 0 and _rng is not None and _frac > 0 and _rng < _frac * _a:
+            continue  # coil bar — exclude from the active-bar mean
+        v = vr[i] if 0 <= i < len(vr) else None
+        if v is None:
+            continue
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if fv == fv:  # not NaN
+            ratios.append(fv)
+    if len(ratios) < 2:
+        return None
+    return sum(ratios) / len(ratios)
+
+
 # ── Volatility-aware pullback validity ────────────────────────────────────────
 # The lane now SELECTS explosive low-float small-caps (universe profile #531/#533),
 # but the pullback-validity checks were tuned for orderly large-caps: a flat 50%
@@ -3341,11 +3393,28 @@ def tape_confirms_hold(
     returns ``(False, ...)``. So a missing tape NEVER produces an early fire — the caller
     keeps waiting on the existing break trigger. Pure read (no writes).
 
-    KILL-SWITCH ``chili_momentum_tape_hold_entry_enabled`` OFF ⇒ ``(False, ...)`` before any
-    I/O, so the early-fire path is byte-identical (the caller never even probes)."""
+    CAPTURE-G1(b) DECOUPLE (2026-07-03): this confirmer now keys on TAPE AVAILABILITY, not on
+    the FIX-C early-fire flag. Previously it short-circuited to ``(False, tape_hold_disabled)``
+    whenever ``chili_momentum_tape_hold_entry_enabled`` was OFF (the deployed default) — which
+    silently made this a hard-False LAST gate for the TWELVE pattern triggers that require it
+    (bull_flag, wedge, absorption_snap, false_break_reclaim, ask_thins_dip, sub_vwap_trap,
+    pulling_away_roc, premarket_pivot_macd, inverse_h&s, cup_and_handle, bottom_reversal) plus
+    the momentum-continuation entry — so those setups could NEVER fire live even though
+    WAVE-4 R4 had flipped cup_and_handle ON as a "proven filler". Two distinct concerns were
+    fused into one flag. Now: the FIX-C EARLY-FIRE path stays governed by
+    ``chili_momentum_tape_hold_entry_enabled`` at its own call sites (live_runner), while THIS
+    inline gate evaluates the executed tape whenever it is dense+healthy and FAILS CLOSED on
+    genuinely missing/thin/stale/crypto tape EXACTLY as before (``signed_tape_accel_features``
+    returns None on <3 ticks / no db / crypto / error ⇒ ``(False, tape_hold_no_data)``). The
+    fail-closed floor is unchanged — a name with no buyers on tape still never fires.
+
+    KILL-SWITCH ``chili_momentum_pattern_tape_gate_enabled`` (default True) ⇒ OFF restores the
+    legacy hard-False short-circuit (the 12 triggers go dark again) for instant rollback."""
     dbg: dict[str, Any] = {"reason": "tape_hold_no_data"}
     try:
-        if not bool(getattr(settings, "chili_momentum_tape_hold_entry_enabled", False)):
+        if not bool(getattr(settings, "chili_momentum_pattern_tape_gate_enabled", True)):
+            # Rollback kill-switch ONLY: OFF reverts to the pre-decouple hard-False behavior
+            # (every dependent trigger's tape gate refuses ⇒ dark), for a one-flag revert.
             dbg["reason"] = "tape_hold_disabled"
             return False, dbg
         if db is None or not symbol:
@@ -6998,7 +7067,24 @@ def pullback_break_confirmation(
     # keeps the 5m path byte-identical to before. None ⇒ no constraint (run on whatever
     # df is given), which is the path the unit tests + the 1m runner take.
     _fp_iv = first_pullback_interval if first_pullback_interval is not None else entry_interval
-    if _fp_on and str(_fp_iv) == str(entry_interval):
+    # F2 (capture-g fix): with the micropull default flip the CONFIGURED first-pullback
+    # interval is '15s', but the live runner FALLS BACK to the base-interval frame whenever
+    # the micro build is unavailable (sparse tape, or the trade bridge's documented
+    # silent-hang). A strict '15s' == '1m' match made Ross's EARLIEST entry silently vanish
+    # on exactly the degraded path (and broke live-vs-replay parity —
+    # counterfactual_replay passes fp_interval=entry_interval). The branch therefore ALSO
+    # arms when (a) the configured first-pullback interval is SUB-MINUTE (the micro config
+    # is what created the mismatch) AND (b) the entry frame is the base pullback interval
+    # (the live runner's fallback frame by construction) — i.e. the fallback frame behaves
+    # exactly as pre-flip. Non-micro mismatches (e.g. fp '1m' vs a 5m df) keep the original
+    # skip contract byte-identical (test_flag_off_is_byte_identical).
+    _fp_iv_s = str(_fp_iv).strip().lower()
+    _fp_is_micro = _fp_iv_s.endswith("s") and not _fp_iv_s.endswith("ms")
+    _fp_base_iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+    if _fp_on and (
+        str(_fp_iv) == str(entry_interval)
+        or (_fp_is_micro and str(entry_interval) == _fp_base_iv)
+    ):
         _fpv, _fp_high, _fp_low, _fp_dbg = first_pullback_break(
             df,
             symbol=symbol,
@@ -7334,12 +7420,28 @@ def pullback_break_confirmation(
             pass  # thin / non-datetime frame -> fail-open (1m-fast preserved)
 
     # Volume spike on the trigger (break / reclaim) bar.
+    # F1 (capture-g fix): NEVER manufacture a concrete 0.0 from a missing/all-NaN volume
+    # frame. The 15s micro frame carries NaN volume wherever the trade tape doesn't cover a
+    # bucket (volume UNKNOWN); the old fallback turned an all-NaN/zero-avg frame into
+    # vol_ratio=0.0 — a concrete "dead bar" that failed EVERY volume gate below CLOSED
+    # (break_low_volume / faded_volume_no_sustain / the E3 rvol floor), the exact opposite
+    # of the documented missing-volume fail-OPEN intent. Now: unknown stays None and each
+    # volume gate below skips (fail-OPEN) on None; a genuine 0-volume bar INSIDE trade-tape
+    # coverage still computes a real 0.0 ratio via vr and still blocks (fail-closed kept).
     vol_ratio = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
+    if vol_ratio is not None and vol_ratio != vol_ratio:  # NaN -> UNKNOWN
+        vol_ratio = None
     if vol_ratio is None:
-        w = vol.tail(21)
-        avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
-        vol_ratio = (float(vol.iloc[-1]) / avg) if avg > 0 else 0.0
-    debug["vol_ratio"] = round(vol_ratio, 2)
+        try:
+            w = vol.tail(21)
+            _avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
+            _last_v = float(vol.iloc[-1])
+            if _avg == _avg and _avg > 0 and _last_v == _last_v:
+                vol_ratio = _last_v / _avg
+            # else: volume UNKNOWN (all-NaN frame / zero average) -> stays None (fail-OPEN)
+        except (TypeError, ValueError, IndexError):
+            vol_ratio = None
+    debug["vol_ratio"] = None if vol_ratio is None else round(vol_ratio, 2)
 
     # RED-VOLUME EXHAUSTION VETO (AS101/HVM101 "first sign of weakness"). A trigger bar
     # that closes RED (close<open) WHILE printing the session's MAX volume AND a NEW
@@ -7416,7 +7518,15 @@ def pullback_break_confirmation(
                 return False, "below_explosive_floor_rvol", debug
             # Day-change %: session open (first bar) -> current close. Fail-open if the
             # frame is empty or the open is non-positive.
-            if len(df) >= 1:
+            # F1 (capture-g fix): the day-change floor needs SESSION-OPEN context. A
+            # sub-minute MICRO frame (entry_interval like '15s') spans only the recent
+            # lookback window (~30 min), so its first bar is NOT the session open —
+            # computing "day change" from it misreads a 30-min window as the whole day
+            # and would block every micro-frame break. Skip the day-change leg on a
+            # sub-minute frame (fail-open); the 1m/5m day frames keep the check.
+            _iv_str = str(entry_interval or "").strip().lower()
+            _is_micro_frame = _iv_str.endswith("s") and not _iv_str.endswith("ms")
+            if len(df) >= 1 and not _is_micro_frame:
                 _sess_open = float(df["Open"].iloc[0])
                 if _sess_open > 0:
                     _daily_change_pct = (float(close.iloc[cur]) - _sess_open) / _sess_open * 100.0
@@ -7494,7 +7604,9 @@ def pullback_break_confirmation(
                 "effective_floor": round(_bv_relaxed, 3),
             }
             _vol_floor = _bv_relaxed
-    if not _tick_break and vol_ratio < _vol_floor:
+    # F1: vol_ratio None = volume UNKNOWN (micro frame outside trade-tape coverage) -> the
+    # per-bar spike gate fails OPEN (documented); a real computed ratio still gates as before.
+    if not _tick_break and vol_ratio is not None and vol_ratio < _vol_floor:
         return False, "break_low_volume", debug
 
     # #3 Sustaining-volume gate (the ESTR guardrail): the move must STILL be carried
@@ -7505,13 +7617,111 @@ def pullback_break_confirmation(
     # a deep-retrace bounce with unknowable volume support is the textbook
     # dead-cat trap, so that one path fails CLOSED.
     if require_sustained_volume:
-        sustained = _sustained_rvol(vr, cur, int(sustain_lookback_bars))
-        if sustained is not None:
-            debug["sustained_rvol"] = round(sustained, 2)
-            if sustained < float(sustained_rvol_floor):
+        # F1 (capture-g fix, acceptance follow-through): the sustain window is a WALL-CLOCK
+        # design — N bars of the BASE entry interval span the impulse+pullback (the "faded
+        # 24h mover" read needs ~minutes of context). The lookback is a BAR COUNT, so on the
+        # 15s micro frame 5 buckets = only 75 SECONDS — i.e. exactly the quiet pullback
+        # itself — and EVERY pullback break read as "faded" by construction (SVRE 06-30
+        # 12:45:46Z tick-break at Ross's 6.88: mean 0.78 over 75s, vs the designed 5-minute
+        # span). On a SUB-MINUTE frame, convert the configured bar count to the SAME
+        # wall-clock span via the base pullback interval (reuses _orb_bar_count — the ORB
+        # "derive bars from minutes" precedent; no new knob). Non-micro frames keep the raw
+        # count (byte-identical).
+        _sustain_n = int(sustain_lookback_bars)
+        _iv_sus = str(entry_interval or "").strip().lower()
+        if _iv_sus.endswith("s") and not _iv_sus.endswith("ms"):
+            _base_iv_sus = str(
+                getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m"
+            ).strip().lower()
+            _base_min = 1
+            try:
+                if _base_iv_sus.endswith("m"):
+                    _base_min = max(1, int(_base_iv_sus[:-1] or 1))
+                elif _base_iv_sus.endswith("h"):
+                    _base_min = max(1, int(_base_iv_sus[:-1] or 1) * 60)
+            except (TypeError, ValueError):
+                _base_min = 1
+            _sustain_n = _orb_bar_count(entry_interval, _sustain_n * _base_min)
+            debug["sustain_lookback_effective_bars"] = _sustain_n
+        sustained = _sustained_rvol(vr, cur, _sustain_n)
+        # CAPTURE-G2 COIL-EXEMPT (2026-07-03): the N-bar sustain MEAN includes the quiet
+        # coil bars that precede a dry-coil premarket break (JEM 06-30 12:59Z class), so the
+        # break tick is mathematically < 1.0 BY CONSTRUCTION — the setup is structurally
+        # untradeable even as it explodes. TAPE-VERIFIED on JEM 2026-06-30: at the first-break
+        # window 12:59:16-30Z the coil-inclusive 5-bar mean is 0.74-0.91 (< 1.0 floor) while a
+        # coil-EXCLUDED mean crosses 1.0 as the active volume builds, and the forming-bar rvol
+        # reaches the explosive floor by ~12:59:40Z. Two OR-ed exemptions, both fail-CLOSED:
+        #
+        #   (A) EXPLOSIVE FORMING BAR — the break bar's OWN rvol (vol_ratio, already computed)
+        #       is >= chili_momentum_explosive_floor_rvol (no new magic threshold): the bar
+        #       itself proves volume is exploding NOW, exactly what the mean shows once the coil
+        #       rolls off. Catches the completed-bar explosive break.
+        #   (B) COIL-EXCLUDED MEAN — recompute the sustain mean over the recent window but DROP
+        #       the identified low-range COIL bars (bar range < chili_momentum_sustained_coil_
+        #       range_atr_frac x ATR — a structural, not volume-defined, coil marker), then
+        #       require the ACTIVE-bar mean to clear the SAME sustained_rvol_floor. This is the
+        #       matrix's "compute the sustain mean EXCLUDING coil bars" option; it recovers the
+        #       window as real volume returns without ever passing a genuinely dead tape.
+        #
+        # The ESTR faded-24h-mover guardrail stays INTACT: a genuine low-volume drift (break
+        # bar not exploding AND the active-bar mean still below the floor) is blocked below.
+        # Deep-reclaim bounces are NEVER exempted (dead-cat guard). Kill-switch
+        # chili_momentum_sustained_volume_coil_exempt_enabled (default True) ⇒ OFF is byte-
+        # identical to the coil-inclusive gate.
+        _coil_exempt = False
+        if (
+            bool(getattr(settings, "chili_momentum_sustained_volume_coil_exempt_enabled", True))
+            and not _deep_reclaim  # never exempt a deep-retrace bounce (dead-cat trap guard)
+        ):
+            try:
+                _cx_floor = float(
+                    getattr(settings, "chili_momentum_explosive_floor_rvol", 5.0) or 0.0
+                )
+            except (TypeError, ValueError):
+                _cx_floor = 5.0
+            # (A) explosive forming-bar exemption.
+            if (
+                vol_ratio is not None
+                and _cx_floor > 0
+                and float(vol_ratio) == float(vol_ratio)
+                and float(vol_ratio) >= _cx_floor
+            ):
+                _coil_exempt = True
+                debug["sustained_volume_coil_exempt"] = {
+                    "mode": "explosive_break_bar",
+                    "break_bar_rvol": round(float(vol_ratio), 3),
+                    "explosive_floor": round(_cx_floor, 3),
+                }
+            # (B) coil-excluded active-bar mean exemption (recover the window as volume returns).
+            if not _coil_exempt:
+                # F5 (capture-g fix): a configured 0.0 must BIND (0.0 disables the coil
+                # exclusion = the strictest setting) — `or 0.5` silently coerced the falsy
+                # 0.0 back to 0.5, making the strict setting unbindable. Explicit None check.
+                _cx_frac_raw = getattr(
+                    settings, "chili_momentum_sustained_coil_range_atr_frac", None
+                )
+                try:
+                    _cx_frac = 0.5 if _cx_frac_raw is None else float(_cx_frac_raw)
+                except (TypeError, ValueError):
+                    _cx_frac = 0.5
+                _active_mean = _sustained_rvol_excluding_coil(
+                    vr, atr, high, low, cur, _sustain_n,  # same wall-clock-scaled window
+                    coil_range_atr_frac=_cx_frac,
+                )
+                if _active_mean is not None and _active_mean >= float(sustained_rvol_floor):
+                    _coil_exempt = True
+                    debug["sustained_volume_coil_exempt"] = {
+                        "mode": "coil_excluded_mean",
+                        "active_bar_rvol_mean": round(float(_active_mean), 3),
+                        "floor": round(float(sustained_rvol_floor), 3),
+                    }
+        if not _coil_exempt:
+            if sustained is not None:
+                debug["sustained_rvol"] = round(sustained, 2)
+                if sustained < float(sustained_rvol_floor):
+                    return False, "faded_volume_no_sustain", debug
+            elif _deep_reclaim:
                 return False, "faded_volume_no_sustain", debug
-        elif _deep_reclaim:
-            return False, "faded_volume_no_sustain", debug
 
     # ── Ross candle / VWAP / MACD confirmations (the tape-reading the structural
     # gate alone misses; each optional + live-runner-gated, fail-OPEN so thin data

@@ -233,6 +233,114 @@ def test_sustaining_volume_off_lets_faded_through(monkeypatch) -> None:
     assert reason == "pullback_break_ok"
 
 
+# ── capture-g fix F1: UNKNOWN volume (NaN frame) fails the volume gates OPEN ────
+
+def test_unknown_volume_frame_fails_open_not_break_low_volume(monkeypatch) -> None:
+    """F1: a frame whose Volume is all-NaN (the 15s micro frame outside trade-tape coverage)
+    means volume is UNKNOWN — the documented fail-OPEN case. The old fallback manufactured
+    vol_ratio=0.0 (a concrete dead bar) and killed every completed-bar fire at
+    break_low_volume; now the spike/sustain gates SKIP on None and the canonical shallow-
+    pullback break still fires on its price structure."""
+    _isolate_trigger_logic(monkeypatch)
+    rows = [_base(100.0) for _ in range(14)]
+    rows += [_base(c) for c in (102.0, 104.0, 106.0, 108.0, 110.0)]
+    rows += [_base(109.0, 800.0), _base(108.5, 800.0)]
+    rows.append((110.6, 111.2, 109.6, 3200.0))
+    df = _df(rows)
+    df["Volume"] = float("nan")  # volume UNKNOWN everywhere (no trade-tape coverage)
+    ok, reason, dbg = pullback_break_confirmation(df, entry_interval="5m")
+    assert reason != "break_low_volume", (reason, dbg)
+    assert reason != "faded_volume_no_sustain", (reason, dbg)
+    assert ok is True, (reason, dbg)
+    assert dbg.get("vol_ratio") is None  # honest: unknown, not a manufactured 0.0
+
+
+# ── CAPTURE-G2: dry-coil break coil-exempt on the sustained-volume gate ─────────
+# The coil-DEPRESSED sustain mean is a FORMING/tick-break phenomenon (a completed explosive
+# bar's own volume lifts the 5-bar mean above the floor by construction). The two exemption
+# paths are unit-tested deterministically here (path A = explosive break-bar rvol; path B =
+# coil-excluded active-bar mean), plus the ESTR guardrail (genuine drift still blocked) and
+# the flag-off byte-identical contract on the faded frame.
+
+def test_sustained_rvol_excluding_coil_drops_low_range_bars() -> None:
+    # PATH B helper: a JEM-shaped window — 3 quiet LOW-RANGE coil bars (range << ATR, low
+    # rvol) + 2 ACTIVE bars (full range, rvol >= 1). The coil-inclusive mean is < 1.0; the
+    # coil-EXCLUDED mean (dropping the 3 tight coil bars) clears 1.0.
+    from app.services.trading.momentum_neural.entry_gates import (
+        _sustained_rvol,
+        _sustained_rvol_excluding_coil,
+    )
+    import pandas as _pd
+
+    #        idx:   0     1     2      3      4     (cur = 4, lookback = 5)
+    vr = [1.10, 0.25, 0.20, 0.20, 1.15]           # coil bars 1-3 have the depressed rvol
+    atr = [0.20, 0.20, 0.20, 0.20, 0.20]
+    high = _pd.Series([100.30, 100.05, 100.05, 100.05, 100.40])
+    low = _pd.Series([100.00, 100.00, 100.00, 100.00, 100.00])
+    #   ranges:      0.30   0.05   0.05   0.05   0.40   (frac 0.5 x ATR = 0.10 -> bars 1-3 coil)
+    incl = _sustained_rvol(vr, 4, 5)
+    excl = _sustained_rvol_excluding_coil(vr, atr, high, low, 4, 5, coil_range_atr_frac=0.5)
+    assert incl < 1.0                              # coil-inclusive mean is depressed (blocked)
+    assert excl is not None and excl >= 1.0        # active-bar mean clears the floor (exempt)
+    # and a missing/zero ATR keeps the bar (fails toward the stricter inclusive mean).
+    excl_no_atr = _sustained_rvol_excluding_coil(
+        vr, [0.0] * 5, high, low, 4, 5, coil_range_atr_frac=0.5
+    )
+    assert excl_no_atr is not None and abs(excl_no_atr - incl) < 1e-9
+
+
+def test_sustained_gate_path_a_explosive_break_bar_exempts() -> None:
+    # PATH A at the gate: patch _sustained_rvol to a coil-depressed value (< floor) and feed a
+    # frame whose CURRENT (break) bar rvol is exploding (>= the 5x floor). The gate must EXEMPT
+    # (mode=explosive_break_bar) instead of returning faded_volume_no_sustain.
+    from unittest.mock import patch
+    import app.services.trading.momentum_neural.entry_gates as eg
+
+    rows = [_base(100.0, 1000.0) for _ in range(20)]
+    rows += [_base(c, 1000.0) for c in (102.0, 104.0, 106.0, 108.0, 110.0)]
+    rows += [_base(109.0, 1000.0), _base(108.5, 1000.0)]
+    rows.append((110.6, 111.2, 109.6, 30000.0))    # break bar rvol ~ 30x (>> 5x floor)
+    with patch.object(eg, "_sustained_rvol", return_value=0.6):  # coil-depressed mean
+        ok, reason, dbg = eg.pullback_break_confirmation(
+            _df(rows), entry_interval="5m", require_sustained_volume=True,
+            sustained_rvol_floor=1.0,
+        )
+    _cx = dbg.get("sustained_volume_coil_exempt")
+    assert reason != "faded_volume_no_sustain", (reason, dbg)
+    assert _cx is not None and _cx["mode"] == "explosive_break_bar"
+    assert _cx["break_bar_rvol"] >= _cx["explosive_floor"] >= 5.0
+
+
+def test_genuine_low_volume_drift_still_blocked(monkeypatch) -> None:
+    # The ESTR guardrail is intact: a faded mover whose BREAK bar is NOT exploding (~2.6x,
+    # below the 5x floor) AND whose coil-excluded mean is still < 1.0 is STILL blocked even
+    # with the coil exemption ON (the _faded_rows bars are full-range, so path B drops nothing).
+    ok, reason, dbg = pullback_break_confirmation(
+        _df(_faded_rows()), entry_interval="5m",
+        require_sustained_volume=True, sustained_rvol_floor=1.0,
+    )
+    assert ok is False
+    assert reason == "faded_volume_no_sustain"
+    assert dbg.get("sustained_volume_coil_exempt") is None  # neither path A nor B fires
+    assert dbg.get("sustained_rvol") is not None and dbg["sustained_rvol"] < 1.0
+
+
+def test_coil_exempt_off_is_byte_identical(monkeypatch) -> None:
+    # KILL-SWITCH OFF on the faded-drift frame: byte-identical to the legacy coil-inclusive
+    # gate (still blocked at faded_volume_no_sustain, no exemption debug written).
+    monkeypatch.setattr(
+        settings, "chili_momentum_sustained_volume_coil_exempt_enabled", False, raising=False
+    )
+    ok, reason, dbg = pullback_break_confirmation(
+        _df(_faded_rows()), entry_interval="5m",
+        require_sustained_volume=True, sustained_rvol_floor=1.0,
+    )
+    assert ok is False
+    assert reason == "faded_volume_no_sustain"
+    assert dbg.get("sustained_volume_coil_exempt") is None
+    assert dbg.get("sustained_rvol") is not None and dbg["sustained_rvol"] < 1.0
+
+
 # ── #2 breakout-or-bailout fast-exit decision ──────────────────────────────
 
 def test_breakout_failed_to_hold_true_inside_window() -> None:

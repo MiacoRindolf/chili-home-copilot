@@ -21060,6 +21060,49 @@ def _migration_312_momentum_dilution_history(conn) -> None:
     )
 
 
+def _migration_313_momentum_bridge_subscribe_requests(conn) -> None:
+    """CAPTURE-G3 (Gate-0 subscription latency) — EVENT-DRIVEN bridge subscribe-on-first-alert.
+
+    WHY: the IQFeed trade/depth bridges (host processes) subscribe symbols by POLLING two DB
+    tables on a ~20s refresh — the armed/live sessions and the eligible-mover viability board.
+    A symbol that FIRST ignites (crosses a Ross axis in the ws-ignition loop) only reaches the
+    bridge after (a) its viability row is written AND (b) the next bridge refresh — a ~2.7-min
+    blind window on a sub-2-min squeeze (VWAV 2026-06-30: the whole 5->9.75 leg was un-taped).
+
+    This coordination table is a FAST PATH: the app container INSERTs a symbol the instant it
+    first-alerts; the bridge polls this table on a SHORT interval and subscribes immediately,
+    additively to its normal refresh set — so first-alert -> subscribed lands in ~seconds, not
+    minutes. It is NOT a trading table (no orders/positions/fills) — a pure subscription hint,
+    so the container-side write is safe. One row per (symbol, requested_at); the bridge reads a
+    recent trailing window and the retention sweep drains old rows. Idempotent (IF NOT EXISTS).
+    """
+    conn.execute(text(
+        "CREATE TABLE IF NOT EXISTS momentum_bridge_subscribe_requests ("
+        " id BIGSERIAL PRIMARY KEY,"
+        " symbol VARCHAR(16) NOT NULL,"
+        " requested_at TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'utc'),"  # naive UTC (trading-table basis)
+        " reason VARCHAR(32),"                         # 'ws_ignition' | 'first_alert' | ...
+        " source_node_id VARCHAR(80),"
+        " correlation_id VARCHAR(64)"
+        ")"
+    ))
+    # the bridge's fast-path read: newest requests first, trailing window.
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_mbsr_requested_at "
+        "ON momentum_bridge_subscribe_requests (requested_at DESC)"
+    ))
+    # (requested_at, id) leading-time index for the retention drain sweep.
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_mbsr_requested_id "
+        "ON momentum_bridge_subscribe_requests (requested_at, id)"
+    ))
+    conn.commit()
+    logger.info(
+        "[mig313] ensured momentum_bridge_subscribe_requests (CAPTURE-G3 event-driven "
+        "subscribe-on-first-alert coordination table for the IQFeed bridges)"
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -21446,6 +21489,8 @@ MIGRATIONS = [
      _migration_311_momentum_viability_history),
     ("312_momentum_dilution_history",
      _migration_312_momentum_dilution_history),
+    ("313_momentum_bridge_subscribe_requests",
+     _migration_313_momentum_bridge_subscribe_requests),
 ]
 
 

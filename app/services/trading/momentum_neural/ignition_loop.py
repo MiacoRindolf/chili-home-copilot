@@ -404,6 +404,17 @@ class IgnitionScoringLoop:
             run_momentum_neural_tick(
                 db, meta={"tickers": [symbol], "ross_signals": ross_signals}
             )
+            # CAPTURE-G3: this is the FIRST-ALERT moment (the name just crossed a Ross axis and
+            # is being scored onto the viability board). PUSH a subscribe hint so the host IQFeed
+            # bridge fast-polls it and subscribes NOW, instead of waiting for the viability write
+            # + the bridge's ~20s poll (the ~2.7-min Gate-0 blind window on sub-2-min squeezes).
+            # Same transaction as the score (committed together); non-fatal on any error.
+            try:
+                from .bridge_subscribe import request_bridge_subscription
+
+                request_bridge_subscription(db, symbol, reason="ws_ignition")
+            except Exception:
+                _log.debug("[momentum_ws_ignition] bridge subscribe hint failed for %s", symbol, exc_info=True)
             db.commit()
             scored_ok = True
         except Exception as e:

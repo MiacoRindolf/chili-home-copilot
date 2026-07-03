@@ -647,7 +647,15 @@ def load_trade_tape(
 
 def _tape_to_microbars(ticks: Sequence[ReplayTapeTick], *, bar_seconds: int) -> pd.DataFrame | None:
     rows = [(tick.ts, tick.bid, tick.ask) for tick in ticks]
-    return _resample_micro_bars(rows, bar_seconds=bar_seconds)
+    # F1 (capture-g fix) live-vs-replay parity: the live micro build now joins REAL
+    # per-bucket volume from the trade tape; replay ticks carry print size, so feed the
+    # same volume basis (absent sizes ⇒ None ⇒ NaN volume = UNKNOWN, exactly like live).
+    trows = [
+        (tick.ts, tick.size)
+        for tick in ticks
+        if tick.size is not None and tick.size > 0
+    ]
+    return _resample_micro_bars(rows, bar_seconds=bar_seconds, trade_rows=trows or None)
 
 
 def _trade_tape_to_microbars(ticks: Sequence[ReplayTapeTick], *, bar_seconds: int) -> pd.DataFrame | None:

@@ -3115,6 +3115,20 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_WS_IGNITION_ENABLED"),
         description="Enable the additive WS ignition scorer: subscribe the (uncapped) equity universe on the price bus and, the instant a tick shows a name igniting (intraday move% ≥ the ignition floor), score it DIRECTLY into momentum_symbol_viability — bypassing the EMA9 continuation gate that emits nothing for a vertical name (e.g. RGNT +498% nowhere near its EMA9). The scheduled 5-min batch builder + legacy pattern lane are unchanged; this path is purely additive. 0 = scheduled-only (no WS ignition; byte-identical to current).",
     )
+    # CAPTURE-G3 (2026-07-03): Gate-0 subscription latency. The IQFeed trade/depth bridges
+    # (host processes) subscribe symbols by POLLING the armed-sessions + eligible-mover viability
+    # board on a ~20s refresh, so a symbol that FIRST ignites only reaches the bridge after its
+    # viability row is written AND the next refresh — a ~2.7-min blind window on a sub-2-min
+    # squeeze (VWAV 2026-06-30: the whole 5->9.75 leg was un-taped). When ON, the ws-ignition
+    # first-alert writes a hint to momentum_bridge_subscribe_requests (a NON-trading coordination
+    # table) the instant a name crosses a Ross axis; the bridge fast-polls that table and
+    # subscribes immediately (first-alert -> subscribed in seconds). OFF ⇒ no hint write ⇒ the
+    # bridge is byte-identical to the poll-only cadence.
+    chili_momentum_bridge_subscribe_on_alert_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BRIDGE_SUBSCRIBE_ON_ALERT_ENABLED"),
+        description="CAPTURE-G3: event-driven subscribe-on-first-alert for the IQFeed bridges. True (default) = on first ignition/alert, write a subscribe hint to momentum_bridge_subscribe_requests so the host bridge fast-polls it and subscribes the symbol immediately (closes the ~2.7-min Gate-0 blind window on sub-2-min squeezes like VWAV). False = no hint write; the bridge falls back to its ~20s poll cadence (byte-identical to current).",
+    )
     chili_momentum_ross_equity_universe_required: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_EQUITY_UNIVERSE_REQUIRED"),
@@ -4841,9 +4855,9 @@ class Settings(BaseSettings):
         description="Enable Ross's first-pullback entry (first new-high after the first shallow pullback off an impulse) alongside the retest/deep-reclaim ladder. KILL-SWITCH: False -> byte-identical to the current ladder.",
     )
     chili_momentum_first_pullback_interval: str = Field(
-        default="1m",
+        default="15s",
         validation_alias=AliasChoices("CHILI_MOMENTUM_FIRST_PULLBACK_INTERVAL"),
-        description="THE base timeframe knob for the first-pullback structure (1m; a 5m bar structurally collapses the shallow-pull->new-high geometry Ross trades). Set '15s' (with micropull enabled) to run it on tick-built 15s micro-bars.",
+        description="THE base timeframe knob for the first-pullback structure ('15s' — paired with micropull-enabled so Ross's ~120s micro-pullback->new-high geometry runs on the tick-built 15s micro-bars, sub-minute). A 5m bar structurally collapses it; '1m' detects the break a bar-close late. CAPTURE-G1(a) 2026-07-03: flipped 1m->15s (with chili_momentum_micropull_enabled True) — SVRE 2026-06-30 replay-verified: the micro path reaches waiting_for_break at 12:45:25Z with pullback_high=6.89 (Ross's exact 6.98 entry), where the 1m path stays pullback_too_deep the whole window. BYTE-IDENTICAL on the non-micro (1m/5m) runner: the first-pullback branch only activates when entry_interval == this interval, so a 15s value simply skips the branch on a 1m/5m df exactly as a mismatched interval did before.",
     )
     # 15s MICRO-PULLBACK (2026-06-15, operator "1m too slow for our style"): Ross's
     # ~120s micro-pullback happens INSIDE a 1m bar, so a 1m trigger detects the
@@ -4856,9 +4870,9 @@ class Settings(BaseSettings):
     # (_dipbuy_tick_thrust_ok, premarket-confirm) still apply. Default OFF until
     # replay-proven. docs/DESIGN/MOMENTUM_LANE.md
     chili_momentum_micropull_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULL_ENABLED"),
-        description="Run the first-pullback entry on tick-built 15s micro-bars (sub-minute entry). FAIL-SAFE: insufficient tick density ⇒ fall back to 1m (byte-identical). Default OFF.",
+        description="Run the first-pullback entry on tick-built 15s micro-bars (sub-minute entry). FAIL-SAFE: insufficient tick density ⇒ _build_micro_bar_df returns None ⇒ fall back to 1m (byte-identical) — a thin/sparse name can NEVER fabricate 15s bars that arm a junk break. CAPTURE-G1(a) 2026-07-03: flipped False->True (paired with chili_momentum_first_pullback_interval='15s' so the first-pullback ARM engages on the micro-frame). SVRE 2026-06-30 replay-verified: the micro path reaches waiting_for_break at 12:45:25Z with pullback_high=6.89 (Ross's exact 6.98 entry) where the 1m path stays pullback_too_deep the whole window; the extended_verticality anti-chase guard still correctly takes over on the later +6%/s vertical.",
     )
     chili_momentum_micropull_bar_seconds: int = Field(
         default=15, ge=5, le=30,
@@ -5251,6 +5265,28 @@ class Settings(BaseSettings):
         ge=2,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_SUSTAIN_LOOKBACK_BARS"),
         description="Bars over which sustained rel-vol is averaged at the entry tick.",
+    )
+    # CAPTURE-G2 (2026-07-03): the sustained-volume gate averages rel-vol over the last N
+    # bars, which INCLUDES the quiet coil bars preceding a dry-coil premarket break (the JEM
+    # 2026-06-30 12:59Z $46k class). The first break tick's 5-bar mean rvol is therefore < 1.0
+    # BY CONSTRUCTION, so the gate rejects the ONLY catchable window even as the name explodes
+    # — the setup class is structurally untradeable. EXEMPT the sustain gate when the break
+    # bar's OWN forming-bar rvol is exploding (>= chili_momentum_explosive_floor_rvol; the
+    # break bar proves volume is exploding NOW, exactly what the mean would show once the coil
+    # rolls off). The ESTR faded-24h-mover guardrail stays intact (a genuine low-volume drift,
+    # break bar NOT exploding, is still blocked); fail-CLOSED (unreadable break-bar rvol ⇒ no
+    # exemption ⇒ current behavior). Deep-reclaim bounces are never exempted (dead-cat guard).
+    chili_momentum_sustained_volume_coil_exempt_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SUSTAINED_VOLUME_COIL_EXEMPT_ENABLED"),
+        description="CAPTURE-G2: exempt the sustained-volume (faded-mover) gate on the break tick via two OR-ed fail-closed paths: (A) the BREAK BAR's own forming-bar rvol is exploding (>= chili_momentum_explosive_floor_rvol), or (B) the sustain mean recomputed EXCLUDING identified low-range coil bars clears the floor. So a dry-coil premarket break (JEM 06-30 class) whose coil-inclusive 5-bar mean is mathematically depressed by the quiet coil can still reach the entry window as active volume returns. Keeps the ESTR faded-24h-mover guardrail (a genuine low-volume drift — no explosive bar AND active mean still below floor — is still blocked) + the deep-reclaim dead-cat guard. True (default) makes the dry-coil class tradeable; False = byte-identical to the coil-inclusive gate.",
+    )
+    chili_momentum_sustained_coil_range_atr_frac: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SUSTAINED_COIL_RANGE_ATR_FRAC"),
+        description="CAPTURE-G2 (path B): a bar whose range (high-low) is below this fraction of its ATR is an identified low-range COIL bar, excluded from the coil-excluded active-bar sustain mean. 0.5 = half the ATR (a genuinely tight consolidation candle). Only consulted when chili_momentum_sustained_volume_coil_exempt_enabled is ON; a missing/zero ATR keeps the bar (fails toward the stricter coil-inclusive mean).",
     )
     # Ross candle / VWAP / MACD entry confirmations — the tape-reading the structural
     # pullback gate alone misses. Default ON; each fail-OPEN on thin/missing data.
@@ -8343,15 +8379,30 @@ class Settings(BaseSettings):
     # chain), so it CANNOT fire on an extended/faded/rolled-over name. OFF (default) = the
     # confirmer is never even probed in this path ⇒ byte-identical break-only behaviour.
     chili_momentum_tape_hold_entry_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_TAPE_HOLD_ENTRY_ENABLED"),
-        description="FIX C: enter the pullback-HOLD bounce when the TAPE confirms buyers (signed_tape_accel>0 AND tick_rate>=self-relative floor) on a VALID, non-backside pullback that is holding the 9-EMA with a higher low — BEFORE the confirmed break (Ross enters earlier than the break). Tape-confirm is REQUIRED + fail-closed (no/thin/stale tape ⇒ no early fire, fall back to the existing break trigger). All existing entry vetoes + the quote gate still run downstream; does NOT touch evaluate_sticky_backside_bench. false (default) = byte-identical break-only.",
+        description="FIX C: enter the pullback-HOLD bounce when the TAPE confirms buyers (signed_tape_accel>0 AND tick_rate>=self-relative floor) on a VALID, non-backside pullback that is holding the 9-EMA with a higher low — BEFORE the confirmed break (Ross enters earlier than the break). Tape-confirm is REQUIRED + fail-closed (no/thin/stale tape ⇒ no early fire, fall back to the existing break trigger). All existing entry vetoes + the quote gate still run downstream; does NOT touch evaluate_sticky_backside_bench. CAPTURE-G1(b) 2026-07-03: flipped False->True — this now governs ONLY the FIX-C EARLY-FIRE path (the inline pattern-trigger tape gate was decoupled onto chili_momentum_pattern_tape_gate_enabled). The early fire is fail-closed on missing/thin tape and every downstream LIVE_PENDING_ENTRY veto still runs; OFF restores break-only for the early-fire path.",
+    )
+    # CAPTURE-G1(b) DECOUPLE (2026-07-03): the INLINE tape-confirmation gate that the 12
+    # tape-required pattern triggers (bull_flag/wedge/absorption/false_break/ask_thins/
+    # sub_vwap_trap/pulling_away/premarket_pivot/inverse_h&s/cup_and_handle/bottom_reversal)
+    # + the momentum-continuation entry call via tape_confirms_hold. Previously that gate was
+    # fused to chili_momentum_tape_hold_entry_enabled, so with that flag OFF (the deployed
+    # default) all 12 triggers were DARK live — including cup_and_handle, which WAVE-4 R4 had
+    # flipped ON as a proven filler (dead code in prod). Decoupled: tape_confirms_hold now keys
+    # on TAPE AVAILABILITY (dense recent iqfeed ticks ⇒ evaluate; genuinely missing/thin/stale/
+    # crypto ⇒ the existing fail-CLOSED refusal STANDS — never weakened). Default True makes the
+    # 12 triggers reachable; OFF is the instant rollback to the legacy hard-False (dark) behavior.
+    chili_momentum_pattern_tape_gate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PATTERN_TAPE_GATE_ENABLED"),
+        description="CAPTURE-G1(b): govern the inline tape_confirms_hold gate that the 12 tape-required pattern triggers + momentum-continuation entry use as their fail-closed LAST gate. True (default) = evaluate the executed tape when dense+healthy and fail-CLOSED on missing/thin/stale/crypto tape (the 12 triggers become REACHABLE, still tape-gated). False = legacy hard-False short-circuit (every dependent trigger's tape gate refuses ⇒ those setups go dark) — the one-flag instant rollback. Independent of chili_momentum_tape_hold_entry_enabled, which now governs ONLY the FIX-C early-fire path.",
     )
     # ── FIX 1: MOMENTUM-CONTINUATION ENTRY (catch the straight-up runners) ───────────
     chili_momentum_momentum_continuation_entry_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MOMENTUM_CONTINUATION_ENTRY_ENABLED"),
-        description="FIX 1: enter the continuation (a fresh NEW HIGH, NO prior pullback/base required) on a HIGH-CONVICTION mover that trends STRAIGHT UP and so never triggers the pullback/base entries (WSHP +47% 40x RVOL, SDOT +25% 132x RVOL — caught + watched but reaped at 300s, never entered). Fires ONLY when ALL hold: (1) high-conviction (ross_score >= chili_momentum_continuation_ross_floor OR RVOL >= explosive_rvol_floor x coiling_exempt_rvol_mult OR daily_breaking_major); (2) momentum_continuation_trigger new-high break; (3) tape_confirms_hold REQUIRED + fail-closed (no/thin/stale/selling/crypto tape ⇒ no fire); (4) NOT parabolic (_hod_extension_ok / _entry_extension_veto vs 9-EMA AND VWAP); (5) NOT backside / NOT below-VWAP (_detect_back_side + front_side_state) + a structural stop + ALL downstream LIVE_PENDING_ENTRY vetoes. Skipped for benched names. false (default) = byte-identical (the trigger returns disabled before any compute).",
+        description="FIX 1: enter the continuation (a fresh NEW HIGH, NO prior pullback/base required) on a HIGH-CONVICTION mover that trends STRAIGHT UP and so never triggers the pullback/base entries (WSHP +47% 40x RVOL, SDOT +25% 132x RVOL — caught + watched but reaped at 300s, never entered). Fires ONLY when ALL hold: (1) high-conviction (ross_score >= chili_momentum_continuation_ross_floor OR RVOL >= explosive_rvol_floor x coiling_exempt_rvol_mult OR daily_breaking_major); (2) momentum_continuation_trigger new-high break; (3) tape_confirms_hold REQUIRED + fail-closed (no/thin/stale/selling/crypto tape ⇒ no fire); (4) NOT parabolic (_hod_extension_ok / _entry_extension_veto vs 9-EMA AND VWAP); (5) NOT backside / NOT below-VWAP (_detect_back_side + front_side_state) + a structural stop + ALL downstream LIVE_PENDING_ENTRY vetoes. Skipped for benched names. CAPTURE-G1(c) 2026-07-03: flipped False->True (paired with chili_momentum_continuation_arm_skip_tape True to resolve the arm-time tape chicken-and-egg, and chili_momentum_conviction_rvol_fallback_enabled True for scanner-only names) — the purpose-built early path for the JEM/SDOT straight-up class. Guard suite proven (test_ross_mistakes_guarded parabolic/backside avoided, test_momentum_mock_fire_pullback); every guard fail-closed; entry-time tape gate REQUIRED (now decoupled + reachable). False = byte-identical (the trigger returns disabled before any compute).",
     )
     chili_momentum_continuation_ross_floor: float = Field(
         default=0.7,
@@ -8361,14 +8412,14 @@ class Settings(BaseSettings):
         description="FIX 1: the ross_score (Ross momentum quality, [0,1]) at/above which a name is high-conviction enough for the momentum-continuation new-high entry (one of three OR-ed conviction gates with the coiling-exempt RVOL multiple and daily_breaking_major). Only consulted when chili_momentum_momentum_continuation_entry_enabled is ON.",
     )
     chili_momentum_conviction_rvol_fallback_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_CONVICTION_RVOL_FALLBACK_ENABLED"),
-        description="FIX 1b: when a momentum-continuation candidate's OWN persisted scanner signal is EMPTY (no ross_score, no RVOL, not daily_breaking_major — a SCANNER-only name the ignition enricher never scored, e.g. PED +25% AT HOD with a true 13.72x intraday RVOL), COMPUTE intraday relative volume from the ALREADY-FETCHED 5m/5d OHLCV frame (today's cumulative session volume / the trailing average of prior complete sessions) and admit as high-conviction iff it is >= chili_momentum_explosive_rvol_floor x chili_momentum_coiling_exempt_rvol_mult (~9x). ZERO new fetch (reuses the frame the continuation trigger already holds). Shared helper => arm-time (auto_arm) and entry-time (live_runner) stay identical. FAIL-CLOSED: if RVOL cannot be computed reliably (no Volume column, < 2 sessions, NaN/zero average) the name stays low-conviction (never admit a genuinely low-RVOL name — this is the chase-safety). Row signal precedence is preserved: the fallback ONLY fills the empty case; ross_score>=floor and daily_breaking_major paths are unchanged. false (default) = byte-identical (empty-signal names remain low_conviction exactly as deployed 1e2eb09).",
+        description="FIX 1b: when a momentum-continuation candidate's OWN persisted scanner signal is EMPTY (no ross_score, no RVOL, not daily_breaking_major — a SCANNER-only name the ignition enricher never scored, e.g. PED +25% AT HOD with a true 13.72x intraday RVOL), COMPUTE intraday relative volume from the ALREADY-FETCHED 5m/5d OHLCV frame (today's cumulative session volume / the trailing average of prior complete sessions) and admit as high-conviction iff it is >= chili_momentum_explosive_rvol_floor x chili_momentum_coiling_exempt_rvol_mult (~9x). ZERO new fetch (reuses the frame the continuation trigger already holds). Shared helper => arm-time (auto_arm) and entry-time (live_runner) stay identical. FAIL-CLOSED: if RVOL cannot be computed reliably (no Volume column, < 2 sessions, NaN/zero average) the name stays low-conviction (never admit a genuinely low-RVOL name — this is the chase-safety). Row signal precedence is preserved: the fallback ONLY fills the empty case; ross_score>=floor and daily_breaking_major paths are unchanged. CAPTURE-G1(c) 2026-07-03: flipped False->True (paired with the continuation entry flip) so scanner-only movers with a genuine RVOL (PED class) are admitted; FAIL-CLOSED keeps genuinely low-RVOL names out. False = empty-signal names remain low_conviction (the continuation lane misses scanner-only movers).",
     )
     chili_momentum_continuation_arm_skip_tape: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_CONTINUATION_ARM_SKIP_TAPE"),
-        description="ARM-TIME TAPE GATE KILL-SWITCH: in auto_arm._continuation_active_trigger the continuation ARM places NO order — it only starts WATCHING, and arming is what subscribes the trade/depth bridges so tape (iqfeed_trade_ticks) THEN begins flowing for the symbol. A fresh scanner mover (e.g. PED RVOL 13.72x, +25% AT HOD) has ZERO tape before it is armed (tape_hold_no_data), so the unconditional arm-time tape_confirms_hold gate is UNSATISFIABLE → arm never fires → chicken-and-egg (the only thing that bootstraps tape is the arm). default False = tape REQUIRED at arm-time = byte-identical to deployed 1e2eb09. True = arm on conviction(+rvol-fallback) + STRUCTURE ONLY (momentum_continuation_trigger still enforces new-HOD + NOT-extended + NOT-backside) and SKIP the arm-time tape call; the strict tape gate STAYS at the live_runner ENTRY (which places the order) — by entry-time the now-watching symbol is subscribed and tape flows, so NO order is EVER placed without tape confirmation. Does NOT weaken structure/extension/backside/conviction; ONLY the arm-time tape call becomes optional.",
+        description="ARM-TIME TAPE GATE KILL-SWITCH: in auto_arm._continuation_active_trigger the continuation ARM places NO order — it only starts WATCHING, and arming is what subscribes the trade/depth bridges so tape (iqfeed_trade_ticks) THEN begins flowing for the symbol. A fresh scanner mover (e.g. PED RVOL 13.72x, +25% AT HOD) has ZERO tape before it is armed (tape_hold_no_data), so the unconditional arm-time tape_confirms_hold gate is UNSATISFIABLE → arm never fires → chicken-and-egg (the only thing that bootstraps tape is the arm). CAPTURE-G1(c) 2026-07-03: flipped False->True (paired with the continuation entry flip) — arm on conviction(+rvol-fallback) + STRUCTURE ONLY (momentum_continuation_trigger still enforces new-HOD + NOT-extended + NOT-backside) and SKIP the arm-time tape call; the strict tape gate STAYS at the live_runner ENTRY (which places the order) — by entry-time the now-watching symbol is subscribed and tape flows, so NO order is EVER placed without tape confirmation. Without this the continuation entry flip is inert (nothing ever arms). Does NOT weaken structure/extension/backside/conviction; ONLY the arm-time tape call becomes optional. False = tape REQUIRED at arm-time (the continuation lane cannot bootstrap).",
     )
     # ── FIX 2: EMPTY-SIGNAL DE-RANK (push no-momentum-signal names below real movers) ──
     chili_momentum_no_signal_derank_enabled: bool = Field(
