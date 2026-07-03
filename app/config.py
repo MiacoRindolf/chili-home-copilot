@@ -4750,6 +4750,15 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_MICROPULL_BAR_SECONDS"),
         description="THE single base knob for micro-bar width (seconds) — the tick tape is bucketed into OHLC bars of this size for the sub-minute first-pullback trigger.",
     )
+    # WAVE-4 ITEM-7 F2: when the micro-bar build (from the in-DB tick tape) raises, RETRY
+    # ONCE on a FRESH short-lived SessionLocal before falling back — the tape is in-DB, so a
+    # transient/stale session error must NOT silently drop the micro frame to the 1m/5m path.
+    # OFF ⇒ the legacy single-attempt swallow (byte-identical). Paired with the F1 log/meta.
+    chili_momentum_micro_fallback_1m_from_ticks_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MICRO_FALLBACK_1M_FROM_TICKS_ENABLED"),
+        description="WAVE-4 ITEM-7 F2: on a micro-bar build error, retry ONCE on a fresh short-lived SessionLocal (the tape is in-DB) before falling back — never silently degrade the micro frame on a transient session error. OFF ⇒ legacy single-attempt (byte-identical).",
+    )
     # Pending-entry lifecycle is EVENT-DRIVEN (cancel on setup invalidation /
     # limit left behind), not clock-driven — this is only the BACKSTOP: a
     # submitted entry limit must not outlive the bar evidence that produced it,

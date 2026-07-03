@@ -3606,51 +3606,100 @@ def _bid_prop_confirms_break(
     return confirmed, debug
 
 
-def _build_micro_bar_df(db, symbol: str, *, bar_seconds: int, lookback_minutes: float = 30.0):
+def _micro_bar_df_from_session(db, symbol: str, *, bar_seconds: int, lookback_minutes: float):
+    """The raw micro-bar build off ONE session (may raise). Split out so the public
+    ``_build_micro_bar_df`` can RETRY once on a fresh short-lived session (WAVE-4 ITEM-7 F2)."""
+    from datetime import timedelta as _td
+
+    from sqlalchemy import text as _text
+
+    from .micro_bars import _resample_micro_bars
+
+    # replay v3: anchor the lookback on the sim clock (prod byte-identical — _utcnow()
+    # is naive-UTC, exactly what datetime.now(utc).replace(tzinfo=None) produced here).
+    since = _utcnow() - _td(minutes=float(lookback_minutes))
+    rows = db.execute(
+        _text(
+            "SELECT observed_at, bid, ask FROM momentum_nbbo_spread_tape "
+            "WHERE symbol = :s AND observed_at >= :since AND bid > 0 AND ask > 0 "
+            "ORDER BY observed_at ASC"
+        ),
+        {"s": str(symbol).upper(), "since": since},
+    ).fetchall()
+    if not rows or len(rows) < 2:
+        return None
+    df = _resample_micro_bars(
+        [(r[0], float(r[1]), float(r[2])) for r in rows], bar_seconds=bar_seconds
+    )
+    # The trigger needs >=10 bars to evaluate (pullback_break_confirmation's own
+    # ``len(df) < 10`` floor). A name with only 1-min snapshots resamples to far
+    # fewer micro-bars, so this is exactly the SUPERSET/FAIL-SAFE boundary: too
+    # sparse ⇒ return None ⇒ the caller uses the 1m df (byte-identical). Enforcing
+    # the floor HERE keeps the density decision in one place.
+    if df is None or getattr(df, "empty", True) or len(df) < 10:
+        return None
+    return df
+
+
+def _build_micro_bar_df(db, symbol: str, *, bar_seconds: int, lookback_minutes: float = 30.0, meta: dict | None = None):
     """15s MICRO-PULLBACK (2026-06-15, "1m too slow"): build an OHLC micro-bar df
-    from the densified tick tape (``momentum_nbbo_spread_tape`` rows for ``symbol``
-    over the last ``lookback_minutes``) so the first-pullback trigger can run
-    sub-minute. Returns a Open/High/Low/Close/Volume DataFrame (same shape as
-    ``fetch_ohlcv_df``) or None.
+    from the densified tick tape (``momentum_nbbo_spread_tape`` rows for ``symbol``,
+    mirrored from the IQFeed trade tape, over the last ``lookback_minutes``) so the
+    first-pullback trigger can run sub-minute. Returns a Open/High/Low/Close/Volume
+    DataFrame (same shape as ``fetch_ohlcv_df``) or None.
 
     FAIL-SAFE / SUPERSET: insufficient tick DENSITY (only the 1-min sampler exists
     for this name) ⇒ ``_resample_micro_bars`` yields <2 micro-bars ⇒ this returns
-    None ⇒ the caller falls back to the 1m bars (byte-identical). Never raises — a
-    read/resample error returns None (fall back), so the micro path can only ADD an
-    earlier entry where the dense tape supports it, never break the 1m path.
+    None ⇒ the caller falls back to the 1m bars (byte-identical). The micro path can
+    only ADD an earlier entry where the dense tape supports it, never break the 1m path.
+
+    WAVE-4 ITEM-7 F1: a swallowed build EXCEPTION is no longer silent — it is logged
+    with exc_info AND (when ``meta`` is supplied) recorded as ``meta["micro_error_detail"]``
+    so the operator can see WHY a name silently degraded off the micro frame.
+    WAVE-4 ITEM-7 F2: on a build error, RETRY ONCE on a FRESH short-lived SessionLocal
+    (the tape is in-DB; a transient session error must not silently drop the micro frame
+    to the 1m/5m path) before falling back. Gated by
+    ``chili_momentum_micro_fallback_1m_from_ticks_enabled`` (default True); OFF ⇒ the
+    legacy single-attempt swallow (byte-identical).
     """
     try:
-        from datetime import timedelta as _td
-
-        from sqlalchemy import text as _text
-
-        from .micro_bars import _resample_micro_bars
-
-        # replay v3: anchor the lookback on the sim clock (prod byte-identical — _utcnow()
-        # is naive-UTC, exactly what datetime.now(utc).replace(tzinfo=None) produced here).
-        since = _utcnow() - _td(minutes=float(lookback_minutes))
-        rows = db.execute(
-            _text(
-                "SELECT observed_at, bid, ask FROM momentum_nbbo_spread_tape "
-                "WHERE symbol = :s AND observed_at >= :since AND bid > 0 AND ask > 0 "
-                "ORDER BY observed_at ASC"
-            ),
-            {"s": str(symbol).upper(), "since": since},
-        ).fetchall()
-        if not rows or len(rows) < 2:
-            return None
-        df = _resample_micro_bars(
-            [(r[0], float(r[1]), float(r[2])) for r in rows], bar_seconds=bar_seconds
+        return _micro_bar_df_from_session(
+            db, symbol, bar_seconds=bar_seconds, lookback_minutes=lookback_minutes
         )
-        # The trigger needs >=10 bars to evaluate (pullback_break_confirmation's own
-        # ``len(df) < 10`` floor). A name with only 1-min snapshots resamples to far
-        # fewer micro-bars, so this is exactly the SUPERSET/FAIL-SAFE boundary: too
-        # sparse ⇒ return None ⇒ the caller uses the 1m df (byte-identical). Enforcing
-        # the floor HERE keeps the density decision in one place.
-        if df is None or getattr(df, "empty", True) or len(df) < 10:
-            return None
-        return df
-    except Exception:
+    except Exception as exc:
+        # F1: surface the swallowed error (log + meta), never re-raise into the tick loop.
+        if isinstance(meta, dict):
+            meta["micro_error_detail"] = repr(exc)
+        _log.warning(
+            "[momentum_live] micro-bar build failed sym=%s bar_s=%s: %s",
+            symbol, bar_seconds, exc, exc_info=True,
+        )
+        # F2: retry ONCE on a fresh short-lived session (the tape is in-DB; a stale/errored
+        # session must not silently drop the micro frame). OFF ⇒ legacy single-attempt.
+        if bool(getattr(settings, "chili_momentum_micro_fallback_1m_from_ticks_enabled", True)):
+            try:
+                from ....db import SessionLocal as _SessionLocal
+
+                _retry_db = _SessionLocal()
+                try:
+                    _df = _micro_bar_df_from_session(
+                        _retry_db, symbol, bar_seconds=bar_seconds, lookback_minutes=lookback_minutes
+                    )
+                    if isinstance(meta, dict) and _df is not None:
+                        meta["micro_retry_recovered"] = True
+                    return _df
+                finally:
+                    try:
+                        _retry_db.rollback()
+                    except Exception:
+                        pass
+                    _retry_db.close()
+            except Exception as exc2:
+                if isinstance(meta, dict):
+                    meta["micro_retry_error_detail"] = repr(exc2)
+                _log.warning(
+                    "[momentum_live] micro-bar retry failed sym=%s: %s", symbol, exc2, exc_info=True,
+                )
         return None
 
 
@@ -6280,9 +6329,14 @@ def tick_live_session(
                                 _df_trig, _iv_trig = _df_pb, _interval
                                 if bool(getattr(settings, "chili_momentum_micropull_enabled", False)):
                                     _bar_s = int(getattr(settings, "chili_momentum_micropull_bar_seconds", 15) or 15)
-                                    _df_micro = _build_micro_bar_df(db, sess.symbol, bar_seconds=_bar_s)
+                                    # ITEM-7 F1: pass a meta dict so a swallowed micro build error
+                                    # surfaces (micro_error_detail) instead of a silent degrade.
+                                    _micro_meta: dict[str, Any] = {}
+                                    _df_micro = _build_micro_bar_df(db, sess.symbol, bar_seconds=_bar_s, meta=_micro_meta)
                                     if _df_micro is not None and len(_df_micro) >= 10:
                                         _df_trig, _iv_trig = _df_micro, "15s"
+                                    elif _micro_meta and isinstance(_pb_debug, dict):
+                                        _pb_debug.update(_micro_meta)
                                 _trigger_ok, _trigger_reason, _pb_debug = momentum_pullback_trigger(
                                     _df_trig, entry_interval=_iv_trig, live_price=_live_px,
                                     symbol=sess.symbol, db=db,
