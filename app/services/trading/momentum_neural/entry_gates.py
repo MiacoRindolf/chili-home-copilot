@@ -6645,6 +6645,63 @@ def cup_and_handle_confirmation(
             debug.update(_l2patch)
             return False, f"cup_and_handle_{_reason}", debug
 
+        # ── A6 (clro-p1) TOPPING-TAIL ANTICIPATORY EARLY FIRE ──────────────────────────────
+        # Ross's biggest challenge winner: "jumped in a little early to anticipate the break-
+        # through … these were BOTH topping tails … got in as volume started to pick up down
+        # here." When BOTH rim-high bars are topping tails (exhaustion wicks that will likely be
+        # cleared on the next thrust), fire EARLY on a live uptick through the handle-low reclaim
+        # level (handle_low x (1 + the SAME min_reclaim_bps base tick_scalp uses)) + the existing
+        # volume-surge leg, BEFORE waiting for a full new-high above the rim. Stop UNCHANGED
+        # (handle low). EVERY guard above (backside/front-side, extension, L2 seller veto) has
+        # already run; the tape-required fail-closed gate runs below before this returns True.
+        # FAIL-CLOSED on unreadable rim-bar wick geometry ⇒ no early path (rim-break only).
+        if (
+            bool(getattr(settings, "chili_momentum_cup_handle_anticipatory_enabled", False))
+            and live_price is not None and float(live_price) > 0
+        ):
+            try:
+                from .candles import is_topping_tail
+
+                _open = df["Open"].astype(float)
+                _o1, _hi1, _lo1, _c1 = float(_open.iloc[i1]), float(high.iloc[i1]), float(low.iloc[i1]), float(close.iloc[i1])
+                _o2, _hi2, _lo2, _c2 = float(_open.iloc[i2]), float(high.iloc[i2]), float(low.iloc[i2]), float(close.iloc[i2])
+                _both_topping = is_topping_tail(_o1, _hi1, _lo1, _c1) and is_topping_tail(_o2, _hi2, _lo2, _c2)
+                debug["rim_both_topping_tails"] = bool(_both_topping)
+            except Exception:
+                _both_topping = False  # unreadable wick geometry ⇒ fail-closed to rim-break only
+            if _both_topping:
+                # reclaim level = handle_low x (1 + min_reclaim_bps) — the SAME base tick_scalp
+                # uses (getattr default 8.0 bps); no new magic number.
+                _reclaim_bps = float(getattr(settings, "chili_momentum_tick_first_pullback_min_reclaim_bps", 8.0) or 8.0)
+                _reclaim_level = handle_low * (1.0 + max(0.0, _reclaim_bps) / 10_000.0)
+                debug["anticipatory_reclaim_level"] = round(_reclaim_level, 6)
+                debug["anticipatory_reclaim_bps"] = _reclaim_bps
+                if float(live_price) > _reclaim_level:
+                    # the existing volume-surge leg (the SAME break-bar surge the rim-break path
+                    # requires) must also confirm — an early fire still needs volume coming in.
+                    _vr = arrays.get("volume_ratio") or []
+                    _vol_ratio = None
+                    try:
+                        _vol_ratio = float(_vr[cur]) if cur < len(_vr) and _vr[cur] is not None else None
+                    except (TypeError, ValueError):
+                        _vol_ratio = None
+                    if _vol_ratio is None:
+                        _w = vol.tail(21)
+                        _avg = float(_w.iloc[:-1].mean()) if len(_w) > 1 else float(vol.iloc[-1])
+                        _vol_ratio = (float(vol.iloc[-1]) / _avg) if _avg > 0 else 0.0
+                    _vol_mult = float(getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5)
+                    debug["anticipatory_vol_ratio"] = round(_vol_ratio, 2)
+                    if _vol_ratio >= _vol_mult:
+                        # TAPE REQUIRED + FAIL-CLOSED — the LAST gate, identical to the rim-break
+                        # fire path: buyers must be actively lifting the ask THIS tick.
+                        _atape_ok, _atape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+                        debug["anticipatory_tape_reason"] = _atape_dbg.get("reason")
+                        if _atape_ok:
+                            debug["anticipatory_topping_tail"] = True
+                            debug["live_price"] = float(live_price)
+                            return True, "cup_and_handle_anticipatory_topping_tail", debug
+                        # tape unconfirmed ⇒ do NOT fire early; fall through to the rim-break path.
+
         # TRIGGER: the first NEW HIGH above the cup rim (the double-top peak) -- either the
         # live tick already trading through the rim (tick-break) OR a completed bar that broke
         # it. Compute WHICH before the tape gate so TAPE REQUIRED applies to BOTH fire paths.

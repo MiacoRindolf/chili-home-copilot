@@ -4623,6 +4623,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_CUP_AND_HANDLE_MAX_HANDLE_BARS"),
         description="Batch C: cup-and-handle handle length — the handle is at most this many completed bars (the shallow pullback after the second top, before the breaking bar). ONE documented handle-length base knob.",
     )
+    chili_momentum_cup_handle_anticipatory_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CUP_HANDLE_ANTICIPATORY_ENABLED"),
+        description="A6 (clro-p1) cup-and-handle TOPPING-TAIL ANTICIPATORY early-fire variant. When BOTH rim-high bars are topping tails (is_topping_tail), allow an EARLY fire on a live uptick through handle_low x (1 + the SAME min_reclaim_bps base tick_scalp uses) AND the existing volume-surge leg — Ross: 'jumped in a little early to anticipate the breakthrough … these were BOTH topping tails … got in as volume started to pick up.' Stop unchanged (handle low). ALL existing guards (backside/front-side, extension, L2 seller veto, tape-required) stay ahead of the fire. Fail-closed on unreadable rim-bar wick geometry => rim-break only. false => byte-identical to the rim-break-only path.",
+    )
     # E2 — CATALYST GRADING + WEAK HARD GATE. weak_catalyst_symbols() (dilution/compliance/
     # legal) existed only as a soft viability de-boost; it never gated the arm queue. Ross
     # DISTRUSTS weak catalysts (fade predictors) and favors STRONG (FDA/M&A/contract). When
