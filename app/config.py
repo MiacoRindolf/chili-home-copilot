@@ -4530,9 +4530,13 @@ class Settings(BaseSettings):
         default="hybrid",
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_TRIGGER_MODE"),
     )
-    # Timeframe for the Ross pullback-break trigger (1m = scalp, 5m = default).
+    # Timeframe for the Ross pullback-break trigger. DURABLE DEFAULT = "1m" (the scalp clock).
+    # WAVE-4 ITEM-0: flipped 5m->1m so a future dropped env pin can't silently regress to the
+    # 5m clock — that was THE −$137 bug (2026-07-02: both IPW trades bench on a 1m frame; on 5m
+    # they armed below-VWAP and cost −$136.93). The live env pin (CHILI_MOMENTUM_PULLBACK_ENTRY_INTERVAL=1m)
+    # and this default now MATCH, so the binding-assert manifest (FIX-9) expects "1m" both ways.
     chili_momentum_pullback_entry_interval: str = Field(
-        default="5m",
+        default="1m",
         validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ENTRY_INTERVAL"),
     )
     # ── Tick-scalp one-shot latch: placeability gate (STEP-B #12) ──

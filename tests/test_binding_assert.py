@@ -38,10 +38,12 @@ def test_clean_settings_all_ok_and_no_raise(caplog):
 
 
 def _drifted_settings():
-    """A settings clone with ONE deploy-critical pin dropped: the pullback interval
-    reverted to a wrong timeframe (the −$137 class), everything else intact."""
+    """A settings clone with ONE deploy-critical pin drifted (the stop-ratchet flag,
+    forced below). The pullback interval is kept at the durable default "1m" (WAVE-4
+    ITEM-0: the default is now "1m" so a dropped env pin can't regress to the 5m clock),
+    everything else intact."""
     kw = {
-        "chili_momentum_pullback_entry_interval": "5m",
+        "chili_momentum_pullback_entry_interval": "1m",
         "chili_momentum_midday_deweight_enabled": settings.chili_momentum_midday_deweight_enabled,
         "chili_momentum_run_r_breaker_enabled": settings.chili_momentum_run_r_breaker_enabled,
         "chili_momentum_stop_ratchet_strict_enabled": settings.chili_momentum_stop_ratchet_strict_enabled,
