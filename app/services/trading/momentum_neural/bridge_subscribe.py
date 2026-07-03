@@ -42,24 +42,38 @@ def request_bridge_subscription(
     at the read side (the bridge de-dups against its current watch set); a repeated write within
     the fast window is harmless (just refreshes the freshness). Never raises — a failed hint must
     NEVER break the ignition/alert path that called it.
+
+    F3 (capture-g fix): the INSERT runs inside a SAVEPOINT (``db.begin_nested()``). The hint
+    shares the caller's session/transaction (the ignition score's viability/hub writes commit
+    together with it); a plain failed INSERT — e.g. the table missing on a pre-mig-313 env —
+    ABORTED the whole shared transaction, and swallowing the exception did NOT un-abort it, so
+    the caller's ``db.commit()`` raised and EVERY ignition score for that tick rolled back. The
+    savepoint confines the failure to the hint: on error we roll back TO the savepoint and the
+    outer transaction stays healthy. Symbol is truncated to the column's VARCHAR(16).
     """
     if not bool(getattr(settings, "chili_momentum_bridge_subscribe_on_alert_enabled", True)):
         return False
     sym = str(symbol or "").strip().upper()
     if not sym or sym.endswith("-USD"):  # equities only (the IQFeed L1/L2 bridges are equity)
         return False
+    sym = sym[:16]  # momentum_bridge_subscribe_requests.symbol is VARCHAR(16)
     _at = (now_utc or datetime.now(timezone.utc)).replace(tzinfo=None)
     try:
-        db.execute(
-            _sql(
-                "INSERT INTO momentum_bridge_subscribe_requests (symbol, requested_at, reason) "
-                "VALUES (:s, :at, :r)"
-            ),
-            {"s": sym, "at": _at, "r": str(reason)[:32]},
-        )
+        # SAVEPOINT: a failed hint INSERT must not poison the caller's transaction (the
+        # ignition viability writes). begin_nested rolls back to the savepoint on error,
+        # leaving the outer transaction committable.
+        with db.begin_nested():
+            db.execute(
+                _sql(
+                    "INSERT INTO momentum_bridge_subscribe_requests "
+                    "(symbol, requested_at, reason) VALUES (:s, :at, :r)"
+                ),
+                {"s": sym, "at": _at, "r": str(reason)[:32]},
+            )
         return True
     except Exception:
-        # the caller owns the transaction; a failed hint is non-fatal — do not raise.
+        # non-fatal by contract: missing table (pre-mig-313) / constraint / transient DB error
+        # -> the savepoint already rolled back; the outer transaction is untouched.
         _log.debug("[bridge_subscribe] hint write failed sym=%s", sym, exc_info=True)
         return False
 

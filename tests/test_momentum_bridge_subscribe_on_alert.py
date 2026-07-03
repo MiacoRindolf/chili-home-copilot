@@ -85,12 +85,32 @@ def test_select_skips_garbage_and_crypto():
 class _CaptureDB:
     def __init__(self):
         self.calls = []
+        self.savepoints_opened = 0
+        self.savepoints_rolled_back = 0
+
+    def begin_nested(self):  # F3: Session-shaped SAVEPOINT context manager
+        outer = self
+
+        class _SP:
+            def __enter__(self_sp):
+                outer.savepoints_opened += 1
+                return self_sp
+
+            def __exit__(self_sp, exc_type, exc, tb):
+                if exc_type is not None:
+                    outer.savepoints_rolled_back += 1
+                return False  # propagate — request_bridge_subscription swallows
+
+        return _SP()
 
     def execute(self, stmt, params=None):
         self.calls.append((str(stmt), params))
 
 
-class _RaisingDB:
+class _RaisingDB(_CaptureDB):
+    """F3: the INSERT itself fails (missing table / db down) — the savepoint must roll
+    back and the wrapper must swallow (outer transaction untouched)."""
+
     def execute(self, *a, **k):
         raise RuntimeError("db down")
 
@@ -140,6 +160,59 @@ def test_request_never_raises_on_db_error(monkeypatch):
     monkeypatch.setattr(bs, "settings", _S(chili_momentum_bridge_subscribe_on_alert_enabled=True))
     # a failed hint must NEVER break the ignition path that called it.
     assert request_bridge_subscription(_RaisingDB(), "VWAV") is False
+
+
+def test_request_uses_savepoint_success_and_rollback_on_failure(monkeypatch):
+    """F3: the INSERT runs inside a SAVEPOINT so a failed hint can never abort the caller's
+    shared ignition transaction (pre-mig-313 missing table = every score lost)."""
+    import app.services.trading.momentum_neural.bridge_subscribe as bs
+
+    monkeypatch.setattr(bs, "settings", _S(chili_momentum_bridge_subscribe_on_alert_enabled=True))
+    ok_db = _CaptureDB()
+    assert request_bridge_subscription(ok_db, "VWAV", now_utc=NOW) is True
+    assert ok_db.savepoints_opened == 1 and ok_db.savepoints_rolled_back == 0
+    bad_db = _RaisingDB()
+    assert request_bridge_subscription(bad_db, "VWAV", now_utc=NOW) is False
+    assert bad_db.savepoints_opened == 1 and bad_db.savepoints_rolled_back == 1
+
+
+def test_request_truncates_symbol_to_varchar16(monkeypatch):
+    """F3: the column is VARCHAR(16); an over-long symbol must be truncated, not error."""
+    import app.services.trading.momentum_neural.bridge_subscribe as bs
+
+    monkeypatch.setattr(bs, "settings", _S(chili_momentum_bridge_subscribe_on_alert_enabled=True))
+    db = _CaptureDB()
+    assert request_bridge_subscription(db, "A" * 40, now_utc=NOW) is True
+    assert db.calls[0][1]["s"] == "A" * 16
+
+
+def test_failed_hint_does_not_poison_outer_transaction(db, monkeypatch):
+    """F3 end-to-end (real Session): drop the table so the hint INSERT fails, then prove the
+    OUTER transaction still commits cleanly — the exact pre-mig-313 poisoning scenario."""
+    import sqlalchemy as _sa
+
+    import app.services.trading.momentum_neural.bridge_subscribe as bs
+    from app.migrations import _migration_313_momentum_bridge_subscribe_requests
+
+    monkeypatch.setattr(bs, "settings", _S(chili_momentum_bridge_subscribe_on_alert_enabled=True))
+    db.execute(_sa.text("DROP TABLE IF EXISTS momentum_bridge_subscribe_requests"))
+    db.commit()
+    # an unrelated write in the SAME transaction (stands in for the ignition viability write)
+    db.execute(_sa.text(
+        "CREATE TABLE IF NOT EXISTS _f3_probe (id INT); INSERT INTO _f3_probe VALUES (1)"
+    ))
+    assert request_bridge_subscription(db, "VWAV") is False  # table missing -> hint fails
+    # the outer transaction MUST still be committable (savepoint confined the abort)
+    db.commit()
+    n = db.execute(_sa.text("SELECT count(*) FROM _f3_probe")).scalar()
+    assert n == 1
+    db.execute(_sa.text("DROP TABLE IF EXISTS _f3_probe"))
+    db.commit()
+    # restore the coordination table for any later test — on a SEPARATE connection (the
+    # migration helper commits its own Connection; mixing that with Session.commit on the
+    # same connection leaves the session's root transaction inactive).
+    with db.get_bind().connect() as _c:
+        _migration_313_momentum_bridge_subscribe_requests(_c)
 
 
 # ── migration 313 (coordination table) ──────────────────────────────────────
