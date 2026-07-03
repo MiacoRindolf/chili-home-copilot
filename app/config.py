@@ -4583,6 +4583,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_GRADE_GATE_ENABLED"),
         description="E2: grade catalysts — suppress weak-catalyst (dilution/compliance/legal) equities from live eligibility and boost strong-catalyst (FDA/M&A/contract) names; medium neutral. Absent feed/crypto -> no-op. KILL-SWITCH: False -> byte-identical.",
     )
+    chili_momentum_catalyst_action_grading_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_ACTION_GRADING_ENABLED"),
+        description="Ross-batch2 QUCY-vs-ILLR lesson: grade a STRONG catalyst higher/lower by HEADLINE VERB QUALITY + DOLLAR AMOUNT. Completed-action verbs (acquires/signed/definitive agreement/awarded) BOOST; tentative/pursuit verbs (approves pursuit/explores/letter of intent) DE-BOOST (the +24%-fade class); a headline dollar amount ($400M) ADDS a boost scaled adaptively vs market cap (else >= $100M strong / >= $10M moderate). Fail-closed: no verb/dollar signal -> unchanged. KILL-SWITCH: False -> byte-identical.",
+    )
     # Entry trigger mode: "hybrid" (Ross pullback-break on 1m/5m, momentum_volume
     # fallback), "pullback_break" (pullback only), or "momentum_volume" (legacy 15m).
     chili_momentum_entry_trigger_mode: str = Field(

@@ -2082,6 +2082,38 @@ def run_momentum_neural_tick(
     except Exception:
         pass
 
+    # ── Ross-batch2: ACTION-COMPLETENESS + DOLLAR-AMOUNT catalyst grade (QUCY-vs-ILLR) ──────
+    # Refine the STRONG-catalyst selection boost by HEADLINE VERB QUALITY + DOLLAR MAGNITUDE:
+    # a completed-action / big-dollar headline (ILLR "$400M to acquire") gets an ADDED positive
+    # delta; a tentative / pursuit headline (QUCY "approves pursuit") an ADDED negative delta.
+    # ADAPTIVE dollar-vs-market-cap when the mover's market cap is on its signal (a $400M deal on
+    # a $200M-cap micro-float is material regardless of the absolute tier). Same per-pass news
+    # fetch the strong/weak graders use (no new feed). Flag OFF / no signal / absent feed -> empty
+    # map -> the strong boost is byte-identical. JSON-safe {ticker: delta} stamped into meta so
+    # viability's catalyst_grade_selection_delta can add it. docs/.../AUDIT_REPORT_BATCH2.md row #9
+    try:
+        if bool(getattr(settings, "chili_momentum_catalyst_action_grading_enabled", True)):
+            from .catalyst import action_grade_deltas_by_symbol
+
+            _mkt_caps: dict[str, float] = {}
+            for _s, _sig in (meta.get("ross_signals") or {}).items():
+                if not isinstance(_sig, dict):
+                    continue
+                _su = str(_s).upper()
+                if _su.endswith("-USD"):
+                    continue
+                _mc = _pick_num(_sig, ("market_cap", "marketcap"))
+                if _mc and _mc > 0:
+                    _mkt_caps[_su] = float(_mc)
+            _action_deltas = action_grade_deltas_by_symbol(market_caps=_mkt_caps or None)
+            if _action_deltas:
+                # JSON-safe (str keys, float values); only non-zero deltas are present.
+                meta["catalyst_action_deltas"] = {
+                    str(k): round(float(v), 6) for k, v in _action_deltas.items()
+                }
+    except Exception:
+        pass
+
     ctx_meta = {
         k: meta[k]
         for k in (
@@ -2102,6 +2134,7 @@ def run_momentum_neural_tick(
             "weak_catalyst_symbols",
             "strong_catalyst_symbols",
             "fake_catalyst_symbols",
+            "catalyst_action_deltas",
             "sympathy_symbols",
             "theme_sympathy_symbols",
             "top_market_gainers",
