@@ -343,6 +343,18 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
                         {"d": int(RETENTION_DAYS)})
             except Exception as e:
                 log.debug("retention prune failed: %s", e)
+            # F7 (capture-g fix): drain the subscribe-hint coordination table too — hints are
+            # only meaningful for the ~180s fresh window; without a sweep the table grew
+            # unbounded (the mig313 docstring promised a retention sweep — this makes it
+            # true). Own transaction + own try so a missing table (pre-mig-313 env) can
+            # never roll back the tick prune above.
+            try:
+                with engine.begin() as c:
+                    c.execute(sa.text(
+                        "DELETE FROM momentum_bridge_subscribe_requests "
+                        "WHERE requested_at < (now() at time zone 'utc') - make_interval(hours => 48)"))
+            except Exception as e:
+                log.debug("subscribe-requests prune failed: %s", e)
             last_prune = time.monotonic()
         if time.monotonic() - last_refresh >= REFRESH_S:
             if _limit_hit:                          # adaptive: IQFeed signalled its symbol limit -> back off
