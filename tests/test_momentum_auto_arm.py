@@ -27,7 +27,12 @@ class _FakeDB:
 
 
 def _cand(symbol="RSC-USD", variant_id=8, score=0.61):
-    return SimpleNamespace(symbol=symbol, variant_id=variant_id, viability_score=score)
+    return SimpleNamespace(
+        symbol=symbol,
+        variant_id=variant_id,
+        viability_score=score,
+        execution_readiness_json={},
+    )
 
 
 @pytest.fixture
@@ -37,6 +42,7 @@ def happy(monkeypatch):
     monkeypatch.setattr(aa.settings, "chili_momentum_auto_arm_live_scheduler_enabled", True, raising=False)
     monkeypatch.setattr(aa.settings, "chili_momentum_live_runner_enabled", True, raising=False)
     monkeypatch.setattr(aa.settings, "chili_autotrader_user_id", 1, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_momentum_decouple_watching_enabled", False, raising=False)
     # ── Crypto live-arm gates added AFTER this fixture (PR #675 crypto-live-off,
     #    PR #685 liquidity floor): the happy-path candidates are crypto (-USD), so
     #    neutralize the new gates here. These are settings/time/data seams, not the
@@ -45,6 +51,7 @@ def happy(monkeypatch):
     monkeypatch.setattr(aa.settings, "chili_momentum_crypto_live_arm_enabled", True, raising=False)
     monkeypatch.setattr(aa.settings, "chili_momentum_crypto_pause_during_us_session", False, raising=False)
     monkeypatch.setattr(aa.settings, "chili_crypto_schedule_enabled", False, raising=False)
+    monkeypatch.setattr(aa.settings, "chili_momentum_ross_equity_universe_required", False, raising=False)
     # Post-reap cooldown (#701) writes reaped crypto names into a module-global dict;
     # disable it here so a happy-path arm is deterministic and never order-dependent on
     # whatever the reaper unit-tests left in aa._REAP_COOLDOWN (0 = cooldown off).
@@ -545,17 +552,46 @@ def test_equity_only_skips_crypto(happy):
     happy.setattr(aa.settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
     happy.setattr(aa.settings, "chili_momentum_auto_arm_equity_only", True, raising=False)
     happy.setattr(
+        aa,
+        "_ross_snapshot_rows_by_symbol",
+        lambda: {
+            "MOVE": {
+                "ticker": "MOVE",
+                "lastTrade": {"p": 4.25},
+                "day": {"v": 400_000},
+                "todaysChangePerc": 18.0,
+            }
+        },
+    )
+    happy.setattr(
         aa, "_fresh_live_eligible_candidates",
-        lambda db, *, limit: [_cand("KAIO-USD", 8, 0.80), _cand("ARKK", 8, 0.55)],
+        lambda db, *, limit, ross_universe_symbols=None: [_cand("KAIO-USD", 8, 0.80), _cand("MOVE", 8, 0.55)],
     )
     happy.setattr(aa, "_symbol_market_open", lambda sym: True)
     happy.setattr(aa, "_entry_trigger_fires", lambda sym: (True, "momentum_ok"))
     out = aa.run_auto_arm_pass(_FakeDB())
     assert out["armed"] == 1
-    assert out["symbol"] == "ARKK"  # crypto KAIO-USD excluded by equity-only focus
+    assert out["symbol"] == "MOVE"  # crypto KAIO-USD excluded by equity-only focus
 
 
 # ── Adaptive concurrency (equity-relative, risk-bounded) ──────────────────────
+
+def test_ross_required_empty_universe_refuses_generic_equity_fallback(happy):
+    happy.setattr(aa.settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
+    happy.setattr(aa.settings, "chili_momentum_auto_arm_equity_only", True, raising=False)
+    happy.setattr(aa.settings, "chili_momentum_ross_equity_universe_required", True, raising=False)
+    happy.setattr(aa, "_ross_snapshot_rows_by_symbol", lambda: {})
+
+    def _must_not_fetch_candidates(*_a, **_k):
+        raise AssertionError("generic viability candidates must not be fetched for an empty Ross universe")
+
+    happy.setattr(aa, "_fresh_live_eligible_candidates", _must_not_fetch_candidates)
+    out = aa.run_auto_arm_pass(_FakeDB())
+
+    assert out["skipped"] == "no_fresh_live_eligible"
+    assert out["ross_universe_symbols"] == 0
+    assert out["scanned"] == 0
+
 
 def test_adaptive_concurrency_falls_back_to_base_without_equity(monkeypatch):
     """No equity available -> use the fixed base cap (never scale against unknown equity)."""

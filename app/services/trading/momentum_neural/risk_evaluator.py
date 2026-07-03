@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import time
 from typing import Any, Iterable, Optional
 
 from sqlalchemy.orm import Session
@@ -39,6 +40,9 @@ _CONCURRENT_STATES = (
     frozenset(PAPER_CONCURRENT_STATES) | frozenset(LIVE_INTENT_STATES) | frozenset(LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY)
 )
 
+_ROSS_RISK_SNAPSHOT_TS = 0.0
+_ROSS_RISK_SNAPSHOT_ROWS: dict[str, dict[str, Any]] = {}
+
 
 def _utcnow() -> datetime:
     # REPLAY v3 P2: route through the SAME sim-clock chokepoint the live runner uses
@@ -69,6 +73,107 @@ def _check(
     detail: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     return {"id": cid, "ok": ok, "severity": severity, "message": message, "detail": detail or {}}
+
+
+def _ross_lane_universe_required(*, mode: str, execution_family: str, symbol: str) -> bool:
+    """True when live equity admission is using the Ross equity lane."""
+    if str(mode or "").lower().strip() != "live":
+        return False
+    if not bool(getattr(settings, "chili_momentum_ross_equity_universe_required", True)):
+        return False
+    sym = str(symbol or "").strip().upper()
+    if not sym or "-USD" in sym:
+        return False
+    try:
+        return asset_class_of_execution_family(normalize_execution_family(execution_family)) == "equity"
+    except Exception:
+        return False
+
+
+def _ross_signal_from_viability(via: MomentumSymbolViability | None, symbol: str) -> dict[str, Any] | None:
+    if via is None:
+        return None
+    try:
+        from .tick_scalp import ross_signal_for_symbol
+
+        return ross_signal_for_symbol(via.execution_readiness_json, symbol)
+    except Exception:
+        return None
+
+
+def _ross_risk_snapshot_rows() -> dict[str, dict[str, Any]]:
+    """Cached full-market snapshot map for filling missing Ross universe fields."""
+    global _ROSS_RISK_SNAPSHOT_TS, _ROSS_RISK_SNAPSHOT_ROWS
+    try:
+        from .universe import EQUITY_ROSS_SMALLCAP
+
+        ttl = float(EQUITY_ROSS_SMALLCAP.snapshot_max_age_seconds or 300.0)
+    except Exception:
+        ttl = 300.0
+    now = time.monotonic()
+    if _ROSS_RISK_SNAPSHOT_ROWS and (now - _ROSS_RISK_SNAPSHOT_TS) <= ttl:
+        return _ROSS_RISK_SNAPSHOT_ROWS
+    try:
+        from ...massive_client import get_full_market_snapshot
+        from .universe import EQUITY_ROSS_SMALLCAP
+
+        snapshot = get_full_market_snapshot(
+            max_age_seconds=EQUITY_ROSS_SMALLCAP.snapshot_max_age_seconds
+        ) or []
+    except Exception:
+        return _ROSS_RISK_SNAPSHOT_ROWS
+    rows: dict[str, dict[str, Any]] = {}
+    for row in snapshot:
+        if not isinstance(row, dict):
+            continue
+        ticker = str(row.get("ticker") or "").strip().upper()
+        if ticker:
+            rows[ticker] = row
+    _ROSS_RISK_SNAPSHOT_ROWS = rows
+    _ROSS_RISK_SNAPSHOT_TS = now
+    return rows
+
+
+def _ross_lane_universe_check(symbol: str, via: MomentumSymbolViability | None) -> tuple[bool, str, dict[str, Any]]:
+    """Hard Ross equity instrument-class check for final live admission."""
+    try:
+        from .universe import ross_smallcap_profile_evidence
+
+        signal = _ross_signal_from_viability(via, symbol)
+        ok, reason, detail = ross_smallcap_profile_evidence(symbol, signal=signal)
+        if ok or reason not in {
+            "ross_universe_missing_price",
+            "ross_universe_missing_dollar_volume",
+            "ross_universe_missing_change_pct",
+        }:
+            return bool(ok), str(reason or ""), dict(detail or {})
+        snapshot_row = _ross_risk_snapshot_rows().get(str(symbol or "").strip().upper())
+        if snapshot_row:
+            ok, reason, detail = ross_smallcap_profile_evidence(
+                symbol,
+                signal=signal,
+                snapshot_row=snapshot_row,
+            )
+            detail = dict(detail or {})
+            detail["snapshot_backfill_used"] = True
+        return bool(ok), str(reason or ""), dict(detail or {})
+    except Exception as exc:
+        return False, "ross_universe_risk_check_error", {"error": str(exc)[:160]}
+
+
+def _ross_lane_universe_message(ok: bool, reason: str | None) -> str:
+    if ok:
+        return "Ross equity universe proof present."
+    r = str(reason or "").strip()
+    if r == "ross_universe_price_above_profile":
+        return "Ross equity lane blocks broad/mega-cap equity candidate."
+    if r == "ross_universe_price_below_profile":
+        return "Ross equity lane blocks sub-dollar/non-profile equity candidate."
+    if r in {"ross_universe_change_below_profile", "ross_universe_dollar_volume_below_profile"}:
+        return "Ross equity lane blocks faded/thin small-cap candidate below profile."
+    if r.startswith("ross_universe_missing_"):
+        return "Ross equity lane blocks candidate with incomplete Ross universe proof."
+    return "Ross equity lane blocks non-profile equity candidate."
 
 
 def aggregate_open_risk_usd(db: Session, *, user_id: int) -> tuple[float, list[dict[str, Any]]]:
@@ -1053,41 +1158,64 @@ def evaluate_proposed_momentum_automation(
                         _check("live_eligible", True, severity="ok", message="Live eligible")
                     )
                 else:
-                    # TOCTOU recency grace: a fast/thin premarket vertical can FLICKER
-                    # live_eligible False at the exact entry instant even though the name
-                    # armed+confirmed live-eligible seconds earlier (UPC +500%, 2026-06-29).
-                    # If the session was live-eligible at arm/confirm within the grace window
-                    # AND live forward momentum is present, DOWNGRADE the terminal block to a
-                    # warn so a transient flicker can't veto a just-confirmed active mover.
-                    # FAIL-SAFE: no recent-eligible evidence / no momentum => keep the block.
-                    grace_active, grace_detail = _live_eligible_recency_grace_active(
-                        policy=policy,
-                        recent_live_eligible_at_utc=recent_live_eligible_at_utc,
-                        live_forward_momentum=live_forward_momentum,
-                    )
-                    if grace_active:
+                    ross_profile_live_ok = False
+                    ross_profile_detail: dict[str, Any] = {}
+                    if _ross_lane_universe_required(mode=m, execution_family=ef, symbol=sym):
+                        try:
+                            ross_profile_live_ok, _ross_profile_reason, ross_profile_detail = (
+                                _ross_lane_universe_check(sym, via)
+                            )
+                            ross_profile_detail = dict(ross_profile_detail or {})
+                            ross_profile_detail["ross_profile_live_eligible_backfill"] = True
+                        except Exception:
+                            ross_profile_live_ok = False
+                            ross_profile_detail = {}
+                    if ross_profile_live_ok:
                         checks.append(
                             _check(
                                 "live_eligible",
                                 True,
-                                severity="warn",
-                                message=(
-                                    "Live-eligibility FLICKER tolerated by recency grace "
-                                    "(recent-eligible at arm/confirm + live forward momentum)."
-                                ),
-                                detail=grace_detail,
+                                severity="ok",
+                                message="Ross profile proof satisfies live eligibility.",
+                                detail=ross_profile_detail,
                             )
                         )
                     else:
-                        checks.append(
-                            _check(
-                                "live_eligible",
-                                False,
-                                severity="block",
-                                message="Not live-eligible per neural viability.",
-                                detail=grace_detail,
-                            )
+                        # TOCTOU recency grace: a fast/thin premarket vertical can FLICKER
+                        # live_eligible False at the exact entry instant even though the name
+                        # armed+confirmed live-eligible seconds earlier (UPC +500%, 2026-06-29).
+                        # If the session was live-eligible at arm/confirm within the grace window
+                        # AND live forward momentum is present, DOWNGRADE the terminal block to a
+                        # warn so a transient flicker can't veto a just-confirmed active mover.
+                        # FAIL-SAFE: no recent-eligible evidence / no momentum => keep the block.
+                        grace_active, grace_detail = _live_eligible_recency_grace_active(
+                            policy=policy,
+                            recent_live_eligible_at_utc=recent_live_eligible_at_utc,
+                            live_forward_momentum=live_forward_momentum,
                         )
+                        if grace_active:
+                            checks.append(
+                                _check(
+                                    "live_eligible",
+                                    True,
+                                    severity="warn",
+                                    message=(
+                                        "Live-eligibility FLICKER tolerated by recency grace "
+                                        "(recent-eligible at arm/confirm + live forward momentum)."
+                                    ),
+                                    detail=grace_detail,
+                                )
+                            )
+                        else:
+                            checks.append(
+                                _check(
+                                    "live_eligible",
+                                    False,
+                                    severity="block",
+                                    message="Not live-eligible per neural viability.",
+                                    detail=grace_detail,
+                                )
+                            )
             else:
                 checks.append(
                     _check(
@@ -1099,6 +1227,18 @@ def evaluate_proposed_momentum_automation(
                 )
 
         # ── Execution readiness (spread / slip / fee) ──────────────────
+            if _ross_lane_universe_required(mode=m, execution_family=ef, symbol=sym):
+                ross_ok, ross_reason, ross_detail = _ross_lane_universe_check(sym, via)
+                checks.append(
+                    _check(
+                        "ross_equity_universe",
+                        ross_ok,
+                        severity="ok" if ross_ok else "block",
+                        message=_ross_lane_universe_message(ross_ok, ross_reason),
+                        detail={**dict(ross_detail or {}), "reason": ross_reason},
+                    )
+                )
+
         ex = via.execution_readiness_json if isinstance(via.execution_readiness_json, dict) else {}
         nums = _readiness_numbers(ex)
         # Live spread cap is volatility-relative (adaptive) when the caller passes

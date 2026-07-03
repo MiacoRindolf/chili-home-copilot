@@ -3115,6 +3115,15 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_WS_IGNITION_ENABLED"),
         description="Enable the additive WS ignition scorer: subscribe the (uncapped) equity universe on the price bus and, the instant a tick shows a name igniting (intraday move% ≥ the ignition floor), score it DIRECTLY into momentum_symbol_viability — bypassing the EMA9 continuation gate that emits nothing for a vertical name (e.g. RGNT +498% nowhere near its EMA9). The scheduled 5-min batch builder + legacy pattern lane are unchanged; this path is purely additive. 0 = scheduled-only (no WS ignition; byte-identical to current).",
     )
+    chili_momentum_ross_equity_universe_required: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_EQUITY_UNIVERSE_REQUIRED"),
+        description=(
+            "Require live equity momentum entries on the Ross/Robinhood lane to prove "
+            "they belong to the Ross small-cap active-mover universe. This is an "
+            "entry-time invariant, not a candidate-cap increase."
+        ),
+    )
     chili_momentum_ignition_min_pct: float = Field(
         default=3.0,
         ge=0.0,

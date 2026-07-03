@@ -11,6 +11,7 @@ from app.services.trading.momentum_neural.universe import (
     UniverseProfile,
     _pos_in_range,
     build_equity_universe,
+    ross_smallcap_profile_evidence,
 )
 from app.config import settings
 
@@ -42,6 +43,28 @@ def test_rejects_megacaps_pennies_downs_and_illiquids():
     out = set(build_equity_universe(EQUITY_ROSS_SMALLCAP, snapshot=_SNAP))
     for rejected in ("MEGA", "HIGH", "PENNY", "DOWN", "ILLIQ", "FLAT"):
         assert rejected not in out
+
+
+def test_ross_profile_evidence_rejects_broad_high_price_signal():
+    ok, reason, detail = ross_smallcap_profile_evidence(
+        "AAPL",
+        signal={"price": 185.0, "daily_change_pct": 8.0, "dollar_volume": 50_000_000.0},
+    )
+
+    assert ok is False
+    assert reason == "ross_universe_price_above_profile"
+    assert detail["price"] == 185.0
+
+
+def test_ross_profile_evidence_accepts_low_price_active_signal():
+    ok, reason, detail = ross_smallcap_profile_evidence(
+        "MOVE",
+        signal={"price": 4.25, "todays_change_perc": 18.0, "volume": 400_000},
+    )
+
+    assert ok is True
+    assert reason == "ross_universe_profile_ok"
+    assert detail["dollar_volume"] == 1_700_000.0
 
 
 def test_max_universe_cap(monkeypatch):

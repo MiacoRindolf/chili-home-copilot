@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.core import User
-from app.models.trading import MomentumStrategyVariant, TradingAutomationSession
+from app.models.trading import MomentumStrategyVariant, MomentumSymbolViability, TradingAutomationSession
 from app.services.trading.momentum_neural.context import build_momentum_regime_context
 from app.services.trading.momentum_neural.features import ExecutionReadinessFeatures
 from app.services.trading.momentum_neural.persistence import ensure_momentum_strategy_variants, persist_neural_momentum_tick
@@ -54,6 +54,38 @@ def _seed_live_eligible_row(db: Session, *, symbol: str = "SOL-USD") -> tuple[in
     )
     db.commit()
     v = db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.family == "impulse_breakout").one()
+    return v.id, v
+
+
+def _seed_equity_live_row(
+    db: Session,
+    *,
+    symbol: str,
+    signal: dict,
+) -> tuple[int, MomentumStrategyVariant]:
+    ensure_momentum_strategy_variants(db)
+    db.commit()
+    v = db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.family == "impulse_breakout").one()
+    row = MomentumSymbolViability(
+        symbol=symbol,
+        scope="symbol",
+        variant_id=v.id,
+        viability_score=0.91,
+        paper_eligible=True,
+        live_eligible=True,
+        freshness_ts=datetime.utcnow(),
+        regime_snapshot_json={"regime": "test"},
+        execution_readiness_json={
+            "spread_bps": 5.0,
+            "extra": {"ross_signals": {symbol.upper(): signal}},
+        },
+        explain_json={},
+        evidence_window_json={},
+        source_node_id="test",
+        correlation_id=f"risk-ross-{symbol}",
+    )
+    db.add(row)
+    db.commit()
     return v.id, v
 
 
@@ -144,6 +176,54 @@ def test_evaluate_paper_not_blocked_by_kill_switch_default(db: Session) -> None:
             mode="paper",
         )
     assert ev["allowed"] is True
+
+
+def test_live_equity_risk_blocks_non_ross_universe_broad_cap(monkeypatch, db: Session) -> None:
+    monkeypatch.setattr(settings, "chili_momentum_ross_equity_universe_required", True, raising=False)
+    vid, _ = _seed_equity_live_row(
+        db,
+        symbol="AAPL",
+        signal={"price": 185.0, "daily_change_pct": 8.0, "dollar_volume": 50_000_000.0},
+    )
+    uid = _uid(db, "ross_broad")
+
+    ev = evaluate_proposed_momentum_automation(
+        db,
+        user_id=uid,
+        symbol="AAPL",
+        variant_id=vid,
+        mode="live",
+        execution_family="robinhood_spot",
+    )
+    check = next(c for c in ev["checks"] if c["id"] == "ross_equity_universe")
+
+    assert ev["allowed"] is False
+    assert check["ok"] is False
+    assert check["severity"] == "block"
+    assert check["detail"]["reason"] == "ross_universe_price_above_profile"
+
+
+def test_live_equity_risk_accepts_ross_universe_profile(monkeypatch, db: Session) -> None:
+    monkeypatch.setattr(settings, "chili_momentum_ross_equity_universe_required", True, raising=False)
+    vid, _ = _seed_equity_live_row(
+        db,
+        symbol="MOVE",
+        signal={"price": 4.25, "todays_change_perc": 18.0, "volume": 400_000},
+    )
+    uid = _uid(db, "ross_profile")
+
+    ev = evaluate_proposed_momentum_automation(
+        db,
+        user_id=uid,
+        symbol="MOVE",
+        variant_id=vid,
+        mode="live",
+        execution_family="robinhood_spot",
+    )
+    check = next(c for c in ev["checks"] if c["id"] == "ross_equity_universe")
+
+    assert check["ok"] is True
+    assert check["detail"]["reason"] == "ross_universe_profile_ok"
 
 
 def test_concurrency_blocks_second_paper_draft(monkeypatch, db: Session) -> None:

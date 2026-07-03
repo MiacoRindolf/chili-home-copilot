@@ -249,6 +249,165 @@ def _snapshot_today_shares(s: dict) -> float | None:
     return v if v > 0 else None
 
 
+def _first_num(mapping: dict | None, *keys: str) -> float | None:
+    if not isinstance(mapping, dict):
+        return None
+    for key in keys:
+        value = _f(mapping.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _signal_price(signal: dict | None) -> float | None:
+    return _first_num(
+        signal,
+        "price",
+        "last_price",
+        "alert_price",
+        "hod_price",
+        "close",
+        "last",
+        "last_trade_price",
+        "lastTradePrice",
+    )
+
+
+def _signal_change_pct(signal: dict | None) -> float | None:
+    return _first_num(
+        signal,
+        "daily_change_pct",
+        "todays_change_perc",
+        "todaysChangePerc",
+        "change_pct",
+        "percent_change",
+        "gap_pct",
+        "pct_change",
+        "change",
+    )
+
+
+def _signal_dollar_volume(signal: dict | None, price: float | None) -> float | None:
+    dollar_volume = _first_num(
+        signal,
+        "dollar_volume",
+        "dollar_vol",
+        "todays_dollar_volume",
+        "today_dollar_volume",
+        "day_dollar_volume",
+        "turnover",
+        "notional_volume",
+    )
+    if dollar_volume is not None and dollar_volume > 0:
+        return dollar_volume
+    shares = _first_num(
+        signal,
+        "volume",
+        "day_volume",
+        "todays_volume",
+        "today_volume",
+        "cumulative_volume",
+        "volume_today",
+        "share_volume",
+        "shares_traded_today",
+        "v",
+    )
+    if price is None or shares is None:
+        return None
+    value = float(price) * float(shares)
+    return value if value > 0 else None
+
+
+def _normalize_ross_common_stock_symbol(value: object) -> str:
+    sym = str(value or "").strip().upper()
+    if not sym or "-USD" in sym or "/" in sym:
+        return ""
+    return sym
+
+
+def ross_smallcap_profile_evidence(
+    symbol: str,
+    *,
+    signal: dict | None = None,
+    snapshot_row: dict | None = None,
+    profile: UniverseProfile = EQUITY_ROSS_SMALLCAP,
+) -> tuple[bool, str, dict]:
+    """Hard Ross equity instrument-class gate for live auto-arm/admission.
+
+    Setup evidence still lives in the tick/Ross gates. This helper validates the
+    universe itself: low-priced, liquid-enough, already-moving equities. Missing
+    numeric proof fails closed so a generic broad-equity row cannot pass as Ross.
+    """
+    raw_sym = str(symbol or "").strip().upper()
+    sym = _normalize_ross_common_stock_symbol(raw_sym)
+    if profile.asset_class != "equity":
+        return False, "wrong_profile_asset_class", {"profile_id": profile.profile_id}
+    if not sym or "-USD" in raw_sym:
+        return False, "not_equity_symbol", {"symbol": raw_sym}
+
+    snap_price = _snapshot_price(snapshot_row) if isinstance(snapshot_row, dict) else None
+    sig_price = _signal_price(signal)
+    price = snap_price if snap_price is not None else sig_price
+
+    snap_change = (
+        _f(snapshot_row.get("todaysChangePerc"))
+        if isinstance(snapshot_row, dict)
+        else None
+    )
+    sig_change = _signal_change_pct(signal)
+    change_pct = snap_change if snap_change is not None else sig_change
+
+    snap_dollar_volume = None
+    if isinstance(snapshot_row, dict):
+        snap_shares = _snapshot_today_shares(snapshot_row)
+        if snap_price is not None and snap_shares is not None:
+            snap_dollar_volume = float(snap_price) * float(snap_shares)
+    sig_dollar_volume = _signal_dollar_volume(signal, sig_price)
+    dollar_volume = (
+        snap_dollar_volume if snap_dollar_volume is not None else sig_dollar_volume
+    )
+
+    debug = {
+        "symbol": sym,
+        "profile_id": profile.profile_id,
+        "price": price,
+        "price_source": "snapshot" if snap_price is not None else ("signal" if sig_price is not None else None),
+        "change_pct": change_pct,
+        "change_source": "snapshot" if snap_change is not None else ("signal" if sig_change is not None else None),
+        "dollar_volume": dollar_volume,
+        "dollar_volume_source": (
+            "snapshot"
+            if snap_dollar_volume is not None
+            else ("signal" if sig_dollar_volume is not None else None)
+        ),
+        "price_min": profile.price_min,
+        "price_max": profile.price_max,
+        "min_dollar_volume": profile.min_dollar_volume,
+        "min_change_pct": profile.min_change_pct,
+    }
+
+    if price is None:
+        return False, "ross_universe_missing_price", debug
+    if price <= 0:
+        return False, "ross_universe_invalid_price", debug
+    if profile.price_min is not None and price < profile.price_min:
+        return False, "ross_universe_price_below_profile", debug
+    if profile.price_max is not None and price > profile.price_max:
+        return False, "ross_universe_price_above_profile", debug
+
+    if dollar_volume is None:
+        return False, "ross_universe_missing_dollar_volume", debug
+    if profile.min_dollar_volume is not None and dollar_volume < profile.min_dollar_volume:
+        return False, "ross_universe_dollar_volume_below_profile", debug
+
+    if change_pct is None:
+        return False, "ross_universe_missing_change_pct", debug
+    if profile.min_change_pct is not None and change_pct < profile.min_change_pct:
+        return False, "ross_universe_change_below_profile", debug
+
+    return True, "ross_universe_profile_ok", debug
+
+
 def _intraday_rvol(today_shares: float | None, adv_shares: float | None) -> float | None:
     """Relative volume = today's accumulated shares ÷ the prior-day baseline (the
     ADV proxy). ``None`` (fail-closed) when either side is missing/degenerate — a
