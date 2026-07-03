@@ -1998,6 +1998,40 @@ def _identify_session_leader(rows: list[Any]) -> str | None:
         return None
 
 
+def _wildcard_dominant_symbol(db: "Session | None") -> str | None:
+    """A3: the WILDCARD-regime dominant symbol (UPPER), or None when not in a wildcard regime /
+    flag OFF / unreadable breadth (fail-closed to neutral). When a wildcard is detected this lone
+    leader is the one the lane concentrates on — the arm-queue leader (rank-boost + hoist) AND the
+    eviction-protected watch slot. Pure of side effects; never raises (fail-open to None)."""
+    try:
+        from .breadth_regime import compute_breadth_regime
+
+        reg = compute_breadth_regime(db)
+        if reg.is_wildcard and reg.dominant_symbol:
+            return str(reg.dominant_symbol).upper()
+    except Exception:
+        logger.debug("[auto_arm] wildcard dominant-symbol read failed (fail-open)", exc_info=True)
+    return None
+
+
+def _effective_session_leader(db: "Session | None", rows: list[Any]) -> str | None:
+    """A3-aware leader: in a WILDCARD regime the breadth-dominant symbol IS the leader (so it is
+    rank-boosted/hoisted + eviction-protected). Otherwise the normal explosive symbol-of-day
+    leader. Fail-closed: no wildcard => the existing ``_identify_session_leader`` (byte-identical
+    when the wildcard flag is off / breadth is unreadable)."""
+    dom = _wildcard_dominant_symbol(db)
+    if dom:
+        # only override when the dominant name is actually in the current candidate set (a live,
+        # armable row) — otherwise fall back to the normal leader (never force an absent name).
+        try:
+            present = {str(getattr(r, "symbol", "") or "").upper() for r in (rows or [])}
+        except Exception:
+            present = set()
+        if dom in present:
+            return dom
+    return _identify_session_leader(rows)
+
+
 def _hoist_leader(rows: list[Any], leader: str | None) -> list[Any]:
     """Move the leader's row to the FRONT of the (already rank-ordered) candidate list so it
     is first-in-arm-queue — its ONE guaranteed priority slot. The REST keep their normal rank
@@ -2134,7 +2168,9 @@ def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[Momentum
     # ordering above is returned byte-identical). Run BEFORE dedupe so the leader survives
     # the per-symbol dedupe at the front; the displacement victim-veto protects it too.
     if _symbol_of_day_focus_enabled() and rows:
-        rows = _hoist_leader(rows, _identify_session_leader(rows))
+        # A3: in a WILDCARD regime the breadth-dominant lone mover is the leader to hoist
+        # (concentrate the lane on it); otherwise the normal explosive symbol-of-day leader.
+        rows = _hoist_leader(rows, _effective_session_leader(db, rows))
     return _dedupe_by_symbol(rows, limit=int(limit))
 
 
@@ -3299,7 +3335,9 @@ def _try_displacement_for_full_slots(db: Session, *, uid: int | None, out: dict[
     # _fresh_live_eligible_candidates already hoisted the leader to cands[0], so the normal
     # "first non-busy eligible" walk picks it first when it is not yet armed. Flag-OFF =>
     # leader is None => byte-identical to the prior behaviour.
-    _leader = _identify_session_leader(cands) if _symbol_of_day_focus_enabled() else None
+    # A3: in a WILDCARD regime the breadth-dominant lone mover is the protected leader (its watch
+    # slot is never the eviction victim) — concentrate the lane on it. Otherwise the normal leader.
+    _leader = _effective_session_leader(db, cands) if _symbol_of_day_focus_enabled() else None
     newcomer = None
     for c in cands:
         su = str(c.symbol or "").upper()

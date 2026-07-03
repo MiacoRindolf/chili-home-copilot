@@ -8028,6 +8028,19 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SYMBOL_OF_DAY_FOCUS_ENABLED"),
     )
+    # A3 (Ross CLRO-lesson 2026-07-02): SCANNER-BREADTH WILDCARD REGIME. When the scanner is
+    # DEAD (bottom-decile breadth vs the trailing-20-session same-time-of-day p20) but ONE mover
+    # dominates (dominance >= its own trailing percentile) — the wildcard effect ("one stock
+    # squeezes for lack of anything else") — CONCENTRATE the lane on that leader: rank-boost +
+    # hoist + eviction-protect the dominant watch slot, and size-tilt DOWN B-grade admissions
+    # (tilt, never veto). A pre-holiday day feeds the low-breadth PRIOR as a size/trail deweight.
+    # FAIL-CLOSED for the up-weights: unreadable breadth => neutral, zero effects. ONE documented
+    # base = the breadth percentile floor (p20). Default-ON; kill-switch =0.
+    chili_momentum_wildcard_breadth_regime_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WILDCARD_BREADTH_REGIME_ENABLED"),
+        description="A3: detect the wildcard breadth regime (dead scanner + one dominant mover) and concentrate slots/size on the leader — rank-boost/hoist/eviction-protect the dominant name + B-grade size-tilt DOWN + pre-holiday breadth-prior deweight. Tilt, never veto. Fail-closed to neutral on unreadable breadth. false => byte-identical.",
+    )
     # The ONE adaptive base knob: minimum CURRENT-viability-score gap a newcomer must
     # STRICTLY exceed over the worst inert victim to displace it (hysteresis). Derived
     # as a score-gap margin within the live batch — not a fixed per-class number. Raise

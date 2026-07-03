@@ -1124,6 +1124,21 @@ def _count_symbol_episodes_today(
         return 0, set(), {"reason": "error_fail_open"}
 
 
+def _wildcard_dominant_symbol(db: Any) -> str | None:
+    """A3: the WILDCARD-regime dominant symbol (UPPER), or None when not in a wildcard regime /
+    flag OFF / unreadable breadth (fail-closed to neutral). Reused by the A1/A2 top-rank
+    predicate — in a wildcard regime the lone mover is the top-rank beneficiary. Never raises."""
+    try:
+        from .breadth_regime import compute_breadth_regime
+
+        reg = compute_breadth_regime(db)
+        if reg.is_wildcard and reg.dominant_symbol:
+            return str(reg.dominant_symbol).upper()
+    except Exception:
+        logger.debug("[momentum_neural] wildcard dominant-symbol read failed", exc_info=True)
+    return None
+
+
 def _top_ranked_live_eligible_symbol(
     db: Any, *, crypto: bool = False
 ) -> tuple[str | None, float | None, float | None, dict[str, Any]]:
@@ -1358,6 +1373,18 @@ def daily_trade_count_budget_decision(
             meta["exempt_reason"] = "rank_unreadable"
             return False, meta
         if _cand_sym != top_sym:
+            # A3 REUSE: the wildcard breadth regime's DOMINANT symbol IS the top-rank
+            # beneficiary even when a razor-thin score gap makes another row the raw #1 —
+            # in a wildcard regime the lone mover is the name to concentrate on. Fail-closed:
+            # no wildcard / not the dominant name => the plain not-top-ranked block stands.
+            _wc_dom = _wildcard_dominant_symbol(db)
+            if _wc_dom and _cand_sym == _wc_dom:
+                meta["exempt"] = True
+                meta["exempt_reason"] = "wildcard_dominant_exempt"
+                meta["exempt_sub_budget"] = base
+                meta["reason"] = "top_rank_exempt"
+                meta["allowed"] = True
+                return True, meta
             meta["exempt"] = False
             meta["exempt_reason"] = "not_top_ranked"
             return False, meta

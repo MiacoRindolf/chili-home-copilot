@@ -9579,12 +9579,38 @@ def tick_live_session(
                     )
             except Exception:
                 _red_intraday_mult = 1.0  # fail-OPEN: any error never blocks/shrinks the fill
+        # A3 (Ross CLRO-lesson): WILDCARD-regime B-GRADE size-tilt DOWN. In a wildcard regime
+        # (dead scanner + one dominant mover) concentrate risk on the leader — a NON-dominant
+        # (B-grade) admission sizes DOWN (and a pre-holiday day deweights further). The DOMINANT
+        # symbol is NEVER tilted down (it is the concentration target). A tilt, never a veto;
+        # fail-OPEN to 1.0 on any error / flag OFF (byte-identical). docs/DESIGN/MOMENTUM_LANE.md
+        _wildcard_bgrade_mult = 1.0
+        if bool(getattr(settings, "chili_momentum_wildcard_breadth_regime_enabled", True)):
+            try:
+                from .breadth_regime import compute_breadth_regime
+
+                _wc_reg = compute_breadth_regime(db)
+                if _wc_reg.is_wildcard or _wc_reg.is_pre_holiday:
+                    _sym_u = str(getattr(sess, "symbol", "") or "").upper()
+                    _is_dominant = bool(_wc_reg.dominant_symbol and _sym_u == str(_wc_reg.dominant_symbol).upper())
+                    if not _is_dominant:  # B-grade: size DOWN (the leader is never tilted down)
+                        _wildcard_bgrade_mult = float(_wc_reg.b_grade_size_tilt())
+                        if _wildcard_bgrade_mult < 1.0:
+                            le["wildcard_bgrade_size_tilt"] = {
+                                "mult": round(_wildcard_bgrade_mult, 4),
+                                "breadth": _wc_reg.breadth,
+                                "dominant": _wc_reg.dominant_symbol,
+                                "is_wildcard": _wc_reg.is_wildcard,
+                                "is_pre_holiday": _wc_reg.is_pre_holiday,
+                            }
+            except Exception:
+                _wildcard_bgrade_mult = 1.0  # fail-OPEN: never blocks/shrinks the fill on error
         # LOW-7: sanitize EACH per-factor multiplier (fail-NEUTRAL to 1.0 on NaN/inf/negative)
         # as it enters the product so a single poisoned helper can never NaN-out or sign-flip the
         # whole budget and silently kill the fill. The 3x clamp + max_notional ceiling below are
         # unchanged; a valid product is byte-identical.
         _eff_max_loss = min(
-            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult) * _safe_mult(_daily_room_mult) * _safe_mult(_red_intraday_mult) * _safe_mult(_perf_size_mult) * _safe_mult(_day_open_ramp_mult),
+            float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult) * _safe_mult(_daily_room_mult) * _safe_mult(_red_intraday_mult) * _safe_mult(_perf_size_mult) * _safe_mult(_day_open_ramp_mult) * _safe_mult(_wildcard_bgrade_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
         # COMBINED SIZE-DOWN FLOOR for a genuine front-side A-setup (default ON; OFF /
