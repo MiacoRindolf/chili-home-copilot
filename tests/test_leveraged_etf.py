@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from app.services.trading.momentum_neural.leveraged_etf import (
+    is_excluded_fund_name,
     is_leveraged_etf_name,
+    symbol_is_excluded_fund,
     symbol_is_leveraged_etf,
 )
 
@@ -42,3 +44,35 @@ def test_symbol_resolver_excludes_crypto_and_empties():
     assert symbol_is_leveraged_etf("ETH-USD") is False
     assert symbol_is_leveraged_etf("") is False
     assert symbol_is_leveraged_etf(None) is False
+
+
+# ── A8: REIT / closed-end-fund NAME token (Ross CLRO-lesson 2026-07-02, WHLR pass) ──
+
+
+def test_flags_reit_and_fund_structures_by_name():
+    # Ross's exact pass at [01:55]: "Wheeler ... Real Estate Investment Trust ... Not interested"
+    assert is_excluded_fund_name("Wheeler Real Estate Investment Trust")
+    assert is_excluded_fund_name("Some Bancorp REIT")                  # word-bounded " REIT" token
+    assert is_excluded_fund_name("Acme Reit Inc.")                     # trailing token, case-insensitive
+    assert is_excluded_fund_name("BlackRock Closed-End Fund")          # closed-end fund
+    assert is_excluded_fund_name("Nuveen Closed End Fund Trust")       # unhyphenated variant
+
+
+def test_does_not_flag_operating_companies_or_reit_substrings():
+    # Realty Income is a REIT-structured operating company by charter, but its NAME carries
+    # NO fund/trust token — the filter keys on the stated STRUCTURE token, not the sector.
+    assert not is_excluded_fund_name("Realty Income Corp")
+    assert not is_excluded_fund_name("Apple Inc.")
+    assert not is_excluded_fund_name("Carvana Co.")
+    assert not is_excluded_fund_name("Reitmans (Canada) Limited")      # "Reit" is a substring, NOT bounded
+    assert not is_excluded_fund_name("Streit Industries")             # "reit" mid-word, NOT bounded
+    assert not is_excluded_fund_name(None)
+    assert not is_excluded_fund_name("")
+
+
+def test_fund_symbol_resolver_excludes_crypto_and_empties():
+    # crypto is never an equity fund; empties fail-open to False (no fundamentals fetch)
+    assert symbol_is_excluded_fund("BTC-USD") is False
+    assert symbol_is_excluded_fund("ETH-USD") is False
+    assert symbol_is_excluded_fund("") is False
+    assert symbol_is_excluded_fund(None) is False

@@ -11,7 +11,7 @@ from sqlalchemy import desc
 from ....config import settings
 from .context import MomentumRegimeContext, VolatilityRegime
 from .features import ExecutionReadinessFeatures
-from .leveraged_etf import symbol_is_leveraged_etf
+from .leveraged_etf import symbol_is_excluded_fund, symbol_is_leveraged_etf
 from .variants import MomentumStrategyFamily
 
 if TYPE_CHECKING:
@@ -312,6 +312,17 @@ def score_viability(
             rationale=f"{symbol}: leveraged/inverse ETF — excluded from Ross momentum lane (low-float common only)",
             warnings=("Leveraged/inverse ETF vetoed from momentum lane",),
         )
+
+    # A8 (Ross CLRO-lesson 2026-07-02): REIT / closed-end-fund NAME structures. Unlike
+    # the leveraged-ETF HARD veto above, this is a soft DOWN-WEIGHT (score derate) — a
+    # real low-float mover still outranks it, but a fund/trust vehicle no longer wastes a
+    # watch slot (Ross passed WHLR "Wheeler Real Estate Investment Trust" at a glance;
+    # CHILI armed it at 5:50 ET). Reuses the adaptive name classifier (no hardcoded list);
+    # fail-open there (a fundamentals miss classifies False) so a real mover is never
+    # wrongly demoted. Default-ON; kill-switch CHILI_MOMENTUM_EXCLUDE_FUND_STRUCTURES=0.
+    if bool(getattr(settings, "chili_momentum_exclude_fund_structures_enabled", True)) and symbol_is_excluded_fund(symbol):
+        base -= 0.12
+        warnings.append("REIT / closed-end fund structure — down-weighted from Ross momentum lane")
 
     if spread_bps is not None:
         # DERATE the score for wider spreads (tighter books rank higher) but do NOT

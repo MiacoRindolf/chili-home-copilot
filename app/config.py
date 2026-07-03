@@ -8843,6 +8843,19 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXCLUDE_LEVERAGED_ETFS"),
     )
+    # A8 (Ross CLRO-lesson, 2026-07-02): REIT / closed-end-fund NAME token in the
+    # structural selection filter. Ross passed "Wheeler Real Estate Investment Trust" at
+    # a glance ("Not interested"); CHILI armed WHLR at 5:50 ET (a wasted watch slot). A
+    # REIT / closed-end fund is not the low-float company squeeze the lane trades. Unlike
+    # the leveraged-ETF HARD veto above, this is a soft DOWN-WEIGHT (score derate) at the
+    # same viability site — a real mover still outranks it, but junk fund structures no
+    # longer waste a slot. Fail-OPEN (False) on a name miss so a real mover is never
+    # wrongly demoted. Default-ON; kill-switch CHILI_MOMENTUM_EXCLUDE_FUND_STRUCTURES=0.
+    chili_momentum_exclude_fund_structures_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXCLUDE_FUND_STRUCTURES_ENABLED"),
+        description="A8: DOWN-WEIGHT (not ban) REIT / closed-end-fund named structures in the momentum selection score. Fail-open on a name miss. OFF => byte-identical (no derate).",
+    )
     # A-SETUP QUALITY FLOOR (2026-06-26): the 'puro talo' root — the lane had NO
     # quality floor, so it armed/traded ANYTHING that fired a trigger -> B/C junk and
     # small losses all day (9 round-trips, all ~-$65 losers). Live proof: AREC (float
