@@ -3766,6 +3766,10 @@ def _bridge_scanner_to_viability(
     try:
         from .trading.momentum_neural.pipeline import run_momentum_neural_tick
 
+        def _require_persistence_ok(result: object) -> None:
+            if isinstance(result, dict) and result.get("persistence_ok") is False:
+                raise RuntimeError("momentum neural tick returned persistence_ok=False")
+
         if _bridge_uncapped and len(tickers) > _VIABILITY_BRIDGE_CHUNK:
             # UNCAPPED: the pipeline tick caps symbols at 32 internally, so feed the
             # full universe through in chunks of _VIABILITY_BRIDGE_CHUNK and COMMIT
@@ -3777,9 +3781,12 @@ def _bridge_scanner_to_viability(
                 _chunk = tickers[_i : _i + _VIABILITY_BRIDGE_CHUNK]
                 _chunk_signals = {t: ross_signals[t] for t in _chunk if t in ross_signals}
                 try:
-                    run_momentum_neural_tick(
+                    # Clear aborted best-effort probe transactions before durable viability writes.
+                    db.rollback()
+                    _tick_result = run_momentum_neural_tick(
                         db, meta={"tickers": _chunk, "ross_signals": _chunk_signals}
                     )
+                    _require_persistence_ok(_tick_result)
                     db.commit()
                     _chunks += 1
                 except Exception as _ce:
@@ -3791,14 +3798,19 @@ def _bridge_scanner_to_viability(
                         db.rollback()
                     except Exception:
                         pass
+            if _chunks <= 0:
+                raise RuntimeError("viability bridge persisted zero chunks")
             logger.info(
                 "[scheduler] viability bridge (%s): %d tickers in %d chunk(s) → direct tick ok",
                 source, len(tickers), _chunks,
             )
         else:
-            run_momentum_neural_tick(
+            # Clear aborted best-effort probe transactions before durable viability writes.
+            db.rollback()
+            _tick_result = run_momentum_neural_tick(
                 db, meta={"tickers": tickers, "ross_signals": ross_signals}
             )
+            _require_persistence_ok(_tick_result)
             db.commit()
             logger.info(
                 "[scheduler] viability bridge (%s): %d tickers → direct tick ok",

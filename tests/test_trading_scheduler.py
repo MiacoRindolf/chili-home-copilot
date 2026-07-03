@@ -407,6 +407,92 @@ def test_momentum_exec_prewarm_registers_viability_refresh_jobs(monkeypatch):
     assert intervals["tape_delta_ignite"] == 5.0
 
 
+def test_viability_bridge_rolls_back_before_direct_tick(monkeypatch):
+    from app.services import trading_scheduler
+    from app.services.trading.momentum_neural import nbbo_tape, pipeline
+
+    db = _FakeBatchSession("bridge")
+    calls = []
+
+    def _fake_tick(seen_db, *, meta):
+        assert seen_db is db
+        assert seen_db.rollbacks >= 1
+        calls.append(meta)
+
+    monkeypatch.setattr(settings, "chili_momentum_universe_uncapped_enabled", False, raising=False)
+    monkeypatch.setattr(nbbo_tape, "tape_running_up_symbols", lambda _db: [])
+    monkeypatch.setattr(trading_scheduler, "_active_equity_session_symbols", lambda _db: [])
+    monkeypatch.setattr(pipeline, "run_momentum_neural_tick", _fake_tick)
+
+    trading_scheduler._bridge_scanner_to_viability(
+        db,
+        [{"ticker": "MOVE", "daily_change_pct": 35.0, "dollar_volume": 10_000_000}],
+        source="equity_viability_refresh",
+    )
+
+    assert [call["tickers"] for call in calls] == [["MOVE"]]
+    assert db.rollbacks == 1
+    assert db.commits == 1
+
+
+def test_viability_bridge_rolls_back_before_each_chunk_tick(monkeypatch):
+    from app.services import trading_scheduler
+    from app.services.trading.momentum_neural import nbbo_tape, pipeline
+
+    db = _FakeBatchSession("bridge")
+    rollback_counts = []
+
+    def _fake_tick(seen_db, *, meta):
+        assert seen_db is db
+        rollback_counts.append(seen_db.rollbacks)
+
+    monkeypatch.setattr(settings, "chili_momentum_universe_uncapped_enabled", True, raising=False)
+    monkeypatch.setattr(trading_scheduler, "_VIABILITY_BRIDGE_CHUNK", 2)
+    monkeypatch.setattr(nbbo_tape, "tape_running_up_symbols", lambda _db: [])
+    monkeypatch.setattr(trading_scheduler, "_active_equity_session_symbols", lambda _db: [])
+    monkeypatch.setattr(pipeline, "run_momentum_neural_tick", _fake_tick)
+
+    trading_scheduler._bridge_scanner_to_viability(
+        db,
+        [
+            {"ticker": f"MOVE{i}", "daily_change_pct": 30.0 + i, "dollar_volume": 10_000_000 + i}
+            for i in range(5)
+        ],
+        source="equity_viability_refresh",
+    )
+
+    assert rollback_counts == [1, 2, 3]
+    assert db.commits == 3
+
+
+def test_viability_bridge_does_not_commit_when_tick_persistence_fails(monkeypatch, caplog):
+    from app.services import trading_scheduler
+    from app.services.trading.momentum_neural import nbbo_tape, pipeline
+
+    db = _FakeBatchSession("bridge")
+
+    def _fake_tick(seen_db, *, meta):
+        assert seen_db is db
+        assert seen_db.rollbacks >= 1
+        return {"ok": True, "persistence_ok": False}
+
+    monkeypatch.setattr(settings, "chili_momentum_universe_uncapped_enabled", False, raising=False)
+    monkeypatch.setattr(nbbo_tape, "tape_running_up_symbols", lambda _db: [])
+    monkeypatch.setattr(trading_scheduler, "_active_equity_session_symbols", lambda _db: [])
+    monkeypatch.setattr(pipeline, "run_momentum_neural_tick", _fake_tick)
+    caplog.set_level("WARNING", logger="app.services.trading_scheduler")
+
+    trading_scheduler._bridge_scanner_to_viability(
+        db,
+        [{"ticker": "MOVE", "daily_change_pct": 35.0, "dollar_volume": 10_000_000}],
+        source="equity_viability_refresh",
+    )
+
+    assert db.commits == 0
+    assert db.rollbacks == 2
+    assert "persistence_ok=False" in caplog.text
+
+
 def test_scheduler_all_emits_heartbeat_by_default_unless_env_disables(monkeypatch):
     """CHILI_SCHEDULER_ROLE=all registers heartbeat unless env explicitly disables it."""
     from app.services.trading_scheduler import get_scheduler_info, start_scheduler, stop_scheduler
