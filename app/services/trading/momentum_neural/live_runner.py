@@ -4883,6 +4883,64 @@ def _halt_resume_cooldown_seconds() -> float:
         return 120.0
 
 
+def _mark_suspected_halt(db, sess, le: dict, tick: Any = None, *, detail: dict | None = None) -> None:
+    """Set the suspected-halt marker + all the downstream flags/telemetry ONCE at halt
+    onset. Shared by BOTH inference paths — the quote-staleness streak
+    (``_register_stale_quote_tick``) AND the R6 print-recency inference
+    (``_register_print_recency_halt_check``) — so a halt detected either way lights the
+    exact same lifecycle (suspected_halt_since_utc, GAP 2/3 halt_level capture, the
+    suspected_halt_detected + position_halted events). Idempotent: a no-op if a halt is
+    already in force (``suspected_halt_since_utc`` set)."""
+    if le.get("suspected_halt_since_utc"):
+        return
+    le["suspected_halt_since_utc"] = _utcnow().isoformat()
+    # MED-3 fail-SAFE: clear any PRIOR resume markers at the onset of a NEW halt so a
+    # RE-HALT does not read stale resume data (halt_resumed_at_utc / halt_resumption_open
+    # are stamped on resume but were never cleared at a fresh halt onset). The resume-stamp
+    # logic is unchanged; this only prevents the re-halt window from inheriting the last
+    # resume. Use pop (not set-None) so a FIRST halt with no prior resume leaves the keys
+    # ABSENT — byte-identical when no resume has occurred yet.
+    le.pop("halt_resumed_at_utc", None)
+    le.pop("halt_resumption_open", None)
+    # GAP 2/3 — capture the halt_level (last good price) once, at halt onset. Only
+    # when a resume-direction / false-halt flag is ON and a tick is available; the
+    # bid is the last good top-of-book before the book went dark (mid as fallback).
+    try:
+        if (
+            tick is not None
+            and (
+                bool(getattr(settings, "chili_momentum_halt_resumption_direction_enabled", False))
+                or bool(getattr(settings, "chili_momentum_false_halt_avoid_enabled", False))
+                # The add-into-halt master needs halt_level for its H2/H3 leg (now
+                # self-sufficient under the master). Master OFF + sub-flags OFF ⇒ no
+                # halt_level is written ⇒ byte-identical.
+                or bool(getattr(settings, "chili_momentum_add_into_halt_enabled", False))
+            )
+        ):
+            _hl = None
+            try:
+                _hl = float(getattr(tick, "bid", None) or getattr(tick, "mid", None) or 0) or None
+            except (TypeError, ValueError):
+                _hl = None
+            if _hl is not None and _hl > 0:
+                le["halt_level"] = _hl
+    except Exception:
+        pass
+    _emit(db, sess, "suspected_halt_detected", dict(detail or {}))
+    pos = le.get("position")
+    if isinstance(pos, dict) and float(pos.get("quantity") or 0) > 0:
+        _log.warning(
+            "[momentum_live] POSITION HALTED symbol=%s session=%s qty=%s — software stop "
+            "cannot execute until the halt resumes; exit will price at the resume open.",
+            sess.symbol, sess.id, pos.get("quantity"),
+        )
+        _emit(db, sess, "position_halted", {
+            "quantity": pos.get("quantity"),
+            "avg_entry_price": pos.get("avg_entry_price"),
+            "stop_price": pos.get("stop_price"),
+        })
+
+
 def _register_stale_quote_tick(db, sess, le: dict, tick: Any = None) -> None:
     """Count a consecutive stale-quote tick; at the threshold mark a suspected halt
     (and alert loudly if a real position is held into it).
@@ -4895,52 +4953,7 @@ def _register_stale_quote_tick(db, sess, le: dict, tick: Any = None) -> None:
     streak = int(le.get("halt_stale_streak") or 0) + 1
     le["halt_stale_streak"] = streak
     if streak == _halt_stale_ticks_threshold() and not le.get("suspected_halt_since_utc"):
-        le["suspected_halt_since_utc"] = _utcnow().isoformat()
-        # MED-3 fail-SAFE: clear any PRIOR resume markers at the onset of a NEW halt so a
-        # RE-HALT does not read stale resume data (halt_resumed_at_utc / halt_resumption_open
-        # are stamped on resume but were never cleared at a fresh halt onset). The resume-stamp
-        # logic is unchanged; this only prevents the re-halt window from inheriting the last
-        # resume. Use pop (not set-None) so a FIRST halt with no prior resume leaves the keys
-        # ABSENT — byte-identical when no resume has occurred yet.
-        le.pop("halt_resumed_at_utc", None)
-        le.pop("halt_resumption_open", None)
-        # GAP 2/3 — capture the halt_level (last good price) once, at halt onset. Only
-        # when a resume-direction / false-halt flag is ON and a tick is available; the
-        # bid is the last good top-of-book before the book went dark (mid as fallback).
-        try:
-            if (
-                tick is not None
-                and (
-                    bool(getattr(settings, "chili_momentum_halt_resumption_direction_enabled", False))
-                    or bool(getattr(settings, "chili_momentum_false_halt_avoid_enabled", False))
-                    # The add-into-halt master needs halt_level for its H2/H3 leg (now
-                    # self-sufficient under the master). Master OFF + sub-flags OFF ⇒ no
-                    # halt_level is written ⇒ byte-identical.
-                    or bool(getattr(settings, "chili_momentum_add_into_halt_enabled", False))
-                )
-            ):
-                _hl = None
-                try:
-                    _hl = float(getattr(tick, "bid", None) or getattr(tick, "mid", None) or 0) or None
-                except (TypeError, ValueError):
-                    _hl = None
-                if _hl is not None and _hl > 0:
-                    le["halt_level"] = _hl
-        except Exception:
-            pass
-        _emit(db, sess, "suspected_halt_detected", {"stale_tick_streak": streak})
-        pos = le.get("position")
-        if isinstance(pos, dict) and float(pos.get("quantity") or 0) > 0:
-            _log.warning(
-                "[momentum_live] POSITION HALTED symbol=%s session=%s qty=%s — software stop "
-                "cannot execute until the halt resumes; exit will price at the resume open.",
-                sess.symbol, sess.id, pos.get("quantity"),
-            )
-            _emit(db, sess, "position_halted", {
-                "quantity": pos.get("quantity"),
-                "avg_entry_price": pos.get("avg_entry_price"),
-                "stop_price": pos.get("stop_price"),
-            })
+        _mark_suspected_halt(db, sess, le, tick, detail={"stale_tick_streak": streak})
     # TIER-2 OVERNIGHT PRICE-BUS-DARK KILL: a position held OVERNIGHT into a stale book is
     # the dangerous case — the software stop can only act on the NEXT fresh tick, so a dark
     # bus means the held position is unprotected. When overnight trading is on AND a position
@@ -5024,6 +5037,132 @@ def _register_stale_quote_tick(db, sess, le: dict, tick: Any = None) -> None:
                         })
     except Exception:
         pass
+
+
+def _print_recency_halt_states() -> frozenset:
+    """The lane states in which a print-recency halt inference is meaningful — a name
+    we are actively WATCHING for entry or HOLDING. (An armed-but-pre-watch or terminal
+    session has no live tape stake, so we never infer a halt there.)"""
+    return frozenset({
+        STATE_WATCHING_LIVE,
+        STATE_LIVE_ENTRY_CANDIDATE,
+        STATE_LIVE_PENDING_ENTRY,
+        STATE_LIVE_ENTERED,
+        STATE_LIVE_SCALING_OUT,
+        STATE_LIVE_TRAILING,
+        STATE_LIVE_BAILOUT,
+    })
+
+
+def _register_print_recency_halt_check(db, sess, le: dict, tick: Any = None) -> None:
+    """R6 (WAVE-4 ITEM-1) — INDEPENDENT print-recency halt inference.
+
+    The quote-freshness halt path (``_register_stale_quote_tick``) starved since 2026-06-26:
+    a secondary BBO refetch stamps FRESH meta on cached quotes, so ``stale_bbo`` never
+    returns → ``suspected_halt`` went 602/day → 0 and ``halt_resume_dip`` has NEVER fired.
+    But a real LULD halt STOPS THE TRADE PRINTS even when the (cached) quote meta looks
+    fresh. This second, quote-independent path infers a halt from the TAPE going silent:
+    for a WATCHED/HELD name that was RECENTLY ACTIVE, if the equity trade tape
+    (``iqfeed_trade_ticks``) shows no prints for an ADAPTIVE window (a multiple of the
+    name's recent median inter-print gap; floor ~30s) while the market is open, we mark a
+    suspected halt via ``_mark_suspected_halt`` — lighting the EXACT same downstream
+    lifecycle the quote path does (so ``halt_resume_dip`` can finally fire on the return).
+
+    FAIL-CLOSED by design (never false-halt a quiet name):
+      * no tape data ⇒ no inference (``print_recency_state`` returns None);
+      * not recently active (< min prints in the recent-active window) ⇒ no inference;
+      * market not open (data session) ⇒ no inference;
+      * a halt already in force ⇒ no-op (``_mark_suspected_halt`` is idempotent).
+
+    Flag ``chili_momentum_halt_print_recency_enabled`` (default True). OFF ⇒ this entire
+    function is a no-op ⇒ byte-identical to the quote-only path."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_halt_print_recency_enabled", True)):
+            return
+        # Only a name we are actively watching/holding, and only on the equity tape
+        # (crypto has no iqfeed_trade_ticks — print_recency_state returns None there).
+        if getattr(sess, "state", None) not in _print_recency_halt_states():
+            return
+        if le.get("suspected_halt_since_utc"):
+            return  # a halt is already in force (either path) — nothing to add.
+        sym = (getattr(sess, "symbol", None) or "").strip().upper()
+        if not sym or sym.endswith("-USD"):
+            return
+        # Market must be OPEN (a data session) — a silent tape overnight/closed is normal,
+        # not a halt. Fail-closed: any error here ⇒ no inference.
+        try:
+            from .market_profile import is_data_session_now as _is_data_session_now
+
+            if not _is_data_session_now(sym):
+                return
+        except Exception:
+            return
+
+        try:
+            _gap_mult = max(1.0, float(getattr(settings, "chili_momentum_halt_print_gap_multiple", 8.0) or 8.0))
+        except (TypeError, ValueError):
+            _gap_mult = 8.0
+        try:
+            _gap_floor = max(1.0, float(getattr(settings, "chili_momentum_halt_print_gap_floor_seconds", 30.0) or 30.0))
+        except (TypeError, ValueError):
+            _gap_floor = 30.0
+        try:
+            _active_window = max(1.0, float(getattr(settings, "chili_momentum_halt_print_recent_active_seconds", 300.0) or 300.0))
+        except (TypeError, ValueError):
+            _active_window = 300.0
+        try:
+            _active_min = max(1, int(getattr(settings, "chili_momentum_halt_print_recent_active_min_prints", 5) or 5))
+        except (TypeError, ValueError):
+            _active_min = 5
+
+        from .nbbo_tape import print_recency_state
+
+        st = print_recency_state(
+            db,
+            sym,
+            recent_active_window_s=_active_window,
+            gap_sample_window_s=max(_active_window, _gap_floor * _gap_mult),
+            now_utc=_utcnow(),
+        )
+        if not st:
+            return  # no tape data ⇒ fail-closed (no inference).
+        last_age = st.get("last_print_age_s")
+        recent_n = int(st.get("recent_print_count") or 0)
+        median_gap = st.get("median_gap_s")
+        if last_age is None:
+            return
+        # FAIL-CLOSED activity requirement: the name must have been RECENTLY ACTIVE (enough
+        # prints in the lookback) — a quiet never-active name is never inferred as halted.
+        if recent_n < _active_min:
+            return
+        # ADAPTIVE no-print window: a multiple of the recent median gap, floored. A name
+        # that normally prints every 2s halts far faster than one printing every 20s.
+        if median_gap is not None and median_gap > 0:
+            _window = max(_gap_floor, float(median_gap) * _gap_mult)
+        else:
+            _window = _gap_floor
+        if float(last_age) < _window:
+            return  # tape is still printing within the adaptive window — not halted.
+        _mark_suspected_halt(
+            db, sess, le, tick,
+            detail={
+                "source": "print_recency",
+                "last_print_age_s": round(float(last_age), 2),
+                "no_print_window_s": round(_window, 2),
+                "median_gap_s": (round(float(median_gap), 3) if median_gap is not None else None),
+                "recent_print_count": recent_n,
+            },
+        )
+        _log.warning(
+            "[momentum_live] SUSPECTED HALT (print-recency) symbol=%s session=%s "
+            "last_print_age=%.1fs window=%.1fs median_gap=%s recent_prints=%s — tape went "
+            "silent while quotes look fresh; lighting the halt lifecycle so resume-dip can fire.",
+            sym, sess.id, float(last_age), _window,
+            (round(float(median_gap), 2) if median_gap is not None else None), recent_n,
+        )
+    except Exception:
+        # Never let the halt inference break the tick loop — fail-closed (no inference).
+        _log.debug("[momentum_live] print-recency halt check skipped", exc_info=True)
 
 
 def _entry_pricebook_snapshot(symbol: str) -> dict | None:
@@ -5704,6 +5843,12 @@ def tick_live_session(
         _register_stale_quote_tick(db, sess, le, tick)
     else:
         _register_fresh_quote_tick(db, sess, le, tick)
+        # R6 (WAVE-4 ITEM-1) — INDEPENDENT print-recency halt inference. The quote path
+        # saw this tick as FRESH (the starvation case: a secondary BBO refetch stamps fresh
+        # meta on cached quotes), so the stale_bbo streak never fires. But a real LULD halt
+        # stops the trade PRINTS while the quote meta stays fresh — so infer the halt from
+        # the tape going silent (fail-closed: watched/held + recently-active + open only).
+        _register_print_recency_halt_check(db, sess, le, tick)
     # SPREAD STABILITY (2026-06-11 INDP): the instantaneous BBO passed the gate
     # for ONE tick inside a flickering, hostile spread regime — we submitted,
     # the spread blew out a second later, and the eventual fill bought a dying

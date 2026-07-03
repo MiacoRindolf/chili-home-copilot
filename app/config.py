@@ -3271,6 +3271,48 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FALSE_HALT_AVOID_ENABLED"),
         description="GAP 3: a limit-UP halt that resumes WEAK (first post-resume bar opens below halt_level) = a FALSE halt → AVOID the halt-resume-dip long. Shares halt_level + resumption read with GAP 2. Risk-reducing only (adds a no-fire); never enables an entry. OFF ⇒ byte-identical.",
     )
+    # ── R6 (WAVE-4 ITEM-1): PRINT-RECENCY halt inference (an INDEPENDENT second path) ──
+    # The quote-freshness halt inference (_register_stale_quote_tick ⇒ stale_bbo streak)
+    # STARVED since 2026-06-26: a secondary BBO refetch stamps FRESH meta on cached quotes,
+    # so stale_bbo never returns → suspected_halt went 602/day → 0 and halt_resume_dip has
+    # NEVER fired. A real LULD halt still stops the PRINTS (trade tape) even when the quote
+    # meta looks fresh. When ON, for a WATCHED/HELD symbol with a fresh NBBO session, if the
+    # trade tape (iqfeed_trade_ticks) shows NO PRINTS for an ADAPTIVE window while the market
+    # is open AND the name was RECENTLY ACTIVE, mark a suspected halt (the SAME downstream
+    # flags the quote path sets). FAIL-CLOSED: no tape data / not recently active ⇒ NO
+    # inference (never false-halt a quiet name). The existing false_halt_avoid guard still
+    # applies at the resume read. OFF ⇒ this path is never consulted ⇒ byte-identical.
+    chili_momentum_halt_print_recency_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_PRINT_RECENCY_ENABLED"),
+        description="R6: independent PRINT-RECENCY halt inference. For a watched/held symbol with a fresh NBBO session, if the trade tape shows no prints for an adaptive window (multiple of the recent median inter-print gap; floor ~30s) while open AND the name was recently active, mark suspected-halt (same downstream flags as the quote path). Fail-closed: no tape / not recently active ⇒ no inference. OFF ⇒ byte-identical.",
+    )
+    # The no-print window = this multiple of the symbol's recent MEDIAN inter-print gap
+    # (adaptive: a name that normally prints every 2s halts far faster than one printing
+    # every 20s). Bounded below by the absolute floor so a dense name still needs a real gap.
+    chili_momentum_halt_print_gap_multiple: float = Field(
+        default=8.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_PRINT_GAP_MULTIPLE"),
+        description="R6: the no-print halt window = this multiple of the symbol's recent median inter-print gap (adaptive). Bounded below by chili_momentum_halt_print_gap_floor_seconds. Only consulted when chili_momentum_halt_print_recency_enabled is ON.",
+    )
+    chili_momentum_halt_print_gap_floor_seconds: float = Field(
+        default=30.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_PRINT_GAP_FLOOR_SECONDS"),
+        description="R6: absolute floor (seconds) for the no-print halt window — a dense name must still be silent this long before a print-recency halt is inferred. Prevents a one-tick tape blip from false-halting.",
+    )
+    # "Recently active" = the name printed at least one trade within this lookback BEFORE the
+    # silence began (the fail-closed activity requirement: a quiet never-active name must not
+    # be inferred as halted — it was never trading). Window sized generously vs the gap.
+    chili_momentum_halt_print_recent_active_seconds: float = Field(
+        default=300.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_PRINT_RECENT_ACTIVE_SECONDS"),
+        description="R6: 'recently active' lookback (seconds) — the name must have printed at least chili_momentum_halt_print_recent_active_min_prints trades within this window (ending at the last print) to be eligible for a print-recency halt inference. Fail-closed: a never-active quiet name is never inferred as halted.",
+    )
+    chili_momentum_halt_print_recent_active_min_prints: int = Field(
+        default=5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_PRINT_RECENT_ACTIVE_MIN_PRINTS"),
+        description="R6: minimum prints within the recent-active window required to treat the name as recently active (activity floor). Below it ⇒ no print-recency halt inference (fail-closed).",
+    )
     # HOT-tape regime floor: this many simultaneous LULD-scale movers (>=30% day
     # move among the bridge's scanned candidates) flips the catalyst tilt to the
     # no-news read (Ross 2026-06-10: hot days = no-news foreign small caps run;

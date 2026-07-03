@@ -733,6 +733,81 @@ def tape_inter_row_gap_p50_seconds(
         return None
 
 
+def print_recency_state(
+    db: Session,
+    symbol: str,
+    *,
+    recent_active_window_s: float = 300.0,
+    gap_sample_window_s: float = 300.0,
+    now_utc: Optional[datetime] = None,
+) -> Optional[dict[str, Any]]:
+    """R6 (WAVE-4 ITEM-1): the PRINT-RECENCY state for ``symbol`` off the equity TRADE
+    tape (``iqfeed_trade_ticks``) — the independent halt-inference input the quote path
+    can't see. A real LULD halt STOPS THE PRINTS even when the (cached) quote meta looks
+    fresh, so a name that was RECENTLY ACTIVE and has now gone silent for an adaptive
+    window is a suspected halt.
+
+    Returns a dict:
+      * ``last_print_age_s`` — seconds since the newest print (None ⇒ NO tape ⇒ caller
+        fails CLOSED: no data, no inference).
+      * ``recent_print_count`` — prints within ``recent_active_window_s`` (the activity read).
+      * ``median_gap_s`` — median inter-print gap over ``gap_sample_window_s`` (adaptive
+        cadence; None ⇒ too few prints to estimate a gap).
+
+    Best-effort / never raises; crypto (``-USD``) returns None (no equity tick tape)."""
+    sym = str(symbol or "").strip().upper()
+    if not sym or sym.endswith("-USD"):
+        return None
+    now_utc = now_utc or datetime.now(timezone.utc)
+    now_naive = now_utc.replace(tzinfo=None) if now_utc.tzinfo is not None else now_utc
+    active_since = now_naive - timedelta(seconds=float(recent_active_window_s))
+    gap_since = now_naive - timedelta(seconds=float(gap_sample_window_s))
+    try:
+        # One round-trip: newest-print epoch + a recent-activity count + the median gap.
+        row = db.execute(
+            text(
+                "WITH recent AS ("
+                "  SELECT observed_at,"
+                "    EXTRACT(EPOCH FROM (observed_at - lag(observed_at) OVER ("
+                "      ORDER BY observed_at))) AS gap_s"
+                "  FROM iqfeed_trade_ticks"
+                "  WHERE symbol = :s AND observed_at >= :gap_since"
+                ") "
+                "SELECT"
+                "  EXTRACT(EPOCH FROM (:now_naive - max(observed_at))) AS last_age_s,"
+                "  count(*) FILTER (WHERE observed_at >= :active_since) AS recent_n,"
+                "  percentile_cont(0.5) WITHIN GROUP (ORDER BY gap_s)"
+                "    FILTER (WHERE gap_s IS NOT NULL AND gap_s > 0) AS median_gap_s "
+                "FROM recent"
+            ),
+            {"s": sym, "gap_since": gap_since, "active_since": active_since, "now_naive": now_naive},
+        ).fetchone()
+    except Exception as exc:
+        logger.debug("[nbbo_tape] print-recency read failed for %s: %s", sym, exc)
+        return None
+    if not row or row[0] is None:
+        # No prints in the window at all ⇒ no data ⇒ fail-closed (no inference).
+        return None
+    try:
+        last_age = float(row[0])
+    except (TypeError, ValueError):
+        return None
+    try:
+        recent_n = int(row[1] or 0)
+    except (TypeError, ValueError):
+        recent_n = 0
+    median_gap: Optional[float]
+    try:
+        median_gap = float(row[2]) if row[2] is not None else None
+    except (TypeError, ValueError):
+        median_gap = None
+    return {
+        "last_print_age_s": last_age,
+        "recent_print_count": recent_n,
+        "median_gap_s": median_gap,
+    }
+
+
 def recent_spread_median_bps(
     db: Session, symbol: str, *, window_s: float, now_utc: Optional[datetime] = None,
 ) -> tuple[float, int] | None:
