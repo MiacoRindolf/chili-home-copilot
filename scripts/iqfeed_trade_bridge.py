@@ -220,13 +220,23 @@ def _eligible_symbols(limit: int) -> list[str]:
 def _alert_symbols(fresh_window_s: float) -> list[str]:
     """CAPTURE-G3 fast path: the symbols the app container flagged for IMMEDIATE subscription
     (first-alert hints written to momentum_bridge_subscribe_requests within the fresh window).
-    Empty on any error / missing table so the bridge degrades to its normal poll cadence."""
+    Empty on any error / missing table so the bridge degrades to its normal poll cadence.
+
+    F8 (capture-g fix): NEWEST-FIRST — ordered by each symbol's freshest hint DESC, mirroring
+    the unit-tested select_fresh_subscribe_symbols contract (bridge_subscribe.py). The fast
+    poll breaks at the adaptive watch cap, so ordering decides WHO gets the last slot: an
+    unordered DISTINCT let an arbitrary/stale hint take it while the 2s-old igniting mover
+    was skipped. Now the cap keeps the FRESHEST movers."""
     try:
         with engine.connect() as c:
             rows = c.execute(sa.text(
-                "SELECT DISTINCT symbol FROM momentum_bridge_subscribe_requests "
-                "WHERE requested_at > (now() at time zone 'utc') - make_interval(secs => :w) "
-                "  AND symbol NOT LIKE '%-USD'"
+                "SELECT symbol FROM ("
+                "  SELECT symbol, max(requested_at) AS freshest "
+                "  FROM momentum_bridge_subscribe_requests "
+                "  WHERE requested_at > (now() at time zone 'utc') - make_interval(secs => :w) "
+                "    AND symbol NOT LIKE '%-USD' "
+                "  GROUP BY symbol"
+                ") q ORDER BY freshest DESC"
             ), {"w": float(fresh_window_s)}).fetchall()
         return [str(r[0]).upper() for r in rows]
     except Exception as e:

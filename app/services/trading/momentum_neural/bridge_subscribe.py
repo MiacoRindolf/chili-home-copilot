@@ -6,9 +6,10 @@ ignites only reaches the bridge after its viability row is written AND the next 
 ~2.7-min blind window on a sub-2-min squeeze (VWAV 2026-06-30: the 5->9.75 leg was un-taped).
 
 This module is the FAST PATH: the app container writes a subscription HINT the instant a symbol
-first-alerts (``request_bridge_subscription``); the bridge reads a recent trailing window
-(``recent_subscribe_requests`` / the pure ``select_fresh_subscribe_symbols``) and subscribes
-immediately, additively to its normal refresh set — first-alert -> subscribed in seconds.
+first-alerts (``request_bridge_subscription``); the bridge fast-polls a recent trailing window
+(its standalone SQL reader mirrors the pure, unit-tested ``select_fresh_subscribe_symbols``
+contract — newest-first, fresh-window, cap keeps the freshest) and subscribes immediately,
+additively to its normal refresh set — first-alert -> subscribed in seconds.
 
 ``momentum_bridge_subscribe_requests`` is NOT a trading table (no orders/positions/fills) — a
 pure subscription hint — so the container-side write is safe (matrix G3). Kill-switch
@@ -90,6 +91,13 @@ def select_fresh_subscribe_symbols(
     return the NEW symbols to subscribe NOW — those requested within ``fresh_window_s`` of
     ``now_utc`` and NOT already watched, de-duplicated, newest-first, capped at ``max_new``.
 
+    This is the tested SPECIFICATION of the fast-poll contract. The host bridge
+    (``scripts/iqfeed_trade_bridge.py::_alert_symbols``) mirrors it in SQL (per-symbol
+    ``max(requested_at)`` ordered DESC within the fresh window) because it stays standalone
+    (no app-package import on the host) — F8: newest-first ordering is load-bearing there,
+    since the fast poll breaks at the adaptive watch cap and the cap must keep the FRESHEST
+    movers, never let a stale hint take the last slot.
+
     ``requested_at`` may be naive-UTC (the table basis) or tz-aware; both are compared in naive
     UTC. A row with an unreadable timestamp is skipped (fail-safe: never subscribe on garbage).
     """
@@ -128,23 +136,6 @@ def select_fresh_subscribe_symbols(
     return out
 
 
-def recent_subscribe_requests(
-    engine: Any, *, fresh_window_s: float = FRESH_WINDOW_S_DEFAULT, now_utc: datetime | None = None
-) -> list[tuple[str, datetime]]:
-    """Read the fast-path hint rows (symbol, requested_at) within the fresh window. Used by the
-    bridge (which owns a raw SQLAlchemy engine). Returns [] on any error / missing table so the
-    bridge degrades to its normal poll cadence (never crashes on the fast path)."""
-    _now = (now_utc or datetime.now(timezone.utc)).replace(tzinfo=None)
-    cutoff = _now - timedelta(seconds=max(0.0, float(fresh_window_s)))
-    try:
-        with engine.connect() as c:
-            rows = c.execute(
-                _sql(
-                    "SELECT symbol, requested_at FROM momentum_bridge_subscribe_requests "
-                    "WHERE requested_at > :cut ORDER BY requested_at DESC"
-                ),
-                {"cut": cutoff},
-            ).fetchall()
-        return [(str(r[0]).upper(), r[1]) for r in rows]
-    except Exception:
-        return []
+# F8 note: the former recent_subscribe_requests(engine) reader was removed — it was dead code
+# (the host bridge keeps its own standalone SQL reader, scripts/iqfeed_trade_bridge.py::
+# _alert_symbols, which mirrors select_fresh_subscribe_symbols' newest-first contract).
