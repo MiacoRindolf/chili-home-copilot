@@ -12,6 +12,7 @@ from app.services.trading.momentum_neural.universe import (
     _pos_in_range,
     build_equity_universe,
 )
+from app.config import settings
 
 
 def _row(ticker, chg, price, vol):
@@ -43,7 +44,9 @@ def test_rejects_megacaps_pennies_downs_and_illiquids():
         assert rejected not in out
 
 
-def test_max_universe_cap():
+def test_max_universe_cap(monkeypatch):
+    monkeypatch.setattr(settings, "chili_momentum_hot_mover_recatch_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "chili_momentum_universe_uncapped_enabled", False, raising=False)
     prof = UniverseProfile(
         profile_id="t", asset_class="equity", label="t",
         price_min=1.0, price_max=20.0, min_dollar_volume=1_000_000.0,

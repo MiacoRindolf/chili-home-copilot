@@ -36,6 +36,11 @@ def test_momentum_signal_with_rvol_is_selected():
     assert [s["ticker"] for s in _equity_movers_for_ross_bridge(out)] == ["TYRA"]
 
 
+def test_todays_change_perc_only_mover_is_selected():
+    out = _sweep(momentum=[{"ticker": "MOVE", "todays_change_perc": 12.4, "direction": "up"}])
+    assert [s["ticker"] for s in _equity_movers_for_ross_bridge(out)] == ["MOVE"]
+
+
 def test_short_orb_breakdown_is_dropped():
     # The lane is LONG-only — a short ORB breakdown must not become an armable
     # equity candidate even though it carries a pillar.

@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from ....config import settings
+from .market_calendar import is_us_market_holiday
 
 
 _NY_TZ = ZoneInfo("America/New_York")
@@ -56,6 +57,10 @@ def _afterhours_end_min() -> int:
     return _parse_hhmm(getattr(settings, "chili_momentum_afterhours_end_et", None), _DEFAULT_AFTERHOURS_MIN)
 
 
+def _is_market_holiday_local(local: datetime) -> bool:
+    return is_us_market_holiday(local.date())
+
+
 def market_session_now(symbol: str | None, *, now: datetime | None = None) -> str:
     """Return the current session for ``symbol``: one of
     ``premarket`` | ``regular`` | ``afterhours`` | ``closed``.
@@ -71,7 +76,7 @@ def market_session_now(symbol: str | None, *, now: datetime | None = None) -> st
     if ref.tzinfo is None:
         ref = ref.replace(tzinfo=timezone.utc)
     local = ref.astimezone(_NY_TZ)
-    if local.weekday() >= 5:
+    if local.weekday() >= 5 or _is_market_holiday_local(local):
         return "closed"
     mod = local.hour * 60 + local.minute
     pre = min(_premarket_start_min(), _REGULAR_OPEN_MIN)
@@ -115,7 +120,7 @@ def schedule_window_now(now: datetime | None = None) -> str:
     if ref.tzinfo is None:
         ref = ref.replace(tzinfo=timezone.utc)
     local = ref.astimezone(_NY_TZ)
-    if local.weekday() >= 5:
+    if local.weekday() >= 5 or _is_market_holiday_local(local):
         return "closed"
     mod = local.hour * 60 + local.minute
     if 4 * 60 <= mod < 10 * 60 + 30:
@@ -239,6 +244,8 @@ def early_premarket_unlocked(now: datetime | None = None) -> tuple[bool, int | N
     local = ref.astimezone(_NY_TZ)
     if local.weekday() >= 5:
         return False, None, {"reason": "weekend"}
+    if _is_market_holiday_local(local):
+        return False, None, {"reason": "market_holiday"}
     mod = local.hour * 60 + local.minute
     # Only meaningful in the pre-entry-window band: at/after the exchange 04:00 open and
     # BEFORE the configured premarket_start (the window we want to unlock EARLY into).
@@ -326,7 +333,7 @@ def is_data_session_now(symbol: str | None, *, now: datetime | None = None) -> b
     if ref.tzinfo is None:
         ref = ref.replace(tzinfo=timezone.utc)
     local = ref.astimezone(_NY_TZ)
-    if local.weekday() >= 5:
+    if local.weekday() >= 5 or _is_market_holiday_local(local):
         return False
     mod = local.hour * 60 + local.minute
     return _data_session_open_min() <= mod < max(_afterhours_end_min(), _REGULAR_CLOSE_MIN)
@@ -349,6 +356,8 @@ def is_overnight_now(symbol: str | None = None, *, now: datetime | None = None) 
     if ref.tzinfo is None:
         ref = ref.replace(tzinfo=timezone.utc)
     local = ref.astimezone(_NY_TZ)
+    if _is_market_holiday_local(local):
+        return False
     wd = local.weekday()  # Mon=0 .. Sun=6
     mod = local.hour * 60 + local.minute
     post = max(_afterhours_end_min(), _REGULAR_CLOSE_MIN)  # 20:00 ET afterhours end
@@ -394,7 +403,11 @@ def _next_regular_open_utc(local: datetime, *, allow_extended_hours: bool = Fals
             candidate_date.day,
             tzinfo=_NY_TZ,
         ) + timedelta(minutes=open_min)
-        if candidate_local.weekday() < 5 and candidate_local > local:
+        if (
+            candidate_local.weekday() < 5
+            and not is_us_market_holiday(candidate_date)
+            and candidate_local > local
+        ):
             return candidate_local.astimezone(timezone.utc)
         days_ahead += 1
 
@@ -428,7 +441,14 @@ def market_session_for_symbol(
         "premarket": "pre_market",
         "regular": "regular_hours",
         "afterhours": "post_market",
-    }.get(session, "closed_weekend" if local.weekday() >= 5 else "closed_overnight")
+    }.get(
+        session,
+        (
+            "closed_weekend"
+            if local.weekday() >= 5
+            else ("closed_holiday" if _is_market_holiday_local(local) else "closed_overnight")
+        ),
+    )
     is_tradable = session == "regular" or (
         allow_extended_hours and session in {"premarket", "afterhours"}
     )
@@ -478,7 +498,7 @@ def minutes_since_regular_open(symbol: str | None, *, now: datetime | None = Non
     if ref.tzinfo is None:
         ref = ref.replace(tzinfo=timezone.utc)
     local = ref.astimezone(_NY_TZ)
-    if local.weekday() >= 5:
+    if local.weekday() >= 5 or _is_market_holiday_local(local):
         return None
     mod = local.hour * 60 + local.minute + local.second / 60.0
     return float(mod - _REGULAR_OPEN_MIN)

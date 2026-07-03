@@ -3506,6 +3506,7 @@ _ROSS_PILLAR_KEYS = (
     "volume_ratio",
     "gap_pct",
     "daily_change_pct",
+    "todays_change_perc",
     "change_pct",
     "change_24h",
 )

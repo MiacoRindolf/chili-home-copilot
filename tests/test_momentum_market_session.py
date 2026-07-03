@@ -33,7 +33,9 @@ def test_premarket_is_tradeable_but_not_regular_open():
     assert mp.is_tradeable_now("PAVS", now=t) is True   # but the lane CAN trade it
 
 
-def test_before_premarket_start_is_closed():
+def test_before_premarket_start_is_closed(monkeypatch):
+    monkeypatch.setattr(mp.settings, "chili_momentum_premarket_start_et", "07:00", raising=False)
+    monkeypatch.setattr(mp.settings, "chili_momentum_early_premarket_enabled", False, raising=False)
     t = _at(2026, 6, 9, 6, 0)  # 6:00 ET — before the 7:00 default pre-market start
     assert mp.market_session_now("PAVS", now=t) == "closed"
     assert mp.is_tradeable_now("PAVS", now=t) is False
@@ -56,6 +58,23 @@ def test_weekend_is_closed_for_equities():
     t = _at(2026, 6, 13, 10, 0)  # Saturday 10:00 ET
     assert mp.market_session_now("PAVS", now=t) == "closed"
     assert mp.is_tradeable_now("PAVS", now=t) is False
+
+
+def test_market_holiday_is_closed_for_equities_but_not_crypto():
+    t = _at(2026, 7, 3, 10, 0)  # Independence Day observed; NYSE/Nasdaq closed.
+    assert mp.market_session_now("PAVS", now=t) == "closed"
+    assert mp.schedule_window_now(now=t) == "closed"
+    assert mp.market_open_now("PAVS", now=t, allow_extended_hours=True) is False
+    assert mp.is_tradeable_now("PAVS", now=t) is False
+    assert mp.market_session_now("BTC-USD", now=t) == "regular"
+
+
+def test_market_holiday_deferred_until_next_regular_open():
+    t = _at(2026, 7, 3, 10, 0)
+    info = mp.market_session_for_symbol("PAVS", now=t, allow_extended_hours=False)
+    assert info["market_session"] == "closed_holiday"
+    assert info["is_tradable"] is False
+    assert str(info["deferred_until_utc"]).startswith("2026-07-06T13:30:00+00:00")
 
 
 def test_crypto_is_always_tradeable():

@@ -743,7 +743,7 @@ def snapshot_dollar_volumes(
             if t not in want:
                 continue
             px = _snapshot_price(s)
-            vol = _f((s.get("day") or {}).get("v")) or 0.0
+            vol = _snapshot_today_shares(s) or 0.0
             if px and px > 0 and vol > 0:
                 out[t] = float(px) * float(vol)
         except Exception:

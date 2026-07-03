@@ -44,6 +44,11 @@ def test_dollar_volume_uses_day_close_when_no_last_trade():
     assert snapshot_dollar_volumes(["NPT"], snapshot=snap)["NPT"] == 4_000_000.0
 
 
+def test_dollar_volume_uses_min_av_when_day_volume_zero():
+    snap = [{"ticker": "PREGAP", "lastTrade": {"p": 2.50}, "day": {"v": 0}, "min": {"av": 900_000}}]
+    assert snapshot_dollar_volumes(["PREGAP"], snapshot=snap)["PREGAP"] == 2_250_000.0
+
+
 # ── auto_arm._liquidity_rerank ────────────────────────────────────────────────
 def _rows(*symbols):
     return [SimpleNamespace(symbol=s) for s in symbols]

@@ -34,10 +34,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from ....config import settings
+from .market_calendar import is_pre_holiday
 
 if TYPE_CHECKING:  # pragma: no cover
     from sqlalchemy.orm import Session
@@ -59,20 +60,6 @@ _TRAILING_SESSIONS = 20
 _WILDCARD_B_GRADE_SIZE_TILT = 0.60
 # The pre-holiday size/trail deweight (a day before a US market holiday tends to be low-breadth).
 _PRE_HOLIDAY_SIZE_TILT = 0.85
-
-# US market holidays (fixed observed dates) — the ONE documented calendar base (no vendor
-# exists; per the profit-max roadmap "no new vendor"). Day-BEFORE any of these is "pre-holiday".
-# Covers the current + next year; extend as needed. Naive dates in ET-equivalent calendar terms.
-_US_MARKET_HOLIDAYS: frozenset[date] = frozenset(
-    {
-        date(2026, 1, 1), date(2026, 1, 19), date(2026, 2, 16), date(2026, 4, 3),
-        date(2026, 5, 25), date(2026, 6, 19), date(2026, 7, 3), date(2026, 9, 7),
-        date(2026, 11, 26), date(2026, 12, 25),
-        date(2027, 1, 1), date(2027, 1, 18), date(2027, 2, 15), date(2027, 3, 26),
-        date(2027, 5, 31), date(2027, 6, 18), date(2027, 7, 5), date(2027, 9, 6),
-        date(2027, 11, 25), date(2027, 12, 24),
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -109,14 +96,6 @@ def _now_utc(now: datetime | None) -> datetime:
     if now is not None:
         return now.astimezone(timezone.utc).replace(tzinfo=None) if now.tzinfo else now
     return datetime.now(timezone.utc).replace(tzinfo=None)
-
-
-def is_pre_holiday(d: date) -> bool:
-    """True when the NEXT calendar day is a US market holiday (day-before-holiday). Pure."""
-    try:
-        return (d + timedelta(days=1)) in _US_MARKET_HOLIDAYS
-    except Exception:
-        return False
 
 
 def _percentile(sorted_vals: list[float], q: float) -> float | None:
