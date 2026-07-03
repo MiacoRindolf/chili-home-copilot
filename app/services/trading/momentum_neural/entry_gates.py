@@ -179,6 +179,58 @@ def _sustained_rvol(vr: list[Any], cur: int, lookback: int) -> float | None:
     return sum(ratios) / len(ratios)
 
 
+def _sustained_rvol_excluding_coil(
+    vr: list[Any], atr: list[Any], high: Any, low: Any, cur: int, lookback: int,
+    *, coil_range_atr_frac: float = 0.5,
+) -> float | None:
+    """CAPTURE-G2: mean per-bar rel-vol over the last ``lookback`` bars but DROPPING the
+    identified low-range COIL bars — a bar whose range (``high-low``) is below
+    ``coil_range_atr_frac`` x its ATR is a structural coil bar (a dead, tight consolidation
+    candle), not an active trading bar, and its depressed rel-vol should not count against a
+    genuine break's sustain. This is the tape-faithful "compute the sustain mean EXCLUDING
+    coil bars" recovery for a dry-coil premarket break (JEM 06-30 class): as real volume
+    returns, the ACTIVE-bar mean clears the floor even while the coil-inclusive mean is still
+    depressed. Returns ``None`` on < 2 remaining active samples (⇒ the caller keeps the
+    coil-inclusive gate — never a free pass on a genuinely quiet tape). Pure; no I/O.
+
+    ``high`` / ``low`` are the pandas Close/High/Low series the caller already holds (indexed
+    by bar position); ``atr`` is the ATR array from ``compute_all_from_df``.
+    """
+    start = max(0, cur - max(1, int(lookback)) + 1)
+    ratios: list[float] = []
+    try:
+        _frac = float(coil_range_atr_frac)
+    except (TypeError, ValueError):
+        _frac = 0.5
+    if _frac < 0.0:
+        _frac = 0.0
+    for i in range(start, cur + 1):
+        # identify + DROP a low-range coil bar (range < frac x ATR). A missing/zero ATR
+        # cannot classify the bar as coil ⇒ it is KEPT (fail-toward the stricter inclusive mean).
+        try:
+            _a = float(atr[i]) if (0 <= i < len(atr) and atr[i] is not None) else None
+        except (TypeError, ValueError):
+            _a = None
+        try:
+            _rng = float(high.iloc[i]) - float(low.iloc[i])
+        except (TypeError, ValueError, IndexError):
+            _rng = None
+        if _a is not None and _a > 0 and _rng is not None and _frac > 0 and _rng < _frac * _a:
+            continue  # coil bar — exclude from the active-bar mean
+        v = vr[i] if 0 <= i < len(vr) else None
+        if v is None:
+            continue
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if fv == fv:  # not NaN
+            ratios.append(fv)
+    if len(ratios) < 2:
+        return None
+    return sum(ratios) / len(ratios)
+
+
 # ── Volatility-aware pullback validity ────────────────────────────────────────
 # The lane now SELECTS explosive low-float small-caps (universe profile #531/#533),
 # but the pullback-validity checks were tuned for orderly large-caps: a flat 50%
@@ -7523,12 +7575,76 @@ def pullback_break_confirmation(
     # dead-cat trap, so that one path fails CLOSED.
     if require_sustained_volume:
         sustained = _sustained_rvol(vr, cur, int(sustain_lookback_bars))
-        if sustained is not None:
-            debug["sustained_rvol"] = round(sustained, 2)
-            if sustained < float(sustained_rvol_floor):
+        # CAPTURE-G2 COIL-EXEMPT (2026-07-03): the N-bar sustain MEAN includes the quiet
+        # coil bars that precede a dry-coil premarket break (JEM 06-30 12:59Z class), so the
+        # break tick is mathematically < 1.0 BY CONSTRUCTION — the setup is structurally
+        # untradeable even as it explodes. TAPE-VERIFIED on JEM 2026-06-30: at the first-break
+        # window 12:59:16-30Z the coil-inclusive 5-bar mean is 0.74-0.91 (< 1.0 floor) while a
+        # coil-EXCLUDED mean crosses 1.0 as the active volume builds, and the forming-bar rvol
+        # reaches the explosive floor by ~12:59:40Z. Two OR-ed exemptions, both fail-CLOSED:
+        #
+        #   (A) EXPLOSIVE FORMING BAR — the break bar's OWN rvol (vol_ratio, already computed)
+        #       is >= chili_momentum_explosive_floor_rvol (no new magic threshold): the bar
+        #       itself proves volume is exploding NOW, exactly what the mean shows once the coil
+        #       rolls off. Catches the completed-bar explosive break.
+        #   (B) COIL-EXCLUDED MEAN — recompute the sustain mean over the recent window but DROP
+        #       the identified low-range COIL bars (bar range < chili_momentum_sustained_coil_
+        #       range_atr_frac x ATR — a structural, not volume-defined, coil marker), then
+        #       require the ACTIVE-bar mean to clear the SAME sustained_rvol_floor. This is the
+        #       matrix's "compute the sustain mean EXCLUDING coil bars" option; it recovers the
+        #       window as real volume returns without ever passing a genuinely dead tape.
+        #
+        # The ESTR faded-24h-mover guardrail stays INTACT: a genuine low-volume drift (break
+        # bar not exploding AND the active-bar mean still below the floor) is blocked below.
+        # Deep-reclaim bounces are NEVER exempted (dead-cat guard). Kill-switch
+        # chili_momentum_sustained_volume_coil_exempt_enabled (default True) ⇒ OFF is byte-
+        # identical to the coil-inclusive gate.
+        _coil_exempt = False
+        if (
+            bool(getattr(settings, "chili_momentum_sustained_volume_coil_exempt_enabled", True))
+            and not _deep_reclaim  # never exempt a deep-retrace bounce (dead-cat trap guard)
+        ):
+            try:
+                _cx_floor = float(
+                    getattr(settings, "chili_momentum_explosive_floor_rvol", 5.0) or 0.0
+                )
+            except (TypeError, ValueError):
+                _cx_floor = 5.0
+            # (A) explosive forming-bar exemption.
+            if (
+                vol_ratio is not None
+                and _cx_floor > 0
+                and float(vol_ratio) == float(vol_ratio)
+                and float(vol_ratio) >= _cx_floor
+            ):
+                _coil_exempt = True
+                debug["sustained_volume_coil_exempt"] = {
+                    "mode": "explosive_break_bar",
+                    "break_bar_rvol": round(float(vol_ratio), 3),
+                    "explosive_floor": round(_cx_floor, 3),
+                }
+            # (B) coil-excluded active-bar mean exemption (recover the window as volume returns).
+            if not _coil_exempt:
+                _active_mean = _sustained_rvol_excluding_coil(
+                    vr, atr, high, low, cur, int(sustain_lookback_bars),
+                    coil_range_atr_frac=float(
+                        getattr(settings, "chili_momentum_sustained_coil_range_atr_frac", 0.5) or 0.5
+                    ),
+                )
+                if _active_mean is not None and _active_mean >= float(sustained_rvol_floor):
+                    _coil_exempt = True
+                    debug["sustained_volume_coil_exempt"] = {
+                        "mode": "coil_excluded_mean",
+                        "active_bar_rvol_mean": round(float(_active_mean), 3),
+                        "floor": round(float(sustained_rvol_floor), 3),
+                    }
+        if not _coil_exempt:
+            if sustained is not None:
+                debug["sustained_rvol"] = round(sustained, 2)
+                if sustained < float(sustained_rvol_floor):
+                    return False, "faded_volume_no_sustain", debug
+            elif _deep_reclaim:
                 return False, "faded_volume_no_sustain", debug
-        elif _deep_reclaim:
-            return False, "faded_volume_no_sustain", debug
 
     # ── Ross candle / VWAP / MACD confirmations (the tape-reading the structural
     # gate alone misses; each optional + live-runner-gated, fail-OPEN so thin data

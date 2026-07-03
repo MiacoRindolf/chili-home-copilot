@@ -5252,6 +5252,28 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_SUSTAIN_LOOKBACK_BARS"),
         description="Bars over which sustained rel-vol is averaged at the entry tick.",
     )
+    # CAPTURE-G2 (2026-07-03): the sustained-volume gate averages rel-vol over the last N
+    # bars, which INCLUDES the quiet coil bars preceding a dry-coil premarket break (the JEM
+    # 2026-06-30 12:59Z $46k class). The first break tick's 5-bar mean rvol is therefore < 1.0
+    # BY CONSTRUCTION, so the gate rejects the ONLY catchable window even as the name explodes
+    # — the setup class is structurally untradeable. EXEMPT the sustain gate when the break
+    # bar's OWN forming-bar rvol is exploding (>= chili_momentum_explosive_floor_rvol; the
+    # break bar proves volume is exploding NOW, exactly what the mean would show once the coil
+    # rolls off). The ESTR faded-24h-mover guardrail stays intact (a genuine low-volume drift,
+    # break bar NOT exploding, is still blocked); fail-CLOSED (unreadable break-bar rvol ⇒ no
+    # exemption ⇒ current behavior). Deep-reclaim bounces are never exempted (dead-cat guard).
+    chili_momentum_sustained_volume_coil_exempt_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SUSTAINED_VOLUME_COIL_EXEMPT_ENABLED"),
+        description="CAPTURE-G2: exempt the sustained-volume (faded-mover) gate on the break tick via two OR-ed fail-closed paths: (A) the BREAK BAR's own forming-bar rvol is exploding (>= chili_momentum_explosive_floor_rvol), or (B) the sustain mean recomputed EXCLUDING identified low-range coil bars clears the floor. So a dry-coil premarket break (JEM 06-30 class) whose coil-inclusive 5-bar mean is mathematically depressed by the quiet coil can still reach the entry window as active volume returns. Keeps the ESTR faded-24h-mover guardrail (a genuine low-volume drift — no explosive bar AND active mean still below floor — is still blocked) + the deep-reclaim dead-cat guard. True (default) makes the dry-coil class tradeable; False = byte-identical to the coil-inclusive gate.",
+    )
+    chili_momentum_sustained_coil_range_atr_frac: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SUSTAINED_COIL_RANGE_ATR_FRAC"),
+        description="CAPTURE-G2 (path B): a bar whose range (high-low) is below this fraction of its ATR is an identified low-range COIL bar, excluded from the coil-excluded active-bar sustain mean. 0.5 = half the ATR (a genuinely tight consolidation candle). Only consulted when chili_momentum_sustained_volume_coil_exempt_enabled is ON; a missing/zero ATR keeps the bar (fails toward the stricter coil-inclusive mean).",
+    )
     # Ross candle / VWAP / MACD entry confirmations — the tape-reading the structural
     # pullback gate alone misses. Default ON; each fail-OPEN on thin/missing data.
     chili_momentum_entry_require_break_candle: bool = Field(
