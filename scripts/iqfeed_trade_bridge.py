@@ -353,9 +353,18 @@ def writer(forced_syms: set[str], deadline: float | None) -> None:
                 target = forced_syms
             else:
                 armed = _live_symbols()             # armed/live names: ALWAYS watched (load-bearing for live)
-                room = max(0, _max_watch - len(armed))
-                movers = [s for s in _eligible_symbols(_max_watch) if s not in armed][:room]
-                target = armed | set(movers)
+                # F4 (capture-g fix): UNION the fresh first-alert hints into the slow-refresh
+                # target. Without this the refresh rebuilt target = armed | eligible-movers
+                # ONLY, so a fast-subscribed alert name that missed the eligibility cut was
+                # UNWATCHED <=20s after the 3s poll added it — then re-added on the next fast
+                # poll (hint fresh 180s): a watch FLAP that left tape gaps mid-squeeze and,
+                # via _last_trade.pop on unwatch, DUPLICATE prints on re-add. A fresh-hint
+                # name now stays watched for its whole hint window.
+                alerts = set(_alert_symbols(SUBSCRIBE_FRESH_WINDOW_S)) if SUBSCRIBE_ON_ALERT else set()
+                base = armed | alerts
+                room = max(0, _max_watch - len(base))
+                movers = [s for s in _eligible_symbols(_max_watch) if s not in base][:room]
+                target = base | set(movers)
             for sym in target - watched:
                 _send(f"w{sym}")                # Level-1 watch -> Q/P updates with Last + Last Size
                 watched.add(sym)
