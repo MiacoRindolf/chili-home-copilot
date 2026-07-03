@@ -2640,6 +2640,52 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_DAILY_TRADE_COUNT_BUDGET_ENABLED"),
         description="Adaptive per-day A+ entry-count ceiling — cap the number of fresh entries per session (discipline / overtrading guard).",
     )
+    # A1(b) (Ross CLRO-lesson 2026-07-02): TOP-RANK EXEMPTION for the trade-count budget.
+    # Ross spent 3 trades on ONE name (CLRO) for +$8,917 while CHILI's 5/5 FIFO budget denied
+    # 98 CLRO candidates (used on B-names). Episode-counting alone still yields 5/5 on a churny
+    # day, so the #1 freshness-valid live-eligible mover whose score >= today's within-day p90
+    # gets its OWN episode sub-budget = the SAME base — the CLRO-class name is never blocked
+    # while B-names churn the ceiling. FAIL-CLOSED: unreadable rank / not-#1 / below-p90 => no
+    # exemption (the ceiling stands). Default-ON; kill-switch
+    # CHILI_MOMENTUM_TRADE_BUDGET_TOP_RANK_EXEMPT_ENABLED=0.
+    chili_momentum_trade_budget_top_rank_exempt_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TRADE_BUDGET_TOP_RANK_EXEMPT_ENABLED"),
+        description="A1(b): the #1 freshness-valid live-eligible symbol (score >= within-day p90) gets its OWN episode sub-budget = the same base when the trade-count ceiling is reached. Fail-closed on unreadable rank. OFF => the ceiling is a hard block (no exemption).",
+    )
+    # A2 (Ross CLRO-lesson 2026-07-02): QUALITY-RANKED RISK-ENVELOPE DISPLACEMENT. On 07-02
+    # two dying IPW losers pinned the whole 3%-of-equity aggregate risk envelope (726 blocks)
+    # through CLRO's curl. When the aggregate-open-risk cap blocks a TOP-RANKED candidate (A1's
+    # top-rank predicate), enqueue a stop-TIGHTEN on the largest at-risk open position to that
+    # position's OWN already-computed most-defensive trail candidate (never an invented
+    # breakeven; INVARIANT-A compose max(candidate, current) — stops only tighten). THIS tick
+    # still blocks (no simultaneous act); the position's next tick applies the tighten and the
+    # freed envelope admits the NEXT candidate tick. FAIL-CLOSED everywhere: no candidate level
+    # / frees < planned / non-top-ranked => plain block, byte-identical to today. Default-ON;
+    # kill-switch CHILI_MOMENTUM_RISK_ENVELOPE_DISPLACEMENT_ENABLED=0.
+    # NOTE (sequencing): commit 0276285 (basis-independent slots) is NOT yet in main 888198e —
+    # A2 composes with the CURRENT main aggregate-risk accounting; reconcile when 0276285 lands.
+    chili_momentum_risk_envelope_displacement_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_ENVELOPE_DISPLACEMENT_ENABLED"),
+        description="A2: when the aggregate-open-risk cap blocks a TOP-RANKED candidate, enqueue a stop-TIGHTEN on the largest at-risk open position to its own most-defensive trail candidate (INVARIANT-A max(candidate,current)); this tick still blocks, the next admits against the freed envelope. Fail-closed: no candidate level / frees < planned / non-top-ranked => plain block. OFF => byte-identical.",
+    )
+    # A4 (Ross CLRO-lesson 2026-07-02): MID-MOVE ELIGIBILITY-FLIP RE-SCORE. On 07-02 621x
+    # "Not live-eligible per neural viability" covered Ross's ENTIRE CLRO window; the flip
+    # landed ~60-90s after the top. main already has the tape-delta ignite feeder, but it only
+    # fires on >=10%/5min crossers — CLRO's SLOW 15-min curl (~2.7%/5min) slipped under it. A4
+    # closes that hole: at a viability block whose ONLY failing checks are live_eligible /
+    # viability_freshness, when the session is ARMED and its own tick evidence shows running-up
+    # continuation (signed OFI level>0 AND slope>=0), invoke the SAME single-symbol re-score the
+    # tape-delta feeder uses (run_momentum_neural_tick, freshness_ts=now), rate-limited per
+    # symbol to the adaptive tape cadence (clamp of tape_inter_row_gap_p50). FAIL-CLOSED: a
+    # re-score error => the block stands; never force eligibility. Default-ON; kill-switch
+    # CHILI_MOMENTUM_ELIGIBILITY_BLOCK_RESCORE_ENABLED=0.
+    chili_momentum_eligibility_block_rescore_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ELIGIBILITY_BLOCK_RESCORE_ENABLED"),
+        description="A4: at an eligibility-only viability block on an ARMED, running-up session, invoke the same single-symbol re-score the tape-delta feeder uses (freshness_ts=now), rate-limited per symbol to the adaptive tape cadence. Fail-closed: re-score error => block stands; never force eligibility. OFF => byte-identical (no re-score).",
+    )
     chili_momentum_prior_day_pnl_damper_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_PRIOR_DAY_PNL_DAMPER_ENABLED"),

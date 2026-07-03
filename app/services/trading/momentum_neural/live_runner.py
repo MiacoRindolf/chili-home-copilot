@@ -2727,6 +2727,80 @@ def _only_held_eligibility_flicker_block(ev: dict[str, Any]) -> bool:
         return False
 
 
+# A4: per-symbol last-rescore monotonic timestamps (rate-limit to the adaptive tape cadence).
+# Hard-capped dict (CLAUDE.md: caches need a max size); on overflow the whole map clears (cheap).
+_A4_RESCORE_LAST: dict[str, float] = {}
+_A4_RESCORE_MAX = 4096
+
+
+def _maybe_rescore_eligibility_block(
+    db: Session, sess: TradingAutomationSession, ev: dict[str, Any]
+) -> bool:
+    """A4 MID-MOVE ELIGIBILITY-FLIP RE-SCORE. At a viability block whose ONLY failing checks are
+    ``live_eligible`` / ``viability_freshness``, when the session is ARMED and its own tick
+    evidence shows running-up continuation (``_live_forward_momentum``: signed OFI level>0 AND
+    slope>=0), invoke the SAME single-symbol re-score the tape-delta feeder uses
+    (``run_momentum_neural_tick`` with freshness_ts=now), rate-limited PER SYMBOL to the adaptive
+    tape cadence (clamp of the p50 tape inter-row gap). The re-score may flip eligibility True OR
+    legitimately confirm False.
+
+    Returns True iff a re-score was performed this tick (the caller re-reads viability / re-runs
+    the boundary gate). FAIL-CLOSED: flag off / not an eligibility-only block / not ARMED / not
+    running-up / rate-limited / any error => returns False and the ORIGINAL block stands. NEVER
+    forces eligibility — it only asks the scorer to look again against fresh evidence."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_eligibility_block_rescore_enabled", True)):
+            return False
+        # ARMED / queued only (a freshly-armed setup that never held a position).
+        if sess.state not in (STATE_ARMED_PENDING_RUNNER, STATE_QUEUED_LIVE):
+            return False
+        # ONLY eligibility/freshness failing (never re-score past a real risk block).
+        if not _only_held_eligibility_flicker_block(ev):
+            return False
+        sym = str(sess.symbol or "").strip().upper()
+        if not sym or sym.endswith("-USD"):
+            return False  # equity lane only (the tape-delta feeder is equity tape)
+        # Running-up continuation (the existing ross_event predicate): signed OFI level>0 AND
+        # slope>=0. None/False (thin/falling tape) => do NOT re-score (fail-closed, block stands).
+        if _live_forward_momentum(db, sess, as_of=_utcnow()) is not True:
+            return False
+        # Adaptive per-symbol rate-limit = clamp(p50 tape inter-row gap, floor, 15).
+        import time as _time
+
+        now_mono = _time.monotonic()
+        try:
+            from .nbbo_tape import tape_inter_row_gap_p50_seconds
+
+            _p50 = tape_inter_row_gap_p50_seconds(db)
+        except Exception:
+            _p50 = None
+        _floor = float(getattr(settings, "chili_momentum_tape_delta_min_seconds", 5.0) or 5.0)
+        _floor = max(1.0, _floor)
+        cadence = _floor if _p50 is None else min(15.0, max(_floor, float(_p50)))
+        _last = _A4_RESCORE_LAST.get(sym)
+        if _last is not None and (now_mono - _last) < cadence:
+            return False  # arrived sooner than the adaptive cadence — self-throttle (block stands)
+        if len(_A4_RESCORE_LAST) >= _A4_RESCORE_MAX:
+            _A4_RESCORE_LAST.clear()
+        _A4_RESCORE_LAST[sym] = now_mono
+        # Re-score via the SAME single-symbol path the tape-delta feeder uses (freshness_ts=now
+        # is stamped inside run_momentum_neural_tick). Own commit; idempotent (symbol,variant)
+        # upsert downstream. FAIL-CLOSED: any error => the block stands.
+        from .pipeline import run_momentum_neural_tick
+
+        run_momentum_neural_tick(db, meta={"tickers": [sym], "ross_signals": {sym: {"ticker": sym, "direction": "long"}}})
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            return False
+        _emit(db, sess, "eligibility_block_rescored", {"symbol": sym, "cadence_s": round(cadence, 2)})
+        return True
+    except Exception:
+        _log.debug("[momentum_live] A4 eligibility-block re-score skipped", exc_info=True)
+        return False
+
+
 def _round_base_size(qty: float, increment: Optional[float], min_sz: Optional[float]) -> float:
     if qty <= 0:
         return 0.0
@@ -5976,6 +6050,16 @@ def tick_live_session(
     ok_b, ev = runner_boundary_risk_ok(
         db, sess, expected_move_bps=_expected_move_bps, apply_eligibility_grace=True
     )
+    # A4 MID-MOVE ELIGIBILITY-FLIP RE-SCORE: when the ONLY boundary failure is eligibility /
+    # freshness on an ARMED, running-up name, re-score the single symbol (freshness_ts=now) via
+    # the SAME path the tape-delta feeder uses, rate-limited to the adaptive tape cadence, then
+    # re-run the boundary gate ONCE against the fresh viability. The re-score may flip eligibility
+    # True (the slow-curl CLRO-class name) or legitimately confirm False. FAIL-CLOSED: no
+    # re-score / still blocked => the original block stands (byte-identical).
+    if not ok_b and _maybe_rescore_eligibility_block(db, sess, ev):
+        ok_b, ev = runner_boundary_risk_ok(
+            db, sess, expected_move_bps=_expected_move_bps, apply_eligibility_grace=True
+        )
     if not ok_b:
         _emit(
             db,
@@ -10074,19 +10158,19 @@ def tick_live_session(
             # atomic with the position cap.
             from .risk_policy import daily_trade_count_budget_decision
 
+            # A1(b): pass the candidate symbol so the #1 freshness-valid live-eligible mover
+            # can earn the top-rank exemption when the ceiling is reached (CLRO-class names
+            # must never be denied while B-names churned the budget).
             _tcb_ok, _tcb_meta = daily_trade_count_budget_decision(
-                db, execution_family=ef, open_entry_count=_pos_ct
+                db, execution_family=ef, open_entry_count=_pos_ct, symbol=sess.symbol
             )
             if not _tcb_ok:
                 _emit(db, sess, "live_entry_blocked_daily_trade_count_budget", _tcb_meta)
-                # GAP 1: hitting the daily trade-count budget is a broken over-trading
-                # discipline rule — arm the NEXT-day lockout (no-op unless the flag is on).
-                # Best-effort; never affects this tick's block result.
-                try:
-                    from ..governance import set_next_day_trading_lockout
-                    set_next_day_trading_lockout("daily_trade_count_budget")
-                except Exception:
-                    pass
+                # A1(c): the NEXT-day-lockout arming call is REMOVED. Hitting a per-day
+                # trade-count ceiling is a normal quality-aware budget block on a BOT — NOT
+                # a broken-discipline event that should lock out the next day (a misapplied
+                # human-tilt rule, same class as the removed daily_trade_count human budget).
+                # The 07-02 landmine: this fired 98x and armed a next-day lockout row.
                 _safe_transition(db, sess, STATE_WATCHING_LIVE)
                 db.flush()
                 return {
@@ -10629,6 +10713,41 @@ def tick_live_session(
         avg = float(pos["avg_entry_price"])
         stop_px = float(pos["stop_price"])
         target_px = float(pos["target_price"])
+        # ── A2 RISK-ENVELOPE DISPLACEMENT — APPLY an enqueued stop-TIGHTEN ────────────
+        # When the aggregate-open-risk cap blocked a TOP-RANKED candidate, the risk gate
+        # enqueued a stop-tighten request onto THIS (largest at-risk) position, to its OWN
+        # already-computed most-defensive trail candidate. Apply it HERE via INVARIANT-A
+        # compose max(candidate, current) — the exit machinery owns the stop, so the
+        # displacement expresses itself here, never as a force-liquidation. One-shot: the
+        # request is consumed after applying. Flag OFF / no request / non-tightening => no-op
+        # (byte-identical). Fail-safe: any error is swallowed and the tick proceeds.
+        try:
+            _disp_req = le.get("pending_risk_displacement_tighten") if isinstance(le, dict) else None
+            if (
+                isinstance(_disp_req, dict)
+                and bool(getattr(settings, "chili_momentum_risk_envelope_displacement_enabled", True))
+            ):
+                _disp_cand = _float_or_none(_disp_req.get("candidate_stop"))
+                # INVARIANT-A: only ever TIGHTEN (raise) the long stop; never loosen.
+                if _disp_cand is not None and math.isfinite(_disp_cand) and _disp_cand > stop_px:
+                    _old_disp_stop = stop_px
+                    stop_px = _disp_cand
+                    pos["stop_price"] = stop_px
+                    le["position"] = pos
+                    le.pop("pending_risk_displacement_tighten", None)
+                    _commit_le(sess, le)
+                    _emit(db, sess, "risk_envelope_displacement_tighten", {
+                        "old_stop": _old_disp_stop,
+                        "new_stop": stop_px,
+                        "for_candidate": _disp_req.get("for_candidate"),
+                        "freed_usd": _disp_req.get("freed_usd"),
+                    })
+                else:
+                    # A stale / non-tightening request is consumed (one-shot) so it can't linger.
+                    le.pop("pending_risk_displacement_tighten", None)
+                    _commit_le(sess, le)
+        except Exception:
+            _log.debug("[momentum_live] risk-envelope displacement apply skipped", exc_info=True)
         # Ross runner: track the high-water mark (peak bid) each tick so the
         # trailing chandelier stop can ratchet up off it. Frozen in the position.
         _hwm_prev = _float_or_none(pos.get("high_water_mark"))
