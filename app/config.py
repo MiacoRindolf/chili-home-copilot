@@ -4588,6 +4588,28 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_ACTION_GRADING_ENABLED"),
         description="Ross-batch2 QUCY-vs-ILLR lesson: grade a STRONG catalyst higher/lower by HEADLINE VERB QUALITY + DOLLAR AMOUNT. Completed-action verbs (acquires/signed/definitive agreement/awarded) BOOST; tentative/pursuit verbs (approves pursuit/explores/letter of intent) DE-BOOST (the +24%-fade class); a headline dollar amount ($400M) ADDS a boost scaled adaptively vs market cap (else >= $100M strong / >= $10M moderate). Fail-closed: no verb/dollar signal -> unchanged. KILL-SWITCH: False -> byte-identical.",
     )
+    # A9 (Ross CLRO-lesson 2026-07-02): MERGER-class reliability notch. Ross at [04:43]:
+    # "merger agreements can work. They don't always." Split a MERGER sub-class out of the
+    # completed-action grader + emit the class label on EVERY graded headline NOW
+    # (instrumentation first). The per-class reliability MULTIPLIER is ADAPTIVE from our own
+    # labeled follow-through history once >= N samples exist, else EXACTLY 1.0 — so behavior
+    # is byte-identical to today until the class has enough labeled outcomes to earn a
+    # weight. FAIL direction: no history => 1.0. Default-ON; kill-switch
+    # CHILI_MOMENTUM_CATALYST_CLASS_RELIABILITY_ENABLED=0.
+    chili_momentum_catalyst_class_reliability_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_CLASS_RELIABILITY_ENABLED"),
+        description="A9: split a MERGER sub-class out of the completed-action grader + emit the class label on every graded headline. Per-class reliability multiplier is ADAPTIVE from labeled history once >= N samples, else EXACTLY 1.0 (identical until trained). OFF => label still emitted, multiplier always 1.0.",
+    )
+    # ONE documented base: minimum labeled per-class samples before an adaptive reliability
+    # multiplier is trusted (below this the class multiplier is exactly 1.0). A FLOOR, not a
+    # magic tuning ceiling.
+    chili_momentum_catalyst_class_reliability_min_samples: int = Field(
+        default=20,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_CLASS_RELIABILITY_MIN_SAMPLES"),
+        description="A9: minimum labeled per-class outcomes before the adaptive reliability multiplier departs from 1.0. ONE documented base (floor).",
+    )
     # Entry trigger mode: "hybrid" (Ross pullback-break on 1m/5m, momentum_volume
     # fallback), "pullback_break" (pullback only), or "momentum_volume" (legacy 15m).
     chili_momentum_entry_trigger_mode: str = Field(

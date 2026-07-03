@@ -717,17 +717,28 @@ def strong_catalyst_symbols() -> set[str]:
 # ``chili_momentum_catalyst_action_grading_enabled`` (default True). No magic constants beyond
 # the documented dollar tiers + the multiplier bases below.
 
-# COMPLETED-ACTION verbs — a DONE (or contractually committed) deal. Present/past tense +
-# "definitive"/"merger agreement" (a signed contract, not an exploration).
+# A9 (Ross CLRO-lesson 2026-07-02) — MERGER sub-class split out of the completed-action
+# set. Ross at [04:43]: "merger agreements can work. They don't always." A merger/definitive
+# agreement is STILL a completed action (grades +1 the same as before — behavior identical),
+# but it is LABELED as its own class so its follow-through reliability can be learned
+# ADAPTIVELY over time (see catalyst_class_reliability_multiplier). These phrases were
+# previously inline in _COMPLETED_ACTION_KEYWORDS; splitting them out changes NO grade.
+_MERGER_CLASS_KEYWORDS = (
+    "merger agreement", "definitive agreement", "enters definitive", "completes merger",
+)
+
+# COMPLETED-ACTION verbs — a DONE (or contractually committed) deal. Present/past tense.
+# The MERGER-class phrases live in _MERGER_CLASS_KEYWORDS above and are UNIONED back in
+# for the completeness grade (so a merger headline still grades +1 completed — byte-identical).
 _COMPLETED_ACTION_KEYWORDS = (
     "acquires", "to acquire", "acquired", "acquisition of", "signs", "signed", "signs agreement",
     "awarded", "wins contract", "wins award", "receives approval", "receives fda approval",
     "receives clearance", "granted approval", "enters agreement", "enters into agreement",
-    "enters definitive", "definitive agreement", "merger agreement", "closes", "closing of",
-    "completes acquisition", "completes merger", "completed", "finalizes", "finalized",
+    "closes", "closing of",
+    "completes acquisition", "completed", "finalizes", "finalized",
     "executes agreement", "secures contract", "secures order", "purchase agreement",
     "receives order", "receives purchase order",
-)
+) + _MERGER_CLASS_KEYWORDS
 
 # TENTATIVE / pursuit verbs — INTENT, not a done deal (the QUCY "approves pursuit" fade class).
 _TENTATIVE_ACTION_KEYWORDS = (
@@ -795,6 +806,104 @@ def _action_completeness_grade(title: str) -> int:
     return 0
 
 
+# A9: the catalyst ACTION CLASS labels emitted on every graded headline. "merger" is the
+# split-out sub-class (Ross: "merger agreements can work. They don't always."); "acquisition"
+# / "approval" / "contract" are the other completed families we can learn reliability for
+# independently later. "tentative" is the pursuit/fade class; "other" is any completed
+# headline that doesn't match a named family; "none" is no action verb at all.
+CATALYST_ACTION_CLASSES = ("merger", "acquisition", "approval", "contract", "tentative", "other", "none")
+
+_ACQUISITION_KEYWORDS = ("acquires", "to acquire", "acquired", "acquisition of", "completes acquisition")
+_APPROVAL_KEYWORDS = (
+    "receives approval", "receives fda approval", "receives clearance", "granted approval",
+)
+_CONTRACT_KEYWORDS = (
+    "awarded", "wins contract", "wins award", "secures contract", "secures order",
+    "receives order", "receives purchase order", "purchase agreement",
+)
+
+
+def catalyst_action_class(title: str) -> str:
+    """The ACTION-CLASS label for ONE headline (A9 instrumentation). Emitted on EVERY
+    graded headline NOW so the per-class follow-through can be learned adaptively later.
+
+    Precedence (tentative dominates a co-occurring completed word, mirroring
+    ``_action_completeness_grade``): tentative -> 'tentative'; else the first matching
+    completed family (merger -> acquisition -> approval -> contract); else a completed
+    headline with no named family -> 'other'; else no action verb -> 'none'. Pure;
+    fail-closed to 'none' on an unreadable title."""
+    t = str(title or "").lower()
+    if not t:
+        return "none"
+    if any(k in t for k in _TENTATIVE_ACTION_KEYWORDS):
+        return "tentative"
+    if any(k in t for k in _MERGER_CLASS_KEYWORDS):
+        return "merger"
+    if any(k in t for k in _ACQUISITION_KEYWORDS):
+        return "acquisition"
+    if any(k in t for k in _APPROVAL_KEYWORDS):
+        return "approval"
+    if any(k in t for k in _CONTRACT_KEYWORDS):
+        return "contract"
+    if any(k in t for k in _COMPLETED_ACTION_KEYWORDS):
+        return "other"
+    return "none"
+
+
+def _catalyst_class_reliability_enabled() -> bool:
+    """Kill-switch for the A9 per-class reliability multiplier. Default True (the label is
+    always emitted; the multiplier is 1.0 until a class has >= N labeled samples). Flag OFF
+    => the multiplier is always exactly 1.0 (label still emitted; byte-identical grade)."""
+    return bool(getattr(settings, "chili_momentum_catalyst_class_reliability_enabled", True))
+
+
+def catalyst_class_reliability_multiplier(action_class: str, db: object | None = None) -> float:
+    """ADAPTIVE per-class reliability multiplier in (0, ~1.x], learned from OUR OWN labeled
+    follow-through history. Returns EXACTLY 1.0 (no effect) when:
+      * the flag is OFF, or
+      * the class has FEWER than the documented minimum labeled samples
+        (``chili_momentum_catalyst_class_reliability_min_samples``, default 20), or
+      * no history source is available.
+
+    So behavior is byte-identical to today until a class earns enough labeled outcomes to
+    carry a weight (Ross's n=1 merger stays at 1.0). FAIL direction: any error / no history
+    => 1.0. The learning READ is intentionally a NO-OP stub here (the label-emit is the
+    instrumentation half A9 ships now); the adaptive weight is wired once the labeled
+    per-class outcome table is populated — until then this ALWAYS returns 1.0."""
+    if not _catalyst_class_reliability_enabled():
+        return 1.0
+    cls = str(action_class or "").strip().lower()
+    if cls not in CATALYST_ACTION_CLASSES or cls in ("none", "other"):
+        return 1.0
+    try:
+        min_samples = int(
+            getattr(settings, "chili_momentum_catalyst_class_reliability_min_samples", 20) or 20
+        )
+    except (TypeError, ValueError):
+        min_samples = 20
+    # Read the class's labeled follow-through history (samples + realized reliability).
+    # No history source wired yet => (0 samples) => below the floor => exactly 1.0. This
+    # stays a strict no-op (multiplier 1.0) until the labeled per-class outcome store is
+    # populated, then the adaptive weight departs from 1.0 ONLY at/above the sample floor.
+    samples, reliability = _catalyst_class_history(cls, db)
+    if samples < max(1, min_samples) or reliability is None:
+        return 1.0
+    try:
+        # Bound the learned weight to a conservative band so a noisy early estimate can
+        # never over-boost or zero a class (a class only ever nudges within [0.5, 1.5]).
+        return float(max(0.5, min(1.5, reliability)))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _catalyst_class_history(action_class: str, db: object | None) -> tuple[int, float | None]:
+    """(labeled_sample_count, realized_reliability_in_[0,inf)) for a catalyst action class
+    from OUR OWN follow-through history. Until the labeled per-class outcome store is wired,
+    returns (0, None) => the caller keeps the multiplier at exactly 1.0. Fail-closed to
+    (0, None) on any error (no history => no departure from 1.0)."""
+    return 0, None
+
+
 def _parse_dollar_amount(title: str) -> float | None:
     """The LARGEST dollar figure stated in a headline, in dollars ("$400 million" -> 4.0e8,
     "$1.2B" -> 1.2e9, "$400,000,000" -> 4.0e8). Returns the MAX match (the headline's headline
@@ -853,7 +962,11 @@ def action_dollar_grade_delta(title: str, *, market_cap: float | None = None) ->
     A pure pursuit headline WITH a dollar amount (e.g. "board approves pursuit ... potential
     $500M") nets to ``tilt * (-0.5 + dollar_frac)`` — still <= 0 unless the number is material,
     reflecting that intent + a big number is Ross's exact pop-and-fade trap. FAIL-CLOSED: no
-    verb signal AND no dollar => 0 (byte-identical to the flag-off path). Flag OFF => 0. Pure."""
+    verb signal AND no dollar => 0 (byte-identical to the flag-off path). Flag OFF => 0. Pure.
+
+    A9: the delta is scaled by the ADAPTIVE per-class reliability multiplier
+    (``catalyst_class_reliability_multiplier``), which is EXACTLY 1.0 until a class earns
+    >= N labeled samples — so this is byte-identical to the pre-A9 grade until trained."""
     if not _catalyst_action_grading_enabled():
         return 0.0
     comp = _action_completeness_grade(title)
@@ -862,7 +975,23 @@ def action_dollar_grade_delta(title: str, *, market_cap: float | None = None) ->
     if comp == 0 and dfrac == 0.0:
         return 0.0
     total_frac = (comp * _ACTION_COMPLETENESS_TILT_FRAC) + dfrac
-    return round(_catalyst_tilt() * total_frac, 6)
+    # A9: emit the action class label on EVERY graded headline (instrumentation first) +
+    # apply the adaptive per-class reliability multiplier (1.0 until the class is trained,
+    # so byte-identical today). Only a POSITIVE (completed-action) grade is reliability-
+    # scaled: the multiplier expresses "how often does THIS class of completed catalyst
+    # actually follow through" — it never rescales a tentative DE-boost (that stays the
+    # full fade penalty).
+    action_class = catalyst_action_class(title)
+    rel_mult = 1.0
+    if total_frac > 0.0:
+        rel_mult = catalyst_class_reliability_multiplier(action_class)
+    delta = round(_catalyst_tilt() * total_frac * rel_mult, 6)
+    if action_class not in ("none", "other") and logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "[catalyst] action_class=%s comp=%d dfrac=%.3f rel_mult=%.3f delta=%.6f",
+            action_class, comp, dfrac, rel_mult, delta,
+        )
+    return delta
 
 
 def action_grade_deltas_by_symbol(
