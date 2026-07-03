@@ -2238,6 +2238,13 @@ def run_momentum_neural_tick(
         "correlation_id": correlation_id,
     }
 
+    try:
+        # Feature probes above are best-effort reads; clear any aborted probe transaction
+        # before the durable BrainNodeState/evolution/viability writes.
+        db.rollback()
+    except Exception:
+        _log.debug("[momentum_neural] pre-persistence rollback skipped", exc_info=True)
+
     hub = get_or_create_state(db, HUB_NODE_ID)
     hub.local_state = hub_payload
     hub.last_activated_at = datetime.utcnow()
