@@ -3115,6 +3115,20 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_WS_IGNITION_ENABLED"),
         description="Enable the additive WS ignition scorer: subscribe the (uncapped) equity universe on the price bus and, the instant a tick shows a name igniting (intraday move% ≥ the ignition floor), score it DIRECTLY into momentum_symbol_viability — bypassing the EMA9 continuation gate that emits nothing for a vertical name (e.g. RGNT +498% nowhere near its EMA9). The scheduled 5-min batch builder + legacy pattern lane are unchanged; this path is purely additive. 0 = scheduled-only (no WS ignition; byte-identical to current).",
     )
+    # CAPTURE-G3 (2026-07-03): Gate-0 subscription latency. The IQFeed trade/depth bridges
+    # (host processes) subscribe symbols by POLLING the armed-sessions + eligible-mover viability
+    # board on a ~20s refresh, so a symbol that FIRST ignites only reaches the bridge after its
+    # viability row is written AND the next refresh — a ~2.7-min blind window on a sub-2-min
+    # squeeze (VWAV 2026-06-30: the whole 5->9.75 leg was un-taped). When ON, the ws-ignition
+    # first-alert writes a hint to momentum_bridge_subscribe_requests (a NON-trading coordination
+    # table) the instant a name crosses a Ross axis; the bridge fast-polls that table and
+    # subscribes immediately (first-alert -> subscribed in seconds). OFF ⇒ no hint write ⇒ the
+    # bridge is byte-identical to the poll-only cadence.
+    chili_momentum_bridge_subscribe_on_alert_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BRIDGE_SUBSCRIBE_ON_ALERT_ENABLED"),
+        description="CAPTURE-G3: event-driven subscribe-on-first-alert for the IQFeed bridges. True (default) = on first ignition/alert, write a subscribe hint to momentum_bridge_subscribe_requests so the host bridge fast-polls it and subscribes the symbol immediately (closes the ~2.7-min Gate-0 blind window on sub-2-min squeezes like VWAV). False = no hint write; the bridge falls back to its ~20s poll cadence (byte-identical to current).",
+    )
     chili_momentum_ross_equity_universe_required: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_EQUITY_UNIVERSE_REQUIRED"),
