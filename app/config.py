@@ -6678,6 +6678,28 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_SPREAD_BPS_ABS_CAP"),
     )
+    # STEP-E #15: the FIXED 300bps abs cap clamped a legitimately-wide low-float's adaptive
+    # EM-based ceiling (DSY adaptive 721bps -> clamped to 300 -> 1,358 wide_bbo blocks). When
+    # ON, the effective cap SCALES with the name's OWN adaptive EM ceiling:
+    #   effective_cap = max(configured_abs_cap, k * (ratio * expected_move_bps))
+    # so a name whose expected move JUSTIFIES a 721bps ceiling isn't clamped to 300, while
+    # junk (small EM => small ratio*em) stays capped at 300 and still blocks. k is the ONE
+    # documented base (>=1.0 = never clamp below the EM-justified ceiling). Acceptance of the
+    # wider spread is COUPLED to a proportional size-down (the spread is priced as entry cost)
+    # via the existing spread-cost derate. Missing EM => the fixed cap (fail-closed). OFF =>
+    # the fixed 300 cap (byte-identical legacy).
+    chili_momentum_risk_spread_abs_cap_em_scale_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_SPREAD_ABS_CAP_EM_SCALE_ENABLED"),
+        description="Scale the absolute spread cap with the name's adaptive EM-based ceiling (max(abs_cap, k*ratio*EM)) so a legitimately-wide low-float isn't clamped to 300bps; junk (small EM) still blocks. Coupled to a proportional size-down.",
+    )
+    chili_momentum_risk_spread_abs_cap_em_scale_k: float = Field(
+        default=1.0,
+        ge=1.0,
+        le=5.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_SPREAD_ABS_CAP_EM_SCALE_K"),
+        description="Multiplier on the adaptive EM ceiling for the scaled abs cap. The ONE documented base; k=1.0 = the cap never clamps below the EM-justified ceiling. A FLOOR (>=1.0), not a ceiling.",
+    )
     # SKIP-FOR-LIMITS (operator 2026-06-23): the momentum entry is a marketable LIMIT
     # (place_limit_order_gtc at/above the guarded ask) — the LIMIT PRICE itself bounds the
     # fill cost, so the adaptive wide-spread gate is redundant for it (it protects against

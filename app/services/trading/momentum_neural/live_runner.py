@@ -3167,13 +3167,31 @@ def _adaptive_live_max_spread_bps(
     except (TypeError, ValueError):
         abs_cap = 300.0
     em = expected_move_bps
+    used_fallback_em = False
     if (
         em is None
         and fallback_em_bps is not None
         and bool(getattr(settings, "chili_momentum_spread_cap_em_fallback_enabled", True))
     ):
         em = fallback_em_bps
-    return adaptive_max_spread_bps(base, em, ratio, abs_cap_bps=abs_cap)
+        used_fallback_em = True
+    # STEP-E #15: EM-scale the abs cap so a legitimately-wide low-float (whose OWN measured
+    # expected move justifies a wide ceiling) isn't clamped to 300. Applied ONLY to a REAL
+    # expected_move_bps — NOT to the conservative fallback substitution (a fabricated EM must
+    # not relax the hard "spread too wide -> skip" backstop; the fixed abs_cap still hard-caps
+    # the fallback path). Missing EM entirely => base floor (fail-closed).
+    em_scale_k: float | None = None
+    if (
+        not used_fallback_em
+        and bool(getattr(settings, "chili_momentum_risk_spread_abs_cap_em_scale_enabled", True))
+    ):
+        try:
+            em_scale_k = float(getattr(settings, "chili_momentum_risk_spread_abs_cap_em_scale_k", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            em_scale_k = 1.0
+    return adaptive_max_spread_bps(
+        base, em, ratio, abs_cap_bps=abs_cap, abs_cap_em_scale_k=em_scale_k
+    )
 
 
 def _live_entry_quote_gate_applies(sess: TradingAutomationSession, le: dict[str, Any]) -> bool:

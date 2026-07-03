@@ -55,6 +55,7 @@ def adaptive_max_spread_bps(
     ratio: float,
     *,
     abs_cap_bps: float | None = None,
+    abs_cap_em_scale_k: float | None = None,
 ) -> float:
     """Volatility-relative spread tolerance, with an absolute safety cap.
 
@@ -91,7 +92,20 @@ def adaptive_max_spread_bps(
         try:
             cap = float(abs_cap_bps)
             if math.isfinite(cap) and cap > 0:
-                adaptive = min(adaptive, max(base, cap))  # never tolerate above the cap
+                # STEP-E #15: EM-scale the abs cap so a legitimately-wide low-float (whose OWN
+                # expected move justifies a wide ceiling, e.g. DSY adaptive 721bps) isn't
+                # clamped to the fixed cap (300). effective_cap = max(cap, k * (ratio*EM)) with
+                # k >= 1.0 the ONE documented base. Junk (small EM => small ratio*em) keeps the
+                # fixed cap and still blocks. When k is None (legacy) the fixed cap applies.
+                effective_cap = cap
+                if abs_cap_em_scale_k is not None:
+                    try:
+                        k = float(abs_cap_em_scale_k)
+                        if math.isfinite(k) and k >= 1.0:
+                            effective_cap = max(cap, k * (r * em))
+                    except (TypeError, ValueError):
+                        effective_cap = cap
+                adaptive = min(adaptive, max(base, effective_cap))  # never tolerate above the cap
         except (TypeError, ValueError):
             pass
     return adaptive
@@ -1680,7 +1694,18 @@ def spread_liquidity_risk_multiplier(
         if abs_cap_bps is None:
             abs_cap_bps = float(getattr(settings, "chili_momentum_risk_max_spread_bps_abs_cap", 800.0) or 800.0)
         base = float(getattr(settings, "chili_momentum_risk_max_spread_bps_live", 60.0) or 60.0)
-        tol = adaptive_max_spread_bps(base, expected_move_bps, ratio, abs_cap_bps=abs_cap_bps)
+        # STEP-E #15: use the SAME EM-scaled tolerance the admission gate used, so a wider spread
+        # accepted via the EM-scaled cap is priced as a proportional SIZE-DOWN (a DSY-class name
+        # at its 721bps EM ceiling shrinks toward the floor, not admitted at full size).
+        _em_scale_k: float | None = None
+        if bool(getattr(settings, "chili_momentum_risk_spread_abs_cap_em_scale_enabled", True)):
+            try:
+                _em_scale_k = float(getattr(settings, "chili_momentum_risk_spread_abs_cap_em_scale_k", 1.0) or 1.0)
+            except (TypeError, ValueError):
+                _em_scale_k = 1.0
+        tol = adaptive_max_spread_bps(
+            base, expected_move_bps, ratio, abs_cap_bps=abs_cap_bps, abs_cap_em_scale_k=_em_scale_k
+        )
         if not math.isfinite(tol) or tol <= 0:
             return 1.0, {"reason": "no_tolerance"}
         flo = float(floor)
