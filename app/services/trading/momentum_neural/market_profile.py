@@ -252,16 +252,49 @@ def early_premarket_unlocked(now: datetime | None = None) -> tuple[bool, int | N
     try:
         from .nbbo_tape import early_premarket_first_mover
 
-        first_at_utc, n_movers, lead_sym, lead_pct = early_premarket_first_mover(
-            now_utc=ref.astimezone(timezone.utc),
-            window_min=float(window_min),
-            min_move_pct=float(_MIN_ABS_CHANGE_PCT),
-            freshness_sec=30.0,
-        )
+        _now_utc = ref.astimezone(timezone.utc)
+        try:
+            first_at_utc, n_movers, lead_sym, lead_pct = early_premarket_first_mover(
+                now_utc=_now_utc,
+                window_min=float(window_min),
+                min_move_pct=float(_MIN_ABS_CHANGE_PCT),
+                freshness_sec=30.0,
+                # GAP axis (STEP-C #13): a name gapped >= the same mover floor vs prior close
+                # qualifies even with a flat trailing tape (the overnight gapper).
+                gap_floor_pct=float(_MIN_ABS_CHANGE_PCT),
+            )
+        except TypeError:
+            # Back-compat: a caller/test that stubbed early_premarket_first_mover without the
+            # new gap_floor_pct kwarg — fall back to the velocity-only signature.
+            first_at_utc, n_movers, lead_sym, lead_pct = early_premarket_first_mover(
+                now_utc=_now_utc,
+                window_min=float(window_min),
+                min_move_pct=float(_MIN_ABS_CHANGE_PCT),
+                freshness_sec=30.0,
+            )
     except Exception:
         return False, None, {"reason": "tape_read_error"}
-    if first_at_utc is None or n_movers < min_movers:
-        return False, None, {"reason": "insufficient_movers", "n_movers": n_movers}
+    # ADAPTIVE N (STEP-C #13): the configured min-movers is a CEILING, not a floor. Clamp it
+    # to what the sampler is actually surfacing (p75 of concurrent distinct movers) so a 3-bar
+    # isn't structurally dead on a day the tape only ever carried 2. Coverage unavailable (or
+    # the reader stubbed out) => keep the configured value (fail toward the strict bar).
+    effective_min_movers = min_movers
+    _coverage_p75: int | None = None
+    try:
+        from .nbbo_tape import early_premarket_mover_coverage_p75
+
+        _coverage_p75 = early_premarket_mover_coverage_p75(now_utc=_now_utc)
+        if _coverage_p75 is not None:
+            effective_min_movers = min(min_movers, max(1, int(_coverage_p75)))
+    except Exception:
+        pass
+    if first_at_utc is None or n_movers < effective_min_movers:
+        return False, None, {
+            "reason": "insufficient_movers",
+            "n_movers": n_movers,
+            "min_movers": effective_min_movers,
+            "configured_min_movers": min_movers,
+        }
     first_local = first_at_utc.astimezone(_NY_TZ)
     first_mod = max(_EXCHANGE_EXT_OPEN_MIN, first_local.hour * 60 + first_local.minute)
     return True, first_mod, {
@@ -269,6 +302,9 @@ def early_premarket_unlocked(now: datetime | None = None) -> tuple[bool, int | N
         "lead_symbol": lead_sym,
         "lead_pct": lead_pct,
         "first_mover_min": first_mod,
+        "min_movers": effective_min_movers,
+        "configured_min_movers": min_movers,
+        "coverage_p75": _coverage_p75,
     }
 
 

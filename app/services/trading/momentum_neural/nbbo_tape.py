@@ -69,18 +69,57 @@ def _in_sampling_window(now_utc: datetime) -> bool:
     return is_sample_session_now("EQUITY", now=now_utc)
 
 
+def _snapshot_prior_close_map(symbols: set[str]) -> dict[str, float]:
+    """Prior RTH close (``prevDay.c``) per symbol from the CACHED Massive snapshot — the
+    existing prior-close source (no new feed). Best-effort: {} on any failure. Reuses the
+    same cache the sampler warms every cycle, so this is a dict lookup, not a fresh fetch."""
+    if not symbols:
+        return {}
+    try:
+        from ...massive_client import get_full_market_snapshot
+
+        snap = get_full_market_snapshot(max_age_seconds=120) or []
+    except Exception as exc:
+        logger.debug("[nbbo_tape] prior-close snapshot fetch failed: %s", exc)
+        return {}
+    out: dict[str, float] = {}
+    want = {str(s).upper() for s in symbols}
+    for s in snap:
+        if not isinstance(s, dict):
+            continue
+        sym = str(s.get("ticker") or "").strip().upper()
+        if sym not in want:
+            continue
+        prev = s.get("prevDay") if isinstance(s.get("prevDay"), dict) else {}
+        pc = _f(prev.get("c"))
+        if pc is not None and pc > 0:
+            out[sym] = pc
+    return out
+
+
 def early_premarket_first_mover(
     *,
     now_utc: datetime,
     window_min: float,
     min_move_pct: float,
     freshness_sec: float,
+    gap_floor_pct: Optional[float] = None,
 ) -> tuple[Optional[datetime], int, Optional[str], Optional[float]]:
     """TIER-1 reader for the adaptive early-premarket unlock (market_profile.
     early_premarket_unlocked). Over the last ``window_min`` minutes of EQUITY tape, find the
-    DISTINCT symbols whose MID moved >= ``min_move_pct`` AND whose freshest row is younger
-    than ``freshness_sec``. Returns:
+    DISTINCT symbols that qualify as movers AND whose freshest row is younger than
+    ``freshness_sec``. Returns:
       (earliest_qualifying_observed_at_utc | None, n_qualifying_symbols, lead_symbol, lead_pct).
+
+    A symbol QUALIFIES on EITHER axis (STEP-C #13):
+      * trailing velocity — abs mid move over the window >= ``min_move_pct`` (the original
+        test); OR
+      * GAP-vs-prior-close — current mid vs the prior RTH close >= ``gap_floor_pct``.
+    The gap axis is what catches an overnight GAPPER: a name already +40% before the window
+    opens prints a nearly-FLAT 5-min tape, so the velocity-only test structurally never
+    passed it. ``gap_floor_pct`` defaults to ``min_move_pct`` (one shared "moving" floor, no
+    second magic number); prior close comes from the CACHED Massive snapshot (the existing
+    source), best-effort — if it's unavailable the gap axis simply degrades to velocity-only.
 
     Spread-cleanliness is already guaranteed at write time (``_ross_row`` drops crossed/
     locked/>5000bps rows), so every tape row here is a clean NBBO. Pure read; best-effort
@@ -88,6 +127,8 @@ def early_premarket_first_mover(
     to the fixed clock. The first-mover time is the earliest first-seen observation among
     qualifying symbols — selection RANK prefers the earliest igniter."""
     from ....db import SessionLocal
+
+    _gap_floor = float(gap_floor_pct) if gap_floor_pct is not None else float(min_move_pct)
 
     # observed_at is TIMESTAMPTZ (SQLAlchemy returns tz-AWARE UTC). Keep the window bounds
     # tz-aware too so `last_at < fresh_cut` compares aware-vs-aware (a naive .replace(tzinfo=
@@ -125,7 +166,10 @@ def early_premarket_first_mover(
         except Exception:
             pass
         db.close()
-    qualifying: list[tuple[datetime, str, float]] = []
+    # PASS 1: keep the fresh candidates with a usable first/last mid; carry the trailing
+    # velocity now. Defer the gap axis until after we know which symbols are fresh (so the
+    # prior-close snapshot lookup is bounded to just those names).
+    fresh: list[tuple[datetime, str, float, float]] = []  # (first_at, sym, last_mid, velocity_pct)
     for sym, first_mid, last_mid, first_at, last_at in rows:
         try:
             f, l = float(first_mid), float(last_mid)
@@ -141,9 +185,25 @@ def early_premarket_first_mover(
             first_at = first_at.replace(tzinfo=timezone.utc)
         if last_at < fresh_cut:  # freshest row too old — name not actually trading now
             continue
-        pct = abs((l - f) / f * 100.0)
-        if pct >= float(min_move_pct):
-            qualifying.append((first_at, str(sym).upper(), pct))
+        velocity_pct = abs((l - f) / f * 100.0)
+        fresh.append((first_at, str(sym).upper(), l, velocity_pct))
+    if not fresh:
+        return None, 0, None, None
+
+    # Prior-close map for the GAP axis — only for the fresh candidates (bounded lookup on the
+    # cached snapshot). Empty => the gap axis degrades to velocity-only (fail-open).
+    prior_close = _snapshot_prior_close_map({sym for _, sym, _, _ in fresh})
+
+    qualifying: list[tuple[datetime, str, float]] = []
+    for first_at, sym, last_mid, velocity_pct in fresh:
+        gap_pct = 0.0
+        pc = prior_close.get(sym)
+        if pc is not None and pc > 0:
+            gap_pct = abs((last_mid - pc) / pc * 100.0)
+        # Qualify on EITHER axis: an overnight gapper (flat tape, big gap) OR a live runner
+        # (fresh trailing velocity). Rank by the STRONGER of the two.
+        if velocity_pct >= float(min_move_pct) or gap_pct >= _gap_floor:
+            qualifying.append((first_at, sym, max(velocity_pct, gap_pct)))
     if not qualifying:
         return None, 0, None, None
     qualifying.sort(key=lambda t: t[0])  # earliest first-seen = the lead igniter
@@ -154,6 +214,54 @@ def early_premarket_first_mover(
         lead_sym,
         round(lead_pct, 2),
     )
+
+
+def early_premarket_mover_coverage_p75(
+    *,
+    now_utc: datetime,
+    lookback_min: float = 60.0,
+) -> Optional[int]:
+    """p75 of the per-minute distinct-symbol count the tape carried over the last
+    ``lookback_min`` — a measure of how many concurrent movers the sampler is ACTUALLY
+    surfacing (STEP-C #13). The early-unlock's required-mover count clamps to this so a
+    3-mover bar isn't structurally dead on a day the sampler only ever surfaced 2 (the exact
+    premarket-zero forensic: max concurrent was 2). Returns None on insufficient data /
+    failure (caller keeps its configured value). Best-effort; never raises."""
+    from ....db import SessionLocal
+
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    since = (now_utc - timedelta(minutes=float(lookback_min))).replace(tzinfo=None)
+    db = SessionLocal()
+    try:
+        row = db.execute(
+            text(
+                "WITH per_min AS ("
+                "  SELECT date_trunc('minute', observed_at) AS m,"
+                "         count(DISTINCT symbol) AS n"
+                "  FROM momentum_nbbo_spread_tape"
+                "  WHERE observed_at >= :since AND mid > 0 AND symbol NOT LIKE '%-USD'"
+                "  GROUP BY 1"
+                ") "
+                "SELECT percentile_cont(0.75) WITHIN GROUP (ORDER BY n) FROM per_min"
+            ),
+            {"since": since},
+        ).fetchone()
+    except Exception as exc:
+        logger.debug("[nbbo_tape] mover-coverage p75 read failed: %s", exc)
+        return None
+    finally:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+    if not row or row[0] is None:
+        return None
+    try:
+        return max(1, int(round(float(row[0]))))
+    except (TypeError, ValueError):
+        return None
 
 
 def _overnight_24h_whitelist() -> Optional[set[str]]:
