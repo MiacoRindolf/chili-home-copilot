@@ -2297,30 +2297,17 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_SCORING_ENABLED"),
         description="3-layer EXPLOSIVE scorer for score_universe (fixes the score-compression bug where a non-explosive mega-cap out-ranked a +400%/15,000x-RVOL rocket). Replaces the compensatory linear-percentile blend with: (1) a lexicographic explosiveness TIER (batch-median multiples — non-compensatory outer sort key), (2) a magnitude-preserving log-min-max multiplicative explosive CORE (rvol_norm^0.6 * mom_norm^0.4) x bounded quality modifier from the secondary pillars, (3) raw-rvol tiebreak. Batch-relative / no magic numbers; fail-OPEN (missing rvol/change degrades to tier 0, never crashes, never vetoes — selection re-rank only). Flag OFF ⇒ byte-identical to the legacy blend.",
     )
-    # 2026-07-04 — RECOVERY-GAP DOWN-RANK. A "leading gainer" whose big % is measured off a CRUSHED
-    # prior close (the prior session collapsed, closing deep below its own high) is a backside-fade
-    # recovery, NOT a fresh explosive breakout — Ross lost -$394.89 on exactly this (TC 07-01). The
-    # scanner emits recovery_gap_ratio = prev_day_close/prev_day_high; ross_momentum SMOOTHLY dampens
-    # the momentum pillar (a size-tilt DOWN-RANK, NOT a veto) as the ratio drops below the floor. A
-    # fresh gainer (closed near its high, ratio ~1) is untouched. OFF ⇒ byte-identical.
+    # 2026-07-04 — RECOVERY-GAP DOWN-RANK (NO MAGIC). A "leading gainer" whose big % is measured off a
+    # CRUSHED prior close (the prior session collapsed) is a backside-fade recovery, NOT a fresh
+    # breakout — Ross lost -$394.89 on exactly this (TC 07-01). The scanner emits chg_vs_prev_high_pct
+    # (the honest change vs the name's OWN prior-day HIGH); ross_momentum CAPS the momentum pillar at
+    # that value — a purely adaptive down-rank off the name's own price history, no threshold/constant.
+    # A genuine breakout (at/above its prior high) is untouched; a recovery under its prior high is
+    # down-ranked to its true progress. OFF ⇒ byte-identical.
     chili_momentum_recovery_gap_dampen_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RECOVERY_GAP_DAMPEN_ENABLED"),
-        description="2026-07-04: down-rank a leading-gainer whose % is inflated by a crushed prior close (prev day collapsed = recovery-gap fade trap, e.g. TC 07-01). Smoothly dampens the momentum pillar when recovery_gap_ratio (prev_day_close/prev_day_high) < floor. Size-tilt, never a veto. OFF ⇒ byte-identical.",
-    )
-    chili_momentum_recovery_gap_ratio_floor: float = Field(
-        default=0.5,
-        ge=0.0,
-        le=1.0,
-        validation_alias=AliasChoices("CHILI_MOMENTUM_RECOVERY_GAP_RATIO_FLOOR"),
-        description="2026-07-04: prev_day_close/prev_day_high below THIS = the prior session collapsed (closed in the bottom half after a big down-move) ⇒ recovery-gap dampening engages. 0.5 = closed below the midpoint of its own range.",
-    )
-    chili_momentum_recovery_gap_min_mult: float = Field(
-        default=0.4,
-        ge=0.0,
-        le=1.0,
-        validation_alias=AliasChoices("CHILI_MOMENTUM_RECOVERY_GAP_MIN_MULT"),
-        description="2026-07-04: the momentum multiplier at recovery_gap_ratio=0 (total prior-day collapse). Ramps linearly 1.0 (at ratio=floor) -> this (at ratio=0). 0.4 = a fully-collapsed name's momentum pillar is cut to 40%.",
+        description="2026-07-04: cap the momentum pillar at chg_vs_prev_high_pct (change vs the name's own prior-day HIGH) so a leading-gainer whose % is inflated by a crushed prior close (recovery-gap fade trap, e.g. TC 07-01) is down-ranked to its true progress. Adaptive, no magic number; a genuine breakout at/above its prior high is untouched. OFF ⇒ byte-identical.",
     )
     chili_momentum_ross_rvol_feed_enabled: bool = Field(
         default=True,

@@ -653,24 +653,22 @@ def _extract_pillars(
     ]
     momentum = max(cands) if cands else None
 
-    # RECOVERY-GAP DOWN-RANK (2026-07-04): a big momentum % measured off a CRUSHED prior close is a
-    # backside-fade recovery, not a fresh explosive breakout (TC 07-01: prev day collapsed to close
-    # 0.26 of its own high, "+243%" faded all day; Ross lost -$394.89 on exactly this shape). The
-    # scanner emits recovery_gap_ratio = prev_day_close / prev_day_high in (0,1]; a LOW ratio = the
-    # prior session collapsed => the % is inflated by the crushed reference. SMOOTHLY dampen the
-    # momentum pillar (a size-tilt / DOWN-RANK — NOT a hard veto; the audit said don't dark-block)
-    # as the ratio drops below the floor: mult ramps 1.0 (at ratio>=floor) -> min_mult (at ratio=0).
-    # A fresh gainer (closed near its high, ratio ~1) is UNTOUCHED. Default ON, kill-switchable.
-    if momentum is not None and momentum > 0.0:
+    # RECOVERY-GAP DOWN-RANK (2026-07-04, NO MAGIC): a big momentum % measured off a CRUSHED prior
+    # close is a backside-fade recovery, not a fresh explosive breakout (TC 07-01: prev day collapsed,
+    # "+243%" off the crushed open faded all day; Ross lost -$394.89 on it). The HONEST momentum is
+    # the change vs the name's OWN prior-day HIGH (what it must overcome to make real progress): a
+    # recovery barely clears it (TC +18%), a fresh gainer blows past it (JEM +466%). CAP the momentum
+    # pillar at that value — a purely ADAPTIVE down-rank off the name's own price history, no
+    # threshold / no magic constant. A name at/above its prior-day high (a genuine breakout) is
+    # UNCHANGED (the cap doesn't bite); a recovery trading under its prior high is down-ranked to its
+    # true progress. Missing prior day (new listing) => no cap (fail-open). Default ON, kill-switch.
+    if momentum is not None:
         try:
             from app.config import settings as _settings  # local import: no top-level dep
             if bool(getattr(_settings, "chili_momentum_recovery_gap_dampen_enabled", True)):
-                _rg = _first_float(signal, "recovery_gap_ratio")
-                _floor = float(getattr(_settings, "chili_momentum_recovery_gap_ratio_floor", 0.5) or 0.5)
-                if _rg is not None and 0.0 <= _rg < _floor and _floor > 0.0:
-                    _minmult = float(getattr(_settings, "chili_momentum_recovery_gap_min_mult", 0.4) or 0.4)
-                    _mult = _minmult + (1.0 - _minmult) * (_rg / _floor)
-                    momentum = momentum * max(0.0, min(1.0, _mult))
+                _cvh = _first_float(signal, "chg_vs_prev_high_pct")
+                if _cvh is not None and _cvh < momentum:
+                    momentum = _cvh
         except Exception:
             pass
 
