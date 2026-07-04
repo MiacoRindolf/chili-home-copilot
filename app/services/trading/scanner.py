@@ -1416,6 +1416,26 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
         else:
             gap_pct = 0.0
 
+        # RECOVERY-GAP RATIO (2026-07-04): a "leading gainer" measured off a CRUSHED prior close is
+        # a backside-fade trap, not a fresh explosive breakout (TC 07-01: 06-30 collapsed 7.09->1.85
+        # close = -74% off its own high, then "+243%" vs the crushed 2.44 open all-day-faded; Ross
+        # lost -$394.89 on exactly this). The tell is the PRIOR DAY closing DEEP below its own high
+        # (a collapse), vs a fresh gainer that closed near its high / is basing. ratio =
+        # prev_day_close / prev_day_high in (0,1]; LOW => the prior session collapsed => the % is a
+        # recovery. Consumed as a momentum DOWN-RANK (size-tilt, never a hard veto) in ross_momentum.
+        recovery_gap_ratio: float | None = None
+        try:
+            _days = sorted(set(df.index.date))
+            if len(_days) >= 2:
+                _pd = df[df.index.date == _days[-2]]
+                if len(_pd) > 0:
+                    _pdh = float(_pd["High"].max())
+                    _pdc = float(_pd["Close"].iloc[-1])
+                    if _pdh > 0:
+                        recovery_gap_ratio = round(max(0.0, min(1.0, _pdc / _pdh)), 4)
+        except Exception:
+            recovery_gap_ratio = None
+
         # Daily change % (from today's open to current price)
         daily_change_pct = 0.0
         if len(today_df) > 0:
@@ -1615,6 +1635,7 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
             "vol_ratio": vol_ratio,
             "gap_pct": gap_pct,
             "daily_change_pct": daily_change_pct,
+            "recovery_gap_ratio": recovery_gap_ratio,
             "macd_positive": not macd_negative,
             "indicators": {
                 "rsi": round(float(rsi_val), 1) if pd.notna(rsi_val) else None,
