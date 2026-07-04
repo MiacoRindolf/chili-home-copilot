@@ -584,7 +584,33 @@ def main(argv: list[str] | None = None) -> int:
         help="Require certifiable Ross/admission rows before entry, not transcript-only mentions.",
     )
     parser.add_argument("--risk-usd", type=float, default=None, help="Override structural risk dollars.")
-    parser.add_argument("--max-notional-usd", type=float, default=None, help="Override notional cap.")
+    parser.add_argument(
+        "--max-notional-usd",
+        type=float,
+        default=None,
+        help=(
+            "Extra flat notional ceiling layered ABOVE the live equity-relative/liquidity "
+            "caps (see --live-admission-mode). Does not disable those caps."
+        ),
+    )
+    parser.add_argument(
+        "--no-live-admission-mode",
+        dest="live_admission_mode",
+        action="store_false",
+        help=(
+            "Diagnostic/opportunity-labeling only: disable D3 live-parity admission "
+            "(re-enables the tick_first_pullback / tick_vwap_reclaim_burst harness-only "
+            "gate families and the market_certified synthetic-source bypass) and D4 live "
+            "sizing (equity-relative + liquidity notional caps). DEFAULT is live-admission ON."
+        ),
+    )
+    parser.set_defaults(live_admission_mode=True)
+    parser.add_argument(
+        "--account-equity-usd",
+        type=float,
+        default=None,
+        help="Account equity/buying-power basis (USD) for D4 live sizing caps. Default ~$13k.",
+    )
     parser.add_argument(
         "--fixed-shares",
         type=float,
@@ -719,6 +745,8 @@ def main(argv: list[str] | None = None) -> int:
                     fixed_qty=args.fixed_shares,
                     reward_risk=args.reward_risk,
                     max_hold_seconds=args.max_hold_seconds,
+                    live_admission_mode=args.live_admission_mode,
+                    account_equity_usd=args.account_equity_usd,
                 )
                 runs.append((cap, result_to_dict(result), perf_counter() - started))
             out = _tick_cap_sweep_payload(runs)
@@ -744,6 +772,8 @@ def main(argv: list[str] | None = None) -> int:
             reward_risk=args.reward_risk,
             max_hold_seconds=args.max_hold_seconds,
             exit_model=args.exit_model,
+            live_admission_mode=args.live_admission_mode,
+            account_equity_usd=args.account_equity_usd,
         )
         payload = result_to_dict(result)
         failures = _certification_failures(
