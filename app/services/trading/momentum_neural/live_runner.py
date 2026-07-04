@@ -15345,7 +15345,16 @@ def tick_live_session(
             until = datetime.fromisoformat(str(until_raw).replace("Z", "+00:00")).replace(tzinfo=None)
         except Exception:
             until = _utcnow()
-        if _utcnow() >= until:
+        # 2026-07-04 TIMER REMOVED (default): the fixed wall-clock re-entry timer was a band-aid over
+        # an OLD substring-classifier bug (IPW -$78.62 3s re-arm; fixed sign-authoritative in
+        # risk_policy) and it BLOCKED the fast Ross re-buy of a strong leader on a shallow pullback
+        # (accurate-FSM CELZ 06-30: 300s timer -> -$108; 5s -> +$229). With the timer OFF the session
+        # recycles to WATCHING immediately and re-entry quality is enforced DOWNSTREAM by the existing
+        # reentry_escalation_decision (structural trigger + HWM reclaim + tape buyers, escalation
+        # level>=1) PLUS the stopout-cycle cap + day-leader exemption below — a real setup condition,
+        # not a clock. TRUE restores the legacy timer (kill-switch).
+        _timer_gate_on = bool(getattr(settings, "chili_momentum_stopout_cooldown_timer_enabled", False))
+        if (not _timer_gate_on) or (_utcnow() >= until):
             le.pop("cooldown_until_utc", None)
             le["trade_cycles"] = int(le.get("trade_cycles") or 0) + 1
             # Count LOSS recycles separately (a profit recycle is a free re-scalp).

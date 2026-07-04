@@ -7056,6 +7056,23 @@ class Settings(BaseSettings):
         ge=0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_COOLDOWN_AFTER_STOPOUT_SECONDS"),
     )
+    # 2026-07-04 — REMOVE THE FIXED STOP-OUT TIMER (default OFF). The wall-clock re-entry timer
+    # above was a band-aid over an OLD substring-classifier bug (a losing trail_stop was mis-tagged
+    # profit -> a 0.25x SHORT cooldown -> IPW re-armed in 3s -> -$78.62; fixed sign-authoritative in
+    # risk_policy.adaptive_reentry_cooldown_seconds) AND it BLOCKS the fast Ross re-buy of a strong
+    # leader on a shallow pullback. Accurate-FSM proof (CELZ 06-30 12:35-14:30): the 300s timer
+    # suppressed the profitable 1.54/2.98 re-entries -> -$108; a 5s timer -> +$229. Ross watches no
+    # clock — he re-enters when the SETUP RE-FORMS. With the timer OFF, re-entry quality is gated
+    # DOWNSTREAM by the existing reentry_escalation_decision (structural trigger + HWM reclaim + tape
+    # buyers, at escalation level>=1) PLUS the stopout-cycle cap and day-leader exemption — a real
+    # setup condition, not a clock. A failing name won't show structure+buyers => won't re-enter
+    # (the IPW protection, preserved); a strong leader on a shallow pullback WILL => Ross re-buy.
+    # TRUE restores the legacy fixed timer (kill-switch).
+    chili_momentum_stopout_cooldown_timer_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_STOPOUT_COOLDOWN_TIMER_ENABLED"),
+        description="2026-07-04: when FALSE (default) the fixed wall-clock stop-out re-entry timer is REMOVED — the session recycles to WATCHING immediately and re-entry quality is gated by reentry_escalation_decision (structure+reclaim+buyers) + the stopout-cycle cap. TRUE restores the legacy fixed timer.",
+    )
     # TASK#8 — ADAPTIVE AFTER-EXIT COOLDOWN. The fixed 300s above is the documented BASE/floor;
     # scale it by the exit REASON (a clean profit/target exit => a SHORT re-scalp window so a
     # winner can be re-entered on the next micro-pullback — the TNMG case; a stop-out => full
