@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 
 from ....config import settings
 from .entry_gates import (
+    TICK_ARMED_WAIT_REASONS,
     momentum_pullback_trigger,
     vwap_reclaim_confirmation,
 )
@@ -64,6 +65,11 @@ except ImportError:  # main lineage: gate not present
         )
 
 from .micro_bars import _resample_micro_bars
+from .risk_policy import (
+    equity_relative_notional_cap,
+    liquidity_capped_notional,
+    replay_account_equity,
+)
 from .tick_scalp import (
     ROSS_TICK_SCALP_COURSE_PRICE_FLOOR,
     ROSS_TICK_SCALP_MAX_PRICE,
@@ -1235,6 +1241,55 @@ def _candidate_from_gate(
     )
 
 
+def _call_bar_gate(
+    family: str,
+    *,
+    frame: pd.DataFrame,
+    entry_interval: str,
+    live_price: float | None,
+    symbol: str,
+    now: datetime,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Dispatch one named bar-close gate. Shared by the bar-close pass AND the
+    tick-armed re-fire below, so both call sites stay byte-identical."""
+    if family == "momentum_pullback":
+        # D1 (cf-parity): ``first_pullback_interval=`` was RETIRED by the F2 fix —
+        # the trigger reads ``chili_momentum_first_pullback_interval`` from settings
+        # itself (that IS live parity; live_runner.py:6450 passes no such kwarg).
+        # Passing it raised TypeError on every bar candidate.
+        return momentum_pullback_trigger(
+            frame,
+            entry_interval=entry_interval,
+            live_price=live_price,
+            symbol=symbol,
+            now=now,
+            db=None,
+            l2_as_of=now,
+        )
+    if family == "vwap_reclaim":
+        return vwap_reclaim_confirmation(
+            frame,
+            entry_interval=entry_interval,
+            live_price=live_price,
+            symbol=symbol,
+            now=now,
+        )
+    if family == "ross_breakout_starter":
+        return ross_breakout_starter_confirmation(
+            frame,
+            entry_interval=entry_interval,
+            live_price=live_price,
+            symbol=symbol,
+            now=now,
+            db=None,
+            l2_as_of=now,
+        )
+    raise ValueError(f"unknown bar gate family: {family}")
+
+
+_BAR_GATE_FAMILIES = ("momentum_pullback", "vwap_reclaim", "ross_breakout_starter")
+
+
 def _iter_bar_candidates(
     *,
     symbol: str,
@@ -1259,58 +1314,95 @@ def _iter_bar_candidates(
         tick = _latest_tick_at_or_before(ticks, ts)
         if tick is None:
             continue
-        gate_calls = (
-            (
-                "momentum_pullback",
-                momentum_pullback_trigger(
-                    frame,
-                    entry_interval=entry_interval,
-                    live_price=tick.mid,
-                    symbol=symbol,
-                    now=ts,
-                    db=None,
-                    l2_as_of=ts,
-                    first_pullback_interval=entry_interval,
-                ),
-            ),
-            (
-                "vwap_reclaim",
-                vwap_reclaim_confirmation(
-                    frame,
-                    entry_interval=entry_interval,
-                    live_price=tick.mid,
-                    symbol=symbol,
-                    now=ts,
-                ),
-            ),
-            (
-                "ross_breakout_starter",
-                ross_breakout_starter_confirmation(
-                    frame,
-                    entry_interval=entry_interval,
-                    live_price=tick.mid,
-                    symbol=symbol,
-                    now=ts,
-                    db=None,
-                    l2_as_of=ts,
-                ),
-            ),
-        )
-        for family, (ok, reason, debug) in gate_calls:
+        fired = False
+        for family in _BAR_GATE_FAMILIES:
+            ok, reason, debug = _call_bar_gate(
+                family,
+                frame=frame,
+                entry_interval=entry_interval,
+                live_price=tick.mid,
+                symbol=symbol,
+                now=ts,
+            )
+            debug = debug if isinstance(debug, Mapping) else {}
+            fire_tick = tick
+            # D2 (cf-parity): live's tick-speed dispatch does NOT wait for the next bar
+            # close once a gate is TICK-ARMED (``TICK_ARMED_WAIT_REASONS`` — e.g.
+            # ``waiting_for_break`` with ``pullback_high`` set) — live_runner.py:6450
+            # onward re-evaluates the SAME completed-bar structure against every
+            # subsequent live ask and fires the instant the ask trades through the
+            # level (see live_runner.py's tick-break comment + replay_v2.py's mirror
+            # of the same mechanic). The old bar-close-only loop here only re-checked
+            # once per NEW bar, so a tick fire between bar closes (SVRE 06-30 12:45:25Z
+            # pbh 6.89 -> tick fire 6.88-7.00, entirely inside one 15s bar) was silently
+            # missed -> zero candidates. Mirror live: walk every quote/trade tick after
+            # this bar's close (bounded by the NEXT bar's ts so we don't re-claim a
+            # later bar's own structure) and re-fire the SAME gate the instant the ask
+            # crosses ``pullback_high``.
+            if (
+                not ok
+                and str(reason) in TICK_ARMED_WAIT_REASONS
+                and _float_or_none(debug.get("pullback_high")) is not None
+            ):
+                level = float(debug["pullback_high"])
+                next_bar_ts: datetime | None = None
+                if idx + 1 < len(bars):
+                    nxt_raw = bars.index[idx + 1]
+                    next_bar_ts = _parse_dt(
+                        nxt_raw.to_pydatetime() if hasattr(nxt_raw, "to_pydatetime") else nxt_raw
+                    )
+                for cand_tick in ticks:
+                    if cand_tick.ts <= tick.ts:
+                        continue
+                    if next_bar_ts is not None and cand_tick.ts >= next_bar_ts:
+                        break
+                    if cand_tick.ask <= level:
+                        continue
+                    # The level-crossing tick is a NECESSARY but not always SUFFICIENT
+                    # condition to fire (the trigger also checks volume/candle/VWAP
+                    # state that can lag the raw price cross by a tick or two) — keep
+                    # walking subsequent ticks until the gate actually fires, exactly
+                    # like live's tick-speed dispatch re-evaluating on every quote.
+                    # Only stop scanning once it fires; do NOT bail on the first
+                    # (possibly premature) crossing tick that the gate still rejects.
+                    ok2, reason2, debug2 = _call_bar_gate(
+                        family,
+                        frame=frame,
+                        entry_interval=entry_interval,
+                        live_price=cand_tick.ask,
+                        symbol=symbol,
+                        now=cand_tick.ts,
+                    )
+                    if ok2:
+                        ok, reason, debug = ok2, reason2, (
+                            debug2 if isinstance(debug2, Mapping) else {}
+                        )
+                        fire_tick = cand_tick
+                        break
             candidate, skipped = _candidate_from_gate(
                 symbol=symbol,
-                ts=tick.ts,
-                tick=tick,
+                ts=fire_tick.ts,
+                tick=fire_tick,
                 gate_family=family,
                 ok=bool(ok),
                 reason=str(reason),
-                debug=debug if isinstance(debug, Mapping) else {},
+                debug=debug,
             )
             if candidate is not None:
                 candidates.append(candidate)
+                fired = True
                 break
             if skipped:
                 reasons[skipped] = reasons.get(skipped, 0) + 1
+        if fired:
+            continue
+    if not candidates and not reasons:
+        # D2 (cf-parity): "gate_reasons must NEVER be silently empty" — if the bar loop
+        # produced neither a candidate nor a single skip/wait reason (e.g. zero bars
+        # ever reached line 9, or every gate call raised before returning a mapped
+        # reason), that is itself a diagnostic fact the caller needs, not a silent
+        # empty-empty result that reads as "nothing happened here."
+        reasons["bar_candidates_no_reason_recorded"] = 1
     return candidates, reasons
 
 
@@ -1905,7 +1997,34 @@ def run_counterfactual_symbol_replay(
     cash_usd: float | None = None,
     cash_fraction: float | None = None,
     exit_model: str = "adaptive",
+    live_admission_mode: bool = True,
+    account_equity_usd: float | None = None,
 ) -> SymbolReplayResult:
+    """Replay one symbol's tape against the current entry-gate code.
+
+    ``live_admission_mode`` (D3, cf-parity, DEFAULT ON) restricts candidate
+    generation and entry admission to live's ACTUAL entry-class set and
+    catalyst/source discipline instead of the harness's diagnostic-only
+    superset:
+
+      * ``tick_first_pullback`` (``_iter_tick_scalp_candidates``) and
+        ``tick_vwap_reclaim_burst`` (``_iter_tick_vwap_reclaim_burst_candidates``)
+        are NOT wired into ``live_runner.py`` at all — ``evaluate_tick_first_pullback``
+        and the tick-VWAP-burst walker are called ONLY from this replay module.
+        Live's actual ladder is exactly ``_BAR_GATE_FAMILIES`` (momentum_pullback /
+        vwap_reclaim / ross_breakout_starter), now tick-armed (D2). Firing an
+        entry off a family live never evaluates is not a counterfactual of live —
+        it is a different strategy. Diagnostic/opportunity-labeling callers that
+        want the wider net can still pass ``live_admission_mode=False``.
+      * the ``market_certified`` synthetic source window (a pure-market-volume
+        substitute for an actual Ross/catalyst source, see
+        ``_market_certified_window``) is disabled as an admission bypass — live
+        never enters on "the tape looks busy" alone; it requires a real source/
+        catalyst or a certified viability/arm state. CELZ 2026-06-30: live took
+        ONE ORB entry (+$40, entry 3.67); with the synthetic bypass active the
+        harness fabricated 3 additional chop entries (2.93/3.15/4.47, all
+        losers) that live's admission would have refused outright.
+    """
     sym = _safe_symbol(symbol)
     ticks = load_nbbo_tape(db, sym, since=since, until=until, max_ticks=max_ticks)
     trade_ticks = load_trade_tape(db, sym, since=since, until=until, max_ticks=max_ticks)
@@ -1943,25 +2062,33 @@ def run_counterfactual_symbol_replay(
         for reason, count in bar_reasons.items():
             gate_reasons[reason] = gate_reasons.get(reason, 0) + count
     signal = _source_signal_for_symbol(source_events)
-    tick_candidates, tick_reasons = _iter_tick_scalp_candidates(
-        symbol=sym,
-        ticks=ticks,
-        signal=signal,
-        eval_since=eval_start,
-    )
-    candidates.extend(tick_candidates)
-    for reason, count in tick_reasons.items():
-        gate_reasons[reason] = gate_reasons.get(reason, 0) + count
-    tick_vwap_candidates, tick_vwap_reasons = _iter_tick_vwap_reclaim_burst_candidates(
-        symbol=sym,
-        quote_ticks=ticks,
-        trade_ticks=trade_ticks,
-        source_events=source_events,
-        eval_since=eval_start,
-    )
-    candidates.extend(tick_vwap_candidates)
-    for reason, count in tick_vwap_reasons.items():
-        gate_reasons[reason] = gate_reasons.get(reason, 0) + count
+    if live_admission_mode:
+        # D3 (cf-parity): these two families are harness-only diagnostics with NO live
+        # counterpart (see the docstring above) — skip them under live-admission so the
+        # candidate set matches live's actual entry-class ladder. Recorded (not silently
+        # dropped) so a caller diffing gate_reason_counts sees why they're absent.
+        gate_reasons["tick_first_pullback_skipped_live_admission_mode"] = 1
+        gate_reasons["tick_vwap_reclaim_burst_skipped_live_admission_mode"] = 1
+    else:
+        tick_candidates, tick_reasons = _iter_tick_scalp_candidates(
+            symbol=sym,
+            ticks=ticks,
+            signal=signal,
+            eval_since=eval_start,
+        )
+        candidates.extend(tick_candidates)
+        for reason, count in tick_reasons.items():
+            gate_reasons[reason] = gate_reasons.get(reason, 0) + count
+        tick_vwap_candidates, tick_vwap_reasons = _iter_tick_vwap_reclaim_burst_candidates(
+            symbol=sym,
+            quote_ticks=ticks,
+            trade_ticks=trade_ticks,
+            source_events=source_events,
+            eval_since=eval_start,
+        )
+        candidates.extend(tick_vwap_candidates)
+        for reason, count in tick_vwap_reasons.items():
+            gate_reasons[reason] = gate_reasons.get(reason, 0) + count
     candidates = _dedupe_candidates(candidates)
 
     risk = float(
@@ -1975,7 +2102,47 @@ def run_counterfactual_symbol_replay(
         if cash_fraction is not None
         else getattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.15)
     )
-    if max_notional_usd is None and fixed_qty is None and cash_usd is None:
+    # D4 (cf-parity): wire LIVE's actual notional-ceiling chain instead of the flat,
+    # caller-passed ``max_notional_usd`` the harness used to size against unconditionally
+    # (proof: SVRE/CELZ-class replays sized ~$15.4k notional on a ~$13k account). Live's
+    # chain (live_runner.py, risk_policy.py) is:
+    #   fixed/flat cap -> equity_relative_notional_cap (equity x
+    #   chili_momentum_risk_notional_fraction_of_equity, default 15%) ->
+    #   liquidity_capped_notional (participation fraction of the name's $-volume).
+    # ``account_equity_usd`` (default the mission's ~$13k account) is injected through
+    # the SAME ``replay_account_equity`` ContextVar seam Replay v3 P2 already uses
+    # (risk_policy.py) — zero broker I/O, pure and side-effect-free. There is no
+    # historical raw buying-power table, so a fixed injected equity is the honest
+    # basis; it is reported in ``confidence_reasons`` and per-trade debug rather than
+    # silently assumed. Dollar-volume for the liquidity leg is approximated from the
+    # REPLAYED trade tape itself (price*size), since ``universe.snapshot_dollar_volumes``
+    # is a live-only data source with no as-of history to query.
+    equity_basis = float(account_equity_usd) if account_equity_usd is not None else 13_000.0
+    live_notional_cap: float | None = None
+    if live_admission_mode and fixed_qty is None and cash_usd is None:
+        # The flat fallback only matters when equity is unavailable (never true here —
+        # ``replay_account_equity`` always injects one); a caller-passed
+        # ``max_notional_usd`` still layers in as an extra flat ceiling ABOVE the
+        # equity-relative fraction, exactly like live's frozen-policy flat cap.
+        flat_fallback = notional if notional > 0 else max(equity_basis * 10.0, 1.0)
+        tape_dollar_volume = None
+        if trade_ticks:
+            tape_dollar_volume = sum(
+                float(t.mid) * float(t.size)
+                for t in trade_ticks
+                if t.size is not None and t.mid is not None and t.mid > 0
+            ) or None
+        with replay_account_equity(lambda *_a, **_k: equity_basis):
+            equity_capped = equity_relative_notional_cap(flat_fallback)
+        live_notional_cap = liquidity_capped_notional(equity_capped, tape_dollar_volume)
+        confidence_reasons.append(
+            f"live_sizing_equity_usd:{round(equity_basis, 2)}"
+            f"_equity_cap:{round(equity_capped, 2)}"
+            f"_liquidity_cap:{round(live_notional_cap, 2)}"
+            f"_tape_dollar_volume:{round(tape_dollar_volume, 0) if tape_dollar_volume else None}"
+        )
+        notional = live_notional_cap
+    if max_notional_usd is None and fixed_qty is None and cash_usd is None and not live_admission_mode:
         confidence_reasons.append("counterfactual_notional_uncapped_no_broker_state")
     if cash_usd is not None:
         confidence_reasons.append(
@@ -2006,8 +2173,19 @@ def run_counterfactual_symbol_replay(
             candidate.ts,
             require_certifiable=require_certifiable_source,
         )
-        market_certified = bool(candidate.trigger_debug.get("market_certified"))
-        source_recertified = bool(candidate.trigger_debug.get("source_blocker_recertified"))
+        # D3 (cf-parity): under live-admission the ``market_certified`` synthetic
+        # source (pure market-volume, no actual catalyst/source) no longer bypasses
+        # the source-before-entry requirement — see the function docstring.
+        market_certified = (
+            False
+            if live_admission_mode
+            else bool(candidate.trigger_debug.get("market_certified"))
+        )
+        source_recertified = (
+            False
+            if live_admission_mode
+            else bool(candidate.trigger_debug.get("source_blocker_recertified"))
+        )
         if require_source_before_entry and not source_ok and not market_certified and not source_recertified:
             skipped[source_reason] = skipped.get(source_reason, 0) + 1
             continue
@@ -2043,6 +2221,11 @@ def run_counterfactual_symbol_replay(
         if trade is None:
             skipped["simulate_no_trade"] = skipped.get("simulate_no_trade", 0) + 1
             continue
+        # D4 (cf-parity): print the per-trade notional so a validation run can see the
+        # live-parity dollar sizing directly on the trade, not just in the aggregate
+        # confidence_reasons string.
+        trade.debug["live_notional_cap_usd"] = live_notional_cap
+        trade.debug["account_equity_basis_usd"] = equity_basis if live_admission_mode else None
         trades.append(trade)
         cursor_ts = trade.exit_ts
 
@@ -2110,6 +2293,8 @@ def run_counterfactual_replay(
     cash_usd: float | None = None,
     cash_fraction: float | None = None,
     exit_model: str = "adaptive",
+    live_admission_mode: bool = True,
+    account_equity_usd: float | None = None,
 ) -> CounterfactualReplayResult:
     syms = sorted({_safe_symbol(s) for s in symbols if _safe_symbol(s)})
     source_by_symbol = load_ross_source_events(since=since, until=until, symbols=syms)
@@ -2138,6 +2323,8 @@ def run_counterfactual_replay(
                     cash_usd=cash_usd,
                     cash_fraction=cash_fraction,
                     exit_model=exit_model,
+                    live_admission_mode=live_admission_mode,
+                    account_equity_usd=account_equity_usd,
                 )
             )
         except Exception as exc:
@@ -2368,11 +2555,19 @@ def result_to_dict(result: CounterfactualReplayResult) -> dict[str, Any]:
                         "stop_price": t.stop_price,
                         "target_price": t.target_price,
                         "qty": t.qty,
+                        "notional_usd": round(t.qty * t.entry_price, 2),
                         "pnl_usd": t.pnl_usd,
                         "pnl_r": t.pnl_r,
                         "reason": t.reason,
                         "exit_reason": t.exit_reason,
                         "gate_family": t.gate_family,
+                        # D5 (cf-parity): explicit attribution aliases. ``reason`` /
+                        # ``gate_family`` are the dataclass's own fields (kept for
+                        # existing consumers); ``entry_reason`` / ``trigger_class`` are
+                        # the mission's requested names, GUARANTEED non-empty (never a
+                        # blank string reads as '?' in a report table).
+                        "entry_reason": str(t.reason or "unknown_entry_reason"),
+                        "trigger_class": str(t.gate_family or "unknown_gate_family"),
                         "max_favorable_r": t.max_favorable_r,
                         "max_adverse_r": t.max_adverse_r,
                         "debug": t.debug,
