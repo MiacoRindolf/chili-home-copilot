@@ -7344,6 +7344,44 @@ def tick_live_session(
                             _g4e_tape_accel = _float_or_none(_g4e_tape.get("signed_tape_accel"))
                 except Exception:
                     _g4e_tape_accel = None
+                # Review m2: the day-leader must not be permanently WAIT-blocked when
+                # its entries fire via non-structural (volume-confirmation) reasons.
+                # Reuse the ~1min-cached leader read (same g4_leader_min/g4_leader_is
+                # cache the grind path uses) so the leader can substitute a STRICT
+                # tape+reclaim equivalent for the structural class inside the decision.
+                # Fail-CLOSED: an unreadable board ⇒ None ⇒ NOT a leader ⇒ strict path.
+                _g4e_leader = None
+                try:
+                    _g4e_min_key = _utcnow().strftime("%Y%m%d%H%M")
+                    if le.get("g4_leader_min") == _g4e_min_key:
+                        _g4e_leader = le.get("g4_leader_is")
+                    else:
+                        from .risk_policy import (
+                            _top_ranked_live_eligible_symbol as _g4e_top_fn,
+                            _wildcard_dominant_symbol as _g4e_wild_fn,
+                        )
+
+                        _g4e_sym = str(sess.symbol or "").strip().upper()
+                        _g4e_top, _g4e_ts, _g4e_p90, _g4e_meta = _g4e_top_fn(
+                            db, crypto=_g4e_sym.endswith("-USD")
+                        )
+                        if _g4e_top is not None:
+                            _g4e_leader = bool(
+                                _g4e_sym == _g4e_top
+                                or (
+                                    _g4e_p90 is not None
+                                    and float(via.viability_score or 0.0) >= float(_g4e_p90)
+                                )
+                            )
+                        if _g4e_leader is not True:
+                            _g4e_wild = _g4e_wild_fn(db)
+                            if _g4e_wild is not None and _g4e_sym == _g4e_wild:
+                                _g4e_leader = True
+                        le["g4_leader_min"] = _g4e_min_key
+                        le["g4_leader_is"] = _g4e_leader
+                        _commit_le(sess, le)
+                except Exception:
+                    _g4e_leader = None  # fail-closed: unreadable board = not leader
                 try:
                     _g4e_ok, _g4e_dbg = reentry_escalation_decision(
                         enabled=True,
@@ -7354,6 +7392,7 @@ def tick_live_session(
                         prior_exit_price=_float_or_none(_g4e_prior.get("exit_price")),
                         prior_risk_dist=_float_or_none(_g4e_prior.get("risk_dist")),
                         tape_accel=_g4e_tape_accel,
+                        is_day_leader=(_g4e_leader if isinstance(_g4e_leader, bool) else None),
                     )
                 except Exception:
                     _g4e_ok, _g4e_dbg = True, {"reason": "g4_escalation_error_fail_open"}

@@ -247,3 +247,94 @@ def test_stop_class_predicate_token_semantics() -> None:
     assert _is_stop_class_exit_reason("stopout_cycle") is False
     assert _is_stop_class_exit_reason("unstoppable") is False
     assert _is_stop_class_exit_reason(None) is False
+
+
+# ── Review m2: day-leader structural substitute ──────────────────────────────
+# A leader whose entries only fire via non-structural (volume-confirmation)
+# reasons must not be permanently WAIT-blocked. It may substitute a STRICT
+# equivalent: readable POSITIVE tape AND an actual reclaim above the prior
+# failure — both actively satisfied (no skip-on-missing). Non-leaders keep the
+# strict structural requirement.
+
+def test_leader_substitute_clears_non_structural_with_tape_and_reclaim() -> None:
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=2, structural_trigger=False,
+        live_price=6.98, prior_hwm=6.90, prior_exit_price=6.80,
+        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True,
+    )
+    assert allowed is True
+    assert dbg.get("leader_structural_substitute") is True
+
+
+def test_leader_substitute_requires_positive_tape() -> None:
+    # leader + reclaim met but tape not lifting (<=0) => substitute fails => block
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=2, structural_trigger=False,
+        live_price=6.98, prior_hwm=6.90, prior_exit_price=6.80,
+        prior_risk_dist=0.05, tape_accel=-0.3, is_day_leader=True,
+    )
+    assert allowed is False
+    assert dbg["reason"] == "non_structural_trigger"
+    assert dbg.get("leader_structural_substitute") is False
+
+
+def test_leader_substitute_requires_actual_reclaim_no_skip() -> None:
+    # leader + positive tape but price BELOW the reclaim reference => block
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=2, structural_trigger=False,
+        live_price=6.70, prior_hwm=6.90, prior_exit_price=6.80,
+        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True,
+    )
+    assert allowed is False
+    assert dbg["reason"] == "non_structural_trigger"
+
+
+def test_leader_substitute_requires_a_reference_no_free_pass() -> None:
+    # leader + positive tape but NO prior reference at all => substitute cannot
+    # be satisfied (unlike step-2 which skips on missing ref) => block.
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=2, structural_trigger=False,
+        live_price=6.98, prior_hwm=None, prior_exit_price=None,
+        prior_risk_dist=None, tape_accel=1.2, is_day_leader=True,
+    )
+    assert allowed is False
+    assert dbg["reason"] == "non_structural_trigger"
+
+
+def test_non_leader_still_blocks_on_non_structural_even_with_tape_and_reclaim() -> None:
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=2, structural_trigger=False,
+        live_price=6.98, prior_hwm=6.90, prior_exit_price=6.80,
+        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=False,
+    )
+    assert allowed is False
+    assert dbg["reason"] == "non_structural_trigger"
+    assert dbg.get("leader_structural_substitute") is None
+
+
+def test_leader_with_structural_trigger_unaffected_by_substitute() -> None:
+    # structural trigger present => substitute path not taken; normal flow passes.
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=1, structural_trigger=True,
+        live_price=6.98, prior_hwm=6.90, prior_exit_price=6.80,
+        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True,
+    )
+    assert allowed is True
+    assert dbg["reason"] == "reclaim_met"
+
+
+def test_leader_substitute_margin_scales_with_level() -> None:
+    # level 3 demands ref + (3-1)*risk_dist = 6.90 + 2*0.05 = 7.00; 6.98 < 7.00 => block
+    allowed, dbg = reentry_escalation_decision(
+        enabled=True, escalation_level=3, structural_trigger=False,
+        live_price=6.98, prior_hwm=6.90, prior_exit_price=6.80,
+        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True,
+    )
+    assert allowed is False
+    # and at 7.01 it clears
+    allowed2, _ = reentry_escalation_decision(
+        enabled=True, escalation_level=3, structural_trigger=False,
+        live_price=7.01, prior_hwm=6.90, prior_exit_price=6.80,
+        prior_risk_dist=0.05, tape_accel=1.2, is_day_leader=True,
+    )
+    assert allowed2 is True

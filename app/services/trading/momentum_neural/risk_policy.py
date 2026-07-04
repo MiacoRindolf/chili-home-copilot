@@ -2287,6 +2287,7 @@ def reentry_escalation_decision(
     prior_exit_price: float | None,
     prior_risk_dist: float | None,
     tape_accel: float | None,
+    is_day_leader: bool | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """G4 P2 — SAME-SYMBOL re-entry escalation after a stop-out (PURE, no I/O).
 
@@ -2303,7 +2304,14 @@ def reentry_escalation_decision(
     At level >= 1, ALL of (adaptive; no hard counts, margins in the trade's OWN units):
       * STRUCTURAL trigger class — the fired trigger must carry real structure
         (pullback_low; the same class set the structural-stop machinery trusts). The
-        weak fallbacks (momentum_continuation / score_only) no longer qualify;
+        weak fallbacks (momentum_continuation / score_only) no longer qualify.
+        DAY-LEADER SUBSTITUTE (review m2): the #1 name (``is_day_leader``) must never
+        be permanently WAIT-blocked just because its entries fire via non-structural
+        (volume-confirmation) reasons. When the leader's trigger is non-structural it
+        may substitute a STRICT high-quality equivalent for the structural class:
+        readable POSITIVE tape AND an ACTUAL price reclaim above the prior failure
+        (both actively satisfied — NO skip-on-missing, so this is a HIGHER bar, not a
+        hole). Non-leaders keep the strict structural requirement;
       * STRUCTURE RECLAIM — live price must exceed the level where the LAST attempt
         FAILED: the prior trade's high-water mark (fallback: its exit price when no
         HWM was recorded), plus ``(level - 1) * prior_risk_dist`` — each successive
@@ -2319,6 +2327,7 @@ def reentry_escalation_decision(
     dbg: dict[str, Any] = {
         "escalation_level": escalation_level,
         "structural_trigger": bool(structural_trigger),
+        "is_day_leader": bool(is_day_leader) if is_day_leader is not None else None,
         "prior_hwm": prior_hwm,
         "prior_exit_price": prior_exit_price,
         "prior_risk_dist": prior_risk_dist,
@@ -2336,31 +2345,73 @@ def reentry_escalation_decision(
     if lvl <= 0:
         dbg["reason"] = "no_escalation"
         return True, dbg
-    # 1) structural trigger class required at any escalation level.
-    if not structural_trigger:
-        dbg["reason"] = "non_structural_trigger"
-        return False, dbg
-    # 2) structure reclaim: price must prove the prior failure wrong.
-    ref = None
-    for cand in (prior_hwm, prior_exit_price):
-        try:
-            if cand is not None and math.isfinite(float(cand)) and float(cand) > 0:
-                ref = float(cand)
-                break
-        except (TypeError, ValueError):
-            continue
-    if ref is not None:
-        margin = 0.0
+
+    # Shared reclaim math (prior-failure reference + per-level margin) — used by both
+    # the leader substitute below and the reclaim gate (step 2). Returns
+    # (ref, required_price) with ref None when no usable prior reference exists.
+    def _reclaim_required() -> tuple[float | None, float | None]:
+        _ref = None
+        for _cand in (prior_hwm, prior_exit_price):
+            try:
+                if _cand is not None and math.isfinite(float(_cand)) and float(_cand) > 0:
+                    _ref = float(_cand)
+                    break
+            except (TypeError, ValueError):
+                continue
+        if _ref is None:
+            return None, None
+        _m = 0.0
         try:
             if (
                 prior_risk_dist is not None
                 and math.isfinite(float(prior_risk_dist))
                 and float(prior_risk_dist) > 0
             ):
-                margin = max(0, lvl - 1) * float(prior_risk_dist)
+                _m = max(0, lvl - 1) * float(prior_risk_dist)
         except (TypeError, ValueError):
-            margin = 0.0
-        required = ref + margin
+            _m = 0.0
+        return _ref, _ref + _m
+
+    def _price_ge(target: float | None) -> bool:
+        if target is None:
+            return False
+        try:
+            return (
+                live_price is not None
+                and math.isfinite(float(live_price))
+                and float(live_price) > 0
+                and float(live_price) >= float(target)
+            )
+        except (TypeError, ValueError):
+            return False
+
+    def _tape_positive() -> bool:
+        try:
+            return (
+                tape_accel is not None
+                and math.isfinite(float(tape_accel))
+                and float(tape_accel) > 0.0
+            )
+        except (TypeError, ValueError):
+            return False
+
+    # 1) structural trigger class required at any escalation level.
+    if not structural_trigger:
+        # Day-leader substitute (review m2): the leader may replace the structural
+        # class with a STRICT equivalent — readable POSITIVE tape AND an actual
+        # reclaim above the prior failure, BOTH actively satisfied (no skip). A
+        # non-leader, or a leader without that confirmation, still blocks.
+        _sub_ok = False
+        if is_day_leader:
+            _, _sub_req = _reclaim_required()
+            _sub_ok = bool(_tape_positive() and _sub_req is not None and _price_ge(_sub_req))
+            dbg["leader_structural_substitute"] = _sub_ok
+        if not _sub_ok:
+            dbg["reason"] = "non_structural_trigger"
+            return False, dbg
+    # 2) structure reclaim: price must prove the prior failure wrong.
+    ref, required = _reclaim_required()
+    if ref is not None:
         dbg["required_reclaim"] = round(required, 6)
         px = None
         try:
