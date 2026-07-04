@@ -2277,6 +2277,118 @@ def reentry_after_stop_allowed(
     return True, "allowed"
 
 
+def reentry_escalation_decision(
+    *,
+    enabled: bool,
+    escalation_level: int,
+    structural_trigger: bool,
+    live_price: float | None,
+    prior_hwm: float | None,
+    prior_exit_price: float | None,
+    prior_risk_dist: float | None,
+    tape_accel: float | None,
+) -> tuple[bool, dict[str, Any]]:
+    """G4 P2 — SAME-SYMBOL re-entry escalation after a stop-out (PURE, no I/O).
+
+    The bleed-stopping half of the losers-eat-the-winner fix (CLRO 07-02: two earlier
+    full-risk stops ate the +$285 leg to +$13). After each stop-out on a name within
+    the day, the NEXT entry on that same name must be HIGHER-QUALITY — a confirmation
+    RAISE, never a lockout (the decision is a WAIT that clears the moment the market
+    proves the level; the day-leader stays re-enterable by design).
+
+    ``escalation_level`` = consecutive-loss pressure for this name today (incremented
+    per loss recycle, decayed on a profit recycle, RESET on a green banked round —
+    green_banked_reentry_free parity). Level <= 0 ⇒ no escalation (byte-identical).
+
+    At level >= 1, ALL of (adaptive; no hard counts, margins in the trade's OWN units):
+      * STRUCTURAL trigger class — the fired trigger must carry real structure
+        (pullback_low; the same class set the structural-stop machinery trusts). The
+        weak fallbacks (momentum_continuation / score_only) no longer qualify;
+      * STRUCTURE RECLAIM — live price must exceed the level where the LAST attempt
+        FAILED: the prior trade's high-water mark (fallback: its exit price when no
+        HWM was recorded), plus ``(level - 1) * prior_risk_dist`` — each successive
+        failure demands one more full R of proof. Missing BOTH references ⇒ the
+        reclaim check is skipped (structural-trigger + tape still required — partial
+        raise rather than a starving block on absent bookkeeping);
+      * TAPE HOLD — when the executed tape is readable, ``tape_accel`` must be > 0
+        (buyers lifting). An unreadable tape (None) skips this check (the reclaim
+        requirement still stands) so a thin-tape name is not starved.
+
+    Returns ``(allowed, debug)``. Fail-OPEN on unusable numeric basis (current
+    behavior — the standard trigger already fired). docs/DESIGN/MOMENTUM_LANE.md"""
+    dbg: dict[str, Any] = {
+        "escalation_level": escalation_level,
+        "structural_trigger": bool(structural_trigger),
+        "prior_hwm": prior_hwm,
+        "prior_exit_price": prior_exit_price,
+        "prior_risk_dist": prior_risk_dist,
+        "tape_accel": tape_accel,
+        "required_reclaim": None,
+    }
+    if not enabled:
+        dbg["reason"] = "flag_off"
+        return True, dbg
+    try:
+        lvl = int(escalation_level or 0)
+    except (TypeError, ValueError):
+        dbg["reason"] = "bad_level_fail_open"
+        return True, dbg
+    if lvl <= 0:
+        dbg["reason"] = "no_escalation"
+        return True, dbg
+    # 1) structural trigger class required at any escalation level.
+    if not structural_trigger:
+        dbg["reason"] = "non_structural_trigger"
+        return False, dbg
+    # 2) structure reclaim: price must prove the prior failure wrong.
+    ref = None
+    for cand in (prior_hwm, prior_exit_price):
+        try:
+            if cand is not None and math.isfinite(float(cand)) and float(cand) > 0:
+                ref = float(cand)
+                break
+        except (TypeError, ValueError):
+            continue
+    if ref is not None:
+        margin = 0.0
+        try:
+            if (
+                prior_risk_dist is not None
+                and math.isfinite(float(prior_risk_dist))
+                and float(prior_risk_dist) > 0
+            ):
+                margin = max(0, lvl - 1) * float(prior_risk_dist)
+        except (TypeError, ValueError):
+            margin = 0.0
+        required = ref + margin
+        dbg["required_reclaim"] = round(required, 6)
+        px = None
+        try:
+            if live_price is not None and math.isfinite(float(live_price)) and float(live_price) > 0:
+                px = float(live_price)
+        except (TypeError, ValueError):
+            px = None
+        if px is None:
+            # No readable live price: the downstream quote gates own that failure
+            # mode; do not double-block here (fail toward current behavior).
+            dbg["reason"] = "no_live_price_fail_open"
+        elif px < required:
+            dbg["reason"] = "reclaim_not_met"
+            return False, dbg
+        else:
+            dbg["reason"] = "reclaim_met"
+    else:
+        dbg["reason"] = "no_reclaim_reference"
+    # 3) tape hold when readable.
+    try:
+        if tape_accel is not None and math.isfinite(float(tape_accel)) and float(tape_accel) <= 0.0:
+            dbg["reason"] = "tape_not_confirming"
+            return False, dbg
+    except (TypeError, ValueError):
+        pass
+    return True, dbg
+
+
 def liquidity_capped_notional(
     equity_notional_cap: float, dollar_volume: float | None, *, fraction: float | None = None
 ) -> float:

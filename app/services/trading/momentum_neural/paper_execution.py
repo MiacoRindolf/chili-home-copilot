@@ -2928,6 +2928,170 @@ def _classify_cadence(
     return out
 
 
+def grind_mode_decision(
+    *,
+    enabled: bool,
+    prior_active: bool,
+    is_day_leader: bool | None,
+    cadence_cls: str | None,
+    entry_price: float,
+    bid: float,
+    atr_pct: float,
+    stop_atr_mult: float,
+    high_water_mark: float,
+    ema_5m: float | None,
+    last_higher_low: float | None,
+) -> dict[str, Any]:
+    """G4 P1 — GRIND/TREND mode classifier for the held runner (PURE, no I/O).
+
+    The losers-eat-the-winner pattern (CLRO 07-02: two full-risk stops ate the +$285
+    leg to net +$13; capture-matrix grind days: 5-6 scalps whose losers eat 40-60% of
+    the winner) happens because the climax-lock exit layers ratchet the stop to a
+    tight giveback near every LOCAL high of a 100-min grind. GRIND mode switches the
+    runner to STRUCTURE-trailing while the grind demonstrably holds.
+
+    ACTIVATION (prior_active False) — conservative AND of signals the lane ALREADY
+    computes (fail-CLOSED: any missing/uncertain input ⇒ inactive ⇒ scalp behavior):
+      * ``is_day_leader`` True — the symbol is the top-ranked fresh live_eligible name,
+        scores >= the within-day p90 of the live_eligible board, or is the wildcard-
+        dominant symbol (all adaptive percentile ranks; no magic number);
+      * ``cadence_cls == "FAST"`` — the deployed cadence classifier confirms a live
+        runner (SLOW_CHOPPER / UNCERTAIN / None never grind);
+      * peak excursion >= 1R in the trade's OWN frozen risk unit — the SAME >=1R basis
+        the cushion trail's 5m-EMA structure anchor uses (shared basis, no new number);
+      * price HOLDING the 5m EMA-9 (bid >= ema_5m — structure intact);
+      * a confirmed HIGHER-LOW above entry exists (``last_higher_low > entry_price``) —
+        at least one full pullback-and-continue cycle completed. This is the grind
+        signature that a fast pop-scalp (CELZ class) does NOT print on 5m bars, so
+        grind mode cannot misfire on a non-grind pop.
+
+    MAINTENANCE (prior_active True) — hysteresis so board flicker alone cannot drop a
+    working grind: keep active while ``enabled``, cadence is NOT SLOW_CHOPPER (and is
+    readable), and price holds the structure floor. Structure break / cadence flip /
+    missing anchors ⇒ deactivate (fail toward scalp).
+
+    Returns ``{"active": bool, "reason": str, "structure_floor": float|None,
+    "peak_r": float|None}``. ``structure_floor`` = max(available anchors of 5m-EMA9 and
+    the confirmed higher-low) minus the SAME ATR-scaled wick buffer the cushion trail's
+    EMA anchor uses (entry * max(0.001, atr_pct * 0.25)) — the level GRIND clamps the
+    climax-lock ratchet CANDIDATES to. The placed stop is NEVER loosened (INVARIANT-A:
+    callers compose candidates through max(current_stop, ...)). docs/DESIGN/MOMENTUM_LANE.md
+    """
+    out: dict[str, Any] = {
+        "active": False,
+        "reason": "",
+        "structure_floor": None,
+        "peak_r": None,
+    }
+    if not enabled:
+        out["reason"] = "flag_off"
+        return out
+    try:
+        entry = float(entry_price)
+        b = float(bid)
+        hwm = float(high_water_mark)
+        ap = float(atr_pct or 0.0)
+        sm = float(stop_atr_mult or 0.0)
+    except (TypeError, ValueError):
+        out["reason"] = "bad_inputs"
+        return out
+    if not (math.isfinite(entry) and math.isfinite(b) and math.isfinite(hwm)) or entry <= 0:
+        out["reason"] = "bad_inputs"
+        return out
+    # The trade's own risk unit, frozen at entry (same formula the stop/trail use).
+    risk_dist = entry * max(0.003, ap * sm)
+    peak_r = max(0.0, (hwm - entry) / risk_dist) if risk_dist > 0 else 0.0
+    out["peak_r"] = round(peak_r, 4)
+    # Structure floor from whatever anchors are available (same wick buffer as the
+    # cushion trail's EMA anchor — shared basis, no new number).
+    buf = entry * max(0.001, ap * 0.25)
+    anchors: list[float] = []
+    ema_ok = None
+    try:
+        if ema_5m is not None and math.isfinite(float(ema_5m)) and float(ema_5m) > 0:
+            ema_ok = float(ema_5m)
+            anchors.append(ema_ok)
+    except (TypeError, ValueError):
+        ema_ok = None
+    hl_ok = None
+    try:
+        if last_higher_low is not None and math.isfinite(float(last_higher_low)) and float(last_higher_low) > 0:
+            hl_ok = float(last_higher_low)
+            anchors.append(hl_ok)
+    except (TypeError, ValueError):
+        hl_ok = None
+    structure_floor = (max(anchors) - buf) if anchors else None
+
+    if prior_active:
+        # ── MAINTENANCE (hysteresis) ──
+        if cadence_cls is None or str(cadence_cls) == "SLOW_CHOPPER":
+            out["reason"] = "cadence_dropped"
+            return out
+        if structure_floor is None:
+            out["reason"] = "structure_anchors_missing"
+            return out
+        if b < structure_floor:
+            out["reason"] = "structure_broken"
+            return out
+        out["active"] = True
+        out["reason"] = "maintained"
+        out["structure_floor"] = structure_floor
+        return out
+
+    # ── ACTIVATION (all AND; fail-closed) ──
+    if is_day_leader is not True:
+        out["reason"] = "not_day_leader"
+        return out
+    if str(cadence_cls or "") != "FAST":
+        out["reason"] = "cadence_not_fast"
+        return out
+    if peak_r < 1.0:
+        out["reason"] = "below_1r"
+        return out
+    if ema_ok is None or b < ema_ok:
+        out["reason"] = "ema_not_held"
+        return out
+    if hl_ok is None or hl_ok <= entry:
+        out["reason"] = "no_higher_low_above_entry"
+        return out
+    out["active"] = True
+    out["reason"] = "activated"
+    out["structure_floor"] = structure_floor
+    return out
+
+
+def grind_effective_max_adds(
+    *,
+    base_max_adds: int,
+    grind_active: bool,
+    cushion_r: float | None,
+    min_cushion_r: float,
+) -> int:
+    """G4 P1 — cushion-adaptive pyramid re-add cap in GRIND mode (PURE, no I/O).
+
+    Outside grind mode (or on any unusable basis): the documented base cap, unchanged.
+    In grind mode: prefer RE-ADD over full-exit+reenter — allow one add per
+    ``min_cushion_r`` of BANKED cushion (``int(cushion_r // min_cushion_r)``), floored
+    at the base. Purely derived from the trade's own banked R (no new number): each
+    extra add still requires the FULL pyramid confirmation set (cushion banked, stop
+    >= breakeven, new-HOD, OFI thrust, iceberg probe, midday guard) AND the GUARD #4
+    aggregate-risk admission — this only lifts the hard COUNT, never a risk bound."""
+    try:
+        base = max(0, int(base_max_adds))
+    except (TypeError, ValueError):
+        return 0
+    if not grind_active or cushion_r is None:
+        return base
+    try:
+        cr = float(cushion_r)
+        per = float(min_cushion_r)
+    except (TypeError, ValueError):
+        return base
+    if not (math.isfinite(cr) and cr > 0 and math.isfinite(per) and per > 0):
+        return base
+    return max(base, int(cr // per))
+
+
 def sell_into_strength_ladder(
     *,
     high_water_mark: float,

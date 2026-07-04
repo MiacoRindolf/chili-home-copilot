@@ -7103,6 +7103,21 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_STOPOUT_REENTRIES"),
         description="TASK#8: per-name/per-session cap on re-entries permitted after a STOP-OUT/loss. Only loss recycles count; profit recycles are unbounded. ge 1, le 10.",
     )
+    # ── G4 (losers-eat-the-winner fix, 2026-07-03): grind-aware exits + same-symbol
+    # re-entry escalation. Two kill-switches, everything else derived (leader = the
+    # existing within-day p90 live_eligible rank; structure = the 5m EMA-9 / confirmed
+    # higher-low the trail already anchors on; escalation margins in the trade's OWN
+    # frozen risk-distance units). Single-flag rollback each.
+    chili_momentum_g4_grind_exit_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_GRIND_EXIT_ENABLED"),
+        description="G4 P1: GRIND/TREND exit mode on the held runner. When the position's symbol is the day leader (top-ranked/p90/wildcard-dominant), cadence is FAST, >=1R peak and a confirmed HIGHER-LOW above entry has formed, the exit machinery switches to STRUCTURE-trailing: climax-lock ratchets are clamped to the 5m-EMA9/higher-low structure floor (candidates only — the placed stop NEVER loosens, INVARIANT-A), the topping-tail full-flatten defers to the structure trail, and the pyramid re-add cap becomes cushion-adaptive. Fail-CLOSED: any missing/uncertain input ⇒ scalp behavior byte-identical. OFF ⇒ byte-identical.",
+    )
+    chili_momentum_g4_reentry_escalation_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_G4_REENTRY_ESCALATION_ENABLED"),
+        description="G4 P2: SAME-SYMBOL re-entry escalation. After each stop-out the NEXT entry on the name needs higher-quality confirmation (a STRUCTURAL trigger class + price reclaim of the failed attempt's high-water mark, margin scaling with consecutive stops in the trade's own risk-distance units, + positive tape when readable). Never a lockout — a WAIT that clears when the market proves the level. Resets on a green banked round (green_banked_reentry_free parity). The day-leader additionally bypasses the TASK#8 terminal cap (escalation still applies). OFF ⇒ byte-identical.",
+    )
     chili_momentum_risk_cooldown_after_cancel_seconds: int = Field(
         default=60,
         ge=0,
