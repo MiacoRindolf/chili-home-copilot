@@ -74,6 +74,19 @@ def test_missing_cadence_blocks_activation() -> None:
     assert out["reason"] == "cadence_not_fast"
 
 
+def test_uncertain_cadence_activates_when_all_other_signals_align() -> None:
+    """Replay finding (CLRO 2.74R / SVRE 1.32R at full tick density): the classifier's
+    own default is UNCERTAIN -> treated as FAST/normal with no modulation, and
+    MAINTENANCE already accepts UNCERTAIN. ACTIVATION must accept it too — gating on
+    exact "FAST" made grind-hold near-totally inert despite every other signal firing."""
+    out = grind_mode_decision(**_activate_kwargs(
+        cadence_cls="UNCERTAIN", high_water_mark=12.0, bid=11.5,
+    ))
+    assert out["active"] is True
+    assert out["reason"] == "activated"
+    assert out["structure_floor"] is not None
+
+
 def test_below_1r_blocks_activation() -> None:
     out = grind_mode_decision(**_activate_kwargs(high_water_mark=10.2, bid=10.1))
     assert out["active"] is False
