@@ -65,6 +65,11 @@ except ImportError:  # main lineage: gate not present
         )
 
 from .micro_bars import _resample_micro_bars
+from .risk_policy import (
+    equity_relative_notional_cap,
+    liquidity_capped_notional,
+    replay_account_equity,
+)
 from .tick_scalp import (
     ROSS_TICK_SCALP_COURSE_PRICE_FLOOR,
     ROSS_TICK_SCALP_MAX_PRICE,
@@ -2097,7 +2102,47 @@ def run_counterfactual_symbol_replay(
         if cash_fraction is not None
         else getattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.15)
     )
-    if max_notional_usd is None and fixed_qty is None and cash_usd is None:
+    # D4 (cf-parity): wire LIVE's actual notional-ceiling chain instead of the flat,
+    # caller-passed ``max_notional_usd`` the harness used to size against unconditionally
+    # (proof: SVRE/CELZ-class replays sized ~$15.4k notional on a ~$13k account). Live's
+    # chain (live_runner.py, risk_policy.py) is:
+    #   fixed/flat cap -> equity_relative_notional_cap (equity x
+    #   chili_momentum_risk_notional_fraction_of_equity, default 15%) ->
+    #   liquidity_capped_notional (participation fraction of the name's $-volume).
+    # ``account_equity_usd`` (default the mission's ~$13k account) is injected through
+    # the SAME ``replay_account_equity`` ContextVar seam Replay v3 P2 already uses
+    # (risk_policy.py) — zero broker I/O, pure and side-effect-free. There is no
+    # historical raw buying-power table, so a fixed injected equity is the honest
+    # basis; it is reported in ``confidence_reasons`` and per-trade debug rather than
+    # silently assumed. Dollar-volume for the liquidity leg is approximated from the
+    # REPLAYED trade tape itself (price*size), since ``universe.snapshot_dollar_volumes``
+    # is a live-only data source with no as-of history to query.
+    equity_basis = float(account_equity_usd) if account_equity_usd is not None else 13_000.0
+    live_notional_cap: float | None = None
+    if live_admission_mode and fixed_qty is None and cash_usd is None:
+        # The flat fallback only matters when equity is unavailable (never true here —
+        # ``replay_account_equity`` always injects one); a caller-passed
+        # ``max_notional_usd`` still layers in as an extra flat ceiling ABOVE the
+        # equity-relative fraction, exactly like live's frozen-policy flat cap.
+        flat_fallback = notional if notional > 0 else max(equity_basis * 10.0, 1.0)
+        tape_dollar_volume = None
+        if trade_ticks:
+            tape_dollar_volume = sum(
+                float(t.mid) * float(t.size)
+                for t in trade_ticks
+                if t.size is not None and t.mid is not None and t.mid > 0
+            ) or None
+        with replay_account_equity(lambda *_a, **_k: equity_basis):
+            equity_capped = equity_relative_notional_cap(flat_fallback)
+        live_notional_cap = liquidity_capped_notional(equity_capped, tape_dollar_volume)
+        confidence_reasons.append(
+            f"live_sizing_equity_usd:{round(equity_basis, 2)}"
+            f"_equity_cap:{round(equity_capped, 2)}"
+            f"_liquidity_cap:{round(live_notional_cap, 2)}"
+            f"_tape_dollar_volume:{round(tape_dollar_volume, 0) if tape_dollar_volume else None}"
+        )
+        notional = live_notional_cap
+    if max_notional_usd is None and fixed_qty is None and cash_usd is None and not live_admission_mode:
         confidence_reasons.append("counterfactual_notional_uncapped_no_broker_state")
     if cash_usd is not None:
         confidence_reasons.append(
@@ -2176,6 +2221,11 @@ def run_counterfactual_symbol_replay(
         if trade is None:
             skipped["simulate_no_trade"] = skipped.get("simulate_no_trade", 0) + 1
             continue
+        # D4 (cf-parity): print the per-trade notional so a validation run can see the
+        # live-parity dollar sizing directly on the trade, not just in the aggregate
+        # confidence_reasons string.
+        trade.debug["live_notional_cap_usd"] = live_notional_cap
+        trade.debug["account_equity_basis_usd"] = equity_basis if live_admission_mode else None
         trades.append(trade)
         cursor_ts = trade.exit_ts
 
