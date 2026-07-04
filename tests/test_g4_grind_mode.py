@@ -192,3 +192,74 @@ def test_max_adds_bad_base_type_returns_zero() -> None:
     assert grind_effective_max_adds(
         base_max_adds="oops", grind_active=True, cushion_r=3.0, min_cushion_r=1.0,
     ) == 0
+
+
+# ── review M2: no active=True with the floor already broken; explicit grind death ──
+
+
+def test_activation_blocked_when_floor_already_broken() -> None:
+    """The M2 defect: hl > ema puts the floor ABOVE a bid that still holds the EMA —
+    activation must refuse rather than report an already-broken structure floor."""
+    out = grind_mode_decision(**_activate_kwargs(
+        high_water_mark=12.0, bid=10.6, ema_5m=10.5, last_higher_low=11.5,
+    ))
+    # floor = 11.5 - 10*max(0.001, 0.05*0.25) = 11.375 > bid 10.6
+    assert out["active"] is False
+    assert out["reason"] == "structure_floor_not_held"
+
+
+def test_active_true_implies_floor_held() -> None:
+    """M2 property: whenever the decision reports active, the reported floor is at/below
+    the evaluated bid (never an already-broken level)."""
+    for kw in (
+        _activate_kwargs(high_water_mark=12.0, bid=11.5),
+        _activate_kwargs(prior_active=True, high_water_mark=12.0, bid=10.8),
+    ):
+        out = grind_mode_decision(**kw)
+        if out["active"]:
+            assert float(kw["bid"]) >= float(out["structure_floor"])
+
+
+def test_activation_blocked_on_vwap_not_held() -> None:
+    out = grind_mode_decision(**_activate_kwargs(
+        high_water_mark=12.0, bid=11.5, vwap=11.8,
+    ))
+    assert out["active"] is False
+    assert out["reason"] == "vwap_not_held"
+
+
+def test_activation_skips_unreadable_vwap() -> None:
+    out = grind_mode_decision(**_activate_kwargs(high_water_mark=12.0, bid=11.5, vwap=None))
+    assert out["active"] is True
+    out2 = grind_mode_decision(**_activate_kwargs(
+        high_water_mark=12.0, bid=11.5, vwap=float("nan"),
+    ))
+    assert out2["active"] is True
+
+
+def test_maintenance_drops_on_lower_low_below_entry() -> None:
+    """Explicit grind death: a READABLE swing-low anchor degrading to/below entry
+    (the lower-low signature) deactivates even while the EMA floor still holds."""
+    out = grind_mode_decision(**_activate_kwargs(
+        prior_active=True, high_water_mark=12.0, bid=10.8, last_higher_low=9.8,
+    ))
+    assert out["active"] is False
+    assert out["reason"] == "lower_low_below_entry"
+
+
+def test_maintenance_drops_on_vwap_loss() -> None:
+    out = grind_mode_decision(**_activate_kwargs(
+        prior_active=True, high_water_mark=12.0, bid=10.8, vwap=11.0,
+    ))
+    assert out["active"] is False
+    assert out["reason"] == "vwap_lost"
+
+
+def test_maintenance_unreadable_hl_keeps_ema_hysteresis() -> None:
+    """Hysteresis intact: an UNREADABLE (None) swing-low this tick is flicker, not a
+    lower-low — the EMA-anchored floor keeps a working grind alive."""
+    out = grind_mode_decision(**_activate_kwargs(
+        prior_active=True, high_water_mark=12.0, bid=10.8, last_higher_low=None,
+    ))
+    assert out["active"] is True
+    assert out["reason"] == "maintained"

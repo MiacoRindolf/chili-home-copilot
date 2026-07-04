@@ -4941,6 +4941,7 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "g4_leader_min",
     "g4_leader_is",
     "g4_hl5m_val",
+    "g4_vwap5m_val",
 )
 # DELIBERATELY KEPT (NOT in the reset set): post_exit_excursion_pending. It is the deferred
 # shake-out-learning marker for the trade that JUST closed; a separate horizon job
@@ -11973,6 +11974,7 @@ def tick_live_session(
                         high_water_mark=_float_or_none(pos.get("high_water_mark")) or avg,
                         ema_5m=_float_or_none(le.get("ema5m_val")),
                         last_higher_low=_float_or_none(le.get("g4_hl5m_val")),
+                        vwap=_float_or_none(le.get("g4_vwap5m_val")),
                     )
                     _g4_active_now = bool(_g4_grind.get("active"))
                     if _g4_active_now:
@@ -12087,6 +12089,21 @@ def tick_live_session(
                         )
                     except Exception:
                         le["g4_hl5m_val"] = None
+                    # G4 M2: rolling VWAP from the SAME df fetch (zero new I/O; the
+                    # deployed indicator_core proxy every VWAP gate in the lane reads).
+                    # Feeds the grind decision's VWAP-hold / VWAP-loss legs. Fail-open:
+                    # None ⇒ the VWAP legs are skipped (grind keys on floor/EMA/HL).
+                    try:
+                        from ..indicator_core import compute_all_from_df as _g4_ind_fn
+
+                        _g4_vwap = None
+                        if _df5 is not None and len(_df5) >= 2:
+                            _g4_vwap_arr = (_g4_ind_fn(_df5, needed={"vwap"}) or {}).get("vwap") or []
+                            if _g4_vwap_arr and _g4_vwap_arr[-1] is not None:
+                                _g4_vwap = float(_g4_vwap_arr[-1]) or None
+                        le["g4_vwap5m_val"] = _g4_vwap
+                    except Exception:
+                        le["g4_vwap5m_val"] = None
                     _commit_le(sess, le)
             except Exception:
                 _ema5 = None

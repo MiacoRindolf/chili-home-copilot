@@ -2941,6 +2941,7 @@ def grind_mode_decision(
     high_water_mark: float,
     ema_5m: float | None,
     last_higher_low: float | None,
+    vwap: float | None = None,
 ) -> dict[str, Any]:
     """G4 P1 — GRIND/TREND mode classifier for the held runner (PURE, no I/O).
 
@@ -2963,12 +2964,21 @@ def grind_mode_decision(
       * a confirmed HIGHER-LOW above entry exists (``last_higher_low > entry_price``) —
         at least one full pullback-and-continue cycle completed. This is the grind
         signature that a fast pop-scalp (CELZ class) does NOT print on 5m bars, so
-        grind mode cannot misfire on a non-grind pop.
+        grind mode cannot misfire on a non-grind pop;
+      * price HOLDING the derived STRUCTURE FLOOR itself (``bid >= structure_floor``,
+        review M2): activation must never report a floor the price has ALREADY broken
+        (bid between the EMA and a higher HL-band floor previously slipped through);
+      * price HOLDING VWAP when readable (``bid >= vwap``; None ⇒ check skipped —
+        the caller derives it from the same cached 5m frame, zero new I/O).
 
     MAINTENANCE (prior_active True) — hysteresis so board flicker alone cannot drop a
     working grind: keep active while ``enabled``, cadence is NOT SLOW_CHOPPER (and is
-    readable), and price holds the structure floor. Structure break / cadence flip /
-    missing anchors ⇒ deactivate (fail toward scalp).
+    readable), and price holds the structure floor. The grind DIES explicitly on
+    (review M2 — the switch BACK to scalp/ratchet, pending exhaustion candidates then
+    apply unclamped): STRUCTURE-FLOOR BREAK (``bid < structure_floor``), a LOWER-LOW
+    (the confirmed swing-low anchor degrading to/below entry — the pullback-and-
+    continue signature is gone), VWAP LOSS (``bid < vwap`` when readable), cadence
+    flip, or missing anchors ⇒ deactivate (fail toward scalp).
 
     Returns ``{"active": bool, "reason": str, "structure_floor": float|None,
     "peak_r": float|None}``. ``structure_floor`` = max(available anchors of 5m-EMA9 and
@@ -3020,10 +3030,19 @@ def grind_mode_decision(
             anchors.append(hl_ok)
     except (TypeError, ValueError):
         hl_ok = None
+    vwap_ok = None
+    try:
+        if vwap is not None and math.isfinite(float(vwap)) and float(vwap) > 0:
+            vwap_ok = float(vwap)
+    except (TypeError, ValueError):
+        vwap_ok = None
     structure_floor = (max(anchors) - buf) if anchors else None
 
     if prior_active:
-        # ── MAINTENANCE (hysteresis) ──
+        # ── MAINTENANCE (hysteresis) — the grind DIES explicitly here (review M2):
+        # floor break / lower-low / VWAP loss / cadence flip / missing anchors each
+        # force the switch BACK to scalp/ratchet behavior (the pending exhaustion
+        # candidates then apply unclamped). ──
         if cadence_cls is None or str(cadence_cls) == "SLOW_CHOPPER":
             out["reason"] = "cadence_dropped"
             return out
@@ -3032,6 +3051,16 @@ def grind_mode_decision(
             return out
         if b < structure_floor:
             out["reason"] = "structure_broken"
+            return out
+        # LOWER-LOW: a READABLE swing-low anchor that has degraded to/below entry means
+        # the pullback-and-continue signature is gone (an unreadable None keeps the
+        # EMA-anchored hysteresis — flicker alone must not drop a working grind).
+        if hl_ok is not None and hl_ok <= entry:
+            out["reason"] = "lower_low_below_entry"
+            return out
+        # VWAP LOSS when readable (None ⇒ skipped, fail-open on the missing input).
+        if vwap_ok is not None and b < vwap_ok:
+            out["reason"] = "vwap_lost"
             return out
         out["active"] = True
         out["reason"] = "maintained"
@@ -3053,6 +3082,16 @@ def grind_mode_decision(
         return out
     if hl_ok is None or hl_ok <= entry:
         out["reason"] = "no_higher_low_above_entry"
+        return out
+    # Review M2: activation must never report a structure floor the price has ALREADY
+    # broken — with hl > ema the floor (max(anchors) - buf) can sit ABOVE a bid that
+    # still holds the EMA; grind may only engage with the floor demonstrably intact.
+    if structure_floor is None or b < structure_floor:
+        out["reason"] = "structure_floor_not_held"
+        return out
+    # VWAP hold when readable (symmetric with maintenance; None ⇒ skipped).
+    if vwap_ok is not None and b < vwap_ok:
+        out["reason"] = "vwap_not_held"
         return out
     out["active"] = True
     out["reason"] = "activated"
