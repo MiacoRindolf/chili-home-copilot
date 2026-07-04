@@ -3447,6 +3447,55 @@ def tape_confirms_hold(
         return False, dbg  # any error -> fail-CLOSED
 
 
+def buyers_confirmed(
+    symbol: str | None, *, db: Any = None, settings: Any = settings, l2_as_of: Any = None
+) -> tuple[bool, dict[str, Any]]:
+    """UNIFIED, CRYPTO-SAFE 'are buyers actually lifting right now' confirmer for the
+    HOT-TAPE-ONLY touch triggers (wick_reclaim, micro_pullback_primary) — the ones that
+    otherwise fire on price/level GEOMETRY alone (adversarial review 07-04: gating just one
+    relocates the too-early fire to the other; this is the ONE gate for BOTH).
+
+    EQUITY (non ``-USD``): reuse the VALIDATED trade-tape confirmer ``tape_confirms_hold``
+    (signed_tape_accel>0 AND tick_rate>=self-relative floor). FAIL-CLOSED on missing/thin
+    tape — a HOT-TAPE trigger has dense ticks by construction (_is_hot_tape already required
+    RVOL/ATR), so a genuine data-miss here is rare and refusing is correct (no buyers => no
+    fire). Accurate-FSM proof (CELZ 06-30): this gate filtered 6 entries -> 2 cleaner ones
+    (+$229 -> +$269).
+
+    CRYPTO (``-USD``, no iqfeed trade tape — signed_tape_accel is None there): use the L2
+    book OFI (``_live_ofi_microprice`` ofi_level, which reads the Coinbase ring / fast_orderbook
+    and is defined for crypto). ofi_level>0 = bid-side aggression (buyers). FAIL-OPEN when the
+    book is unreadable (the per-process ring can be empty for a subscribed name — must NOT
+    silently disable crypto wick_reclaim/micro_pullback, the review's crypto-exclusion finding).
+
+    KILL-SWITCH ``chili_momentum_buyers_confirm_enabled`` (default True): OFF => (True, ...) so
+    the touch triggers fire on geometry alone exactly as before this change. Pure read."""
+    dbg: dict[str, Any] = {"reason": "buyers_no_symbol"}
+    s = (symbol or "").strip().upper()
+    if not s:
+        return True, dbg  # bad input -> fail-OPEN (never block a trigger on a missing symbol)
+    if not bool(getattr(settings, "chili_momentum_buyers_confirm_enabled", True)):
+        return True, {"reason": "buyers_confirm_disabled"}
+    if s.endswith("-USD"):
+        # CRYPTO: L2 book OFI; FAIL-OPEN on an unreadable/empty book (per-process ring).
+        try:
+            from .pipeline import _live_ofi_microprice
+
+            ofi, _micro = _live_ofi_microprice(s, db=db, as_of=l2_as_of)
+            if ofi is None:
+                return True, {"reason": "crypto_book_no_data_fail_open"}
+            dbg = {"reason": "crypto_ofi", "ofi_level": round(float(ofi), 5)}
+            if float(ofi) > 0.0:
+                dbg["reason"] = "crypto_buyers_ofi_pos"
+                return True, dbg
+            dbg["reason"] = "crypto_buyers_ofi_nonpos"
+            return False, dbg
+        except Exception:
+            return True, {"reason": "crypto_ofi_error_fail_open"}
+    # EQUITY: the validated fail-CLOSED trade-tape confirmer.
+    return tape_confirms_hold(s, db=db, settings=settings, l2_as_of=l2_as_of)
+
+
 def tape_confirmed_hold_trigger(
     df,
     *,
@@ -4107,6 +4156,8 @@ def wick_reclaim_confirmation(
     live_price: float | None = None,
     symbol: str | None = None,
     now: Any = None,
+    db: Any = None,
+    l2_as_of: Any = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """HOT-TAPE WICK-RECLAIM entry (HVM101 #008; flag ``chili_momentum_wick_reclaim_entry_enabled``).
 
@@ -4308,6 +4359,15 @@ def wick_reclaim_confirmation(
             "flush_low": round(flush_low, 6),
             "rejection_bar_offset": int(cur - rej_idx),
         })
+        # ── UNIFIED BUYERS-CONFIRM (2026-07-04): the wick-reclaim fired on the retrace-into-wick
+        # GEOMETRY alone (hot-tape RVOL/ATR + rejection+flush) with NO check that buyers are
+        # actually lifting — so a momentary touch into the opening flush could fire a whipsaw
+        # entry. Require the SAME crypto-safe buyers gate as micro_pullback_primary before firing;
+        # a valid shape with no buyers yet just re-evaluates next tick.
+        _b_ok, _b_dbg = buyers_confirmed(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+        debug["buyers_confirm"] = _b_dbg.get("reason") if isinstance(_b_dbg, dict) else None
+        if not _b_ok:
+            return False, "wick_reclaim_buyers_unconfirmed", debug
         return True, "wick_reclaim", debug
     except Exception:
         return False, "wick_reclaim_error", {"entry_interval": entry_interval}
@@ -9744,6 +9804,16 @@ def micro_pullback_primary_confirmation(
         debug["pullback_low"] = float(stop)
         debug["bounce_high"] = round(level, 6)
         debug["dip_low"] = round(stop, 6)
+
+        # ── UNIFIED BUYERS-CONFIRM (2026-07-04): this hot-tape touch trigger fired on the
+        # bounce-high GEOMETRY alone (RVOL/ATR + curl + hidden-seller veto) with NO check that
+        # buyers are actually lifting — the whack-a-mole sibling of wick_reclaim. Require the
+        # SAME crypto-safe buyers gate before either fire path. Gates the fire only; a valid
+        # geometry with no buyers yet just re-evaluates next tick (wait for the lift).
+        _b_ok, _b_dbg = buyers_confirmed(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+        debug["buyers_confirm"] = _b_dbg.get("reason") if isinstance(_b_dbg, dict) else None
+        if not _b_ok:
+            return False, "micro_primary_buyers_unconfirmed", debug
 
         # ── TICK-BREAK: the live ask trading through the micro-break (bounce high) ──────
         if (
