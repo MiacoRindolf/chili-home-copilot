@@ -2436,6 +2436,69 @@ def reentry_escalation_level_update(
     return max(0, lvl - 1), "profit_recycle_decay"
 
 
+def symbol_day_banked_pnl_other_sessions(
+    db: Any,
+    *,
+    symbol: str,
+    exclude_session_id: int | None = None,
+    execution_family: str | None = None,
+) -> float | None:
+    """G4 P2 (review m1) — the SYMBOL's today-ET net realized PnL across its OTHER
+    (already-terminal) live sessions.
+
+    The green-banked reset must key on the symbol's DAY-WIDE net (the
+    ``_count_symbol_episodes_today`` precedent: green-banked = today NET realized PnL
+    across ALL sessions), not one session's local ledger — a symbol that banked green
+    in an earlier session and then recycles red in a fresh session is still a
+    green-banked name. Outcome rows are one-per-terminal-session (the current live
+    session has none yet), so the caller composes: day_net = THIS session's cumulative
+    ``le["realized_pnl_usd"]`` + this other-sessions sum. CHEAP by construction — the
+    caller runs it once per loss-recycle transition (not per tick) over the indexed
+    (symbol, mode) outcome table with today's terminal_at bounds.
+
+    Returns the sum (0.0 when no qualifying rows) or ``None`` on any read error —
+    the caller then falls back to the session-local basis (current behavior)."""
+    s = str(symbol or "").strip().upper()
+    if db is None or not s:
+        return None
+    try:
+        from ....models.trading import MomentumAutomationOutcome
+        from .outcome_labels import is_real_entry_outcome
+
+        start_utc, end_utc = _et_day_bounds_utc(days_ago=0)
+        q = (
+            db.query(
+                MomentumAutomationOutcome.session_id,
+                MomentumAutomationOutcome.outcome_class,
+                MomentumAutomationOutcome.realized_pnl_usd,
+            )
+            .filter(
+                MomentumAutomationOutcome.symbol == s,
+                MomentumAutomationOutcome.mode == "live",
+                MomentumAutomationOutcome.terminal_at >= start_utc,
+                MomentumAutomationOutcome.terminal_at < end_utc,
+            )
+        )
+        if execution_family:
+            q = q.filter(MomentumAutomationOutcome.execution_family == execution_family)
+        total = 0.0
+        for sid, oc, pnl in q.all():
+            if exclude_session_id is not None and sid == exclude_session_id:
+                continue
+            if not is_real_entry_outcome(oc):
+                continue
+            if pnl is None:
+                continue
+            try:
+                total += float(pnl)
+            except (TypeError, ValueError):
+                continue
+        return total
+    except Exception:
+        logger.debug("[momentum_neural] symbol day-banked pnl read failed", exc_info=True)
+        return None
+
+
 def liquidity_capped_notional(
     equity_notional_cap: float, dollar_volume: float | None, *, fraction: float | None = None
 ) -> float:

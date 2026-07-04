@@ -67,6 +67,7 @@ from .risk_policy import (
     reentry_after_stop_allowed,
     reentry_escalation_decision,
     reentry_escalation_level_update,
+    symbol_day_banked_pnl_other_sessions,
 )
 from .paper_execution import (
     _classify_cadence,
@@ -15262,12 +15263,26 @@ def tick_live_session(
                     if isinstance(le.get("g4_prior_trade"), dict) else {}
                 )
                 _g4_exit_reason = _g4_prior_x.get("exit_reason") or le.get("last_exit_reason")
+                # Review m1: green-banked = the symbol's TODAY-ET NET realized PnL
+                # across ALL sessions (_count_symbol_episodes_today precedent), not one
+                # session's local ledger: THIS session's cumulative (the just-closed
+                # trade is in it; its own outcome row doesn't exist yet — outcomes are
+                # one-per-terminal-session) + the OTHER terminal sessions' banked sum.
+                # Runs once per loss-recycle transition (not per tick) — cheap. Read
+                # error ⇒ None ⇒ 0.0 contribution ⇒ the session-local basis (current
+                # behavior fallback).
                 _g4_cum = _float_or_none(le.get("realized_pnl_usd")) or 0.0
+                _g4_day_other = symbol_day_banked_pnl_other_sessions(
+                    db,
+                    symbol=str(sess.symbol or ""),
+                    exclude_session_id=sess.id,
+                    execution_family=str(getattr(sess, "execution_family", "") or "") or None,
+                )
                 _g4_esc, _g4_esc_why = reentry_escalation_level_update(
                     current_level=int(le.get("g4_reentry_escalation") or 0),
                     was_loss=_was_loss,
                     exit_reason=(str(_g4_exit_reason) if _g4_exit_reason else None),
-                    green_banked=bool(_g4_cum > 0),
+                    green_banked=bool((_g4_cum + (_g4_day_other or 0.0)) > 0),
                 )
                 le["g4_reentry_escalation"] = _g4_esc
             except Exception:
