@@ -2555,11 +2555,19 @@ def result_to_dict(result: CounterfactualReplayResult) -> dict[str, Any]:
                         "stop_price": t.stop_price,
                         "target_price": t.target_price,
                         "qty": t.qty,
+                        "notional_usd": round(t.qty * t.entry_price, 2),
                         "pnl_usd": t.pnl_usd,
                         "pnl_r": t.pnl_r,
                         "reason": t.reason,
                         "exit_reason": t.exit_reason,
                         "gate_family": t.gate_family,
+                        # D5 (cf-parity): explicit attribution aliases. ``reason`` /
+                        # ``gate_family`` are the dataclass's own fields (kept for
+                        # existing consumers); ``entry_reason`` / ``trigger_class`` are
+                        # the mission's requested names, GUARANTEED non-empty (never a
+                        # blank string reads as '?' in a report table).
+                        "entry_reason": str(t.reason or "unknown_entry_reason"),
+                        "trigger_class": str(t.gate_family or "unknown_gate_family"),
                         "max_favorable_r": t.max_favorable_r,
                         "max_adverse_r": t.max_adverse_r,
                         "debug": t.debug,
