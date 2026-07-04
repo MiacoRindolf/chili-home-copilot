@@ -653,6 +653,27 @@ def _extract_pillars(
     ]
     momentum = max(cands) if cands else None
 
+    # RECOVERY-GAP DOWN-RANK (2026-07-04): a big momentum % measured off a CRUSHED prior close is a
+    # backside-fade recovery, not a fresh explosive breakout (TC 07-01: prev day collapsed to close
+    # 0.26 of its own high, "+243%" faded all day; Ross lost -$394.89 on exactly this shape). The
+    # scanner emits recovery_gap_ratio = prev_day_close / prev_day_high in (0,1]; a LOW ratio = the
+    # prior session collapsed => the % is inflated by the crushed reference. SMOOTHLY dampen the
+    # momentum pillar (a size-tilt / DOWN-RANK — NOT a hard veto; the audit said don't dark-block)
+    # as the ratio drops below the floor: mult ramps 1.0 (at ratio>=floor) -> min_mult (at ratio=0).
+    # A fresh gainer (closed near its high, ratio ~1) is UNTOUCHED. Default ON, kill-switchable.
+    if momentum is not None and momentum > 0.0:
+        try:
+            from app.config import settings as _settings  # local import: no top-level dep
+            if bool(getattr(_settings, "chili_momentum_recovery_gap_dampen_enabled", True)):
+                _rg = _first_float(signal, "recovery_gap_ratio")
+                _floor = float(getattr(_settings, "chili_momentum_recovery_gap_ratio_floor", 0.5) or 0.5)
+                if _rg is not None and 0.0 <= _rg < _floor and _floor > 0.0:
+                    _minmult = float(getattr(_settings, "chili_momentum_recovery_gap_min_mult", 0.4) or 0.4)
+                    _mult = _minmult + (1.0 - _minmult) * (_rg / _floor)
+                    momentum = momentum * max(0.0, min(1.0, _mult))
+        except Exception:
+            pass
+
     size = _first_float(signal, "float_shares", "market_cap")
     liquidity = -math.log10(size) if (size and size > 0) else None
 
