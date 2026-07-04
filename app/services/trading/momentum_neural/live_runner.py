@@ -11920,9 +11920,11 @@ def tick_live_session(
             # decision itself is the PURE shared helper (grind_mode_decision) so replay/
             # tests exercise one source of truth. First trailing tick: the caches are
             # cold ⇒ inactive ⇒ scalp behavior (fail-CLOSED); grind engages once warm.
-            # INVARIANT-A: grind only ever clamps ratchet CANDIDATES to the structure
-            # floor — the PLACED stop is never loosened (every write below still guards
-            # `> stop_px`). Flag OFF / any error ⇒ _g4_cap None ⇒ byte-identical.
+            # INVARIANT-A: grind only ever clamps the PASSIVE heat-class trail candidate
+            # to the structure floor — the PLACED stop is never loosened (every write
+            # below still guards `> stop_px`) and the FLOW-CONFIRMED reversal locks (OFI
+            # exhaustion, tape-accel turn, sell-into-strength, measured-move/double-top)
+            # write UNCLAMPED (C1/C2). Flag OFF / any error ⇒ _g4_cap None ⇒ byte-identical.
             _g4_cap: float | None = None
             if bool(getattr(settings, "chili_momentum_g4_grind_exit_enabled", True)):
                 try:
@@ -12000,12 +12002,21 @@ def tick_live_session(
                         pass
 
             def _g4_clamp(_cand: float) -> float:
-                """G4 P1 — GRIND structure clamp on ratchet CANDIDATES. In grind mode no
-                climax-lock layer may tighten INSIDE the structure floor (5m EMA-9 /
-                confirmed higher-low band): candidates above it are clamped DOWN to it.
-                Never below the CURRENT placed stop (reads the live local at call time),
-                so the stop still only ever ratchets UP — INVARIANT-A intact. Inactive
-                (cap None) ⇒ identity (byte-identical scalp behavior)."""
+                """G4 P1 — GRIND structure clamp on PASSIVE ratchet CANDIDATES ONLY.
+
+                Applies to the heat-class trail (the cushion/volnorm/ride-lock composed
+                candidate): while the grind holds, passive giveback-tightening may not
+                creep INSIDE the structure floor (5m EMA-9 / confirmed higher-low band) —
+                candidates above it are clamped DOWN to it. FLOW-CONFIRMED reversal locks
+                (ofi_exhaustion_lock, tape_accel_reversal_exit, sell-into-strength, the
+                measured-move/double-top composite) are NEVER routed through this clamp:
+                they fire only on confirmed real-time exhaustion/reversal evidence and
+                are designed to lock near the high-water mark — clamping them to the
+                (looser) structure floor would reintroduce the very giveback they exist
+                to prevent (adversarial review C1/C2). Their writes stay ratchet-only /
+                higher-wins. Never below the CURRENT placed stop (reads the live local
+                at call time), so the stop still only ever ratchets UP — INVARIANT-A
+                intact. Inactive (cap None) ⇒ identity (byte-identical scalp behavior)."""
                 if _g4_cap is None:
                     return _cand
                 return min(_cand, max(float(_g4_cap), float(stop_px)))
@@ -12364,8 +12375,9 @@ def tick_live_session(
                         _cand = max(
                             [v for v in (_mm_floor, _dt_floor) if v is not None] or [stop_px]
                         )
-                        # G4 P1: grind structure clamp (identity when inactive).
-                        _cand = _g4_clamp(_cand)
+                        # G4 C1/C2: FLOW-CONFIRMED composite (measured-move fire /
+                        # double-top exhaustion) — writes UNCLAMPED even in grind mode
+                        # (higher-wins; the > stop_px guard keeps INVARIANT-A).
                         if _cand > stop_px:
                             pos["stop_price"] = _cand
                             stop_px = _cand
@@ -12518,10 +12530,11 @@ def tick_live_session(
                             "high_water_mark": _hwm_trail,
                         })
                     # Action A: ratchet-only stop write (belt-and-suspenders > guard).
+                    # G4 C1/C2: FLOW-CONFIRMED lock (OFI exhaustion confluence) — writes
+                    # UNCLAMPED even in grind mode: it fires only on confirmed real-time
+                    # exhaustion and locks near the HWM; clamping it to the (looser)
+                    # structure floor would reintroduce the giveback it prevents.
                     _lock_stop = _float_or_none(_lock.get("new_stop_floor"))
-                    if _lock_stop is not None:
-                        # G4 P1: grind structure clamp (identity when inactive).
-                        _lock_stop = _g4_clamp(_lock_stop)
                     if _lock.get("fired") and _lock_stop is not None and _lock_stop > stop_px:
                         pos["stop_price"] = _lock_stop
                         stop_px = _lock_stop
@@ -12591,10 +12604,9 @@ def tick_live_session(
                         le["prev_signed_tape_accel"] = _accel
                         _commit_le(sess, le)
                     # RATCHET-ONLY stop write (belt-and-suspenders > stop_px guard).
+                    # G4 C1/C2: FLOW-CONFIRMED reversal (tape-accel genuine TURN) —
+                    # writes UNCLAMPED even in grind mode (see the OFI-lock note).
                     _ar_stop = _float_or_none(_ar.get("new_stop_floor"))
-                    if _ar_stop is not None:
-                        # G4 P1: grind structure clamp (identity when inactive).
-                        _ar_stop = _g4_clamp(_ar_stop)
                     if _ar.get("fired") and _ar_stop is not None and _ar_stop > stop_px:
                         pos["stop_price"] = _ar_stop
                         stop_px = _ar_stop
@@ -12783,10 +12795,9 @@ def tick_live_session(
                             "cadence_loosened": bool(_sis.get("cadence_loosened")),
                         })
                     # Action A: ratchet-only stop (INVARIANT A; live-on, can only help).
+                    # G4 C1/C2: FLOW-CONFIRMED strength/exhaustion ladder — writes
+                    # UNCLAMPED even in grind mode (see the OFI-lock note).
                     _sis_stop = _float_or_none(_sis.get("new_stop_floor"))
-                    if _sis_stop is not None:
-                        # G4 P1: grind structure clamp (identity when inactive).
-                        _sis_stop = _g4_clamp(_sis_stop)
                     if _sis_stop is not None and _sis_stop > stop_px:
                         pos["stop_price"] = _sis_stop
                         stop_px = _sis_stop
