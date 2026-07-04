@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 
 from ....config import settings
 from .entry_gates import (
+    TICK_ARMED_WAIT_REASONS,
     momentum_pullback_trigger,
     vwap_reclaim_confirmation,
 )
@@ -1235,6 +1236,55 @@ def _candidate_from_gate(
     )
 
 
+def _call_bar_gate(
+    family: str,
+    *,
+    frame: pd.DataFrame,
+    entry_interval: str,
+    live_price: float | None,
+    symbol: str,
+    now: datetime,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Dispatch one named bar-close gate. Shared by the bar-close pass AND the
+    tick-armed re-fire below, so both call sites stay byte-identical."""
+    if family == "momentum_pullback":
+        # D1 (cf-parity): ``first_pullback_interval=`` was RETIRED by the F2 fix —
+        # the trigger reads ``chili_momentum_first_pullback_interval`` from settings
+        # itself (that IS live parity; live_runner.py:6450 passes no such kwarg).
+        # Passing it raised TypeError on every bar candidate.
+        return momentum_pullback_trigger(
+            frame,
+            entry_interval=entry_interval,
+            live_price=live_price,
+            symbol=symbol,
+            now=now,
+            db=None,
+            l2_as_of=now,
+        )
+    if family == "vwap_reclaim":
+        return vwap_reclaim_confirmation(
+            frame,
+            entry_interval=entry_interval,
+            live_price=live_price,
+            symbol=symbol,
+            now=now,
+        )
+    if family == "ross_breakout_starter":
+        return ross_breakout_starter_confirmation(
+            frame,
+            entry_interval=entry_interval,
+            live_price=live_price,
+            symbol=symbol,
+            now=now,
+            db=None,
+            l2_as_of=now,
+        )
+    raise ValueError(f"unknown bar gate family: {family}")
+
+
+_BAR_GATE_FAMILIES = ("momentum_pullback", "vwap_reclaim", "ross_breakout_starter")
+
+
 def _iter_bar_candidates(
     *,
     symbol: str,
@@ -1259,58 +1309,95 @@ def _iter_bar_candidates(
         tick = _latest_tick_at_or_before(ticks, ts)
         if tick is None:
             continue
-        gate_calls = (
-            (
-                "momentum_pullback",
-                momentum_pullback_trigger(
-                    frame,
-                    entry_interval=entry_interval,
-                    live_price=tick.mid,
-                    symbol=symbol,
-                    now=ts,
-                    db=None,
-                    l2_as_of=ts,
-                    first_pullback_interval=entry_interval,
-                ),
-            ),
-            (
-                "vwap_reclaim",
-                vwap_reclaim_confirmation(
-                    frame,
-                    entry_interval=entry_interval,
-                    live_price=tick.mid,
-                    symbol=symbol,
-                    now=ts,
-                ),
-            ),
-            (
-                "ross_breakout_starter",
-                ross_breakout_starter_confirmation(
-                    frame,
-                    entry_interval=entry_interval,
-                    live_price=tick.mid,
-                    symbol=symbol,
-                    now=ts,
-                    db=None,
-                    l2_as_of=ts,
-                ),
-            ),
-        )
-        for family, (ok, reason, debug) in gate_calls:
+        fired = False
+        for family in _BAR_GATE_FAMILIES:
+            ok, reason, debug = _call_bar_gate(
+                family,
+                frame=frame,
+                entry_interval=entry_interval,
+                live_price=tick.mid,
+                symbol=symbol,
+                now=ts,
+            )
+            debug = debug if isinstance(debug, Mapping) else {}
+            fire_tick = tick
+            # D2 (cf-parity): live's tick-speed dispatch does NOT wait for the next bar
+            # close once a gate is TICK-ARMED (``TICK_ARMED_WAIT_REASONS`` — e.g.
+            # ``waiting_for_break`` with ``pullback_high`` set) — live_runner.py:6450
+            # onward re-evaluates the SAME completed-bar structure against every
+            # subsequent live ask and fires the instant the ask trades through the
+            # level (see live_runner.py's tick-break comment + replay_v2.py's mirror
+            # of the same mechanic). The old bar-close-only loop here only re-checked
+            # once per NEW bar, so a tick fire between bar closes (SVRE 06-30 12:45:25Z
+            # pbh 6.89 -> tick fire 6.88-7.00, entirely inside one 15s bar) was silently
+            # missed -> zero candidates. Mirror live: walk every quote/trade tick after
+            # this bar's close (bounded by the NEXT bar's ts so we don't re-claim a
+            # later bar's own structure) and re-fire the SAME gate the instant the ask
+            # crosses ``pullback_high``.
+            if (
+                not ok
+                and str(reason) in TICK_ARMED_WAIT_REASONS
+                and _float_or_none(debug.get("pullback_high")) is not None
+            ):
+                level = float(debug["pullback_high"])
+                next_bar_ts: datetime | None = None
+                if idx + 1 < len(bars):
+                    nxt_raw = bars.index[idx + 1]
+                    next_bar_ts = _parse_dt(
+                        nxt_raw.to_pydatetime() if hasattr(nxt_raw, "to_pydatetime") else nxt_raw
+                    )
+                for cand_tick in ticks:
+                    if cand_tick.ts <= tick.ts:
+                        continue
+                    if next_bar_ts is not None and cand_tick.ts >= next_bar_ts:
+                        break
+                    if cand_tick.ask <= level:
+                        continue
+                    # The level-crossing tick is a NECESSARY but not always SUFFICIENT
+                    # condition to fire (the trigger also checks volume/candle/VWAP
+                    # state that can lag the raw price cross by a tick or two) — keep
+                    # walking subsequent ticks until the gate actually fires, exactly
+                    # like live's tick-speed dispatch re-evaluating on every quote.
+                    # Only stop scanning once it fires; do NOT bail on the first
+                    # (possibly premature) crossing tick that the gate still rejects.
+                    ok2, reason2, debug2 = _call_bar_gate(
+                        family,
+                        frame=frame,
+                        entry_interval=entry_interval,
+                        live_price=cand_tick.ask,
+                        symbol=symbol,
+                        now=cand_tick.ts,
+                    )
+                    if ok2:
+                        ok, reason, debug = ok2, reason2, (
+                            debug2 if isinstance(debug2, Mapping) else {}
+                        )
+                        fire_tick = cand_tick
+                        break
             candidate, skipped = _candidate_from_gate(
                 symbol=symbol,
-                ts=tick.ts,
-                tick=tick,
+                ts=fire_tick.ts,
+                tick=fire_tick,
                 gate_family=family,
                 ok=bool(ok),
                 reason=str(reason),
-                debug=debug if isinstance(debug, Mapping) else {},
+                debug=debug,
             )
             if candidate is not None:
                 candidates.append(candidate)
+                fired = True
                 break
             if skipped:
                 reasons[skipped] = reasons.get(skipped, 0) + 1
+        if fired:
+            continue
+    if not candidates and not reasons:
+        # D2 (cf-parity): "gate_reasons must NEVER be silently empty" — if the bar loop
+        # produced neither a candidate nor a single skip/wait reason (e.g. zero bars
+        # ever reached line 9, or every gate call raised before returning a mapped
+        # reason), that is itself a diagnostic fact the caller needs, not a silent
+        # empty-empty result that reads as "nothing happened here."
+        reasons["bar_candidates_no_reason_recorded"] = 1
     return candidates, reasons
 
 
