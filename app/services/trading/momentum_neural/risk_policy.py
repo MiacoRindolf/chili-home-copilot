@@ -2389,6 +2389,53 @@ def reentry_escalation_decision(
     return True, dbg
 
 
+def _is_stop_class_exit_reason(reason: str | None) -> bool:
+    """G4 P2 (review M1) — TRUE iff the exit reason is a genuine STOP-class exit.
+
+    Token membership on the ``_``-split reason (the SAME convention the outcome
+    classifier and the adaptive-cooldown token fallback use), so decorated reasons
+    (``stop_broker_zero_reconcile``, ``trail_stop_retry_cap_broker_zero_reconcile``)
+    still classify while ``kill_switch_flatten`` / ``bailout`` / ``max_hold`` /
+    ``target`` / ``scale_out_limit`` do NOT. Unknown/None ⇒ False (fail toward the
+    pre-G4 behavior: no escalation on an unconfirmed class)."""
+    try:
+        tokens = set(str(reason or "").lower().split("_"))
+    except Exception:
+        return False
+    return "stop" in tokens
+
+
+def reentry_escalation_level_update(
+    *,
+    current_level: int,
+    was_loss: bool,
+    exit_reason: str | None,
+    green_banked: bool,
+) -> tuple[int, str]:
+    """G4 P2 (review M1) — the escalation-level bookkeeping rule (PURE, no I/O).
+
+    The level measures CONSECUTIVE STOP pressure on the name today, so only a genuine
+    STOP-class loss raises it (``_is_stop_class_exit_reason``): a kill-switch flatten,
+    a bailout, a max-hold timeout, or a target/scale exit that happens to close red is
+    NOT evidence the entry level failed — those exits do not increment even when
+    pnl <= 0 (level unchanged). A profit recycle DECAYS the level by one; a GREEN
+    BANKED round (the symbol's banked realized PnL > 0 — the caller supplies the
+    basis) RESETS it to zero (green_banked_reentry_free parity).
+
+    Returns ``(new_level, reason)``. Unusable ``current_level`` ⇒ treated as 0."""
+    try:
+        lvl = max(0, int(current_level or 0))
+    except (TypeError, ValueError):
+        lvl = 0
+    if was_loss:
+        if _is_stop_class_exit_reason(exit_reason):
+            return lvl + 1, "stop_class_loss_increment"
+        return lvl, "non_stop_loss_unchanged"
+    if green_banked:
+        return 0, "green_banked_reset"
+    return max(0, lvl - 1), "profit_recycle_decay"
+
+
 def liquidity_capped_notional(
     equity_notional_cap: float, dollar_volume: float | None, *, fraction: float | None = None
 ) -> float:

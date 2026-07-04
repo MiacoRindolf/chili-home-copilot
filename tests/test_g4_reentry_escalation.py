@@ -9,7 +9,13 @@ WAIT, not a lockout — fail-open on unusable numeric basis (current behavior)."
 
 from __future__ import annotations
 
-from app.services.trading.momentum_neural.risk_policy import reentry_escalation_decision
+import pytest
+
+from app.services.trading.momentum_neural.risk_policy import (
+    _is_stop_class_exit_reason,
+    reentry_escalation_decision,
+    reentry_escalation_level_update,
+)
 
 
 def test_flag_off_always_allows() -> None:
@@ -168,3 +174,76 @@ def test_bad_numeric_basis_does_not_crash() -> None:
     # nan live_price is treated as unreadable -> fail-open on the reclaim leg.
     assert allowed is True
     assert dbg["reason"] == "no_live_price_fail_open"
+
+
+# ── review M1: level bookkeeping — only genuine STOP-class losses escalate ──────
+
+
+@pytest.mark.parametrize("reason", [
+    "stop",
+    "trail_stop",
+    "grind_trail_stop",
+    "stop_broker_zero_reconcile",                    # decorated by broker-zero reconcile
+    "trail_stop_retry_cap_broker_zero_reconcile",    # decorated retry-cap path
+])
+def test_stop_class_loss_increments(reason) -> None:
+    lvl, why = reentry_escalation_level_update(
+        current_level=1, was_loss=True, exit_reason=reason, green_banked=False,
+    )
+    assert lvl == 2
+    assert why == "stop_class_loss_increment"
+
+
+@pytest.mark.parametrize("reason", [
+    "kill_switch_flatten",
+    "bailout",
+    "max_hold",
+    "target",
+    "scale_out_limit",
+    "operator_flatten",
+    None,           # unknown reason: cannot confirm stop-class -> no increment
+    "",
+])
+def test_non_stop_class_loss_does_not_increment(reason) -> None:
+    lvl, why = reentry_escalation_level_update(
+        current_level=2, was_loss=True, exit_reason=reason, green_banked=False,
+    )
+    assert lvl == 2
+    assert why == "non_stop_loss_unchanged"
+
+
+def test_profit_recycle_decays() -> None:
+    lvl, why = reentry_escalation_level_update(
+        current_level=3, was_loss=False, exit_reason="target", green_banked=False,
+    )
+    assert lvl == 2
+    assert why == "profit_recycle_decay"
+
+
+def test_green_banked_resets_to_zero() -> None:
+    lvl, why = reentry_escalation_level_update(
+        current_level=4, was_loss=False, exit_reason="target", green_banked=True,
+    )
+    assert lvl == 0
+    assert why == "green_banked_reset"
+
+
+def test_decay_floors_at_zero_and_bad_level_treated_as_zero() -> None:
+    lvl, _ = reentry_escalation_level_update(
+        current_level=0, was_loss=False, exit_reason="target", green_banked=False,
+    )
+    assert lvl == 0
+    lvl2, _ = reentry_escalation_level_update(
+        current_level="oops", was_loss=True, exit_reason="stop", green_banked=False,
+    )
+    assert lvl2 == 1  # unusable basis treated as 0, then a stop-class loss increments
+
+
+def test_stop_class_predicate_token_semantics() -> None:
+    # token-split membership, not substring: "stopout_cycle" tokens {stopout, cycle}
+    # must NOT classify (no exact "stop" token), while decorated stop reasons do.
+    assert _is_stop_class_exit_reason("stop") is True
+    assert _is_stop_class_exit_reason("grind_trail_stop") is True
+    assert _is_stop_class_exit_reason("stopout_cycle") is False
+    assert _is_stop_class_exit_reason("unstoppable") is False
+    assert _is_stop_class_exit_reason(None) is False

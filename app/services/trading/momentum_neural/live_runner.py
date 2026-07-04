@@ -66,6 +66,7 @@ from .risk_policy import (
     adaptive_reentry_cooldown_seconds,
     reentry_after_stop_allowed,
     reentry_escalation_decision,
+    reentry_escalation_level_update,
 )
 from .paper_execution import (
     _classify_cadence,
@@ -15228,19 +15229,29 @@ def tick_live_session(
         _rb = _float_or_none(le.get("last_exit_return_bps"))
         _was_loss = bool(_rb is not None and _rb <= 0)
         le["last_recycle_was_stopout"] = _was_loss
-        # G4 P2: same-symbol re-entry ESCALATION level (persists across recycle). Each
-        # loss raises it; a profit recycle DECAYS it; a GREEN BANKED round (the session's
-        # cumulative realized > 0 — green_banked_reentry_free parity) RESETS it. Purely
-        # within-day/within-session state — no hard counts, the level only scales the
-        # confirmation quality the next entry must show (never a lockout).
+        # G4 P2: same-symbol re-entry ESCALATION level (persists across recycle). Only a
+        # genuine STOP-class loss raises it (review M1: kill_switch_flatten / bailout /
+        # max_hold / target exits that close red are NOT entry-level failures and do not
+        # increment) — the exit reason comes from the g4_prior_trade stash written at
+        # exit-confirm (fallback: last_exit_reason, same writer). A profit recycle DECAYS
+        # it; a GREEN BANKED round RESETS it (green_banked_reentry_free parity). The
+        # bookkeeping rule is the PURE shared helper (reentry_escalation_level_update).
+        # No hard counts — the level only scales the confirmation quality the next entry
+        # must show (never a lockout).
         if bool(getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True)):
             try:
-                _g4_esc = int(le.get("g4_reentry_escalation") or 0)
-                if _was_loss:
-                    _g4_esc += 1
-                else:
-                    _g4_cum = _float_or_none(le.get("realized_pnl_usd")) or 0.0
-                    _g4_esc = 0 if _g4_cum > 0 else max(0, _g4_esc - 1)
+                _g4_prior_x = (
+                    le.get("g4_prior_trade")
+                    if isinstance(le.get("g4_prior_trade"), dict) else {}
+                )
+                _g4_exit_reason = _g4_prior_x.get("exit_reason") or le.get("last_exit_reason")
+                _g4_cum = _float_or_none(le.get("realized_pnl_usd")) or 0.0
+                _g4_esc, _g4_esc_why = reentry_escalation_level_update(
+                    current_level=int(le.get("g4_reentry_escalation") or 0),
+                    was_loss=_was_loss,
+                    exit_reason=(str(_g4_exit_reason) if _g4_exit_reason else None),
+                    green_banked=bool(_g4_cum > 0),
+                )
                 le["g4_reentry_escalation"] = _g4_esc
             except Exception:
                 pass
