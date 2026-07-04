@@ -2956,8 +2956,13 @@ def grind_mode_decision(
       * ``is_day_leader`` True — the symbol is the top-ranked fresh live_eligible name,
         scores >= the within-day p90 of the live_eligible board, or is the wildcard-
         dominant symbol (all adaptive percentile ranks; no magic number);
-      * ``cadence_cls == "FAST"`` — the deployed cadence classifier confirms a live
-        runner (SLOW_CHOPPER / UNCERTAIN / None never grind);
+      * cadence NOT ``SLOW_CHOPPER`` and readable (``None`` never grinds) — accepts
+        both "FAST" and "UNCERTAIN", matching MAINTENANCE below and the classifier's
+        own documented default (UNCERTAIN "defaults to FAST/normal — no modulation");
+        replay on real CLRO/SVRE tape found genuine >=1R movers classify UNCERTAIN at
+        full tick density, so gating activation on exact "FAST" made grind-hold
+        near-totally inert while maintenance (which already accepted UNCERTAIN) kept
+        working — an illogical asymmetry, now resolved by aligning the two gates;
       * peak excursion >= 1R in the trade's OWN frozen risk unit — the SAME >=1R basis
         the cushion trail's 5m-EMA structure anchor uses (shared basis, no new number);
       * price HOLDING the 5m EMA-9 (bid >= ema_5m — structure intact);
@@ -3071,7 +3076,7 @@ def grind_mode_decision(
     if is_day_leader is not True:
         out["reason"] = "not_day_leader"
         return out
-    if str(cadence_cls or "") != "FAST":
+    if cadence_cls is None or str(cadence_cls) == "SLOW_CHOPPER":
         out["reason"] = "cadence_not_fast"
         return out
     if peak_r < 1.0:
