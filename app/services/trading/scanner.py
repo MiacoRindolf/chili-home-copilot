@@ -1416,25 +1416,24 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
         else:
             gap_pct = 0.0
 
-        # RECOVERY-GAP RATIO (2026-07-04): a "leading gainer" measured off a CRUSHED prior close is
-        # a backside-fade trap, not a fresh explosive breakout (TC 07-01: 06-30 collapsed 7.09->1.85
-        # close = -74% off its own high, then "+243%" vs the crushed 2.44 open all-day-faded; Ross
-        # lost -$394.89 on exactly this). The tell is the PRIOR DAY closing DEEP below its own high
-        # (a collapse), vs a fresh gainer that closed near its high / is basing. ratio =
-        # prev_day_close / prev_day_high in (0,1]; LOW => the prior session collapsed => the % is a
-        # recovery. Consumed as a momentum DOWN-RANK (size-tilt, never a hard veto) in ross_momentum.
-        recovery_gap_ratio: float | None = None
+        # CHANGE VS PRIOR-DAY HIGH (2026-07-04): a "leading gainer" measured off a CRUSHED prior close
+        # is a backside-fade recovery, not a fresh explosive breakout (TC 07-01: 06-30 collapsed to
+        # close 0.26 of its own high, then "+243%" vs the crushed 2.44 open faded all day; Ross lost
+        # -$394.89 on it). The HONEST momentum is the change vs the name's OWN prior-day HIGH (what it
+        # must overcome to make real progress) — a recovery barely exceeds it (TC +18%), a fresh
+        # gainer blows past it (JEM +466%). No magic threshold: ross_momentum caps the momentum pillar
+        # at THIS value, adaptively down-ranking recoveries by their own price history.
+        chg_vs_prev_high_pct: float | None = None
         try:
             _days = sorted(set(df.index.date))
             if len(_days) >= 2:
                 _pd = df[df.index.date == _days[-2]]
                 if len(_pd) > 0:
                     _pdh = float(_pd["High"].max())
-                    _pdc = float(_pd["Close"].iloc[-1])
                     if _pdh > 0:
-                        recovery_gap_ratio = round(max(0.0, min(1.0, _pdc / _pdh)), 4)
+                        chg_vs_prev_high_pct = round((price - _pdh) / _pdh * 100.0, 2)
         except Exception:
-            recovery_gap_ratio = None
+            chg_vs_prev_high_pct = None
 
         # Daily change % (from today's open to current price)
         daily_change_pct = 0.0
@@ -1635,7 +1634,7 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
             "vol_ratio": vol_ratio,
             "gap_pct": gap_pct,
             "daily_change_pct": daily_change_pct,
-            "recovery_gap_ratio": recovery_gap_ratio,
+            "chg_vs_prev_high_pct": chg_vs_prev_high_pct,
             "macd_positive": not macd_negative,
             "indicators": {
                 "rsi": round(float(rsi_val), 1) if pd.notna(rsi_val) else None,
