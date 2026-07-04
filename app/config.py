@@ -5929,9 +5929,9 @@ class Settings(BaseSettings):
     # must prove out on replay A/B + paper before any live flip (unlike #770). Entry-side
     # only — never blocks/delays an exit; the stop can only tighten (INVARIANT-A).
     chili_momentum_pyramid_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_PYRAMID_ENABLED"),
-        description="Kill-switch for the risk-neutral confirmation-pyramid single-add. false = byte-identical (no add, no pos mutation, #769 anchor None == legacy).",
+        description="2026-07-04 DEFAULT-ON: the risk-neutral confirmation-pyramid single-add — PRESS the winner (Ross laddering) instead of only trimming it. THE diagnosed gap: the accurate-FSM JEM histogram showed CHILI is TRIM-BIASED (sell_into_strength ×556, ofi_exhaustion_lock ×556) but NEVER adds (pyramid/pullback_add ×0) — so it shrinks a runner Ross would grow (JEM +$121 vs Ross +$46k). Risk-NEUTRAL by design: adds ONLY when cushion >= min_cushion_r*R0 (default 1.0R banked) AND new-HOD AND OFI thrust AND stop>=breakeven, and pyramid_blend re-bases the #769 circuit to the starter R0 so the ENLARGED worst-case stays <= R0 (INVARIANT-A; stop only tightens). FSM-validated net-positive (with live-representative OFI): JEM +$121.56->+$160.33 (+$38.77), CELZ +$100.48->+$127.73 (+$27.25). Kill-switch false = byte-identical (no add, no pos mutation, #769 anchor None == legacy).",
     )
     chili_momentum_pyramid_min_cushion_r: float = Field(
         default=1.0,
