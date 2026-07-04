@@ -2277,6 +2277,279 @@ def reentry_after_stop_allowed(
     return True, "allowed"
 
 
+def reentry_escalation_decision(
+    *,
+    enabled: bool,
+    escalation_level: int,
+    structural_trigger: bool,
+    live_price: float | None,
+    prior_hwm: float | None,
+    prior_exit_price: float | None,
+    prior_risk_dist: float | None,
+    tape_accel: float | None,
+    is_day_leader: bool | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """G4 P2 — SAME-SYMBOL re-entry escalation after a stop-out (PURE, no I/O).
+
+    The bleed-stopping half of the losers-eat-the-winner fix (CLRO 07-02: two earlier
+    full-risk stops ate the +$285 leg to +$13). After each stop-out on a name within
+    the day, the NEXT entry on that same name must be HIGHER-QUALITY — a confirmation
+    RAISE, never a lockout (the decision is a WAIT that clears the moment the market
+    proves the level; the day-leader stays re-enterable by design).
+
+    ``escalation_level`` = consecutive-loss pressure for this name today (incremented
+    per loss recycle, decayed on a profit recycle, RESET on a green banked round —
+    green_banked_reentry_free parity). Level <= 0 ⇒ no escalation (byte-identical).
+
+    At level >= 1, ALL of (adaptive; no hard counts, margins in the trade's OWN units):
+      * STRUCTURAL trigger class — the fired trigger must carry real structure
+        (pullback_low; the same class set the structural-stop machinery trusts). The
+        weak fallbacks (momentum_continuation / score_only) no longer qualify.
+        DAY-LEADER SUBSTITUTE (review m2): the #1 name (``is_day_leader``) must never
+        be permanently WAIT-blocked just because its entries fire via non-structural
+        (volume-confirmation) reasons. When the leader's trigger is non-structural it
+        may substitute a STRICT high-quality equivalent for the structural class:
+        readable POSITIVE tape AND an ACTUAL price reclaim above the prior failure
+        (both actively satisfied — NO skip-on-missing, so this is a HIGHER bar, not a
+        hole). Non-leaders keep the strict structural requirement;
+      * STRUCTURE RECLAIM — live price must exceed the level where the LAST attempt
+        FAILED: the prior trade's high-water mark (fallback: its exit price when no
+        HWM was recorded), plus ``(level - 1) * prior_risk_dist`` — each successive
+        failure demands one more full R of proof. Missing BOTH references ⇒ the
+        reclaim check is skipped (structural-trigger + tape still required — partial
+        raise rather than a starving block on absent bookkeeping);
+      * TAPE HOLD — when the executed tape is readable, ``tape_accel`` must be > 0
+        (buyers lifting). An unreadable tape (None) skips this check (the reclaim
+        requirement still stands) so a thin-tape name is not starved.
+
+    Returns ``(allowed, debug)``. Fail-OPEN on unusable numeric basis (current
+    behavior — the standard trigger already fired). docs/DESIGN/MOMENTUM_LANE.md"""
+    dbg: dict[str, Any] = {
+        "escalation_level": escalation_level,
+        "structural_trigger": bool(structural_trigger),
+        "is_day_leader": bool(is_day_leader) if is_day_leader is not None else None,
+        "prior_hwm": prior_hwm,
+        "prior_exit_price": prior_exit_price,
+        "prior_risk_dist": prior_risk_dist,
+        "tape_accel": tape_accel,
+        "required_reclaim": None,
+    }
+    if not enabled:
+        dbg["reason"] = "flag_off"
+        return True, dbg
+    try:
+        lvl = int(escalation_level or 0)
+    except (TypeError, ValueError):
+        dbg["reason"] = "bad_level_fail_open"
+        return True, dbg
+    if lvl <= 0:
+        dbg["reason"] = "no_escalation"
+        return True, dbg
+
+    # Shared reclaim math (prior-failure reference + per-level margin) — used by both
+    # the leader substitute below and the reclaim gate (step 2). Returns
+    # (ref, required_price) with ref None when no usable prior reference exists.
+    def _reclaim_required() -> tuple[float | None, float | None]:
+        _ref = None
+        for _cand in (prior_hwm, prior_exit_price):
+            try:
+                if _cand is not None and math.isfinite(float(_cand)) and float(_cand) > 0:
+                    _ref = float(_cand)
+                    break
+            except (TypeError, ValueError):
+                continue
+        if _ref is None:
+            return None, None
+        _m = 0.0
+        try:
+            if (
+                prior_risk_dist is not None
+                and math.isfinite(float(prior_risk_dist))
+                and float(prior_risk_dist) > 0
+            ):
+                _m = max(0, lvl - 1) * float(prior_risk_dist)
+        except (TypeError, ValueError):
+            _m = 0.0
+        return _ref, _ref + _m
+
+    def _price_ge(target: float | None) -> bool:
+        if target is None:
+            return False
+        try:
+            return (
+                live_price is not None
+                and math.isfinite(float(live_price))
+                and float(live_price) > 0
+                and float(live_price) >= float(target)
+            )
+        except (TypeError, ValueError):
+            return False
+
+    def _tape_positive() -> bool:
+        try:
+            return (
+                tape_accel is not None
+                and math.isfinite(float(tape_accel))
+                and float(tape_accel) > 0.0
+            )
+        except (TypeError, ValueError):
+            return False
+
+    # 1) structural trigger class required at any escalation level.
+    if not structural_trigger:
+        # Day-leader substitute (review m2): the leader may replace the structural
+        # class with a STRICT equivalent — readable POSITIVE tape AND an actual
+        # reclaim above the prior failure, BOTH actively satisfied (no skip). A
+        # non-leader, or a leader without that confirmation, still blocks.
+        _sub_ok = False
+        if is_day_leader:
+            _, _sub_req = _reclaim_required()
+            _sub_ok = bool(_tape_positive() and _sub_req is not None and _price_ge(_sub_req))
+            dbg["leader_structural_substitute"] = _sub_ok
+        if not _sub_ok:
+            dbg["reason"] = "non_structural_trigger"
+            return False, dbg
+    # 2) structure reclaim: price must prove the prior failure wrong.
+    ref, required = _reclaim_required()
+    if ref is not None:
+        dbg["required_reclaim"] = round(required, 6)
+        px = None
+        try:
+            if live_price is not None and math.isfinite(float(live_price)) and float(live_price) > 0:
+                px = float(live_price)
+        except (TypeError, ValueError):
+            px = None
+        if px is None:
+            # No readable live price: the downstream quote gates own that failure
+            # mode; do not double-block here (fail toward current behavior).
+            dbg["reason"] = "no_live_price_fail_open"
+        elif px < required:
+            dbg["reason"] = "reclaim_not_met"
+            return False, dbg
+        else:
+            dbg["reason"] = "reclaim_met"
+    else:
+        dbg["reason"] = "no_reclaim_reference"
+    # 3) tape hold when readable.
+    try:
+        if tape_accel is not None and math.isfinite(float(tape_accel)) and float(tape_accel) <= 0.0:
+            dbg["reason"] = "tape_not_confirming"
+            return False, dbg
+    except (TypeError, ValueError):
+        pass
+    return True, dbg
+
+
+def _is_stop_class_exit_reason(reason: str | None) -> bool:
+    """G4 P2 (review M1) — TRUE iff the exit reason is a genuine STOP-class exit.
+
+    Token membership on the ``_``-split reason (the SAME convention the outcome
+    classifier and the adaptive-cooldown token fallback use), so decorated reasons
+    (``stop_broker_zero_reconcile``, ``trail_stop_retry_cap_broker_zero_reconcile``)
+    still classify while ``kill_switch_flatten`` / ``bailout`` / ``max_hold`` /
+    ``target`` / ``scale_out_limit`` do NOT. Unknown/None ⇒ False (fail toward the
+    pre-G4 behavior: no escalation on an unconfirmed class)."""
+    try:
+        tokens = set(str(reason or "").lower().split("_"))
+    except Exception:
+        return False
+    return "stop" in tokens
+
+
+def reentry_escalation_level_update(
+    *,
+    current_level: int,
+    was_loss: bool,
+    exit_reason: str | None,
+    green_banked: bool,
+) -> tuple[int, str]:
+    """G4 P2 (review M1) — the escalation-level bookkeeping rule (PURE, no I/O).
+
+    The level measures CONSECUTIVE STOP pressure on the name today, so only a genuine
+    STOP-class loss raises it (``_is_stop_class_exit_reason``): a kill-switch flatten,
+    a bailout, a max-hold timeout, or a target/scale exit that happens to close red is
+    NOT evidence the entry level failed — those exits do not increment even when
+    pnl <= 0 (level unchanged). A profit recycle DECAYS the level by one; a GREEN
+    BANKED round (the symbol's banked realized PnL > 0 — the caller supplies the
+    basis) RESETS it to zero (green_banked_reentry_free parity).
+
+    Returns ``(new_level, reason)``. Unusable ``current_level`` ⇒ treated as 0."""
+    try:
+        lvl = max(0, int(current_level or 0))
+    except (TypeError, ValueError):
+        lvl = 0
+    if was_loss:
+        if _is_stop_class_exit_reason(exit_reason):
+            return lvl + 1, "stop_class_loss_increment"
+        return lvl, "non_stop_loss_unchanged"
+    if green_banked:
+        return 0, "green_banked_reset"
+    return max(0, lvl - 1), "profit_recycle_decay"
+
+
+def symbol_day_banked_pnl_other_sessions(
+    db: Any,
+    *,
+    symbol: str,
+    exclude_session_id: int | None = None,
+    execution_family: str | None = None,
+) -> float | None:
+    """G4 P2 (review m1) — the SYMBOL's today-ET net realized PnL across its OTHER
+    (already-terminal) live sessions.
+
+    The green-banked reset must key on the symbol's DAY-WIDE net (the
+    ``_count_symbol_episodes_today`` precedent: green-banked = today NET realized PnL
+    across ALL sessions), not one session's local ledger — a symbol that banked green
+    in an earlier session and then recycles red in a fresh session is still a
+    green-banked name. Outcome rows are one-per-terminal-session (the current live
+    session has none yet), so the caller composes: day_net = THIS session's cumulative
+    ``le["realized_pnl_usd"]`` + this other-sessions sum. CHEAP by construction — the
+    caller runs it once per loss-recycle transition (not per tick) over the indexed
+    (symbol, mode) outcome table with today's terminal_at bounds.
+
+    Returns the sum (0.0 when no qualifying rows) or ``None`` on any read error —
+    the caller then falls back to the session-local basis (current behavior)."""
+    s = str(symbol or "").strip().upper()
+    if db is None or not s:
+        return None
+    try:
+        from ....models.trading import MomentumAutomationOutcome
+        from .outcome_labels import is_real_entry_outcome
+
+        start_utc, end_utc = _et_day_bounds_utc(days_ago=0)
+        q = (
+            db.query(
+                MomentumAutomationOutcome.session_id,
+                MomentumAutomationOutcome.outcome_class,
+                MomentumAutomationOutcome.realized_pnl_usd,
+            )
+            .filter(
+                MomentumAutomationOutcome.symbol == s,
+                MomentumAutomationOutcome.mode == "live",
+                MomentumAutomationOutcome.terminal_at >= start_utc,
+                MomentumAutomationOutcome.terminal_at < end_utc,
+            )
+        )
+        if execution_family:
+            q = q.filter(MomentumAutomationOutcome.execution_family == execution_family)
+        total = 0.0
+        for sid, oc, pnl in q.all():
+            if exclude_session_id is not None and sid == exclude_session_id:
+                continue
+            if not is_real_entry_outcome(oc):
+                continue
+            if pnl is None:
+                continue
+            try:
+                total += float(pnl)
+            except (TypeError, ValueError):
+                continue
+        return total
+    except Exception:
+        logger.debug("[momentum_neural] symbol day-banked pnl read failed", exc_info=True)
+        return None
+
+
 def liquidity_capped_notional(
     equity_notional_cap: float, dollar_volume: float | None, *, fraction: float | None = None
 ) -> float:

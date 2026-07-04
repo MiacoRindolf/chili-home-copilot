@@ -65,6 +65,9 @@ from .risk_policy import (
     policy_int_cap,
     adaptive_reentry_cooldown_seconds,
     reentry_after_stop_allowed,
+    reentry_escalation_decision,
+    reentry_escalation_level_update,
+    symbol_day_banked_pnl_other_sessions,
 )
 from .paper_execution import (
     _classify_cadence,
@@ -74,6 +77,8 @@ from .paper_execution import (
     double_top_tighten_decision,
     effective_stop_atr_pct,
     flag_breakout_add_decision,
+    grind_effective_max_adds,
+    grind_mode_decision,
     iceberg_seller_score,
     measured_move_exit_enabled,
     measured_move_scale_exit_decision,
@@ -1978,6 +1983,26 @@ def _complete_confirmed_live_exit(
     # worked AFTER we exited — was the stop too tight? — instead of the learner
     # seeing a shallow loss. (post_exit_excursion.py; docs/DESIGN/MOMENTUM_LANE.md)
     _exit_pos = le.get("position") if isinstance(le.get("position"), dict) else {}
+    # G4 P2: persist the CLOSED trade's reference levels for the same-symbol re-entry
+    # escalation (kept across recycle — NOT in _RECYCLE_ENTRY_STATE_KEYS; overwritten
+    # on the next real exit). risk_dist prefers the frozen entry sizing stop_distance
+    # (the C1b basis); fallback = the realized entry->exit distance (a full-risk
+    # stop-out approximates it). Fail-open: any error just skips the marker (the
+    # escalation gate then falls back to its trigger-class + tape requirements).
+    try:
+        _g4_es = le.get("entry_sizing") if isinstance(le.get("entry_sizing"), dict) else {}
+        _g4_rd = _float_or_none(_g4_es.get("stop_distance"))
+        if _g4_rd is None or _g4_rd <= 0:
+            _g4_rd = abs(float(entry_price) - float(fill_price)) or None
+        le["g4_prior_trade"] = {
+            "exit_price": float(fill_price),
+            "high_water_mark": _float_or_none(_exit_pos.get("high_water_mark")),
+            "risk_dist": _g4_rd,
+            "was_loss": bool(pnl <= 0),
+            "exit_reason": reason,
+        }
+    except Exception:
+        pass
     le["post_exit_excursion_pending"] = {
         "symbol": sess.symbol,
         "entry_price": float(entry_price),
@@ -4911,6 +4936,13 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "cadence_prev_ema5m",
     "cadence_prev_rvol",
     "cadence_cls",
+    # ── G4 grind-mode caches computed against the closed position (the grind flag
+    #    itself lives in pos and dies with it). NOT here: g4_prior_trade +
+    #    g4_reentry_escalation — the P2 escalation state MUST persist across recycle. ──
+    "g4_leader_min",
+    "g4_leader_is",
+    "g4_hl5m_val",
+    "g4_vwap5m_val",
 )
 # DELIBERATELY KEPT (NOT in the reset set): post_exit_excursion_pending. It is the deferred
 # shake-out-learning marker for the trade that JUST closed; a separate horizon job
@@ -4919,6 +4951,51 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
 # recycle would DROP that learning signal before the horizon elapses — a regression. The exit
 # path OVERWRITES (not appends) this marker on the next real exit, and the labeler already skips
 # sessions that re-entered a holding state, so carrying it forward cannot mis-label the new trade.
+
+
+# STRUCTURAL trigger classes — every fired trigger reason that carries a REAL structural
+# level (pullback_low; the classes the structural-stop + breakout-or-bailout machinery
+# trusts). Shared by (1) the structural-stop stash at entry-candidate promotion and
+# (2) the G4 P2 re-entry escalation gate (an escalated re-entry must fire on one of
+# THESE — the weak momentum_continuation / score_only fallbacks no longer qualify).
+STRUCTURAL_TRIGGER_REASONS: tuple[str, ...] = (
+    "pullback_break_ok", "pullback_break_tick_ok", "halt_resume_dip_ok",
+    "deep_reclaim_ok", "deep_reclaim_tick_ok",
+    "deep_reclaim_dipbuy_ok", "deep_reclaim_dipbuy_tick_ok",
+    # HVM101 (C): the two new triggers carry pullback_low/high under the
+    # SAME keys, so they reuse the IDENTICAL structural-stop + breakout-or-
+    # bailout machinery. BATCH B (FIX 2): the hot-tape wick-reclaim carries
+    # pullback_low (= the wick/flush low) + pullback_high (= the wick high)
+    # under the SAME keys, so it reuses the same machinery.
+    "flush_dip_buy", "vwap_reclaim", "wick_reclaim",
+    # BATCH A: the HOD-break / flat-top breakouts carry pullback_low (= the
+    # consolidation low / structural stop) + pullback_high (= the break level)
+    # under the SAME keys, so the structural-stop + bailout machinery is reused.
+    "hod_break", "hod_break_tick_ok", "flat_top_break", "flat_top_break_tick_ok",
+    # BATCH C: ABCD (SS101 #013) + double-bottom carry pullback_low (= the C-low /
+    # double-bottom low = structural stop) + pullback_high (= the B-high / neckline
+    # break level) under the SAME keys, so the same machinery is reused.
+    "abcd_break", "abcd_break_tick_ok",
+    "double_bottom_break", "double_bottom_break_tick_ok",
+    # LOCATE #2/#4/#5/#6: the four new scalp/dip triggers carry pullback_low
+    # (= the dip/trap/base structural stop) + pullback_high (= the break level)
+    # under the SAME keys, so the structural-stop + breakout-or-bailout machinery
+    # is reused unchanged.
+    "ask_thins_dip", "ask_thins_dip_tick",
+    "sub_vwap_trap", "sub_vwap_trap_tick",
+    "pulling_away_roc", "pulling_away_roc_tick",
+    "premarket_pivot_macd", "premarket_pivot_macd_tick",
+    # FIX C(1) BACKSTOP: the explosive RAW first-push / raw-break escapes and the
+    # first-pullback fire all carry pullback_low (= the raw/pullback structural stop)
+    # + pullback_high (= the break level) under the SAME debug keys (entry_gates.py
+    # populates them via _evaluate_raw_break), so they MUST reuse the structural-stop
+    # + breakout-or-bailout machinery. Omitting them silently dropped the structural
+    # stop on the default-ON first-push path -> noise-tight vol-floored ATR stop on
+    # exactly the gappy low-float names the -$697 tail came from.
+    "explosive_raw_first_push_ok", "explosive_raw_first_push_tick_ok",
+    "explosive_raw_break_ok", "explosive_raw_break_tick_ok",
+    "first_pullback_ok", "first_pullback_tick_ok",
+)
 
 
 def _reset_entry_state_on_recycle(le: dict) -> list[str]:
@@ -7232,6 +7309,102 @@ def tick_live_session(
                 _emit(db, sess, "live_entry_red_candle_blocked", {
                     "blocked_trigger": _prev_reason,
                 })
+        # G4 P2: SAME-SYMBOL RE-ENTRY ESCALATION. After each stop-out on this symbol
+        # (le["g4_reentry_escalation"], persisted across recycle — see
+        # _RECYCLE_ENTRY_STATE_KEYS comment), the NEXT fired trigger must clear a raised
+        # confirmation bar (structural trigger class + reclaim of the prior failed
+        # attempt's high-water mark, margin scaling with consecutive stops, + positive
+        # tape when readable). This is a WAIT, not a lockout — it re-checks every tick
+        # and clears the moment the market proves the level, so it cannot starve the
+        # day leader (which also bypasses the TASK#8 terminal cap below, unescalated).
+        # Flag OFF / level<=0 (no prior stop this session) ⇒ reentry_escalation_decision
+        # returns (True, ...) before any read ⇒ byte-identical.
+        if _trigger_ok and bool(
+            getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True)
+        ):
+            try:
+                _g4e_level = int(le.get("g4_reentry_escalation") or 0)
+            except (TypeError, ValueError):
+                _g4e_level = 0
+            if _g4e_level > 0:
+                _g4e_prior = le.get("g4_prior_trade") if isinstance(le.get("g4_prior_trade"), dict) else {}
+                _g4e_px = None
+                try:
+                    if tick is not None:
+                        _g4e_px = float(tick.ask or tick.mid or 0) or None
+                except Exception:
+                    _g4e_px = None
+                _g4e_tape_accel = None
+                try:
+                    if not str(sess.symbol or "").upper().endswith("-USD"):
+                        from .entry_gates import signed_tape_accel_features as _g4e_tape_fn
+
+                        _g4e_tape = _g4e_tape_fn(sess.symbol, db=db)
+                        if _g4e_tape is not None:
+                            _g4e_tape_accel = _float_or_none(_g4e_tape.get("signed_tape_accel"))
+                except Exception:
+                    _g4e_tape_accel = None
+                # Review m2: the day-leader must not be permanently WAIT-blocked when
+                # its entries fire via non-structural (volume-confirmation) reasons.
+                # Reuse the ~1min-cached leader read (same g4_leader_min/g4_leader_is
+                # cache the grind path uses) so the leader can substitute a STRICT
+                # tape+reclaim equivalent for the structural class inside the decision.
+                # Fail-CLOSED: an unreadable board ⇒ None ⇒ NOT a leader ⇒ strict path.
+                _g4e_leader = None
+                try:
+                    _g4e_min_key = _utcnow().strftime("%Y%m%d%H%M")
+                    if le.get("g4_leader_min") == _g4e_min_key:
+                        _g4e_leader = le.get("g4_leader_is")
+                    else:
+                        from .risk_policy import (
+                            _top_ranked_live_eligible_symbol as _g4e_top_fn,
+                            _wildcard_dominant_symbol as _g4e_wild_fn,
+                        )
+
+                        _g4e_sym = str(sess.symbol or "").strip().upper()
+                        _g4e_top, _g4e_ts, _g4e_p90, _g4e_meta = _g4e_top_fn(
+                            db, crypto=_g4e_sym.endswith("-USD")
+                        )
+                        if _g4e_top is not None:
+                            _g4e_leader = bool(
+                                _g4e_sym == _g4e_top
+                                or (
+                                    _g4e_p90 is not None
+                                    and float(via.viability_score or 0.0) >= float(_g4e_p90)
+                                )
+                            )
+                        if _g4e_leader is not True:
+                            _g4e_wild = _g4e_wild_fn(db)
+                            if _g4e_wild is not None and _g4e_sym == _g4e_wild:
+                                _g4e_leader = True
+                        le["g4_leader_min"] = _g4e_min_key
+                        le["g4_leader_is"] = _g4e_leader
+                        _commit_le(sess, le)
+                except Exception:
+                    _g4e_leader = None  # fail-closed: unreadable board = not leader
+                try:
+                    _g4e_ok, _g4e_dbg = reentry_escalation_decision(
+                        enabled=True,
+                        escalation_level=_g4e_level,
+                        structural_trigger=(_trigger_reason in STRUCTURAL_TRIGGER_REASONS),
+                        live_price=_g4e_px,
+                        prior_hwm=_float_or_none(_g4e_prior.get("high_water_mark")),
+                        prior_exit_price=_float_or_none(_g4e_prior.get("exit_price")),
+                        prior_risk_dist=_float_or_none(_g4e_prior.get("risk_dist")),
+                        tape_accel=_g4e_tape_accel,
+                        is_day_leader=(_g4e_leader if isinstance(_g4e_leader, bool) else None),
+                    )
+                except Exception:
+                    _g4e_ok, _g4e_dbg = True, {"reason": "g4_escalation_error_fail_open"}
+                if not _g4e_ok:
+                    _prev_reason = _trigger_reason
+                    _trigger_ok = False
+                    _trigger_reason = "g4_reentry_escalation_wait"
+                    _emit(db, sess, "g4_reentry_escalation_blocked", {
+                        "blocked_trigger": _prev_reason,
+                        "escalation_level": _g4e_level,
+                        **_g4e_dbg,
+                    })
         # HVM101 (B): BID-PROP / SPREAD-TIGHTENING CONFIRMER — confirm a fired break
         # only when, over the last few L1 samples, the best-bid is non-decreasing AND
         # the spread is at/below its short trailing median (genuine backing). Equity/RH
@@ -7313,44 +7486,10 @@ def tick_live_session(
             # pullback low so sizing + placement can stop just UNDER the structure
             # (not at a noise-tight ATR). The momentum_volume fallback has no
             # structure -> clear it so the vol-floored ATR stop is used instead.
-            if _trigger_reason in (
-                "pullback_break_ok", "pullback_break_tick_ok", "halt_resume_dip_ok",
-                "deep_reclaim_ok", "deep_reclaim_tick_ok",
-                "deep_reclaim_dipbuy_ok", "deep_reclaim_dipbuy_tick_ok",
-                # HVM101 (C): the two new triggers carry pullback_low/high under the
-                # SAME keys, so they reuse the IDENTICAL structural-stop + breakout-or-
-                # bailout machinery. BATCH B (FIX 2): the hot-tape wick-reclaim carries
-                # pullback_low (= the wick/flush low) + pullback_high (= the wick high)
-                # under the SAME keys, so it reuses the same machinery.
-                "flush_dip_buy", "vwap_reclaim", "wick_reclaim",
-                # BATCH A: the HOD-break / flat-top breakouts carry pullback_low (= the
-                # consolidation low / structural stop) + pullback_high (= the break level)
-                # under the SAME keys, so the structural-stop + bailout machinery is reused.
-                "hod_break", "hod_break_tick_ok", "flat_top_break", "flat_top_break_tick_ok",
-                # BATCH C: ABCD (SS101 #013) + double-bottom carry pullback_low (= the C-low /
-                # double-bottom low = structural stop) + pullback_high (= the B-high / neckline
-                # break level) under the SAME keys, so the same machinery is reused.
-                "abcd_break", "abcd_break_tick_ok",
-                "double_bottom_break", "double_bottom_break_tick_ok",
-                # LOCATE #2/#4/#5/#6: the four new scalp/dip triggers carry pullback_low
-                # (= the dip/trap/base structural stop) + pullback_high (= the break level)
-                # under the SAME keys, so the structural-stop + breakout-or-bailout machinery
-                # is reused unchanged.
-                "ask_thins_dip", "ask_thins_dip_tick",
-                "sub_vwap_trap", "sub_vwap_trap_tick",
-                "pulling_away_roc", "pulling_away_roc_tick",
-                "premarket_pivot_macd", "premarket_pivot_macd_tick",
-                # FIX C(1) BACKSTOP: the explosive RAW first-push / raw-break escapes and the
-                # first-pullback fire all carry pullback_low (= the raw/pullback structural stop)
-                # + pullback_high (= the break level) under the SAME debug keys (entry_gates.py
-                # populates them via _evaluate_raw_break), so they MUST reuse the structural-stop
-                # + breakout-or-bailout machinery. Omitting them silently dropped the structural
-                # stop on the default-ON first-push path -> noise-tight vol-floored ATR stop on
-                # exactly the gappy low-float names the -$697 tail came from.
-                "explosive_raw_first_push_ok", "explosive_raw_first_push_tick_ok",
-                "explosive_raw_break_ok", "explosive_raw_break_tick_ok",
-                "first_pullback_ok", "first_pullback_tick_ok",
-            ) and _pb_debug.get("pullback_low"):
+            # (the class list is the shared module constant STRUCTURAL_TRIGGER_REASONS —
+            # also the G4 P2 escalation gate's required-quality set; see its definition
+            # for the per-class provenance comments)
+            if _trigger_reason in STRUCTURAL_TRIGGER_REASONS and _pb_debug.get("pullback_low"):
                 le["structural_stop_price"] = float(_pb_debug["pullback_low"])
                 # #2 Breakout-or-bailout: stash the broken pullback HIGH (the breakout
                 # level) so the held-position handler can fast-bail if it fails to hold
@@ -11814,6 +11953,117 @@ def tick_live_session(
         # check below then enforces it SAME tick. Derived from the frozen entry ATR —
         # not a static floor. (docs/DESIGN/MOMENTUM_LANE.md)
         if st == STATE_LIVE_TRAILING:
+            # ── G4 P1: GRIND/TREND exit-mode decision (docs: losers-eat-the-winner fix).
+            # All inputs are values the lane ALREADY computes: the within-day p90 leader
+            # rank (risk_policy._top_ranked_live_eligible_symbol, cached ~1min like the
+            # 5m-EMA), the deployed cadence class (le["cadence_cls"], persisted each held
+            # tick by the ladder block), the cached 5m EMA-9 (ema5m_val) and the confirmed
+            # 5m HIGHER-LOW (g4_hl5m_val, computed from the SAME _df5 fetch below). The
+            # decision itself is the PURE shared helper (grind_mode_decision) so replay/
+            # tests exercise one source of truth. First trailing tick: the caches are
+            # cold ⇒ inactive ⇒ scalp behavior (fail-CLOSED); grind engages once warm.
+            # INVARIANT-A: grind only ever clamps the PASSIVE heat-class trail candidate
+            # to the structure floor — the PLACED stop is never loosened (every write
+            # below still guards `> stop_px`) and the FLOW-CONFIRMED reversal locks (OFI
+            # exhaustion, tape-accel turn, sell-into-strength, measured-move/double-top)
+            # write UNCLAMPED (C1/C2). Flag OFF / any error ⇒ _g4_cap None ⇒ byte-identical.
+            _g4_cap: float | None = None
+            if bool(getattr(settings, "chili_momentum_g4_grind_exit_enabled", True)):
+                try:
+                    _g4_min_key = _utcnow().strftime("%Y%m%d%H%M")
+                    if le.get("g4_leader_min") == _g4_min_key:
+                        _g4_leader = le.get("g4_leader_is")
+                    else:
+                        _g4_leader = None
+                        try:
+                            from .risk_policy import (
+                                _top_ranked_live_eligible_symbol as _g4_top_fn,
+                                _wildcard_dominant_symbol as _g4_wild_fn,
+                            )
+
+                            _g4_sym = str(sess.symbol or "").strip().upper()
+                            _g4_top, _g4_top_score, _g4_p90, _g4_meta = _g4_top_fn(
+                                db, crypto=_g4_sym.endswith("-USD")
+                            )
+                            if _g4_top is not None:
+                                _g4_leader = bool(
+                                    _g4_sym == _g4_top
+                                    or (
+                                        _g4_p90 is not None
+                                        and float(via.viability_score or 0.0) >= float(_g4_p90)
+                                    )
+                                )
+                            if _g4_leader is not True:
+                                _g4_wild = _g4_wild_fn(db)
+                                if _g4_wild is not None and _g4_sym == _g4_wild:
+                                    _g4_leader = True
+                        except Exception:
+                            _g4_leader = None  # fail-closed: unreadable board = not leader
+                        le["g4_leader_min"] = _g4_min_key
+                        le["g4_leader_is"] = _g4_leader
+                        _commit_le(sess, le)
+                    _g4_grind = grind_mode_decision(
+                        enabled=True,
+                        prior_active=bool(pos.get("g4_grind_active")),
+                        is_day_leader=(_g4_leader if isinstance(_g4_leader, bool) else None),
+                        cadence_cls=(le.get("cadence_cls") if isinstance(le.get("cadence_cls"), str) else None),
+                        entry_price=avg,
+                        bid=float(bid),
+                        atr_pct=_float_or_none(le.get("entry_stop_atr_pct")) or 0.0,
+                        stop_atr_mult=float(params.get("stop_atr_mult") or 0.60),
+                        high_water_mark=_float_or_none(pos.get("high_water_mark")) or avg,
+                        ema_5m=_float_or_none(le.get("ema5m_val")),
+                        last_higher_low=_float_or_none(le.get("g4_hl5m_val")),
+                        vwap=_float_or_none(le.get("g4_vwap5m_val")),
+                    )
+                    _g4_active_now = bool(_g4_grind.get("active"))
+                    if _g4_active_now:
+                        _g4_cap = _float_or_none(_g4_grind.get("structure_floor"))
+                    if _g4_active_now != bool(pos.get("g4_grind_active")):
+                        pos["g4_grind_active"] = _g4_active_now
+                        le["position"] = pos
+                        _commit_le(sess, le)
+                        _emit(db, sess, "g4_grind_mode", {
+                            "active": _g4_active_now,
+                            "reason": _g4_grind.get("reason"),
+                            "structure_floor": _g4_grind.get("structure_floor"),
+                            "peak_r": _g4_grind.get("peak_r"),
+                            "leader": _g4_leader,
+                            "cadence_cls": le.get("cadence_cls"),
+                            "bid": bid,
+                        })
+                except Exception:
+                    # Fail toward SCALP: any grind-read error leaves every exit layer
+                    # byte-identical this tick (and drops a stale grind marker).
+                    _g4_cap = None
+                    try:
+                        if pos.get("g4_grind_active"):
+                            pos["g4_grind_active"] = False
+                            le["position"] = pos
+                            _commit_le(sess, le)
+                    except Exception:
+                        pass
+
+            def _g4_clamp(_cand: float) -> float:
+                """G4 P1 — GRIND structure clamp on PASSIVE ratchet CANDIDATES ONLY.
+
+                Applies to the heat-class trail (the cushion/volnorm/ride-lock composed
+                candidate): while the grind holds, passive giveback-tightening may not
+                creep INSIDE the structure floor (5m EMA-9 / confirmed higher-low band) —
+                candidates above it are clamped DOWN to it. FLOW-CONFIRMED reversal locks
+                (ofi_exhaustion_lock, tape_accel_reversal_exit, sell-into-strength, the
+                measured-move/double-top composite) are NEVER routed through this clamp:
+                they fire only on confirmed real-time exhaustion/reversal evidence and
+                are designed to lock near the high-water mark — clamping them to the
+                (looser) structure floor would reintroduce the very giveback they exist
+                to prevent (adversarial review C1/C2). Their writes stay ratchet-only /
+                higher-wins. Never below the CURRENT placed stop (reads the live local
+                at call time), so the stop still only ever ratchets UP — INVARIANT-A
+                intact. Inactive (cap None) ⇒ identity (byte-identical scalp behavior)."""
+                if _g4_cap is None:
+                    return _cand
+                return min(_cand, max(float(_g4_cap), float(stop_px)))
+
             # Ross sell-into-strength: a topping-tail / shooting-star on the runner's
             # candles is momentum exhaustion — lock the tail NOW rather than waiting for
             # the chandelier trail to be hit on the way back down. Runner-only (post
@@ -11824,15 +12074,27 @@ def tick_live_session(
                     from .candles import topping_tail_from_df
 
                     if topping_tail_from_df(_entry_df):
-                        le["last_bailout_trigger"] = "topping_tail_runner"
-                        _commit_le(sess, le)
-                        _safe_transition(db, sess, STATE_LIVE_BAILOUT)
-                        _emit(db, sess, "live_bailout", {
-                            "reason": "topping_tail_runner_exit", "bid": bid,
-                            "high_water_mark": _float_or_none(pos.get("high_water_mark")),
-                        })
-                        db.flush()
-                        return {"ok": True, "session_id": sess.id, "state": sess.state}
+                        if _g4_cap is not None:
+                            # G4 P1: in GRIND mode a topping tail on an intact structure
+                            # (bid >= floor — re-verified by the decision THIS tick) does
+                            # NOT full-flatten the day leader mid-grind; the structure
+                            # trail owns the exit (the clamped stop enforces same-tick on
+                            # a real break). Grind uncertain/off ⇒ bailout fires as today.
+                            _emit(db, sess, "g4_grind_hold_topping_tail", {
+                                "bid": bid,
+                                "structure_floor": _g4_cap,
+                                "high_water_mark": _float_or_none(pos.get("high_water_mark")),
+                            })
+                        else:
+                            le["last_bailout_trigger"] = "topping_tail_runner"
+                            _commit_le(sess, le)
+                            _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                            _emit(db, sess, "live_bailout", {
+                                "reason": "topping_tail_runner_exit", "bid": bid,
+                                "high_water_mark": _float_or_none(pos.get("high_water_mark")),
+                            })
+                            db.flush()
+                            return {"ok": True, "session_id": sess.id, "state": sess.state}
                 except Exception:
                     pass
             _atr_pct_trail = _float_or_none(le.get("entry_stop_atr_pct")) or 0.0
@@ -11855,6 +12117,33 @@ def tick_live_session(
                         _ema5 = float(_df5["Close"].ewm(span=9, adjust=False).mean().iloc[-1])
                     le["ema5m_min"] = _min_key
                     le["ema5m_val"] = _ema5
+                    # G4 P1: the confirmed 5m HIGHER-LOW from the SAME df fetch (zero new
+                    # I/O) — the grind structure anchor. lookback=5 is the deployed shelf
+                    # precedent (entry_gates micropullback shelf read). Fail-open: None ⇒
+                    # grind stays/falls inactive (scalp behavior).
+                    try:
+                        from .entry_gates import _compute_confirmed_swing_low_last as _g4_hl_fn
+
+                        le["g4_hl5m_val"] = (
+                            _g4_hl_fn(_df5, lookback=5) if _df5 is not None else None
+                        )
+                    except Exception:
+                        le["g4_hl5m_val"] = None
+                    # G4 M2: rolling VWAP from the SAME df fetch (zero new I/O; the
+                    # deployed indicator_core proxy every VWAP gate in the lane reads).
+                    # Feeds the grind decision's VWAP-hold / VWAP-loss legs. Fail-open:
+                    # None ⇒ the VWAP legs are skipped (grind keys on floor/EMA/HL).
+                    try:
+                        from ..indicator_core import compute_all_from_df as _g4_ind_fn
+
+                        _g4_vwap = None
+                        if _df5 is not None and len(_df5) >= 2:
+                            _g4_vwap_arr = (_g4_ind_fn(_df5, needed={"vwap"}) or {}).get("vwap") or []
+                            if _g4_vwap_arr and _g4_vwap_arr[-1] is not None:
+                                _g4_vwap = float(_g4_vwap_arr[-1]) or None
+                        le["g4_vwap5m_val"] = _g4_vwap
+                    except Exception:
+                        le["g4_vwap5m_val"] = None
                     _commit_le(sess, le)
             except Exception:
                 _ema5 = None
@@ -12061,6 +12350,10 @@ def tick_live_session(
                         })
                 except Exception:
                     pass
+            # G4 P1: GRIND structure clamp — the composed candidate (cushion + volnorm +
+            # ride-lock) may not tighten inside the structure floor while the grind holds.
+            # Identity when grind is inactive; never lowers the placed stop (INVARIANT-A).
+            _trailed = _g4_clamp(_trailed)
             if _trailed > stop_px:
                 pos["stop_price"] = _trailed
                 stop_px = _trailed
@@ -12070,6 +12363,7 @@ def tick_live_session(
                     "new_stop": _trailed,
                     "high_water_mark": _hwm_trail,
                     "partial_taken": bool(pos.get("partial_taken")),
+                    "grind_clamped": bool(_g4_cap is not None),
                 })
 
             # MEASURED-MOVE SCALE TARGET + DOUBLE-TOP EXHAUSTION (winner-management,
@@ -12139,6 +12433,9 @@ def tick_live_session(
                         _cand = max(
                             [v for v in (_mm_floor, _dt_floor) if v is not None] or [stop_px]
                         )
+                        # G4 C1/C2: FLOW-CONFIRMED composite (measured-move fire /
+                        # double-top exhaustion) — writes UNCLAMPED even in grind mode
+                        # (higher-wins; the > stop_px guard keeps INVARIANT-A).
                         if _cand > stop_px:
                             pos["stop_price"] = _cand
                             stop_px = _cand
@@ -12291,6 +12588,10 @@ def tick_live_session(
                             "high_water_mark": _hwm_trail,
                         })
                     # Action A: ratchet-only stop write (belt-and-suspenders > guard).
+                    # G4 C1/C2: FLOW-CONFIRMED lock (OFI exhaustion confluence) — writes
+                    # UNCLAMPED even in grind mode: it fires only on confirmed real-time
+                    # exhaustion and locks near the HWM; clamping it to the (looser)
+                    # structure floor would reintroduce the giveback it prevents.
                     _lock_stop = _float_or_none(_lock.get("new_stop_floor"))
                     if _lock.get("fired") and _lock_stop is not None and _lock_stop > stop_px:
                         pos["stop_price"] = _lock_stop
@@ -12361,6 +12662,8 @@ def tick_live_session(
                         le["prev_signed_tape_accel"] = _accel
                         _commit_le(sess, le)
                     # RATCHET-ONLY stop write (belt-and-suspenders > stop_px guard).
+                    # G4 C1/C2: FLOW-CONFIRMED reversal (tape-accel genuine TURN) —
+                    # writes UNCLAMPED even in grind mode (see the OFI-lock note).
                     _ar_stop = _float_or_none(_ar.get("new_stop_floor"))
                     if _ar.get("fired") and _ar_stop is not None and _ar_stop > stop_px:
                         pos["stop_price"] = _ar_stop
@@ -12550,6 +12853,8 @@ def tick_live_session(
                             "cadence_loosened": bool(_sis.get("cadence_loosened")),
                         })
                     # Action A: ratchet-only stop (INVARIANT A; live-on, can only help).
+                    # G4 C1/C2: FLOW-CONFIRMED strength/exhaustion ladder — writes
+                    # UNCLAMPED even in grind mode (see the OFI-lock note).
                     _sis_stop = _float_or_none(_sis.get("new_stop_floor"))
                     if _sis_stop is not None and _sis_stop > stop_px:
                         pos["stop_price"] = _sis_stop
@@ -12948,6 +13253,32 @@ def tick_live_session(
                             except Exception:
                                 # Fail-OPEN: any read/parse error leaves the add unchanged.
                                 _discrete_add = None
+                        # G4 P1: prefer RE-ADD over full-exit+reenter — in GRIND mode the
+                        # add COUNT cap becomes cushion-adaptive (one add per
+                        # min_cushion_r of BANKED R, floored at the documented base; the
+                        # pure helper owns the math). Every other pyramid guard (cushion
+                        # banked, stop >= breakeven, new-HOD, OFI thrust, iceberg,
+                        # midday) + the GUARD #4 aggregate-risk admission still gates
+                        # EACH add — only the hard COUNT lifts. Outside grind / any
+                        # error ⇒ the base cap byte-identical.
+                        try:
+                            _g4_cush_r = None
+                            if _d0 and _q0_starter and float(_d0) > 0 and float(_q0_starter) > 0:
+                                _g4_R0 = float(_d0) * float(_q0_starter)
+                                if _g4_R0 > 0:
+                                    _g4_cush_r = max(
+                                        0.0, (float(bid) - float(_a0_starter)) * float(_q0_starter)
+                                    ) / _g4_R0
+                            _max_adds = grind_effective_max_adds(
+                                base_max_adds=_max_adds,
+                                grind_active=bool(pos.get("g4_grind_active")),
+                                cushion_r=_g4_cush_r,
+                                min_cushion_r=float(
+                                    getattr(settings, "chili_momentum_pyramid_min_cushion_r", 1.0) or 1.0
+                                ),
+                            )
+                        except Exception:
+                            pass
                         # SHARED pure predicate (one source of truth w/ replay + tests).
                         _decn = pyramid_add_decision(
                             enabled=True,  # outer block already gated on the flag
@@ -14654,6 +14985,14 @@ def tick_live_session(
             # A stop hit while TRAILING (or after the first-target partial) IS the
             # runner's trailing stop; before that it's the initial protective stop.
             _stop_reason = "trail_stop" if (st == STATE_LIVE_TRAILING or pos.get("partial_taken")) else "stop"
+            # G4 P3: grind-aware exit ATTRIBUTION — a trail stop that fires while the
+            # position is in GRIND mode labels grind_trail_stop so the counterfactual /
+            # capture tooling can attribute grind vs scalp exits. Classification parity:
+            # the outcome classifier keys on the "stop" substring (OUTCOME_STOP_LOSS,
+            # identical) and the adaptive-cooldown token fallback splits on "_" (tokens
+            # {"grind","trail","stop"} carry no profit token — identical treatment).
+            if _stop_reason == "trail_stop" and bool(pos.get("g4_grind_active")):
+                _stop_reason = "grind_trail_stop"
             cid = f"chili_ml_s_{sess.id}_{uuid.uuid4().hex[:12]}"
             sr = _submit_live_market_exit(
                 db,
@@ -14947,6 +15286,46 @@ def tick_live_session(
         _rb = _float_or_none(le.get("last_exit_return_bps"))
         _was_loss = bool(_rb is not None and _rb <= 0)
         le["last_recycle_was_stopout"] = _was_loss
+        # G4 P2: same-symbol re-entry ESCALATION level (persists across recycle). Only a
+        # genuine STOP-class loss raises it (review M1: kill_switch_flatten / bailout /
+        # max_hold / target exits that close red are NOT entry-level failures and do not
+        # increment) — the exit reason comes from the g4_prior_trade stash written at
+        # exit-confirm (fallback: last_exit_reason, same writer). A profit recycle DECAYS
+        # it; a GREEN BANKED round RESETS it (green_banked_reentry_free parity). The
+        # bookkeeping rule is the PURE shared helper (reentry_escalation_level_update).
+        # No hard counts — the level only scales the confirmation quality the next entry
+        # must show (never a lockout).
+        if bool(getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True)):
+            try:
+                _g4_prior_x = (
+                    le.get("g4_prior_trade")
+                    if isinstance(le.get("g4_prior_trade"), dict) else {}
+                )
+                _g4_exit_reason = _g4_prior_x.get("exit_reason") or le.get("last_exit_reason")
+                # Review m1: green-banked = the symbol's TODAY-ET NET realized PnL
+                # across ALL sessions (_count_symbol_episodes_today precedent), not one
+                # session's local ledger: THIS session's cumulative (the just-closed
+                # trade is in it; its own outcome row doesn't exist yet — outcomes are
+                # one-per-terminal-session) + the OTHER terminal sessions' banked sum.
+                # Runs once per loss-recycle transition (not per tick) — cheap. Read
+                # error ⇒ None ⇒ 0.0 contribution ⇒ the session-local basis (current
+                # behavior fallback).
+                _g4_cum = _float_or_none(le.get("realized_pnl_usd")) or 0.0
+                _g4_day_other = symbol_day_banked_pnl_other_sessions(
+                    db,
+                    symbol=str(sess.symbol or ""),
+                    exclude_session_id=sess.id,
+                    execution_family=str(getattr(sess, "execution_family", "") or "") or None,
+                )
+                _g4_esc, _g4_esc_why = reentry_escalation_level_update(
+                    current_level=int(le.get("g4_reentry_escalation") or 0),
+                    was_loss=_was_loss,
+                    exit_reason=(str(_g4_exit_reason) if _g4_exit_reason else None),
+                    green_banked=bool((_g4_cum + (_g4_day_other or 0.0)) > 0),
+                )
+                le["g4_reentry_escalation"] = _g4_esc
+            except Exception:
+                pass
         until = _utcnow() + timedelta(seconds=max(0, int(cd_sec)))
         le["cooldown_until_utc"] = until.isoformat()
         _safe_transition(db, sess, STATE_LIVE_COOLDOWN)
@@ -14980,6 +15359,40 @@ def tick_live_session(
                 stopout_cycles=int(le.get("stopout_cycles") or 0),
                 max_stopout_reentries=int(getattr(settings, "chili_momentum_max_stopout_reentries", 3) or 3),
             )
+            # G4 P2 (A1 top_rank_exempt coordination): the CURRENT day-leader must not
+            # be terminalized by the loss-recycle cap — CLRO 07-02: the #1 name has to
+            # stay re-enterable for the big leg. It recycles PAST the cap, but every
+            # re-entry then needs the escalated confirmation (structural trigger +
+            # HWM reclaim + tape) — a QUALITY raise, never a free pass. FAIL-CLOSED:
+            # an unreadable board grants NO exemption (terminalize exactly as today).
+            if (
+                not _re_ok
+                and bool(getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True))
+            ):
+                try:
+                    from .risk_policy import (
+                        _top_ranked_live_eligible_symbol as _g4c_top_fn,
+                        _wildcard_dominant_symbol as _g4c_wild_fn,
+                    )
+
+                    _g4c_sym = str(sess.symbol or "").strip().upper()
+                    _g4c_top, _, _, _ = _g4c_top_fn(db, crypto=_g4c_sym.endswith("-USD"))
+                    _g4c_leader = bool(_g4c_top is not None and _g4c_sym == _g4c_top)
+                    if not _g4c_leader:
+                        _g4c_wild = _g4c_wild_fn(db)
+                        _g4c_leader = bool(_g4c_wild is not None and _g4c_sym == _g4c_wild)
+                    if _g4c_leader:
+                        _re_ok = True
+                        _emit(db, sess, "live_reentry_cap_leader_exempt", {
+                            "reason": _re_reason,
+                            "stopout_cycles": int(le.get("stopout_cycles") or 0),
+                            "escalation_level": int(le.get("g4_reentry_escalation") or 0),
+                        })
+                except Exception:
+                    _log.debug(
+                        "[momentum_live] g4 leader-exempt read failed (fail-closed)",
+                        exc_info=True,
+                    )
             if not _re_ok:
                 _commit_le(sess, le)
                 _safe_transition(db, sess, STATE_LIVE_FINISHED)
