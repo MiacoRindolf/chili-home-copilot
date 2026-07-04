@@ -722,6 +722,11 @@ def _wick_settings(ms) -> None:
     ms.chili_momentum_wick_reclaim_min_retrace_frac = 0.4
     ms.chili_momentum_vwap_reclaim_min_below_bars = 2
     ms.chili_momentum_wick_reclaim_slow_recovery_gate_enabled = False
+    # This file's wick-reclaim tests exercise the GEOMETRY (rejection/flush/retrace) with no
+    # db/tape wired up; the tape-confirmation gate (buyers actively lifting, CELZ 06-30
+    # dead-tape-flush finding) is covered on its own in
+    # tests/test_momentum_wick_reclaim_slow_recovery.py, so keep it OFF here.
+    ms.chili_momentum_wick_reclaim_confirm_enabled = False
 
 
 def _wick_arrays(n: int = 12) -> dict:

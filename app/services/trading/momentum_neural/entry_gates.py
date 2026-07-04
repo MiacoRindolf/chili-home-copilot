@@ -4107,6 +4107,8 @@ def wick_reclaim_confirmation(
     live_price: float | None = None,
     symbol: str | None = None,
     now: Any = None,
+    db: Any = None,
+    l2_as_of: Any = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """HOT-TAPE WICK-RECLAIM entry (HVM101 #008; flag ``chili_momentum_wick_reclaim_entry_enabled``).
 
@@ -4136,9 +4138,21 @@ def wick_reclaim_confirmation(
     retrace-into-the-wick depth). The outsized-range test is measured against the name's OWN
     ATR% (no fixed-price magnitude).
 
-    ADDITIVE: flag OFF / thin (<10 bars) / cold tape / non-applicable -> ``(False, reason,
-    {...})`` with NO side effects; fail-OPEN to a benign decline on any error (never raises,
-    never blocks downstream). docs/DESIGN/MOMENTUM_LANE.md
+    TAPE CONFIRMATION (accurate-FSM CELZ 06-30 finding): the retrace/level checks above only
+    prove a momentary TOUCH of the ``min_retrace_frac`` level — they do NOT prove buyers are
+    actually stepping in. A wick_reclaim into a still-flushing name (e.g. CELZ's 1.50->0.97
+    open) can touch the retrace level on a dead tick and immediately re-flush, which is
+    exactly the whipsaw the accurate FSM replay isolated as the #1 bad entry. Right before
+    firing, this now reuses the SAME ``tape_confirms_hold`` fail-closed confirmer every other
+    pattern trigger's last gate uses: buyers must be actively lifting the ask THIS tick
+    (``signed_tape_accel > 0``) AND tick activity at/above its own floor. Missing/thin/stale
+    tape -> FAILS CLOSED (no fire), exactly like bull_flag / wedge / cup / etc. KILL-SWITCH
+    ``chili_momentum_wick_reclaim_confirm_enabled`` (default True) -> OFF restores the
+    pre-fix level-touch-only behavior for a one-flag revert.
+
+    ADDITIVE: flag OFF / thin (<10 bars) / cold tape / non-applicable / tape-unconfirmed ->
+    ``(False, reason, {...})`` with NO side effects; fail-OPEN to a benign decline on any
+    error (never raises, never blocks downstream). docs/DESIGN/MOMENTUM_LANE.md
     """
     try:
         if not bool(getattr(settings, "chili_momentum_wick_reclaim_entry_enabled", True)):
@@ -4308,6 +4322,19 @@ def wick_reclaim_confirmation(
             "flush_low": round(flush_low, 6),
             "rejection_bar_offset": int(cur - rej_idx),
         })
+
+        # ── TAPE REQUIRED + FAIL-CLOSED (the LAST gate; no fire without buyers on tape) ──
+        # The level-touch checks above only prove a momentary retrace TOUCH, not that buyers
+        # are actually lifting (the CELZ 06-30 1.47-into-flush whipsaw the accurate-FSM
+        # replay found: the reclaim level was touched on a dead tick then immediately
+        # re-flushed). Mirrors bull_flag / wedge / cup / etc: any disabled-flag / no-tape /
+        # thin / stale / crypto / error -> NO fire.
+        if bool(getattr(settings, "chili_momentum_wick_reclaim_confirm_enabled", True)):
+            _tape_ok, _tape_dbg = tape_confirms_hold(symbol, db=db, settings=settings, l2_as_of=l2_as_of)
+            debug["tape_confirm"] = _tape_dbg.get("reason") if isinstance(_tape_dbg, dict) else None
+            if not _tape_ok:
+                return False, "wick_reclaim_tape_unconfirmed", debug
+
         return True, "wick_reclaim", debug
     except Exception:
         return False, "wick_reclaim_error", {"entry_interval": entry_interval}

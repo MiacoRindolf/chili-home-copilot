@@ -2846,6 +2846,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_WICK_RECLAIM_MAX_RECOVERY_BARS"),
         description="HVM101 #008: max bars the wick-reclaim recovery may take (the one documented base; 1-3 fire, the 4th bar fires only on strong drying-up price-action, 5-6+ are rejected). Gated by chili_momentum_wick_reclaim_slow_recovery_gate_enabled.",
     )
+    chili_momentum_wick_reclaim_confirm_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_WICK_RECLAIM_CONFIRM_ENABLED"),
+        description="Require tape_confirms_hold (buyers actively lifting) before a wick_reclaim entry fires — the reclaim must be REAL, not a momentary 40%-retrace touch that reverses (CELZ 06-30 1.47-into-flush whipsaw the accurate FSM replay found). OFF => the pre-fix level-touch behavior.",
+    )
     chili_momentum_bid_prop_confirmer_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BID_PROP_CONFIRMER_ENABLED"),

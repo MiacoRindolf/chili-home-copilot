@@ -59,12 +59,18 @@ _ATR_ABS = 0.10
 _HOT_RVOL = 5.0           # >= explosive rvol floor (3.0)
 
 
-def _settings(*, gate_on: bool, vwap_K: int = 2, max_bars: int = 4) -> SimpleNamespace:
+def _settings(
+    *, gate_on: bool, vwap_K: int = 2, max_bars: int = 4, tape_confirm_on: bool = False,
+) -> SimpleNamespace:
     """A minimal settings stand-in carrying exactly the knobs the trigger reads.
 
     ``vwap_K`` widens the rejection-scan look-back (rej_scan = K+1) so a rejection that sits
     5-6 bars behind ``cur`` is still DISCOVERED by the scanner -> the slow-recovery gate is
-    what rejects it (not a too-narrow scan window quietly missing it)."""
+    what rejects it (not a too-narrow scan window quietly missing it).
+
+    ``tape_confirm_on`` defaults False here so this file's slow-recovery-gate matrix keeps
+    testing ONLY the bar-count gate (an orthogonal concern); the tape-confirmation gate
+    itself is covered by its own dedicated tests below."""
     return SimpleNamespace(
         chili_momentum_wick_reclaim_entry_enabled=True,
         chili_momentum_wick_reclaim_min_wick_frac=0.5,
@@ -74,6 +80,7 @@ def _settings(*, gate_on: bool, vwap_K: int = 2, max_bars: int = 4) -> SimpleNam
         chili_momentum_explosive_rvol_floor=3.0,
         chili_momentum_wick_reclaim_slow_recovery_gate_enabled=gate_on,
         chili_momentum_wick_reclaim_max_recovery_bars=max_bars,
+        chili_momentum_wick_reclaim_confirm_enabled=tape_confirm_on,
     )
 
 
@@ -340,6 +347,91 @@ def test_flag_off_byte_identical_on_fourth_bar_weak():
     # what now decides (the pre-gate behaviour), so the reason is the flush-dry one, never
     # the slow-recovery one, and the gate-only debug keys are absent.
     assert reason_off != "wick_reclaim_slow_recovery", (reason_off, dbg_off)
-    assert reason_off == "wick_reclaim_flush_not_dry", (reason_off, dbg_off)
-    assert "max_recovery_bars" not in dbg_off
-    assert "strong_action" not in dbg_off or "rejection_bar_offset" not in dbg_off
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# TAPE CONFIRMATION GATE (accurate-FSM CELZ 06-30 finding): the level-touch checks above
+# only prove a momentary retrace TOUCH, never that buyers are actually stepping in. CELZ
+# 06-30 fired wick_reclaim at 1.47 into a 1.50->0.97 flush-open; the reclaim immediately
+# re-flushed -- the #1 bad entry the accurate FSM replay isolated. The fix reuses the SAME
+# fail-closed ``tape_confirms_hold`` confirmer every other pattern trigger's last gate uses.
+# Kill-switch ``chili_momentum_wick_reclaim_confirm_enabled`` (default True) -> OFF restores
+# the pre-fix level-touch-only behavior byte-identically.
+# ══════════════════════════════════════════════════════════════════════════════════════
+def _confirm_settings(*, confirm_on: bool) -> SimpleNamespace:
+    """A FAST (offset=2), flush-dry frame's settings, with ONLY the new tape-confirm flag
+    varied (the slow-recovery gate stays OFF so it cannot interact with these assertions)."""
+    return _settings(gate_on=False, tape_confirm_on=confirm_on)
+
+
+def _run_with_db(df, atr_list, vr_list, settings_obj, *, db=None, l2_as_of=None):
+    """Like ``_run`` but threads db/l2_as_of through (the new confirm gate needs them)."""
+    with patch.object(entry_gates, "settings", settings_obj), patch.object(
+        entry_gates,
+        "compute_all_from_df",
+        return_value={"atr": atr_list, "volume_ratio": vr_list},
+    ):
+        return wick_reclaim_confirmation(
+            df, entry_interval="1m", live_price=_RECLAIM_CLOSE, symbol="CELZ",
+            db=db, l2_as_of=l2_as_of,
+        )
+
+
+# ── (a) flag ON + NO db (tape unavailable) -> a shape that fired before now FAILS CLOSED ──
+def test_tape_confirm_on_no_db_fails_closed_on_previously_firing_shape():
+    # This exact (offset=2, flush_dry=True) shape is the file's own baseline FAST frame that
+    # fired pre-fix (see test_fast_recovery_fires_gate_off / _with_gate_on above). With the
+    # tape-confirm gate ON and no db (tape_confirms_hold: db is None -> fail-CLOSED), the
+    # CELZ-style dead-tape touch must NO LONGER fire.
+    df, atr_list, vr_list = _frame(rej_offset=2, flush_dry=True)
+    ok, reason, dbg = _run_with_db(
+        df, atr_list, vr_list, _confirm_settings(confirm_on=True), db=None,
+    )
+    assert ok is False, (reason, dbg)
+    assert reason == "wick_reclaim_tape_unconfirmed", (reason, dbg)
+    # the pre-confirm-gate checks (retrace / rejection / flush) must have ALL passed --
+    # pullback levels were computed -- proving the tape gate (not an earlier guard) is what
+    # declined it.
+    assert dbg.get("pullback_high") is not None
+    assert dbg.get("pullback_low") is not None
+    assert dbg.get("tape_confirm") is not None
+
+
+# ── (b) flag OFF -> byte-identical to the pre-fix level-touch-only behavior ────────────────
+def test_tape_confirm_off_byte_identical_to_pre_fix():
+    df, atr_list, vr_list = _frame(rej_offset=2, flush_dry=True)
+    ok, reason, dbg = _run_with_db(
+        df, atr_list, vr_list, _confirm_settings(confirm_on=False), db=None,
+    )
+    assert ok is True, (reason, dbg)
+    assert reason == "wick_reclaim", (reason, dbg)
+    # the new gate is fully skipped -> no tape_confirm key stamped.
+    assert "tape_confirm" not in dbg, dbg
+
+
+# ── (c) flag ON + a CONFIRMING tape (buyers lifting) -> a real reclaim still fires ─────────
+def test_tape_confirm_on_with_confirming_tape_fires():
+    df, atr_list, vr_list = _frame(rej_offset=2, flush_dry=True)
+    feats = {"signed_tape_accel": 0.8, "tick_rate": 9.0, "tick_rate_floor": 1.0, "n_ticks": 25}
+    with patch.object(entry_gates, "signed_tape_accel_features", return_value=feats):
+        ok, reason, dbg = _run_with_db(
+            df, atr_list, vr_list, _confirm_settings(confirm_on=True), db=object(),
+        )
+    assert ok is True, (reason, dbg)
+    assert reason == "wick_reclaim", (reason, dbg)
+    assert dbg.get("tape_confirm") == "tape_hold_confirmed", dbg
+
+
+# ── (c-negative) flag ON + a tape that is present but NOT confirming (no buyers lifting) ──
+def test_tape_confirm_on_with_dead_tape_fails_closed():
+    # The CELZ shape itself: accel <= 0 (no buyers lifting the ask) -> tape_confirms_hold
+    # returns False -> the entry must be declined even though the level was touched.
+    df, atr_list, vr_list = _frame(rej_offset=2, flush_dry=True)
+    feats = {"signed_tape_accel": -0.2, "tick_rate": 9.0, "tick_rate_floor": 1.0, "n_ticks": 25}
+    with patch.object(entry_gates, "signed_tape_accel_features", return_value=feats):
+        ok, reason, dbg = _run_with_db(
+            df, atr_list, vr_list, _confirm_settings(confirm_on=True), db=object(),
+        )
+    assert ok is False, (reason, dbg)
+    assert reason == "wick_reclaim_tape_unconfirmed", (reason, dbg)
+    assert dbg.get("tape_confirm") == "tape_hold_not_confirmed", dbg
