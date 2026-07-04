@@ -1981,6 +1981,26 @@ def _complete_confirmed_live_exit(
     # worked AFTER we exited — was the stop too tight? — instead of the learner
     # seeing a shallow loss. (post_exit_excursion.py; docs/DESIGN/MOMENTUM_LANE.md)
     _exit_pos = le.get("position") if isinstance(le.get("position"), dict) else {}
+    # G4 P2: persist the CLOSED trade's reference levels for the same-symbol re-entry
+    # escalation (kept across recycle — NOT in _RECYCLE_ENTRY_STATE_KEYS; overwritten
+    # on the next real exit). risk_dist prefers the frozen entry sizing stop_distance
+    # (the C1b basis); fallback = the realized entry->exit distance (a full-risk
+    # stop-out approximates it). Fail-open: any error just skips the marker (the
+    # escalation gate then falls back to its trigger-class + tape requirements).
+    try:
+        _g4_es = le.get("entry_sizing") if isinstance(le.get("entry_sizing"), dict) else {}
+        _g4_rd = _float_or_none(_g4_es.get("stop_distance"))
+        if _g4_rd is None or _g4_rd <= 0:
+            _g4_rd = abs(float(entry_price) - float(fill_price)) or None
+        le["g4_prior_trade"] = {
+            "exit_price": float(fill_price),
+            "high_water_mark": _float_or_none(_exit_pos.get("high_water_mark")),
+            "risk_dist": _g4_rd,
+            "was_loss": bool(pnl <= 0),
+            "exit_reason": reason,
+        }
+    except Exception:
+        pass
     le["post_exit_excursion_pending"] = {
         "symbol": sess.symbol,
         "entry_price": float(entry_price),
@@ -4930,6 +4950,51 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
 # sessions that re-entered a holding state, so carrying it forward cannot mis-label the new trade.
 
 
+# STRUCTURAL trigger classes — every fired trigger reason that carries a REAL structural
+# level (pullback_low; the classes the structural-stop + breakout-or-bailout machinery
+# trusts). Shared by (1) the structural-stop stash at entry-candidate promotion and
+# (2) the G4 P2 re-entry escalation gate (an escalated re-entry must fire on one of
+# THESE — the weak momentum_continuation / score_only fallbacks no longer qualify).
+STRUCTURAL_TRIGGER_REASONS: tuple[str, ...] = (
+    "pullback_break_ok", "pullback_break_tick_ok", "halt_resume_dip_ok",
+    "deep_reclaim_ok", "deep_reclaim_tick_ok",
+    "deep_reclaim_dipbuy_ok", "deep_reclaim_dipbuy_tick_ok",
+    # HVM101 (C): the two new triggers carry pullback_low/high under the
+    # SAME keys, so they reuse the IDENTICAL structural-stop + breakout-or-
+    # bailout machinery. BATCH B (FIX 2): the hot-tape wick-reclaim carries
+    # pullback_low (= the wick/flush low) + pullback_high (= the wick high)
+    # under the SAME keys, so it reuses the same machinery.
+    "flush_dip_buy", "vwap_reclaim", "wick_reclaim",
+    # BATCH A: the HOD-break / flat-top breakouts carry pullback_low (= the
+    # consolidation low / structural stop) + pullback_high (= the break level)
+    # under the SAME keys, so the structural-stop + bailout machinery is reused.
+    "hod_break", "hod_break_tick_ok", "flat_top_break", "flat_top_break_tick_ok",
+    # BATCH C: ABCD (SS101 #013) + double-bottom carry pullback_low (= the C-low /
+    # double-bottom low = structural stop) + pullback_high (= the B-high / neckline
+    # break level) under the SAME keys, so the same machinery is reused.
+    "abcd_break", "abcd_break_tick_ok",
+    "double_bottom_break", "double_bottom_break_tick_ok",
+    # LOCATE #2/#4/#5/#6: the four new scalp/dip triggers carry pullback_low
+    # (= the dip/trap/base structural stop) + pullback_high (= the break level)
+    # under the SAME keys, so the structural-stop + breakout-or-bailout machinery
+    # is reused unchanged.
+    "ask_thins_dip", "ask_thins_dip_tick",
+    "sub_vwap_trap", "sub_vwap_trap_tick",
+    "pulling_away_roc", "pulling_away_roc_tick",
+    "premarket_pivot_macd", "premarket_pivot_macd_tick",
+    # FIX C(1) BACKSTOP: the explosive RAW first-push / raw-break escapes and the
+    # first-pullback fire all carry pullback_low (= the raw/pullback structural stop)
+    # + pullback_high (= the break level) under the SAME debug keys (entry_gates.py
+    # populates them via _evaluate_raw_break), so they MUST reuse the structural-stop
+    # + breakout-or-bailout machinery. Omitting them silently dropped the structural
+    # stop on the default-ON first-push path -> noise-tight vol-floored ATR stop on
+    # exactly the gappy low-float names the -$697 tail came from.
+    "explosive_raw_first_push_ok", "explosive_raw_first_push_tick_ok",
+    "explosive_raw_break_ok", "explosive_raw_break_tick_ok",
+    "first_pullback_ok", "first_pullback_tick_ok",
+)
+
+
 def _reset_entry_state_on_recycle(le: dict) -> list[str]:
     """Pop every per-trade entry/position lifecycle key so the recycled watcher starts
     CLEAN (no entry order for the late-fill sweep / pre-submit poll to re-adopt). Returns
@@ -7241,6 +7306,63 @@ def tick_live_session(
                 _emit(db, sess, "live_entry_red_candle_blocked", {
                     "blocked_trigger": _prev_reason,
                 })
+        # G4 P2: SAME-SYMBOL RE-ENTRY ESCALATION. After each stop-out on this symbol
+        # (le["g4_reentry_escalation"], persisted across recycle — see
+        # _RECYCLE_ENTRY_STATE_KEYS comment), the NEXT fired trigger must clear a raised
+        # confirmation bar (structural trigger class + reclaim of the prior failed
+        # attempt's high-water mark, margin scaling with consecutive stops, + positive
+        # tape when readable). This is a WAIT, not a lockout — it re-checks every tick
+        # and clears the moment the market proves the level, so it cannot starve the
+        # day leader (which also bypasses the TASK#8 terminal cap below, unescalated).
+        # Flag OFF / level<=0 (no prior stop this session) ⇒ reentry_escalation_decision
+        # returns (True, ...) before any read ⇒ byte-identical.
+        if _trigger_ok and bool(
+            getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True)
+        ):
+            try:
+                _g4e_level = int(le.get("g4_reentry_escalation") or 0)
+            except (TypeError, ValueError):
+                _g4e_level = 0
+            if _g4e_level > 0:
+                _g4e_prior = le.get("g4_prior_trade") if isinstance(le.get("g4_prior_trade"), dict) else {}
+                _g4e_px = None
+                try:
+                    if tick is not None:
+                        _g4e_px = float(tick.ask or tick.mid or 0) or None
+                except Exception:
+                    _g4e_px = None
+                _g4e_tape_accel = None
+                try:
+                    if not str(sess.symbol or "").upper().endswith("-USD"):
+                        from .entry_gates import signed_tape_accel_features as _g4e_tape_fn
+
+                        _g4e_tape = _g4e_tape_fn(sess.symbol, db=db)
+                        if _g4e_tape is not None:
+                            _g4e_tape_accel = _float_or_none(_g4e_tape.get("signed_tape_accel"))
+                except Exception:
+                    _g4e_tape_accel = None
+                try:
+                    _g4e_ok, _g4e_dbg = reentry_escalation_decision(
+                        enabled=True,
+                        escalation_level=_g4e_level,
+                        structural_trigger=(_trigger_reason in STRUCTURAL_TRIGGER_REASONS),
+                        live_price=_g4e_px,
+                        prior_hwm=_float_or_none(_g4e_prior.get("high_water_mark")),
+                        prior_exit_price=_float_or_none(_g4e_prior.get("exit_price")),
+                        prior_risk_dist=_float_or_none(_g4e_prior.get("risk_dist")),
+                        tape_accel=_g4e_tape_accel,
+                    )
+                except Exception:
+                    _g4e_ok, _g4e_dbg = True, {"reason": "g4_escalation_error_fail_open"}
+                if not _g4e_ok:
+                    _prev_reason = _trigger_reason
+                    _trigger_ok = False
+                    _trigger_reason = "g4_reentry_escalation_wait"
+                    _emit(db, sess, "g4_reentry_escalation_blocked", {
+                        "blocked_trigger": _prev_reason,
+                        "escalation_level": _g4e_level,
+                        **_g4e_dbg,
+                    })
         # HVM101 (B): BID-PROP / SPREAD-TIGHTENING CONFIRMER — confirm a fired break
         # only when, over the last few L1 samples, the best-bid is non-decreasing AND
         # the spread is at/below its short trailing median (genuine backing). Equity/RH
@@ -7322,44 +7444,10 @@ def tick_live_session(
             # pullback low so sizing + placement can stop just UNDER the structure
             # (not at a noise-tight ATR). The momentum_volume fallback has no
             # structure -> clear it so the vol-floored ATR stop is used instead.
-            if _trigger_reason in (
-                "pullback_break_ok", "pullback_break_tick_ok", "halt_resume_dip_ok",
-                "deep_reclaim_ok", "deep_reclaim_tick_ok",
-                "deep_reclaim_dipbuy_ok", "deep_reclaim_dipbuy_tick_ok",
-                # HVM101 (C): the two new triggers carry pullback_low/high under the
-                # SAME keys, so they reuse the IDENTICAL structural-stop + breakout-or-
-                # bailout machinery. BATCH B (FIX 2): the hot-tape wick-reclaim carries
-                # pullback_low (= the wick/flush low) + pullback_high (= the wick high)
-                # under the SAME keys, so it reuses the same machinery.
-                "flush_dip_buy", "vwap_reclaim", "wick_reclaim",
-                # BATCH A: the HOD-break / flat-top breakouts carry pullback_low (= the
-                # consolidation low / structural stop) + pullback_high (= the break level)
-                # under the SAME keys, so the structural-stop + bailout machinery is reused.
-                "hod_break", "hod_break_tick_ok", "flat_top_break", "flat_top_break_tick_ok",
-                # BATCH C: ABCD (SS101 #013) + double-bottom carry pullback_low (= the C-low /
-                # double-bottom low = structural stop) + pullback_high (= the B-high / neckline
-                # break level) under the SAME keys, so the same machinery is reused.
-                "abcd_break", "abcd_break_tick_ok",
-                "double_bottom_break", "double_bottom_break_tick_ok",
-                # LOCATE #2/#4/#5/#6: the four new scalp/dip triggers carry pullback_low
-                # (= the dip/trap/base structural stop) + pullback_high (= the break level)
-                # under the SAME keys, so the structural-stop + breakout-or-bailout machinery
-                # is reused unchanged.
-                "ask_thins_dip", "ask_thins_dip_tick",
-                "sub_vwap_trap", "sub_vwap_trap_tick",
-                "pulling_away_roc", "pulling_away_roc_tick",
-                "premarket_pivot_macd", "premarket_pivot_macd_tick",
-                # FIX C(1) BACKSTOP: the explosive RAW first-push / raw-break escapes and the
-                # first-pullback fire all carry pullback_low (= the raw/pullback structural stop)
-                # + pullback_high (= the break level) under the SAME debug keys (entry_gates.py
-                # populates them via _evaluate_raw_break), so they MUST reuse the structural-stop
-                # + breakout-or-bailout machinery. Omitting them silently dropped the structural
-                # stop on the default-ON first-push path -> noise-tight vol-floored ATR stop on
-                # exactly the gappy low-float names the -$697 tail came from.
-                "explosive_raw_first_push_ok", "explosive_raw_first_push_tick_ok",
-                "explosive_raw_break_ok", "explosive_raw_break_tick_ok",
-                "first_pullback_ok", "first_pullback_tick_ok",
-            ) and _pb_debug.get("pullback_low"):
+            # (the class list is the shared module constant STRUCTURAL_TRIGGER_REASONS —
+            # also the G4 P2 escalation gate's required-quality set; see its definition
+            # for the per-class provenance comments)
+            if _trigger_reason in STRUCTURAL_TRIGGER_REASONS and _pb_debug.get("pullback_low"):
                 le["structural_stop_price"] = float(_pb_debug["pullback_low"])
                 # #2 Breakout-or-bailout: stash the broken pullback HIGH (the breakout
                 # level) so the held-position handler can fast-bail if it fails to hold
@@ -15129,6 +15217,22 @@ def tick_live_session(
         _rb = _float_or_none(le.get("last_exit_return_bps"))
         _was_loss = bool(_rb is not None and _rb <= 0)
         le["last_recycle_was_stopout"] = _was_loss
+        # G4 P2: same-symbol re-entry ESCALATION level (persists across recycle). Each
+        # loss raises it; a profit recycle DECAYS it; a GREEN BANKED round (the session's
+        # cumulative realized > 0 — green_banked_reentry_free parity) RESETS it. Purely
+        # within-day/within-session state — no hard counts, the level only scales the
+        # confirmation quality the next entry must show (never a lockout).
+        if bool(getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True)):
+            try:
+                _g4_esc = int(le.get("g4_reentry_escalation") or 0)
+                if _was_loss:
+                    _g4_esc += 1
+                else:
+                    _g4_cum = _float_or_none(le.get("realized_pnl_usd")) or 0.0
+                    _g4_esc = 0 if _g4_cum > 0 else max(0, _g4_esc - 1)
+                le["g4_reentry_escalation"] = _g4_esc
+            except Exception:
+                pass
         until = _utcnow() + timedelta(seconds=max(0, int(cd_sec)))
         le["cooldown_until_utc"] = until.isoformat()
         _safe_transition(db, sess, STATE_LIVE_COOLDOWN)
@@ -15162,6 +15266,40 @@ def tick_live_session(
                 stopout_cycles=int(le.get("stopout_cycles") or 0),
                 max_stopout_reentries=int(getattr(settings, "chili_momentum_max_stopout_reentries", 3) or 3),
             )
+            # G4 P2 (A1 top_rank_exempt coordination): the CURRENT day-leader must not
+            # be terminalized by the loss-recycle cap — CLRO 07-02: the #1 name has to
+            # stay re-enterable for the big leg. It recycles PAST the cap, but every
+            # re-entry then needs the escalated confirmation (structural trigger +
+            # HWM reclaim + tape) — a QUALITY raise, never a free pass. FAIL-CLOSED:
+            # an unreadable board grants NO exemption (terminalize exactly as today).
+            if (
+                not _re_ok
+                and bool(getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True))
+            ):
+                try:
+                    from .risk_policy import (
+                        _top_ranked_live_eligible_symbol as _g4c_top_fn,
+                        _wildcard_dominant_symbol as _g4c_wild_fn,
+                    )
+
+                    _g4c_sym = str(sess.symbol or "").strip().upper()
+                    _g4c_top, _, _, _ = _g4c_top_fn(db, crypto=_g4c_sym.endswith("-USD"))
+                    _g4c_leader = bool(_g4c_top is not None and _g4c_sym == _g4c_top)
+                    if not _g4c_leader:
+                        _g4c_wild = _g4c_wild_fn(db)
+                        _g4c_leader = bool(_g4c_wild is not None and _g4c_sym == _g4c_wild)
+                    if _g4c_leader:
+                        _re_ok = True
+                        _emit(db, sess, "live_reentry_cap_leader_exempt", {
+                            "reason": _re_reason,
+                            "stopout_cycles": int(le.get("stopout_cycles") or 0),
+                            "escalation_level": int(le.get("g4_reentry_escalation") or 0),
+                        })
+                except Exception:
+                    _log.debug(
+                        "[momentum_live] g4 leader-exempt read failed (fail-closed)",
+                        exc_info=True,
+                    )
             if not _re_ok:
                 _commit_le(sess, le)
                 _safe_transition(db, sess, STATE_LIVE_FINISHED)
