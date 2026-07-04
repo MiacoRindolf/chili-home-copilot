@@ -1992,7 +1992,34 @@ def run_counterfactual_symbol_replay(
     cash_usd: float | None = None,
     cash_fraction: float | None = None,
     exit_model: str = "adaptive",
+    live_admission_mode: bool = True,
+    account_equity_usd: float | None = None,
 ) -> SymbolReplayResult:
+    """Replay one symbol's tape against the current entry-gate code.
+
+    ``live_admission_mode`` (D3, cf-parity, DEFAULT ON) restricts candidate
+    generation and entry admission to live's ACTUAL entry-class set and
+    catalyst/source discipline instead of the harness's diagnostic-only
+    superset:
+
+      * ``tick_first_pullback`` (``_iter_tick_scalp_candidates``) and
+        ``tick_vwap_reclaim_burst`` (``_iter_tick_vwap_reclaim_burst_candidates``)
+        are NOT wired into ``live_runner.py`` at all — ``evaluate_tick_first_pullback``
+        and the tick-VWAP-burst walker are called ONLY from this replay module.
+        Live's actual ladder is exactly ``_BAR_GATE_FAMILIES`` (momentum_pullback /
+        vwap_reclaim / ross_breakout_starter), now tick-armed (D2). Firing an
+        entry off a family live never evaluates is not a counterfactual of live —
+        it is a different strategy. Diagnostic/opportunity-labeling callers that
+        want the wider net can still pass ``live_admission_mode=False``.
+      * the ``market_certified`` synthetic source window (a pure-market-volume
+        substitute for an actual Ross/catalyst source, see
+        ``_market_certified_window``) is disabled as an admission bypass — live
+        never enters on "the tape looks busy" alone; it requires a real source/
+        catalyst or a certified viability/arm state. CELZ 2026-06-30: live took
+        ONE ORB entry (+$40, entry 3.67); with the synthetic bypass active the
+        harness fabricated 3 additional chop entries (2.93/3.15/4.47, all
+        losers) that live's admission would have refused outright.
+    """
     sym = _safe_symbol(symbol)
     ticks = load_nbbo_tape(db, sym, since=since, until=until, max_ticks=max_ticks)
     trade_ticks = load_trade_tape(db, sym, since=since, until=until, max_ticks=max_ticks)
@@ -2030,25 +2057,33 @@ def run_counterfactual_symbol_replay(
         for reason, count in bar_reasons.items():
             gate_reasons[reason] = gate_reasons.get(reason, 0) + count
     signal = _source_signal_for_symbol(source_events)
-    tick_candidates, tick_reasons = _iter_tick_scalp_candidates(
-        symbol=sym,
-        ticks=ticks,
-        signal=signal,
-        eval_since=eval_start,
-    )
-    candidates.extend(tick_candidates)
-    for reason, count in tick_reasons.items():
-        gate_reasons[reason] = gate_reasons.get(reason, 0) + count
-    tick_vwap_candidates, tick_vwap_reasons = _iter_tick_vwap_reclaim_burst_candidates(
-        symbol=sym,
-        quote_ticks=ticks,
-        trade_ticks=trade_ticks,
-        source_events=source_events,
-        eval_since=eval_start,
-    )
-    candidates.extend(tick_vwap_candidates)
-    for reason, count in tick_vwap_reasons.items():
-        gate_reasons[reason] = gate_reasons.get(reason, 0) + count
+    if live_admission_mode:
+        # D3 (cf-parity): these two families are harness-only diagnostics with NO live
+        # counterpart (see the docstring above) — skip them under live-admission so the
+        # candidate set matches live's actual entry-class ladder. Recorded (not silently
+        # dropped) so a caller diffing gate_reason_counts sees why they're absent.
+        gate_reasons["tick_first_pullback_skipped_live_admission_mode"] = 1
+        gate_reasons["tick_vwap_reclaim_burst_skipped_live_admission_mode"] = 1
+    else:
+        tick_candidates, tick_reasons = _iter_tick_scalp_candidates(
+            symbol=sym,
+            ticks=ticks,
+            signal=signal,
+            eval_since=eval_start,
+        )
+        candidates.extend(tick_candidates)
+        for reason, count in tick_reasons.items():
+            gate_reasons[reason] = gate_reasons.get(reason, 0) + count
+        tick_vwap_candidates, tick_vwap_reasons = _iter_tick_vwap_reclaim_burst_candidates(
+            symbol=sym,
+            quote_ticks=ticks,
+            trade_ticks=trade_ticks,
+            source_events=source_events,
+            eval_since=eval_start,
+        )
+        candidates.extend(tick_vwap_candidates)
+        for reason, count in tick_vwap_reasons.items():
+            gate_reasons[reason] = gate_reasons.get(reason, 0) + count
     candidates = _dedupe_candidates(candidates)
 
     risk = float(
@@ -2093,8 +2128,19 @@ def run_counterfactual_symbol_replay(
             candidate.ts,
             require_certifiable=require_certifiable_source,
         )
-        market_certified = bool(candidate.trigger_debug.get("market_certified"))
-        source_recertified = bool(candidate.trigger_debug.get("source_blocker_recertified"))
+        # D3 (cf-parity): under live-admission the ``market_certified`` synthetic
+        # source (pure market-volume, no actual catalyst/source) no longer bypasses
+        # the source-before-entry requirement — see the function docstring.
+        market_certified = (
+            False
+            if live_admission_mode
+            else bool(candidate.trigger_debug.get("market_certified"))
+        )
+        source_recertified = (
+            False
+            if live_admission_mode
+            else bool(candidate.trigger_debug.get("source_blocker_recertified"))
+        )
         if require_source_before_entry and not source_ok and not market_certified and not source_recertified:
             skipped[source_reason] = skipped.get(source_reason, 0) + 1
             continue
@@ -2197,6 +2243,8 @@ def run_counterfactual_replay(
     cash_usd: float | None = None,
     cash_fraction: float | None = None,
     exit_model: str = "adaptive",
+    live_admission_mode: bool = True,
+    account_equity_usd: float | None = None,
 ) -> CounterfactualReplayResult:
     syms = sorted({_safe_symbol(s) for s in symbols if _safe_symbol(s)})
     source_by_symbol = load_ross_source_events(since=since, until=until, symbols=syms)
@@ -2225,6 +2273,8 @@ def run_counterfactual_replay(
                     cash_usd=cash_usd,
                     cash_fraction=cash_fraction,
                     exit_model=exit_model,
+                    live_admission_mode=live_admission_mode,
+                    account_equity_usd=account_equity_usd,
                 )
             )
         except Exception as exc:
