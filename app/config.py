@@ -8430,6 +8430,21 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_PATTERN_TAPE_GATE_ENABLED"),
         description="CAPTURE-G1(b): govern the inline tape_confirms_hold gate that the 12 tape-required pattern triggers + momentum-continuation entry use as their fail-closed LAST gate. True (default) = evaluate the executed tape when dense+healthy and fail-CLOSED on missing/thin/stale/crypto tape (the 12 triggers become REACHABLE, still tape-gated). False = legacy hard-False short-circuit (every dependent trigger's tape gate refuses ⇒ those setups go dark) — the one-flag instant rollback. Independent of chili_momentum_tape_hold_entry_enabled, which now governs ONLY the FIX-C early-fire path.",
     )
+    # 2026-07-04 — UNIFIED BUYERS-CONFIRMATION for the HOT-TAPE-ONLY touch triggers. The two
+    # touch triggers that fire on price/level GEOMETRY alone with NO buyers check — wick_reclaim
+    # and micro_pullback_primary — are the whack-a-mole gap: gating only one relocates the
+    # too-early fire to the other (adversarial review 07-04). `buyers_confirmed` is the ONE
+    # crypto-safe gate applied to BOTH: equity => the validated trade-tape confirmer
+    # (signed_tape_accel>0 AND tick_rate>=floor, FAIL-CLOSED on missing tape — a hot-tape trigger
+    # has dense ticks); crypto (-USD, no iqfeed trade tape) => L2 book OFI (ofi_level>0),
+    # FAIL-OPEN when the per-process book ring is empty (must NOT silently disable crypto — the
+    # review's crypto-exclusion finding). OFF ⇒ byte-identical (touch triggers fire on geometry
+    # alone, as before this change).
+    chili_momentum_buyers_confirm_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BUYERS_CONFIRM_ENABLED"),
+        description="2026-07-04: require 'buyers actually lifting' before the HOT-TAPE-only touch triggers (wick_reclaim, micro_pullback_primary) fire — equity: signed_tape_accel>0 (fail-closed on missing tape); crypto: OFI ofi_level>0 (fail-open on empty book ring). The unified, crypto-safe, non-whack-a-mole buyers gate. OFF ⇒ triggers fire on price geometry alone (legacy).",
+    )
     # ── FIX 1: MOMENTUM-CONTINUATION ENTRY (catch the straight-up runners) ───────────
     chili_momentum_momentum_continuation_entry_enabled: bool = Field(
         default=True,

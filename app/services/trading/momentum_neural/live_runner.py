@@ -6622,7 +6622,7 @@ def tick_live_session(
 
                                     _wr_ok, _wr_reason, _wr_debug = wick_reclaim_confirmation(
                                         _df_trig, entry_interval=_iv_trig, live_price=_live_px,
-                                        symbol=sess.symbol,
+                                        symbol=sess.symbol, db=db,
                                     )
                                     if _wr_ok:
                                         _trigger_ok, _trigger_reason, _pb_debug = _wr_ok, _wr_reason, _wr_debug
