@@ -511,6 +511,42 @@ def _daily_ctx_cached(symbol: str, *, price: float | None = None) -> Any:
         return None
 
 
+def _recent_mfe_samples(db: Any, setup_family: Any, *, limit: int = 200) -> list[float]:
+    """Recent realized MFE_R samples for the DATA-DERIVED exit-target shadow. Reads the
+    momentum_mfe_realized events (newest-first), filters to the given setup family (all
+    families when None), returns the ``mfe_r`` list. Bounded + fail-OPEN (any error ⇒ [])
+    so the shadow computation never affects the entry path."""
+    try:
+        import json as _j
+
+        from sqlalchemy import text as _sql
+
+        _fam = str(setup_family) if setup_family is not None else None
+        rows = db.execute(
+            _sql(
+                "SELECT payload_json FROM trading_automation_events "
+                "WHERE event_type='momentum_mfe_realized' ORDER BY id DESC LIMIT :lim"
+            ),
+            {"lim": int(max(1, min(2000, limit * 4)))},
+        ).fetchall()
+        out: list[float] = []
+        for (pj,) in rows:
+            try:
+                d = _j.loads(pj) if isinstance(pj, str) else (pj or {})
+            except Exception:
+                continue
+            if _fam is not None and str(d.get("setup_family")) != _fam:
+                continue
+            _m = _float_or_none(d.get("mfe_r"))
+            if _m is not None:
+                out.append(_m)
+            if len(out) >= int(limit):
+                break
+        return out
+    except Exception:
+        return []
+
+
 # ── REGIME-ADAPTIVE FRONT-SIDE STRENGTH DISTRIBUTION (kill the fixed 0.25/0.75) ──
 # The front-side size-tilt ramp used to take s_lo/s_hi/defer from the function defaults
 # (0.25/0.75/0.15) — FIXED magic numbers that ignore the regime. The strength score is
@@ -2029,6 +2065,35 @@ def _complete_confirmed_live_exit(
     if sell_result is not None:
         payload["sell_result"] = sell_result
     _emit(db, sess, "live_exit_filled", payload)
+    # MFE SHADOW-LOGGER (Phase 1, log-only, ZERO behavior change): record the realized Maximum
+    # Favorable Excursion in R-units per trade, keyed by setup family, so the exit target can
+    # later be DERIVED from the tape's OWN MFE distribution (a percentile) instead of the fixed
+    # rr_cap magic. Emits an event only — the actual target/behavior is UNCHANGED. Flag OFF ⇒
+    # no emit, byte-identical. Fail-open (a bad read never affects the exit).
+    try:
+        if bool(getattr(settings, "chili_momentum_mfe_shadow_logging_enabled", True)):
+            from .exit_calibration import realized_excursion_r
+            _es = le.get("entry_sizing") if isinstance(le.get("entry_sizing"), dict) else {}
+            _sd = _float_or_none(_es.get("stop_distance"))
+            if _sd is None or _sd <= 0:
+                _osp = _float_or_none(_exit_pos.get("stop_price"))
+                _sd = (float(entry_price) - _osp) if (_osp is not None and _osp < float(entry_price)) else None
+            _exc = realized_excursion_r(
+                entry=float(entry_price),
+                stop_distance=_sd,
+                high_water_mark=_float_or_none(_exit_pos.get("high_water_mark")),
+                exit_price=float(fill_price),
+                original_target=_float_or_none(_exit_pos.get("target_price")),
+            )
+            if _exc is not None:
+                _emit(db, sess, "momentum_mfe_realized", {
+                    "setup_family": le.get("entry_trigger_reason"),
+                    "exit_reason": reason,
+                    "stop_distance": _sd,
+                    **_exc,
+                })
+    except Exception:
+        pass
     return pnl
 
 
@@ -8021,6 +8086,39 @@ def tick_live_session(
                 )
                 le["position"]["stop_price"] = stop_px
                 le["position"]["target_price"] = target_px
+                # MFE SHADOW-TARGET (Phase 2, log-only): compute what the DATA-DERIVED first-
+                # partial target WOULD be — a percentile of this setup family's realized-MFE
+                # distribution, SHRUNK toward the live magic R:R until enough samples accumulate
+                # — and LOG it beside the live magic target. The live target_px above is
+                # UNCHANGED; this only measures the delta so the operator can promote the
+                # data-derived target once it proves out (the no-magic exit). Flag OFF / thin
+                # data / error ⇒ skipped (byte-identical). The event momentum_shadow_first_target
+                # carries {magic_target_r, shadow_target_r, n_samples, source}.
+                try:
+                    if bool(getattr(settings, "chili_momentum_mfe_shadow_logging_enabled", True)):
+                        from .exit_calibration import mfe_percentile_target_r
+                        _sd_e = float(avg) - float(stop_px)
+                        if _sd_e > 0:
+                            _fam = le.get("entry_trigger_reason")
+                            _base_rr = float(class_aware_reward_risk(sess.symbol))
+                            _shadow = mfe_percentile_target_r(
+                                _recent_mfe_samples(db, _fam, limit=200),
+                                percentile=float(getattr(
+                                    settings, "chili_momentum_mfe_shadow_target_percentile", 0.6) or 0.6),
+                                base_rr=_base_rr,
+                                min_samples=int(getattr(
+                                    settings, "chili_momentum_mfe_shadow_min_samples", 30) or 30),
+                            )
+                            _emit(db, sess, "momentum_shadow_first_target", {
+                                "setup_family": _fam,
+                                "magic_target_r": round((float(target_px) - float(avg)) / _sd_e, 3),
+                                "shadow_target_r": _shadow.get("target_r"),
+                                "n_samples": _shadow.get("n"),
+                                "pctl_r": _shadow.get("pctl_r"),
+                                "source": _shadow.get("source"),
+                            })
+                except Exception:
+                    pass
                 le["admission_viability_score"] = float(via.viability_score or 0)
                 _mark_entry_order_resolved(le, le.get("entry_order_id"), "adopted")
                 _commit_le(sess, le)

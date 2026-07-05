@@ -4214,6 +4214,25 @@ class Settings(BaseSettings):
         lt=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SCALE_OUT_FRACTION"),
     )
+    chili_momentum_mfe_shadow_logging_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MFE_SHADOW_LOGGING_ENABLED"),
+        description="SHADOW-LOG the realized Maximum-Favorable-Excursion (MFE_R) + first-target-R per closed momentum trade (event momentum_mfe_realized), keyed by setup family, to accumulate the tape's OWN excursion distribution. LOG-ONLY — the live exit target/behavior is UNCHANGED. This is the DATA the no-magic exit-target calibration needs (a percentile of realized MFE replaces the fixed rr_cap=6 / room_capture=0.5 magic; see exit_calibration.py). OFF ⇒ no emit, byte-identical. Zero risk (a bad read never affects the exit).",
+    )
+    chili_momentum_mfe_shadow_target_percentile: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MFE_SHADOW_TARGET_PERCENTILE"),
+        description="The ONE documented base for the DATA-DERIVED first-partial target: the fraction of the realized-MFE distribution to aim the first scale at (per setup family). 0.6 = target the 60th-pctile favorable run. SHADOW-computed at entry and logged beside the live magic target (momentum_shadow_first_target) — no behavior change until proven. Everything else is the tape's own realized excursion.",
+    )
+    chili_momentum_mfe_shadow_min_samples: int = Field(
+        default=30,
+        ge=1,
+        le=500,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MFE_SHADOW_MIN_SAMPLES"),
+        description="Small-sample shrinkage floor for the data-derived exit target: blend the realized-MFE percentile toward the current magic R:R (a robust PRIOR) with weight min(1, n_samples/this) until this many closed trades accumulate per setup family. Guards against overfitting a thin excursion sample (the operator's 'no brittle magic' + robustness ask).",
+    )
     # DESIGN #3 — ADAPTIVE PROFIT TARGETS. A fixed 2:1 first target caps a +400% low-float
     # monster at 2R when its realized intraday room (ATR-to-HOD) is 6-10R, and the fixed 0.5
     # scale-out dumps half the runner too early on a high-vol name. Make BOTH adaptive to the
