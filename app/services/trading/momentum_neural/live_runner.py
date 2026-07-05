@@ -2030,11 +2030,17 @@ def _complete_confirmed_live_exit(
         _g4_rd = _float_or_none(_g4_es.get("stop_distance"))
         if _g4_rd is None or _g4_rd <= 0:
             _g4_rd = abs(float(entry_price) - float(fill_price)) or None
+        # was_loss reflects the WHOLE TRADE net (banked partials/scale-outs + this final
+        # tranche), NOT the final tranche alone — else a scaled WINNER whose runner trails
+        # out below the avg entry (green trade, red final tranche) would be tagged a loss
+        # and its next legitimate re-entry wrongly blocked by the anti-chase gate. For a
+        # non-scaled trade trade_realized_usd is absent (0) ⇒ identical to bool(pnl<=0).
+        _g4_trade_net = (_float_or_none(_exit_pos.get("trade_realized_usd")) or 0.0) + float(pnl)
         le["g4_prior_trade"] = {
             "exit_price": float(fill_price),
             "high_water_mark": _float_or_none(_exit_pos.get("high_water_mark")),
             "risk_dist": _g4_rd,
-            "was_loss": bool(pnl <= 0),
+            "was_loss": bool(_g4_trade_net <= 0),
             "exit_reason": reason,
         }
     except Exception:
@@ -2126,6 +2132,12 @@ def _apply_confirmed_live_partial_exit(
     le["last_partial_exit_return_bps"] = (pnl / notional_basis) * 10_000.0 if notional_basis > 1e-12 else None
     pos["quantity"] = remaining
     pos["partial_taken"] = True
+    # Accumulate THIS trade's net realized (banked partials/scale-outs) on the position
+    # so the full-exit handler can judge whether the WHOLE trade was green — a scaled
+    # winner that banks a big partial then trails its runner out below the avg entry has
+    # a red FINAL tranche but a green TRADE, and must not be tagged was_loss (the
+    # anti-chase re-entry gate keys on that). Non-scaled trades never touch this (0).
+    pos["trade_realized_usd"] = float(pos.get("trade_realized_usd") or 0.0) + pnl
     le["position"] = pos
     le.pop("pending_exit_reason", None)
     le.pop("pending_exit_quantity", None)
@@ -7470,6 +7482,67 @@ def tick_live_session(
                         "escalation_level": _g4e_level,
                         **_g4e_dbg,
                     })
+        # ANTI-CHASE re-entry guard: after a LOSING exit on this symbol, do NOT
+        # re-buy far ABOVE where the last attempt failed. This is the same-symbol
+        # loss-chase the escalation ladder is meant to gate — but the ladder's own
+        # reclaim math is defeated here two ways, so this is the load-bearing guard:
+        #   (1) its per-tranche reclaim bar DESCENDS in a topping chop (ref = the last
+        #       CLOSED tranche's local high), so each fading wick trivially clears it;
+        #   (2) it measures the ceiling in the prior trade's stop_distance, which can
+        #       be pathologically WIDE (SVRE 06-30 tranche-1 stop_distance=0.737 ≈ 10%
+        #       of a $7.54 price) — 1.5R of that reaches $8.8, ABOVE every chase.
+        # Fix: anchor to the prior losing tranche's HIGH-WATER-MARK (the resistance
+        # that attempt established) and measure the ceiling in the name's ATR (the
+        # honest "how far it moves" unit), NOT the prior stop. Block a re-entry whose
+        # price is more than chase_cap_r * ATR ABOVE that anchor.
+        #   SVRE 06-30: stopped 7.54->7.51 (hwm 7.70), then re-entered wick-reclaims at
+        #   8.34/8.25/8.70 — all a full ATR-multiple above 7.70, into the 8.91 top ->
+        #   faded to 5.82 (-$7 on the chases). Blocking the FIRST chase (8.34) cascades:
+        #   its trade never opens, so the anchor stays 7.70 and the rest block too.
+        # Fires on ANY loss exit at ANY escalation level. g4_prior_trade["was_loss"] is
+        # the WHOLE-TRADE net (banked partials + final tranche), so a net-GREEN scaled
+        # winner whose runner trails out below the avg entry is NOT tagged a loss and its
+        # next re-entry is NEVER blocked (JEM-style). Flag-off / cap<=0 / missing state
+        # => no-op (fail-open).
+        if _trigger_ok and bool(
+            getattr(settings, "chili_momentum_reentry_chase_cap_enabled", True)
+        ):
+            _cc_cap = float(getattr(settings, "chili_momentum_reentry_chase_cap_r", 1.5) or 0.0)
+            _cc_prior = le.get("g4_prior_trade") if isinstance(le.get("g4_prior_trade"), dict) else None
+            if _cc_cap > 0 and _cc_prior and bool(_cc_prior.get("was_loss")):
+                _cc_anchor = (
+                    _float_or_none(_cc_prior.get("high_water_mark"))
+                    or _float_or_none(_cc_prior.get("exit_price"))
+                )
+                # Risk unit = ATR (in price) at the anchor; fall back to the prior
+                # stop_distance only when the ATR read is unavailable.
+                _cc_atr_pct = _via_atr_pct(via)
+                _cc_risk = None
+                if _cc_anchor and _cc_atr_pct and _cc_atr_pct > 0:
+                    _cc_risk = float(_cc_atr_pct) * float(_cc_anchor)
+                if _cc_risk is None or _cc_risk <= 0:
+                    _cc_risk = _float_or_none(_cc_prior.get("risk_dist"))
+                _cc_px = None
+                try:
+                    if tick is not None:
+                        _cc_px = float(tick.ask or tick.mid or 0) or None
+                except Exception:
+                    _cc_px = None
+                if _cc_anchor and _cc_risk and _cc_risk > 0 and _cc_px:
+                    _cc_ceiling = float(_cc_anchor) + _cc_cap * float(_cc_risk)
+                    if _cc_px > _cc_ceiling:
+                        _prev_reason = _trigger_reason
+                        _trigger_ok = False
+                        _trigger_reason = "reentry_chase_cap_wait"
+                        _emit(db, sess, "momentum_reentry_chase_blocked", {
+                            "blocked_trigger": _prev_reason,
+                            "prior_anchor_hwm": round(float(_cc_anchor), 6),
+                            "risk_unit_atr": round(float(_cc_risk), 6),
+                            "chase_ceiling": round(_cc_ceiling, 6),
+                            "live_price": round(float(_cc_px), 6),
+                            "chase_cap_r": _cc_cap,
+                            "prior_exit_reason": _cc_prior.get("exit_reason"),
+                        })
         # HVM101 (B): BID-PROP / SPREAD-TIGHTENING CONFIRMER — confirm a fired break
         # only when, over the last few L1 samples, the best-bid is non-decreasing AND
         # the spread is at/below its short trailing median (genuine backing). Equity/RH
@@ -8075,48 +8148,70 @@ def tick_live_session(
                         regime_atr_pct(regime), _expected_move_bps,
                         stop_atr_mult=_stop_atr_mult, vol_floor_mult=_stop_vol_floor_mult(),
                     )
+                # DATA-DERIVED FIRST-TARGET (no-magic, LIVE default-ON): the first-partial R:R is
+                # a PERCENTILE of THIS setup family's realized Maximum-Favorable-Excursion (MFE),
+                # SHRUNK toward the plan's base R:R until enough samples — the tape's OWN excursion,
+                # not the fixed rr_cap=6 / room_capture=0.5 magic. With 0 samples it IS the base
+                # R:R (byte-identical to the plan floor); it adapts UP per family as MFE accumulates
+                # (cup_and_handle rides 7R+, wick_reclaim stays at the 2R floor). The round-number
+                # pull-in below still snaps it to structure. Kill-switch
+                # chili_momentum_mfe_target_live_enabled=0 restores the magic realized-HOD lift.
+                _base_rr = float(class_aware_reward_risk(sess.symbol))
+                _fam = le.get("entry_trigger_reason")
+                _dd_rr = None
+                _dd_meta = None
+                try:
+                    if bool(getattr(settings, "chili_momentum_mfe_target_live_enabled", True)):
+                        from .exit_calibration import mfe_percentile_target_r
+                        from .paper_execution import adaptive_first_target_reward_risk
+                        # SHRINKAGE PRIOR = the CURRENT magic-lifted R:R (realized-HOD lift). With 0
+                        # samples the data-derived target == this prior == today's behavior (no day-1
+                        # change); it blends toward the family's MFE percentile as samples accumulate.
+                        _stop_inline = float(avg) * (1.0 - max(0.003, float(atrp) * _stop_atr_mult))
+                        _prior_rr, _ = adaptive_first_target_reward_risk(
+                            base_reward_risk=_base_rr, entry=float(avg), stop=_stop_inline,
+                            realized_high=_float_or_none(le.get("entry_realized_high")), side_long=True,
+                        )
+                        _dd_meta = mfe_percentile_target_r(
+                            _recent_mfe_samples(db, _fam, limit=200),
+                            percentile=float(getattr(
+                                settings, "chili_momentum_mfe_shadow_target_percentile", 0.6) or 0.6),
+                            base_rr=float(_prior_rr),
+                            min_samples=int(getattr(
+                                settings, "chili_momentum_mfe_shadow_min_samples", 30) or 30),
+                        )
+                        _dd_rr = _float_or_none(_dd_meta.get("target_r"))
+                except Exception:
+                    _dd_rr, _dd_meta = None, None
                 stop_px, target_px = stop_target_prices(
                     avg,
                     atr_pct=float(atrp),
                     side_long=True,
                     stop_atr_mult=_stop_atr_mult,
                     target_atr_mult=float(params["target_atr_mult"]),
-                    reward_risk=class_aware_reward_risk(sess.symbol),
-                    realized_high=_float_or_none(le.get("entry_realized_high")),
+                    # data-derived R:R when live (it REPLACES the magic realized-HOD lift, so pass
+                    # realized_high=None to avoid double-lifting); else the base R:R + magic lift.
+                    reward_risk=(_dd_rr if (_dd_rr is not None and _dd_rr > 0) else _base_rr),
+                    realized_high=(None if (_dd_rr is not None and _dd_rr > 0)
+                                   else _float_or_none(le.get("entry_realized_high"))),
                 )
                 le["position"]["stop_price"] = stop_px
                 le["position"]["target_price"] = target_px
-                # MFE SHADOW-TARGET (Phase 2, log-only): compute what the DATA-DERIVED first-
-                # partial target WOULD be — a percentile of this setup family's realized-MFE
-                # distribution, SHRUNK toward the live magic R:R until enough samples accumulate
-                # — and LOG it beside the live magic target. The live target_px above is
-                # UNCHANGED; this only measures the delta so the operator can promote the
-                # data-derived target once it proves out (the no-magic exit). Flag OFF / thin
-                # data / error ⇒ skipped (byte-identical). The event momentum_shadow_first_target
-                # carries {magic_target_r, shadow_target_r, n_samples, source}.
+                # AUDIT: the applied first target (data-derived is LIVE). Also keep the raw-MFE
+                # collection running (momentum_mfe_realized at exit) so the per-family distribution
+                # keeps improving. Fail-open (never blocks the entry).
                 try:
-                    if bool(getattr(settings, "chili_momentum_mfe_shadow_logging_enabled", True)):
-                        from .exit_calibration import mfe_percentile_target_r
-                        _sd_e = float(avg) - float(stop_px)
-                        if _sd_e > 0:
-                            _fam = le.get("entry_trigger_reason")
-                            _base_rr = float(class_aware_reward_risk(sess.symbol))
-                            _shadow = mfe_percentile_target_r(
-                                _recent_mfe_samples(db, _fam, limit=200),
-                                percentile=float(getattr(
-                                    settings, "chili_momentum_mfe_shadow_target_percentile", 0.6) or 0.6),
-                                base_rr=_base_rr,
-                                min_samples=int(getattr(
-                                    settings, "chili_momentum_mfe_shadow_min_samples", 30) or 30),
-                            )
-                            _emit(db, sess, "momentum_shadow_first_target", {
-                                "setup_family": _fam,
-                                "magic_target_r": round((float(target_px) - float(avg)) / _sd_e, 3),
-                                "shadow_target_r": _shadow.get("target_r"),
-                                "n_samples": _shadow.get("n"),
-                                "pctl_r": _shadow.get("pctl_r"),
-                                "source": _shadow.get("source"),
-                            })
+                    _sd_e = float(avg) - float(stop_px)
+                    if _sd_e > 0 and _dd_meta is not None:
+                        _emit(db, sess, "momentum_mfe_target_applied", {
+                            "setup_family": _fam,
+                            "applied_target_r": round((float(target_px) - float(avg)) / _sd_e, 3),
+                            "data_derived_r": _dd_rr,
+                            "base_rr": round(_base_rr, 3),
+                            "n_samples": _dd_meta.get("n"),
+                            "pctl_r": _dd_meta.get("pctl_r"),
+                            "source": _dd_meta.get("source"),
+                        })
                 except Exception:
                     pass
                 le["admission_viability_score"] = float(via.viability_score or 0)
@@ -9913,9 +10008,22 @@ def tick_live_session(
                 _is_frontside_a_setup = bool(
                     _af_above_vwap and _af_ofi_fwd and (_af_via >= _af_via_floor)
                 )
-                _csf_floor = float(
-                    getattr(settings, "chili_momentum_combined_size_down_floor", 0.5) or 0.5
-                )
+                # NO-MAGIC A-setup sizing: the floor = the setup's CONVICTION = how far the
+                # viability sits ABOVE the A-setup floor toward its max (1.0). A top A-setup
+                # (via -> 1.0) gets ~full risk budget -> the risk-first qty then binds on the 15%
+                # notional cap (the operator's stated high-quality risk-appetite: a high-quality
+                # trade ~= 15% of equity); a marginal A-setup (via ~= floor) keeps a smaller floor.
+                # The lift-only gate (_combined_mult < _csf_floor) means this only ever RAISES a
+                # genuine A-setup's size, never cuts — monotonic vs the stacked size-down. NO magic:
+                # the A-setup gate + the [0,1] viability + the 15% cap are all PRE-EXISTING. Kill-
+                # switch chili_momentum_asetup_conviction_size_enabled=0 restores the fixed floor.
+                if bool(getattr(settings, "chili_momentum_asetup_conviction_size_enabled", True)):
+                    _via_denom = max(1e-6, 1.0 - _af_via_floor)
+                    _csf_floor = max(0.0, min(1.0, (_af_via - _af_via_floor) / _via_denom))
+                else:
+                    _csf_floor = float(
+                        getattr(settings, "chili_momentum_combined_size_down_floor", 0.5) or 0.5
+                    )
                 _csf_floor = max(0.0, min(1.0, _csf_floor))
                 _combined_mult = float(_eff_max_loss) / float(_base_max_loss)  # realized aggregate size-down
                 if _is_frontside_a_setup and _combined_mult < _csf_floor:

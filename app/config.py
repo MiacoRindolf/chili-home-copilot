@@ -4217,7 +4217,12 @@ class Settings(BaseSettings):
     chili_momentum_mfe_shadow_logging_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MFE_SHADOW_LOGGING_ENABLED"),
-        description="SHADOW-LOG the realized Maximum-Favorable-Excursion (MFE_R) + first-target-R per closed momentum trade (event momentum_mfe_realized), keyed by setup family, to accumulate the tape's OWN excursion distribution. LOG-ONLY — the live exit target/behavior is UNCHANGED. This is the DATA the no-magic exit-target calibration needs (a percentile of realized MFE replaces the fixed rr_cap=6 / room_capture=0.5 magic; see exit_calibration.py). OFF ⇒ no emit, byte-identical. Zero risk (a bad read never affects the exit).",
+        description="SHADOW-LOG the realized Maximum-Favorable-Excursion (MFE_R) + first-target-R per closed momentum trade (event momentum_mfe_realized), keyed by setup family, to accumulate the tape's OWN excursion distribution. This is the DATA the no-magic exit-target calibration needs (a percentile of realized MFE replaces the fixed rr_cap=6 / room_capture=0.5 magic; see exit_calibration.py). Always keep ON (it feeds the live target). OFF ⇒ no emit; the target then can only use whatever distribution already exists.",
+    )
+    chili_momentum_mfe_target_live_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MFE_TARGET_LIVE_ENABLED"),
+        description="APPLY the DATA-DERIVED first-partial target LIVE (default ON — no dark flag): the actual first-scale R:R = a percentile of the setup family's realized-MFE distribution, SHRUNK toward the plan's base R:R until _min_samples accumulate. With 0 samples it IS the base R:R (byte-identical to today's plan floor) and adapts UP per family as MFE accumulates — replacing the fixed rr_cap=6 / room_capture=0.5 magic realized-HOD lift. The round-number pull-in still snaps it to structure. Emits momentum_mfe_target_applied for audit. Kill-switch =0 ⇒ restore the magic adaptive lift (instant rollback). The shrinkage-toward-prior IS the safety net (López de Prado / fractional-shrinkage): it never diverges from the current behavior faster than real data justifies.",
     )
     chili_momentum_mfe_shadow_target_percentile: float = Field(
         default=0.6,
@@ -4412,7 +4417,12 @@ class Settings(BaseSettings):
         ge=0.0,
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_COMBINED_SIZE_DOWN_FLOOR"),
-        description="Combined size-down FLOOR fraction: a genuine front-side A-setup never sizes below this fraction of the equity-relative base per-trade risk (it FLOORS the realized aggregate of all size-down multipliers). A documented FLOOR (not a ceiling), equity-relative by construction since it multiplies base_max_loss. ONE documented base. Default 0.5 (never below half the equity-relative base), band [0.0,1.0].",
+        description="Combined size-down FLOOR fraction: a genuine front-side A-setup never sizes below this fraction of the equity-relative base per-trade risk (it FLOORS the realized aggregate of all size-down multipliers). A documented FLOOR (not a ceiling), equity-relative by construction since it multiplies base_max_loss. ONE documented base. Default 0.5 (never below half the equity-relative base), band [0.0,1.0]. Superseded by the conviction-derived floor when chili_momentum_asetup_conviction_size_enabled is ON (this becomes the OFF fallback).",
+    )
+    chili_momentum_asetup_conviction_size_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ASETUP_CONVICTION_SIZE_ENABLED"),
+        description="NO-MAGIC A-setup sizing (replaces the fixed 0.5 combined-size-down floor): the floor = the setup's CONVICTION = clamp((viability - A_setup_floor) / (1 - A_setup_floor), 0, 1) — how far the viability sits ABOVE the A-setup floor toward its max. A TOP-conviction A-setup (viability -> 1.0) gets ~FULL base risk, so the risk-first qty binds on the pre-existing 15%-of-equity notional cap — i.e. a high-quality trade sizes to ~15% of cash (the operator's stated risk-appetite), while a marginal A-setup keeps a smaller floor. NO new magic number (the A-setup gate, the [0,1] viability, and the 15% notional cap all pre-exist). LIFT-ONLY (the _combined_mult<floor gate raises, never cuts) ⇒ monotonic vs the stacked size-down, never a regression on marginal setups. Kill-switch =0 ⇒ the fixed chili_momentum_combined_size_down_floor (instant rollback).",
     )
     # ── ROSS RISK GAP 3 — ACCOUNT-WIDE CONSECUTIVE-LOSS ARM HALT (tilt rule) ──────────
     # Ross's tilt rule: 2-3 reds in a row = walk away. The streak dial only de-SIZES (never
@@ -7150,6 +7160,18 @@ class Settings(BaseSettings):
         le=10,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_STOPOUT_REENTRIES"),
         description="TASK#8: per-name/per-session cap on re-entries permitted after a STOP-OUT/loss. Only loss recycles count; profit recycles are unbounded. ge 1, le 10.",
+    )
+    chili_momentum_reentry_chase_cap_r: float = Field(
+        default=1.5,
+        ge=0.0,
+        le=10.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_CHASE_CAP_R"),
+        description="ANTI-CHASE-THE-TOP re-entry guard (live_runner standalone gate). After a LOSING exit on a name, do NOT re-buy far ABOVE where the last attempt failed. Block a re-entry whose price is more than this many ATR ABOVE the prior losing tranche's HIGH-WATER-MARK. The unit is the name's ATR (its honest 'how far it moves'), NOT the prior stop_distance — a pathologically wide prior stop (SVRE 06-30: stop_distance=0.737 ≈ 10% of $7.54) would otherwise inflate the ceiling past every chase. SVRE 06-30: stopped 7.54->7.51 (hwm 7.70, ATR≈0.385), then re-entered wick-reclaims at 8.34/8.25/8.70 — all >1.5 ATR above 7.70, into the 8.91 top -> faded (-$7); the cap blocks the FIRST chase, which cascades (that trade never opens, so the 7.70 anchor holds) -> SVRE takes only the -$0.33 initial stop. JEM-style profit-recycle re-entries are NEVER touched (was_loss=False). The ONE documented base (default 1.5 ATR). 0 disables (byte-identical, unbounded chase).",
+    )
+    chili_momentum_reentry_chase_cap_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_CHASE_CAP_ENABLED"),
+        description="Master kill-switch for the anti-chase re-entry gate (live_runner). ON ⇒ after any loss exit (was_loss) at any escalation level, block a re-entry whose price is more than chili_momentum_reentry_chase_cap_r ATR-multiples above the prior losing tranche's high-water-mark (see that field for the full rationale + the SVRE worked example). OFF ⇒ the gate is a no-op (byte-identical, unbounded chase).",
     )
     # ── G4 (losers-eat-the-winner fix, 2026-07-03): grind-aware exits + same-symbol
     # re-entry escalation. Two kill-switches, everything else derived (leader = the

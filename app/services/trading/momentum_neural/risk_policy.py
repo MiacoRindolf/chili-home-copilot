@@ -2428,6 +2428,12 @@ def reentry_escalation_decision(
             return False, dbg
         else:
             dbg["reason"] = "reclaim_met"
+            # NOTE: the anti-chase-the-top CAP (do not re-buy far above where the last
+            # attempt failed) lives in live_runner's standalone re-entry chase gate, not
+            # here. It anchors to the prior losing tranche's high-water-mark and measures
+            # the ceiling in the name's ATR (robust to a pathologically wide prior stop),
+            # and fires at ANY escalation level — a strict superset of what a `required`-
+            # anchored, prior_risk_dist-scaled cap could do from inside this helper.
     else:
         dbg["reason"] = "no_reclaim_reference"
     # 3) tape hold when readable.
