@@ -10020,6 +10020,20 @@ def tick_live_session(
                 if bool(getattr(settings, "chili_momentum_asetup_conviction_size_enabled", True)):
                     _via_denom = max(1e-6, 1.0 - _af_via_floor)
                     _csf_floor = max(0.0, min(1.0, (_af_via - _af_via_floor) / _via_denom))
+                    # ENTRY-QUALITY gate: viability scores the NAME (DXF and JEM both ~0.90),
+                    # frontside_mult scores THIS ENTRY (extension/OFI/tape/Kaufman-ER). The lift
+                    # discards the stacked size-down (incl. the front-side tilt), so a weak/
+                    # extended top-buy on a good NAME would be blown back up. Re-apply the
+                    # front-side strength to the lift target so the size-up needs BOTH a good
+                    # name AND a good entry (edge = name x entry). Measured DXF/CLRO top-buys:
+                    # frontside_mult 0.36-0.75 -> conviction floor scaled down; JEM (~1.0)
+                    # unchanged. Fail toward current (mult=1.0) if the tilt didn't compute.
+                    if bool(getattr(settings, "chili_momentum_conviction_frontside_gate_enabled", True)):
+                        try:
+                            _csf_fs = float(_frontside_mult)
+                        except (NameError, TypeError, ValueError):
+                            _csf_fs = 1.0
+                        _csf_floor = _csf_floor * max(0.0, min(1.0, _csf_fs))
                 else:
                     _csf_floor = float(
                         getattr(settings, "chili_momentum_combined_size_down_floor", 0.5) or 0.5
