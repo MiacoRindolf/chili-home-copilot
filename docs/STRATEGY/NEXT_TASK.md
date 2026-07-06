@@ -1,92 +1,37 @@
-# NEXT_TASK: f-position-identity-phase-5i-post-rename-soak
+# NEXT_TASK: ross-capture-parity-P0-evidence-and-integrity
 
 STATUS: PENDING
 
-## Goal
+> Supersedes `f-position-identity-phase-5i-post-rename-soak` (2026-06-02, stale — the 14-day
+> soak window has long elapsed; its watcher `CHILI-phase5i-post-rename-soak-probe` still runs
+> and its gate state was green at last record. If the watcher shows regressions, flag them,
+> but do not resume that task without operator direction).
 
-Soak the Phase 5H physical rename after production DDL.
+## Read FIRST
 
-The compatibility view must stay in place. This task is observation plus
-selective cleanup planning, not another destructive schema change.
+`docs/DESIGN/ROSS_CAPTURE_PARITY.md` — the full design (mission, verified baseline, phases
+P0-P3, per-lever RIGOR, DO-NOT guardrails, live-bindings appendix). This task = **P0 only**.
+The executor contract in that doc is binding: one change per deploy, FSM-gate before live,
+STOP at any failed gate and report, never violate §4.
 
-## Current Gate State
+## Goal (P0 — evidence + integrity; NO trading change)
 
-- Phase 5H migration applied: `283_position_identity_phase5h_physical_rename`
-- Physical base table: `trading_management_envelopes` (`relkind='r'`)
-- Legacy compatibility view: `trading_trades` (`relkind='v'`)
-- Phase 5E compare after rename: `READY_FOR_RENAME_BRIEF`
-- Fresh decisions: 3
-- Fresh envelopes: 3
-- Fresh closes: 7
-- Hard linkage issues: 0
-- 30d attribution mismatched rows: 0
-- 30d attribution drift: $0.0000
-- Live rollback smoke:
-  - old SQL through `trading_trades`: green
-  - new SQL through `trading_management_envelopes`: green
-  - SQLAlchemy `Trade` flush through compatibility view: green
-  - Phase 5A trigger created/linked 3/3 decisions: green
-  - row count before/after rollback: 705 -> 705
-- Schema-specific log scan: no rename-path errors.
-- Phase 5I watcher installed: `CHILI-phase5i-post-rename-soak-probe`
-  - cadence: every 30 minutes for 14 days
-  - output: `scripts/dispatch-phase5i-post-rename-soak-probe-out.txt`
-  - latest manual run: `IN_FLIGHT`, 0 fresh decisions/envelopes/closes, 0
-    hard linkage issues, 0 schema-specific log errors
+1. **Baseline reproduction:** re-run the FSM replay (instrument
+   `project_ws/_worktrees/fsmdriver/scripts/replay_v3_fsm_window.py`, dense `TICK_STRIDE=2`,
+   `TEST_DATABASE_URL` ending `_test`) over the 10 scorecard movers
+   (06-26 ZDAI · 06-30 SVRE/JEM/CELZ · 07-01 TC/LHAI/DXF/CANF/JEM · 07-02 CLRO).
+   PASS = net **+$264.25** with JEM **+$314.53** reproduced.
+   FAIL = STOP EVERYTHING and diagnose oracle drift — nothing downstream is trustworthy.
+2. **First-prod-fill capture check (gates P2 / the meta-label lever):** after the first LIVE
+   fill on image ≥ `main-clean-d98c924`, verify `momentum_automation_outcomes.entry_regime_snapshot_json`
+   populated OR a `live_entry_feature_capture_error` event exists (exact SQL in the design doc §2/P0).
+   Neither ⇒ #851's wiring is wrong on the scheduler-arm path — debug `live_runner.py` ~12103-12127
+   before anything else.
+3. Confirm the design doc's §5 bindings appendix still matches the live container
+   (`chili-clean-recovery-momentum-exec`; report BINDINGS, not config defaults).
 
-## Tasks
+## Done means
 
-1. Let at least one fresh entry and one fresh close occur after mig 283. The
-   scheduled watcher now checks this automatically.
-2. Rerun manually when needed:
-
-   ```powershell
-   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\dispatch-phase5i-post-rename-soak-probe.ps1
-   ```
-
-3. Verify:
-   - `HARD_LINKAGE_ISSUES=0`
-   - `FRESH_CLOSE_MISMATCHES=0`
-   - `MISMATCHED_ROWS=0`
-   - `MISMATCHED_PNL=0.0000`
-4. Scan worker logs for schema-specific errors:
-   - `NoReferencedTableError`
-   - `UndefinedTable`
-   - `relation trading_* does not exist`
-   - `PendingRollbackError`
-   - `cannot truncate`
-5. If clean, write Phase 5I closeout and queue Phase 5J selective reader cleanup:
-   - Prefer `trading_management_envelopes` in new analytics/reporting SQL.
-   - Keep `trading_trades` compatibility view.
-   - Do not rename the Python `Trade` class yet.
-
-## Acceptance
-
-- Fresh post-mig-283 entry/close represented in read models.
-- Phase 5E compare remains clean.
-- No schema-specific worker errors.
-- Compatibility view still works.
-- No live trading behavior changed.
-
-## Rollback
-
-Only if a rename-specific production issue appears:
-
-```sql
-DROP VIEW IF EXISTS trading_trades;
-ALTER TABLE trading_management_envelopes RENAME TO trading_trades;
-CREATE VIEW trading_management_envelopes AS
-SELECT * FROM trading_trades;
-DELETE FROM schema_version
- WHERE version_id = '283_position_identity_phase5h_physical_rename';
-```
-
-Then force-recreate affected workers and rerun the Phase 5E compare.
-
-## References
-
-- `docs/STRATEGY/CC_REPORTS/2026-05-28_f-position-identity-phase-5h-production-physical-rename.md`
-- `scripts/d-phase5e-reporting-soak-probe.py`
-- `scripts/d-phase5g-rename-dry-run.py`
-- `scripts/d-phase5i-post-rename-soak-probe.py`
-- `docs/RUNBOOKS/WATCHER_phase5i_post_rename_soak.md`
+- The replay reproduction table (per-day scorecard format) in a new CC_REPORT.
+- The capture-check verdict (populated / error-event-named-cause / FAILED-both + diagnosis).
+- `docs/STRATEGY/CC_REPORTS/YYYY-MM-DD_ross-capture-P0.md` written; this file marked STATUS: DONE; commit.
