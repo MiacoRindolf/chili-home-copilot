@@ -3187,6 +3187,25 @@ def _entry_client_order_id(
     return f"chili_ml_e_{session_id}_{_corr[:8]}_{_suffix}"[:120]
 
 
+def _is_dup_reference_reject(error: str | None) -> bool:
+    """True when a place reject is the broker's duplicate-Reference-ID 409.
+
+    The agentic RH rail passes our DETERMINISTIC entry cid as the order Reference ID
+    (see ``_entry_client_order_id``). An idempotent RE-SUBMIT of the SAME logical entry
+    — an ack-timeout re-place, or a second watcher tick — reuses that cid, so the broker
+    answers ``409 {"detail":"Reference ID must be unique."}``. That 409 is NOT a place
+    failure: it CONFIRMS the first submit is already live at the venue. Treating it as a
+    fatal error (→ live_error) ORPHANS an already-filled position (BJDX sid 10484,
+    2026-07-06). Match is narrow (the 'reference id ... unique' phrase) so a generic 409
+    or an unrelated 'must be unique' never trips it. Pure + side-effect-free."""
+    if not error:
+        return False
+    e = str(error).lower()
+    if "reference id" in e and "unique" in e:
+        return True
+    return ("409" in e) and ("reference" in e) and ("unique" in e)
+
+
 def _adaptive_notional_guard_multiplier(*, expected_move_bps: float | None) -> float:
     """Marketable-limit premium over the ask. Base = the documented notional-guard bps
     (25 today); on a volatile name widen toward a fraction of its expected move so the
@@ -11095,6 +11114,33 @@ def tick_live_session(
             "result": res,
         })
         if not res.get("ok"):
+            # DUP-REFERENCE 409 RECONCILE (2026-07-06, BJDX sid 10484 orphan): a re-submit
+            # of the SAME logical entry (ack-timeout re-place / parallel watcher) reuses our
+            # deterministic cid, so the rail returns 409 "Reference ID must be unique". That
+            # is NOT a place failure — it CONFIRMS our first submit is already live at the
+            # venue. Terminalizing to live_error here strands the (already filled) position
+            # with NO exit management: BJDX filled @1.61, ran to 2.09, and gave the entire
+            # move back to 1.53 fully unmanaged (no trail / ladder / reversal exit ever ran)
+            # because the session was dead. Instead: stay NON-terminal in WATCHING so the
+            # late-fill sweep (_sweep_unresolved_entry_orders, tick head) re-polls the tracked
+            # entry order id (recorded-before-ok in entry_order_ids_all) and ADOPTS the fill
+            # into a managed position next tick. No reject cooldown / non-tradeable learn —
+            # the name is fine and the order is IN. Mirrors the proven `deferred` path above
+            # (stay WATCHING, ok:True). entry_submitted is already set + committed above.
+            if _is_dup_reference_reject(str(res.get("error") or "")):
+                le["entry_submitted"] = True
+                _commit_le(sess, le)
+                _emit(db, sess, "live_entry_dup_reference_reconcile", {
+                    "client_order_id": le.get("entry_client_order_id") or cid,
+                    "error": res.get("error"),
+                    "unresolved_entry_order_ids": _unresolved_entry_order_ids(le),
+                })
+                _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                db.flush()
+                return {
+                    "ok": True, "session_id": sess.id, "state": sess.state,
+                    "reconcile": "dup_reference_adopt",
+                }
             # ADAPTIVE ENTRY-REJECT COOLDOWN (2026-06-22): the broker REFUSED this entry
             # (place_equity_order isError — a leveraged/inverse ETF tripping
             # EQUITY_SUITABILITY like RKLZ/CORD, or a name untradable in the session).
