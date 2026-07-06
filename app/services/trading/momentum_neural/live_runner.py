@@ -8282,6 +8282,18 @@ def tick_live_session(
                 # transition + best-effort -> can NEVER affect the fill or management. Uses the
                 # SHARED helper (parity with replay). Flag chili_momentum_live_capture_features.
                 if bool(getattr(settings, "chili_momentum_live_capture_features", True)):
+                    # Persist the ENTRY regime snapshot FIRST (cheap, cannot fail) so the
+                    # meta-label dataset ALWAYS gets it. Pre-fix, this write lived AFTER
+                    # capture_entry_features INSIDE one try — so a prod capture_entry_features
+                    # exception (the real L2/OHLCV path; the FSM mock never hits it) was
+                    # silently swallowed and dropped the ENTIRE entry snapshot -> prod
+                    # populated 2/942 vs FSM 96/96. Regime is written unconditionally; the
+                    # richer 14-feature vector is best-effort on top (isolated try below).
+                    try:
+                        le["entry_regime_snapshot_json"] = dict(regime)
+                        _commit_le(sess, le)
+                    except Exception:
+                        _log.debug("entry regime snapshot write skipped session=%s", sess.id, exc_info=True)
                     try:
                         fetch_ohlcv_df = _replay_aware_fetch_ohlcv_df  # replay-aware seam (prod byte-identical)
                         from .entry_features import capture_entry_features, macro_regime_features
@@ -8308,7 +8320,6 @@ def tick_live_session(
                             session_df=_cap_df, l2_db=db, l2_as_of=None,
                             macro=macro_regime_features(),
                         )
-                        le["entry_regime_snapshot_json"] = dict(regime)
                         if _ef:
                             le["entry_features"] = _ef
                             # Log the meta-label's EMITTED (p, de_rate) on the AUTHORITATIVE entry
@@ -8324,16 +8335,28 @@ def tick_live_session(
                                     _pp = score_probability(_ef, _ml)
                                     _dr = size_multiplier(_ef, _ml, floor=float(getattr(
                                         settings, "chili_momentum_meta_label_min_size", 0.4)))
-                                    le["entry_regime_snapshot_json"]["meta_label_emit"] = {
-                                        "p": (round(float(_pp), 5) if _pp is not None else None),
-                                        "de_rate": round(float(_dr), 4),
-                                        "conf": round(float(_ml.get("confidence") or 0.0), 4),
-                                    }
+                                    if isinstance(le.get("entry_regime_snapshot_json"), dict):
+                                        le["entry_regime_snapshot_json"]["meta_label_emit"] = {
+                                            "p": (round(float(_pp), 5) if _pp is not None else None),
+                                            "de_rate": round(float(_dr), 4),
+                                            "conf": round(float(_ml.get("confidence") or 0.0), 4),
+                                        }
                             except Exception:
                                 pass
-                        _commit_le(sess, le)
-                    except Exception:
-                        _log.debug("entry-feature capture skipped session=%s", sess.id, exc_info=True)
+                            _commit_le(sess, le)
+                    except Exception as _fe:
+                        # SURFACE the capture failure (was a silent _log.debug) as a queryable
+                        # event so the ROOT cause of the empty feature vector is diagnosable in
+                        # prod, not hidden. The regime snapshot above is already persisted.
+                        try:
+                            _emit(db, sess, "live_entry_feature_capture_error", {
+                                "etype": type(_fe).__name__, "err": str(_fe)[:240],
+                            })
+                        except Exception:
+                            pass
+                        _log.warning(
+                            "entry-feature capture failed session=%s err=%s", sess.id, _fe, exc_info=True,
+                        )
                 db.flush()
                 return {"ok": True, "session_id": sess.id, "state": sess.state}
             if no and _order_open(no):
