@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -426,6 +427,74 @@ def _automation_user_id(request: Request, db: Session) -> int:
     return uid
 
 
+def _parse_replay_dt(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid datetime: {raw}") from exc
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc).replace(tzinfo=None)
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _parse_replay_session_ids(raw: str | None) -> tuple[int, ...] | None:
+    if raw is None or str(raw).strip() == "":
+        return None
+    out: list[int] = []
+    for part in str(raw).replace(";", ",").split(","):
+        clean = part.strip()
+        if not clean:
+            continue
+        try:
+            sid = int(clean)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="session_ids must be comma-separated integers") from exc
+        if sid <= 0:
+            raise HTTPException(status_code=400, detail="session_ids must be positive integers")
+        out.append(sid)
+    return tuple(dict.fromkeys(out))
+
+
+def _live_replay_session_scope(
+    db: Session,
+    *,
+    user_id: int,
+    session_ids: tuple[int, ...] | None,
+    since: datetime | None,
+    until: datetime | None,
+    limit: int,
+) -> tuple[int, ...]:
+    q = db.query(TradingAutomationSession.id, TradingAutomationSession.mode).filter(
+        TradingAutomationSession.user_id == int(user_id)
+    )
+    if session_ids is not None:
+        requested = tuple(session_ids or ())
+        if not requested:
+            return ()
+        rows = q.filter(TradingAutomationSession.id.in_(requested)).all()
+        found = {int(row.id) for row in rows}
+        missing = [sid for sid in requested if sid not in found]
+        if missing:
+            raise HTTPException(status_code=404, detail="Session not found.")
+        non_live = [int(row.id) for row in rows if str(row.mode or "").lower() != "live"]
+        if non_live:
+            raise HTTPException(status_code=400, detail="FSM replay is available for live sessions only.")
+        return requested
+    if since is not None:
+        q = q.filter(TradingAutomationSession.updated_at >= since)
+    if until is not None:
+        q = q.filter(TradingAutomationSession.updated_at <= until)
+    rows = (
+        q.filter(TradingAutomationSession.mode == "live")
+        .order_by(TradingAutomationSession.updated_at.desc(), TradingAutomationSession.id.desc())
+        .limit(max(1, min(int(limit), 500)))
+        .all()
+    )
+    return tuple(int(row.id) for row in rows)
+
+
 @router.get("/automation/summary")
 def get_automation_summary(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
     return automation_summary(db, user_id=_automation_user_id(request, db))
@@ -487,6 +556,60 @@ def get_automation_events(
         event_type=event_type,
         limit=limit,
     )
+
+
+@router.get("/automation/replay/fsm")
+def get_automation_fsm_replay(
+    request: Request,
+    db: Session = Depends(get_db),
+    session_ids: Optional[str] = Query(None, description="Comma-separated live automation session ids."),
+    since: Optional[str] = Query(None, description="UTC ISO lower bound for recent live sessions."),
+    until: Optional[str] = Query(None, description="UTC ISO upper bound for recent live sessions."),
+    limit: int = Query(100, ge=1, le=500),
+    capacity_limit: int = Query(25, ge=1, le=200),
+    order_call_budget: Optional[int] = Query(None, ge=1, le=500),
+    risk_budget_slots: Optional[int] = Query(None, ge=1, le=500),
+    setup_trace_limit: int = Query(500, ge=1, le=5000),
+) -> dict[str, Any]:
+    """Read-only operator endpoint for the same live FSM Replay v3 audit used in verification."""
+
+    uid = _automation_user_id(request, db)
+    since_dt = _parse_replay_dt(since)
+    until_dt = _parse_replay_dt(until)
+    requested_ids = _parse_replay_session_ids(session_ids)
+    scoped_ids = _live_replay_session_scope(
+        db,
+        user_id=uid,
+        session_ids=requested_ids,
+        since=since_dt,
+        until=until_dt,
+        limit=limit,
+    )
+    from ...services.trading.momentum_neural.live_replay_audit import run_live_replay_audit
+
+    replay = run_live_replay_audit(
+        db,
+        since=since_dt,
+        until=until_dt,
+        limit=limit,
+        session_ids=scoped_ids,
+        capacity_limit=capacity_limit,
+        order_call_budget=order_call_budget,
+        risk_budget_slots=risk_budget_slots,
+        setup_trace_limit=setup_trace_limit,
+    )
+    return {
+        "ok": bool(replay.get("ok", True)),
+        "read_only": True,
+        "scope": {
+            "explicit_session_ids": requested_ids is not None,
+            "session_ids": list(scoped_ids),
+            "since_utc": since,
+            "until_utc": until,
+            "limit": int(limit),
+        },
+        "replay": replay,
+    }
 
 
 def _decision_packet_brief(p: TradingDecisionPacket) -> dict[str, Any]:

@@ -67,6 +67,30 @@
 }
 .ta-empty { color: var(--text-muted); font-size: 12px; padding: 24px; text-align: center; }
 .ta-future { opacity: .45; pointer-events: none; }
+.ta-replay-panel {
+  margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--border);
+  border-radius: 10px; background: var(--bg-header);
+}
+.ta-replay-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.ta-replay-head h2 { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-secondary); }
+.ta-replay-head span { font-size: 10px; color: var(--text-muted); }
+.ta-replay-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin-top: 8px; }
+.ta-replay-controls label { display: flex; flex-direction: column; gap: 3px; font-size: 10px; color: var(--text-secondary); }
+.ta-replay-controls input {
+  width: 150px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--text); font-size: 11px;
+}
+.ta-replay-result {
+  margin-top: 10px; font-size: 11px; border-top: 1px solid var(--border); padding-top: 10px;
+}
+.ta-replay-grid { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 8px; }
+.ta-replay-kv { border: 1px solid var(--border); border-radius: 8px; padding: 7px 8px; background: var(--bg); }
+.ta-replay-kv span { display: block; color: var(--text-muted); font-size: 9px; text-transform: uppercase; letter-spacing: .35px; }
+.ta-replay-kv b { display: block; font-size: 14px; margin-top: 2px; }
+.ta-replay-gates { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.ta-replay-debt { margin: 10px 0 0 16px; padding: 0; color: var(--text-secondary); }
+.ta-replay-debt li { margin: 3px 0; }
+.ta-replay-json { max-height: 260px; margin-top: 10px; }
 
 @media (max-width: 768px) {
   .ta-header { padding: 8px 12px; gap: 6px; }
@@ -82,6 +106,8 @@
   .ta-strip { font-size: 12px; }
   .ta-events { font-size: 11px; }
   .ta-detail { font-size: 12px; }
+  .ta-replay-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+  .ta-replay-controls input { width: 135px; }
 }
 </style>
 {% endblock %}
@@ -112,6 +138,34 @@
             <input type="checkbox" id="ta-inc-arch" onchange="taLoadSessions()"/> Show archived
           </label>
         </div>
+        <section class="ta-replay-panel" aria-label="FSM Replay">
+          <div class="ta-replay-head">
+            <h2>FSM Replay</h2>
+            <span>Read-only Replay v3 audit path</span>
+          </div>
+          <div class="ta-replay-controls">
+            <label>Since
+              <input id="ta-replay-since" type="datetime-local" />
+            </label>
+            <label>Until
+              <input id="ta-replay-until" type="datetime-local" />
+            </label>
+            <label>Limit
+              <input id="ta-replay-limit" type="number" min="1" max="500" value="100" />
+            </label>
+            <label>Capacity
+              <input id="ta-replay-capacity" type="number" min="1" max="200" value="25" />
+            </label>
+            <label>Trace rows
+              <input id="ta-replay-trace-limit" type="number" min="1" max="5000" value="500" />
+            </label>
+            <button type="button" class="ta-btn" onclick="taRunFsmReplay(false)">Run recent live</button>
+            <button type="button" class="ta-btn" onclick="taRunFsmReplay(true)">Run selected</button>
+          </div>
+          <div id="ta-replay-result" class="ta-replay-result">
+            <span style="color:var(--text-muted)">No replay run yet.</span>
+          </div>
+        </section>
         <h2 class="ta-section-title">Active / pending sessions</h2>
         <div class="ta-table-wrap">
           <table class="ta-table" id="ta-sessions-table">
@@ -154,6 +208,84 @@
     return d.innerHTML;
   }
 
+  function taNum(v) {
+    if (v == null || v === '') return '0';
+    if (typeof v === 'number' && isFinite(v)) return String(Math.round(v * 10000) / 10000);
+    return String(v);
+  }
+
+  function taBoolBadge(label, ready) {
+    return '<span class="ta-badge ' + (ready ? 'risk-ok' : 'risk-warn') + '">' +
+      esc(label) + ': ' + (ready ? 'ready' : 'blocked') + '</span>';
+  }
+
+  function taDateInputIso(id) {
+    var el = document.getElementById(id);
+    if (!el || !el.value) return '';
+    var dt = new Date(el.value);
+    if (!isFinite(dt.getTime())) return '';
+    return dt.toISOString();
+  }
+
+  function taReplayInput(id, fallback) {
+    var el = document.getElementById(id);
+    var n = el ? parseInt(el.value, 10) : NaN;
+    return isFinite(n) && n > 0 ? n : fallback;
+  }
+
+  function taReplaySummaryHtml(payload) {
+    var replay = (payload && payload.replay) || {};
+    var inputs = replay.inputs || {};
+    var scheduler = replay.scheduler || {};
+    var cert = replay.certification || {};
+    var setup = replay.setup_trace || {};
+    var debt = replay.replay_evidence_debt || [];
+    var scope = payload.scope || {};
+    var html = '';
+    html += '<div class="ta-replay-grid">';
+    html += '<div class="ta-replay-kv"><span>Scope</span><b>' + esc((scope.session_ids || []).join(', ') || 'none') + '</b></div>';
+    html += '<div class="ta-replay-kv"><span>Sessions</span><b>' + esc(taNum(inputs.session_rows)) + '</b></div>';
+    html += '<div class="ta-replay-kv"><span>Snapshots</span><b>' + esc(taNum(inputs.scheduler_snapshot_steps)) + '</b></div>';
+    html += '<div class="ta-replay-kv"><span>Broker outcomes</span><b>' + esc(taNum(inputs.broker_outcomes)) + '</b></div>';
+    html += '<div class="ta-replay-kv"><span>Selected</span><b>' + esc(taNum(scheduler.selected_count)) + '</b></div>';
+    html += '<div class="ta-replay-kv"><span>Terminalized</span><b>' + esc(taNum(scheduler.terminalized_count)) + '</b></div>';
+    html += '<div class="ta-replay-kv"><span>Pending</span><b>' + esc(taNum(scheduler.pending_count)) + '</b></div>';
+    html += '<div class="ta-replay-kv"><span>Expected PnL</span><b>$' + esc(taNum(scheduler.selected_expected_pnl_usd)) + '</b></div>';
+    html += '</div>';
+    html += '<div class="ta-replay-gates">';
+    html += taBoolBadge('scheduler', !!cert.scheduler_priority_claim_ready);
+    html += taBoolBadge('starvation', !!cert.adapter_unavailable_starvation_claim_ready);
+    html += taBoolBadge('broker outcome', !!cert.broker_outcome_attribution_ready);
+    html += taBoolBadge('realized PnL', !!cert.realized_vs_selected_expected_claim_ready);
+    html += taBoolBadge('PnL min/max', !!cert.pnl_minmax_claim_ready);
+    html += taBoolBadge('setup trace', !!(setup.certification && setup.certification.setup_trace_coverage_ready));
+    html += '</div>';
+    if (scheduler.no_selected_reason) {
+      html += '<p style="color:var(--text-secondary);margin:8px 0 0">No selected reason: <code>' + esc(scheduler.no_selected_reason) + '</code></p>';
+    }
+    if (cert.claim_boundary) {
+      html += '<p style="color:var(--text-muted);margin:8px 0 0">' + esc(cert.claim_boundary) + '</p>';
+    }
+    var missing = cert.missing_evidence || [];
+    if (missing.length) {
+      html += '<p style="margin:10px 0 4px"><b>Missing evidence</b></p><ul class="ta-replay-debt">';
+      missing.forEach(function(x) { html += '<li><code>' + esc(x) + '</code></li>'; });
+      html += '</ul>';
+    }
+    if (debt.length) {
+      html += '<details style="margin-top:10px"><summary style="cursor:pointer;color:var(--text-secondary)">Evidence debt details</summary><ul class="ta-replay-debt">';
+      debt.slice(0, 8).forEach(function(row) {
+        html += '<li><b>' + esc(row.missing_evidence || row.evidence_needed || 'missing') + '</b>';
+        if (row.how_to_collect) html += '<br/><span>' + esc(row.how_to_collect) + '</span>';
+        html += '</li>';
+      });
+      html += '</ul></details>';
+    }
+    html += '<details style="margin-top:10px"><summary style="cursor:pointer;color:var(--text-secondary)">Replay JSON</summary>';
+    html += '<pre class="ta-replay-json">' + esc(JSON.stringify(replay, null, 2)) + '</pre></details>';
+    return html;
+  }
+
   function taStateBadgeClass(st) {
     if (st === 'draft' || st === 'queued' || st === 'watching') return 'draft';
     if (st === 'queued_live' || st === 'watching_live') return 'draft';
@@ -181,6 +313,40 @@
     taLoadSessions();
     taLoadEvents();
     if (selectedId) taLoadDetail(selectedId);
+  };
+
+  window.taRunFsmReplay = function(selectedOnly) {
+    if (IS_GUEST) return;
+    var box = document.getElementById('ta-replay-result');
+    if (!box) return;
+    if (selectedOnly && !selectedId) {
+      box.innerHTML = '<span style="color:#f59e0b">Select a live session first.</span>';
+      return;
+    }
+    var params = new URLSearchParams();
+    params.set('limit', String(taReplayInput('ta-replay-limit', 100)));
+    params.set('capacity_limit', String(taReplayInput('ta-replay-capacity', 25)));
+    params.set('setup_trace_limit', String(taReplayInput('ta-replay-trace-limit', 500)));
+    var since = taDateInputIso('ta-replay-since');
+    var until = taDateInputIso('ta-replay-until');
+    if (since) params.set('since', since);
+    if (until) params.set('until', until);
+    if (selectedOnly) params.set('session_ids', String(selectedId));
+    box.innerHTML = '<span style="color:var(--text-secondary)">Running FSM replay...</span>';
+    fetch('/api/trading/momentum/automation/replay/fsm?' + params.toString(), { credentials: 'same-origin' })
+      .then(function(r) {
+        return r.json().then(function(j) { return { ok: r.ok, body: j }; });
+      })
+      .then(function(x) {
+        if (!x.ok) {
+          box.innerHTML = '<span style="color:#f87171">' + esc((x.body && (x.body.detail || x.body.error)) || 'Replay failed') + '</span>';
+          return;
+        }
+        box.innerHTML = taReplaySummaryHtml(x.body);
+      })
+      .catch(function(err) {
+        box.innerHTML = '<span style="color:#f87171">' + esc(err && err.message ? err.message : 'Replay failed') + '</span>';
+      });
   };
 
   function taLoadSummary() {
@@ -343,6 +509,7 @@
         var cancellable = ['draft','queued','live_arm_pending','armed_pending_runner','idle'].indexOf(s.state) >= 0;
         var archivable = ['cancelled','expired','draft'].indexOf(s.state) >= 0;
         html += '<div style="margin-top:10px">';
+        html += '<button type="button" class="ta-btn" onclick="taRunFsmReplay(true)">FSM Replay</button>';
         if (cancellable) {
           html += '<button type="button" class="ta-btn ta-btn-danger" onclick="taCancel(' + s.id + ')">Cancel session</button>';
         }
