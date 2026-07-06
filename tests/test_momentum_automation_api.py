@@ -366,6 +366,11 @@ def test_automation_fsm_replay_route_scopes_to_user_live_sessions(
     assert r2.status_code == 200
     assert calls[-1]["session_ids"] == (live.id,)
 
+    r2b = c.get(f"/api/trading/momentum/replay/fsm?session_ids={live.id}&capacity_limit=9")
+    assert r2b.status_code == 200
+    assert calls[-1]["session_ids"] == (live.id,)
+    assert calls[-1]["capacity_limit"] == 9
+
     r3 = c.get(f"/api/trading/momentum/automation/replay/fsm?session_ids={paper.id}")
     assert r3.status_code == 400
     assert "live sessions" in r3.json()["detail"]
