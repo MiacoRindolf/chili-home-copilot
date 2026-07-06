@@ -4892,9 +4892,14 @@ _RECYCLE_ENTRY_STATE_KEYS: tuple[str, ...] = (
     "entry_repeg_count",
     "entry_chunk_order_ids",
     "entry_decision_packet_id",
-    "entry_features",
+    # entry_features + entry_regime_snapshot_json are NOT cleared here (2026-07-06): they are the
+    # FROZEN entry-moment META-LABEL sample that outcome_extract reads at exit. Clearing them on
+    # recycle/cancel wiped the sample before the outcome captured it (prod
+    # entry_regime_snapshot_json = 2/942; the FSM replay's held sessions never recycle, so it read
+    # 96/96 — masking the bug). They are overwritten fresh on EVERY fill (8312/8343) and are read
+    # ONLY from the outcome (never from le mid-cycle), so retaining them across a cycle is safe and
+    # lets the meta-label finally see fill-then-cancel LOSERS, not just held winners.
     "entry_l2_snapshot",
-    "entry_regime_snapshot_json",
     "entry_sizing",
     "entry_resize_basis",
     "entry_want_qty",
