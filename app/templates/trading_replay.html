@@ -55,6 +55,248 @@
   color: var(--rr-blue);
   border-color: color-mix(in srgb, var(--rr-blue) 55%, transparent);
 }
+.rr-command {
+  border: 1px solid var(--rr-line);
+  border-radius: 8px;
+  background: var(--rr-panel);
+  padding: 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px 18px;
+  align-items: start;
+}
+.rr-command-main {
+  min-width: 0;
+}
+.rr-eyebrow {
+  color: var(--rr-blue);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  font-weight: 700;
+}
+.rr-command h2 {
+  margin: 5px 0 0;
+  font-size: 18px;
+  line-height: 1.2;
+  letter-spacing: 0;
+}
+.rr-command p {
+  margin: 6px 0 0;
+  color: var(--rr-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.rr-command-actions {
+  display: grid;
+  justify-items: end;
+  gap: 6px;
+}
+.rr-command-options {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  border-top: 1px solid var(--rr-line);
+  padding-top: 12px;
+}
+.rr-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 14px;
+  align-items: start;
+  margin-top: 14px;
+}
+.rr-research-side {
+  display: grid;
+  gap: 14px;
+}
+.rr-board .rr-result-head {
+  align-items: flex-start;
+}
+.rr-result-head p {
+  margin: 4px 0 0;
+  color: var(--rr-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.rr-board-hero {
+  display: grid;
+  grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr);
+  gap: 12px;
+}
+.rr-finding {
+  border: 1px solid color-mix(in srgb, var(--rr-blue) 30%, var(--rr-line));
+  border-radius: 8px;
+  background: var(--rr-panel-2);
+  padding: 14px;
+}
+.rr-finding.ready {
+  border-color: color-mix(in srgb, var(--rr-green) 45%, var(--rr-line));
+}
+.rr-finding.blocked {
+  border-color: color-mix(in srgb, var(--rr-amber) 45%, var(--rr-line));
+}
+.rr-finding strong {
+  display: block;
+  font-size: 15px;
+  line-height: 1.3;
+}
+.rr-finding span {
+  display: block;
+  margin-top: 7px;
+  color: var(--rr-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.rr-score {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.rr-score-card {
+  border: 1px solid var(--rr-line);
+  border-radius: 8px;
+  background: var(--rr-panel-2);
+  padding: 11px 12px;
+  min-width: 0;
+}
+.rr-score-card b {
+  display: block;
+  font-size: 19px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.rr-score-card span {
+  display: block;
+  margin-top: 4px;
+  color: var(--rr-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+.rr-corr-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.rr-corr-card {
+  border: 1px solid var(--rr-line);
+  border-radius: 8px;
+  background: var(--rr-panel-2);
+  padding: 11px 12px;
+  min-width: 0;
+}
+.rr-corr-card.ready {
+  border-color: color-mix(in srgb, var(--rr-green) 38%, var(--rr-line));
+}
+.rr-corr-card.blocked {
+  border-color: color-mix(in srgb, var(--rr-amber) 40%, var(--rr-line));
+}
+.rr-corr-card h4 {
+  margin: 0;
+  font-size: 12px;
+  letter-spacing: 0;
+}
+.rr-corr-card b {
+  display: block;
+  margin-top: 8px;
+  font-size: 13px;
+}
+.rr-corr-card.ready b { color: var(--rr-green); }
+.rr-corr-card.blocked b { color: var(--rr-amber); }
+.rr-corr-card span {
+  display: block;
+  margin-top: 4px;
+  color: var(--rr-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.rr-matrix {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+.rr-matrix-row {
+  display: grid;
+  grid-template-columns: minmax(150px, .75fr) minmax(0, 1fr) 84px;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid var(--rr-line);
+  border-radius: 6px;
+  background: var(--rr-panel-2);
+  padding: 8px 10px;
+}
+.rr-matrix-row strong {
+  font-size: 12px;
+}
+.rr-matrix-row span {
+  color: var(--rr-muted);
+  font-size: 11px;
+}
+.rr-state {
+  justify-self: end;
+  color: var(--rr-amber);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+.rr-state.ready { color: var(--rr-green); }
+.rr-lens-list {
+  display: grid;
+  gap: 8px;
+}
+.rr-lens {
+  border: 1px solid var(--rr-line);
+  border-radius: 7px;
+  background: var(--rr-panel-2);
+  padding: 10px 11px;
+}
+.rr-lens strong {
+  display: block;
+  font-size: 12px;
+}
+.rr-lens span {
+  display: block;
+  margin-top: 4px;
+  color: var(--rr-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.rr-archive {
+  margin-top: 14px;
+  border: 1px solid var(--rr-line);
+  border-radius: 8px;
+  background: var(--rr-panel);
+  overflow: hidden;
+}
+.rr-archive > summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 14px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  list-style: none;
+}
+.rr-archive > summary::-webkit-details-marker { display: none; }
+.rr-archive > summary::after {
+  content: "+";
+  color: var(--rr-blue);
+  font-size: 16px;
+}
+.rr-archive[open] > summary::after { content: "-"; }
+.rr-archive-body {
+  border-top: 1px solid var(--rr-line);
+  padding: 14px;
+  display: grid;
+  gap: 14px;
+}
 .rr-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.35fr) minmax(360px, .65fr);
@@ -417,6 +659,12 @@
 .rr-compact {
   padding: 12px 14px;
 }
+.rr-compact .rr-options {
+  margin-top: 10px;
+}
+.rr-compact > .rr-run-strip:first-child {
+  margin-top: 0;
+}
 .rr-run-strip {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -455,18 +703,30 @@
 }
 @media (max-width: 1080px) {
   .rr-grid,
-  .rr-split {
+  .rr-split,
+  .rr-workbench,
+  .rr-board-hero {
     grid-template-columns: 1fr;
+  }
+  .rr-corr-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 @media (max-width: 760px) {
   .rr-shell { padding: 12px 10px 48px; }
   .rr-topbar { align-items: flex-start; }
+  .rr-command { grid-template-columns: 1fr; }
+  .rr-command-actions { justify-items: stretch; }
+  .rr-command-options { grid-template-columns: 1fr; }
   .rr-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .rr-field.wide { grid-column: span 2; }
   .rr-fsm-primary { grid-template-columns: 1fr; }
   .rr-option-row,
   .rr-option-row.five { grid-template-columns: 1fr; }
+  .rr-score,
+  .rr-corr-grid { grid-template-columns: 1fr; }
+  .rr-matrix-row { grid-template-columns: 1fr; }
+  .rr-state { justify-self: start; }
   .rr-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .rr-gates { grid-template-columns: 1fr; }
   .rr-run-strip { grid-template-columns: 1fr; }
@@ -485,150 +745,189 @@
       <a class="rr-link" href="/trading">Trading</a>
     </header>
 
-    <div class="rr-grid">
-      <section class="rr-panel" aria-label="FSM live audit">
-        <div class="rr-panel-head">
-          <div>
-            <h2>FSM Live Audit</h2>
-            <p>Read-only Replay v3 audit over live automation sessions.</p>
-          </div>
-          <span class="rr-tag live">live sessions</span>
-        </div>
-        <div class="rr-fsm-simple">
-          <div class="rr-fsm-primary">
-            <div>
-              <h3>Latest live sessions</h3>
-              <p>Runs the read-only FSM audit using the normal defaults.</p>
-              <span class="rr-status" id="rr-fsm-status">idle</span>
+    <section class="rr-command" aria-label="FSM live audit">
+      <div class="rr-command-main">
+        <div class="rr-eyebrow">FSM Live Audit · Replay v3 · live sessions</div>
+        <h2>Live session correlation audit</h2>
+        <p id="rr-scope-summary">Latest live sessions · read-only · production evidence</p>
+      </div>
+      <div class="rr-command-actions">
+        <button class="rr-btn primary" id="rr-fsm-run" type="button" onclick="rrRunFsmReplay()">Analyze Latest</button>
+        <span class="rr-status" id="rr-fsm-status">idle</span>
+      </div>
+      <div class="rr-command-options">
+        <details class="rr-options">
+          <summary>Scope</summary>
+          <div class="rr-option-row">
+            <div class="rr-field">
+              <label for="rr-fsm-session-ids">Session IDs</label>
+              <input class="rr-input" id="rr-fsm-session-ids" placeholder="optional" />
             </div>
-            <button class="rr-btn primary" id="rr-fsm-run" type="button" onclick="rrRunFsmReplay()">Run Latest Audit</button>
-          </div>
-
-          <details class="rr-options">
-            <summary>Choose sessions or time window</summary>
-            <div class="rr-option-row">
-              <div class="rr-field">
-                <label for="rr-fsm-session-ids">Session IDs</label>
-                <input class="rr-input" id="rr-fsm-session-ids" placeholder="optional" />
-              </div>
-              <div class="rr-field">
-                <label for="rr-fsm-since">Since</label>
-                <input class="rr-input" id="rr-fsm-since" type="datetime-local" />
-              </div>
-              <div class="rr-field">
-                <label for="rr-fsm-until">Until</label>
-                <input class="rr-input" id="rr-fsm-until" type="datetime-local" />
-              </div>
+            <div class="rr-field">
+              <label for="rr-fsm-since">Since</label>
+              <input class="rr-input" id="rr-fsm-since" type="datetime-local" />
             </div>
-            <div class="rr-inline-actions">
-              <button class="rr-btn secondary" type="button" onclick="rrClearFsmScope()">Use latest live</button>
+            <div class="rr-field">
+              <label for="rr-fsm-until">Until</label>
+              <input class="rr-input" id="rr-fsm-until" type="datetime-local" />
             </div>
-          </details>
-
-          <details class="rr-options">
-            <summary>Advanced defaults</summary>
-            <p class="rr-option-note">Only change these when comparing a specific replay run.</p>
-            <div class="rr-option-row five">
-              <div class="rr-field">
-                <label for="rr-fsm-limit">Limit</label>
-                <input class="rr-input" id="rr-fsm-limit" type="number" min="1" max="500" value="100" />
-              </div>
-              <div class="rr-field">
-                <label for="rr-fsm-capacity">Capacity</label>
-                <input class="rr-input" id="rr-fsm-capacity" type="number" min="1" max="200" value="25" />
-              </div>
-              <div class="rr-field">
-                <label for="rr-fsm-order-budget">Order budget</label>
-                <input class="rr-input" id="rr-fsm-order-budget" type="number" min="1" max="500" placeholder="auto" />
-              </div>
-              <div class="rr-field">
-                <label for="rr-fsm-risk-slots">Risk slots</label>
-                <input class="rr-input" id="rr-fsm-risk-slots" type="number" min="1" max="500" placeholder="auto" />
-              </div>
-              <div class="rr-field">
-                <label for="rr-fsm-trace-limit">Trace rows</label>
-                <input class="rr-input" id="rr-fsm-trace-limit" type="number" min="1" max="5000" value="500" />
-              </div>
-            </div>
-          </details>
-        </div>
-      </section>
-
-      <aside class="rr-panel" aria-label="Day replay">
-        <div class="rr-panel-head">
-          <div>
-            <h2>Day Replay</h2>
-            <p>High-fidelity v2 run for a single tape date.</p>
-          </div>
-          <span class="rr-tag readonly">v2</span>
-        </div>
-        <div class="rr-compact">
-          <div class="rr-field">
-            <label for="rr-day-date">Date</label>
-            <input class="rr-input" id="rr-day-date" type="date" />
-          </div>
-          <div class="rr-field" style="margin-top:10px;">
-            <label for="rr-day-mode">Mode</label>
-            <select class="rr-select" id="rr-day-mode">
-              <option value="live">Live armed</option>
-              <option value="asof">As-of selection</option>
-            </select>
           </div>
           <div class="rr-inline-actions">
-            <button class="rr-btn" id="rr-day-run" type="button" onclick="rrRunDayReplay()">Run Day Replay</button>
-            <span class="rr-status" id="rr-day-status">idle</span>
+            <button class="rr-btn secondary" type="button" onclick="rrClearFsmScope()">Use latest live</button>
           </div>
-          <div class="rr-run-strip">
-            <div class="rr-kpi"><b id="rr-job-state">idle</b><span>Job state</span></div>
-            <div class="rr-kpi"><b id="rr-job-date">-</b><span>Last date</span></div>
+        </details>
+
+        <details class="rr-options">
+          <summary>Advanced defaults</summary>
+          <p class="rr-option-note">Internal replay budgets stay on defaults unless a run needs a strict comparison.</p>
+          <div class="rr-option-row five">
+            <div class="rr-field">
+              <label for="rr-fsm-limit">Limit</label>
+              <input class="rr-input" id="rr-fsm-limit" type="number" min="1" max="500" value="100" />
+            </div>
+            <div class="rr-field">
+              <label for="rr-fsm-capacity">Capacity</label>
+              <input class="rr-input" id="rr-fsm-capacity" type="number" min="1" max="200" value="25" />
+            </div>
+            <div class="rr-field">
+              <label for="rr-fsm-order-budget">Order budget</label>
+              <input class="rr-input" id="rr-fsm-order-budget" type="number" min="1" max="500" placeholder="auto" />
+            </div>
+            <div class="rr-field">
+              <label for="rr-fsm-risk-slots">Risk slots</label>
+              <input class="rr-input" id="rr-fsm-risk-slots" type="number" min="1" max="500" placeholder="auto" />
+            </div>
+            <div class="rr-field">
+              <label for="rr-fsm-trace-limit">Trace rows</label>
+              <input class="rr-input" id="rr-fsm-trace-limit" type="number" min="1" max="5000" value="500" />
+            </div>
           </div>
-        </div>
-      </aside>
-    </div>
+        </details>
+      </div>
+    </section>
 
-    <main class="rr-output">
-      <section class="rr-result" id="rr-fsm-result">
+    <main class="rr-workbench">
+      <section class="rr-result rr-board" id="rr-fsm-result">
         <div class="rr-result-head">
-          <h3>FSM audit result</h3>
-          <span class="rr-tag">not run</span>
-        </div>
-        <div class="rr-empty">Run an FSM audit to populate the research result.</div>
-      </section>
-
-      <section class="rr-result" id="rr-day-result" style="display:none;">
-        <div class="rr-result-head">
-          <h3 id="rr-day-title">Day replay result</h3>
-          <span class="rr-tag" id="rr-day-result-mode">v2</span>
-        </div>
-        <div class="rr-result-body" id="rr-day-body"></div>
-      </section>
-
-      <section class="rr-result">
-        <div class="rr-result-head">
-          <h3>Replay history</h3>
-          <span class="rr-tag">persisted</span>
+          <div>
+            <h3>Correlation board</h3>
+            <p>Evidence readiness, outcome attribution, and blocked claims for live sessions.</p>
+          </div>
+          <span class="rr-tag">waiting</span>
         </div>
         <div class="rr-result-body">
-          <div class="rr-table-wrap">
-            <table class="rr-table">
-              <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>Mode</th>
-                  <th>P/L</th>
-                  <th>Trades</th>
-                  <th>W/L</th>
-                  <th>Tape</th>
-                  <th>Candidates</th>
-                  <th>Ran at</th>
-                </tr>
-              </thead>
-              <tbody id="rr-history"></tbody>
-            </table>
+          <div class="rr-board-hero">
+            <div class="rr-finding">
+              <strong>Awaiting live-session evidence.</strong>
+              <span>Selection edge, broker truth, execution friction, and setup coverage will populate after analysis.</span>
+            </div>
+            <div class="rr-score">
+              <div class="rr-score-card"><b>-</b><span>Readiness</span></div>
+              <div class="rr-score-card"><b>-</b><span>Missing evidence</span></div>
+              <div class="rr-score-card"><b>-</b><span>Expected P/L</span></div>
+            </div>
+          </div>
+          <div class="rr-corr-grid">
+            <div class="rr-corr-card"><h4>Selection edge</h4><b>waiting</b><span>Priority vs outcome</span></div>
+            <div class="rr-corr-card"><h4>Broker attribution</h4><b>waiting</b><span>Fill truth vs replay state</span></div>
+            <div class="rr-corr-card"><h4>Execution friction</h4><b>waiting</b><span>Adapter and capacity blockers</span></div>
+            <div class="rr-corr-card"><h4>Setup coverage</h4><b>waiting</b><span>Trace rows vs selected setups</span></div>
           </div>
         </div>
       </section>
+
+      <aside class="rr-research-side">
+        <section class="rr-result">
+          <div class="rr-result-head">
+            <div>
+              <h3>Research lenses</h3>
+              <p>The four correlations that make or break the claim.</p>
+            </div>
+          </div>
+          <div class="rr-result-body">
+            <div class="rr-lens-list">
+              <div class="rr-lens"><strong>Selection edge</strong><span>Did selected setups carry measurable expected value?</span></div>
+              <div class="rr-lens"><strong>Broker truth</strong><span>Can each terminal state be tied back to broker evidence?</span></div>
+              <div class="rr-lens"><strong>Starvation</strong><span>Did adapter or capacity constraints explain missed trades?</span></div>
+              <div class="rr-lens"><strong>Setup trace</strong><span>Were the setup rows dense enough to support the claim?</span></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="rr-panel" aria-label="Day replay">
+          <div class="rr-panel-head">
+            <div>
+              <h2>Day Replay</h2>
+              <p>Single-day v2 replay for tape-level context.</p>
+            </div>
+            <span class="rr-tag readonly">v2</span>
+          </div>
+          <div class="rr-compact">
+            <div class="rr-run-strip">
+              <div class="rr-kpi"><b id="rr-job-state">idle</b><span>Job state</span></div>
+              <div class="rr-kpi"><b id="rr-job-date">-</b><span>Last date</span></div>
+            </div>
+            <details class="rr-options">
+              <summary>Day replay controls</summary>
+              <div class="rr-field" style="margin-top:10px;">
+                <label for="rr-day-date">Date</label>
+                <input class="rr-input" id="rr-day-date" type="date" />
+              </div>
+              <div class="rr-field" style="margin-top:10px;">
+                <label for="rr-day-mode">Mode</label>
+                <select class="rr-select" id="rr-day-mode">
+                  <option value="live">Live armed</option>
+                  <option value="asof">As-of selection</option>
+                </select>
+              </div>
+              <div class="rr-inline-actions">
+                <button class="rr-btn secondary" id="rr-day-run" type="button" onclick="rrRunDayReplay()">Run Day Replay</button>
+                <span class="rr-status" id="rr-day-status">idle</span>
+              </div>
+            </details>
+          </div>
+        </section>
+      </aside>
     </main>
+
+    <details class="rr-archive">
+      <summary>Day replay archive</summary>
+      <div class="rr-archive-body">
+        <section class="rr-result" id="rr-day-result" style="display:none;">
+          <div class="rr-result-head">
+            <h3 id="rr-day-title">Day replay result</h3>
+            <span class="rr-tag" id="rr-day-result-mode">v2</span>
+          </div>
+          <div class="rr-result-body" id="rr-day-body"></div>
+        </section>
+
+        <section class="rr-result">
+          <div class="rr-result-head">
+            <h3>Replay history</h3>
+            <span class="rr-tag">persisted</span>
+          </div>
+          <div class="rr-result-body">
+            <div class="rr-table-wrap">
+              <table class="rr-table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Mode</th>
+                    <th>P/L</th>
+                    <th>Trades</th>
+                    <th>W/L</th>
+                    <th>Tape</th>
+                    <th>Candidates</th>
+                    <th>Ran at</th>
+                  </tr>
+                </thead>
+                <tbody id="rr-history"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </div>
+    </details>
   </div>
 </div>
 
@@ -684,6 +983,22 @@
       '<strong>' + esc(label) + '</strong><span>' + (ready ? 'ready' : 'blocked') + '</span></div>';
   }
 
+  function claimState(ready) {
+    return ready ? 'ready' : 'blocked';
+  }
+
+  function corrCard(title, ready, value, detail) {
+    var state = claimState(ready);
+    return '<div class="rr-corr-card ' + state + '"><h4>' + esc(title) + '</h4>' +
+      '<b>' + esc(value || state) + '</b><span>' + esc(detail || '') + '</span></div>';
+  }
+
+  function matrixRow(signal, evidence, ready) {
+    var state = claimState(ready);
+    return '<div class="rr-matrix-row"><strong>' + esc(signal) + '</strong>' +
+      '<span>' + esc(evidence) + '</span><b class="rr-state ' + state + '">' + state + '</b></div>';
+  }
+
   function setStatus(id, text, cls) {
     var el = document.getElementById(id);
     if (!el) return;
@@ -702,6 +1017,8 @@
     var until = document.getElementById('rr-fsm-until');
     if (since) since.value = '';
     if (until) until.value = '';
+    var scope = document.getElementById('rr-scope-summary');
+    if (scope) scope.textContent = 'Latest live sessions · read-only · production evidence';
     setStatus('rr-fsm-status', 'latest live selected', '');
   };
 
@@ -722,6 +1039,12 @@
     if (until) params.set('until', until);
     if (orderBudget) params.set('order_call_budget', String(orderBudget));
     if (riskSlots) params.set('risk_budget_slots', String(riskSlots));
+    var scopeSummary = document.getElementById('rr-scope-summary');
+    if (scopeSummary) {
+      scopeSummary.textContent = sessionIds.trim()
+        ? 'Chosen sessions · read-only · production evidence'
+        : 'Latest live sessions · read-only · production evidence';
+    }
 
     if (btn) btn.disabled = true;
     setStatus('rr-fsm-status', 'running audit...', 'running');
@@ -753,15 +1076,16 @@
   function renderFsmLoading() {
     var host = document.getElementById('rr-fsm-result');
     if (!host) return;
-    host.innerHTML = '<div class="rr-result-head"><h3>FSM audit result</h3><span class="rr-tag live">running</span></div>' +
-      '<div class="rr-empty">Replay v3 audit is running.</div>';
+    host.innerHTML = '<div class="rr-result-head"><div><h3>Correlation board</h3><p>Evidence readiness, outcome attribution, and blocked claims for live sessions.</p></div><span class="rr-tag live">running</span></div>' +
+      '<div class="rr-result-body"><div class="rr-board-hero"><div class="rr-finding"><strong>Analyzing live sessions.</strong><span>Building the evidence matrix from scheduler snapshots, broker outcomes, setup traces, and replay certification.</span></div>' +
+      '<div class="rr-score"><div class="rr-score-card"><b>-</b><span>Readiness</span></div><div class="rr-score-card"><b>-</b><span>Missing evidence</span></div><div class="rr-score-card"><b>-</b><span>Expected P/L</span></div></div></div></div>';
   }
 
   function renderFsmError(message) {
     var host = document.getElementById('rr-fsm-result');
     if (!host) return;
-    host.innerHTML = '<div class="rr-result-head"><h3>FSM audit result</h3><span class="rr-tag red">error</span></div>' +
-      '<div class="rr-empty" style="color:var(--rr-red);">' + esc(message) + '</div>';
+    host.innerHTML = '<div class="rr-result-head"><div><h3>Correlation board</h3><p>Evidence readiness, outcome attribution, and blocked claims for live sessions.</p></div><span class="rr-tag red">error</span></div>' +
+      '<div class="rr-result-body"><div class="rr-finding blocked"><strong>Audit failed.</strong><span>' + esc(message) + '</span></div></div>';
   }
 
   function renderFsmResult(payload) {
@@ -778,24 +1102,41 @@
     var missing = cert.missing_evidence || [];
     var selectedPnl = Number(scheduler.selected_expected_pnl_usd || 0);
     var sessionIds = scope.session_ids || [];
-    var titleTag = payload && payload.ok === false ? 'blocked' : 'complete';
-    var kpis = [
-      kpi('Scope', sessionIds.length ? sessionIds.join(', ') : 'none'),
-      kpi('Sessions', fmtNum(inputs.session_rows)),
-      kpi('Snapshots', fmtNum(inputs.scheduler_snapshot_steps)),
-      kpi('Broker outcomes', fmtNum(inputs.broker_outcomes)),
-      kpi('Selected', fmtNum(scheduler.selected_count)),
-      kpi('Terminalized', fmtNum(scheduler.terminalized_count)),
-      kpi('Pending', fmtNum(scheduler.pending_count)),
-      kpi('Expected P/L', fmtMoney(selectedPnl), selectedPnl >= 0 ? 'rr-pos' : 'rr-neg')
+    var claims = [
+      { label: 'Scheduler priority', evidence: 'Selected candidates follow replay priority ordering', ready: !!cert.scheduler_priority_claim_ready },
+      { label: 'Adapter starvation', evidence: 'Unavailable adapter states explain skipped execution', ready: !!cert.adapter_unavailable_starvation_claim_ready },
+      { label: 'Broker outcome', evidence: 'Terminal outcomes map to broker-side truth', ready: !!cert.broker_outcome_attribution_ready },
+      { label: 'Realized vs expected', evidence: 'Selected expected value can be compared to realized state', ready: !!cert.realized_vs_selected_expected_claim_ready },
+      { label: 'P/L min-max', evidence: 'Expected P/L sits inside certified replay bounds', ready: !!cert.pnl_minmax_claim_ready },
+      { label: 'Setup trace', evidence: 'Setup trace coverage supports the selection claim', ready: !!setupCert.setup_trace_coverage_ready }
+    ];
+    var readyCount = claims.filter(function(row) { return row.ready; }).length;
+    var blockedCount = claims.length - readyCount;
+    var readiness = readyCount + '/' + claims.length;
+    var titleTag = blockedCount ? 'blocked' : 'claim ready';
+    var findingClass = blockedCount ? 'blocked' : 'ready';
+    var findingTitle = blockedCount
+      ? 'Claims are blocked by ' + blockedCount + ' evidence gap' + (blockedCount === 1 ? '' : 's') + '.'
+      : 'Core claims are ready for review.';
+    var findingDetail = missing.length
+      ? 'Missing: ' + missing.slice(0, 3).join(', ') + (missing.length > 3 ? ', +' + (missing.length - 3) + ' more' : '')
+      : 'No missing evidence reported by certification.';
+    var matrix = claims.map(function(row) {
+      return matrixRow(row.label, row.evidence, row.ready);
+    }).join('');
+    var corr = [
+      corrCard('Selection edge', cert.scheduler_priority_claim_ready && cert.realized_vs_selected_expected_claim_ready, readiness, 'Priority ordering tied to selected outcomes'),
+      corrCard('Broker attribution', cert.broker_outcome_attribution_ready, fmtNum(inputs.broker_outcomes) + ' outcomes', 'Broker truth available for terminal states'),
+      corrCard('Execution friction', cert.adapter_unavailable_starvation_claim_ready, fmtNum(scheduler.pending_count) + ' pending', 'Adapter starvation and capacity pressure'),
+      corrCard('Setup coverage', setupCert.setup_trace_coverage_ready, fmtNum(inputs.scheduler_snapshot_steps) + ' snapshots', 'Setup trace coverage behind selections')
     ].join('');
-    var gates = [
-      gate('Scheduler priority', !!cert.scheduler_priority_claim_ready),
-      gate('Adapter starvation', !!cert.adapter_unavailable_starvation_claim_ready),
-      gate('Broker outcome', !!cert.broker_outcome_attribution_ready),
-      gate('Realized vs expected', !!cert.realized_vs_selected_expected_claim_ready),
-      gate('P/L min-max', !!cert.pnl_minmax_claim_ready),
-      gate('Setup trace', !!setupCert.setup_trace_coverage_ready)
+    var scores = [
+      '<div class="rr-score-card"><b>' + esc(readiness) + '</b><span>Claim readiness</span></div>',
+      '<div class="rr-score-card"><b>' + esc(missing.length) + '</b><span>Missing evidence</span></div>',
+      '<div class="rr-score-card"><b class="' + (selectedPnl >= 0 ? 'rr-pos' : 'rr-neg') + '">' + esc(fmtMoney(selectedPnl)) + '</b><span>Expected P/L</span></div>',
+      '<div class="rr-score-card"><b>' + esc(fmtNum(inputs.session_rows)) + '</b><span>Sessions</span></div>',
+      '<div class="rr-score-card"><b>' + esc(fmtNum(scheduler.selected_count)) + '</b><span>Selected</span></div>',
+      '<div class="rr-score-card"><b>' + esc(fmtNum(scheduler.terminalized_count)) + '</b><span>Terminalized</span></div>'
     ].join('');
     var pills = [
       '<span class="rr-pill blue">read only</span>',
@@ -804,11 +1145,13 @@
     if (scope.since_utc) pills.push('<span class="rr-pill">since ' + esc(scope.since_utc) + '</span>');
     if (scope.until_utc) pills.push('<span class="rr-pill">until ' + esc(scope.until_utc) + '</span>');
 
-    var html = '<div class="rr-result-head"><h3>FSM audit result</h3><span class="rr-tag live">' + esc(titleTag) + '</span></div>';
+    var html = '<div class="rr-result-head"><div><h3>Correlation board</h3><p>Evidence readiness, outcome attribution, and blocked claims for live sessions.</p></div><span class="rr-tag live">' + esc(titleTag) + '</span></div>';
     html += '<div class="rr-result-body">';
-    html += '<div class="rr-kpis">' + kpis + '</div>';
+    html += '<div class="rr-board-hero"><div class="rr-finding ' + findingClass + '"><strong>' + esc(findingTitle) + '</strong><span>' + esc(findingDetail) + '</span></div>';
+    html += '<div class="rr-score">' + scores + '</div></div>';
     html += '<div class="rr-pill-row">' + pills.join('') + '</div>';
-    html += '<div class="rr-gates">' + gates + '</div>';
+    html += '<div class="rr-corr-grid">' + corr + '</div>';
+    html += '<div class="rr-section-title">Evidence matrix</div><div class="rr-matrix">' + matrix + '</div>';
     if (scheduler.no_selected_reason) {
       html += '<div class="rr-section-title">Selection outcome</div><ul class="rr-list"><li><span class="rr-code">' + esc(scheduler.no_selected_reason) + '</span></li></ul>';
     }
@@ -888,7 +1231,7 @@
         if (btn) btn.disabled = false;
         if (job.state === 'done') {
           setStatus('rr-day-status', 'complete', 'done');
-          rrLoadDayResult(job.date, job.armed_source || rrLastDayMode);
+          rrLoadDayResult(job.date, job.armed_source || rrLastDayMode, true);
           rrLoadHistory();
         } else if (job.state === 'error') {
           setStatus('rr-day-status', job.error || 'error', 'error');
@@ -900,21 +1243,23 @@
       .catch(function() {});
   }
 
-  function rrLoadDayResult(date, mode) {
+  function rrLoadDayResult(date, mode, openArchive) {
     if (!date) return;
     fetch('/api/trading/momentum/replay/result/' + encodeURIComponent(date) + '?armed_source=' + encodeURIComponent(mode || 'asof'), { credentials: 'same-origin' })
       .then(function(resp) { return resp.json().then(function(body) { return { ok: resp.ok, body: body }; }); })
       .then(function(out) {
         if (!out.ok || !out.body || !out.body.result) return;
-        renderDayResult(out.body.result);
+        renderDayResult(out.body.result, !!openArchive);
       })
       .catch(function() {});
   }
 
-  function renderDayResult(result) {
+  function renderDayResult(result, openArchive) {
     var host = document.getElementById('rr-day-result');
     var body = document.getElementById('rr-day-body');
     if (!host || !body) return;
+    var archive = document.querySelector('.rr-archive');
+    if (archive && openArchive) archive.open = true;
     host.style.display = '';
     document.getElementById('rr-day-title').textContent = result.date + ' day replay';
     document.getElementById('rr-day-result-mode').textContent = result.armed_source || 'v2';
@@ -991,14 +1336,13 @@
         host.innerHTML = rows.map(function(row) {
           var total = Number(row.total_usd || 0);
           var mode = row.armed_source || 'asof';
-          return '<tr class="clickable" onclick="rrLoadDayResult(\'' + esc(row.date) + '\', \'' + esc(mode) + '\')">' +
+          return '<tr class="clickable" onclick="rrLoadDayResult(\'' + esc(row.date) + '\', \'' + esc(mode) + '\', true)">' +
             '<td><b>' + esc(row.date) + '</b></td><td>' + esc(mode) + '</td>' +
             '<td class="' + (total >= 0 ? 'rr-pos' : 'rr-neg') + '">' + fmtMoney(total) + '</td>' +
             '<td>' + esc(row.n_trades || 0) + '</td><td>' + esc(row.wins || 0) + '/' + esc(row.losses || 0) + '</td>' +
             '<td>' + esc(row.tape_symbols || 0) + '</td><td>' + esc(row.candidates || 0) + '</td>' +
             '<td>' + esc(String(row.ran_at_utc || '').slice(0, 16).replace('T', ' ')) + '</td></tr>';
         }).join('');
-        rrLoadDayResult(rows[0].date, rows[0].armed_source || 'asof');
       })
       .catch(function() {});
   }
