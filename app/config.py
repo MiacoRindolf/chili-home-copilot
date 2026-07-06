@@ -4424,6 +4424,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ASETUP_CONVICTION_SIZE_ENABLED"),
         description="NO-MAGIC A-setup sizing (replaces the fixed 0.5 combined-size-down floor): the floor = the setup's CONVICTION = clamp((viability - A_setup_floor) / (1 - A_setup_floor), 0, 1) — how far the viability sits ABOVE the A-setup floor toward its max. A TOP-conviction A-setup (viability -> 1.0) gets ~FULL base risk, so the risk-first qty binds on the pre-existing 15%-of-equity notional cap — i.e. a high-quality trade sizes to ~15% of cash (the operator's stated risk-appetite), while a marginal A-setup keeps a smaller floor. NO new magic number (the A-setup gate, the [0,1] viability, and the 15% notional cap all pre-exist). LIFT-ONLY (the _combined_mult<floor gate raises, never cuts) ⇒ monotonic vs the stacked size-down, never a regression on marginal setups. Kill-switch =0 ⇒ the fixed chili_momentum_combined_size_down_floor (instant rollback).",
     )
+    chili_momentum_conviction_frontside_gate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CONVICTION_FRONTSIDE_GATE_ENABLED"),
+        description="Gate the A-setup CONVICTION size-up by the ENTRY's front-side strength (frontside_mult), not just the NAME's viability. Viability scores the NAME (DXF and JEM both ~0.90); frontside_mult scores THIS ENTRY (extension/OFI/tape/Kaufman-ER). Without this gate the viability lift OVERRIDES the front-side size-down that already correctly shrank a weak/extended top-buy — measured DXF/CLRO 06-30/07-02: frontside_mult 0.36-0.75 (correctly weak) sized down to combined_mult 0.03-0.21, but the 0.80 viability lift blew them back up 3-23x into a fade. The gate multiplies the conviction floor by frontside_mult so the size-up needs BOTH a high-quality NAME and a high-quality ENTRY (edge = name x entry): JEM (frontside_mult ~1.0) is unchanged; DXF (x0.75)/CLRO (x0.36) size down. OFF ⇒ the viability lift stands alone (byte-identical). Requires chili_momentum_asetup_conviction_size_enabled.",
+    )
     # ── ROSS RISK GAP 3 — ACCOUNT-WIDE CONSECUTIVE-LOSS ARM HALT (tilt rule) ──────────
     # Ross's tilt rule: 2-3 reds in a row = walk away. The streak dial only de-SIZES (never
     # halts), the count day-blocks are PER-SYMBOL, and the account-wide halts are DOLLAR-based
