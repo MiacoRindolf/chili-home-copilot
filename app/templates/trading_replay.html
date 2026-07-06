@@ -210,6 +210,57 @@
   display: grid;
   gap: 9px;
 }
+.rp-viewport {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) 300px;
+  gap: 12px;
+  align-items: center;
+  color: var(--rp-soft);
+  font-size: 10px;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+.rp-viewport-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.rp-viewport-window {
+  min-width: 0;
+  color: var(--rp-text);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rp-viewport-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+}
+.rp-tool {
+  display: inline-grid;
+  place-items: center;
+  min-width: 28px;
+  height: 28px;
+  border: 1px solid var(--rp-line);
+  border-radius: 7px;
+  background: #0b1220;
+  color: var(--rp-text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1;
+  padding: 0 8px;
+}
+.rp-tool:hover {
+  border-color: color-mix(in srgb, var(--rp-blue) 46%, transparent);
+  color: var(--rp-blue);
+}
 .rp-ruler {
   display: grid;
   grid-template-columns: 150px minmax(0, 1fr) 300px;
@@ -272,8 +323,15 @@
 .rp-chart {
   position: relative;
   min-height: 172px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.rp-chart.is-inspecting {
   cursor: crosshair;
-  touch-action: manipulation;
+}
+.rp-chart.is-dragging {
+  cursor: grabbing;
 }
 .rp-chart svg {
   display: block;
@@ -437,6 +495,7 @@
 }
 @media (max-width: 1100px) {
   .rp-command,
+  .rp-viewport,
   .rp-ruler,
   .rp-row {
     grid-template-columns: 1fr;
@@ -446,6 +505,13 @@
   }
   .rp-ruler {
     display: none;
+  }
+  .rp-viewport > div:first-child,
+  .rp-viewport > div:last-child {
+    display: none;
+  }
+  .rp-viewport-tools {
+    margin-left: 0;
   }
   .rp-setup {
     grid-template-columns: 1fr;
@@ -534,6 +600,11 @@
   var rpHistoryRows = [];
   var rpLastResult = null;
   var rpPinnedChart = null;
+  var rpFullDomain = null;
+  var rpViewDomain = null;
+  var rpDragState = null;
+  var rpSuppressClick = false;
+  var RP_MIN_WINDOW_MINUTES = 6;
 
   function esc(value) {
     var div = document.createElement('div');
@@ -638,6 +709,57 @@
       min: Math.max(4 * 60, Math.min.apply(null, mins) - 8),
       max: Math.min(20 * 60, Math.max.apply(null, mins) + 8)
     };
+  }
+
+  function cloneDomain(domain) {
+    return domain ? { min: Number(domain.min), max: Number(domain.max) } : null;
+  }
+
+  function domainSpan(domain) {
+    return domain ? Math.max(0, Number(domain.max) - Number(domain.min)) : 0;
+  }
+
+  function inDomain(minute, domain) {
+    return minute != null && domain && minute >= domain.min && minute <= domain.max;
+  }
+
+  function tradeTouchesDomain(trade, domain) {
+    var entry = timeMin(trade && trade.t);
+    var exit = timeMin(trade && trade.exit_t);
+    if (entry == null && exit == null) return false;
+    if (entry != null && exit != null) {
+      return Math.max(entry, exit) >= domain.min && Math.min(entry, exit) <= domain.max;
+    }
+    return inDomain(entry != null ? entry : exit, domain);
+  }
+
+  function clampViewDomain(min, max) {
+    if (!rpFullDomain) return null;
+    var fullMin = rpFullDomain.min;
+    var fullMax = rpFullDomain.max;
+    var fullSpan = Math.max(1, fullMax - fullMin);
+    var span = Math.max(RP_MIN_WINDOW_MINUTES, Number(max) - Number(min));
+    span = Math.min(fullSpan, span);
+    var nextMin = Number(min);
+    var nextMax = nextMin + span;
+    if (nextMin < fullMin) {
+      nextMin = fullMin;
+      nextMax = fullMin + span;
+    }
+    if (nextMax > fullMax) {
+      nextMax = fullMax;
+      nextMin = fullMax - span;
+    }
+    return { min: Math.round(nextMin), max: Math.round(nextMax) };
+  }
+
+  function viewportLabel() {
+    if (!rpFullDomain || !rpViewDomain) return '';
+    var full = Math.max(1, domainSpan(rpFullDomain));
+    var view = Math.max(1, domainSpan(rpViewDomain));
+    var scale = full / view;
+    var scaleText = scale >= 10 ? scale.toFixed(1) : scale.toFixed(2);
+    return timeLabel(rpViewDomain.min) + ' - ' + timeLabel(rpViewDomain.max) + ' / ' + scaleText + 'x';
   }
 
   function symbolList(result) {
@@ -808,6 +930,7 @@
   }
 
   function handleChartMove(event) {
+    if (updateChartPan(event)) return;
     var chart = event.target.closest && event.target.closest('.rp-chart');
     if (!chart) return;
     if (rpPinnedChart) return;
@@ -815,6 +938,7 @@
   }
 
   function handleChartOut(event) {
+    if (rpDragState) return;
     var chart = event.target.closest && event.target.closest('.rp-chart');
     if (!chart || chart === rpPinnedChart) return;
     if (event.relatedTarget && chart.contains(event.relatedTarget)) return;
@@ -824,6 +948,10 @@
   }
 
   function handleChartClick(event) {
+    if (rpSuppressClick) {
+      event.preventDefault();
+      return;
+    }
     var chart = event.target.closest && event.target.closest('.rp-chart');
     if (!chart) {
       clearPinnedChart();
@@ -838,6 +966,130 @@
     updateChartInspection(chart, event, true);
   }
 
+  function chartOverlayHtml() {
+    return '<div class="rp-crosshair"><span></span></div><div class="rp-tooltip"></div>';
+  }
+
+  function refreshViewportUi() {
+    if (!rpLastResult || !rpViewDomain) return;
+    clearPinnedChart();
+    rpPinnedChart = null;
+    document.querySelectorAll('.rp-row.is-active').forEach(function(row) {
+      row.classList.remove('is-active');
+    });
+    document.querySelectorAll('.rp-chart').forEach(function(chart) {
+      var sym = chart.dataset.symbol || '';
+      chart.classList.remove('is-inspecting');
+      chart.classList.remove('is-pinned');
+      chart.dataset.domainMin = rpViewDomain.min;
+      chart.dataset.domainMax = rpViewDomain.max;
+      chart.innerHTML = chartSvg(rpLastResult, sym, rpViewDomain) + chartOverlayHtml();
+    });
+    var ruler = document.getElementById('rp-ruler');
+    if (ruler) ruler.outerHTML = renderRuler(rpViewDomain);
+    var label = document.getElementById('rp-viewport-window');
+    if (label) label.textContent = viewportLabel();
+  }
+
+  function setViewDomain(domain) {
+    if (!domain) return;
+    var next = clampViewDomain(domain.min, domain.max);
+    if (!next) return;
+    rpViewDomain = next;
+    refreshViewportUi();
+  }
+
+  function zoomViewport(factor, anchorRatio) {
+    if (!rpViewDomain) return;
+    var current = cloneDomain(rpViewDomain);
+    var span = Math.max(1, domainSpan(current));
+    var anchor = Math.max(0, Math.min(1, anchorRatio == null ? 0.5 : anchorRatio));
+    var nextSpan = span * factor;
+    var anchorMinute = current.min + span * anchor;
+    setViewDomain({
+      min: anchorMinute - nextSpan * anchor,
+      max: anchorMinute + nextSpan * (1 - anchor)
+    });
+  }
+
+  function panViewport(deltaRatio, baseDomain) {
+    var source = baseDomain || rpViewDomain;
+    if (!source) return;
+    var shift = domainSpan(source) * deltaRatio;
+    setViewDomain({ min: source.min + shift, max: source.max + shift });
+  }
+
+  function resetViewport() {
+    if (!rpFullDomain) return;
+    setViewDomain(cloneDomain(rpFullDomain));
+  }
+
+  function handleChartWheel(event) {
+    var chart = event.target.closest && event.target.closest('.rp-chart');
+    if (!chart || !rpViewDomain) return;
+    event.preventDefault();
+    var rect = chart.getBoundingClientRect();
+    if (!rect.width) return;
+    if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+      panViewport(event.deltaX / rect.width);
+      return;
+    }
+    var ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    zoomViewport(event.deltaY > 0 ? 1.18 : 0.82, ratio);
+  }
+
+  function handleChartPointerDown(event) {
+    var chart = event.target.closest && event.target.closest('.rp-chart');
+    if (!chart || !rpViewDomain || (event.button != null && event.button !== 0)) return;
+    var rect = chart.getBoundingClientRect();
+    if (!rect.width) return;
+    rpDragState = {
+      chart: chart,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      width: rect.width,
+      domain: cloneDomain(rpViewDomain),
+      moved: false
+    };
+    chart.classList.add('is-dragging');
+    if (chart.setPointerCapture) {
+      try { chart.setPointerCapture(event.pointerId); } catch (err) {}
+    }
+  }
+
+  function updateChartPan(event) {
+    if (!rpDragState) return false;
+    var dx = event.clientX - rpDragState.startX;
+    if (Math.abs(dx) < 3 && !rpDragState.moved) return true;
+    rpDragState.moved = true;
+    event.preventDefault();
+    panViewport(-dx / Math.max(1, rpDragState.width), rpDragState.domain);
+    return true;
+  }
+
+  function finishChartPan(event) {
+    if (!rpDragState) return;
+    if (rpDragState.chart) {
+      rpDragState.chart.classList.remove('is-dragging');
+      if (rpDragState.chart.releasePointerCapture) {
+        try { rpDragState.chart.releasePointerCapture(rpDragState.pointerId); } catch (err) {}
+      }
+    }
+    if (rpDragState.moved) {
+      rpSuppressClick = true;
+      setTimeout(function() { rpSuppressClick = false; }, 0);
+      if (event && event.preventDefault) event.preventDefault();
+    }
+    rpDragState = null;
+  }
+
+  function handleChartDoubleClick(event) {
+    var chart = event.target.closest && event.target.closest('.rp-chart');
+    if (!chart) return;
+    event.preventDefault();
+    resetViewport();
+  }
+
   function chartSvg(result, sym, domain) {
     var width = 720;
     var height = 172;
@@ -845,10 +1097,16 @@
     var top = 16;
     var bottom = 28;
     var plotH = height - top - bottom;
-    var bars = sampleBars(barsFor(result, sym), 260);
+    var visibleBars = barsFor(result, sym).filter(function(bar) {
+      return inDomain(timeMin(bar && bar[0]), domain);
+    });
+    var bars = sampleBars(visibleBars, 260);
     var trades = tradesFor(result, sym);
+    var visibleTrades = trades.filter(function(t) { return tradeTouchesDomain(t, domain); });
     var spans = armedFor(result, sym).spans || [];
-    var traces = tracesFor(result, sym).slice(0, 40);
+    var traces = tracesFor(result, sym).filter(function(row) {
+      return inDomain(timeMin(row.t), domain);
+    }).slice(0, 40);
     var prices = [];
     bars.forEach(function(bar) {
       [1, 2, 3, 4].forEach(function(i) {
@@ -856,7 +1114,7 @@
         if (Number.isFinite(n)) prices.push(n);
       });
     });
-    trades.forEach(function(t) {
+    visibleTrades.forEach(function(t) {
       ['entry', 'exit', 'stop', 'target'].forEach(function(k) {
         var n = Number(t[k]);
         if (Number.isFinite(n)) prices.push(n);
@@ -882,12 +1140,15 @@
       var a = timeMin(span && span[0]);
       var b = timeMin(span && span[1]);
       if (a == null || b == null) return;
-      var x1 = px(a, domain, width, pad);
-      var x2 = px(b, domain, width, pad);
+      var start = Math.max(Math.min(a, b), domain.min);
+      var end = Math.min(Math.max(a, b), domain.max);
+      if (end < domain.min || start > domain.max) return;
+      var x1 = px(start, domain, width, pad);
+      var x2 = px(end, domain, width, pad);
       parts.push('<rect x="' + x1.toFixed(1) + '" y="8" width="' + Math.max(2, x2 - x1).toFixed(1) + '" height="6" rx="3" fill="rgba(96,165,250,.35)"/>');
     });
     if (bars.length) {
-      var candleW = Math.max(1.4, Math.min(7, (width - pad * 2) / Math.max(1, bars.length * 1.45)));
+      var candleW = Math.max(1.4, Math.min(12, (width - pad * 2) / Math.max(1, bars.length * 1.45)));
       bars.forEach(function(bar) {
         var bx = px(timeMin(bar[0]), domain, width, pad);
         var vol = Number(bar[5] || 0);
@@ -914,9 +1175,9 @@
         parts.push('<rect x="' + (bx - candleW / 2).toFixed(1) + '" y="' + bodyY.toFixed(1) + '" width="' + candleW.toFixed(1) + '" height="' + bodyH.toFixed(1) + '" rx="1.1" fill="' + color + '" opacity=".88"/>');
       });
     } else {
-      parts.push('<text x="' + (width / 2) + '" y="' + (height / 2) + '" fill="#64748b" font-size="12" text-anchor="middle">no chart series</text>');
+      parts.push('<text x="' + (width / 2) + '" y="' + (height / 2) + '" fill="#64748b" font-size="12" text-anchor="middle">no candles in view</text>');
     }
-    trades.forEach(function(t) {
+    visibleTrades.forEach(function(t) {
       var entryM = timeMin(t.t);
       var exitM = timeMin(t.exit_t);
       var entryX = px(entryM, domain, width, pad);
@@ -931,12 +1192,12 @@
       if (Number.isFinite(Number(t.target))) {
         parts.push('<line x1="' + pad + '" y1="' + targetY.toFixed(1) + '" x2="' + (width - pad) + '" y2="' + targetY.toFixed(1) + '" stroke="#34d399" stroke-width="1" stroke-dasharray="4 4" opacity=".55"/>');
       }
-      if (entryM != null) {
+      if (inDomain(entryM, domain)) {
         parts.push('<line x1="' + entryX.toFixed(1) + '" y1="14" x2="' + entryX.toFixed(1) + '" y2="' + (height - bottom) + '" stroke="#60a5fa" stroke-width="1.3" opacity=".85"/>');
         parts.push('<circle cx="' + entryX.toFixed(1) + '" cy="' + entryY.toFixed(1) + '" r="4" fill="#60a5fa"/>');
         parts.push('<text x="' + Math.min(width - 80, entryX + 6).toFixed(1) + '" y="' + Math.max(16, entryY - 8).toFixed(1) + '" fill="#bfdbfe" font-size="10">ENTRY ' + esc(t.t || '') + '</text>');
       }
-      if (exitM != null) {
+      if (inDomain(exitM, domain)) {
         var good = Number(t.usd || 0) >= 0;
         var color = good ? '#34d399' : '#fb7185';
         parts.push('<line x1="' + exitX.toFixed(1) + '" y1="14" x2="' + exitX.toFixed(1) + '" y2="' + (height - bottom) + '" stroke="' + color + '" stroke-width="1.3" opacity=".85"/>');
@@ -962,7 +1223,24 @@
       var m = Math.round(domain.min + ((domain.max - domain.min) * i / 5));
       ticks.push('<span style="left:' + pct(m, domain).toFixed(1) + '%">' + esc(timeLabel(m)) + '</span>');
     }
-    return '<div class="rp-ruler"><div>Symbol</div><div class="rp-ruler-line">' + ticks.join('') + '</div><div>Setup / indicators</div></div>';
+    return '<div class="rp-ruler" id="rp-ruler"><div>Symbol</div><div class="rp-ruler-line">' + ticks.join('') + '</div><div>Setup / indicators</div></div>';
+  }
+
+  function renderViewportControls() {
+    return '<div class="rp-viewport">' +
+      '<div>Viewport</div>' +
+      '<div class="rp-viewport-main">' +
+      '<span class="rp-viewport-window" id="rp-viewport-window">' + esc(viewportLabel()) + '</span>' +
+      '<div class="rp-viewport-tools">' +
+      '<button class="rp-tool" type="button" aria-label="Pan earlier" title="Pan earlier" onclick="rpPanCharts(-0.24)">&lt;</button>' +
+      '<button class="rp-tool" type="button" aria-label="Zoom out" title="Zoom out" onclick="rpZoomCharts(1.28)">-</button>' +
+      '<button class="rp-tool" type="button" aria-label="Zoom in" title="Zoom in" onclick="rpZoomCharts(0.78)">+</button>' +
+      '<button class="rp-tool" type="button" aria-label="Pan later" title="Pan later" onclick="rpPanCharts(0.24)">&gt;</button>' +
+      '<button class="rp-tool" type="button" aria-label="Fit full replay" title="Fit full replay" onclick="rpResetCharts()">Fit</button>' +
+      '</div>' +
+      '</div>' +
+      '<div>Scale</div>' +
+      '</div>';
   }
 
   function renderChips(result, sym) {
@@ -1000,7 +1278,7 @@
     var badge = trades.length ? fmtMoney(pnl) : (armedFor(result, sym).spans || []).length ? 'armed' : 'watched';
     return '<article class="rp-row" data-symbol="' + esc(sym) + '">' +
       '<div class="rp-symbol"><b>' + esc(sym) + '</b><span>' + esc(trades.length + ' trades') + '</span><span>' + esc(fmtNum(bars.length) + ' bars') + '</span><span class="rp-badge ' + (pnl >= 0 ? 'rp-pos' : 'rp-neg') + '">' + esc(badge) + '</span></div>' +
-      '<div class="rp-chart" data-symbol="' + esc(sym) + '" data-domain-min="' + esc(domain.min) + '" data-domain-max="' + esc(domain.max) + '">' + chartSvg(result, sym, domain) + '<div class="rp-crosshair"><span></span></div><div class="rp-tooltip"></div></div>' +
+      '<div class="rp-chart" data-symbol="' + esc(sym) + '" data-domain-min="' + esc(domain.min) + '" data-domain-max="' + esc(domain.max) + '">' + chartSvg(result, sym, domain) + chartOverlayHtml() + '</div>' +
       '<div class="rp-setup">' + renderChips(result, sym) + renderTraceLines(result, sym) + '</div>' +
       '</article>';
   }
@@ -1034,21 +1312,29 @@
       '<div class="rp-stat"><b>' + esc(result.armed_source || 'replay') + '</b><span>Mode</span></div>' +
       '</div>';
     if (result.error) {
+      rpFullDomain = null;
+      rpViewDomain = null;
       host.innerHTML = stats + '<div class="rp-empty">' + esc(result.error) + '</div>';
       return;
     }
     if (!symbols.length) {
+      rpFullDomain = null;
+      rpViewDomain = null;
       host.innerHTML = stats + '<div class="rp-empty">No symbol actions for this replay.</div>';
       return;
     }
-    var domain = replayDomain(result);
-    var rows = symbols.map(function(sym) { return renderSymbolRow(result, sym, domain); }).join('');
-    host.innerHTML = stats + '<div class="rp-timeline">' + renderRuler(domain) + rows + '</div>';
+    rpFullDomain = replayDomain(result);
+    rpViewDomain = cloneDomain(rpFullDomain);
+    var rows = symbols.map(function(sym) { return renderSymbolRow(result, sym, rpViewDomain); }).join('');
+    host.innerHTML = stats + '<div class="rp-timeline">' + renderViewportControls() + renderRuler(rpViewDomain) + rows + '</div>';
   }
 
   function renderLoading(text) {
     var host = document.getElementById('rp-workspace');
     if (!host) return;
+    rpFullDomain = null;
+    rpViewDomain = null;
+    rpDragState = null;
     host.innerHTML = '<div class="rp-empty">' + esc(text || 'Loading replay...') + '</div>';
   }
 
@@ -1185,6 +1471,18 @@
     return loadResult(date, mode || 'live', false);
   };
 
+  window.rpZoomCharts = function(factor) {
+    zoomViewport(Number(factor) || 1, 0.5);
+  };
+
+  window.rpPanCharts = function(deltaRatio) {
+    panViewport(Number(deltaRatio) || 0);
+  };
+
+  window.rpResetCharts = function() {
+    resetViewport();
+  };
+
   document.addEventListener('DOMContentLoaded', function() {
     var date = document.getElementById('rp-date');
     if (date && !date.value) date.value = new Date().toISOString().slice(0, 10);
@@ -1194,9 +1492,14 @@
       mode.addEventListener('change', updateModeHint);
       updateModeHint();
     }
+    document.addEventListener('pointerdown', handleChartPointerDown);
     document.addEventListener('pointermove', handleChartMove);
+    document.addEventListener('pointerup', finishChartPan);
+    document.addEventListener('pointercancel', finishChartPan);
     document.addEventListener('pointerout', handleChartOut);
     document.addEventListener('click', handleChartClick);
+    document.addEventListener('dblclick', handleChartDoubleClick);
+    document.addEventListener('wheel', handleChartWheel, { passive: false });
     loadHistory();
   });
 })();
