@@ -875,7 +875,7 @@
       return top + ((maxP - n) / (maxP - minP)) * plotH;
     };
     var parts = [];
-    parts.push('<svg viewBox="0 0 ' + width + ' ' + height + '" role="img" aria-label="' + esc(sym) + ' chart">');
+    parts.push('<svg viewBox="0 0 ' + width + ' ' + height + '" role="img" aria-label="' + esc(sym) + ' candlestick chart">');
     parts.push('<rect x="0" y="0" width="' + width + '" height="' + height + '" fill="transparent"/>');
     parts.push('<line x1="' + pad + '" y1="' + (height - bottom) + '" x2="' + (width - pad) + '" y2="' + (height - bottom) + '" stroke="rgba(148,163,184,.25)" stroke-width="1"/>');
     spans.forEach(function(span) {
@@ -887,16 +887,32 @@
       parts.push('<rect x="' + x1.toFixed(1) + '" y="8" width="' + Math.max(2, x2 - x1).toFixed(1) + '" height="6" rx="3" fill="rgba(96,165,250,.35)"/>');
     });
     if (bars.length) {
-      var poly = bars.map(function(bar) {
-        return px(timeMin(bar[0]), domain, width, pad).toFixed(1) + ',' + y(bar[4]).toFixed(1);
-      }).join(' ');
+      var candleW = Math.max(1.4, Math.min(7, (width - pad * 2) / Math.max(1, bars.length * 1.45)));
       bars.forEach(function(bar) {
         var bx = px(timeMin(bar[0]), domain, width, pad);
         var vol = Number(bar[5] || 0);
         var vh = Math.max(1, Math.min(18, Math.log10(vol + 10) * 4));
         parts.push('<line x1="' + bx.toFixed(1) + '" y1="' + (height - bottom).toFixed(1) + '" x2="' + bx.toFixed(1) + '" y2="' + (height - bottom - vh).toFixed(1) + '" stroke="rgba(148,163,184,.18)" stroke-width="1"/>');
+        var open = Number(bar[1]);
+        var high = Number(bar[2]);
+        var low = Number(bar[3]);
+        var close = Number(bar[4]);
+        if (!Number.isFinite(open) || !Number.isFinite(high) || !Number.isFinite(low) || !Number.isFinite(close)) return;
+        var up = close > open;
+        var down = close < open;
+        var color = up ? '#22c55e' : down ? '#fb7185' : '#94a3b8';
+        var openY = y(open);
+        var closeY = y(close);
+        var highY = y(high);
+        var lowY = y(low);
+        var rawBodyH = Math.abs(closeY - openY);
+        var bodyH = Math.max(1.5, rawBodyH);
+        var bodyY = Math.min(openY, closeY);
+        if (rawBodyH < 1.5) bodyY = ((openY + closeY) / 2) - (bodyH / 2);
+        bodyY = Math.max(top, Math.min(height - bottom - bodyH, bodyY));
+        parts.push('<line x1="' + bx.toFixed(1) + '" y1="' + highY.toFixed(1) + '" x2="' + bx.toFixed(1) + '" y2="' + lowY.toFixed(1) + '" stroke="' + color + '" stroke-width="1" opacity=".78"/>');
+        parts.push('<rect x="' + (bx - candleW / 2).toFixed(1) + '" y="' + bodyY.toFixed(1) + '" width="' + candleW.toFixed(1) + '" height="' + bodyH.toFixed(1) + '" rx="1.1" fill="' + color + '" opacity=".88"/>');
       });
-      parts.push('<polyline points="' + poly + '" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>');
     } else {
       parts.push('<text x="' + (width / 2) + '" y="' + (height / 2) + '" fill="#64748b" font-size="12" text-anchor="middle">no chart series</text>');
     }
