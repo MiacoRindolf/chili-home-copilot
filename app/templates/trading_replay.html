@@ -124,6 +124,12 @@
   border-color: var(--rp-blue);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--rp-blue) 20%, transparent);
 }
+.rp-mode-hint {
+  color: var(--rp-soft);
+  font-size: 10px;
+  line-height: 1.3;
+  max-width: 260px;
+}
 .rp-btn {
   min-height: 36px;
   border: 1px solid #1d4ed8;
@@ -234,6 +240,11 @@
   border-radius: 8px;
   background: var(--rp-panel-2);
   padding: 10px;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+.rp-row.is-active {
+  border-color: color-mix(in srgb, var(--rp-blue) 58%, var(--rp-line));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--rp-blue) 24%, transparent);
 }
 .rp-symbol {
   display: grid;
@@ -261,12 +272,74 @@
 .rp-chart {
   position: relative;
   min-height: 172px;
+  cursor: crosshair;
+  touch-action: manipulation;
 }
 .rp-chart svg {
   display: block;
   width: 100%;
   height: 172px;
   overflow: visible;
+}
+.rp-crosshair {
+  position: absolute;
+  top: 8px;
+  bottom: 28px;
+  left: 0;
+  width: 1px;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--rp-amber) 80%, transparent);
+  opacity: 0;
+}
+.rp-chart.is-inspecting .rp-crosshair,
+.rp-chart.is-pinned .rp-crosshair {
+  opacity: 1;
+}
+.rp-crosshair span {
+  position: absolute;
+  top: -7px;
+  left: 50%;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--rp-amber);
+  transform: translateX(-50%);
+}
+.rp-tooltip {
+  position: absolute;
+  z-index: 3;
+  top: 22px;
+  left: 0;
+  min-width: 176px;
+  max-width: min(280px, calc(100% - 14px));
+  border: 1px solid color-mix(in srgb, var(--rp-blue) 42%, var(--rp-line));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--rp-panel) 92%, #020617 8%);
+  color: var(--rp-text);
+  box-shadow: 0 10px 26px rgba(2, 6, 23, .28);
+  opacity: 0;
+  padding: 9px 10px;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+.rp-chart.is-inspecting .rp-tooltip,
+.rp-chart.is-pinned .rp-tooltip {
+  opacity: 1;
+}
+.rp-tooltip b {
+  display: block;
+  font-size: 12px;
+  line-height: 1.25;
+}
+.rp-tooltip span {
+  display: block;
+  margin-top: 3px;
+  color: var(--rp-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.rp-pinned-note {
+  color: var(--rp-amber);
 }
 .rp-setup {
   display: grid;
@@ -427,9 +500,10 @@
           <div class="rp-field">
             <label for="rp-mode">Mode</label>
             <select class="rp-select" id="rp-mode">
-              <option value="live">Live armed</option>
-              <option value="asof">As-of selection</option>
+              <option value="asof">As-of selection - rerun system</option>
+              <option value="live">Live armed - actual Chili sessions</option>
             </select>
+            <span class="rp-mode-hint" id="rp-mode-hint">Reruns Chili's selection against the date data.</span>
           </div>
           <button class="rp-btn" id="rp-run" type="button" onclick="rpRunReplay()">Run Replay</button>
           <span class="rp-status" id="rp-status">idle</span>
@@ -459,6 +533,7 @@
   var rpPoll = null;
   var rpHistoryRows = [];
   var rpLastResult = null;
+  var rpPinnedChart = null;
 
   function esc(value) {
     var div = document.createElement('div');
@@ -628,6 +703,141 @@
       .replace(/:/g, ': ');
   }
 
+  function modeHint(mode) {
+    if (mode === 'asof') {
+      return 'Reruns Chili selection against the date data.';
+    }
+    return 'Replays the sessions Chili actually armed live.';
+  }
+
+  function updateModeHint() {
+    var mode = (document.getElementById('rp-mode') || {}).value || 'asof';
+    var hint = document.getElementById('rp-mode-hint');
+    if (hint) hint.textContent = modeHint(mode);
+  }
+
+  function nearestByMinute(rows, targetMinute, getMinute) {
+    var best = null;
+    var bestDelta = Infinity;
+    rows.forEach(function(row) {
+      var m = getMinute(row);
+      if (m == null) return;
+      var delta = Math.abs(m - targetMinute);
+      if (delta < bestDelta) {
+        best = row;
+        bestDelta = delta;
+      }
+    });
+    return best ? { row: best, delta: bestDelta } : null;
+  }
+
+  function nearestBar(sym, minute) {
+    return nearestByMinute(barsFor(rpLastResult || {}, sym), minute, function(bar) {
+      return timeMin(bar && bar[0]);
+    });
+  }
+
+  function nearestAction(sym, minute) {
+    var actions = [];
+    tradesFor(rpLastResult || {}, sym).forEach(function(t) {
+      if (t.t) actions.push({ kind: 'entry', t: t.t, price: t.entry, detail: 'entry ' + (t.entry == null ? '' : t.entry) });
+      if (t.exit_t) actions.push({ kind: 'exit', t: t.exit_t, price: t.exit, detail: 'exit ' + (t.exit == null ? '' : t.exit) + ' - ' + (t.why || '') });
+      if (t.stop != null) actions.push({ kind: 'stop', t: t.t || t.exit_t, price: t.stop, detail: 'stop ' + t.stop });
+      if (t.target != null) actions.push({ kind: 'target', t: t.t || t.exit_t, price: t.target, detail: 'target ' + t.target });
+    });
+    tracesFor(rpLastResult || {}, sym).forEach(function(row) {
+      actions.push({ kind: 'setup', t: row.t, detail: cleanStage(row.stage) });
+    });
+    var found = nearestByMinute(actions, minute, function(row) { return timeMin(row.t); });
+    return found && found.delta <= 8 ? found.row : null;
+  }
+
+  function describeInspection(sym, minute) {
+    var barHit = nearestBar(sym, minute);
+    var action = nearestAction(sym, minute);
+    var lines = [];
+    var title = sym + ' - ' + timeLabel(minute);
+    if (barHit && barHit.delta <= 5) {
+      var bar = barHit.row;
+      title = sym + ' - ' + bar[0];
+      lines.push('O ' + bar[1] + ' - H ' + bar[2] + ' - L ' + bar[3] + ' - C ' + bar[4]);
+      lines.push('Vol ' + fmtNum(bar[5]));
+    }
+    if (action) {
+      lines.push(action.kind.toUpperCase() + ' - ' + action.detail);
+    }
+    if (!lines.length) {
+      lines.push('No nearby event at this time.');
+    }
+    return '<b>' + esc(title) + '</b>' + lines.map(function(line) {
+      return '<span>' + esc(line) + '</span>';
+    }).join('');
+  }
+
+  function clearPinnedChart() {
+    if (!rpPinnedChart) return;
+    rpPinnedChart.classList.remove('is-pinned');
+    rpPinnedChart.classList.remove('is-inspecting');
+    rpPinnedChart = null;
+    document.querySelectorAll('.rp-row.is-active').forEach(function(row) {
+      row.classList.remove('is-active');
+    });
+  }
+
+  function updateChartInspection(chart, event, pinned) {
+    if (!chart || !rpLastResult) return;
+    var rect = chart.getBoundingClientRect();
+    if (!rect.width) return;
+    var ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    var min = Number(chart.dataset.domainMin || 0);
+    var max = Number(chart.dataset.domainMax || 0);
+    var minute = Math.round(min + (max - min) * ratio);
+    var symbol = chart.dataset.symbol || '';
+    var left = ratio * 100;
+    var crosshair = chart.querySelector('.rp-crosshair');
+    var tooltip = chart.querySelector('.rp-tooltip');
+    if (crosshair) crosshair.style.left = left.toFixed(2) + '%';
+    if (tooltip) {
+      tooltip.style.left = Math.max(88, Math.min(rect.width - 88, ratio * rect.width)).toFixed(1) + 'px';
+      tooltip.innerHTML = describeInspection(symbol, minute) + (pinned ? '<span class="rp-pinned-note">Pinned</span>' : '');
+    }
+    chart.classList.add('is-inspecting');
+    if (pinned) chart.classList.add('is-pinned');
+    var row = chart.closest('.rp-row');
+    if (row) row.classList.add('is-active');
+  }
+
+  function handleChartMove(event) {
+    var chart = event.target.closest && event.target.closest('.rp-chart');
+    if (!chart) return;
+    if (rpPinnedChart) return;
+    updateChartInspection(chart, event, false);
+  }
+
+  function handleChartOut(event) {
+    var chart = event.target.closest && event.target.closest('.rp-chart');
+    if (!chart || chart === rpPinnedChart) return;
+    if (event.relatedTarget && chart.contains(event.relatedTarget)) return;
+    chart.classList.remove('is-inspecting');
+    var row = chart.closest('.rp-row');
+    if (row && (!rpPinnedChart || !row.contains(rpPinnedChart))) row.classList.remove('is-active');
+  }
+
+  function handleChartClick(event) {
+    var chart = event.target.closest && event.target.closest('.rp-chart');
+    if (!chart) {
+      clearPinnedChart();
+      return;
+    }
+    if (rpPinnedChart === chart && chart.classList.contains('is-pinned')) {
+      clearPinnedChart();
+      return;
+    }
+    clearPinnedChart();
+    rpPinnedChart = chart;
+    updateChartInspection(chart, event, true);
+  }
+
   function chartSvg(result, sym, domain) {
     var width = 720;
     var height = 172;
@@ -772,9 +982,9 @@
     var bars = barsFor(result, sym);
     var pnl = trades.reduce(function(sum, t) { return sum + Number(t.usd || 0); }, 0);
     var badge = trades.length ? fmtMoney(pnl) : (armedFor(result, sym).spans || []).length ? 'armed' : 'watched';
-    return '<article class="rp-row">' +
+    return '<article class="rp-row" data-symbol="' + esc(sym) + '">' +
       '<div class="rp-symbol"><b>' + esc(sym) + '</b><span>' + esc(trades.length + ' trades') + '</span><span>' + esc(fmtNum(bars.length) + ' bars') + '</span><span class="rp-badge ' + (pnl >= 0 ? 'rp-pos' : 'rp-neg') + '">' + esc(badge) + '</span></div>' +
-      '<div class="rp-chart">' + chartSvg(result, sym, domain) + '</div>' +
+      '<div class="rp-chart" data-symbol="' + esc(sym) + '" data-domain-min="' + esc(domain.min) + '" data-domain-max="' + esc(domain.max) + '">' + chartSvg(result, sym, domain) + '<div class="rp-crosshair"><span></span></div><div class="rp-tooltip"></div></div>' +
       '<div class="rp-setup">' + renderChips(result, sym) + renderTraceLines(result, sym) + '</div>' +
       '</article>';
   }
@@ -796,6 +1006,8 @@
     var mode = document.getElementById('rp-mode');
     if (date && result.date) date.value = result.date;
     if (mode && result.armed_source) mode.value = result.armed_source;
+    updateModeHint();
+    clearPinnedChart();
     var symbols = symbolList(result);
     var total = Number(result.total_usd || 0);
     var stats = '<div class="rp-stats">' +
@@ -867,7 +1079,7 @@
       return;
     }
     host.innerHTML = rows.slice(0, 24).map(function(row) {
-      var label = row.date + ' ' + (row.armed_source || 'asof') + ' · ' + (row.n_trades || 0) + ' trades';
+      var label = row.date + ' ' + (row.armed_source || 'asof') + ' - ' + (row.n_trades || 0) + ' trades';
       return '<button type="button" onclick="rpLoadReplay(\'' + esc(row.date) + '\', \'' + esc(row.armed_source || 'asof') + '\')">' + esc(label) + '</button>';
     }).join('');
   }
@@ -960,6 +1172,15 @@
   document.addEventListener('DOMContentLoaded', function() {
     var date = document.getElementById('rp-date');
     if (date && !date.value) date.value = new Date().toISOString().slice(0, 10);
+    var mode = document.getElementById('rp-mode');
+    if (mode) {
+      mode.value = mode.value || 'asof';
+      mode.addEventListener('change', updateModeHint);
+      updateModeHint();
+    }
+    document.addEventListener('pointermove', handleChartMove);
+    document.addEventListener('pointerout', handleChartOut);
+    document.addEventListener('click', handleChartClick);
     loadHistory();
   });
 })();
