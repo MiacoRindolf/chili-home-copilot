@@ -20931,10 +20931,34 @@ def _migration_310_iqfeed_depth_ladder_jsonb(conn) -> None:
     per side, best-first, mirroring the crypto fast_orderbook shape so ONE
     multi-level reader serves both asset classes.
 
-    Additive + idempotent (ADD COLUMN IF NOT EXISTS). No backfill: the bridge
-    writes these going forward; historical rows keep NULL ladders and the
-    reader fails OPEN to the existing level-1 (bid_top/ask_top) sequence.
+    Additive + idempotent (CREATE/ADD IF NOT EXISTS). Fresh CI databases do not
+    run the host-side bridge DDL before migrations, so bootstrap the empty bridge
+    table when absent, then ensure the ladder columns. No backfill: the bridge
+    writes these going forward; historical rows keep NULL ladders and the reader
+    fails OPEN to the existing level-1 (bid_top/ask_top) sequence.
     """
+    conn.execute(text(
+        "CREATE TABLE IF NOT EXISTS iqfeed_depth_snapshots ("
+        " id BIGSERIAL PRIMARY KEY,"
+        " symbol VARCHAR(16) NOT NULL,"
+        " observed_at TIMESTAMP NOT NULL,"
+        " bid_top DOUBLE PRECISION,"
+        " ask_top DOUBLE PRECISION,"
+        " bid_top_size DOUBLE PRECISION,"
+        " ask_top_size DOUBLE PRECISION,"
+        " bid5_size DOUBLE PRECISION,"
+        " ask5_size DOUBLE PRECISION,"
+        " imbalance5 DOUBLE PRECISION,"
+        " venues INT,"
+        " source VARCHAR(24) NOT NULL DEFAULT 'iqfeed_l2',"
+        " bids_json JSONB,"
+        " asks_json JSONB"
+        ")"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_iqfeed_depth_sym_at "
+        "ON iqfeed_depth_snapshots (symbol, observed_at DESC)"
+    ))
     conn.execute(text(
         "ALTER TABLE iqfeed_depth_snapshots ADD COLUMN IF NOT EXISTS bids_json JSONB"
     ))
