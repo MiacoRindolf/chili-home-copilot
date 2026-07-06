@@ -107,6 +107,72 @@
   grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
 }
+.rr-fsm-simple {
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+}
+.rr-fsm-primary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  border: 1px solid var(--rr-line);
+  border-radius: 8px;
+  background: var(--rr-panel-2);
+  padding: 14px;
+}
+.rr-fsm-primary h3 {
+  margin: 0;
+  font-size: 15px;
+  letter-spacing: 0;
+}
+.rr-fsm-primary p {
+  margin: 5px 0 0;
+  color: var(--rr-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.rr-btn.primary {
+  min-height: 42px;
+  padding: 0 18px;
+  font-size: 13px;
+}
+.rr-option-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+.rr-option-row.five {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+.rr-options {
+  border-top: 1px solid var(--rr-line);
+  padding-top: 12px;
+}
+.rr-options summary {
+  cursor: pointer;
+  color: var(--rr-muted);
+  font-size: 12px;
+  list-style: none;
+  width: fit-content;
+}
+.rr-options summary::-webkit-details-marker { display: none; }
+.rr-options summary:hover { color: var(--rr-blue); }
+.rr-options summary::before {
+  content: "+";
+  display: inline-block;
+  width: 16px;
+  color: var(--rr-blue);
+  font-weight: 700;
+}
+.rr-options[open] summary::before { content: "-"; }
+.rr-option-note {
+  margin: 8px 0 0;
+  color: var(--rr-soft);
+  font-size: 11px;
+}
 .rr-field {
   display: flex;
   flex-direction: column;
@@ -398,6 +464,9 @@
   .rr-topbar { align-items: flex-start; }
   .rr-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .rr-field.wide { grid-column: span 2; }
+  .rr-fsm-primary { grid-template-columns: 1fr; }
+  .rr-option-row,
+  .rr-option-row.five { grid-template-columns: 1fr; }
   .rr-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .rr-gates { grid-template-columns: 1fr; }
   .rr-run-strip { grid-template-columns: 1fr; }
@@ -425,46 +494,63 @@
           </div>
           <span class="rr-tag live">live sessions</span>
         </div>
-        <div class="rr-form">
-          <div class="rr-field wide">
-            <label for="rr-fsm-session-ids">Session IDs</label>
-            <input class="rr-input" id="rr-fsm-session-ids" placeholder="recent live when empty" />
+        <div class="rr-fsm-simple">
+          <div class="rr-fsm-primary">
+            <div>
+              <h3>Latest live sessions</h3>
+              <p>Runs the read-only FSM audit using the normal defaults.</p>
+              <span class="rr-status" id="rr-fsm-status">idle</span>
+            </div>
+            <button class="rr-btn primary" id="rr-fsm-run" type="button" onclick="rrRunFsmReplay()">Run Latest Audit</button>
           </div>
-          <div class="rr-field wide">
-            <label for="rr-fsm-since">Since</label>
-            <input class="rr-input" id="rr-fsm-since" type="datetime-local" />
-          </div>
-          <div class="rr-field wide">
-            <label for="rr-fsm-until">Until</label>
-            <input class="rr-input" id="rr-fsm-until" type="datetime-local" />
-          </div>
-          <div class="rr-field">
-            <label for="rr-fsm-limit">Limit</label>
-            <input class="rr-input" id="rr-fsm-limit" type="number" min="1" max="500" value="100" />
-          </div>
-          <div class="rr-field">
-            <label for="rr-fsm-capacity">Capacity</label>
-            <input class="rr-input" id="rr-fsm-capacity" type="number" min="1" max="200" value="25" />
-          </div>
-          <div class="rr-field">
-            <label for="rr-fsm-order-budget">Order budget</label>
-            <input class="rr-input" id="rr-fsm-order-budget" type="number" min="1" max="500" placeholder="auto" />
-          </div>
-          <div class="rr-field">
-            <label for="rr-fsm-risk-slots">Risk slots</label>
-            <input class="rr-input" id="rr-fsm-risk-slots" type="number" min="1" max="500" placeholder="auto" />
-          </div>
-          <div class="rr-field">
-            <label for="rr-fsm-trace-limit">Trace rows</label>
-            <input class="rr-input" id="rr-fsm-trace-limit" type="number" min="1" max="5000" value="500" />
-          </div>
-          <div class="rr-actions">
-            <button class="rr-btn" id="rr-fsm-run" type="button" onclick="rrRunFsmReplay()">Run FSM Audit</button>
-            <button class="rr-btn secondary" type="button" onclick="rrClearFsmScope()">Recent live</button>
-          </div>
-          <div class="rr-field full">
-            <span class="rr-status" id="rr-fsm-status">idle</span>
-          </div>
+
+          <details class="rr-options">
+            <summary>Choose sessions or time window</summary>
+            <div class="rr-option-row">
+              <div class="rr-field">
+                <label for="rr-fsm-session-ids">Session IDs</label>
+                <input class="rr-input" id="rr-fsm-session-ids" placeholder="optional" />
+              </div>
+              <div class="rr-field">
+                <label for="rr-fsm-since">Since</label>
+                <input class="rr-input" id="rr-fsm-since" type="datetime-local" />
+              </div>
+              <div class="rr-field">
+                <label for="rr-fsm-until">Until</label>
+                <input class="rr-input" id="rr-fsm-until" type="datetime-local" />
+              </div>
+            </div>
+            <div class="rr-inline-actions">
+              <button class="rr-btn secondary" type="button" onclick="rrClearFsmScope()">Use latest live</button>
+            </div>
+          </details>
+
+          <details class="rr-options">
+            <summary>Advanced defaults</summary>
+            <p class="rr-option-note">Only change these when comparing a specific replay run.</p>
+            <div class="rr-option-row five">
+              <div class="rr-field">
+                <label for="rr-fsm-limit">Limit</label>
+                <input class="rr-input" id="rr-fsm-limit" type="number" min="1" max="500" value="100" />
+              </div>
+              <div class="rr-field">
+                <label for="rr-fsm-capacity">Capacity</label>
+                <input class="rr-input" id="rr-fsm-capacity" type="number" min="1" max="200" value="25" />
+              </div>
+              <div class="rr-field">
+                <label for="rr-fsm-order-budget">Order budget</label>
+                <input class="rr-input" id="rr-fsm-order-budget" type="number" min="1" max="500" placeholder="auto" />
+              </div>
+              <div class="rr-field">
+                <label for="rr-fsm-risk-slots">Risk slots</label>
+                <input class="rr-input" id="rr-fsm-risk-slots" type="number" min="1" max="500" placeholder="auto" />
+              </div>
+              <div class="rr-field">
+                <label for="rr-fsm-trace-limit">Trace rows</label>
+                <input class="rr-input" id="rr-fsm-trace-limit" type="number" min="1" max="5000" value="500" />
+              </div>
+            </div>
+          </details>
         </div>
       </section>
 
@@ -612,7 +698,11 @@
   window.rrClearFsmScope = function() {
     var ids = document.getElementById('rr-fsm-session-ids');
     if (ids) ids.value = '';
-    setStatus('rr-fsm-status', 'recent live scope selected', '');
+    var since = document.getElementById('rr-fsm-since');
+    var until = document.getElementById('rr-fsm-until');
+    if (since) since.value = '';
+    if (until) until.value = '';
+    setStatus('rr-fsm-status', 'latest live selected', '');
   };
 
   window.rrRunFsmReplay = function() {
@@ -634,7 +724,7 @@
     if (riskSlots) params.set('risk_budget_slots', String(riskSlots));
 
     if (btn) btn.disabled = true;
-    setStatus('rr-fsm-status', 'running FSM audit...', 'running');
+    setStatus('rr-fsm-status', 'running audit...', 'running');
     renderFsmLoading();
 
     fetch(fsmEndpoint(params), { credentials: 'same-origin' })
@@ -648,7 +738,7 @@
           renderFsmError(detail || 'Audit failed');
           return;
         }
-        setStatus('rr-fsm-status', 'audit complete', 'done');
+        setStatus('rr-fsm-status', 'complete', 'done');
         renderFsmResult(out.body);
       })
       .catch(function(err) {
@@ -709,8 +799,7 @@
     ].join('');
     var pills = [
       '<span class="rr-pill blue">read only</span>',
-      '<span class="rr-pill ' + (scope.explicit_session_ids ? 'green' : 'amber') + '">' + (scope.explicit_session_ids ? 'explicit sessions' : 'recent live') + '</span>',
-      '<span class="rr-pill">limit ' + esc(scope.limit || '-') + '</span>'
+      '<span class="rr-pill ' + (scope.explicit_session_ids ? 'green' : 'amber') + '">' + (scope.explicit_session_ids ? 'chosen sessions' : 'latest live') + '</span>'
     ];
     if (scope.since_utc) pills.push('<span class="rr-pill">since ' + esc(scope.since_utc) + '</span>');
     if (scope.until_utc) pills.push('<span class="rr-pill">until ' + esc(scope.until_utc) + '</span>');
