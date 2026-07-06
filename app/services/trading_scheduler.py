@@ -6739,12 +6739,17 @@ def start_scheduler():
                 max_instances=1,
             )
 
+        # _bus_on is read by BOTH the web-light paper-runner branch AND the
+        # momentum-exec live-runner/auto-arm branches below — it must be assigned
+        # unconditionally (a momentum_exec_only worker, where include_web_light is
+        # False, hits UnboundLocalError at `if _bus_on:` the moment
+        # chili_momentum_live_runner_scheduler_enabled is turned on).
+        _bus_on = bool(settings.chili_autopilot_price_bus_enabled)
         if (
             include_web_light
             and settings.chili_momentum_paper_runner_enabled
             and settings.chili_momentum_paper_runner_scheduler_enabled
         ):
-            _bus_on = bool(settings.chili_autopilot_price_bus_enabled)
             _pr_m = 1 if _bus_on else max(2, int(settings.chili_momentum_paper_runner_scheduler_interval_minutes))
             _scheduler.add_job(
                 _run_momentum_paper_runner_batch_job,
