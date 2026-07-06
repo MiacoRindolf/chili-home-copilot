@@ -6323,9 +6323,9 @@ class Settings(BaseSettings):
         description="Master gate / kill-switch for the v2 sell-into-strength layer. ON = the ladder read + decision run and emit live_sell_into_strength with the pure-hold counterfactual on every armed tick, AND the INVARIANT-A stop-ratchet applies (can only help). The size-MOVING resting limit is separately gated by chili_momentum_exit_ladder_live.",
     )
     chili_momentum_exit_ladder_live: bool = Field(
-        default=True,
+        default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_LADDER_LIVE"),
-        description="The size-moving gate: when ON, a fired distribution read posts the small resting sell-into-strength limit live. 2026-07-06: FLIPPED ON (dark flag removed) — the armed-tick counterfactuals have soaked and the funnel is sane; the HARVEST now sells into the top instead of only ratcheting the stop. Resting-limit + veto + INVARIANT A bound the worst case to recoverable. Instant rollback: CHILI_MOMENTUM_EXIT_LADDER_LIVE=false.",
+        description="The size-moving gate: when ON, a fired distribution read posts the small resting sell-into-strength limit live. Default OFF — a DELIBERATE staged step: the armed-tick counterfactual + INVARIANT-A stop-ratchet (exit_ladder_ENABLED) are already live, but the size-moving sell is not yet A/B-proven net-positive (2026-07-06: a premature default-ON was reverted — the BJDX/LUCY give-backs were the dup-Reference 409 orphan bug, fixed independently, NOT a missing harvest). Flip ON (or set CHILI_MOMENTUM_EXIT_LADDER_LIVE=true) to promote once the counterfactual proves out.",
     )
     # Class gate: extend the adaptive exit (v1 exhaustion lock + v2 sell-into-strength)
     # to the EQUITY lane too (using equity L2 from iqfeed_depth_snapshots). The helpers
