@@ -558,21 +558,19 @@ def get_automation_events(
     )
 
 
-@router.get("/automation/replay/fsm")
-def get_automation_fsm_replay(
+def _fsm_replay_response(
     request: Request,
-    db: Session = Depends(get_db),
-    session_ids: Optional[str] = Query(None, description="Comma-separated live automation session ids."),
-    since: Optional[str] = Query(None, description="UTC ISO lower bound for recent live sessions."),
-    until: Optional[str] = Query(None, description="UTC ISO upper bound for recent live sessions."),
-    limit: int = Query(100, ge=1, le=500),
-    capacity_limit: int = Query(25, ge=1, le=200),
-    order_call_budget: Optional[int] = Query(None, ge=1, le=500),
-    risk_budget_slots: Optional[int] = Query(None, ge=1, le=500),
-    setup_trace_limit: int = Query(500, ge=1, le=5000),
+    db: Session,
+    *,
+    session_ids: Optional[str],
+    since: Optional[str],
+    until: Optional[str],
+    limit: int,
+    capacity_limit: int,
+    order_call_budget: Optional[int],
+    risk_budget_slots: Optional[int],
+    setup_trace_limit: int,
 ) -> dict[str, Any]:
-    """Read-only operator endpoint for the same live FSM Replay v3 audit used in verification."""
-
     uid = _automation_user_id(request, db)
     since_dt = _parse_replay_dt(since)
     until_dt = _parse_replay_dt(until)
@@ -610,6 +608,64 @@ def get_automation_fsm_replay(
         },
         "replay": replay,
     }
+
+
+@router.get("/automation/replay/fsm")
+def get_automation_fsm_replay(
+    request: Request,
+    db: Session = Depends(get_db),
+    session_ids: Optional[str] = Query(None, description="Comma-separated live automation session ids."),
+    since: Optional[str] = Query(None, description="UTC ISO lower bound for recent live sessions."),
+    until: Optional[str] = Query(None, description="UTC ISO upper bound for recent live sessions."),
+    limit: int = Query(100, ge=1, le=500),
+    capacity_limit: int = Query(25, ge=1, le=200),
+    order_call_budget: Optional[int] = Query(None, ge=1, le=500),
+    risk_budget_slots: Optional[int] = Query(None, ge=1, le=500),
+    setup_trace_limit: int = Query(500, ge=1, le=5000),
+) -> dict[str, Any]:
+    """Read-only compatibility endpoint for the live FSM Replay v3 audit."""
+
+    return _fsm_replay_response(
+        request,
+        db,
+        session_ids=session_ids,
+        since=since,
+        until=until,
+        limit=limit,
+        capacity_limit=capacity_limit,
+        order_call_budget=order_call_budget,
+        risk_budget_slots=risk_budget_slots,
+        setup_trace_limit=setup_trace_limit,
+    )
+
+
+@router.get("/replay/fsm")
+def get_research_fsm_replay(
+    request: Request,
+    db: Session = Depends(get_db),
+    session_ids: Optional[str] = Query(None, description="Comma-separated live automation session ids."),
+    since: Optional[str] = Query(None, description="UTC ISO lower bound for recent live sessions."),
+    until: Optional[str] = Query(None, description="UTC ISO upper bound for recent live sessions."),
+    limit: int = Query(100, ge=1, le=500),
+    capacity_limit: int = Query(25, ge=1, le=200),
+    order_call_budget: Optional[int] = Query(None, ge=1, le=500),
+    risk_budget_slots: Optional[int] = Query(None, ge=1, le=500),
+    setup_trace_limit: int = Query(500, ge=1, le=5000),
+) -> dict[str, Any]:
+    """Read-only replay research endpoint for the live FSM Replay v3 audit."""
+
+    return _fsm_replay_response(
+        request,
+        db,
+        session_ids=session_ids,
+        since=since,
+        until=until,
+        limit=limit,
+        capacity_limit=capacity_limit,
+        order_call_budget=order_call_budget,
+        risk_budget_slots=risk_budget_slots,
+        setup_trace_limit=setup_trace_limit,
+    )
 
 
 def _decision_packet_brief(p: TradingDecisionPacket) -> dict[str, Any]:

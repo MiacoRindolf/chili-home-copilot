@@ -1,555 +1,927 @@
 {% extends "base.html" %}
-{% block title %}CHILI Replay Lab{% endblock %}
+{% block title %}CHILI Replay Research{% endblock %}
 
 {% block head_extra %}
 <style>
-.rl-wrap { max-width: 1180px; margin: 0 auto; padding: 18px 16px 60px; color: var(--text); }
-.rl-head { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:14px; }
-.rl-head h1 { font-size:19px; margin:0; }
-.rl-sub { color: var(--text-secondary); font-size:12px; margin:3px 0 0; }
-.rl-card { background: var(--bg-card, rgba(255,255,255,.03)); border:1px solid var(--border); border-radius:12px; padding:16px; margin-bottom:16px; }
-.rl-row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-.rl-row input[type=date] { background: var(--bg); color: var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 12px; font-size:13px; }
-.rl-btn { background:linear-gradient(180deg,#3b8bff,#2f6fe0); color:#fff; border:0; border-radius:8px; padding:9px 20px; font-size:13px; font-weight:600; cursor:pointer; box-shadow:0 2px 8px rgba(47,111,224,.35); }
-.rl-btn:disabled { opacity:.5; cursor:default; box-shadow:none; }
-.rl-status { font-size:12.5px; color: var(--text-secondary); }
-.rl-status.running { color:#d29922; } .rl-status.done { color:#3fb950; } .rl-status.error { color:#f85149; }
-.rl-kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:10px; margin:4px 0 2px; }
-.rl-kpi { background:rgba(255,255,255,.025); border:1px solid var(--border); border-radius:10px; padding:10px 12px; }
-.rl-kpi .v { font-size:21px; font-weight:700; letter-spacing:-.02em; }
-.rl-kpi .v.pos { color:#3fb950; } .rl-kpi .v.neg { color:#f85149; }
-.rl-kpi .k { font-size:10.5px; color: var(--text-secondary); text-transform:uppercase; letter-spacing:.05em; margin-top:2px; }
-table.rl-t { width:100%; border-collapse:collapse; font-size:12.5px; }
-table.rl-t th { text-align:left; color:var(--text-secondary); font-weight:600; padding:6px 8px; border-bottom:1px solid var(--border); font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; }
-table.rl-t td { padding:7px 8px; border-bottom:1px solid rgba(255,255,255,.04); }
-table.rl-t tr.hist { cursor:pointer; } table.rl-t tr.hist:hover { background: rgba(255,255,255,.045); }
-.rl-pos { color:#3fb950; font-weight:600; } .rl-neg { color:#f85149; font-weight:600; }
-.rl-note { font-size:11.5px; color:var(--text-secondary); margin-top:8px; line-height:1.55; }
-.rl-legend { display:flex; gap:16px; flex-wrap:wrap; font-size:11px; color:var(--text-secondary); margin:6px 0 10px; }
-.rl-legend span { display:inline-flex; align-items:center; gap:5px; }
-.rl-sw { display:inline-block; width:14px; height:9px; border-radius:2px; }
-/* ── timeline ── */
-.tl-grid { position:relative; }
-.tl-axis { position:relative; height:18px; margin-left:86px; border-bottom:1px solid var(--border); }
-.tl-axis span { position:absolute; top:0; font-size:10px; color:var(--text-secondary); transform:translateX(-50%); }
-.tl-row { display:flex; align-items:center; min-height:30px; border-bottom:1px solid rgba(255,255,255,.035); cursor:pointer; }
-.tl-row:hover { background:rgba(255,255,255,.035); }
-.tl-row.traded .tl-sym { color:#e8b339; font-weight:700; }
-.tl-sym { width:86px; flex:0 0 86px; font-size:12px; font-weight:600; padding-left:4px; display:flex; align-items:center; gap:5px; }
-.tl-track { position:relative; flex:1; height:20px; background:rgba(255,255,255,.018); border-radius:4px; overflow:hidden; }
-.tl-armed { position:absolute; top:4px; height:12px; background:rgba(63,131,248,.34); border-radius:3px; }
-.tl-halt { position:absolute; top:0; height:100%; background:repeating-linear-gradient(45deg, rgba(248,81,73,.22) 0 4px, transparent 4px 8px); }
-.tl-entry { position:absolute; top:-1px; width:0; height:0; border-left:5px solid transparent; border-right:5px solid transparent; border-bottom:9px solid #3fb950; transform:translateX(-5px); }
-.tl-exit { position:absolute; bottom:-1px; width:0; height:0; border-left:5px solid transparent; border-right:5px solid transparent; border-top:9px solid #f85149; transform:translateX(-5px); }
-.tl-chartbox { margin:4px 0 10px 86px; display:none; }
-.tl-chartbox.open { display:block; }
-.rl-chart-meta { font-size:11.5px; color:var(--text-secondary); margin:2px 0 4px; }
-svg.rl-chart { cursor:grab; width:100%; height:252px; background:rgba(0,0,0,.18); border:1px solid var(--border); border-radius:8px; }
+:root {
+  --rr-panel: color-mix(in srgb, var(--bg-header, #111827) 82%, #0f172a 18%);
+  --rr-panel-2: color-mix(in srgb, var(--bg, #0b1220) 88%, #111827 12%);
+  --rr-line: var(--border, rgba(148, 163, 184, .22));
+  --rr-muted: var(--text-secondary, #94a3b8);
+  --rr-soft: var(--text-muted, #64748b);
+  --rr-blue: #60a5fa;
+  --rr-green: #34d399;
+  --rr-red: #fb7185;
+  --rr-amber: #fbbf24;
+  --rr-violet: #a78bfa;
+}
+.rr-page {
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+}
+.rr-shell {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 18px 18px 64px;
+}
+.rr-topbar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+.rr-title h1 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.1;
+  letter-spacing: 0;
+}
+.rr-title p {
+  margin: 5px 0 0;
+  color: var(--rr-muted);
+  font-size: 12px;
+}
+.rr-link {
+  color: var(--rr-muted);
+  text-decoration: none;
+  font-size: 12px;
+  border: 1px solid var(--rr-line);
+  border-radius: 6px;
+  padding: 7px 10px;
+}
+.rr-link:hover {
+  color: var(--rr-blue);
+  border-color: color-mix(in srgb, var(--rr-blue) 55%, transparent);
+}
+.rr-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(360px, .65fr);
+  gap: 14px;
+  align-items: start;
+}
+.rr-panel {
+  border: 1px solid var(--rr-line);
+  border-radius: 8px;
+  background: var(--rr-panel);
+  overflow: hidden;
+}
+.rr-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--rr-line);
+}
+.rr-panel-head h2 {
+  margin: 0;
+  font-size: 14px;
+  letter-spacing: 0;
+}
+.rr-panel-head p {
+  margin: 4px 0 0;
+  color: var(--rr-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.rr-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid var(--rr-line);
+  color: var(--rr-muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.rr-tag.live { color: var(--rr-green); border-color: color-mix(in srgb, var(--rr-green) 40%, transparent); }
+.rr-tag.readonly { color: var(--rr-blue); border-color: color-mix(in srgb, var(--rr-blue) 40%, transparent); }
+.rr-tag.red { color: var(--rr-red); border-color: color-mix(in srgb, var(--rr-red) 40%, transparent); }
+.rr-form {
+  padding: 14px 16px 16px;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+}
+.rr-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.rr-field.wide { grid-column: span 2; }
+.rr-field.full { grid-column: 1 / -1; }
+.rr-field label {
+  color: var(--rr-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.rr-input,
+.rr-select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  background: var(--rr-panel-2);
+  color: var(--text);
+  border: 1px solid var(--rr-line);
+  border-radius: 6px;
+  padding: 8px 9px;
+  font-size: 12px;
+  outline: none;
+}
+.rr-input:focus,
+.rr-select:focus {
+  border-color: var(--rr-blue);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--rr-blue) 22%, transparent);
+}
+.rr-actions {
+  display: flex;
+  gap: 8px;
+  align-items: end;
+  flex-wrap: wrap;
+}
+.rr-btn {
+  border: 1px solid #1d4ed8;
+  background: #2563eb;
+  color: #fff;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .16);
+}
+.rr-btn:hover {
+  border-color: #1e40af;
+  background: #1d4ed8;
+}
+.rr-btn:disabled {
+  cursor: default;
+  opacity: .55;
+}
+.rr-btn.secondary {
+  background: var(--rr-panel-2);
+  color: var(--text);
+  border-color: var(--rr-line);
+  box-shadow: none;
+}
+.rr-btn.secondary:hover {
+  color: var(--rr-blue);
+  background: var(--rr-panel-2);
+  border-color: color-mix(in srgb, var(--rr-blue) 45%, transparent);
+}
+.rr-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  color: var(--rr-muted);
+  font-size: 12px;
+}
+.rr-status.running { color: var(--rr-amber); }
+.rr-status.done { color: var(--rr-green); }
+.rr-status.error { color: var(--rr-red); }
+.rr-output {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+}
+.rr-result {
+  border: 1px solid var(--rr-line);
+  border-radius: 8px;
+  background: var(--rr-panel);
+  overflow: hidden;
+}
+.rr-result-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--rr-line);
+}
+.rr-result-head h3 {
+  margin: 0;
+  font-size: 13px;
+}
+.rr-result-body {
+  padding: 14px;
+}
+.rr-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.rr-kpi {
+  border: 1px solid var(--rr-line);
+  border-radius: 6px;
+  background: var(--rr-panel-2);
+  padding: 9px 10px;
+  min-width: 0;
+}
+.rr-kpi b {
+  display: block;
+  font-size: 17px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+.rr-kpi span {
+  display: block;
+  margin-top: 3px;
+  color: var(--rr-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.rr-pos { color: var(--rr-green); }
+.rr-neg { color: var(--rr-red); }
+.rr-gates {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.rr-gate {
+  border: 1px solid var(--rr-line);
+  border-radius: 6px;
+  background: var(--rr-panel-2);
+  padding: 9px 10px;
+}
+.rr-gate strong {
+  display: block;
+  font-size: 12px;
+}
+.rr-gate span {
+  display: inline-flex;
+  margin-top: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+.rr-gate.ready { border-color: color-mix(in srgb, var(--rr-green) 40%, transparent); }
+.rr-gate.ready span { color: var(--rr-green); }
+.rr-gate.blocked { border-color: color-mix(in srgb, var(--rr-amber) 40%, transparent); }
+.rr-gate.blocked span { color: var(--rr-amber); }
+.rr-section-title {
+  margin: 16px 0 8px;
+  font-size: 11px;
+  color: var(--rr-muted);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+.rr-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+.rr-list li {
+  border: 1px solid var(--rr-line);
+  border-radius: 6px;
+  background: var(--rr-panel-2);
+  padding: 8px 10px;
+  color: var(--rr-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.rr-code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  color: var(--rr-blue);
+}
+.rr-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--rr-line);
+  border-radius: 6px;
+}
+.rr-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.rr-table th {
+  text-align: left;
+  color: var(--rr-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  padding: 8px 9px;
+  border-bottom: 1px solid var(--rr-line);
+  white-space: nowrap;
+}
+.rr-table td {
+  padding: 8px 9px;
+  border-bottom: 1px solid color-mix(in srgb, var(--rr-line) 68%, transparent);
+  vertical-align: top;
+}
+.rr-table tr:last-child td { border-bottom: 0; }
+.rr-table tr.clickable { cursor: pointer; }
+.rr-table tr.clickable:hover { background: color-mix(in srgb, var(--rr-blue) 8%, transparent); }
+.rr-empty {
+  color: var(--rr-soft);
+  font-size: 12px;
+  padding: 18px;
+  text-align: center;
+}
+.rr-json {
+  margin-top: 10px;
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--rr-line);
+  border-radius: 6px;
+  background: #020617;
+  color: #dbeafe;
+  padding: 12px;
+  font-size: 11px;
+}
+.rr-details summary {
+  cursor: pointer;
+  color: var(--rr-muted);
+  font-size: 12px;
+  margin-top: 12px;
+}
+.rr-compact {
+  padding: 12px 14px;
+}
+.rr-run-strip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+.rr-pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.rr-pill {
+  border: 1px solid var(--rr-line);
+  border-radius: 999px;
+  color: var(--rr-muted);
+  background: var(--rr-panel-2);
+  padding: 4px 8px;
+  font-size: 10px;
+}
+.rr-pill.blue { color: var(--rr-blue); border-color: color-mix(in srgb, var(--rr-blue) 35%, transparent); }
+.rr-pill.green { color: var(--rr-green); border-color: color-mix(in srgb, var(--rr-green) 35%, transparent); }
+.rr-pill.red { color: var(--rr-red); border-color: color-mix(in srgb, var(--rr-red) 35%, transparent); }
+.rr-pill.amber { color: var(--rr-amber); border-color: color-mix(in srgb, var(--rr-amber) 35%, transparent); }
+.rr-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+.rr-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, .6fr);
+  gap: 12px;
+}
+@media (max-width: 1080px) {
+  .rr-grid,
+  .rr-split {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 760px) {
+  .rr-shell { padding: 12px 10px 48px; }
+  .rr-topbar { align-items: flex-start; }
+  .rr-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rr-field.wide { grid-column: span 2; }
+  .rr-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rr-gates { grid-template-columns: 1fr; }
+  .rr-run-strip { grid-template-columns: 1fr; }
+}
 </style>
 {% endblock %}
 
 {% block content %}
-<div class="rl-wrap">
-  <div class="rl-head">
-    <div>
-      <h1>🔁 Replay Lab <span style="font-size:11px;color:var(--text-secondary);font-weight:400;">high-fidelity (v2)</span></h1>
-      <p class="rl-sub">Real NBBO spreads · limit-touch fills · halt masking · no lookahead — the permanent benchmark engine</p>
+<div class="rr-page">
+  <div class="rr-shell">
+    <header class="rr-topbar">
+      <div class="rr-title">
+        <h1>Replay Research</h1>
+        <p>Live FSM audit, broker evidence, and day-level replay results in one workspace.</p>
+      </div>
+      <a class="rr-link" href="/trading">Trading</a>
+    </header>
+
+    <div class="rr-grid">
+      <section class="rr-panel" aria-label="FSM live audit">
+        <div class="rr-panel-head">
+          <div>
+            <h2>FSM Live Audit</h2>
+            <p>Read-only Replay v3 audit over live automation sessions.</p>
+          </div>
+          <span class="rr-tag live">live sessions</span>
+        </div>
+        <div class="rr-form">
+          <div class="rr-field wide">
+            <label for="rr-fsm-session-ids">Session IDs</label>
+            <input class="rr-input" id="rr-fsm-session-ids" placeholder="recent live when empty" />
+          </div>
+          <div class="rr-field wide">
+            <label for="rr-fsm-since">Since</label>
+            <input class="rr-input" id="rr-fsm-since" type="datetime-local" />
+          </div>
+          <div class="rr-field wide">
+            <label for="rr-fsm-until">Until</label>
+            <input class="rr-input" id="rr-fsm-until" type="datetime-local" />
+          </div>
+          <div class="rr-field">
+            <label for="rr-fsm-limit">Limit</label>
+            <input class="rr-input" id="rr-fsm-limit" type="number" min="1" max="500" value="100" />
+          </div>
+          <div class="rr-field">
+            <label for="rr-fsm-capacity">Capacity</label>
+            <input class="rr-input" id="rr-fsm-capacity" type="number" min="1" max="200" value="25" />
+          </div>
+          <div class="rr-field">
+            <label for="rr-fsm-order-budget">Order budget</label>
+            <input class="rr-input" id="rr-fsm-order-budget" type="number" min="1" max="500" placeholder="auto" />
+          </div>
+          <div class="rr-field">
+            <label for="rr-fsm-risk-slots">Risk slots</label>
+            <input class="rr-input" id="rr-fsm-risk-slots" type="number" min="1" max="500" placeholder="auto" />
+          </div>
+          <div class="rr-field">
+            <label for="rr-fsm-trace-limit">Trace rows</label>
+            <input class="rr-input" id="rr-fsm-trace-limit" type="number" min="1" max="5000" value="500" />
+          </div>
+          <div class="rr-actions">
+            <button class="rr-btn" id="rr-fsm-run" type="button" onclick="rrRunFsmReplay()">Run FSM Audit</button>
+            <button class="rr-btn secondary" type="button" onclick="rrClearFsmScope()">Recent live</button>
+          </div>
+          <div class="rr-field full">
+            <span class="rr-status" id="rr-fsm-status">idle</span>
+          </div>
+        </div>
+      </section>
+
+      <aside class="rr-panel" aria-label="Day replay">
+        <div class="rr-panel-head">
+          <div>
+            <h2>Day Replay</h2>
+            <p>High-fidelity v2 run for a single tape date.</p>
+          </div>
+          <span class="rr-tag readonly">v2</span>
+        </div>
+        <div class="rr-compact">
+          <div class="rr-field">
+            <label for="rr-day-date">Date</label>
+            <input class="rr-input" id="rr-day-date" type="date" />
+          </div>
+          <div class="rr-field" style="margin-top:10px;">
+            <label for="rr-day-mode">Mode</label>
+            <select class="rr-select" id="rr-day-mode">
+              <option value="live">Live armed</option>
+              <option value="asof">As-of selection</option>
+            </select>
+          </div>
+          <div class="rr-inline-actions">
+            <button class="rr-btn" id="rr-day-run" type="button" onclick="rrRunDayReplay()">Run Day Replay</button>
+            <span class="rr-status" id="rr-day-status">idle</span>
+          </div>
+          <div class="rr-run-strip">
+            <div class="rr-kpi"><b id="rr-job-state">idle</b><span>Job state</span></div>
+            <div class="rr-kpi"><b id="rr-job-date">-</b><span>Last date</span></div>
+          </div>
+        </div>
+      </aside>
     </div>
-    <a href="/trading" style="font-size:12px;color:var(--text-secondary);">← Trading</a>
-  </div>
 
-  <div class="rl-card">
-    <div class="rl-row">
-      <input type="date" id="rl-date">
-      <select id="rl-mode" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:12.5px;">
-        <option value="live">Live-armed (re-enact the day's actual sessions)</option>
-        <option value="asof">As-of selection (what the system would pick)</option>
-      </select>
-      <button class="rl-btn" id="rl-run" onclick="rlRun()">▶ Run Replay</button>
-      <span class="rl-status" id="rl-status">idle</span>
-    </div>
-    <div class="rl-note">
-      Runs for ~3–8 min (per-symbol bar fetches); one replay at a time. Requires the <b>NBBO tape</b> for the date
-      (minute-dense since 2026-06-10; partial 06-08/09) — without it you get <code>no_tape_for_date</code>.
-    </div>
-  </div>
+    <main class="rr-output">
+      <section class="rr-result" id="rr-fsm-result">
+        <div class="rr-result-head">
+          <h3>FSM audit result</h3>
+          <span class="rr-tag">not run</span>
+        </div>
+        <div class="rr-empty">Run an FSM audit to populate the research result.</div>
+      </section>
 
-  <div class="rl-card" id="rl-result-card" style="display:none;">
-    <h3 style="margin:0 0 10px;font-size:15px;" id="rl-result-title"></h3>
-    <div class="rl-kpis" id="rl-kpis"></div>
+      <section class="rr-result" id="rr-day-result" style="display:none;">
+        <div class="rr-result-head">
+          <h3 id="rr-day-title">Day replay result</h3>
+          <span class="rr-tag" id="rr-day-result-mode">v2</span>
+        </div>
+        <div class="rr-result-body" id="rr-day-body"></div>
+      </section>
 
-    <h4 style="margin:18px 0 2px;font-size:13px;">🎬 Synced replay <span style="font-size:10.5px;color:var(--text-secondary);font-weight:400;">— drag the timeline or any lane; one playhead scrubs every symbol at once</span></h4>
-    <div id="rl-synced"></div>
-
-    <h4 style="margin:18px 0 2px;font-size:13px;">🕐 Activity timeline <span style="font-size:10.5px;color:var(--text-secondary);font-weight:400;">— click a row for its annotated chart</span></h4>
-    <div class="rl-legend">
-      <span><span class="rl-sw" style="background:rgba(63,131,248,.5);"></span> armed/watching</span>
-      <span><span class="rl-sw" style="background:repeating-linear-gradient(45deg, rgba(248,81,73,.4) 0 4px, transparent 4px 8px);"></span> HALTED</span>
-      <span style="color:#3fb950;">▲ entry</span>
-      <span style="color:#f85149;">▼ exit</span>
-      <span style="color:#e8b339;">★ traded</span>
-    </div>
-    <div class="tl-grid" id="rl-timeline"></div>
-
-    <h4 style="margin:18px 0 6px;font-size:13px;">📋 Trades</h4>
-    <table class="rl-t">
-      <thead><tr><th>Entry (UTC)</th><th>Exit</th><th>Symbol</th><th>Entry px</th><th>Exit px</th><th>Qty</th><th>Spread</th><th>Stop</th><th>Target</th><th>Exit reason</th><th>P/L</th></tr></thead>
-      <tbody id="rl-trades"></tbody>
-    </table>
-
-    <div id="rl-div-sec" style="display:none;">
-      <h4 style="margin:18px 0 6px;font-size:13px;">🔀 Live vs replay divergence <span style="font-size:10.5px;color:var(--text-secondary);font-weight:400;">— per symbol: what LIVE did vs what the REPLAY did, and why they differ</span></h4>
-      <div id="rl-div-kpis" class="rl-kpis" style="margin-bottom:8px;"></div>
-      <table class="rl-t">
-        <thead><tr><th>Symbol</th><th>Live decisions</th><th>Replay decisions</th><th>Cause</th></tr></thead>
-        <tbody id="rl-div-rows"></tbody>
-      </table>
-      <div id="rl-div-more" style="padding:6px;text-align:center;"></div>
-    </div>
-  </div>
-
-  <div class="rl-card">
-    <h3 style="margin:0 0 8px;font-size:14px;">📜 Past replays <span style="font-size:11px;color:var(--text-secondary);font-weight:400;">(click to open)</span></h3>
-    <table class="rl-t">
-      <thead><tr><th>Date</th><th>P/L</th><th>Trades</th><th>W/L</th><th>Tape syms</th><th>Candidates</th><th>Halt windows</th><th>Ran at</th></tr></thead>
-      <tbody id="rl-hist"></tbody>
-    </table>
+      <section class="rr-result">
+        <div class="rr-result-head">
+          <h3>Replay history</h3>
+          <span class="rr-tag">persisted</span>
+        </div>
+        <div class="rr-result-body">
+          <div class="rr-table-wrap">
+            <table class="rr-table">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Mode</th>
+                  <th>P/L</th>
+                  <th>Trades</th>
+                  <th>W/L</th>
+                  <th>Tape</th>
+                  <th>Candidates</th>
+                  <th>Ran at</th>
+                </tr>
+              </thead>
+              <tbody id="rr-history"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
   </div>
 </div>
 
 <script>
-const rlEsc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const T0 = 11*60, T1 = 20*60;                          // UTC 11:00→20:00 = 07:00–16:00 ET (incl. pre-market)
-const tMin = t => { const [h,m] = String(t||'').split(':').map(Number); return h*60+(m||0); };
-const tPct = t => Math.max(0, Math.min(100, (tMin(t)-T0)/(T1-T0)*100));
-let rlPoll = null, rlCur = null;
+(function() {
+  var rrPoll = null;
+  var rrLastDayMode = 'live';
 
-function rlSetStatus(text, cls) { const el = document.getElementById('rl-status'); el.textContent = text; el.className = 'rl-status ' + (cls||''); }
-
-async function rlRun() {
-  const date = document.getElementById('rl-date').value;
-  if (!date) { rlSetStatus('pick a date first','error'); return; }
-  document.getElementById('rl-run').disabled = true;
-  rlSetStatus('starting…','running');
-  try {
-    const j = await (await fetch('/api/trading/momentum/replay/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({date, armed_source: document.getElementById('rl-mode').value})})).json();
-    if (!j.ok) { rlSetStatus(j.error==='replay_already_running' ? 'a replay is already running — wait for it' : (j.error||'error'),'error'); document.getElementById('rl-run').disabled = false; return; }
-    rlPoll = setInterval(rlCheck, 5000); rlCheck();
-  } catch (e) { rlSetStatus('request failed: '+e,'error'); document.getElementById('rl-run').disabled = false; }
-}
-
-async function rlCheck() {
-  try {
-    const j = await (await fetch('/api/trading/momentum/replay/status')).json();
-    const job = j.job || {};
-    if (job.state === 'running') { rlSetStatus('running… ('+(job.date||'')+') ~3-8 min','running'); return; }
-    if (rlPoll) { clearInterval(rlPoll); rlPoll = null; }
-    document.getElementById('rl-run').disabled = false;
-    if (job.state === 'done') { rlSetStatus('done: '+job.date+' → $'+Number(job.total_usd||0).toLocaleString()+' ('+(job.n_trades||0)+' trades)','done'); rlLoadResult(job.date, job.armed_source); rlLoadHistory(); }
-    else if (job.state === 'error') { rlSetStatus('error: '+(job.error||'?'),'error'); rlLoadHistory(); }
-    else rlSetStatus(job.state || 'idle');
-  } catch (e) { /* transient */ }
-}
-
-async function rlLoadResult(date, mode) {
-  try {
-    const j = await (await fetch('/api/trading/momentum/replay/result/'+date+'?armed_source='+(mode||'asof'))).json();
-    if (!j.ok) return;
-    const r = rlCur = j.result;
-    document.getElementById('rl-result-card').style.display = '';
-    document.getElementById('rl-result-title').textContent = '📊 ' + r.date + ' — high-fidelity result · ' + (r.armed_source === 'live' ? 'live-armed re-enactment' : 'as-of selection');
-    const tot = Number(r.total_usd||0);
-    document.getElementById('rl-kpis').innerHTML =
-      kpi('$'+tot.toLocaleString(), 'Day P/L', tot>=0?'pos':'neg') +
-      kpi((r.trades||[]).length, 'Trades') + kpi((r.wins||0)+'/'+(r.losses||0), 'W/L') +
-      kpi(r.candidates||0, 'As-of candidates') + kpi((r.armed_timeline||[]).length, 'Symbols watched') +
-      kpi(r.halt_windows||0, 'Halt windows') + kpi(r.day_halted||'—', 'Day halt');
-    rlTimeline(r);
-    rlSynced(r);
-    rlTradesTable(r);
-    rlDivergence(r);
-  } catch (e) { /* ignore */ }
-}
-
-function rlCauseChip(cause) {
-  const root = String(cause||'').split(':')[0];
-  const c = {aligned:'#3fb950', replay_trigger:'#e8b339', replay_gate:'#f0883e', arming_timing:'#a371f7',
-             fill_model_no_touch:'#f85149', live_blocked:'#58a6ff', both_skipped:'#8b949e'}[root] || '#8b949e';
-  return '<span style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:10.5px;font-weight:600;'
-       + 'color:'+c+';border:1px solid '+c+'55;background:'+c+'18;white-space:nowrap;">'+rlEsc(cause)+'</span>';
-}
-
-function rlDivergence(r, showAll) {
-  const sec = document.getElementById('rl-div-sec');
-  const rows = r.divergence || [];
-  if (!rows.length) { sec.style.display = 'none'; return; }
-  sec.style.display = '';
-  const interesting = rows.filter(d => d.cause !== 'both_skipped');
-  const counts = {};
-  rows.forEach(d => { const k = String(d.cause||'').split(':')[0]; counts[k] = (counts[k]||0) + 1; });
-  document.getElementById('rl-div-kpis').innerHTML = Object.entries(counts)
-    .sort((a,b) => b[1]-a[1]).map(([k,n]) => kpi(n, k)).join('');
-  const vis = showAll ? rows : interesting;
-  document.getElementById('rl-div-rows').innerHTML = vis.map(d =>
-    '<tr><td><b>'+rlEsc(d.sym)+'</b></td>'+
-    '<td style="font-size:11px;color:var(--text-secondary);max-width:340px;">'+rlEsc(d.live)+'</td>'+
-    '<td style="font-size:11px;color:var(--text-secondary);max-width:340px;">'+rlEsc(d.replay)+'</td>'+
-    '<td>'+rlCauseChip(d.cause)+'</td></tr>'
-  ).join('') || '<tr><td colspan="4" style="color:var(--text-secondary);">No divergent symbols — live and replay agreed everywhere.</td></tr>';
-  document.getElementById('rl-div-more').innerHTML = (!showAll && rows.length > interesting.length)
-    ? '<a href="#" style="font-size:11.5px;color:#3b8bff;" onclick="rlDivergence(rlCur,true); return false;">Show '+(rows.length-interesting.length)+' both-skipped symbols ▾</a>'
-    : (showAll ? '<a href="#" style="font-size:11.5px;color:#3b8bff;" onclick="rlDivergence(rlCur); return false;">Hide both-skipped ▴</a>' : '');
-}
-const kpi = (v,k,cls) => '<div class="rl-kpi"><div class="v '+(cls||'')+'">'+v+'</div><div class="k">'+k+'</div></div>';
-
-function rlTradesTable(r) {
-  document.getElementById('rl-trades').innerHTML = (r.trades||[]).map(t =>
-    '<tr><td>'+rlEsc(t.t)+'</td><td>'+rlEsc(t.exit_t||'—')+'</td><td><b>'+rlEsc(t.sym)+'</b></td><td>'+rlEsc(t.entry)+'</td><td>'+rlEsc(t.exit)+'</td>'+
-    '<td>'+Number(t.qty||0).toLocaleString()+'</td><td>'+rlEsc(t.spread_bps)+'bps</td><td>'+rlEsc(t.stop??'—')+'</td><td>'+rlEsc(t.target??'—')+'</td>'+
-    '<td>'+rlEsc(t.why)+'</td><td class="'+(Number(t.usd)>=0?'rl-pos':'rl-neg')+'">$'+Number(t.usd||0).toLocaleString()+'</td></tr>'
-  ).join('') || '<tr><td colspan="11" style="color:var(--text-secondary);">No trades passed the real-fidelity gates this day.</td></tr>';
-}
-
-function rlTimeline(r) {
-  const rows = (r.armed_timeline||[]).slice().sort((a,b) => (b.traded?1:0)-(a.traded?1:0) || a.sym.localeCompare(b.sym));
-  const tradesBySym = {}; (r.trades||[]).forEach(t => (tradesBySym[t.sym] = tradesBySym[t.sym]||[]).push(t));
-  // axis hour marks
-  let axis = '<div class="tl-axis">';
-  for (let m = T0; m <= T1; m += 60) { const et=(m-240+1440)%1440; axis += '<span style="left:'+((m-T0)/(T1-T0)*100)+'%;">'+String(Math.floor(et/60)).padStart(2,'0')+':'+String(et%60).padStart(2,'0')+' ET</span>'; }
-  axis += '</div>';
-  const CAP = 15; let hidden = 0;
-  window._rlAllRows = rows;
-  const visRows = window._rlShowAll ? rows : rows.filter((r,ix) => r.traded || ix < CAP);
-  hidden = rows.length - visRows.length;
-  document.getElementById('rl-timeline').innerHTML = axis + visRows.map((row,i) => {
-    const spans = (row.spans||[]).map(sp => '<div class="tl-armed" style="left:'+tPct(sp[0])+'%;width:'+Math.max(0.7, tPct(sp[1])-tPct(sp[0]))+'%;"></div>').join('');
-    const halts = ((r.halt_spans||{})[row.sym]||[]).map(h => '<div class="tl-halt" style="left:'+tPct(h[0])+'%;width:'+Math.max(0.5, tPct(h[1])-tPct(h[0]))+'%;"></div>').join('');
-    const marks = (tradesBySym[row.sym]||[]).map(t =>
-      '<div class="tl-entry" style="left:'+tPct(t.t)+'%;" title="entry '+t.entry+' @'+t.t+'"></div>' +
-      (t.exit_t ? '<div class="tl-exit" style="left:'+tPct(t.exit_t)+'%;" title="exit '+t.exit+' @'+t.exit_t+'"></div>' : '')).join('');
-    return '<div class="tl-row'+(row.traded?' traded':'')+'" onclick="rlToggleChart('+i+',\''+rlEsc(row.sym)+'\')">' +
-      '<div class="tl-sym">'+(row.traded?'★ ':'')+rlEsc(row.sym)+'</div>' +
-      '<div class="tl-track">'+spans+halts+marks+'</div></div>' +
-      '<div class="tl-chartbox" id="rl-cb-'+i+'"></div>';
-  }).join('') + (hidden > 0 ? '<div style="padding:8px;text-align:center;"><a href="#" style="font-size:11.5px;color:#3b8bff;" onclick="window._rlShowAll=true; rlTimeline(rlCur); return false;">Show all '+rows.length+' watched symbols ▾</a></div>' : '');
-  // auto-open charts for traded symbols
-  visRows.forEach((row,i) => { if (row.traded) rlToggleChart(i, row.sym, true); });
-}
-
-// ── Synced multi-lane replay: ONE draggable playhead scrubs every symbol at once ──
-function rlSynced(r) {
-  const host = document.getElementById('rl-synced'); if (!host) return;
-  const trd = {}; (r.trades||[]).forEach(t => (trd[t.sym] = trd[t.sym]||[]).push(t));
-  let syms = Object.keys(trd);
-  if (!syms.length) syms = (r.armed_timeline||[]).filter(a => a.traded).map(a => a.sym);
-  syms = syms.slice(0, 8);
-  if (!syms.length) { host.innerHTML = '<div style="color:var(--text-secondary);font-size:12px;padding:6px;">no traded symbols to scrub this day</div>'; return; }
-  const UP='#3fb950', DN='#f85149', BL='#58a6ff', W=1000, X0=46, X1=W-8, LH=78;
-  const xOf = m => X0 + (m-T0)/(T1-T0)*(X1-X0);
-  window._rlSyncSyms = syms;
-  let tl = '<svg viewBox="0 0 '+W+' 30" width="100%" style="display:block;cursor:col-resize;" preserveAspectRatio="none">';
-  tl += '<line x1="'+X0+'" y1="20" x2="'+X1+'" y2="20" stroke="var(--border)" stroke-width="1"/>';
-  for (let m=Math.ceil(T0/60)*60; m<=T1; m+=60) { const et=(m-240+1440)%1440, x=xOf(m); tl+='<line x1="'+x.toFixed(1)+'" y1="16" x2="'+x.toFixed(1)+'" y2="20" stroke="var(--text-secondary)" stroke-width="1"/><text x="'+x.toFixed(1)+'" y="11" fill="var(--text-secondary)" font-size="9" text-anchor="middle">'+String(Math.floor(et/60)).padStart(2,'0')+':'+String(et%60).padStart(2,'0')+'</text>'; }
-  tl += '<line id="rl-sync-tlph" x1="'+X1+'" y1="2" x2="'+X1+'" y2="28" stroke="'+BL+'" stroke-width="1.5"/></svg>';
-  let lanes = '';
-  syms.forEach(sym => {
-    const S = ((r.series||{})[sym]||[]).filter(b => { const m=tMin(b[0]); return m>=T0 && m<=T1; });
-    const trs = trd[sym]||[];
-    let lo=Infinity, hi=-Infinity;
-    S.forEach(b => { lo=Math.min(lo,b[3]); hi=Math.max(hi,b[2]); });
-    trs.forEach(t => [t.entry,t.exit,t.stop,t.target].forEach(v => { if (v!=null) { lo=Math.min(lo,+v); hi=Math.max(hi,+v); } }));
-    const sid = 'rls-'+sym.replace(/[^A-Za-z0-9]/g,'');
-    if (!isFinite(lo)) { lanes += '<div style="font-size:11px;color:var(--text-secondary);padding:4px;">'+rlEsc(sym)+' — no bars</div>'; return; }
-    const pad=(hi-lo)*0.08||0.1; lo-=pad; hi+=pad;
-    const yt=4, yb=LH-12, Y=p => yt+(1-(p-lo)/(hi-lo))*(yb-yt);
-    const cw=Math.max(1.2, Math.min(6, (X1-X0)/Math.max(30,S.length)*0.8));
-    let g='';
-    trs.forEach(t => { if (t.stop!=null) g+='<line x1="'+X0+'" x2="'+X1+'" y1="'+Y(+t.stop).toFixed(1)+'" y2="'+Y(+t.stop).toFixed(1)+'" stroke="'+DN+'" stroke-width="0.7" stroke-dasharray="3,3" opacity="0.55"/>'; if (t.target!=null) g+='<line x1="'+X0+'" x2="'+X1+'" y1="'+Y(+t.target).toFixed(1)+'" y2="'+Y(+t.target).toFixed(1)+'" stroke="'+UP+'" stroke-width="0.7" stroke-dasharray="3,3" opacity="0.45"/>'; });
-    S.forEach(b => { const m=tMin(b[0]), up=b[4]>=b[1], col=up?UP:DN, xc=xOf(m); g+='<line x1="'+xc.toFixed(1)+'" y1="'+Y(b[2]).toFixed(1)+'" x2="'+xc.toFixed(1)+'" y2="'+Y(b[3]).toFixed(1)+'" stroke="'+col+'" stroke-width="0.8"/>'; const yo=Y(b[1]),yc=Y(b[4]),bt=Math.min(yo,yc),bh=Math.max(0.8,Math.abs(yc-yo)); g+='<rect x="'+(xc-cw/2).toFixed(1)+'" y="'+bt.toFixed(1)+'" width="'+cw.toFixed(1)+'" height="'+bh.toFixed(1)+'" fill="'+col+'"/>'; });
-    trs.forEach(t => { const xe=xOf(tMin(t.t)), ye=Y(+t.entry), won=+t.usd>=0; g+='<path d="M'+xe.toFixed(1)+' '+(ye+7).toFixed(1)+' l-4 6 l8 0 z" fill="'+BL+'"/>'; if (t.exit_t) { const xx=xOf(tMin(t.exit_t)), yx=Y(+t.exit); g+='<path d="M'+xx.toFixed(1)+' '+(yx-7).toFixed(1)+' l-4 -6 l8 0 z" fill="'+(won?UP:DN)+'"/><text x="'+xx.toFixed(1)+'" y="'+(yx-11).toFixed(1)+'" fill="'+(won?UP:DN)+'" font-size="9" text-anchor="middle">'+(won?'+':'')+'$'+Math.round(+t.usd)+'</text>'; } });
-    g += '<rect id="'+sid+'-ov" x="'+X1+'" y="0" width="0" height="'+LH+'" fill="#808080" opacity="0.32"/>';
-    g += '<line id="'+sid+'-ph" x1="'+X1+'" y1="0" x2="'+X1+'" y2="'+LH+'" stroke="'+BL+'" stroke-width="1.1"/>';
-    g += '<text x="'+(X0-3)+'" y="9" fill="var(--text-secondary)" font-size="8.5" text-anchor="end">'+hi.toFixed(2)+'</text><text x="'+(X0-3)+'" y="'+yb.toFixed(1)+'" fill="var(--text-secondary)" font-size="8.5" text-anchor="end">'+lo.toFixed(2)+'</text>';
-    const pl = trs.reduce((a,t) => a+(+t.usd), 0);
-    lanes += '<div style="margin:3px 0;"><div style="font-size:11.5px;font-weight:600;">'+rlEsc(sym)+' <span style="color:'+(pl>=0?UP:DN)+';font-weight:400;">'+(pl>=0?'+':'')+'$'+Math.round(pl)+'</span></div><svg viewBox="0 0 '+W+' '+LH+'" width="100%" style="display:block;cursor:col-resize;" preserveAspectRatio="none">'+g+'</svg></div>';
-  });
-  host.innerHTML = '<div id="rl-sync-wrap" style="touch-action:none;user-select:none;"><div style="font-size:11px;color:var(--text-secondary);margin-bottom:2px;"><span id="rl-sync-time" style="font-family:monospace;color:var(--text);"></span> · drag to scrub all lanes · <span style="color:'+BL+';">▲</span> entry <span style="color:'+UP+';">▼</span>/<span style="color:'+DN+';">▼</span> exit · stop/target dashed</div>'+tl+lanes+'</div>';
-  rlSyncScrub(T1); rlSyncBind();
-}
-function rlSyncScrub(t) {
-  const W=1000, X0=46, X1=W-8; t=Math.max(T0, Math.min(T1, Math.round(t))); window._rlSyncCur=t;
-  const X = X0 + (t-T0)/(T1-T0)*(X1-X0);
-  (window._rlSyncSyms||[]).forEach(sym => { const sid='rls-'+sym.replace(/[^A-Za-z0-9]/g,''); const ov=document.getElementById(sid+'-ov'); if (ov) { ov.setAttribute('x',X.toFixed(1)); ov.setAttribute('width',Math.max(0,X1-X).toFixed(1)); } const ph=document.getElementById(sid+'-ph'); if (ph) { ph.setAttribute('x1',X.toFixed(1)); ph.setAttribute('x2',X.toFixed(1)); } });
-  const tp=document.getElementById('rl-sync-tlph'); if (tp) { tp.setAttribute('x1',X.toFixed(1)); tp.setAttribute('x2',X.toFixed(1)); }
-  const et=(t-240+1440)%1440, tm=document.getElementById('rl-sync-time'); if (tm) tm.textContent=String(Math.floor(et/60)).padStart(2,'0')+':'+String(et%60).padStart(2,'0')+' ET';
-}
-function rlSyncBind() {
-  const wrap=document.getElementById('rl-sync-wrap'); if (!wrap) return;
-  const W=1000, X0=46, X1=W-8; let drag=false, raf=0;
-  const xToT = cx => { const svg=wrap.querySelector('svg'); const rr=svg.getBoundingClientRect(); const px0=rr.left+(X0/W)*rr.width, px1=rr.left+(X1/W)*rr.width; let f=(cx-px0)/(px1-px0); f=Math.max(0,Math.min(1,f)); return T0+f*(T1-T0); };
-  wrap.addEventListener('pointerdown', e => { drag=true; try { wrap.setPointerCapture(e.pointerId); } catch(_) {} rlSyncScrub(xToT(e.clientX)); e.preventDefault(); });
-  wrap.addEventListener('pointermove', e => { if (!drag) return; const cx=e.clientX; if (raf) return; raf=requestAnimationFrame(() => { raf=0; rlSyncScrub(xToT(cx)); }); });
-  wrap.addEventListener('pointerup', () => { drag=false; });
-  wrap.addEventListener('pointercancel', () => { drag=false; });
-}
-
-function rlToggleChart(i, sym, forceOpen) {
-  const box = document.getElementById('rl-cb-'+i);
-  if (!box) return;
-  if (box.classList.contains('open') && !forceOpen) { box.classList.remove('open'); return; }
-  if (!box.innerHTML) box.innerHTML = rlChartSVG(sym);
-  box.classList.add('open');
-  rlAttachHover('rlc-'+sym.replace(/[^A-Za-z0-9]/g,''), sym);
-}
-
-function rlChartSVG(sym) {
-  const r = rlCur || {};
-  let S = (r.series||{})[sym];
-  if (!S || !S.length) return '<div class="rl-chart-meta">no bar data for '+rlEsc(sym)+'</div>';
-  S = S.filter(b => { const m = tMin(b[0]); return m >= T0 && m <= T1; });
-  if (!S.length) return '<div class="rl-chart-meta">no bars in the trading window for '+rlEsc(sym)+'</div>';
-  const cid = 'rlc-'+sym.replace(/[^A-Za-z0-9]/g,'');
-  window._rlBars = window._rlBars || {}; window._rlBars[cid] = S;
-  window._rlView = window._rlView || {};
-  if (!window._rlView[cid]) window._rlView[cid] = { t0: 13*60+30, t1: T1 };  // default RTH; drag left to reveal pre-market
-  const meta = ((rlCur.trades)||[]).filter(t => t.sym === sym).map(t => 'P/L $'+Number(t.usd).toLocaleString()+' · spread '+t.spread_bps+'bps · qty '+Number(t.qty).toLocaleString()).join(' | ');
-  return '<div class="rl-chart-meta">'+rlEsc(sym)+' — '+rlEsc((rlCur&&rlCur.entry_interval)||'5m')+' · ET · <span style="color:#58a6ff;">EMA9</span> · <span style="color:#e8b339;">VWAP</span> · scroll=zoom time · shift+scroll=zoom price · drag=pan · dbl-click=reset'+(meta ? ' · '+meta : ' · watched, no fill')+'</div>' +
-         '<div style="position:relative;">' +
-         '<svg class="rl-chart" id="'+cid+'" viewBox="0 0 1040 252" preserveAspectRatio="none">'+rlChartBody(sym, cid)+'</svg>' +
-         '<div id="'+cid+'-tip" style="position:absolute;top:6px;left:8px;background:rgba(8,12,20,.92);border:1px solid var(--border);border-radius:6px;padding:5px 9px;font-size:11px;display:none;pointer-events:none;"></div></div>';
-}
-
-function rlChartBody(sym, cid) {
-  const r = rlCur || {};
-  const view = (window._rlView||{})[cid] || { t0: T0, t1: T1 };
-  const V0 = view.t0, V1 = view.t1;
-  const all = (window._rlBars||{})[cid] || [];
-  const S = all.filter(b => { const m = tMin(b[0]); return m >= V0 - 5 && m <= V1 + 5; });
-  if (!S.length) return '';
-  const W = 1040, H = 252, padL = 46, padR = 8, padT = 10, padB = 40;
-  // EMA9/VWAP computed over ALL bars (correct history), kept for in-view points
-  const ov = [];
-  (function(){
-    const k = 2/(9+1); let ema = null, cumPV = 0, cumV = 0;
-    all.forEach(b => {
-      const m = tMin(b[0]); const typ = (b[2]+b[3]+b[4])/3;
-      ema = ema === null ? b[4] : b[4]*k + ema*(1-k);
-      cumPV += typ * b[5]; cumV += b[5];
-      if (m >= V0 && m <= V1) ov.push([b[0], ema, cumV > 0 ? cumPV/cumV : null]);
-    });
-  })();
-  // SMART Y: auto-fit to everything visible — bars, overlays, AND trade annotations
-  let lo = Math.min(...S.map(b => b[3])), hi = Math.max(...S.map(b => b[2]));
-  ov.forEach(p => { const v = p[2] == null ? p[1] : p[2]; lo = Math.min(lo, p[1], v); hi = Math.max(hi, p[1], v); });
-  ((r.trades)||[]).filter(t => t.sym === sym).forEach(t => {
-    const te = tMin(t.t), tx = t.exit_t ? tMin(t.exit_t) : null;
-    const add = p => { if (p != null && isFinite(+p)) { lo = Math.min(lo, +p); hi = Math.max(hi, +p); } };
-    if (te >= V0 && te <= V1) add(t.entry);
-    if (te <= V1) { add(t.stop); add(t.target); }       // stop/target lines extend right
-    if (tx != null && tx >= V0 && tx <= V1) add(t.exit);
-  });
-  const padPr = (hi - lo) * 0.07 || Math.max(hi, 1) * 0.005;
-  let dLo = lo - padPr, dHi = hi + padPr;
-  if (view.p0 != null && view.p1 != null) { dLo = view.p0; dHi = view.p1; }  // manual price view
-  view._dLo = dLo; view._dHi = dHi;                      // handlers read the rendered domain
-  const span = (dHi - dLo) || 1, y = p => padT + (dHi - p) / span * (H-padT-padB);
-  const dec = span < 0.35 ? 3 : (dHi >= 100 ? 1 : 2);
-  const x = t => padL + (Math.max(V0, Math.min(V1, tMin(t))) - V0) / (V1-V0) * (W-padL-padR);
-  const barMin = (rlCur && rlCur.bar_interval_min) || 5;
-  const bw = Math.max(1.2, (W-padL-padR) / ((V1-V0)/barMin) - (barMin >= 5 ? 2 : 0.6));
-  const fmtET = t => { const m = (tMin(t)-240+1440)%1440; return String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0'); };
-  let g = '';
-  const range = V1 - V0;
-  const step = range > 360 ? 60 : range > 150 ? 30 : range > 60 ? 15 : 5;
-  for (let m = Math.ceil(V0/step)*step; m <= V1; m += step) {
-    const xx = padL + (m - V0) / (V1-V0) * (W-padL-padR);
-    const et = (m-240+1440)%1440;
-    g += '<line x1="'+xx+'" x2="'+xx+'" y1="'+(H-padB)+'" y2="'+(H-padB+4)+'" stroke="rgba(255,255,255,.3)"/>' +
-         '<text x="'+xx+'" y="'+(H-padB+14)+'" text-anchor="middle" fill="rgba(255,255,255,.5)" font-size="9">'+String(Math.floor(et/60)).padStart(2,'0')+':'+String(et%60).padStart(2,'0')+'</text>';
+  function esc(value) {
+    var div = document.createElement('div');
+    div.textContent = value == null ? '' : String(value);
+    return div.innerHTML;
   }
-  if (V0 <= 810 && 810 <= V1) {
-    const xo = padL + (810 - V0)/(V1-V0)*(W-padL-padR);
-    g += '<line x1="'+xo+'" x2="'+xo+'" y1="'+padT+'" y2="'+(H-padB)+'" stroke="rgba(255,255,255,.22)" stroke-dasharray="3 4"/>' +
-         '<text x="'+(xo+3)+'" y="'+(padT+9)+'" fill="rgba(255,255,255,.4)" font-size="8">09:30 open</text>';
-  }
-  (function(){
-    const spans = ((r.halt_spans||{})[sym]||[]).slice().sort((a,b) => tMin(a[0])-tMin(b[0]));
-    const merged = [];
-    spans.forEach(h => {
-      const last = merged[merged.length-1];
-      if (last && tMin(h[0]) - tMin(last[1]) <= 3) { if (tMin(h[1]) > tMin(last[1])) last[1] = h[1]; }
-      else merged.push([h[0], h[1]]);
-    });
-    merged.forEach(h => {
-      if (tMin(h[1]) < V0 || tMin(h[0]) > V1) return;
-      const x0 = x(h[0]), wpx = Math.max(2, x(h[1])-x0);
-      g += '<rect x="'+x0+'" y="'+padT+'" width="'+wpx+'" height="'+(H-padT-padB)+'" fill="rgba(248,81,73,.10)"/>';
-      if (wpx > 30) g += '<text x="'+(x0+3)+'" y="'+(padT+19)+'" fill="rgba(248,81,73,.7)" font-size="8">HALT</text>';
-    });
-  })();
-  for (let k = 0; k <= 4; k++) {
-    const pp = dLo + span*k/4, yy = y(pp);
-    g += '<line x1="'+padL+'" x2="'+(W-padR)+'" y1="'+yy+'" y2="'+yy+'" stroke="rgba(255,255,255,.06)"/>' +
-         '<text x="4" y="'+(yy+3)+'" fill="rgba(255,255,255,.45)" font-size="9">'+pp.toFixed(dec)+'</text>';
-  }
-  const vmax = Math.max(...S.map(b => b[5])) || 1;
-  S.forEach(b => {
-    const up = b[4] >= b[1];
-    const vh = Math.max(1, (b[5] / vmax) * 24);
-    g += '<rect x="'+(x(b[0])-bw/2)+'" y="'+(H-16-vh)+'" width="'+bw+'" height="'+vh+'" fill="'+(up?'#3fb950':'#f85149')+'" opacity="0.28"/>';
-  });
-  S.forEach(b => {
-    const cx = x(b[0]), up = b[4] >= b[1], col = up ? '#3fb950' : '#f85149';
-    g += '<line x1="'+cx+'" x2="'+cx+'" y1="'+y(b[2])+'" y2="'+y(b[3])+'" stroke="'+col+'" stroke-width="1"/>' +
-         '<rect x="'+(cx-bw/2)+'" y="'+y(Math.max(b[1],b[4]))+'" width="'+bw+'" height="'+Math.max(1, Math.abs(y(b[1])-y(b[4])))+'" fill="'+col+'" opacity="0.85"/>';
-  });
-  (function(){
-    const ePts = [], vPts = [];
-    ov.forEach(p => {
-      ePts.push(x(p[0]).toFixed(1)+','+y(p[1]).toFixed(1));
-      if (p[2] != null) vPts.push(x(p[0]).toFixed(1)+','+y(p[2]).toFixed(1));
-    });
-    if (ePts.length > 1) g += '<polyline points="'+ePts.join(' ')+'" fill="none" stroke="#58a6ff" stroke-width="1.3" opacity=".85"/>';
-    if (vPts.length > 1) g += '<polyline points="'+vPts.join(' ')+'" fill="none" stroke="#e8b339" stroke-width="1.3" stroke-dasharray="6 3" opacity=".8"/>';
-  })();
-  const placed = [];
-  const clampY = v => Math.max(padT+12, Math.min(H-padB-6, v));   // labels stay INSIDE the plot
-  function labelY(xp, yp) {
-    let yy = clampY(yp);
-    for (let tries = 0; tries < 8; tries++) {
-      if (!placed.some(b => Math.abs(b.x - xp) < 150 && Math.abs(b.y - yy) < 12)) break;
-      yy = yy + 13 > H-padB-6 ? yy - 13 : yy + 13;                 // push down, flip up at the floor
-    }
-    yy = clampY(yy);
-    placed.push({x: xp, y: yy});
-    return yy;
-  }
-  const inPlot = v => v >= padT && v <= H-padB;
-  ((rlCur.trades)||[]).filter(t => t.sym === sym).forEach(t => {
-    if (tMin(t.t) < V0 || tMin(t.t) > V1) return;
-    const xe = x(t.t), ye = y(t.entry);
-    const eA = xe > W-180 ? ' text-anchor="end"' : '';
-    g += '<circle cx="'+xe+'" cy="'+Math.max(padT, Math.min(H-padB, ye))+'" r="5" fill="#3fb950" stroke="#fff" stroke-width="1.2"/>' +
-         '<text x="'+(xe + (eA? -7 : 7))+'" y="'+labelY(xe, ye-7)+'"'+eA+' fill="#3fb950" font-size="10" font-weight="700">▲ entry '+t.entry+' @'+fmtET(t.t)+' ET</text>';
-    if (t.stop && inPlot(y(t.stop))) {
-      g += '<line x1="'+xe+'" x2="'+(W-padR)+'" y1="'+y(t.stop)+'" y2="'+y(t.stop)+'" stroke="#f85149" stroke-dasharray="5 4" stroke-width="1"/>' +
-           '<text x="'+(W-padR-2)+'" y="'+clampY(y(t.stop)-3)+'" text-anchor="end" fill="#f85149" font-size="9">stop '+t.stop+'</text>';
-    }
-    if (t.target && inPlot(y(t.target))) {
-      g += '<line x1="'+xe+'" x2="'+(W-padR)+'" y1="'+y(t.target)+'" y2="'+y(t.target)+'" stroke="#3fb950" stroke-dasharray="5 4" stroke-width="1" opacity=".7"/>' +
-           '<text x="'+(W-padR-2)+'" y="'+clampY(y(t.target)-3)+'" text-anchor="end" fill="#3fb950" font-size="9">target '+t.target+'</text>';
-    }
-    if (t.exit_t && tMin(t.exit_t) >= V0 && tMin(t.exit_t) <= V1) {
-      const xx = x(t.exit_t), yx = y(t.exit);
-      const xA = xx > W-220 ? ' text-anchor="end"' : '';
-      g += '<circle cx="'+xx+'" cy="'+Math.max(padT, Math.min(H-padB, yx))+'" r="5" fill="#f85149" stroke="#fff" stroke-width="1.2"/>' +
-           '<text x="'+(xx + (xA? -7 : 7))+'" y="'+labelY(xx, yx+13)+'"'+xA+' fill="#f85149" font-size="10" font-weight="700">▼ exit '+t.exit+' @'+fmtET(t.exit_t)+' ET ('+t.why+')</text>';
-    }
-  });
-  g += '<line id="'+cid+'-x" x1="0" x2="0" y1="'+padT+'" y2="'+(H-padB)+'" stroke="rgba(255,255,255,.35)" stroke-dasharray="2 3" visibility="hidden"/>';
-  return g;
-}
 
-const RL_W = 1040, RL_PADL = 46, RL_PADR = 8, RL_H = 252, RL_PADT = 10, RL_PADB = 40;
-function rlRedraw(cid, sym) {
-  const svg = document.getElementById(cid);
-  if (svg) svg.innerHTML = rlChartBody(sym, cid);
-}
-function rlAttachHover(cid, sym) {
-  const svg = document.getElementById(cid);
-  if (!svg || svg._rlWired) return;
-  svg._rlWired = true;
-  svg.addEventListener('mousemove', ev => {
-    if (svg._rlDrag) {
-      const view = window._rlView[cid];
-      const r = svg.getBoundingClientRect();
-      const d = svg._rlDrag;
-      const dmin = (d.x - ev.clientX) / r.width * (d.v1 - d.v0);
-      let t0 = d.v0 + dmin, t1 = d.v1 + dmin;
-      if (t0 < T0) { t1 += T0-t0; t0 = T0; } if (t1 > T1) { t0 -= t1-T1; t1 = T1; }
-      view.t0 = t0; view.t1 = t1;
-      // vertical pan engages after 8px so a pure time-pan keeps Y on auto-fit
-      if (Math.abs(ev.clientY - d.cy) > 8) d.vy = true;
-      if (d.vy) {
-        const dpr = (ev.clientY - d.cy) / r.height * RL_H / (RL_H-RL_PADT-RL_PADB) * (d.dHi - d.dLo);
-        view.p0 = d.dLo + dpr; view.p1 = d.dHi + dpr;
-      }
-      rlRedraw(cid, sym); return;
-    }
-    rlHover(ev, cid);
-  });
-  svg.addEventListener('mouseleave', () => { svg._rlDrag = null; rlHoverOff(cid); });
-  svg.addEventListener('mousedown', ev => {
-    const v = window._rlView[cid];
-    svg._rlDrag = { x: ev.clientX, cy: ev.clientY, v0: v.t0, v1: v.t1, dLo: v._dLo, dHi: v._dHi, vy: false };
-    ev.preventDefault();
-  });
-  svg.addEventListener('mouseup', () => { svg._rlDrag = null; });
-  svg.addEventListener('dblclick', () => { window._rlView[cid] = { t0: T0, t1: T1 }; rlRedraw(cid, sym); });  // fresh view = auto-fit price
-  svg.addEventListener('wheel', ev => {
-    ev.preventDefault();
-    const view = window._rlView[cid];
-    const r = svg.getBoundingClientRect();
-    if (ev.shiftKey) {                                    // shift+scroll = PRICE zoom anchored at cursor
-      const dLo = view._dLo, dHi = view._dHi;
-      if (dLo == null || dHi == null) return;
-      const fy = Math.max(0, Math.min(1, ((ev.clientY - r.top)/r.height*RL_H - RL_PADT) / (RL_H-RL_PADT-RL_PADB)));
-      const cp = dHi - fy * (dHi - dLo);
-      const z = ev.deltaY > 0 ? 1.25 : 0.8;
-      const p0 = cp - (cp - dLo) * z, p1 = cp + (dHi - cp) * z;
-      if ((p1 - p0) / Math.max(Math.abs(cp), 0.01) < 0.002) return;
-      view.p0 = p0; view.p1 = p1; rlRedraw(cid, sym); return;
-    }
-    const fx = Math.max(0, Math.min(1, ((ev.clientX - r.left)/r.width*RL_W - RL_PADL) / (RL_W-RL_PADL-RL_PADR)));
-    const cm = view.t0 + fx * (view.t1 - view.t0);
-    const z = ev.deltaY > 0 ? 1.25 : 0.8;
-    let t0 = Math.max(T0, cm - (cm - view.t0) * z), t1 = Math.min(T1, cm + (view.t1 - cm) * z);
-    if (t1 - t0 < 30) return;
-    view.t0 = t0; view.t1 = t1; rlRedraw(cid, sym);
-  }, { passive: false });
-}
-function rlHover(ev, cid) {
-  const view = (window._rlView||{})[cid]; if (!view) return;
-  const bars = ((window._rlBars||{})[cid]||[]).filter(b => tMin(b[0]) >= view.t0 && tMin(b[0]) <= view.t1);
-  if (!bars.length) return;
-  const svg = document.getElementById(cid); if (!svg) return;
-  const r = svg.getBoundingClientRect();
-  const xf = (ev.clientX - r.left) / r.width * RL_W;
-  const span = RL_W - RL_PADL - RL_PADR;
-  let best = 0, bd = 1e9;
-  bars.forEach((b,i) => { const bx = RL_PADL + (tMin(b[0])-view.t0)/(view.t1-view.t0)*span; const d = Math.abs(bx - xf); if (d < bd) { bd = d; best = i; } });
-  const b = bars[best];
-  const xx = RL_PADL + (tMin(b[0])-view.t0)/(view.t1-view.t0)*span;
-  const xl = document.getElementById(cid+'-x'); if (xl) { xl.setAttribute('x1', xx); xl.setAttribute('x2', xx); xl.setAttribute('visibility','visible'); }
-  const m = tMin(b[0]); const et = (m-240+1440)%1440;
-  const tip = document.getElementById(cid+'-tip');
-  if (tip) { tip.style.display=''; tip.innerHTML = '<b>'+String(Math.floor(et/60)).padStart(2,'0')+':'+String(et%60).padStart(2,'0')+' ET</b> &nbsp; O '+b[1]+' · H '+b[2]+' · L '+b[3]+' · C '+b[4]+' · Vol '+Number(b[5]).toLocaleString(); }
-}
-function rlHoverOff(cid) {
-  const xl = document.getElementById(cid+'-x'); if (xl) xl.setAttribute('visibility','hidden');
-  const tip = document.getElementById(cid+'-tip'); if (tip) tip.style.display='none';
-}
+  function intInput(id, fallback) {
+    var el = document.getElementById(id);
+    var n = el ? parseInt(el.value, 10) : NaN;
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+  }
 
-async function rlLoadHistory() {
-  try {
-    const j = await (await fetch('/api/trading/momentum/replay/list')).json();
-    document.getElementById('rl-hist').innerHTML = (j.results||[]).map(r =>
-      '<tr class="hist" onclick="rlLoadResult(\''+rlEsc(r.date)+'\', \''+(r.armed_source||'asof')+'\')"><td><b>'+rlEsc(r.date)+'</b></td>'+
-      '<td class="'+(Number(r.total_usd)>=0?'rl-pos':'rl-neg')+'">$'+Number(r.total_usd||0).toLocaleString()+'</td>'+
-      '<td>'+(r.n_trades||0)+'</td><td>'+(r.wins||0)+'/'+(r.losses||0)+'</td>'+
-      '<td>'+(r.tape_symbols||0)+'</td><td>'+(r.candidates||0)+'</td><td>'+(r.halt_windows||0)+'</td>'+
-      '<td style="color:var(--text-secondary);">'+rlEsc((r.ran_at_utc||'').slice(0,16).replace('T',' '))+'</td></tr>'
-    ).join('') || '<tr><td colspan="8" style="color:var(--text-secondary);">No replays yet — run your first one above.</td></tr>';
-  } catch (e) { /* ignore */ }
-}
+  function optionalIntInput(id) {
+    var el = document.getElementById(id);
+    var n = el ? parseInt(el.value, 10) : NaN;
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
 
-(function init() {
-  document.getElementById('rl-date').value = new Date().toISOString().slice(0,10);
-  rlLoadHistory(); rlCheck();
-  // auto-open the newest persisted result kung meron
-  fetch('/api/trading/momentum/replay/list').then(r=>r.json()).then(j => {
-    const first = (j.results||[])[0]; if (first) rlLoadResult(first.date);
-  }).catch(()=>{});
+  function datetimeIso(id) {
+    var el = document.getElementById(id);
+    if (!el || !el.value) return '';
+    var dt = new Date(el.value);
+    return Number.isFinite(dt.getTime()) ? dt.toISOString() : '';
+  }
+
+  function fmtNum(value, fallback) {
+    if (value == null || value === '') return fallback == null ? '0' : String(fallback);
+    var n = Number(value);
+    if (!Number.isFinite(n)) return String(value);
+    return Math.round(n * 10000) / 10000;
+  }
+
+  function fmtMoney(value) {
+    var n = Number(value || 0);
+    var sign = n < 0 ? '-' : '';
+    return sign + '$' + Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  }
+
+  function kpi(label, value, cls) {
+    return '<div class="rr-kpi"><b class="' + (cls || '') + '">' + esc(value) + '</b><span>' + esc(label) + '</span></div>';
+  }
+
+  function gate(label, ready) {
+    return '<div class="rr-gate ' + (ready ? 'ready' : 'blocked') + '">' +
+      '<strong>' + esc(label) + '</strong><span>' + (ready ? 'ready' : 'blocked') + '</span></div>';
+  }
+
+  function setStatus(id, text, cls) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'rr-status ' + (cls || '');
+  }
+
+  function fsmEndpoint(params) {
+    return '/api/trading/momentum/replay/fsm?' + params.toString();
+  }
+
+  window.rrClearFsmScope = function() {
+    var ids = document.getElementById('rr-fsm-session-ids');
+    if (ids) ids.value = '';
+    setStatus('rr-fsm-status', 'recent live scope selected', '');
+  };
+
+  window.rrRunFsmReplay = function() {
+    var btn = document.getElementById('rr-fsm-run');
+    var params = new URLSearchParams();
+    var sessionIds = (document.getElementById('rr-fsm-session-ids') || {}).value || '';
+    var since = datetimeIso('rr-fsm-since');
+    var until = datetimeIso('rr-fsm-until');
+    var orderBudget = optionalIntInput('rr-fsm-order-budget');
+    var riskSlots = optionalIntInput('rr-fsm-risk-slots');
+
+    params.set('limit', String(intInput('rr-fsm-limit', 100)));
+    params.set('capacity_limit', String(intInput('rr-fsm-capacity', 25)));
+    params.set('setup_trace_limit', String(intInput('rr-fsm-trace-limit', 500)));
+    if (sessionIds.trim()) params.set('session_ids', sessionIds.trim());
+    if (since) params.set('since', since);
+    if (until) params.set('until', until);
+    if (orderBudget) params.set('order_call_budget', String(orderBudget));
+    if (riskSlots) params.set('risk_budget_slots', String(riskSlots));
+
+    if (btn) btn.disabled = true;
+    setStatus('rr-fsm-status', 'running FSM audit...', 'running');
+    renderFsmLoading();
+
+    fetch(fsmEndpoint(params), { credentials: 'same-origin' })
+      .then(function(resp) {
+        return resp.json().then(function(body) { return { ok: resp.ok, body: body }; });
+      })
+      .then(function(out) {
+        if (!out.ok) {
+          var detail = out.body && (out.body.detail || out.body.error);
+          setStatus('rr-fsm-status', detail || 'audit failed', 'error');
+          renderFsmError(detail || 'Audit failed');
+          return;
+        }
+        setStatus('rr-fsm-status', 'audit complete', 'done');
+        renderFsmResult(out.body);
+      })
+      .catch(function(err) {
+        setStatus('rr-fsm-status', err && err.message ? err.message : 'audit failed', 'error');
+        renderFsmError(err && err.message ? err.message : 'Audit failed');
+      })
+      .finally(function() {
+        if (btn) btn.disabled = false;
+      });
+  };
+
+  function renderFsmLoading() {
+    var host = document.getElementById('rr-fsm-result');
+    if (!host) return;
+    host.innerHTML = '<div class="rr-result-head"><h3>FSM audit result</h3><span class="rr-tag live">running</span></div>' +
+      '<div class="rr-empty">Replay v3 audit is running.</div>';
+  }
+
+  function renderFsmError(message) {
+    var host = document.getElementById('rr-fsm-result');
+    if (!host) return;
+    host.innerHTML = '<div class="rr-result-head"><h3>FSM audit result</h3><span class="rr-tag red">error</span></div>' +
+      '<div class="rr-empty" style="color:var(--rr-red);">' + esc(message) + '</div>';
+  }
+
+  function renderFsmResult(payload) {
+    var host = document.getElementById('rr-fsm-result');
+    if (!host) return;
+    var replay = payload && payload.replay || {};
+    var scope = payload && payload.scope || {};
+    var inputs = replay.inputs || {};
+    var scheduler = replay.scheduler || {};
+    var cert = replay.certification || {};
+    var setup = replay.setup_trace || {};
+    var setupCert = setup.certification || {};
+    var debt = replay.replay_evidence_debt || [];
+    var missing = cert.missing_evidence || [];
+    var selectedPnl = Number(scheduler.selected_expected_pnl_usd || 0);
+    var sessionIds = scope.session_ids || [];
+    var titleTag = payload && payload.ok === false ? 'blocked' : 'complete';
+    var kpis = [
+      kpi('Scope', sessionIds.length ? sessionIds.join(', ') : 'none'),
+      kpi('Sessions', fmtNum(inputs.session_rows)),
+      kpi('Snapshots', fmtNum(inputs.scheduler_snapshot_steps)),
+      kpi('Broker outcomes', fmtNum(inputs.broker_outcomes)),
+      kpi('Selected', fmtNum(scheduler.selected_count)),
+      kpi('Terminalized', fmtNum(scheduler.terminalized_count)),
+      kpi('Pending', fmtNum(scheduler.pending_count)),
+      kpi('Expected P/L', fmtMoney(selectedPnl), selectedPnl >= 0 ? 'rr-pos' : 'rr-neg')
+    ].join('');
+    var gates = [
+      gate('Scheduler priority', !!cert.scheduler_priority_claim_ready),
+      gate('Adapter starvation', !!cert.adapter_unavailable_starvation_claim_ready),
+      gate('Broker outcome', !!cert.broker_outcome_attribution_ready),
+      gate('Realized vs expected', !!cert.realized_vs_selected_expected_claim_ready),
+      gate('P/L min-max', !!cert.pnl_minmax_claim_ready),
+      gate('Setup trace', !!setupCert.setup_trace_coverage_ready)
+    ].join('');
+    var pills = [
+      '<span class="rr-pill blue">read only</span>',
+      '<span class="rr-pill ' + (scope.explicit_session_ids ? 'green' : 'amber') + '">' + (scope.explicit_session_ids ? 'explicit sessions' : 'recent live') + '</span>',
+      '<span class="rr-pill">limit ' + esc(scope.limit || '-') + '</span>'
+    ];
+    if (scope.since_utc) pills.push('<span class="rr-pill">since ' + esc(scope.since_utc) + '</span>');
+    if (scope.until_utc) pills.push('<span class="rr-pill">until ' + esc(scope.until_utc) + '</span>');
+
+    var html = '<div class="rr-result-head"><h3>FSM audit result</h3><span class="rr-tag live">' + esc(titleTag) + '</span></div>';
+    html += '<div class="rr-result-body">';
+    html += '<div class="rr-kpis">' + kpis + '</div>';
+    html += '<div class="rr-pill-row">' + pills.join('') + '</div>';
+    html += '<div class="rr-gates">' + gates + '</div>';
+    if (scheduler.no_selected_reason) {
+      html += '<div class="rr-section-title">Selection outcome</div><ul class="rr-list"><li><span class="rr-code">' + esc(scheduler.no_selected_reason) + '</span></li></ul>';
+    }
+    if (cert.claim_boundary) {
+      html += '<div class="rr-section-title">Claim boundary</div><ul class="rr-list"><li>' + esc(cert.claim_boundary) + '</li></ul>';
+    }
+    if (missing.length) {
+      html += '<div class="rr-section-title">Missing evidence</div><ul class="rr-list">';
+      missing.forEach(function(item) { html += '<li><span class="rr-code">' + esc(item) + '</span></li>'; });
+      html += '</ul>';
+    }
+    if (debt.length) {
+      html += '<div class="rr-section-title">Evidence debt</div><ul class="rr-list">';
+      debt.slice(0, 10).forEach(function(row) {
+        var label = row.missing_evidence || row.evidence_needed || 'missing';
+        html += '<li><b>' + esc(label) + '</b>';
+        if (row.how_to_collect) html += '<br>' + esc(row.how_to_collect);
+        html += '</li>';
+      });
+      html += '</ul>';
+    }
+    html += '<details class="rr-details"><summary>Raw replay JSON</summary><pre class="rr-json">' + esc(JSON.stringify(replay, null, 2)) + '</pre></details>';
+    html += '</div>';
+    host.innerHTML = html;
+  }
+
+  window.rrRunDayReplay = function() {
+    var date = document.getElementById('rr-day-date').value;
+    var mode = document.getElementById('rr-day-mode').value || 'live';
+    var btn = document.getElementById('rr-day-run');
+    rrLastDayMode = mode;
+    if (!date) {
+      setStatus('rr-day-status', 'pick a date', 'error');
+      return;
+    }
+    if (btn) btn.disabled = true;
+    setStatus('rr-day-status', 'starting...', 'running');
+    fetch('/api/trading/momentum/replay/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ date: date, armed_source: mode })
+    })
+      .then(function(resp) { return resp.json(); })
+      .then(function(body) {
+        if (!body.ok) {
+          setStatus('rr-day-status', body.error || 'replay refused', 'error');
+          if (btn) btn.disabled = false;
+          return;
+        }
+        if (rrPoll) clearInterval(rrPoll);
+        rrPoll = setInterval(rrCheckDayReplay, 5000);
+        rrCheckDayReplay();
+      })
+      .catch(function(err) {
+        setStatus('rr-day-status', err && err.message ? err.message : 'request failed', 'error');
+        if (btn) btn.disabled = false;
+      });
+  };
+
+  function rrCheckDayReplay() {
+    fetch('/api/trading/momentum/replay/status', { credentials: 'same-origin' })
+      .then(function(resp) { return resp.json(); })
+      .then(function(body) {
+        var job = body.job || {};
+        document.getElementById('rr-job-state').textContent = job.state || 'idle';
+        document.getElementById('rr-job-date').textContent = job.date || '-';
+        if (job.state === 'running') {
+          setStatus('rr-day-status', 'running ' + (job.date || ''), 'running');
+          return;
+        }
+        if (rrPoll) {
+          clearInterval(rrPoll);
+          rrPoll = null;
+        }
+        var btn = document.getElementById('rr-day-run');
+        if (btn) btn.disabled = false;
+        if (job.state === 'done') {
+          setStatus('rr-day-status', 'complete', 'done');
+          rrLoadDayResult(job.date, job.armed_source || rrLastDayMode);
+          rrLoadHistory();
+        } else if (job.state === 'error') {
+          setStatus('rr-day-status', job.error || 'error', 'error');
+          rrLoadHistory();
+        } else {
+          setStatus('rr-day-status', job.state || 'idle', '');
+        }
+      })
+      .catch(function() {});
+  }
+
+  function rrLoadDayResult(date, mode) {
+    if (!date) return;
+    fetch('/api/trading/momentum/replay/result/' + encodeURIComponent(date) + '?armed_source=' + encodeURIComponent(mode || 'asof'), { credentials: 'same-origin' })
+      .then(function(resp) { return resp.json().then(function(body) { return { ok: resp.ok, body: body }; }); })
+      .then(function(out) {
+        if (!out.ok || !out.body || !out.body.result) return;
+        renderDayResult(out.body.result);
+      })
+      .catch(function() {});
+  }
+
+  function renderDayResult(result) {
+    var host = document.getElementById('rr-day-result');
+    var body = document.getElementById('rr-day-body');
+    if (!host || !body) return;
+    host.style.display = '';
+    document.getElementById('rr-day-title').textContent = result.date + ' day replay';
+    document.getElementById('rr-day-result-mode').textContent = result.armed_source || 'v2';
+    var total = Number(result.total_usd || 0);
+    var trades = result.trades || [];
+    var divergence = result.divergence || [];
+    var watched = result.armed_timeline || [];
+    var html = '<div class="rr-kpis">';
+    html += kpi('P/L', fmtMoney(total), total >= 0 ? 'rr-pos' : 'rr-neg');
+    html += kpi('Trades', trades.length);
+    html += kpi('W/L', (result.wins || 0) + '/' + (result.losses || 0));
+    html += kpi('Candidates', result.candidates || 0);
+    html += kpi('Tape symbols', result.tape_symbols || 0);
+    html += kpi('Watched', watched.length);
+    html += kpi('Halt windows', result.halt_windows || 0);
+    html += kpi('Day halt', result.day_halted || '-');
+    html += '</div>';
+    html += '<div class="rr-split">';
+    html += '<div>';
+    html += '<div class="rr-section-title">Trades</div>' + tradesTable(trades);
+    html += '</div><div>';
+    html += '<div class="rr-section-title">Watched symbols</div>' + watchedTable(watched);
+    html += '</div></div>';
+    if (divergence.length) {
+      html += '<div class="rr-section-title">Live vs replay divergence</div>' + divergenceTable(divergence);
+    }
+    if (result.error) {
+      html += '<div class="rr-section-title">Replay error</div><ul class="rr-list"><li style="color:var(--rr-red);">' + esc(result.error) + '</li></ul>';
+    }
+    html += '<details class="rr-details"><summary>Raw day replay JSON</summary><pre class="rr-json">' + esc(JSON.stringify(result, null, 2)) + '</pre></details>';
+    body.innerHTML = html;
+  }
+
+  function tradesTable(trades) {
+    if (!trades.length) return '<div class="rr-empty">No trades in this result.</div>';
+    var rows = trades.map(function(t) {
+      var usd = Number(t.usd || 0);
+      return '<tr><td><b>' + esc(t.sym) + '</b></td><td>' + esc(t.t || '-') + '</td><td>' + esc(t.exit_t || '-') + '</td>' +
+        '<td>' + esc(t.entry || '-') + '</td><td>' + esc(t.exit || '-') + '</td><td>' + esc(t.qty || '-') + '</td>' +
+        '<td>' + esc(t.why || '-') + '</td><td class="' + (usd >= 0 ? 'rr-pos' : 'rr-neg') + '">' + fmtMoney(usd) + '</td></tr>';
+    }).join('');
+    return '<div class="rr-table-wrap"><table class="rr-table"><thead><tr><th>Symbol</th><th>Entry</th><th>Exit</th><th>Entry px</th><th>Exit px</th><th>Qty</th><th>Reason</th><th>P/L</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  }
+
+  function watchedTable(watched) {
+    if (!watched.length) return '<div class="rr-empty">No watched symbols recorded.</div>';
+    var rows = watched.slice(0, 24).map(function(row) {
+      var spans = row.spans || [];
+      var first = spans.length ? spans[0][0] : '-';
+      var last = spans.length ? spans[spans.length - 1][1] : '-';
+      return '<tr><td><b>' + esc(row.sym || '-') + '</b></td><td>' + esc(row.traded ? 'yes' : 'no') + '</td><td>' + spans.length + '</td><td>' + esc(first) + '</td><td>' + esc(last) + '</td></tr>';
+    }).join('');
+    return '<div class="rr-table-wrap"><table class="rr-table"><thead><tr><th>Symbol</th><th>Traded</th><th>Spans</th><th>First</th><th>Last</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  }
+
+  function divergenceTable(rows) {
+    var body = rows.slice(0, 80).map(function(row) {
+      return '<tr><td><b>' + esc(row.sym || '-') + '</b></td><td>' + esc(row.live || '-') + '</td><td>' + esc(row.replay || '-') + '</td><td><span class="rr-code">' + esc(row.cause || '-') + '</span></td></tr>';
+    }).join('');
+    return '<div class="rr-table-wrap"><table class="rr-table"><thead><tr><th>Symbol</th><th>Live</th><th>Replay</th><th>Cause</th></tr></thead><tbody>' + body + '</tbody></table></div>';
+  }
+
+  function rrLoadHistory() {
+    fetch('/api/trading/momentum/replay/list', { credentials: 'same-origin' })
+      .then(function(resp) { return resp.json(); })
+      .then(function(body) {
+        var rows = body.results || [];
+        var host = document.getElementById('rr-history');
+        if (!host) return;
+        if (!rows.length) {
+          host.innerHTML = '<tr><td colspan="8"><div class="rr-empty">No persisted day replays yet.</div></td></tr>';
+          return;
+        }
+        host.innerHTML = rows.map(function(row) {
+          var total = Number(row.total_usd || 0);
+          var mode = row.armed_source || 'asof';
+          return '<tr class="clickable" onclick="rrLoadDayResult(\'' + esc(row.date) + '\', \'' + esc(mode) + '\')">' +
+            '<td><b>' + esc(row.date) + '</b></td><td>' + esc(mode) + '</td>' +
+            '<td class="' + (total >= 0 ? 'rr-pos' : 'rr-neg') + '">' + fmtMoney(total) + '</td>' +
+            '<td>' + esc(row.n_trades || 0) + '</td><td>' + esc(row.wins || 0) + '/' + esc(row.losses || 0) + '</td>' +
+            '<td>' + esc(row.tape_symbols || 0) + '</td><td>' + esc(row.candidates || 0) + '</td>' +
+            '<td>' + esc(String(row.ran_at_utc || '').slice(0, 16).replace('T', ' ')) + '</td></tr>';
+        }).join('');
+        rrLoadDayResult(rows[0].date, rows[0].armed_source || 'asof');
+      })
+      .catch(function() {});
+  }
+
+  function init() {
+    var dayDate = document.getElementById('rr-day-date');
+    if (dayDate) dayDate.value = new Date().toISOString().slice(0, 10);
+    rrLoadHistory();
+    rrCheckDayReplay();
+  }
+
+  init();
 })();
 </script>
 {% endblock %}

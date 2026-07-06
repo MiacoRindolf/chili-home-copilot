@@ -15,6 +15,14 @@ def test_replay_run_rejects_bad_date(client):
     assert r.status_code == 400
 
 
+def test_replay_page_exposes_research_fsm_console(client):
+    r = client.get("/trading/replay")
+    assert r.status_code == 200
+    assert b"Replay Research" in r.content
+    assert b"FSM Live Audit" in r.content
+    assert b"/api/trading/momentum/replay/fsm" in r.content
+
+
 def test_replay_run_starts_thread_and_single_flights(client):
     import app.routers.trading_sub.replay_api as ra
     with patch.object(ra.threading, "Thread") as th:
