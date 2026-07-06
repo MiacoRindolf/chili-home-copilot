@@ -1,562 +1,464 @@
 {% extends "base.html" %}
-{% block title %}CHILI Replay Research{% endblock %}
+{% block title %}CHILI Replay Timeline{% endblock %}
 
 {% block head_extra %}
 <style>
 :root {
-  --rr-bg: var(--bg, #0b1220);
-  --rr-panel: color-mix(in srgb, var(--bg-header, #111827) 84%, #0f172a 16%);
-  --rr-panel-2: color-mix(in srgb, var(--bg, #0b1220) 90%, #111827 10%);
-  --rr-line: var(--border, rgba(148, 163, 184, .24));
-  --rr-text: var(--text, #e5e7eb);
-  --rr-muted: var(--text-secondary, #94a3b8);
-  --rr-soft: var(--text-muted, #64748b);
-  --rr-blue: #60a5fa;
-  --rr-green: #34d399;
-  --rr-amber: #fbbf24;
-  --rr-red: #fb7185;
+  --rp-bg: var(--bg, #0b1220);
+  --rp-panel: color-mix(in srgb, var(--bg-header, #111827) 82%, #0f172a 18%);
+  --rp-panel-2: color-mix(in srgb, var(--bg, #0b1220) 90%, #111827 10%);
+  --rp-line: var(--border, rgba(148, 163, 184, .24));
+  --rp-text: var(--text, #e5e7eb);
+  --rp-muted: var(--text-secondary, #94a3b8);
+  --rp-soft: var(--text-muted, #64748b);
+  --rp-blue: #60a5fa;
+  --rp-green: #34d399;
+  --rp-amber: #fbbf24;
+  --rp-red: #fb7185;
+  --rp-purple: #c084fc;
 }
-.rr-page {
+.rp-page {
   min-height: 100vh;
-  background: var(--rr-bg);
-  color: var(--rr-text);
+  background: var(--rp-bg);
+  color: var(--rp-text);
 }
-.rr-shell {
-  width: min(1040px, calc(100% - 32px));
+.rp-shell {
+  width: min(1500px, calc(100% - 32px));
   margin: 0 auto;
-  padding: 24px 0 56px;
+  padding: 20px 0 56px;
 }
-.rr-top {
+.rp-top {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 18px;
+  margin-bottom: 12px;
 }
-.rr-title h1 {
+.rp-title h1 {
   margin: 0;
   font-size: 22px;
   line-height: 1.1;
   letter-spacing: 0;
 }
-.rr-title p {
-  margin: 6px 0 0;
-  color: var(--rr-muted);
+.rp-title p {
+  margin: 5px 0 0;
+  color: var(--rp-muted);
   font-size: 12px;
-  line-height: 1.4;
 }
-.rr-link {
-  border: 1px solid var(--rr-line);
+.rp-link {
+  border: 1px solid var(--rp-line);
   border-radius: 6px;
-  color: var(--rr-muted);
-  text-decoration: none;
+  color: var(--rp-muted);
   font-size: 12px;
   padding: 7px 10px;
+  text-decoration: none;
   white-space: nowrap;
 }
-.rr-link:hover {
-  color: var(--rr-blue);
-  border-color: color-mix(in srgb, var(--rr-blue) 45%, transparent);
-}
-.rr-card {
-  border: 1px solid var(--rr-line);
+.rp-card {
+  border: 1px solid var(--rp-line);
   border-radius: 8px;
-  background: var(--rr-panel);
+  background: var(--rp-panel);
+  overflow: hidden;
 }
-.rr-hero {
-  padding: 18px;
+.rp-command {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 16px;
-  align-items: center;
+  gap: 14px;
+  align-items: end;
+  padding: 16px;
+  border-bottom: 1px solid var(--rp-line);
 }
-.rr-eyebrow {
-  color: var(--rr-blue);
+.rp-eyebrow {
+  color: var(--rp-blue);
   font-size: 10px;
-  font-weight: 800;
+  font-weight: 900;
   letter-spacing: .08em;
   text-transform: uppercase;
 }
-.rr-hero h2 {
+.rp-command h2 {
   margin: 5px 0 0;
   font-size: 20px;
   line-height: 1.2;
   letter-spacing: 0;
 }
-.rr-hero p {
-  margin: 7px 0 0;
-  color: var(--rr-muted);
+.rp-command p {
+  margin: 6px 0 0;
+  color: var(--rp-muted);
   font-size: 12px;
   line-height: 1.45;
 }
-.rr-actions {
-  display: grid;
-  justify-items: end;
+.rp-controls {
+  display: flex;
+  align-items: end;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 8px;
 }
-.rr-btn {
+.rp-field {
+  display: grid;
+  gap: 5px;
+  min-width: 148px;
+}
+.rp-field label {
+  color: var(--rp-muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+.rp-input,
+.rp-select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  border: 1px solid var(--rp-line);
+  border-radius: 6px;
+  background: var(--rp-panel-2);
+  color: var(--rp-text);
+  font-size: 12px;
+  outline: none;
+  padding: 8px 9px;
+}
+.rp-input:focus,
+.rp-select:focus {
+  border-color: var(--rp-blue);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--rp-blue) 20%, transparent);
+}
+.rp-btn {
+  min-height: 36px;
   border: 1px solid #1d4ed8;
   border-radius: 6px;
   background: #2563eb;
   color: #fff;
   cursor: pointer;
-  font-size: 13px;
-  font-weight: 800;
-  min-height: 42px;
-  padding: 0 18px;
+  font-size: 12px;
+  font-weight: 900;
+  padding: 0 14px;
   white-space: nowrap;
 }
-.rr-btn:hover {
+.rp-btn:hover {
   background: #1d4ed8;
   border-color: #1e40af;
 }
-.rr-btn:disabled {
+.rp-btn:disabled {
   cursor: default;
   opacity: .55;
 }
-.rr-btn.secondary {
-  background: var(--rr-panel-2);
-  border-color: var(--rr-line);
-  box-shadow: none;
-  color: var(--rr-text);
-  min-height: 36px;
+.rp-btn.secondary {
+  background: var(--rp-panel-2);
+  border-color: var(--rp-line);
+  color: var(--rp-text);
 }
-.rr-status {
-  color: var(--rr-muted);
+.rp-status {
+  min-width: 78px;
+  color: var(--rp-muted);
   font-size: 12px;
-  min-height: 18px;
+  text-align: right;
 }
-.rr-status.running { color: var(--rr-amber); }
-.rr-status.done { color: var(--rr-green); }
-.rr-status.error { color: var(--rr-red); }
-.rr-result {
-  border-top: 1px solid var(--rr-line);
-  padding: 18px;
-}
-.rr-summary {
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) repeat(3, minmax(120px, .45fr));
-  gap: 10px;
-}
-.rr-finding,
-.rr-metric,
-.rr-signal,
-.rr-row,
-.rr-day-kpi {
-  border: 1px solid var(--rr-line);
-  border-radius: 7px;
-  background: var(--rr-panel-2);
-}
-.rr-finding {
+.rp-status.running { color: var(--rp-amber); }
+.rp-status.done { color: var(--rp-green); }
+.rp-status.error { color: var(--rp-red); }
+.rp-workspace {
   padding: 14px;
 }
-.rr-finding.ready {
-  border-color: color-mix(in srgb, var(--rr-green) 45%, var(--rr-line));
+.rp-stats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
 }
-.rr-finding.blocked {
-  border-color: color-mix(in srgb, var(--rr-amber) 45%, var(--rr-line));
-}
-.rr-finding.error {
-  border-color: color-mix(in srgb, var(--rr-red) 45%, var(--rr-line));
-}
-.rr-finding strong {
-  display: block;
-  font-size: 15px;
-  line-height: 1.3;
-}
-.rr-finding span {
-  display: block;
-  margin-top: 7px;
-  color: var(--rr-muted);
-  font-size: 12px;
-  line-height: 1.45;
-}
-.rr-metric {
-  padding: 12px;
+.rp-stat {
+  border: 1px solid var(--rp-line);
+  border-radius: 7px;
+  background: var(--rp-panel-2);
+  padding: 10px 11px;
   min-width: 0;
 }
-.rr-metric b {
+.rp-stat b {
   display: block;
-  font-size: 21px;
-  line-height: 1.15;
+  font-size: 18px;
+  line-height: 1.2;
   overflow-wrap: anywhere;
 }
-.rr-metric span,
-.rr-day-kpi span {
+.rp-stat span {
   display: block;
-  margin-top: 5px;
-  color: var(--rr-muted);
+  margin-top: 4px;
+  color: var(--rp-muted);
   font-size: 10px;
+  font-weight: 800;
   letter-spacing: .05em;
   text-transform: uppercase;
 }
-.rr-signals {
+.rp-pos { color: var(--rp-green); }
+.rp-neg { color: var(--rp-red); }
+.rp-empty {
+  border: 1px dashed var(--rp-line);
+  border-radius: 8px;
+  background: var(--rp-panel-2);
+  color: var(--rp-muted);
+  padding: 26px;
+  text-align: center;
+  font-size: 13px;
+}
+.rp-timeline {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 10px;
+  gap: 9px;
 }
-.rr-signal {
-  padding: 11px 12px;
-}
-.rr-signal strong {
-  display: block;
-  font-size: 12px;
-}
-.rr-signal b {
-  display: block;
-  margin-top: 8px;
-  font-size: 12px;
-}
-.rr-signal span {
-  display: block;
-  margin-top: 4px;
-  color: var(--rr-muted);
-  font-size: 11px;
-  line-height: 1.4;
-}
-.rr-signal.ready b { color: var(--rr-green); }
-.rr-signal.blocked b { color: var(--rr-amber); }
-.rr-signal.error b { color: var(--rr-red); }
-.rr-section-title {
-  margin: 18px 0 8px;
-  color: var(--rr-muted);
+.rp-ruler {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) 300px;
+  gap: 12px;
+  align-items: end;
+  color: var(--rp-soft);
   font-size: 10px;
-  font-weight: 800;
-  letter-spacing: .07em;
+  letter-spacing: .03em;
   text-transform: uppercase;
 }
-.rr-evidence {
+.rp-ruler-line {
+  position: relative;
+  height: 22px;
+  border-bottom: 1px solid var(--rp-line);
+}
+.rp-ruler-line span {
+  position: absolute;
+  bottom: 4px;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+.rp-row {
   display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) 300px;
+  gap: 12px;
+  align-items: stretch;
+  border: 1px solid var(--rp-line);
+  border-radius: 8px;
+  background: var(--rp-panel-2);
+  padding: 10px;
+}
+.rp-symbol {
+  display: grid;
+  align-content: start;
   gap: 6px;
 }
-.rr-row {
-  display: grid;
-  grid-template-columns: minmax(140px, .5fr) minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: center;
-  padding: 9px 10px;
+.rp-symbol b {
+  font-size: 18px;
+  line-height: 1;
 }
-.rr-row strong {
-  font-size: 12px;
-}
-.rr-row span {
-  color: var(--rr-muted);
+.rp-symbol span {
+  color: var(--rp-muted);
   font-size: 11px;
-  line-height: 1.4;
+  line-height: 1.35;
 }
-.rr-state {
-  color: var(--rr-amber);
+.rp-badge {
+  display: inline-flex;
+  width: fit-content;
+  border: 1px solid var(--rp-line);
+  border-radius: 999px;
+  color: var(--rp-muted);
   font-size: 10px;
-  font-weight: 900;
-  letter-spacing: .06em;
-  text-transform: uppercase;
+  padding: 3px 7px;
 }
-.rr-state.ready { color: var(--rr-green); }
-.rr-state.error { color: var(--rr-red); }
-.rr-details {
+.rp-chart {
+  position: relative;
+  min-height: 172px;
+}
+.rp-chart svg {
+  display: block;
+  width: 100%;
+  height: 172px;
+  overflow: visible;
+}
+.rp-setup {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+}
+.rp-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.rp-chip {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  border: 1px solid var(--rp-line);
+  border-radius: 999px;
+  color: var(--rp-muted);
+  background: color-mix(in srgb, var(--rp-panel-2) 82%, transparent);
+  font-size: 10px;
+  line-height: 1.2;
+  padding: 4px 7px;
+}
+.rp-chip.entry { color: var(--rp-blue); border-color: color-mix(in srgb, var(--rp-blue) 42%, transparent); }
+.rp-chip.exit { color: var(--rp-green); border-color: color-mix(in srgb, var(--rp-green) 42%, transparent); }
+.rp-chip.loss { color: var(--rp-red); border-color: color-mix(in srgb, var(--rp-red) 42%, transparent); }
+.rp-chip.warn { color: var(--rp-amber); border-color: color-mix(in srgb, var(--rp-amber) 42%, transparent); }
+.rp-trace-list {
+  display: grid;
+  gap: 5px;
+  margin-top: 2px;
+}
+.rp-trace-line {
+  color: var(--rp-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.rp-trace-line b {
+  color: var(--rp-text);
+  font-size: 11px;
+}
+.rp-details {
   margin-top: 12px;
-  border-top: 1px solid var(--rr-line);
-  padding: 13px 18px 0;
+  border: 1px solid var(--rp-line);
+  border-radius: 8px;
+  background: var(--rp-panel);
+  padding: 12px 14px;
 }
-.rr-details summary,
-.rr-archive > summary {
+.rp-details summary {
   cursor: pointer;
-  color: var(--rr-muted);
+  color: var(--rp-muted);
   font-size: 12px;
   list-style: none;
 }
-.rr-details summary::-webkit-details-marker,
-.rr-archive > summary::-webkit-details-marker {
-  display: none;
-}
-.rr-details summary::before,
-.rr-archive > summary::before {
+.rp-details summary::-webkit-details-marker { display: none; }
+.rp-details summary::before {
   content: "+";
-  color: var(--rr-blue);
+  color: var(--rp-blue);
   display: inline-block;
   font-weight: 900;
   width: 16px;
 }
-.rr-details[open] summary::before,
-.rr-archive[open] > summary::before {
-  content: "-";
-}
-.rr-options {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-  margin-top: 12px;
-  padding-bottom: 16px;
-}
-.rr-options.five {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-}
-.rr-field {
-  display: grid;
-  gap: 5px;
-  min-width: 0;
-}
-.rr-field label {
-  color: var(--rr-muted);
-  font-size: 10px;
-  letter-spacing: .05em;
-  text-transform: uppercase;
-}
-.rr-input,
-.rr-select {
-  width: 100%;
-  min-width: 0;
-  box-sizing: border-box;
-  border: 1px solid var(--rr-line);
-  border-radius: 6px;
-  background: var(--rr-panel-2);
-  color: var(--rr-text);
-  font-size: 12px;
-  outline: none;
-  padding: 8px 9px;
-}
-.rr-input:focus,
-.rr-select:focus {
-  border-color: var(--rr-blue);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--rr-blue) 22%, transparent);
-}
-.rr-archive {
-  margin-top: 12px;
-  padding: 13px 18px;
-}
-.rr-day {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+.rp-details[open] summary::before { content: "-"; }
+.rp-history {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
   margin-top: 12px;
 }
-.rr-day-kpi {
-  padding: 10px;
-}
-.rr-day-kpi b {
-  display: block;
-  font-size: 16px;
-}
-.rr-table-wrap {
-  margin-top: 12px;
-  overflow-x: auto;
-  border: 1px solid var(--rr-line);
-  border-radius: 7px;
-}
-.rr-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
-}
-.rr-table th,
-.rr-table td {
-  padding: 8px 9px;
-  text-align: left;
-  border-bottom: 1px solid color-mix(in srgb, var(--rr-line) 70%, transparent);
-  white-space: nowrap;
-}
-.rr-table th {
-  color: var(--rr-muted);
-  font-size: 10px;
-  letter-spacing: .05em;
-  text-transform: uppercase;
-}
-.rr-table tr:last-child td {
-  border-bottom: 0;
-}
-.rr-table tr.clickable {
+.rp-history button {
+  border: 1px solid var(--rp-line);
+  border-radius: 999px;
+  background: var(--rp-panel-2);
+  color: var(--rp-muted);
   cursor: pointer;
+  font-size: 11px;
+  padding: 5px 9px;
 }
-.rr-table tr.clickable:hover {
-  background: color-mix(in srgb, var(--rr-blue) 8%, transparent);
+.rp-history button:hover {
+  color: var(--rp-blue);
+  border-color: color-mix(in srgb, var(--rp-blue) 42%, transparent);
 }
-.rr-json {
-  margin-top: 10px;
-  max-height: 280px;
+.rp-json {
+  max-height: 320px;
   overflow: auto;
-  border: 1px solid var(--rr-line);
+  border: 1px solid var(--rp-line);
   border-radius: 7px;
   background: #020617;
   color: #dbeafe;
   padding: 12px;
   font-size: 11px;
 }
-.rr-pos { color: var(--rr-green); }
-.rr-neg { color: var(--rr-red); }
-@media (max-width: 860px) {
-  .rr-shell {
-    width: min(100% - 20px, 1040px);
+#rp-fsm-endpoint {
+  display: none;
+}
+@media (max-width: 1100px) {
+  .rp-command,
+  .rp-ruler,
+  .rp-row {
+    grid-template-columns: 1fr;
+  }
+  .rp-controls {
+    justify-content: flex-start;
+  }
+  .rp-ruler {
+    display: none;
+  }
+  .rp-setup {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 760px) {
+  .rp-shell {
+    width: min(100% - 20px, 1500px);
     padding-top: 14px;
   }
-  .rr-top,
-  .rr-hero {
-    grid-template-columns: 1fr;
+  .rp-top {
+    align-items: flex-start;
   }
-  .rr-hero,
-  .rr-result,
-  .rr-details,
-  .rr-archive {
-    padding-left: 14px;
-    padding-right: 14px;
-  }
-  .rr-actions {
-    justify-items: stretch;
-  }
-  .rr-btn {
+  .rp-controls,
+  .rp-field,
+  .rp-btn {
     width: 100%;
   }
-  .rr-summary,
-  .rr-signals,
-  .rr-options,
-  .rr-options.five,
-  .rr-day {
-    grid-template-columns: 1fr;
+  .rp-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .rr-row {
-    grid-template-columns: 1fr;
+  .rp-chart svg {
+    height: 150px;
   }
 }
 </style>
 {% endblock %}
 
 {% block content %}
-<div class="rr-page">
-  <div class="rr-shell">
-    <header class="rr-top">
-      <div class="rr-title">
+<div class="rp-page">
+  <div class="rp-shell">
+    <header class="rp-top">
+      <div class="rp-title">
         <h1>Replay Research</h1>
-        <p>Minimal FSM Live Audit for live-session correlations.</p>
+        <p>FSM Live Audit visual replay by symbol, action, and setup.</p>
       </div>
-      <a class="rr-link" href="/trading">Trading</a>
+      <a class="rp-link" href="/trading">Trading</a>
     </header>
 
-    <section class="rr-card" aria-label="FSM Live Audit">
-      <div class="rr-hero">
+    <section class="rp-card" aria-label="Replay timeline">
+      <div class="rp-command">
         <div>
-          <div class="rr-eyebrow">FSM Live Audit</div>
-          <h2>Latest live sessions</h2>
-          <p id="rr-scope-summary">Read-only replay audit using safe defaults.</p>
+          <div class="rp-eyebrow">Visual Replay</div>
+          <h2>Trading behavior timeline</h2>
+          <p id="rp-subtitle">Rows are symbols; markers are Chili actions on the chart.</p>
         </div>
-        <div class="rr-actions">
-          <button class="rr-btn" id="rr-fsm-run" type="button" onclick="rrRunFsmReplay()">Run FSM Replay</button>
-          <span class="rr-status" id="rr-fsm-status">idle</span>
-        </div>
-      </div>
-
-      <div class="rr-result" id="rr-fsm-result">
-        <div class="rr-summary">
-          <div class="rr-finding">
-            <strong>No run yet.</strong>
-            <span>Run the audit to see claim readiness, broker coverage, and execution blockers.</span>
+        <div class="rp-controls">
+          <div class="rp-field">
+            <label for="rp-date">Date</label>
+            <input class="rp-input" id="rp-date" type="date" />
           </div>
-          <div class="rr-metric"><b>-</b><span>Readiness</span></div>
-          <div class="rr-metric"><b>-</b><span>Evidence gaps</span></div>
-          <div class="rr-metric"><b>-</b><span>Expected P/L</span></div>
-        </div>
-        <div class="rr-signals">
-          <div class="rr-signal"><strong>Selection</strong><b>waiting</b><span>Priority vs selected outcome</span></div>
-          <div class="rr-signal"><strong>Broker</strong><b>waiting</b><span>Terminal state attribution</span></div>
-          <div class="rr-signal"><strong>Friction</strong><b>waiting</b><span>Adapter and capacity blockers</span></div>
-          <div class="rr-signal"><strong>Trace</strong><b>waiting</b><span>Setup coverage</span></div>
+          <div class="rp-field">
+            <label for="rp-mode">Mode</label>
+            <select class="rp-select" id="rp-mode">
+              <option value="live">Live armed</option>
+              <option value="asof">As-of selection</option>
+            </select>
+          </div>
+          <button class="rp-btn" id="rp-run" type="button" onclick="rpRunReplay()">Run Replay</button>
+          <span class="rp-status" id="rp-status">idle</span>
         </div>
       </div>
 
-      <details class="rr-details">
-        <summary>Options</summary>
-        <div class="rr-options">
-          <div class="rr-field">
-            <label for="rr-fsm-session-ids">Session IDs</label>
-            <input class="rr-input" id="rr-fsm-session-ids" placeholder="optional" />
-          </div>
-          <div class="rr-field">
-            <label for="rr-fsm-since">Since</label>
-            <input class="rr-input" id="rr-fsm-since" type="datetime-local" />
-          </div>
-          <div class="rr-field">
-            <label for="rr-fsm-until">Until</label>
-            <input class="rr-input" id="rr-fsm-until" type="datetime-local" />
-          </div>
-        </div>
-        <div class="rr-options five">
-          <div class="rr-field">
-            <label for="rr-fsm-limit">Limit</label>
-            <input class="rr-input" id="rr-fsm-limit" type="number" min="1" max="500" value="100" />
-          </div>
-          <div class="rr-field">
-            <label for="rr-fsm-capacity">Capacity</label>
-            <input class="rr-input" id="rr-fsm-capacity" type="number" min="1" max="200" value="25" />
-          </div>
-          <div class="rr-field">
-            <label for="rr-fsm-order-budget">Order budget</label>
-            <input class="rr-input" id="rr-fsm-order-budget" type="number" min="1" max="500" placeholder="auto" />
-          </div>
-          <div class="rr-field">
-            <label for="rr-fsm-risk-slots">Risk slots</label>
-            <input class="rr-input" id="rr-fsm-risk-slots" type="number" min="1" max="500" placeholder="auto" />
-          </div>
-          <div class="rr-field">
-            <label for="rr-fsm-trace-limit">Trace rows</label>
-            <input class="rr-input" id="rr-fsm-trace-limit" type="number" min="1" max="5000" value="500" />
-          </div>
-        </div>
-        <button class="rr-btn secondary" type="button" onclick="rrClearFsmScope()">Reset to latest live</button>
-      </details>
+      <div class="rp-workspace" id="rp-workspace">
+        <div class="rp-empty">No replay loaded.</div>
+      </div>
     </section>
 
-    <details class="rr-card rr-archive">
-      <summary>Day replay and history</summary>
-      <div class="rr-day">
-        <div class="rr-day-kpi"><b id="rr-job-state">idle</b><span>Job state</span></div>
-        <div class="rr-day-kpi"><b id="rr-job-date">-</b><span>Last date</span></div>
-      </div>
-      <div class="rr-options">
-        <div class="rr-field">
-          <label for="rr-day-date">Date</label>
-          <input class="rr-input" id="rr-day-date" type="date" />
-        </div>
-        <div class="rr-field">
-          <label for="rr-day-mode">Mode</label>
-          <select class="rr-select" id="rr-day-mode">
-            <option value="live">Live armed</option>
-            <option value="asof">As-of selection</option>
-          </select>
-        </div>
-        <div class="rr-field">
-          <label>&nbsp;</label>
-          <button class="rr-btn secondary" id="rr-day-run" type="button" onclick="rrRunDayReplay()">Run Day Replay</button>
-        </div>
-      </div>
-      <span class="rr-status" id="rr-day-status">idle</span>
-      <div id="rr-day-result" style="display:none;">
-        <div class="rr-section-title" id="rr-day-title">Day replay result</div>
-        <div id="rr-day-body"></div>
-      </div>
-      <div class="rr-table-wrap">
-        <table class="rr-table">
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>Mode</th>
-              <th>P/L</th>
-              <th>Trades</th>
-              <th>W/L</th>
-              <th>Tape</th>
-              <th>Candidates</th>
-              <th>Ran at</th>
-            </tr>
-          </thead>
-          <tbody id="rr-history"></tbody>
-        </table>
-      </div>
+    <details class="rp-details">
+      <summary>Replay archive</summary>
+      <div class="rp-history" id="rp-history"></div>
+    </details>
+
+    <details class="rp-details">
+      <summary>Diagnostics</summary>
+      <span id="rp-fsm-endpoint">/api/trading/momentum/replay/fsm</span>
+      <pre class="rp-json" id="rp-debug">{}</pre>
     </details>
   </div>
 </div>
 
 <script>
 (function() {
-  var rrPoll = null;
-  var rrLastDayMode = 'live';
+  var rpPoll = null;
+  var rpHistoryRows = [];
+  var rpLastResult = null;
 
   function esc(value) {
     var div = document.createElement('div');
@@ -564,30 +466,11 @@
     return div.innerHTML;
   }
 
-  function intInput(id, fallback) {
-    var el = document.getElementById(id);
-    var n = el ? parseInt(el.value, 10) : NaN;
-    return Number.isFinite(n) && n > 0 ? n : fallback;
-  }
-
-  function optionalIntInput(id) {
-    var el = document.getElementById(id);
-    var n = el ? parseInt(el.value, 10) : NaN;
-    return Number.isFinite(n) && n > 0 ? n : null;
-  }
-
-  function datetimeIso(id) {
-    var el = document.getElementById(id);
-    if (!el || !el.value) return '';
-    var dt = new Date(el.value);
-    return Number.isFinite(dt.getTime()) ? dt.toISOString() : '';
-  }
-
-  function fmtNum(value, fallback) {
-    if (value == null || value === '') return fallback == null ? '0' : String(fallback);
-    var n = Number(value);
-    if (!Number.isFinite(n)) return String(value);
-    return String(Math.round(n * 10000) / 10000);
+  function setStatus(text, cls) {
+    var el = document.getElementById('rp-status');
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'rp-status ' + (cls || '');
   }
 
   function fmtMoney(value) {
@@ -596,182 +479,459 @@
     return sign + '$' + Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 2 });
   }
 
-  function stateClass(ready) {
-    return ready ? 'ready' : 'blocked';
+  function fmtNum(value) {
+    var n = Number(value || 0);
+    if (!Number.isFinite(n)) return '0';
+    return n.toLocaleString(undefined, { maximumFractionDigits: 0 });
   }
 
-  function setStatus(id, text, cls) {
-    var el = document.getElementById(id);
-    if (!el) return;
-    el.textContent = text;
-    el.className = 'rr-status ' + (cls || '');
+  function timeMin(value) {
+    if (value == null) return null;
+    var text = String(value);
+    var m = text.match(/(\d{1,2}):(\d{2})/);
+    if (!m) return null;
+    return Number(m[1]) * 60 + Number(m[2]);
   }
 
-  function fsmEndpoint(params) {
-    return '/api/trading/momentum/replay/fsm?' + params.toString();
+  function timeLabel(minute) {
+    var h = Math.floor(minute / 60);
+    var m = minute % 60;
+    return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
   }
 
-  function signal(title, ready, value, detail) {
-    var cls = stateClass(ready);
-    return '<div class="rr-signal ' + cls + '"><strong>' + esc(title) + '</strong>' +
-      '<b>' + esc(value || cls) + '</b><span>' + esc(detail || '') + '</span></div>';
+  function pct(minute, domain) {
+    if (minute == null || !domain || domain.max <= domain.min) return 0;
+    return Math.max(0, Math.min(100, ((minute - domain.min) / (domain.max - domain.min)) * 100));
   }
 
-  function evidence(name, detail, ready) {
-    var cls = stateClass(ready);
-    return '<div class="rr-row"><strong>' + esc(name) + '</strong><span>' + esc(detail) +
-      '</span><b class="rr-state ' + cls + '">' + cls + '</b></div>';
+  function px(minute, domain, width, pad) {
+    return pad + (pct(minute, domain) / 100) * (width - pad * 2);
   }
 
-  function renderFsmLoading() {
-    var host = document.getElementById('rr-fsm-result');
-    if (!host) return;
-    host.innerHTML =
-      '<div class="rr-summary"><div class="rr-finding"><strong>Running replay audit.</strong>' +
-      '<span>Checking live sessions against scheduler snapshots, broker outcomes, and setup traces.</span></div>' +
-      '<div class="rr-metric"><b>-</b><span>Readiness</span></div>' +
-      '<div class="rr-metric"><b>-</b><span>Evidence gaps</span></div>' +
-      '<div class="rr-metric"><b>-</b><span>Expected P/L</span></div></div>' +
-      '<div class="rr-signals">' +
-      '<div class="rr-signal"><strong>Selection</strong><b>running</b><span>Priority vs selected outcome</span></div>' +
-      '<div class="rr-signal"><strong>Broker</strong><b>running</b><span>Terminal state attribution</span></div>' +
-      '<div class="rr-signal"><strong>Friction</strong><b>running</b><span>Adapter and capacity blockers</span></div>' +
-      '<div class="rr-signal"><strong>Trace</strong><b>running</b><span>Setup coverage</span></div></div>';
+  function normalizeSym(value) {
+    return String(value || '').trim().toUpperCase();
   }
 
-  function renderFsmError(message) {
-    var host = document.getElementById('rr-fsm-result');
-    if (!host) return;
-    host.innerHTML =
-      '<div class="rr-summary"><div class="rr-finding error"><strong>Replay did not run.</strong>' +
-      '<span>' + esc(message || 'Audit failed') + '</span></div>' +
-      '<div class="rr-metric"><b>-</b><span>Readiness</span></div>' +
-      '<div class="rr-metric"><b>-</b><span>Evidence gaps</span></div>' +
-      '<div class="rr-metric"><b>-</b><span>Expected P/L</span></div></div>';
+  function barsFor(result, sym) {
+    var series = result && result.series ? result.series : {};
+    return series[sym] || series[sym.toUpperCase()] || series[sym.toLowerCase()] || [];
   }
 
-  function renderFsmResult(payload) {
-    var host = document.getElementById('rr-fsm-result');
-    if (!host) return;
-    var replay = payload && payload.replay ? payload.replay : (payload || {});
-    var scope = payload && payload.scope ? payload.scope : {};
-    var inputs = replay.inputs || {};
-    var scheduler = replay.scheduler || {};
-    var cert = replay.certification || {};
-    var setupCert = (replay.setup_trace && replay.setup_trace.certification) || {};
-    var missing = cert.missing_evidence || [];
-    var selectedPnl = Number(scheduler.selected_expected_pnl_usd || 0);
-    var claims = [
-      { name: 'Scheduler priority', detail: 'Selected candidates follow replay priority ordering', ready: !!cert.scheduler_priority_claim_ready },
-      { name: 'Adapter starvation', detail: 'Unavailable adapters explain skipped execution', ready: !!cert.adapter_unavailable_starvation_claim_ready },
-      { name: 'Broker outcome', detail: 'Terminal states map to broker-side evidence', ready: !!cert.broker_outcome_attribution_ready },
-      { name: 'Realized vs expected', detail: 'Selected expected value can be compared to realized state', ready: !!cert.realized_vs_selected_expected_claim_ready },
-      { name: 'P/L min-max', detail: 'Expected P/L sits inside certified replay bounds', ready: !!cert.pnl_minmax_claim_ready },
-      { name: 'Setup trace', detail: 'Setup trace coverage supports the selection claim', ready: !!setupCert.setup_trace_coverage_ready }
-    ];
-    var readyCount = claims.filter(function(row) { return row.ready; }).length;
-    var blockedCount = claims.length - readyCount;
-    var findingCls = blockedCount ? 'blocked' : 'ready';
-    var findingTitle = blockedCount
-      ? blockedCount + ' evidence gap' + (blockedCount === 1 ? '' : 's')
-      : 'Claim ready';
-    var findingDetail = missing.length
-      ? missing.slice(0, 4).join(', ') + (missing.length > 4 ? ', +' + (missing.length - 4) : '')
-      : 'No missing evidence reported.';
-    var html = '';
-    html += '<div class="rr-summary">';
-    html += '<div class="rr-finding ' + findingCls + '"><strong>' + esc(findingTitle) + '</strong><span>' + esc(findingDetail) + '</span></div>';
-    html += '<div class="rr-metric"><b>' + readyCount + '/' + claims.length + '</b><span>Readiness</span></div>';
-    html += '<div class="rr-metric"><b>' + missing.length + '</b><span>Evidence gaps</span></div>';
-    html += '<div class="rr-metric"><b class="' + (selectedPnl >= 0 ? 'rr-pos' : 'rr-neg') + '">' + esc(fmtMoney(selectedPnl)) + '</b><span>Expected P/L</span></div>';
-    html += '</div>';
-    html += '<div class="rr-signals">';
-    html += signal('Selection', cert.scheduler_priority_claim_ready && cert.realized_vs_selected_expected_claim_ready, readyCount + '/' + claims.length, 'Priority tied to outcomes');
-    html += signal('Broker', cert.broker_outcome_attribution_ready, fmtNum(inputs.broker_outcomes) + ' outcomes', 'Terminal state evidence');
-    html += signal('Friction', cert.adapter_unavailable_starvation_claim_ready, fmtNum(scheduler.pending_count) + ' pending', 'Adapter/capacity pressure');
-    html += signal('Trace', setupCert.setup_trace_coverage_ready, fmtNum(inputs.scheduler_snapshot_steps) + ' snapshots', 'Setup coverage');
-    html += '</div>';
-    html += '<div class="rr-section-title">Evidence</div><div class="rr-evidence">';
-    html += claims.map(function(row) { return evidence(row.name, row.detail, row.ready); }).join('');
-    html += '</div>';
-    html += '<div class="rr-section-title">Run scope</div><div class="rr-evidence">';
-    html += evidence('Sessions', (scope.session_ids || []).join(', ') || 'none selected', !!(scope.session_ids || []).length);
-    html += evidence('Read only', replay.read_only === false ? 'mutation risk reported' : 'no mutations', replay.read_only !== false);
-    html += '</div>';
-    if (replay.replay_evidence_debt && replay.replay_evidence_debt.length) {
-      html += '<details><summary class="rr-section-title">Evidence debt</summary><pre class="rr-json">' + esc(JSON.stringify(replay.replay_evidence_debt, null, 2)) + '</pre></details>';
-    }
-    host.innerHTML = html;
+  function tradesFor(result, sym) {
+    var target = normalizeSym(sym);
+    return (result.trades || []).filter(function(t) { return normalizeSym(t.sym) === target; });
   }
 
-  window.rrClearFsmScope = function() {
-    ['rr-fsm-session-ids', 'rr-fsm-since', 'rr-fsm-until', 'rr-fsm-order-budget', 'rr-fsm-risk-slots'].forEach(function(id) {
-      var el = document.getElementById(id);
-      if (el) el.value = '';
-    });
-    var scope = document.getElementById('rr-scope-summary');
-    if (scope) scope.textContent = 'Read-only replay audit using safe defaults.';
-    setStatus('rr-fsm-status', 'latest live selected', '');
-  };
+  function tracesFor(result, sym) {
+    var target = normalizeSym(sym);
+    return (result.decision_trace || []).filter(function(row) { return normalizeSym(row.sym) === target; });
+  }
 
-  window.rrRunFsmReplay = function() {
-    var btn = document.getElementById('rr-fsm-run');
-    var params = new URLSearchParams();
-    var sessionIds = (document.getElementById('rr-fsm-session-ids') || {}).value || '';
-    var since = datetimeIso('rr-fsm-since');
-    var until = datetimeIso('rr-fsm-until');
-    var orderBudget = optionalIntInput('rr-fsm-order-budget');
-    var riskSlots = optionalIntInput('rr-fsm-risk-slots');
-    params.set('limit', String(intInput('rr-fsm-limit', 100)));
-    params.set('capacity_limit', String(intInput('rr-fsm-capacity', 25)));
-    params.set('setup_trace_limit', String(intInput('rr-fsm-trace-limit', 500)));
-    if (sessionIds.trim()) params.set('session_ids', sessionIds.trim());
-    if (since) params.set('since', since);
-    if (until) params.set('until', until);
-    if (orderBudget) params.set('order_call_budget', String(orderBudget));
-    if (riskSlots) params.set('risk_budget_slots', String(riskSlots));
+  function armedFor(result, sym) {
+    var target = normalizeSym(sym);
+    return (result.armed_timeline || []).find(function(row) { return normalizeSym(row.sym) === target; }) || { spans: [] };
+  }
 
-    var scope = document.getElementById('rr-scope-summary');
-    if (scope) scope.textContent = sessionIds.trim() ? 'Read-only replay audit for selected sessions.' : 'Read-only replay audit using safe defaults.';
-    if (btn) btn.disabled = true;
-    setStatus('rr-fsm-status', 'running...', 'running');
-    renderFsmLoading();
-
-    fetch(fsmEndpoint(params), { credentials: 'same-origin' })
-      .then(function(resp) {
-        return resp.json().then(function(body) { return { ok: resp.ok, body: body }; });
-      })
-      .then(function(out) {
-        if (!out.ok) {
-          var detail = out.body && (out.body.detail || out.body.error);
-          setStatus('rr-fsm-status', detail || 'failed', 'error');
-          renderFsmError(detail || 'Replay failed');
-          return;
-        }
-        setStatus('rr-fsm-status', 'complete', 'done');
-        renderFsmResult(out.body);
-      })
-      .catch(function(err) {
-        var message = err && err.message ? err.message : 'Replay failed';
-        setStatus('rr-fsm-status', message, 'error');
-        renderFsmError(message);
-      })
-      .finally(function() {
-        if (btn) btn.disabled = false;
+  function replayDomain(result) {
+    var mins = [];
+    Object.keys(result.series || {}).forEach(function(sym) {
+      (result.series[sym] || []).forEach(function(bar) {
+        var m = timeMin(bar && bar[0]);
+        if (m != null) mins.push(m);
       });
-  };
+    });
+    (result.trades || []).forEach(function(t) {
+      var a = timeMin(t.t);
+      var b = timeMin(t.exit_t);
+      if (a != null) mins.push(a);
+      if (b != null) mins.push(b);
+    });
+    (result.armed_timeline || []).forEach(function(row) {
+      (row.spans || []).forEach(function(span) {
+        var a = timeMin(span && span[0]);
+        var b = timeMin(span && span[1]);
+        if (a != null) mins.push(a);
+        if (b != null) mins.push(b);
+      });
+    });
+    (result.decision_trace || []).forEach(function(row) {
+      var m = timeMin(row.t);
+      if (m != null) mins.push(m);
+    });
+    if (!mins.length) return { min: 8 * 60, max: 20 * 60 };
+    return {
+      min: Math.max(4 * 60, Math.min.apply(null, mins) - 8),
+      max: Math.min(20 * 60, Math.max.apply(null, mins) + 8)
+    };
+  }
 
-  window.rrRunDayReplay = function() {
-    var date = (document.getElementById('rr-day-date') || {}).value;
-    var mode = (document.getElementById('rr-day-mode') || {}).value || 'live';
-    var btn = document.getElementById('rr-day-run');
-    if (!date) {
-      setStatus('rr-day-status', 'pick a date', 'error');
+  function symbolList(result) {
+    var seen = new Map();
+    function add(sym, score) {
+      sym = normalizeSym(sym);
+      if (!sym) return;
+      seen.set(sym, Math.max(seen.get(sym) || 0, score || 0));
+    }
+    (result.trades || []).forEach(function(t) { add(t.sym, 100); });
+    (result.armed_timeline || []).forEach(function(row) { add(row.sym, row.traded ? 80 : 40); });
+    (result.decision_trace || []).forEach(function(row) { add(row.sym, 30); });
+    Object.keys(result.series || {}).forEach(function(sym) { if (!seen.size) add(sym, 10); });
+    return Array.from(seen.entries())
+      .sort(function(a, b) {
+        var at = firstActionMinute(result, a[0]);
+        var bt = firstActionMinute(result, b[0]);
+        if (b[1] !== a[1]) return b[1] - a[1];
+        return at - bt;
+      })
+      .map(function(row) { return row[0]; })
+      .slice(0, 32);
+  }
+
+  function firstActionMinute(result, sym) {
+    var values = [];
+    tradesFor(result, sym).forEach(function(t) {
+      var m = timeMin(t.t);
+      if (m != null) values.push(m);
+    });
+    tracesFor(result, sym).forEach(function(row) {
+      var m = timeMin(row.t);
+      if (m != null) values.push(m);
+    });
+    (armedFor(result, sym).spans || []).forEach(function(span) {
+      var m = timeMin(span && span[0]);
+      if (m != null) values.push(m);
+    });
+    return values.length ? Math.min.apply(null, values) : 99999;
+  }
+
+  function sampleBars(bars, maxCount) {
+    if (!bars || bars.length <= maxCount) return bars || [];
+    var step = Math.ceil(bars.length / maxCount);
+    return bars.filter(function(_, i) { return i % step === 0 || i === bars.length - 1; });
+  }
+
+  function uniqueStages(rows) {
+    var out = [];
+    rows.forEach(function(row) {
+      var stage = cleanStage(row.stage);
+      if (stage && out.indexOf(stage) === -1) out.push(stage);
+    });
+    return out.slice(0, 5);
+  }
+
+  function cleanStage(value) {
+    return String(value || '')
+      .replace(/^trigger_fail:/, '')
+      .replace(/^trigger_ok:/, '')
+      .replace(/^fill@/, 'fill @ ')
+      .replace(/_/g, ' ')
+      .replace(/:/g, ': ');
+  }
+
+  function chartSvg(result, sym, domain) {
+    var width = 720;
+    var height = 172;
+    var pad = 22;
+    var top = 16;
+    var bottom = 28;
+    var plotH = height - top - bottom;
+    var bars = sampleBars(barsFor(result, sym), 260);
+    var trades = tradesFor(result, sym);
+    var spans = armedFor(result, sym).spans || [];
+    var traces = tracesFor(result, sym).slice(0, 40);
+    var prices = [];
+    bars.forEach(function(bar) {
+      [1, 2, 3, 4].forEach(function(i) {
+        var n = Number(bar[i]);
+        if (Number.isFinite(n)) prices.push(n);
+      });
+    });
+    trades.forEach(function(t) {
+      ['entry', 'exit', 'stop', 'target'].forEach(function(k) {
+        var n = Number(t[k]);
+        if (Number.isFinite(n)) prices.push(n);
+      });
+    });
+    if (!prices.length) prices = [0, 1];
+    var minP = Math.min.apply(null, prices);
+    var maxP = Math.max.apply(null, prices);
+    if (maxP === minP) {
+      maxP += 1;
+      minP -= 1;
+    }
+    var y = function(price) {
+      var n = Number(price);
+      if (!Number.isFinite(n)) return top + plotH / 2;
+      return top + ((maxP - n) / (maxP - minP)) * plotH;
+    };
+    var parts = [];
+    parts.push('<svg viewBox="0 0 ' + width + ' ' + height + '" role="img" aria-label="' + esc(sym) + ' chart">');
+    parts.push('<rect x="0" y="0" width="' + width + '" height="' + height + '" fill="transparent"/>');
+    parts.push('<line x1="' + pad + '" y1="' + (height - bottom) + '" x2="' + (width - pad) + '" y2="' + (height - bottom) + '" stroke="rgba(148,163,184,.25)" stroke-width="1"/>');
+    spans.forEach(function(span) {
+      var a = timeMin(span && span[0]);
+      var b = timeMin(span && span[1]);
+      if (a == null || b == null) return;
+      var x1 = px(a, domain, width, pad);
+      var x2 = px(b, domain, width, pad);
+      parts.push('<rect x="' + x1.toFixed(1) + '" y="8" width="' + Math.max(2, x2 - x1).toFixed(1) + '" height="6" rx="3" fill="rgba(96,165,250,.35)"/>');
+    });
+    if (bars.length) {
+      var poly = bars.map(function(bar) {
+        return px(timeMin(bar[0]), domain, width, pad).toFixed(1) + ',' + y(bar[4]).toFixed(1);
+      }).join(' ');
+      bars.forEach(function(bar) {
+        var bx = px(timeMin(bar[0]), domain, width, pad);
+        var vol = Number(bar[5] || 0);
+        var vh = Math.max(1, Math.min(18, Math.log10(vol + 10) * 4));
+        parts.push('<line x1="' + bx.toFixed(1) + '" y1="' + (height - bottom).toFixed(1) + '" x2="' + bx.toFixed(1) + '" y2="' + (height - bottom - vh).toFixed(1) + '" stroke="rgba(148,163,184,.18)" stroke-width="1"/>');
+      });
+      parts.push('<polyline points="' + poly + '" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>');
+    } else {
+      parts.push('<text x="' + (width / 2) + '" y="' + (height / 2) + '" fill="#64748b" font-size="12" text-anchor="middle">no chart series</text>');
+    }
+    trades.forEach(function(t) {
+      var entryM = timeMin(t.t);
+      var exitM = timeMin(t.exit_t);
+      var entryX = px(entryM, domain, width, pad);
+      var exitX = px(exitM, domain, width, pad);
+      var entryY = y(t.entry);
+      var exitY = y(t.exit);
+      var stopY = y(t.stop);
+      var targetY = y(t.target);
+      if (Number.isFinite(Number(t.stop))) {
+        parts.push('<line x1="' + pad + '" y1="' + stopY.toFixed(1) + '" x2="' + (width - pad) + '" y2="' + stopY.toFixed(1) + '" stroke="#fb7185" stroke-width="1" stroke-dasharray="4 4" opacity=".65"/>');
+      }
+      if (Number.isFinite(Number(t.target))) {
+        parts.push('<line x1="' + pad + '" y1="' + targetY.toFixed(1) + '" x2="' + (width - pad) + '" y2="' + targetY.toFixed(1) + '" stroke="#34d399" stroke-width="1" stroke-dasharray="4 4" opacity=".55"/>');
+      }
+      if (entryM != null) {
+        parts.push('<line x1="' + entryX.toFixed(1) + '" y1="14" x2="' + entryX.toFixed(1) + '" y2="' + (height - bottom) + '" stroke="#60a5fa" stroke-width="1.3" opacity=".85"/>');
+        parts.push('<circle cx="' + entryX.toFixed(1) + '" cy="' + entryY.toFixed(1) + '" r="4" fill="#60a5fa"/>');
+        parts.push('<text x="' + Math.min(width - 80, entryX + 6).toFixed(1) + '" y="' + Math.max(16, entryY - 8).toFixed(1) + '" fill="#bfdbfe" font-size="10">ENTRY ' + esc(t.t || '') + '</text>');
+      }
+      if (exitM != null) {
+        var good = Number(t.usd || 0) >= 0;
+        var color = good ? '#34d399' : '#fb7185';
+        parts.push('<line x1="' + exitX.toFixed(1) + '" y1="14" x2="' + exitX.toFixed(1) + '" y2="' + (height - bottom) + '" stroke="' + color + '" stroke-width="1.3" opacity=".85"/>');
+        parts.push('<rect x="' + (exitX - 4).toFixed(1) + '" y="' + (exitY - 4).toFixed(1) + '" width="8" height="8" rx="2" fill="' + color + '"/>');
+        parts.push('<text x="' + Math.min(width - 72, exitX + 6).toFixed(1) + '" y="' + Math.min(height - 34, exitY + 14).toFixed(1) + '" fill="' + color + '" font-size="10">EXIT ' + esc(t.exit_t || '') + '</text>');
+      }
+    });
+    traces.forEach(function(row) {
+      var m = timeMin(row.t);
+      if (m == null) return;
+      var x = px(m, domain, width, pad);
+      parts.push('<circle cx="' + x.toFixed(1) + '" cy="18" r="2.5" fill="#fbbf24" opacity=".8"/>');
+    });
+    parts.push('<text x="' + pad + '" y="' + (height - 8) + '" fill="#64748b" font-size="10">' + esc(timeLabel(domain.min)) + '</text>');
+    parts.push('<text x="' + (width - pad) + '" y="' + (height - 8) + '" fill="#64748b" font-size="10" text-anchor="end">' + esc(timeLabel(domain.max)) + '</text>');
+    parts.push('</svg>');
+    return parts.join('');
+  }
+
+  function renderRuler(domain) {
+    var ticks = [];
+    for (var i = 0; i < 6; i++) {
+      var m = Math.round(domain.min + ((domain.max - domain.min) * i / 5));
+      ticks.push('<span style="left:' + pct(m, domain).toFixed(1) + '%">' + esc(timeLabel(m)) + '</span>');
+    }
+    return '<div class="rp-ruler"><div>Symbol</div><div class="rp-ruler-line">' + ticks.join('') + '</div><div>Setup / indicators</div></div>';
+  }
+
+  function renderChips(result, sym) {
+    var trades = tradesFor(result, sym);
+    var traces = tracesFor(result, sym);
+    var stages = uniqueStages(traces);
+    var chips = [];
+    trades.forEach(function(t) {
+      if (t.t) chips.push('<span class="rp-chip entry">entry ' + esc(t.t) + '</span>');
+      if (t.exit_t) chips.push('<span class="rp-chip ' + (Number(t.usd || 0) >= 0 ? 'exit' : 'loss') + '">exit ' + esc(t.exit_t) + '</span>');
+      if (t.why) chips.push('<span class="rp-chip warn">' + esc(String(t.why).replace(/^recorded_live:/, '')) + '</span>');
+      if (t.stop != null) chips.push('<span class="rp-chip">stop ' + esc(t.stop) + '</span>');
+      if (t.target != null) chips.push('<span class="rp-chip">target ' + esc(t.target) + '</span>');
+      if (t.spread_bps != null) chips.push('<span class="rp-chip">spread ' + esc(t.spread_bps) + ' bps</span>');
+    });
+    stages.forEach(function(stage) {
+      chips.push('<span class="rp-chip">' + esc(stage) + '</span>');
+    });
+    if (!chips.length) chips.push('<span class="rp-chip">watching</span>');
+    return '<div class="rp-actions">' + chips.slice(0, 10).join('') + '</div>';
+  }
+
+  function renderTraceLines(result, sym) {
+    var rows = tracesFor(result, sym).slice(0, 4);
+    if (!rows.length) return '';
+    return '<div class="rp-trace-list">' + rows.map(function(row) {
+      return '<div class="rp-trace-line"><b>' + esc(row.t || '') + '</b> ' + esc(cleanStage(row.stage)) + '</div>';
+    }).join('') + '</div>';
+  }
+
+  function renderSymbolRow(result, sym, domain) {
+    var trades = tradesFor(result, sym);
+    var bars = barsFor(result, sym);
+    var pnl = trades.reduce(function(sum, t) { return sum + Number(t.usd || 0); }, 0);
+    var badge = trades.length ? fmtMoney(pnl) : (armedFor(result, sym).spans || []).length ? 'armed' : 'watched';
+    return '<article class="rp-row">' +
+      '<div class="rp-symbol"><b>' + esc(sym) + '</b><span>' + esc(trades.length + ' trades') + '</span><span>' + esc(fmtNum(bars.length) + ' bars') + '</span><span class="rp-badge ' + (pnl >= 0 ? 'rp-pos' : 'rp-neg') + '">' + esc(badge) + '</span></div>' +
+      '<div class="rp-chart">' + chartSvg(result, sym, domain) + '</div>' +
+      '<div class="rp-setup">' + renderChips(result, sym) + renderTraceLines(result, sym) + '</div>' +
+      '</article>';
+  }
+
+  function renderReplay(result) {
+    rpLastResult = result;
+    var host = document.getElementById('rp-workspace');
+    var debug = document.getElementById('rp-debug');
+    if (debug) debug.textContent = JSON.stringify({
+      date: result.date,
+      armed_source: result.armed_source,
+      trades: (result.trades || []).length,
+      series_symbols: Object.keys(result.series || {}).length,
+      trace_rows: (result.decision_trace || []).length,
+      error: result.error || null
+    }, null, 2);
+    if (!host) return;
+    var date = document.getElementById('rp-date');
+    var mode = document.getElementById('rp-mode');
+    if (date && result.date) date.value = result.date;
+    if (mode && result.armed_source) mode.value = result.armed_source;
+    var symbols = symbolList(result);
+    var total = Number(result.total_usd || 0);
+    var stats = '<div class="rp-stats">' +
+      '<div class="rp-stat"><b>' + esc(result.date || '-') + '</b><span>Date</span></div>' +
+      '<div class="rp-stat"><b class="' + (total >= 0 ? 'rp-pos' : 'rp-neg') + '">' + esc(fmtMoney(total)) + '</b><span>P/L</span></div>' +
+      '<div class="rp-stat"><b>' + esc((result.trades || []).length) + '</b><span>Trades</span></div>' +
+      '<div class="rp-stat"><b>' + esc(symbols.length) + '</b><span>Symbols</span></div>' +
+      '<div class="rp-stat"><b>' + esc(result.armed_source || 'replay') + '</b><span>Mode</span></div>' +
+      '</div>';
+    if (result.error) {
+      host.innerHTML = stats + '<div class="rp-empty">' + esc(result.error) + '</div>';
       return;
     }
-    rrLastDayMode = mode;
+    if (!symbols.length) {
+      host.innerHTML = stats + '<div class="rp-empty">No symbol actions for this replay.</div>';
+      return;
+    }
+    var domain = replayDomain(result);
+    var rows = symbols.map(function(sym) { return renderSymbolRow(result, sym, domain); }).join('');
+    host.innerHTML = stats + '<div class="rp-timeline">' + renderRuler(domain) + rows + '</div>';
+  }
+
+  function renderLoading(text) {
+    var host = document.getElementById('rp-workspace');
+    if (!host) return;
+    host.innerHTML = '<div class="rp-empty">' + esc(text || 'Loading replay...') + '</div>';
+  }
+
+  function loadResult(date, mode, quiet) {
+    if (!date) return Promise.resolve(false);
+    if (!quiet) {
+      setStatus('loading...', 'running');
+      renderLoading('Loading replay...');
+    }
+    return fetch('/api/trading/momentum/replay/result/' + encodeURIComponent(date) + '?armed_source=' + encodeURIComponent(mode || 'live'), { credentials: 'same-origin' })
+      .then(function(resp) { return resp.json().then(function(body) { return { ok: resp.ok, body: body }; }); })
+      .then(function(out) {
+        if (!out.ok || !out.body || !out.body.result) {
+          if (!quiet) {
+            setStatus('not found', 'error');
+            renderLoading('No replay result for that date.');
+          }
+          return false;
+        }
+        renderReplay(out.body.result);
+        setStatus('loaded', 'done');
+        var subtitle = document.getElementById('rp-subtitle');
+        if (subtitle) subtitle.textContent = 'Loaded ' + (out.body.result.date || date) + ' with ' + ((out.body.result.trades || []).length) + ' trades.';
+        return true;
+      })
+      .catch(function(err) {
+        if (!quiet) {
+          setStatus('failed', 'error');
+          renderLoading(err && err.message ? err.message : 'Replay load failed.');
+        }
+        return false;
+      });
+  }
+
+  function pickBestHistory(rows) {
+    return rows.find(function(row) { return Number(row.n_trades || 0) > 0 && !row.error; }) || rows[0] || null;
+  }
+
+  function renderHistory(rows) {
+    var host = document.getElementById('rp-history');
+    if (!host) return;
+    if (!rows.length) {
+      host.innerHTML = '<span class="rp-chip">No saved replays</span>';
+      return;
+    }
+    host.innerHTML = rows.slice(0, 24).map(function(row) {
+      var label = row.date + ' ' + (row.armed_source || 'asof') + ' · ' + (row.n_trades || 0) + ' trades';
+      return '<button type="button" onclick="rpLoadReplay(\'' + esc(row.date) + '\', \'' + esc(row.armed_source || 'asof') + '\')">' + esc(label) + '</button>';
+    }).join('');
+  }
+
+  function loadHistory() {
+    return fetch('/api/trading/momentum/replay/list', { credentials: 'same-origin' })
+      .then(function(resp) { return resp.json(); })
+      .then(function(body) {
+        rpHistoryRows = body.results || [];
+        renderHistory(rpHistoryRows);
+        var pick = pickBestHistory(rpHistoryRows);
+        if (pick) {
+          var date = document.getElementById('rp-date');
+          var mode = document.getElementById('rp-mode');
+          if (date) date.value = pick.date || '';
+          if (mode) mode.value = pick.armed_source || 'live';
+          return loadResult(pick.date, pick.armed_source || 'live', false);
+        }
+        renderLoading('No saved replay yet.');
+        return false;
+      })
+      .catch(function() {
+        renderLoading('Replay archive unavailable.');
+        return false;
+      });
+  }
+
+  function pollReplayStatus() {
+    if (rpPoll) clearTimeout(rpPoll);
+    fetch('/api/trading/momentum/replay/status', { credentials: 'same-origin' })
+      .then(function(resp) { return resp.json(); })
+      .then(function(body) {
+        var job = body.job || {};
+        var btn = document.getElementById('rp-run');
+        if (job.state === 'running') {
+          setStatus('running...', 'running');
+          renderLoading('Replay is running...');
+          rpPoll = setTimeout(pollReplayStatus, 3000);
+          return;
+        }
+        if (btn) btn.disabled = false;
+        if (job.state === 'done') {
+          setStatus('complete', 'done');
+          loadResult(job.date, job.armed_source || (document.getElementById('rp-mode') || {}).value || 'live', false);
+          loadHistory();
+        } else if (job.state === 'error') {
+          setStatus(job.error || 'error', 'error');
+          renderLoading(job.error || 'Replay failed.');
+        }
+      })
+      .catch(function() {});
+  }
+
+  window.rpRunReplay = function() {
+    var date = (document.getElementById('rp-date') || {}).value;
+    var mode = (document.getElementById('rp-mode') || {}).value || 'live';
+    var btn = document.getElementById('rp-run');
+    if (!date) {
+      setStatus('pick date', 'error');
+      return;
+    }
     if (btn) btn.disabled = true;
-    setStatus('rr-day-status', 'starting...', 'running');
+    setStatus('starting...', 'running');
+    renderLoading('Starting replay...');
     fetch('/api/trading/momentum/replay/run', {
       method: 'POST',
       credentials: 'same-origin',
@@ -781,105 +941,26 @@
       .then(function(resp) { return resp.json(); })
       .then(function(body) {
         if (!body.ok) {
-          setStatus('rr-day-status', body.error || 'not started', 'error');
+          setStatus(body.error || 'not started', 'error');
           if (btn) btn.disabled = false;
           return;
         }
-        rrPollStatus();
+        pollReplayStatus();
       })
       .catch(function(err) {
-        setStatus('rr-day-status', err && err.message ? err.message : 'failed', 'error');
+        setStatus(err && err.message ? err.message : 'failed', 'error');
         if (btn) btn.disabled = false;
       });
   };
 
-  function rrPollStatus() {
-    if (rrPoll) clearTimeout(rrPoll);
-    fetch('/api/trading/momentum/replay/status', { credentials: 'same-origin' })
-      .then(function(resp) { return resp.json(); })
-      .then(function(body) {
-        var job = body.job || {};
-        var btn = document.getElementById('rr-day-run');
-        var state = document.getElementById('rr-job-state');
-        var date = document.getElementById('rr-job-date');
-        if (state) state.textContent = job.state || 'idle';
-        if (date) date.textContent = job.date || '-';
-        if (job.state === 'running') {
-          setStatus('rr-day-status', 'running...', 'running');
-          rrPoll = setTimeout(rrPollStatus, 3000);
-        } else {
-          if (btn) btn.disabled = false;
-          if (job.state === 'done') {
-            setStatus('rr-day-status', 'complete', 'done');
-            rrLoadDayResult(job.date, job.armed_source || rrLastDayMode, true);
-            rrLoadHistory();
-          } else if (job.state === 'error') {
-            setStatus('rr-day-status', job.error || 'error', 'error');
-          } else {
-            setStatus('rr-day-status', job.state || 'idle', '');
-          }
-        }
-      })
-      .catch(function() {});
-  }
-
-  function rrLoadDayResult(date, mode, openArchive) {
-    if (!date) return;
-    fetch('/api/trading/momentum/replay/result/' + encodeURIComponent(date) + '?armed_source=' + encodeURIComponent(mode || 'asof'), { credentials: 'same-origin' })
-      .then(function(resp) { return resp.json().then(function(body) { return { ok: resp.ok, body: body }; }); })
-      .then(function(out) {
-        if (!out.ok || !out.body || !out.body.result) return;
-        renderDayResult(out.body.result, !!openArchive);
-      })
-      .catch(function() {});
-  }
-
-  function renderDayResult(result, openArchive) {
-    var host = document.getElementById('rr-day-result');
-    var body = document.getElementById('rr-day-body');
-    if (!host || !body) return;
-    var archive = document.querySelector('.rr-archive');
-    if (archive && openArchive) archive.open = true;
-    host.style.display = '';
-    document.getElementById('rr-day-title').textContent = result.date + ' replay';
-    var total = Number(result.total_usd || 0);
-    body.innerHTML =
-      '<div class="rr-day"><div class="rr-day-kpi"><b class="' + (total >= 0 ? 'rr-pos' : 'rr-neg') + '">' + esc(fmtMoney(total)) + '</b><span>P/L</span></div>' +
-      '<div class="rr-day-kpi"><b>' + esc(result.wins || 0) + '/' + esc(result.losses || 0) + '</b><span>W/L</span></div></div>';
-  }
-
-  function rrLoadHistory() {
-    fetch('/api/trading/momentum/replay/list', { credentials: 'same-origin' })
-      .then(function(resp) { return resp.json(); })
-      .then(function(body) {
-        var host = document.getElementById('rr-history');
-        if (!host) return;
-        var rows = body.results || [];
-        if (!rows.length) {
-          host.innerHTML = '<tr><td colspan="8">No replay history.</td></tr>';
-          return;
-        }
-        host.innerHTML = rows.map(function(row) {
-          var total = Number(row.total_usd || 0);
-          var mode = row.armed_source || 'asof';
-          return '<tr class="clickable" onclick="rrLoadDayResult(\'' + esc(row.date) + '\', \'' + esc(mode) + '\', true)">' +
-            '<td><b>' + esc(row.date) + '</b></td><td>' + esc(mode) + '</td>' +
-            '<td class="' + (total >= 0 ? 'rr-pos' : 'rr-neg') + '">' + esc(fmtMoney(total)) + '</td>' +
-            '<td>' + esc(row.n_trades || 0) + '</td><td>' + esc(row.wins || 0) + '/' + esc(row.losses || 0) + '</td>' +
-            '<td>' + esc(row.tape_symbols || 0) + '</td><td>' + esc(row.candidates || 0) + '</td>' +
-            '<td>' + esc(String(row.ran_at_utc || '').slice(0, 16).replace('T', ' ')) + '</td></tr>';
-        }).join('');
-      })
-      .catch(function() {});
-  }
-
-  window.rrLoadDayResult = rrLoadDayResult;
+  window.rpLoadReplay = function(date, mode) {
+    return loadResult(date, mode || 'live', false);
+  };
 
   document.addEventListener('DOMContentLoaded', function() {
-    var dayDate = document.getElementById('rr-day-date');
-    if (dayDate && !dayDate.value) dayDate.value = new Date().toISOString().slice(0, 10);
-    rrPollStatus();
-    rrLoadHistory();
+    var date = document.getElementById('rp-date');
+    if (date && !date.value) date.value = new Date().toISOString().slice(0, 10);
+    loadHistory();
   });
 })();
 </script>
