@@ -542,6 +542,34 @@ def _adv_ceiling_multipliers(
     return weights
 
 
+def _iqfeed_dollar_volumes(tickers) -> dict[str, float]:
+    """IQFeed today $-volume for the given candidate tickers — the ground-truth
+    PREMARKET volume. Massive's snapshot day/min aggregates lag pre-open, so a
+    JEM-class mover that ticked in IQFeed from ~04:00 ET fails the Massive $-vol
+    floor until RTH (JEM: armed 14:50 not ~08:04). Queried via ``symbol = ANY(:syms)``
+    so it rides the EXISTING (symbol, observed_at) index — ~115ms for 2000 tickers;
+    an observed_at-ONLY aggregate over the 52M-row tape is 70s+ (full scan, would
+    STALL the selection loop — that was the reverted deploy-1 bug). Fail-open to {}
+    (any error / 3s timeout => Massive-only $-vol, byte-identical to pre-fix)."""
+    _syms = sorted({str(t).strip().upper() for t in (tickers or []) if t})
+    if not _syms:
+        return {}
+    try:
+        from ....db import SessionLocal
+        from sqlalchemy import text
+        with SessionLocal() as _s:
+            _s.execute(text("SET LOCAL statement_timeout = '3000'"))  # belt-and-suspenders fail-open
+            _rows = _s.execute(text(
+                "SELECT symbol, sum(price*size) FROM iqfeed_trade_ticks "
+                "WHERE symbol = ANY(:syms) AND observed_at >= (now() at time zone 'utc')::date "
+                "AND price > 0 GROUP BY symbol"
+            ), {"syms": _syms}).fetchall()
+        return {str(r[0]).upper(): float(r[1] or 0.0) for r in _rows if r[0]}
+    except Exception:
+        logger.debug("[universe] iqfeed dollar-volume fetch failed", exc_info=True)
+        return {}
+
+
 def build_equity_universe(
     profile: UniverseProfile = EQUITY_ROSS_SMALLCAP,
     *,
@@ -603,6 +631,9 @@ def build_equity_universe(
     advs: list[float | None] = []  # parallel ADV-shares proxy per row (prevDay.v); None = unknown
     rvols: list[float | None] = []  # parallel intraday RVOL per row (today/prevDay shares); None = unknown
     below_price_min: list[bool] = []  # parallel: True when the row is a sub-price_min exemption candidate
+    _iqfeed_dvols = _iqfeed_dollar_volumes(
+        [s.get("ticker") for s in (snapshot or []) if isinstance(s, dict)]
+    )  # IQFeed ground-truth today $-vol for the snapshot candidates (index-fast via symbol=ANY)
     for s in snapshot or []:
         try:
             if not isinstance(s, dict):
@@ -633,7 +664,10 @@ def build_equity_universe(
             # every equity fails the floor pre-market -> empty universe -> nothing
             # to arm in the very window Ross trades (#562's hour gate opened it).
             vol = max(_f(day.get("v")) or 0.0, _f(mn.get("av")) or 0.0)
-            dollar_vol = price * vol
+            # IQFeed ground-truth premarket $-vol (Massive day/min aggregates lag pre-open —
+            # JEM-class movers fail the floor until RTH though IQFeed has them from ~04:00 ET).
+            # MONOTONIC (max) => can only ADD a missed mover, never remove a current one => no regression.
+            dollar_vol = max(price * vol, _iqfeed_dvols.get(ticker, 0.0))
             # The $-vol floor is NEVER relaxed — it is the tradability bar that keeps
             # junk out of BOTH the normal pool and the hot-mover guarantee/exemption.
             if profile.min_dollar_volume is not None and dollar_vol < profile.min_dollar_volume:
