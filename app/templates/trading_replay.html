@@ -647,6 +647,8 @@
   var rpSuppressClick = false;
   var rpRefreshFrame = null;
   var rpVisibleFrame = null;
+  var rpFocusChart = null;
+  var rpDeferredViewportTimer = null;
   var RP_MIN_WINDOW_MINUTES = 6;
   var RP_EAGER_ROWS = 5;
 
@@ -702,8 +704,70 @@
     return String(value || '').trim().toUpperCase();
   }
 
+  function rememberMinute(obj, key, value) {
+    if (!obj) return value;
+    if (value == null) return null;
+    obj[key] = value;
+    return value;
+  }
+
+  function barMinute(bar) {
+    if (!bar) return null;
+    if (bar._rpMinute != null) return bar._rpMinute;
+    return rememberMinute(bar, '_rpMinute', timeMin(bar[0]));
+  }
+
+  function rowMinute(row) {
+    if (!row) return null;
+    if (row._rpMinute != null) return row._rpMinute;
+    return rememberMinute(row, '_rpMinute', timeMin(row.t));
+  }
+
+  function tradeEntryMinute(trade) {
+    if (!trade) return null;
+    if (trade._rpEntryMin != null) return trade._rpEntryMin;
+    return rememberMinute(trade, '_rpEntryMin', timeMin(trade.t));
+  }
+
+  function tradeExitMinute(trade) {
+    if (!trade) return null;
+    if (trade._rpExitMin != null) return trade._rpExitMin;
+    return rememberMinute(trade, '_rpExitMin', timeMin(trade.exit_t));
+  }
+
+  function spanStartMinute(span) {
+    if (!span) return null;
+    if (span._rpStart != null) return span._rpStart;
+    var a = timeMin(span[0]);
+    var b = timeMin(span[1]);
+    if (a == null && b == null) return null;
+    return rememberMinute(span, '_rpStart', Math.min(a == null ? b : a, b == null ? a : b));
+  }
+
+  function spanEndMinute(span) {
+    if (!span) return null;
+    if (span._rpEnd != null) return span._rpEnd;
+    var a = timeMin(span[0]);
+    var b = timeMin(span[1]);
+    if (a == null && b == null) return null;
+    return rememberMinute(span, '_rpEnd', Math.max(a == null ? b : a, b == null ? a : b));
+  }
+
   function emptyReplayCache() {
-    return { bars: {}, trades: {}, traces: {}, armed: {}, indicators: {} };
+    return {
+      bars: {},
+      barMinutes: {},
+      trades: {},
+      traces: {},
+      traceSorted: {},
+      traceMinutes: {},
+      armed: {},
+      spans: {},
+      indicators: {},
+      indicatorMinutes: {},
+      firstAction: {},
+      allMinutes: []
+    };
   }
 
   function cacheList(map, sym) {
@@ -716,19 +780,78 @@
     var cache = emptyReplayCache();
     var series = result && result.series ? result.series : {};
     Object.keys(series).forEach(function(sym) {
-      cache.bars[normalizeSym(sym)] = series[sym] || [];
+      var key = normalizeSym(sym);
+      var bars = series[sym] || [];
+      var minutes = [];
+      bars.forEach(function(bar) {
+        var m = barMinute(bar);
+        minutes.push(m);
+        if (m != null) cache.allMinutes.push(m);
+      });
+      cache.bars[key] = bars;
+      cache.barMinutes[key] = minutes;
     });
     (result && result.trades || []).forEach(function(t) {
+      var entry = tradeEntryMinute(t);
+      var exit = tradeExitMinute(t);
+      if (entry != null) cache.allMinutes.push(entry);
+      if (exit != null) cache.allMinutes.push(exit);
+      t._rpStartMin = entry == null ? exit : exit == null ? entry : Math.min(entry, exit);
+      t._rpEndMin = entry == null ? exit : exit == null ? entry : Math.max(entry, exit);
       cacheList(cache.trades, t.sym).push(t);
     });
     (result && result.decision_trace || []).forEach(function(row) {
+      var minute = rowMinute(row);
+      if (minute != null) cache.allMinutes.push(minute);
       cacheList(cache.traces, row.sym).push(row);
     });
     (result && result.armed_timeline || []).forEach(function(row) {
-      cache.armed[normalizeSym(row.sym)] = row;
+      var key = normalizeSym(row.sym);
+      cache.armed[key] = row;
+      cache.spans[key] = (row.spans || []).filter(function(span) {
+        var start = spanStartMinute(span);
+        var end = spanEndMinute(span);
+        if (start != null) cache.allMinutes.push(start);
+        if (end != null) cache.allMinutes.push(end);
+        return start != null || end != null;
+      });
     });
     Object.keys(cache.bars).forEach(function(sym) {
-      cache.indicators[sym] = indicatorRows(cache.bars[sym]);
+      var indicators = indicatorRows(cache.bars[sym]);
+      indicators.forEach(function(row, i) {
+        row._rpMinute = cache.barMinutes[sym][i];
+      });
+      cache.indicators[sym] = indicators;
+      cache.indicatorMinutes[sym] = indicators.map(function(row) { return rowMinute(row); });
+    });
+    Object.keys(cache.traces).forEach(function(sym) {
+      cache.traceSorted[sym] = cache.traces[sym].filter(function(row) {
+        return rowMinute(row) != null;
+      }).slice().sort(function(a, b) {
+        return rowMinute(a) - rowMinute(b);
+      });
+      cache.traceMinutes[sym] = cache.traceSorted[sym].map(function(row) { return rowMinute(row); });
+    });
+    Object.keys(cache.trades).forEach(function(sym) {
+      cache.trades[sym].forEach(function(t) {
+        var first = t._rpStartMin;
+        if (first == null) return;
+        cache.firstAction[sym] = cache.firstAction[sym] == null ? first : Math.min(cache.firstAction[sym], first);
+      });
+    });
+    Object.keys(cache.traces).forEach(function(sym) {
+      cache.traces[sym].forEach(function(row) {
+        var first = rowMinute(row);
+        if (first == null) return;
+        cache.firstAction[sym] = cache.firstAction[sym] == null ? first : Math.min(cache.firstAction[sym], first);
+      });
+    });
+    Object.keys(cache.spans).forEach(function(sym) {
+      cache.spans[sym].forEach(function(span) {
+        var first = spanStartMinute(span);
+        if (first == null) return;
+        cache.firstAction[sym] = cache.firstAction[sym] == null ? first : Math.min(cache.firstAction[sym], first);
+      });
     });
     return cache;
   }
@@ -736,6 +859,35 @@
   function replayCache(result) {
     if (result === rpLastResult && rpReplayCache) return rpReplayCache;
     return null;
+  }
+
+  function lowerBound(minutes, target) {
+    var lo = 0;
+    var hi = minutes ? minutes.length : 0;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      var value = minutes[mid];
+      if (value == null || value < target) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  function upperBound(minutes, target) {
+    var lo = 0;
+    var hi = minutes ? minutes.length : 0;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      var value = minutes[mid];
+      if (value == null || value <= target) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  function sliceByMinute(rows, minutes, domain) {
+    if (!rows || !minutes || !domain) return [];
+    return rows.slice(lowerBound(minutes, domain.min), upperBound(minutes, domain.max));
   }
 
   function barsFor(result, sym) {
@@ -766,30 +918,80 @@
     return (result.armed_timeline || []).find(function(row) { return normalizeSym(row.sym) === target; }) || { spans: [] };
   }
 
+  function barsWindowFor(result, sym, domain) {
+    var cache = replayCache(result);
+    var key = normalizeSym(sym);
+    if (cache) return sliceByMinute(cache.bars[key], cache.barMinutes[key], domain);
+    return barsFor(result, sym).filter(function(bar) {
+      return inDomain(barMinute(bar), domain);
+    });
+  }
+
+  function indicatorsWindowFor(result, sym, domain, fallbackRows) {
+    var cache = replayCache(result);
+    var key = normalizeSym(sym);
+    if (cache) return sliceByMinute(cache.indicators[key], cache.indicatorMinutes[key], domain);
+    return (fallbackRows || indicatorsFor(sym)).filter(function(row) {
+      return inDomain(rowMinute(row), domain);
+    });
+  }
+
+  function tradesWindowFor(result, sym, domain) {
+    return tradesFor(result, sym).filter(function(t) { return tradeTouchesDomain(t, domain); });
+  }
+
+  function tracesWindowFor(result, sym, domain) {
+    var cache = replayCache(result);
+    var key = normalizeSym(sym);
+    if (cache) return sliceByMinute(cache.traceSorted[key], cache.traceMinutes[key], domain);
+    return tracesFor(result, sym).filter(function(row) {
+      return inDomain(rowMinute(row), domain);
+    });
+  }
+
+  function spansWindowFor(result, sym, domain) {
+    var cache = replayCache(result);
+    var spans = cache ? (cache.spans[normalizeSym(sym)] || []) : (armedFor(result, sym).spans || []);
+    return spans.filter(function(span) {
+      var start = spanStartMinute(span);
+      var end = spanEndMinute(span);
+      if (start == null && end == null) return false;
+      return Math.max(start == null ? end : start, end == null ? start : end) >= domain.min &&
+        Math.min(start == null ? end : start, end == null ? start : end) <= domain.max;
+    });
+  }
+
   function replayDomain(result) {
+    var cache = replayCache(result);
+    if (cache && cache.allMinutes.length) {
+      return {
+        min: Math.max(4 * 60, Math.min.apply(null, cache.allMinutes) - 8),
+        max: Math.min(20 * 60, Math.max.apply(null, cache.allMinutes) + 8)
+      };
+    }
     var mins = [];
     Object.keys(result.series || {}).forEach(function(sym) {
       (result.series[sym] || []).forEach(function(bar) {
-        var m = timeMin(bar && bar[0]);
+        var m = barMinute(bar);
         if (m != null) mins.push(m);
       });
     });
     (result.trades || []).forEach(function(t) {
-      var a = timeMin(t.t);
-      var b = timeMin(t.exit_t);
+      var a = tradeEntryMinute(t);
+      var b = tradeExitMinute(t);
       if (a != null) mins.push(a);
       if (b != null) mins.push(b);
     });
     (result.armed_timeline || []).forEach(function(row) {
       (row.spans || []).forEach(function(span) {
-        var a = timeMin(span && span[0]);
-        var b = timeMin(span && span[1]);
+        var a = spanStartMinute(span);
+        var b = spanEndMinute(span);
         if (a != null) mins.push(a);
         if (b != null) mins.push(b);
       });
     });
     (result.decision_trace || []).forEach(function(row) {
-      var m = timeMin(row.t);
+      var m = rowMinute(row);
       if (m != null) mins.push(m);
     });
     if (!mins.length) return { min: 8 * 60, max: 20 * 60 };
@@ -812,8 +1014,8 @@
   }
 
   function tradeTouchesDomain(trade, domain) {
-    var entry = timeMin(trade && trade.t);
-    var exit = timeMin(trade && trade.exit_t);
+    var entry = tradeEntryMinute(trade);
+    var exit = tradeExitMinute(trade);
     if (entry == null && exit == null) return false;
     if (entry != null && exit != null) {
       return Math.max(entry, exit) >= domain.min && Math.min(entry, exit) <= domain.max;
@@ -873,17 +1075,20 @@
   }
 
   function firstActionMinute(result, sym) {
+    var cache = replayCache(result);
+    var key = normalizeSym(sym);
+    if (cache && cache.firstAction[key] != null) return cache.firstAction[key];
     var values = [];
     tradesFor(result, sym).forEach(function(t) {
-      var m = timeMin(t.t);
+      var m = tradeEntryMinute(t);
       if (m != null) values.push(m);
     });
     tracesFor(result, sym).forEach(function(row) {
-      var m = timeMin(row.t);
+      var m = rowMinute(row);
       if (m != null) values.push(m);
     });
     (armedFor(result, sym).spans || []).forEach(function(span) {
-      var m = timeMin(span && span[0]);
+      var m = spanStartMinute(span);
       if (m != null) values.push(m);
     });
     return values.length ? Math.min.apply(null, values) : 99999;
@@ -947,7 +1152,7 @@
   function pathForRows(rows, domain, width, pad, valueKey, y) {
     var points = [];
     (rows || []).forEach(function(row) {
-      var minute = timeMin(row && row.t);
+      var minute = rowMinute(row);
       var value = Number(row && row[valueKey]);
       if (!inDomain(minute, domain) || !Number.isFinite(value)) return;
       points.push(px(minute, domain, width, pad).toFixed(1) + ',' + y(value).toFixed(1));
@@ -1007,9 +1212,26 @@
     return best ? { row: best, delta: bestDelta } : null;
   }
 
+  function nearestByIndexed(rows, minutes, targetMinute) {
+    if (!rows || !minutes || !rows.length) return null;
+    var i = lowerBound(minutes, targetMinute);
+    var best = null;
+    [i - 1, i, i + 1].forEach(function(idx) {
+      if (idx < 0 || idx >= rows.length) return;
+      var m = minutes[idx];
+      if (m == null) return;
+      var delta = Math.abs(m - targetMinute);
+      if (!best || delta < best.delta) best = { row: rows[idx], delta: delta };
+    });
+    return best;
+  }
+
   function nearestBar(sym, minute) {
+    var cache = replayCache(rpLastResult || {});
+    var key = normalizeSym(sym);
+    if (cache) return nearestByIndexed(cache.bars[key], cache.barMinutes[key], minute);
     return nearestByMinute(barsFor(rpLastResult || {}, sym), minute, function(bar) {
-      return timeMin(bar && bar[0]);
+      return barMinute(bar);
     });
   }
 
@@ -1024,7 +1246,7 @@
     tracesFor(rpLastResult || {}, sym).forEach(function(row) {
       actions.push({ kind: 'setup', t: row.t, detail: cleanStage(row.stage) });
     });
-    var found = nearestByMinute(actions, minute, function(row) { return timeMin(row.t); });
+    var found = nearestByMinute(actions, minute, function(row) { return rowMinute(row); });
     return found && found.delta <= 8 ? found.row : null;
   }
 
@@ -1040,8 +1262,14 @@
   }
 
   function nearestIndicator(sym, minute) {
+    var cache = replayCache(rpLastResult || {});
+    var key = normalizeSym(sym);
+    if (cache) {
+      var indexed = nearestByIndexed(cache.indicators[key], cache.indicatorMinutes[key], minute);
+      return indexed && indexed.delta <= 5 ? indexed.row : null;
+    }
     var found = nearestByMinute(indicatorsFor(sym), minute, function(row) {
-      return timeMin(row && row.t);
+      return rowMinute(row);
     });
     return found && found.delta <= 5 ? found.row : null;
   }
@@ -1267,7 +1495,7 @@
     });
   }
 
-  function refreshViewportUi(forceAll) {
+  function refreshViewportUi(forceAll, focusChart) {
     if (!rpLastResult || !rpViewDomain) return;
     clearPinnedChart();
     rpPinnedChart = null;
@@ -1277,7 +1505,7 @@
     document.querySelectorAll('.rp-chart').forEach(function(chart) {
       chart.classList.remove('is-inspecting');
       chart.classList.remove('is-pinned');
-      if (forceAll || chartNearViewport(chart)) {
+      if (forceAll || chart === focusChart || (!focusChart && chartNearViewport(chart))) {
         renderChartForDomain(chart, rpViewDomain);
       }
     });
@@ -1287,11 +1515,23 @@
     if (label) label.textContent = viewportLabel();
   }
 
-  function requestViewportRefresh() {
+  function requestDeferredViewportRefresh() {
+    if (rpDeferredViewportTimer) clearTimeout(rpDeferredViewportTimer);
+    rpDeferredViewportTimer = setTimeout(function() {
+      rpDeferredViewportTimer = null;
+      refreshViewportUi(false, null);
+    }, 260);
+  }
+
+  function requestViewportRefresh(focusChart) {
+    if (focusChart) rpFocusChart = focusChart;
     if (rpRefreshFrame) return;
     rpRefreshFrame = requestAnimationFrame(function() {
+      var chart = rpFocusChart;
+      rpFocusChart = null;
       rpRefreshFrame = null;
-      refreshViewportUi();
+      refreshViewportUi(false, chart);
+      if (chart) requestDeferredViewportRefresh();
     });
   }
 
@@ -1300,23 +1540,27 @@
       cancelAnimationFrame(rpRefreshFrame);
       rpRefreshFrame = null;
     }
+    if (rpDeferredViewportTimer) {
+      clearTimeout(rpDeferredViewportTimer);
+      rpDeferredViewportTimer = null;
+    }
     refreshViewportUi();
   }
 
-  function setViewDomain(domain, deferRefresh) {
+  function setViewDomain(domain, deferRefresh, focusChart) {
     if (!domain) return;
     var next = clampViewDomain(domain.min, domain.max);
     if (!next) return;
     if (rpViewDomain && next.min === rpViewDomain.min && next.max === rpViewDomain.max) return;
     rpViewDomain = next;
     if (deferRefresh) {
-      requestViewportRefresh();
+      requestViewportRefresh(focusChart);
     } else {
       flushViewportRefresh();
     }
   }
 
-  function zoomViewport(factor, anchorRatio, deferRefresh) {
+  function zoomViewport(factor, anchorRatio, deferRefresh, focusChart) {
     if (!rpViewDomain) return;
     var current = cloneDomain(rpViewDomain);
     var span = Math.max(1, domainSpan(current));
@@ -1326,14 +1570,14 @@
     setViewDomain({
       min: anchorMinute - nextSpan * anchor,
       max: anchorMinute + nextSpan * (1 - anchor)
-    }, deferRefresh);
+    }, deferRefresh, focusChart);
   }
 
-  function panViewport(deltaRatio, baseDomain, deferRefresh) {
+  function panViewport(deltaRatio, baseDomain, deferRefresh, focusChart) {
     var source = baseDomain || rpViewDomain;
     if (!source) return;
     var shift = domainSpan(source) * deltaRatio;
-    setViewDomain({ min: source.min + shift, max: source.max + shift }, deferRefresh);
+    setViewDomain({ min: source.min + shift, max: source.max + shift }, deferRefresh, focusChart);
   }
 
   function resetViewport() {
@@ -1396,11 +1640,11 @@
     var rect = chart.getBoundingClientRect();
     if (!rect.width) return;
     if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
-      panViewport(event.deltaX / rect.width, null, true);
+      panViewport(event.deltaX / rect.width, null, true, chart);
       return;
     }
     var ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-    zoomViewport(event.deltaY > 0 ? 1.18 : 0.82, ratio, true);
+    zoomViewport(event.deltaY > 0 ? 1.18 : 0.82, ratio, true, chart);
   }
 
   function handleChartPointerDown(event) {
@@ -1429,7 +1673,7 @@
     if (Math.abs(dx) < 3 && !rpDragState.moved) return true;
     rpDragState.moved = true;
     event.preventDefault();
-    panViewport(-dx / Math.max(1, rpDragState.width), rpDragState.domain, true);
+    panViewport(-dx / Math.max(1, rpDragState.width), rpDragState.domain, true, rpDragState.chart);
     return true;
   }
 
@@ -1442,7 +1686,12 @@
       }
     }
     if (rpDragState.moved) {
-      flushViewportRefresh();
+      if (rpRefreshFrame) {
+        cancelAnimationFrame(rpRefreshFrame);
+        rpRefreshFrame = null;
+      }
+      refreshViewportUi(false, rpDragState.chart);
+      requestDeferredViewportRefresh();
       rpSuppressClick = true;
       setTimeout(function() { rpSuppressClick = false; }, 0);
       if (event && event.preventDefault) event.preventDefault();
@@ -1469,20 +1718,13 @@
     var plotH = priceBottom - top;
     var macdH = macdBottom - macdTop;
     var rawBars = barsFor(result, sym);
-    var visibleBars = rawBars.filter(function(bar) {
-      return inDomain(timeMin(bar && bar[0]), domain);
-    });
+    var visibleBars = barsWindowFor(result, sym, domain);
     var bars = sampleBars(visibleBars, 260);
     var indicators = result === rpLastResult ? indicatorsFor(sym) : indicatorRows(rawBars);
-    var visibleIndicators = sampleBars(indicators.filter(function(row) {
-      return inDomain(timeMin(row && row.t), domain);
-    }), 260);
-    var trades = tradesFor(result, sym);
-    var visibleTrades = trades.filter(function(t) { return tradeTouchesDomain(t, domain); });
-    var spans = armedFor(result, sym).spans || [];
-    var traces = tracesFor(result, sym).filter(function(row) {
-      return inDomain(timeMin(row.t), domain);
-    }).slice(0, 40);
+    var visibleIndicators = sampleBars(indicatorsWindowFor(result, sym, domain, indicators), 260);
+    var visibleTrades = tradesWindowFor(result, sym, domain);
+    var spans = spansWindowFor(result, sym, domain);
+    var traces = tracesWindowFor(result, sym, domain).slice(0, 40);
     var prices = [];
     bars.forEach(function(bar) {
       [1, 2, 3, 4].forEach(function(i) {
@@ -1539,11 +1781,11 @@
     parts.push('<line x1="' + pad + '" y1="' + priceBottom + '" x2="' + (width - pad) + '" y2="' + priceBottom + '" stroke="rgba(148,163,184,.25)" stroke-width="1"/>');
     parts.push('<line x1="' + pad + '" y1="' + macdTop + '" x2="' + (width - pad) + '" y2="' + macdTop + '" stroke="rgba(148,163,184,.18)" stroke-width="1"/>');
     spans.forEach(function(span) {
-      var a = timeMin(span && span[0]);
-      var b = timeMin(span && span[1]);
+      var a = spanStartMinute(span);
+      var b = spanEndMinute(span);
       if (a == null || b == null) return;
-      var start = Math.max(Math.min(a, b), domain.min);
-      var end = Math.min(Math.max(a, b), domain.max);
+      var start = Math.max(a, domain.min);
+      var end = Math.min(b, domain.max);
       if (end < domain.min || start > domain.max) return;
       var x1 = px(start, domain, width, pad);
       var x2 = px(end, domain, width, pad);
@@ -1552,7 +1794,7 @@
     if (bars.length) {
       var candleW = Math.max(1.4, Math.min(12, (width - pad * 2) / Math.max(1, bars.length * 1.45)));
       bars.forEach(function(bar) {
-        var bx = px(timeMin(bar[0]), domain, width, pad);
+        var bx = px(barMinute(bar), domain, width, pad);
         var vol = Number(bar[5] || 0);
         var vh = Math.max(1, Math.min(18, Math.log10(vol + 10) * 4));
         parts.push('<line x1="' + bx.toFixed(1) + '" y1="' + priceBottom.toFixed(1) + '" x2="' + bx.toFixed(1) + '" y2="' + (priceBottom - vh).toFixed(1) + '" stroke="rgba(148,163,184,.18)" stroke-width="1"/>');
@@ -1585,8 +1827,8 @@
     drawLinePath(parts, visibleIndicators, domain, width, pad, 'ema200', y, '#22d3ee', 1.3, .82);
     parts.push('<text x="' + (width - pad) + '" y="13" fill="#fbbf24" font-size="9" text-anchor="end">EMA 9 50 100 200</text>');
     visibleTrades.forEach(function(t) {
-      var entryM = timeMin(t.t);
-      var exitM = timeMin(t.exit_t);
+      var entryM = tradeEntryMinute(t);
+      var exitM = tradeExitMinute(t);
       var entryX = px(entryM, domain, width, pad);
       var exitX = px(exitM, domain, width, pad);
       var entryY = y(t.entry);
@@ -1613,7 +1855,7 @@
       }
     });
     traces.forEach(function(row) {
-      var m = timeMin(row.t);
+      var m = rowMinute(row);
       if (m == null) return;
       var x = px(m, domain, width, pad);
       parts.push('<circle cx="' + x.toFixed(1) + '" cy="18" r="2.5" fill="#fbbf24" opacity=".8"/>');
@@ -1621,7 +1863,7 @@
     var zeroY = macdY(0);
     parts.push('<line x1="' + pad + '" y1="' + zeroY.toFixed(1) + '" x2="' + (width - pad) + '" y2="' + zeroY.toFixed(1) + '" stroke="rgba(148,163,184,.22)" stroke-width="1"/>');
     visibleIndicators.forEach(function(row) {
-      var minute = timeMin(row && row.t);
+      var minute = rowMinute(row);
       var hist = Number(row && row.hist);
       if (!inDomain(minute, domain) || !Number.isFinite(hist)) return;
       var bx = px(minute, domain, width, pad);
@@ -1685,14 +1927,18 @@
   }
 
   function traceRowsFor(result, sym) {
+    var cache = replayCache(result);
+    if (cache) return (cache.traces[normalizeSym(sym)] || []).filter(function(row) {
+      return rowMinute(row) != null;
+    }).slice(0, 120);
     return tracesFor(result, sym).filter(function(row) {
-      return timeMin(row && row.t) != null;
+      return rowMinute(row) != null;
     }).slice(0, 120);
   }
 
   function renderTraceButtonsFromRows(rows, sym) {
     return rows.map(function(row) {
-      var minute = timeMin(row.t);
+      var minute = rowMinute(row);
       return '<button class="rp-trace-line" type="button" data-symbol="' + esc(sym) + '" data-minute="' + esc(minute) + '"><b>' + esc(row.t || timeLabel(minute)) + '</b> ' + esc(cleanStage(row.stage)) + '</button>';
     }).join('');
   }
@@ -1768,6 +2014,11 @@
       cancelAnimationFrame(rpVisibleFrame);
       rpVisibleFrame = null;
     }
+    if (rpDeferredViewportTimer) {
+      clearTimeout(rpDeferredViewportTimer);
+      rpDeferredViewportTimer = null;
+    }
+    rpFocusChart = null;
     var rows = symbols.map(function(sym, index) { return renderSymbolRow(result, sym, rpViewDomain, index < RP_EAGER_ROWS); }).join('');
     host.innerHTML = stats + '<div class="rp-timeline">' + renderViewportControls() + renderRuler(rpViewDomain) + rows + '</div>';
     requestVisibleChartRefresh();
@@ -1787,6 +2038,11 @@
       cancelAnimationFrame(rpVisibleFrame);
       rpVisibleFrame = null;
     }
+    if (rpDeferredViewportTimer) {
+      clearTimeout(rpDeferredViewportTimer);
+      rpDeferredViewportTimer = null;
+    }
+    rpFocusChart = null;
     rpReplayCache = null;
     rpIndicatorCache = {};
     host.innerHTML = '<div class="rp-empty">' + esc(text || 'Loading replay...') + '</div>';
