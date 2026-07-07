@@ -355,6 +355,20 @@ def ross_tick_scalp_evidence_ok(
         debug["direct_ross_trade_relaxed_scanner_pillars"] = True
         debug["direct_ross_trade_min_change_pct"] = ROSS_DIRECT_TRADE_MIN_CHANGE_PCT
         return True, WATCH_REASON, debug
+    # THIN-PREMARKET NULL-PILLAR ADMISSION (2026-07-07): premarket tape often delivers only ONE
+    # scanner pillar at a time (change w/o rvol, or rvol w/o change) -> the change_ok AND rvol_ok
+    # gate above can NEVER pass premarket, silently killing genuine explosive movers (PPCB: 58.4%
+    # intraday range, blocked 75x because rvol was NULL, never filled). Treat a MISSING pillar as
+    # UNKNOWN (not failed): admit on ONE strongly-present pillar -- change alone must clear the
+    # normal floor; rvol alone must clear a RAISED 1.5x floor (it is the sole evidence). A
+    # PRESENT-but-weak pillar still rejects (CRE change 5.7% / rvol 2.0 stays blocked). Downstream
+    # chase-guards + tape-required + structural stop + max-loss circuit still gate the actual fill.
+    if change_ok and rvol is None:
+        debug["null_pillar_admit"] = "change_solo_rvol_unknown"
+        return True, WATCH_REASON, debug
+    if change_pct is None and rvol is not None and rvol >= float(min_rvol) * 1.5:
+        debug["null_pillar_admit"] = "rvol_solo_change_unknown"
+        return True, WATCH_REASON, debug
     return False, "ross_pillars_not_explosive", debug
 
 
