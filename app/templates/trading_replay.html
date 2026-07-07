@@ -434,6 +434,23 @@
   overscroll-behavior: contain;
   padding-right: 4px;
 }
+.rp-trace-placeholder {
+  min-height: 38px;
+  overflow: hidden;
+}
+.rp-trace-placeholder::before {
+  content: "";
+  display: block;
+  width: 72%;
+  height: 30px;
+  border-radius: 5px;
+  background:
+    linear-gradient(90deg, rgba(148,163,184,.12), rgba(148,163,184,.04)),
+    linear-gradient(90deg, rgba(148,163,184,.08), rgba(148,163,184,.03));
+  background-size: 100% 11px, 64% 11px;
+  background-position: 0 0, 0 17px;
+  background-repeat: no-repeat;
+}
 .rp-trace-line {
   display: block;
   width: 100%;
@@ -631,6 +648,7 @@
   var rpRefreshFrame = null;
   var rpVisibleFrame = null;
   var RP_MIN_WINDOW_MINUTES = 6;
+  var RP_EAGER_ROWS = 5;
 
   function esc(value) {
     var div = document.createElement('div');
@@ -1172,11 +1190,15 @@
     return !chartMatchesDomain(chart, domain) || !chart.querySelector('svg');
   }
 
-  function chartNearViewport(chart) {
-    if (!chart || !chart.getBoundingClientRect) return false;
-    var rect = chart.getBoundingClientRect();
+  function elementNearViewport(el) {
+    if (!el || !el.getBoundingClientRect) return false;
+    var rect = el.getBoundingClientRect();
     var margin = Math.max(420, window.innerHeight * 0.65);
     return rect.bottom >= -margin && rect.top <= window.innerHeight + margin;
+  }
+
+  function chartNearViewport(chart) {
+    return elementNearViewport(chart);
   }
 
   function renderChartForDomain(chart, domain) {
@@ -1204,11 +1226,44 @@
     });
   }
 
+  function renderTraceListInto(list) {
+    if (!list || !rpLastResult) return list;
+    var sym = list.dataset.symbol || '';
+    list.classList.remove('rp-trace-placeholder');
+    list.dataset.traceHydrated = '1';
+    list.innerHTML = renderTraceButtons(rpLastResult, sym);
+    return list;
+  }
+
+  function ensureTraceListFresh(symbol) {
+    var target = normalizeSym(symbol);
+    var found = null;
+    document.querySelectorAll('.rp-row').forEach(function(row) {
+      if (found || normalizeSym(row.dataset.symbol) !== target) return;
+      found = row.querySelector('.rp-trace-list');
+    });
+    if (found && found.dataset.traceHydrated !== '1') renderTraceListInto(found);
+    return found;
+  }
+
+  function refreshVisibleTraceLists() {
+    if (!rpLastResult) return;
+    document.querySelectorAll('.rp-trace-list[data-trace-hydrated="0"]').forEach(function(list) {
+      var row = list.closest('.rp-row');
+      if (elementNearViewport(row || list)) renderTraceListInto(list);
+    });
+  }
+
+  function refreshVisibleRows() {
+    refreshVisibleCharts();
+    refreshVisibleTraceLists();
+  }
+
   function requestVisibleChartRefresh() {
     if (rpVisibleFrame) return;
     rpVisibleFrame = requestAnimationFrame(function() {
       rpVisibleFrame = null;
-      refreshVisibleCharts();
+      refreshVisibleRows();
     });
   }
 
@@ -1287,6 +1342,7 @@
   }
 
   function activeTraceButton(symbol, minute) {
+    ensureTraceListFresh(symbol);
     var target = normalizeSym(symbol);
     var match = null;
     document.querySelectorAll('.rp-trace-line').forEach(function(btn) {
@@ -1324,6 +1380,7 @@
     if (!chart) return;
     var row = chart.closest('.rp-row');
     if (row) row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    ensureTraceListFresh(symbol);
     chart = ensureChartFresh(chart) || chart;
     clearPinnedChart();
     rpPinnedChart = chart;
@@ -1627,15 +1684,28 @@
     return '<div class="rp-actions">' + chips.slice(0, 10).join('') + '</div>';
   }
 
-  function renderTraceLines(result, sym) {
-    var rows = tracesFor(result, sym).filter(function(row) {
+  function traceRowsFor(result, sym) {
+    return tracesFor(result, sym).filter(function(row) {
       return timeMin(row && row.t) != null;
     }).slice(0, 120);
-    if (!rows.length) return '';
-    return '<div class="rp-trace-list">' + rows.map(function(row) {
+  }
+
+  function renderTraceButtonsFromRows(rows, sym) {
+    return rows.map(function(row) {
       var minute = timeMin(row.t);
       return '<button class="rp-trace-line" type="button" data-symbol="' + esc(sym) + '" data-minute="' + esc(minute) + '"><b>' + esc(row.t || timeLabel(minute)) + '</b> ' + esc(cleanStage(row.stage)) + '</button>';
-    }).join('') + '</div>';
+    }).join('');
+  }
+
+  function renderTraceButtons(result, sym) {
+    return renderTraceButtonsFromRows(traceRowsFor(result, sym), sym);
+  }
+
+  function renderTraceLines(result, sym, eager) {
+    var rows = traceRowsFor(result, sym);
+    if (!rows.length) return '';
+    var attrs = ' class="rp-trace-list' + (eager ? '' : ' rp-trace-placeholder') + '" data-symbol="' + esc(sym) + '" data-trace-hydrated="' + (eager ? '1' : '0') + '"';
+    return '<div' + attrs + '>' + (eager ? renderTraceButtonsFromRows(rows, sym) : '') + '</div>';
   }
 
   function renderSymbolRow(result, sym, domain, eager) {
@@ -1646,7 +1716,7 @@
     return '<article class="rp-row" data-symbol="' + esc(sym) + '">' +
       '<div class="rp-symbol"><b>' + esc(sym) + '</b><span>' + esc(trades.length + ' trades') + '</span><span>' + esc(fmtNum(bars.length) + ' bars') + '</span><span class="rp-badge ' + (pnl >= 0 ? 'rp-pos' : 'rp-neg') + '">' + esc(badge) + '</span></div>' +
       '<div class="rp-chart" data-symbol="' + esc(sym) + '" data-domain-min="' + esc(eager ? domain.min : '') + '" data-domain-max="' + esc(eager ? domain.max : '') + '">' + (eager ? chartSvg(result, sym, domain) + chartOverlayHtml() : chartPlaceholderHtml()) + '</div>' +
-      '<div class="rp-setup">' + renderChips(result, sym) + renderTraceLines(result, sym) + '</div>' +
+      '<div class="rp-setup">' + renderChips(result, sym) + renderTraceLines(result, sym, eager) + '</div>' +
       '</article>';
   }
 
@@ -1698,7 +1768,7 @@
       cancelAnimationFrame(rpVisibleFrame);
       rpVisibleFrame = null;
     }
-    var rows = symbols.map(function(sym, index) { return renderSymbolRow(result, sym, rpViewDomain, index < 8); }).join('');
+    var rows = symbols.map(function(sym, index) { return renderSymbolRow(result, sym, rpViewDomain, index < RP_EAGER_ROWS); }).join('');
     host.innerHTML = stats + '<div class="rp-timeline">' + renderViewportControls() + renderRuler(rpViewDomain) + rows + '</div>';
     requestVisibleChartRefresh();
   }
