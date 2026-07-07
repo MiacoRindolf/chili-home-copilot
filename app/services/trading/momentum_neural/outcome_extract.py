@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from typing import Any, Optional
 
@@ -42,6 +43,17 @@ from .risk_policy import RISK_SNAPSHOT_KEY
 
 KEY_PAPER = "momentum_paper_execution"
 KEY_LIVE = "momentum_live_execution"
+
+# Deployed code build stamped onto every outcome so expectancy can be segmented by version
+# (daily fixes make a pooled cross-build PF invalid for sizing-scaling). Read once at import
+# from the deploy-pinned image tag; None when unset (back-compat / non-exec writers).
+# (feedback_sizing_expectancy_code_drift)
+_CODE_VERSION: Optional[str] = (
+    os.getenv("CHILI_MOMENTUM_EXEC_IMAGE")
+    or os.getenv("CHILI_CODE_VERSION")
+    or os.getenv("CHILI_IMAGE_TAG")
+    or None
+)
 
 _NON_STRATEGY_CREDIT_OUTCOMES = frozenset(
     {
@@ -698,6 +710,7 @@ def outcome_row_from_extracted(
         extracted_summary_json=summary,
         evidence_weight=float(evidence_weight),
         contributes_to_evolution=bool(contributes),
+        code_version=_CODE_VERSION,
     )
 
 

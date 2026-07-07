@@ -1969,6 +1969,11 @@ class MomentumAutomationOutcome(Base):
     broker_divergence_usd: Optional[float] = Column(Float, nullable=True)
     broker_reconciled_at: Optional[datetime] = Column(DateTime, nullable=True)
     broker_recon_detail_json: Optional[dict] = Column(JSONB, nullable=True)
+    # Deployed code build (image tag) that produced this outcome. Segments expectancy by
+    # version so sizing-scaling never pools across daily fixes (a pre-fix loss and a post-fix
+    # win are NOT the same edge). Nullable: back-rows + non-stamped writers stay NULL.
+    # (feedback_sizing_expectancy_code_drift)
+    code_version: Optional[str] = Column(String(96), nullable=True, index=True)
 
 
 class MomentumFillOutcome(Base):
