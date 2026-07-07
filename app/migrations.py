@@ -21127,6 +21127,34 @@ def _migration_313_momentum_bridge_subscribe_requests(conn) -> None:
     )
 
 
+def _migration_314_momentum_outcome_code_version(conn) -> None:
+    """Stamp the deployed CODE BUILD onto every momentum trade outcome so expectancy can be
+    SEGMENTED by code version. CHILI ships fixes/enhancements daily, so pooling outcomes across
+    builds contaminates any PF/win-rate used to decide sizing SCALING (old losses from bugs
+    already fixed understate edge; old wins from since-changed behavior overstate it). A nullable
+    code_version column lets the scaling gate filter to the CURRENT build; the value is the
+    deployed image tag (CHILI_MOMENTUM_EXEC_IMAGE), stamped at write-time. Nullable + additive ->
+    existing writers are unaffected, back-rows stay NULL (unknown build). Idempotent.
+    (feedback_sizing_expectancy_code_drift)
+    """
+    if "momentum_automation_outcomes" not in _tables(conn):
+        conn.commit()
+        return
+    conn.execute(text(
+        "ALTER TABLE momentum_automation_outcomes "
+        "ADD COLUMN IF NOT EXISTS code_version VARCHAR(96)"
+    ))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_momentum_outcomes_code_version "
+        "ON momentum_automation_outcomes (code_version)"
+    ))
+    conn.commit()
+    logger.info(
+        "[mig314] ensured momentum_automation_outcomes.code_version (segment expectancy by "
+        "deployed build; feedback_sizing_expectancy_code_drift)"
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -21515,6 +21543,8 @@ MIGRATIONS = [
      _migration_312_momentum_dilution_history),
     ("313_momentum_bridge_subscribe_requests",
      _migration_313_momentum_bridge_subscribe_requests),
+    ("314_momentum_outcome_code_version",
+     _migration_314_momentum_outcome_code_version),
 ]
 
 
