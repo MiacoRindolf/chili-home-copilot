@@ -246,12 +246,22 @@ def resolve_execution_family_for_symbol(symbol: str, *, mode: str = "live") -> s
             return EXECUTION_FAMILY_COINBASE_SPOT
         from ...config import settings
 
-        if (
-            str(mode or "").lower() == "paper"
-            and bool(getattr(settings, "chili_alpaca_enabled", False))
+        _alpaca_ready = (
+            bool(getattr(settings, "chili_alpaca_enabled", False))
             and bool(getattr(settings, "chili_alpaca_paper", True))
             and str(getattr(settings, "chili_alpaca_api_key", "") or "")
+        )
+        # PRIMARY EQUITY -> ALPACA PAPER (2026-07-07): when the operator flips the momentum lane to
+        # Alpaca paper (RH->Alpaca cash transfer in progress), route EQUITIES to alpaca_spot (fake
+        # money) instead of the RH live rail — in LIVE mode too, not only paper. alpaca_spot is
+        # excluded from real daily-loss / aggregate-risk caps (risk_evaluator/risk_policy) =>
+        # paper-by-construction. Default off => byte-identical (the twin-soak path still uses
+        # mode="paper"; with this ON the primary is already alpaca so the twin block skips).
+        if _alpaca_ready and bool(
+            getattr(settings, "chili_momentum_equity_execution_via_alpaca_paper", False)
         ):
+            return EXECUTION_FAMILY_ALPACA_SPOT
+        if str(mode or "").lower() == "paper" and _alpaca_ready:
             return EXECUTION_FAMILY_ALPACA_SPOT
         if _equity_rail_is_agentic_mcp():
             return EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP

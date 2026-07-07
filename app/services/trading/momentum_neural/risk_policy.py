@@ -172,6 +172,41 @@ def _agentic_equity_cached() -> float | None:
     return None
 
 
+_ALPACA_ACCT_CACHE: dict[str, float] = {"equity": 0.0, "bp": 0.0, "ts": 0.0}
+
+
+def _alpaca_account_cached() -> tuple[float | None, float | None]:
+    """(equity, buying_power) for the Alpaca account (paper or live), short-TTL cached like the
+    agentic reads so a burst of candidate sizings does not fire a get_account per name (rate
+    limits). Fail-open to the last-good value on a transient miss. Alpaca's paper account reports
+    ~4x day-trading buying power on its equity; the SIZING basis uses buying_power, the RISK cap
+    uses equity. (2026-07-07, ALPACA_PAPER_ENABLE_PLAN.md)"""
+    import time as _time
+
+    now = _time.monotonic()
+    age = now - (_ALPACA_ACCT_CACHE.get("ts") or 0.0)
+    _eq0 = _ALPACA_ACCT_CACHE.get("equity") or 0.0
+    _bp0 = _ALPACA_ACCT_CACHE.get("bp") or 0.0
+    if _eq0 > 0 and age < _AGENTIC_BP_TTL_SEC:
+        return _eq0, _bp0
+    try:
+        from ..venue.alpaca_spot import AlpacaSpotAdapter
+
+        snap = AlpacaSpotAdapter().get_account_snapshot() or {}
+        eq = float(snap.get("equity") or 0.0)
+        bp = float(snap.get("buying_power") or 0.0)
+    except Exception:
+        eq = bp = 0.0
+    if eq > 0:
+        _ALPACA_ACCT_CACHE["equity"] = eq
+        _ALPACA_ACCT_CACHE["bp"] = bp
+        _ALPACA_ACCT_CACHE["ts"] = now
+        return eq, bp
+    if _eq0 > 0 and age < _AGENTIC_BP_STALE_GRACE:
+        return _eq0, _bp0  # transient miss → recent cached value
+    return None, None
+
+
 # ── LAST-GOOD account-equity guard (FIX: spurious daily-loss-cap collapse) ───────────
 # _account_equity_usd does a LIVE broker portfolio read on every cap evaluation. Robinhood
 # reads are FLAKY (phoenix.robinhood.com SSL handshake failures fall back to api.robinhood.com,
@@ -369,6 +404,24 @@ def _account_equity_usd(
                 return float(stable)
         bp = _agentic_buying_power_cached()
         return float(bp) if (bp is not None and bp > 0) else None
+
+    # Alpaca rail (paper or live): size against the ALPACA account, NOT the RH/Coinbase portfolio.
+    # Without this branch alpaca_spot fell into the Coinbase `else` below and sized against the tiny
+    # Coinbase balance (~$1.9k) => absurd ~$290 orders on a paper account with ~$100k equity / ~$400k
+    # buying power. Alpaca's reported buying_power already includes its (paper 4x) margin, so use it
+    # DIRECTLY with NO extra multiple (like the agentic cash rail); the RISK cap (prefer_equity) reads
+    # the stabilized total EQUITY. (2026-07-07, ALPACA_PAPER_ENABLE_PLAN.md)
+    from ..execution_family_registry import (
+        EXECUTION_FAMILY_ALPACA_SHORT,
+        EXECUTION_FAMILY_ALPACA_SPOT,
+    )
+    if ef in (EXECUTION_FAMILY_ALPACA_SPOT, EXECUTION_FAMILY_ALPACA_SHORT):
+        _a_eq, _a_bp = _alpaca_account_cached()
+        if prefer_equity:
+            return _stabilize_account_equity(ef, _a_eq if (_a_eq and _a_eq > 0) else None)
+        if use_bp and _a_bp and _a_bp > 0:
+            return float(_a_bp)
+        return float(_a_eq) if (_a_eq and _a_eq > 0) else None
 
     try:
         if ef == EXECUTION_FAMILY_ROBINHOOD_SPOT:
@@ -2963,7 +3016,21 @@ def build_session_risk_snapshot(
         caps = snap["momentum_policy_caps"]
         multiple = float(getattr(settings, "chili_momentum_risk_cap_max_median_multiple", 2.0) or 2.0)
         lookback = int(getattr(settings, "chili_momentum_risk_cap_median_lookback", 40) or 40)
-        history = _recent_frozen_per_trade_caps(db, execution_family=execution_family, lookback=lookback)
+        # ALPACA PAPER (2026-07-07): the rolling-median guard clamps a cap to 2x the median of recent
+        # SAME-VENUE caps — it exists to catch a transient BAD equity READ inflating size. The Alpaca
+        # paper equity (~$100k / ~$400k BP) is AUTHORITATIVE (get_account_snapshot), but the recent-cap
+        # history is contaminated by the pre-fix wrong-basis era (Coinbase ~$1.9k), so the median would
+        # under-clamp a legitimate $400k account down to ~$1k. Skip the guard for the paper alpaca lane
+        # so it sizes against its REAL buying power (fake money; the equity-relative cap + BP + per-trade
+        # max-loss still bound it). Default ON; flag restores the guard. (ALPACA_PAPER_ENABLE_PLAN.md)
+        _skip_median_guard = str(execution_family or "").lower() in ("alpaca_spot", "alpaca_short") and bool(
+            getattr(settings, "chili_momentum_alpaca_skip_cap_median_guard", True)
+        )
+        history = (
+            {}
+            if _skip_median_guard
+            else _recent_frozen_per_trade_caps(db, execution_family=execution_family, lookback=lookback)
+        )
         derivation: dict[str, Any] = {}
         for key in _PER_TRADE_CAP_KEYS:
             bounded, d = bounded_by_rolling_median(caps[key], history.get(key, []), multiple=multiple)

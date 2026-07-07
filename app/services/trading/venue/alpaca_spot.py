@@ -182,8 +182,60 @@ class AlpacaSpotAdapter:
             return False
 
     # ── market data ──────────────────────────────────────────────────────────
+    def _iqfeed_l1_quote(self, sym: str):
+        """Freshest IQFeed L1 quote from momentum_nbbo_spread_tape (the SAME feed the live lane
+        uses), so the Alpaca lane decisions on IQFeed data — NOT the thin Alpaca-IEX feed that made
+        2199 sessions go dormant (06-18) on stale/no BBO. Self-contained short-lived read of ONE
+        indexed (symbol, observed_at) row. Returns (NormalizedTicker, FreshnessMeta) or None on
+        miss / stale-beyond-window / error => caller falls back to Alpaca-IEX. Pure read."""
+        try:
+            from ....db import SessionLocal
+            from sqlalchemy import text
+
+            max_age = float(getattr(settings, "chili_alpaca_quote_max_age_seconds", 60.0) or 60.0)
+            with SessionLocal() as _db:
+                row = _db.execute(text(
+                    "SELECT bid, ask, mid, spread_bps, observed_at "
+                    "FROM momentum_nbbo_spread_tape "
+                    "WHERE symbol = :s AND mid > 0 ORDER BY observed_at DESC LIMIT 1"
+                ), {"s": str(sym or "").upper()}).fetchone()
+            if row is None:
+                return None
+            bid = _f(row[0]); ask = _f(row[1]); mid = _f(row[2])
+            if not (bid and ask and mid and mid > 0):
+                return None
+            ts = row[4]
+            if isinstance(ts, datetime):
+                _ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+                if (_now() - _ts).total_seconds() > max_age:
+                    return None  # stale IQFeed row -> let Alpaca-IEX try
+            else:
+                _ts = _now()
+            spread_bps = _f(row[3])
+            if spread_bps is None and ask >= bid:
+                spread_bps = (ask - bid) / mid * 10_000.0
+            meta = FreshnessMeta(retrieved_at_utc=_ts, max_age_seconds=max_age)
+            return NormalizedTicker(
+                product_id=sym, bid=bid, ask=ask, mid=mid, spread_bps=spread_bps,
+                bid_size=None, ask_size=None, freshness=meta, raw={"feed": "iqfeed_l1"},
+            ), meta
+        except Exception as exc:
+            logger.debug("[alpaca_spot] _iqfeed_l1_quote(%s) failed: %s", sym, exc)
+            return None
+
     def get_best_bid_ask(self, product_id: str):
         sym = _to_symbol(product_id)
+        # DATA/EXECUTION DECOUPLING (2026-07-07): Alpaca is EXECUTION-only. Alpaca-IEX quotes have
+        # thin small-cap coverage — the dormancy root cause (stale_bbo/no_bbo on Ross low-float
+        # names since 06-18). Prefer IQFeed L1 (momentum_nbbo_spread_tape, same feed the live lane
+        # uses, ~0.26s fresh); fall back to Alpaca-IEX only on a miss. Kill-switch
+        # chili_alpaca_quotes_via_iqfeed (default True). Equities only. See ALPACA_PAPER_ENABLE_PLAN.md.
+        if not _is_crypto_pid(product_id) and bool(
+            getattr(settings, "chili_alpaca_quotes_via_iqfeed", True)
+        ):
+            _iq = self._iqfeed_l1_quote(sym)
+            if _iq is not None:
+                return _iq
         try:
             if _is_crypto_pid(product_id):
                 from alpaca.data.requests import CryptoLatestQuoteRequest

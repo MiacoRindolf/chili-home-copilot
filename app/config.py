@@ -4211,6 +4211,16 @@ class Settings(BaseSettings):
         ge=1,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_CAP_MEDIAN_LOOKBACK"),
     )
+    # ALPACA PAPER (2026-07-07): skip the rolling-median per-trade cap spike-guard for the alpaca
+    # paper lane. That guard clamps a cap to 2x the recent same-venue median to catch a BAD equity
+    # READ inflating size — but the Alpaca paper account read (~$100k eq / ~$400k BP) is authoritative
+    # and its recent-cap history is contaminated by the pre-fix wrong-basis era (~$1.9k Coinbase), so
+    # the median under-clamps a legit $400k account to ~$1k. Default ON (paper = fake money; the
+    # equity-relative cap + BP + max-loss still bound size). Set False to restore the guard.
+    chili_momentum_alpaca_skip_cap_median_guard: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ALPACA_SKIP_CAP_MEDIAN_GUARD"),
+    )
     # Reward:risk multiple — the TARGET is set this many x the actual stop distance
     # (Ross-style 2:1 floor; the per-instrument/regime learner can raise it). Fixes
     # the old ~1.3-1.5:1 that sat below Ross's strict 2:1. One documented R:R knob.
@@ -9342,6 +9352,23 @@ class Settings(BaseSettings):
     chili_alpaca_quote_max_age_seconds: float = Field(
         default=60.0, ge=1.0, le=600.0,
         validation_alias=AliasChoices("CHILI_ALPACA_QUOTE_MAX_AGE_SECONDS"),
+    )
+    # DATA/EXECUTION DECOUPLING (2026-07-07): source Alpaca-lane ENTRY quotes from IQFeed L1
+    # (momentum_nbbo_spread_tape) instead of the thin Alpaca-IEX feed that dormantized the lane
+    # 06-18 (stale_bbo/no_bbo on Ross names). Alpaca stays EXECUTION-only. Default ON (no dark
+    # flags); OFF => Alpaca-IEX (legacy). (ALPACA_PAPER_ENABLE_PLAN.md)
+    chili_alpaca_quotes_via_iqfeed: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_ALPACA_QUOTES_VIA_IQFEED"),
+    )
+    # PRIMARY EQUITY -> ALPACA PAPER routing (2026-07-07): when ON, the momentum lane routes the
+    # PRIMARY equity arm to alpaca_spot (Alpaca PAPER, fake money) instead of the RH live rail —
+    # for running the lane on Alpaca paper during the RH->Alpaca cash transfer (no real-money RH
+    # entries). Requires chili_alpaca_enabled + paper + key. alpaca_spot is excluded from real
+    # risk caps (paper-by-construction). Default OFF => byte-identical (RH live).
+    chili_momentum_equity_execution_via_alpaca_paper: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EQUITY_EXECUTION_VIA_ALPACA_PAPER"),
     )
     # ── Short-side lane (SHORT_SIDE_LANE.md) ──────────────────────────────────
     # Master gate for the SHORT side on the Alpaca rail. DEFAULT-OFF on purpose:
