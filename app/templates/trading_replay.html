@@ -429,11 +429,33 @@
   display: grid;
   gap: 5px;
   margin-top: 2px;
+  max-height: 138px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
 }
 .rp-trace-line {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
   color: var(--rp-muted);
+  cursor: pointer;
   font-size: 11px;
   line-height: 1.35;
+  padding: 2px 4px;
+  text-align: left;
+}
+.rp-trace-line:hover,
+.rp-trace-line:focus {
+  background: color-mix(in srgb, var(--rp-blue) 14%, transparent);
+  color: var(--rp-text);
+  outline: none;
+}
+.rp-trace-line.is-active {
+  background: color-mix(in srgb, var(--rp-amber) 16%, transparent);
+  color: var(--rp-text);
 }
 .rp-trace-line b {
   color: var(--rp-text);
@@ -997,6 +1019,9 @@
     document.querySelectorAll('.rp-row.is-active').forEach(function(row) {
       row.classList.remove('is-active');
     });
+    document.querySelectorAll('.rp-trace-line.is-active').forEach(function(btn) {
+      btn.classList.remove('is-active');
+    });
   }
 
   function updateChartInspection(chart, event, pinned) {
@@ -1007,6 +1032,17 @@
     var min = Number(chart.dataset.domainMin || 0);
     var max = Number(chart.dataset.domainMax || 0);
     var minute = Math.round(min + (max - min) * ratio);
+    updateChartInspectionAt(chart, minute, pinned);
+  }
+
+  function updateChartInspectionAt(chart, minute, pinned) {
+    if (!chart || !rpLastResult) return;
+    var rect = chart.getBoundingClientRect();
+    if (!rect.width) return;
+    var min = Number(chart.dataset.domainMin || 0);
+    var max = Number(chart.dataset.domainMax || 0);
+    var ratio = max > min ? (minute - min) / (max - min) : .5;
+    ratio = Math.max(0, Math.min(1, ratio));
     var symbol = chart.dataset.symbol || '';
     var left = ratio * 100;
     var crosshair = chart.querySelector('.rp-crosshair');
@@ -1045,6 +1081,7 @@
       event.preventDefault();
       return;
     }
+    if (event.target.closest && event.target.closest('.rp-trace-line')) return;
     var chart = event.target.closest && event.target.closest('.rp-chart');
     if (!chart) {
       clearPinnedChart();
@@ -1057,6 +1094,13 @@
     clearPinnedChart();
     rpPinnedChart = chart;
     updateChartInspection(chart, event, true);
+  }
+
+  function handleTraceClick(event) {
+    var btn = event.target.closest && event.target.closest('.rp-trace-line');
+    if (!btn) return;
+    event.preventDefault();
+    jumpToTrace(btn.dataset.symbol, Number(btn.dataset.minute));
   }
 
   function chartOverlayHtml() {
@@ -1115,6 +1159,50 @@
   function resetViewport() {
     if (!rpFullDomain) return;
     setViewDomain(cloneDomain(rpFullDomain));
+  }
+
+  function activeTraceButton(symbol, minute) {
+    var target = normalizeSym(symbol);
+    var match = null;
+    document.querySelectorAll('.rp-trace-line').forEach(function(btn) {
+      btn.classList.remove('is-active');
+      if (normalizeSym(btn.dataset.symbol) === target && Number(btn.dataset.minute) === Number(minute)) {
+        match = btn;
+      }
+    });
+    if (match) {
+      match.classList.add('is-active');
+      match.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+    return match;
+  }
+
+  function chartForSymbol(symbol) {
+    var target = normalizeSym(symbol);
+    var found = null;
+    document.querySelectorAll('.rp-row').forEach(function(row) {
+      if (!found && normalizeSym(row.dataset.symbol) === target) {
+        found = row.querySelector('.rp-chart');
+      }
+    });
+    return found;
+  }
+
+  function jumpToTrace(symbol, minute) {
+    if (!rpFullDomain || minute == null) return;
+    var currentSpan = domainSpan(rpViewDomain || rpFullDomain);
+    var fullSpan = domainSpan(rpFullDomain);
+    var focusSpan = Math.min(currentSpan || fullSpan, fullSpan, 60);
+    focusSpan = Math.max(RP_MIN_WINDOW_MINUTES, focusSpan);
+    setViewDomain({ min: minute - focusSpan / 2, max: minute + focusSpan / 2 });
+    var chart = chartForSymbol(symbol);
+    if (!chart) return;
+    var row = chart.closest('.rp-row');
+    if (row) row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    clearPinnedChart();
+    rpPinnedChart = chart;
+    updateChartInspectionAt(chart, minute, true);
+    activeTraceButton(symbol, minute);
   }
 
   function handleChartWheel(event) {
@@ -1411,10 +1499,13 @@
   }
 
   function renderTraceLines(result, sym) {
-    var rows = tracesFor(result, sym).slice(0, 4);
+    var rows = tracesFor(result, sym).filter(function(row) {
+      return timeMin(row && row.t) != null;
+    }).slice(0, 120);
     if (!rows.length) return '';
     return '<div class="rp-trace-list">' + rows.map(function(row) {
-      return '<div class="rp-trace-line"><b>' + esc(row.t || '') + '</b> ' + esc(cleanStage(row.stage)) + '</div>';
+      var minute = timeMin(row.t);
+      return '<button class="rp-trace-line" type="button" data-symbol="' + esc(sym) + '" data-minute="' + esc(minute) + '"><b>' + esc(row.t || timeLabel(minute)) + '</b> ' + esc(cleanStage(row.stage)) + '</button>';
     }).join('') + '</div>';
   }
 
@@ -1632,6 +1723,10 @@
     resetViewport();
   };
 
+  window.rpJumpToTrace = function(symbol, minute) {
+    jumpToTrace(symbol, Number(minute));
+  };
+
   document.addEventListener('DOMContentLoaded', function() {
     var date = document.getElementById('rp-date');
     if (date && !date.value) date.value = new Date().toISOString().slice(0, 10);
@@ -1646,6 +1741,7 @@
     document.addEventListener('pointerup', finishChartPan);
     document.addEventListener('pointercancel', finishChartPan);
     document.addEventListener('pointerout', handleChartOut);
+    document.addEventListener('click', handleTraceClick);
     document.addEventListener('click', handleChartClick);
     document.addEventListener('dblclick', handleChartDoubleClick);
     document.addEventListener('wheel', handleChartWheel, { passive: false });
