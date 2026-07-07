@@ -466,8 +466,18 @@ def _governed_place(adapter, place_fn, *, sess=None, **kwargs):
     except Exception as exc:
         note_rail_outcome(settings, exc, lane_key=_rail_lane_key(sess))
         raise
-    _note_rail_rtt(_time.monotonic() - _t0)
+    _place_rtt_s = _time.monotonic() - _t0
+    _note_rail_rtt(_place_rtt_s)
     note_rail_outcome(settings, out, lane_key=_rail_lane_key(sess))
+    # DIAG (2026-07-06): surface the ACTUAL broker place-call RTT into the result dict so
+    # the live_entry_submitted event (which carries "result": res) records it. This splits
+    # the pending->submitted latency into CHILI-code-time vs the REAL RH agentic place-call
+    # time — the rail-vs-our-code question. Metadata-only; no trading behavior change.
+    try:
+        if isinstance(out, dict):
+            out["place_rtt_s"] = round(float(_place_rtt_s), 3)
+    except (TypeError, ValueError):
+        pass
     return out
 
 
