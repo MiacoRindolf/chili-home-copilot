@@ -1383,6 +1383,79 @@ def run_momentum_neural_tick(
                         _weights["float_rotation"] = ROSS_FLOAT_ROTATION_PILLAR_WEIGHT
                 except Exception:
                     pass
+            # MECHANIZE THE RVOL PILLAR PREMARKET (2026-07-07): the scanner payload carries NO rvol
+            # field premarket (0/182 blocked movers had any rvol OR raw-volume key), so
+            # ross_tick_scalp_evidence_ok's rvol pillar is ALWAYS None premarket and genuine
+            # explosive gappers (heavy float rotation but no rvol key) are wrongly blocked
+            # (~146/182 recovered on merit). DERIVE a premarket-scale-correct rvol-equivalent from
+            # FLOAT ROTATION = shares_traded/float (shares_traded = a raw volume key when present,
+            # else dollar_volume/price -- present for ~100% of blocked movers) and STAMP it under the
+            # exact key the gate already reads (intraday_cumulative_rvol, tick_scalp.py:_first_num).
+            # Rotation is PARTICIPATION, not a time-deflated cumulative ratio, so it is correct
+            # premarket. The ONE documented base maps rotation->rvol: rvol_equiv = MIN_RVOL *
+            # rotation / rotation_base. GUARDED + MONOTONIC: stamp ONLY when it would ADMIT
+            # (rvol_equiv >= MIN_RVOL) so a weak-rotation name stays None and the change-solo
+            # null-pillar admission still fires -- never demotes a currently-admitted name. Never
+            # clobbers a real scanner/ignition rvol (skip if any alias present; _first_num also
+            # prefers them). Fail-open. Flag default-ON (no dark flags); OFF => key stays unset =>
+            # byte-identical. Downstream tape-required + live-RVOL floor + structural stop +
+            # max-loss circuit still gate the actual fill; this only affects WATCH admission.
+            if bool(getattr(settings, "chili_momentum_premarket_rvol_pillar_enabled", True)):
+                _MECH_MIN_RVOL = 5.0  # == ross_tick_scalp_evidence_ok min_rvol; the single anchor
+                try:
+                    _rot_base = float(getattr(
+                        settings, "chili_momentum_premarket_rvol_rotation_base", 0.20) or 0.20)
+                except (TypeError, ValueError):
+                    _rot_base = 0.20
+                _rvol_alias_keys = (
+                    "rvol_pace", "rvol", "relative_volume", "relative_volume_daily_rate",
+                    "daily_rate", "five_min_rvol", "5m_rvol", "volume_rate", "vol_ratio",
+                    "intraday_cumulative_rvol",
+                )
+                for _sym, _sig in _ross_signals.items():
+                    if not isinstance(_sig, dict) or str(_sym).upper().endswith("-USD"):
+                        continue  # equities only
+                    try:
+                        if _rot_base <= 0:
+                            continue
+                        # never clobber a real, scanner/ignition-provided rvol
+                        if any(_sig.get(_k) is not None for _k in _rvol_alias_keys):
+                            continue
+                        _flt = _sig.get("float_shares")
+                        _flt = float(_flt) if _flt is not None else None
+                        if _flt is None or _flt <= 0:
+                            continue
+                        # shares traded: prefer a raw volume key (RTH), else derive $-vol / price
+                        _shares = None
+                        for _vk in ("volume", "day_volume", "today_volume",
+                                    "cumulative_volume", "session_volume"):
+                            _vv = _sig.get(_vk)
+                            if _vv is not None:
+                                try:
+                                    _shares = float(_vv)
+                                    break
+                                except (TypeError, ValueError):
+                                    continue
+                        if _shares is None:
+                            _dv = _sig.get("dollar_volume")
+                            _px = _sig.get("price")
+                            _dv = float(_dv) if _dv is not None else None
+                            _px = float(_px) if _px is not None else None
+                            if _dv is not None and _px is not None and _px > 0:
+                                _shares = _dv / _px
+                        if _shares is None or _shares <= 0:
+                            continue
+                        _rotation = _shares / _flt
+                        if _rotation <= 0:
+                            continue
+                        _rvol_equiv = _MECH_MIN_RVOL * (_rotation / _rot_base)
+                        # GUARDED: stamp only when it would ADMIT (monotonic; never demotes a
+                        # change-solo admit whose rotation is in [0, rotation_base)).
+                        if _rvol_equiv >= _MECH_MIN_RVOL:
+                            _sig["intraday_cumulative_rvol"] = round(_rvol_equiv, 4)
+                            _sig["intraday_rvol_source"] = "float_rotation_premarket"
+                    except Exception:
+                        continue
             # SQUEEZE-FUEL TILT (off => byte-identical): Ross SS101 #2 — a heavily-shorted,
             # hard/expensive-to-borrow float = trapped sellers covering INTO the pop (the
             # rocket fuel behind the 100-1000% low-float verticals); free shares / easy-to-

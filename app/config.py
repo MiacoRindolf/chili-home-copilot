@@ -2226,6 +2226,25 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FLOAT_ROTATION_TILT_ENABLED"),
         description="Volume/float rotation sustainability tilt (>=~5x EOD): reward names rotating their float multiple times as a fuel-remaining signal.",
     )
+    # MECHANIZE-RVOL-PILLAR (2026-07-07): the premarket scanner payload carries NO rvol field,
+    # so ross_tick_scalp_evidence_ok's rvol pillar is ALWAYS None premarket -> genuine explosive
+    # gappers (heavy float rotation, no rvol key) are blocked (~146/182 recovered on merit).
+    # Derive a premarket-scale-correct rvol-equivalent from FLOAT ROTATION = shares_traded/float
+    # (shares_traded = raw volume if present else dollar_volume/price) and stamp it under the key
+    # the gate already reads (intraday_cumulative_rvol). GUARDED (stamp only when it would ADMIT,
+    # rvol_equiv >= min_rvol) => monotonic, never demotes a change-solo admit. Default-ON (no dark
+    # flags); OFF => key stays unset => byte-identical. (feedback_adaptive_no_magic)
+    chili_momentum_premarket_rvol_pillar_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_RVOL_PILLAR_ENABLED"),
+        description="Mechanize the RVOL pillar premarket: derive an rvol-equivalent from the already-available float rotation (shares_traded/float) and stamp execution_readiness_json.extra.ross_signals[sym].intraday_cumulative_rvol so ross_tick_scalp_evidence_ok grades the rvol pillar on merit for genuine premarket gappers. Fail-closed (no stamp when dv/price/float missing), guarded (stamp only when rvol_equiv>=min_rvol => monotonic), additive. False = byte-identical (key stays None).",
+    )
+    chili_momentum_premarket_rvol_rotation_base: float = Field(
+        default=0.20,
+        gt=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_RVOL_ROTATION_BASE"),
+        description="The ONE documented base: the float-rotation value that maps to the gate min_rvol (5.0). rvol_equiv = min_rvol * rotation / base. 0.20 ~= p50-p55 of the blocked-gapper rotation distribution (a median-participation gapper clears the pillar; a large-float non-mover reads ~0 and stays blocked). Lower => more permissive, higher => stricter.",
+    )
     # FIX-19(d): flipped default False -> True. The fixed 1800bps pullback ceiling sailed
     # under real 1308/1365bps depths (it never bit), so the adaptive Ross retrace ceiling is
     # now ON by default. It is calm-ONLY tightening + ATR%-WIDENING (explosive/volatile names
