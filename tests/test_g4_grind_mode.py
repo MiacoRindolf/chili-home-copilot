@@ -62,16 +62,23 @@ def test_uncertain_day_leader_none_blocks_activation() -> None:
     assert out["reason"] == "not_day_leader"
 
 
-def test_slow_chopper_cadence_blocks_activation() -> None:
+def test_slow_chopper_cadence_activates() -> None:
+    """2026-07-09 probe verdict (g4_grind_probe): grinders CLASSIFY SLOW_CHOPPER —
+    VRAX was labeled SLOW_CHOPPER while grinding to +172%, and JLHL passed every
+    other gate live (leader, 1.7R, higher-low) blocked ONLY by cadence. A grind IS
+    slow by definition, so excluding SLOW_CHOPPER excluded the exact class G4 was
+    built for. The structure gates (leader/1R/EMA/higher-low/floor/VWAP) carry the
+    burden; cadence only fail-closes on an UNREADABLE classifier."""
     out = grind_mode_decision(**_activate_kwargs(cadence_cls="SLOW_CHOPPER", high_water_mark=12.0))
-    assert out["active"] is False
-    assert out["reason"] == "cadence_not_fast"
+    assert out["active"] is True
+    assert out["reason"] == "activated"
 
 
 def test_missing_cadence_blocks_activation() -> None:
+    # fail-closed: an UNREADABLE classifier (None) still never grinds.
     out = grind_mode_decision(**_activate_kwargs(cadence_cls=None, high_water_mark=12.0))
     assert out["active"] is False
-    assert out["reason"] == "cadence_not_fast"
+    assert out["reason"] == "cadence_unreadable"
 
 
 def test_uncertain_cadence_activates_when_all_other_signals_align() -> None:
@@ -134,12 +141,15 @@ def test_maintenance_holds_through_hysteresis() -> None:
     assert out["reason"] == "maintained"
 
 
-def test_maintenance_drops_on_slow_chopper() -> None:
+def test_maintenance_holds_through_slow_chopper() -> None:
+    """Cadence no longer drops a WORKING grind (2026-07-09): slowness is the grind
+    signature; the grind dies on STRUCTURE only (floor break / lower-low / VWAP loss /
+    missing anchors — each covered by its own test below)."""
     out = grind_mode_decision(**_activate_kwargs(
         prior_active=True, cadence_cls="SLOW_CHOPPER", high_water_mark=12.0,
     ))
-    assert out["active"] is False
-    assert out["reason"] == "cadence_dropped"
+    assert out["active"] is True
+    assert out["reason"] == "maintained"
 
 
 def test_maintenance_drops_on_structure_break() -> None:
