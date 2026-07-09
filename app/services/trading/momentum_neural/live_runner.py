@@ -2907,7 +2907,7 @@ def _maybe_rescore_eligibility_block(
         try:
             from .nbbo_tape import tape_inter_row_gap_p50_seconds
 
-            _p50 = tape_inter_row_gap_p50_seconds(db)
+            _p50 = tape_inter_row_gap_p50_seconds(db, now_utc=_utcnow())
         except Exception:
             _p50 = None
         _floor = float(getattr(settings, "chili_momentum_tape_delta_min_seconds", 5.0) or 5.0)
@@ -3788,7 +3788,7 @@ def _bid_prop_confirms_break(
 
         _min_n = int(getattr(settings, "chili_momentum_bid_prop_min_samples", 3) or 3)
         _max_rows = max(_min_n, int(getattr(settings, "chili_momentum_bid_prop_max_samples", 8) or 8))
-        tape = recent_bid_spread_tape(db, symbol, window_s=float(window_s), max_rows=_max_rows, now_utc=now)
+        tape = recent_bid_spread_tape(db, symbol, window_s=float(window_s), max_rows=_max_rows, now_utc=now or _utcnow())
     except Exception:
         return True, {"reason": "bid_prop_read_error_fail_open"}
     if not tape or len(tape) < max(2, _min_n):
@@ -3846,14 +3846,18 @@ def _micro_bar_df_from_session(db, symbol: str, *, bar_seconds: int, lookback_mi
 
     # replay v3: anchor the lookback on the sim clock (prod byte-identical — _utcnow()
     # is naive-UTC, exactly what datetime.now(utc).replace(tzinfo=None) produced here).
-    since = _utcnow() - _td(minutes=float(lookback_minutes))
+    # The <= :now AS-OF bound is a live no-op (no future rows exist yet); in replay the
+    # preloaded tape extends past sim-now and an unbounded read would look ahead.
+    _mb_now = _utcnow()
+    since = _mb_now - _td(minutes=float(lookback_minutes))
     rows = db.execute(
         _text(
             "SELECT observed_at, bid, ask FROM momentum_nbbo_spread_tape "
-            "WHERE symbol = :s AND observed_at >= :since AND bid > 0 AND ask > 0 "
+            "WHERE symbol = :s AND observed_at >= :since AND observed_at <= :now "
+            "AND bid > 0 AND ask > 0 "
             "ORDER BY observed_at ASC"
         ),
-        {"s": str(symbol).upper(), "since": since},
+        {"s": str(symbol).upper(), "since": since, "now": _mb_now},
     ).fetchall()
     if not rows or len(rows) < 2:
         return None
@@ -3869,10 +3873,11 @@ def _micro_bar_df_from_session(db, symbol: str, *, bar_seconds: int, lookback_mi
                 "SELECT to_timestamp(floor(extract(epoch FROM observed_at) / :bs) * :bs) "
                 "       AT TIME ZONE 'utc' AS bucket, SUM(size) AS vol "
                 "FROM iqfeed_trade_ticks "
-                "WHERE symbol = :s AND observed_at >= :since AND size > 0 "
+                "WHERE symbol = :s AND observed_at >= :since AND observed_at <= :now "
+                "AND size > 0 "
                 "GROUP BY 1 ORDER BY 1"
             ),
-            {"s": str(symbol).upper(), "since": since, "bs": int(bar_seconds)},
+            {"s": str(symbol).upper(), "since": since, "now": _mb_now, "bs": int(bar_seconds)},
         ).fetchall()
         if _trows:
             trade_rows = [(r[0], float(r[1])) for r in _trows]
@@ -4199,13 +4204,17 @@ def _smart_hold_breach_volume(
         from sqlalchemy import text as _sql
 
         # 10 comparable windows of history to form the per-window-volume distribution.
+        # Anchored on _utcnow() (the replay-aware chokepoint) instead of SQL now():
+        # byte-identical live (both are wall UTC), sim-correct in replay — and the
+        # <= :now AS-OF bound keeps a preloaded replay tape from leaking the future.
+        _vw_now = _utcnow()
         rows = db.execute(
             _sql(
                 "SELECT size, observed_at FROM iqfeed_trade_ticks WHERE symbol = :s AND "
-                "observed_at > (now() at time zone 'utc') - make_interval(secs => :w) "
+                "observed_at > :since AND observed_at <= :now "
                 "ORDER BY observed_at ASC"
             ),
-            {"s": s, "w": w * 10.0},
+            {"s": s, "since": _vw_now - timedelta(seconds=w * 10.0), "now": _vw_now},
         ).fetchall()
     except Exception:
         return None, None
@@ -4290,7 +4299,7 @@ def _c1_iqfeed_phantom_loss(
         # Pull the last few fresh L1 samples; the NEWEST is the IQFeed truth bid, and the
         # median spread over the window is the adaptive divergence scale.
         tape = recent_bid_spread_tape(
-            db, sym, window_s=_window_s, max_rows=8, now_utc=now,
+            db, sym, window_s=_window_s, max_rows=8, now_utc=now or _utcnow(),
         )
     except Exception:
         return False, dbg
@@ -4553,12 +4562,16 @@ def _adaptive_quote_max_age_seconds(db: Any, symbol: str, base_max_age: float) -
     try:
         from sqlalchemy import text as _text
         window = 120.0
+        # Anchored on _utcnow() (the replay-aware chokepoint) instead of SQL now():
+        # byte-identical live, sim-correct in replay; the <= :now AS-OF bound keeps a
+        # preloaded replay tape from counting future prints.
+        _sq_now = _utcnow()
         n = db.execute(
             _text(
                 "SELECT count(*) FROM iqfeed_trade_ticks "
-                "WHERE symbol = :s AND observed_at > now() - make_interval(secs => :w)"
+                "WHERE symbol = :s AND observed_at > :since AND observed_at <= :now"
             ),
-            {"s": symbol, "w": window},
+            {"s": symbol, "since": _sq_now - timedelta(seconds=window), "now": _sq_now},
         ).scalar() or 0
         if int(n) <= 0:
             return floor  # not actively trading -> conservative (halted/quiet stays stale)
@@ -6255,7 +6268,7 @@ def tick_live_session(
                 float(getattr(settings, "chili_momentum_spread_stability_window_bars", 1.0) or 1.0)
                 * _entry_interval_seconds()
             )
-            _stab = recent_spread_median_bps(db, sess.symbol, window_s=_stab_window)
+            _stab = recent_spread_median_bps(db, sess.symbol, window_s=_stab_window, now_utc=_utcnow())
             _stab_min_n = int(getattr(settings, "chili_momentum_spread_stability_min_samples", 5) or 5)
             if _stab is not None and _stab[1] >= _stab_min_n and _stab[0] > float(_adaptive_max_spread):
                 quote_block = {
@@ -13570,15 +13583,22 @@ def tick_live_session(
                                 _ice_win = float(
                                     getattr(settings, "chili_crypto_l2_ofi_window_s", 15.0) or 15.0
                                 )
+                                # Anchored on _utcnow() (the replay-aware chokepoint)
+                                # with an <= bound: live-identical, replay-honest.
+                                _ice_now = _utcnow()
                                 _ice_rows = db.execute(
                                     _ice_sql(
                                         "SELECT ask_top, ask_top_size "
                                         "FROM iqfeed_depth_snapshots "
-                                        "WHERE symbol = :s AND observed_at > "
-                                        "(now() at time zone 'utc') - make_interval(secs => :w) "
+                                        "WHERE symbol = :s AND observed_at > :since "
+                                        "AND observed_at <= :now "
                                         "ORDER BY observed_at ASC"
                                     ),
-                                    {"s": str(sess.symbol or "").strip().upper(), "w": _ice_win},
+                                    {
+                                        "s": str(sess.symbol or "").strip().upper(),
+                                        "since": _ice_now - timedelta(seconds=_ice_win),
+                                        "now": _ice_now,
+                                    },
                                 ).fetchall()
                                 _ice_series = [
                                     (float(r[0]), float(r[1]))

@@ -32,6 +32,24 @@ VIABILITY_NODE_ID = "nm_momentum_viability_pool"
 _log = logging.getLogger(__name__)
 
 
+def _tape_asof_default(as_of):
+    """Resolve the tape-read "now" anchor through live_runner's replay-aware clock
+    chokepoint when the caller didn't thread one (2026-07-09). LIVE: ``_utcnow()``
+    IS naive wall-UTC, so routing through the bounded ``as_of`` SQL branch is
+    byte-identical to the old wall-``now()`` branch. FSM REPLAY: ``_utcnow()`` is
+    the sim clock — the old wall-now branch read an EMPTY window there (features
+    silently None => gates/sizing diverged from live) or, against a shared DB with
+    the bridge writing, foreign post-sim ticks (look-ahead)."""
+    if as_of is not None:
+        return as_of
+    try:
+        from .live_runner import _utcnow as _lr_utcnow
+
+        return _lr_utcnow()
+    except Exception:
+        return datetime.utcnow()
+
+
 def _symbol_country(symbol: str) -> str | None:
     """HQ country from the yfinance fundamentals CACHE — cache-only read (the
     viability tick must never block on network); a miss fires a background
@@ -90,13 +108,17 @@ def _live_book_imbalance(symbol: str, db: Any = None) -> float | None:
             try:
                 from sqlalchemy import text as _sql
 
+                # Bounded as-of read via the replay-aware chokepoint (live-identical,
+                # replay-honest — see _tape_asof_default).
+                _ao_q = _tape_asof_default(None)
                 row = db.execute(
                     _sql(
                         "SELECT imbalance5 FROM iqfeed_depth_snapshots "
-                        "WHERE symbol = :s AND observed_at > (now() at time zone 'utc') - interval '15 seconds' "
+                        "WHERE symbol = :s AND observed_at > :as_of - interval '15 seconds' "
+                        "AND observed_at <= :as_of "
                         "ORDER BY observed_at DESC LIMIT 1"
                     ),
-                    {"s": s},
+                    {"s": s, "as_of": _ao_q},
                 ).fetchone()
                 if row is not None and row[0] is not None:
                     return float(row[0])
@@ -228,8 +250,9 @@ def _live_ofi_microprice(
     ``as_of`` (UTC-naive) reads L2 AS-OF a historical instant for the replay
     instrument — the window becomes ``(as_of - w, as_of]`` instead of trailing
     ``now()``, and the in-process ring (which has no history) is skipped so the
-    durable table is the sole source. ``as_of=None`` is the LIVE default and emits
-    the EXACT original SQL (literal ``now()``, no upper bound) → byte-identical.
+    durable table is the sole source. ``as_of=None`` is the LIVE default: the ring
+    is preferred, and the table fallback anchors on the replay-aware clock
+    chokepoint (``_tape_asof_default`` — live-identical row set, replay-honest).
     """
     s = (symbol or "").strip().upper()
     if not s:
@@ -272,21 +295,16 @@ def _live_ofi_microprice(
                 return None, None
             from sqlalchemy import text as _sql
 
-            if as_of is None:
-                _q = (
-                    "SELECT bid_levels, ask_levels FROM fast_orderbook "
-                    "WHERE ticker = :s AND snapshot_at > "
-                    "(now() at time zone 'utc') - make_interval(secs => :w) "
-                    "ORDER BY snapshot_at ASC"
-                )
-                _p = {"s": s, "w": window}
-            else:
-                _q = (
-                    "SELECT bid_levels, ask_levels FROM fast_orderbook "
-                    "WHERE ticker = :s AND snapshot_at > :as_of - make_interval(secs => :w) "
-                    "AND snapshot_at <= :as_of ORDER BY snapshot_at ASC"
-                )
-                _p = {"s": s, "w": window, "as_of": as_of}
+            # Bounded as-of read via the replay-aware chokepoint (live-identical row
+            # set; replay-honest). NOTE: the ring gate above stays keyed on the
+            # CALLER's as_of — only the SQL anchor is resolved here.
+            _ao_q = _tape_asof_default(as_of)
+            _q = (
+                "SELECT bid_levels, ask_levels FROM fast_orderbook "
+                "WHERE ticker = :s AND snapshot_at > :as_of - make_interval(secs => :w) "
+                "AND snapshot_at <= :as_of ORDER BY snapshot_at ASC"
+            )
+            _p = {"s": s, "w": window, "as_of": _ao_q}
             rows = db.execute(_sql(_q), _p).fetchall()
             for r in rows:
                 bl, al = r[0], r[1]
@@ -299,23 +317,16 @@ def _live_ofi_microprice(
         if db is not None:
             from sqlalchemy import text as _sql
 
-            if as_of is None:
-                _q = (
-                    "SELECT bid_top, bid_top_size, ask_top, ask_top_size, bids_json, asks_json "
-                    "FROM iqfeed_depth_snapshots "
-                    "WHERE symbol = :s AND observed_at > "
-                    "(now() at time zone 'utc') - make_interval(secs => :w) "
-                    "ORDER BY observed_at ASC"
-                )
-                _p = {"s": s, "w": window}
-            else:
-                _q = (
-                    "SELECT bid_top, bid_top_size, ask_top, ask_top_size, bids_json, asks_json "
-                    "FROM iqfeed_depth_snapshots "
-                    "WHERE symbol = :s AND observed_at > :as_of - make_interval(secs => :w) "
-                    "AND observed_at <= :as_of ORDER BY observed_at ASC"
-                )
-                _p = {"s": s, "w": window, "as_of": as_of}
+            # Bounded as-of read via the replay-aware chokepoint (live-identical,
+            # replay-honest — see _live_trade_flow).
+            _ao_q = _tape_asof_default(as_of)
+            _q = (
+                "SELECT bid_top, bid_top_size, ask_top, ask_top_size, bids_json, asks_json "
+                "FROM iqfeed_depth_snapshots "
+                "WHERE symbol = :s AND observed_at > :as_of - make_interval(secs => :w) "
+                "AND observed_at <= :as_of ORDER BY observed_at ASC"
+            )
+            _p = {"s": s, "w": window, "as_of": _ao_q}
             rows = db.execute(_sql(_q), _p).fetchall()
             seq = [
                 (float(r[0]), float(r[1]), float(r[2]), float(r[3]))
@@ -379,15 +390,15 @@ def _live_trade_flow(
     try:
         from sqlalchemy import text as _sql
 
-        if as_of is None:
-            q = ("SELECT price, size, bid, ask FROM iqfeed_trade_ticks WHERE symbol = :s AND "
-                 "observed_at > (now() at time zone 'utc') - make_interval(secs => :w) ORDER BY observed_at ASC")
-            p = {"s": s, "w": window}
-        else:
-            _ao = as_of.replace(tzinfo=None) if getattr(as_of, "tzinfo", None) is not None else as_of
-            q = ("SELECT price, size, bid, ask FROM iqfeed_trade_ticks WHERE symbol = :s AND "
-                 "observed_at > :as_of - make_interval(secs => :w) AND observed_at <= :as_of ORDER BY observed_at ASC")
-            p = {"s": s, "w": window, "as_of": _ao}
+        # Always the bounded as-of form, anchored through the replay-aware chokepoint
+        # when the caller didn't thread as_of (live: _utcnow() == wall UTC => identical
+        # row set to the old wall-now() branch; replay: the sim clock, so the read no
+        # longer returns an empty window / foreign post-sim ticks).
+        _ao = _tape_asof_default(as_of)
+        _ao = _ao.replace(tzinfo=None) if getattr(_ao, "tzinfo", None) is not None else _ao
+        q = ("SELECT price, size, bid, ask FROM iqfeed_trade_ticks WHERE symbol = :s AND "
+             "observed_at > :as_of - make_interval(secs => :w) AND observed_at <= :as_of ORDER BY observed_at ASC")
+        p = {"s": s, "w": window, "as_of": _ao}
         rows = db.execute(_sql(q), p).fetchall()
     except Exception:
         return None
@@ -549,17 +560,14 @@ def _live_realized_vol(
     try:
         from sqlalchemy import text as _sql
 
-        if as_of is None:
-            q = ("SELECT price, observed_at FROM iqfeed_trade_ticks WHERE symbol = :s AND "
-                 "observed_at > (now() at time zone 'utc') - make_interval(secs => :w) "
-                 "ORDER BY observed_at ASC")
-            p = {"s": s, "w": window}
-        else:
-            _ao = as_of.replace(tzinfo=None) if getattr(as_of, "tzinfo", None) is not None else as_of
-            q = ("SELECT price, observed_at FROM iqfeed_trade_ticks WHERE symbol = :s AND "
-                 "observed_at > :as_of - make_interval(secs => :w) AND observed_at <= :as_of "
-                 "ORDER BY observed_at ASC")
-            p = {"s": s, "w": window, "as_of": _ao}
+        # Always the bounded as-of form via the replay-aware chokepoint (see
+        # _live_trade_flow — live-identical, replay-honest).
+        _ao = _tape_asof_default(as_of)
+        _ao = _ao.replace(tzinfo=None) if getattr(_ao, "tzinfo", None) is not None else _ao
+        q = ("SELECT price, observed_at FROM iqfeed_trade_ticks WHERE symbol = :s AND "
+             "observed_at > :as_of - make_interval(secs => :w) AND observed_at <= :as_of "
+             "ORDER BY observed_at ASC")
+        p = {"s": s, "w": window, "as_of": _ao}
         rows = db.execute(_sql(q), p).fetchall()
     except Exception:
         return None
@@ -720,17 +728,15 @@ def _live_flow_slope(
     try:
         from sqlalchemy import text as _sql
 
-        if as_of is None:
-            q = ("SELECT price, size, bid, ask, observed_at FROM iqfeed_trade_ticks WHERE symbol = :s AND "
-                 "observed_at > (now() at time zone 'utc') - make_interval(secs => :w) "
-                 "ORDER BY observed_at ASC")
-            p = {"s": s, "w": window}
-        else:
-            _ao = as_of.replace(tzinfo=None) if getattr(as_of, "tzinfo", None) is not None else as_of
-            q = ("SELECT price, size, bid, ask, observed_at FROM iqfeed_trade_ticks WHERE symbol = :s AND "
-                 "observed_at > :as_of - make_interval(secs => :w) AND observed_at <= :as_of "
-                 "ORDER BY observed_at ASC")
-            p = {"s": s, "w": window, "as_of": _ao}
+        # Always the bounded as-of form via the replay-aware chokepoint (see
+        # _live_trade_flow — live-identical, replay-honest). The latest-tick-age
+        # gate below reuses the SAME resolved anchor as its ``now`` reference.
+        _ao = _tape_asof_default(as_of)
+        _ao = _ao.replace(tzinfo=None) if getattr(_ao, "tzinfo", None) is not None else _ao
+        q = ("SELECT price, size, bid, ask, observed_at FROM iqfeed_trade_ticks WHERE symbol = :s AND "
+             "observed_at > :as_of - make_interval(secs => :w) AND observed_at <= :as_of "
+             "ORDER BY observed_at ASC")
+        p = {"s": s, "w": window, "as_of": _ao}
         rows = db.execute(_sql(q), p).fetchall()
     except Exception:
         return None
@@ -747,8 +753,7 @@ def _live_flow_slope(
     # ``now`` semantics: ``as_of`` for replay, else UTC now (both UTC-naive).
     try:
         if rows and rows[-1][4] is not None:
-            _ref = (as_of.replace(tzinfo=None) if (as_of is not None and getattr(as_of, "tzinfo", None) is not None) else as_of) \
-                if as_of is not None else datetime.utcnow()
+            _ref = _ao  # the same resolved anchor the query ran with (naive UTC)
             _last_at = rows[-1][4]
             if getattr(_last_at, "tzinfo", None) is not None:
                 _last_at = _last_at.replace(tzinfo=None)
