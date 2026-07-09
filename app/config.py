@@ -4221,6 +4221,29 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ALPACA_SKIP_CAP_MEDIAN_GUARD"),
     )
+    # ALPACA ORPHAN RECONCILER (2026-07-09): the sub-penny reject storm stranded 6 positions
+    # (~$65k MV) + a stale resting buy with NO managing session (sessions terminalized while
+    # exits bounced); the broker-sync covers RH/Coinbase only, so they persisted silently and
+    # ate buying power ($399k -> $66k). Every pass: flatten LONG-EQUITY positions and cancel
+    # resting orders whose symbol has NO non-terminal alpaca session, none created inside the
+    # grace window, and no outcome terminalized inside it. PAPER-ONLY by construction
+    # (hard-gated on chili_alpaca_paper); flatten-only; crypto/shorts out of scope; fail-open
+    # on unreadable reads; per-pass action cap. (alpaca_reconcile.py)
+    chili_momentum_alpaca_orphan_reconcile_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ALPACA_ORPHAN_RECONCILE_ENABLED"),
+    )
+    chili_momentum_alpaca_orphan_grace_minutes: float = Field(
+        default=15.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ALPACA_ORPHAN_GRACE_MINUTES"),
+        description="Race-guard window: a symbol with an alpaca session CREATED or an outcome TERMINALIZED within this many minutes is never touched (fills/exits still settling).",
+    )
+    chili_momentum_alpaca_orphan_reconcile_interval_seconds: int = Field(
+        default=120,
+        ge=30,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ALPACA_ORPHAN_RECONCILE_INTERVAL_SECONDS"),
+    )
     # Reward:risk multiple — the TARGET is set this many x the actual stop distance
     # (Ross-style 2:1 floor; the per-instrument/regime learner can raise it). Fixes
     # the old ~1.3-1.5:1 that sat below Ross's strict 2:1. One documented R:R knob.

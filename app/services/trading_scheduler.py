@@ -1059,6 +1059,34 @@ def _run_rh_agentic_keepwarm_job():
 _auto_arm_last_skip_sig: "str | None" = None
 
 
+def _run_alpaca_orphan_reconcile_job():
+    """Flatten Alpaca PAPER positions / cancel resting orders that no session manages
+    (the exit-reject storm's stranded orphans). PAPER-only + flatten-only + fail-open
+    guards live in the pass itself. (trading.momentum_neural.alpaca_reconcile)"""
+
+    def _work() -> None:
+        from ..db import SessionLocal
+
+        db = SessionLocal()
+        try:
+            from .trading.momentum_neural.alpaca_reconcile import run_alpaca_orphan_reconcile
+
+            summary = run_alpaca_orphan_reconcile(db)
+            db.commit()
+            if summary.get("flattened") or summary.get("cancelled"):
+                logger.warning("[scheduler] alpaca_orphan_reconcile: %s", summary)
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("alpaca_orphan_reconcile", _work)
+
+
 def _run_momentum_auto_arm_live_job():
     """Autonomously arm ONE live momentum session for the candidate whose entry
     trigger is firing now (Ross-style), fully guarded via the operator arm flow.
@@ -6862,6 +6890,30 @@ def start_scheduler():
                     coalesce=True,
                     next_run_time=datetime.now() + timedelta(seconds=55),
                 )
+
+        # Alpaca ORPHAN reconciler (2026-07-09): flatten paper-account positions /
+        # cancel resting orders that NO session manages (the sub-penny reject storm
+        # stranded 6 positions ~$65k MV + a stale buy; BP $399k -> $66k). PAPER-only
+        # by construction; flatten-only; fail-open; grace-windowed. (alpaca_reconcile.py)
+        if (
+            include_momentum_exec
+            and settings.chili_momentum_live_runner_enabled
+            and settings.chili_momentum_live_runner_scheduler_enabled
+            and getattr(settings, "chili_momentum_alpaca_orphan_reconcile_enabled", True)
+            and bool(getattr(settings, "chili_alpaca_enabled", False))
+            and bool(getattr(settings, "chili_alpaca_paper", True))
+        ):
+            _aor_secs = max(30, int(getattr(settings, "chili_momentum_alpaca_orphan_reconcile_interval_seconds", 120) or 120))
+            _scheduler.add_job(
+                _run_alpaca_orphan_reconcile_job,
+                trigger=IntervalTrigger(seconds=_aor_secs),
+                id="alpaca_orphan_reconcile",
+                name=f"Alpaca orphan reconciler (every {_aor_secs}s; paper-only flatten/cancel of unmanaged positions)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=70),
+            )
 
         # NBBO spread tape: persist the clean consolidated bid/ask (Massive snapshot
         # lastQuote) for the Ross universe each RTH cycle, so the spread-sensitive
