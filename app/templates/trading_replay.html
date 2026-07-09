@@ -821,6 +821,11 @@
     return rememberMinute(trade, '_rpExitMin', timeMin(trade.exit_t));
   }
 
+  function compactTime(value) {
+    var minute = timeMin(value);
+    return minute == null ? '' : timeLabel(minute);
+  }
+
   function spanStartMinute(span) {
     if (!span) return null;
     if (span._rpStart != null) return span._rpStart;
@@ -877,7 +882,7 @@
       cache.bars[key] = bars;
       cache.barMinutes[key] = minutes;
     });
-    (result && result.trades || []).forEach(function(t) {
+    replayTradeRows(result).forEach(function(t) {
       var entry = tradeEntryMinute(t);
       var exit = tradeExitMinute(t);
       if (entry != null) cache.allMinutes.push(entry);
@@ -987,7 +992,7 @@
     var cache = replayCache(result);
     if (cache) return cache.trades[normalizeSym(sym)] || [];
     var target = normalizeSym(sym);
-    return (result.trades || []).filter(function(t) { return normalizeSym(t.sym) === target; });
+    return replayTradeRows(result).filter(function(t) { return normalizeSym(t.sym) === target; });
   }
 
   function tracesFor(result, sym) {
@@ -1062,7 +1067,7 @@
         if (m != null) mins.push(m);
       });
     });
-    (result.trades || []).forEach(function(t) {
+    replayTradeRows(result).forEach(function(t) {
       var a = tradeEntryMinute(t);
       var b = tradeExitMinute(t);
       if (a != null) mins.push(a);
@@ -1145,8 +1150,7 @@
       if (!sym) return;
       seen.set(sym, Math.max(seen.get(sym) || 0, score || 0));
     }
-    (result.trades || []).forEach(function(t) { add(t.sym, 100); });
-    ((result.replay_v3_day || {}).per_trade || []).forEach(function(t) { add(t.symbol, 100); });
+    replayTradeRows(result).forEach(function(t) { add(t.sym, 100); });
     (result.armed_timeline || []).forEach(function(row) { add(row.sym, row.traded ? 80 : 40); });
     (result.decision_trace || []).forEach(function(row) { add(row.sym, 30); });
     Object.keys(result.series || {}).forEach(function(sym) { if (!seen.size) add(sym, 10); });
@@ -1186,6 +1190,29 @@
     return (((result || {}).replay_v3_day || {}).per_trade || []).filter(function(row) {
       return normalizeSym(row && row.symbol) === target;
     });
+  }
+
+  function replayTradeRows(result) {
+    if (!result) return [];
+    var v3Rows = ((result.replay_v3_day || {}).per_trade || []);
+    if (!v3Rows.length) return result.trades || [];
+    if (result._rpV3ReplayTrades) return result._rpV3ReplayTrades;
+    result._rpV3ReplayTrades = v3Rows.map(function(row) {
+      return {
+        sym: normalizeSym(row.symbol),
+        session_id: row.session_id,
+        t: compactTime(row.recorded_entry_ts),
+        exit_t: compactTime(row.recorded_exit_ts),
+        entry: row.recorded_entry,
+        exit: row.recorded_exit,
+        usd: row.recorded_pnl_usd,
+        why: row.trace_matches === false ? 'Replay v3 trace mismatch' : 'Replay v3 live FSM',
+        trace_matches: row.trace_matches
+      };
+    }).filter(function(row) {
+      return row.sym && (row.t || row.exit_t);
+    });
+    return result._rpV3ReplayTrades;
   }
 
   function sampleBars(bars, maxCount) {

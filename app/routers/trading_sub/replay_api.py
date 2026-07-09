@@ -169,7 +169,7 @@ def _load_v3_day_result(date: str) -> dict[str, Any] | None:
         "total_usd": stored.get("recorded_day_pnl_usd", stored.get("total_usd")),
         "wins": stored.get("wins"),
         "losses": stored.get("losses"),
-        "trades": base.get("trades") or stored.get("trades") or [],
+        "trades": stored.get("trades") or base.get("trades") or [],
         "series": base.get("series") or {},
         "armed_timeline": base.get("armed_timeline") or [],
         "decision_trace": list(base.get("decision_trace") or []) + _v3_trace_rows(stored),
