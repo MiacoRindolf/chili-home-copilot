@@ -12336,6 +12336,29 @@ def tick_live_session(
                             "cadence_cls": le.get("cadence_cls"),
                             "bid": bid,
                         })
+                    # G4 DIAGNOSTIC PROBE (2026-07-09, LOG-ONLY): ZERO g4_grind_mode events have
+                    # EVER fired (the event emits only on a STATE CHANGE and grind never activated
+                    # across 67 trailing sessions/30d) => the BINDING activation gate (leader /
+                    # higher-low / cadence / anchors) is unobservable in prod. Emit the full
+                    # decision ONCE PER MINUTE per trailing session while INACTIVE so production
+                    # data names the gate. Pure telemetry — no behavior change; reuses the
+                    # per-minute key computed above. (reference_ross_exit_discipline step 2:
+                    # the 9-EMA structure trail exists here but is inert — find WHY, then fix
+                    # the real gate instead of building a duplicate trail.)
+                    if not _g4_active_now and le.get("g4_probe_min") != _g4_min_key:
+                        le["g4_probe_min"] = _g4_min_key
+                        _commit_le(sess, le)
+                        _emit(db, sess, "g4_grind_probe", {
+                            "reason": _g4_grind.get("reason"),
+                            "peak_r": _g4_grind.get("peak_r"),
+                            "leader": _g4_leader,
+                            "cadence_cls": le.get("cadence_cls"),
+                            "ema5m": _float_or_none(le.get("ema5m_val")),
+                            "hl5m": _float_or_none(le.get("g4_hl5m_val")),
+                            "vwap5m": _float_or_none(le.get("g4_vwap5m_val")),
+                            "structure_floor": _g4_grind.get("structure_floor"),
+                            "bid": bid,
+                        })
                 except Exception:
                     # Fail toward SCALP: any grind-read error leaves every exit layer
                     # byte-identical this tick (and drops a stale grind marker).
