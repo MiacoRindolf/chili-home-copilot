@@ -47,6 +47,18 @@
 6. **Slippage-aware risk resize** (VRAX): when fill slips beyond plan, tighten the exit criterion instead of keeping the original stop — mechanical, portable, matches CHILI's marketable-limit design.
 7. **L2 evidence pack** (V9): seller-wall at a round number (10.96→11.00), LULD band reading, halt-resume indicative decay 10.65→10.55 — training material for `ask_thins_dip`/seller-wall exits and `halt_resume_dip`.
 
+## ⚠️ POST-AUDIT CORRECTION + ROOT CAUSES (conversion-gap investigation, same day)
+
+The "zero momentum fills" readings above are **zero rows in the fill LOG** (`momentum_fill_outcomes` — its writer is gated by `CHILI_MOMENTUM_FILL_LOG_ENABLED`, which was UNSET → default False). The decision trail (`trading_automation_events` + `momentum_automation_outcomes`) shows what actually happened:
+
+- **CLRO Jul-7 — CHILI DID enter, twice**: 26 sh @10.72 (11:35 ET) and 118 sh @13.19 (13:02 ET), both terminal `bailout`; day also had SKIN ×2 `stop_loss`, CRE `bailout`, XHLD — **6 real entries, 0 winners**. Then `daily_trade_count_budget` blocked the afternoon (used 6 ≥ ceiling 5): with `win_rate=0.0` over the same day's scratches, `exp_mult` pinned at **0.5**, so the adaptive ceiling was clamped to the floor — an intraday death-spiral where early bailouts lock the day shut. The A1 top-rank exemption behaved as designed but couldn't help: the blocked candidates were MAAS/XHLD/TVRD (not top-ranked), and CLRO itself — top-ranked at 14:26 ET (0.7776 ≥ p90 0.7198) — **never re-attempted after its bailouts** (re-entry path). Sizing inversion note: the #1 name got 26 shares while TTRX got 1,026.
+- **VRAX Jul-9 — armed fast (07:34:22 ET, +3m22s from alert), never entered**: all 5 sessions rotted at `live_arm_pending` → `live_cancelled`/`live_error`. The exec worker had been **"(unhealthy)" for 42+ hours** across Jul-7→9 and nothing acts on health.
+- **Why unhealthy**: `.env` had `CHILI_MOMENTUM_EXEC_LIVE_RUNNER_SCHEDULER_ENABLED=true` + `CHILI_MOMENTUM_EXEC_AUTO_ARM_SCHEDULER_ENABLED=true` — the FORBIDDEN deprecated scheduler paths (the #852 outage class) forced on, violating the event-loop-only health contract and racing/breaking arm pickup.
+
+**Fixes applied live (2026-07-09 ~16:20 ET, verified in-container):** flipped both forbidden flags to `false`, set `CHILI_MOMENTUM_FILL_LOG_ENABLED=true`, recreated the worker → **health: healthy (streak 0)** with loop/auto-arm true. Added a **health gate** to `D:\CHILI-Docker\premarket-readiness.ps1` (logs health, one force-recreate on unhealthy, FATAL log if still not healthy) so an unhealthy worker can never again serve silently through sessions.
+
+**Flagged for code follow-up (needs replay validation, not applied):** (a) exclude same-day scratches/bailouts (|r|≈0) from the budget's `win_rate` so `exp_mult` can't death-spiral the ceiling intraday (risk_policy.py:1601–1614); (b) top-ranked name that bailed out should get an A4-style re-score/re-arm instead of staying retired while it runs to 16.50; (c) audit the size-by-rank tilt (26 sh on the #1 vs 1,026 sh on TTRX).
+
 ## Verification notes
 
 264 claims: 224 confirmed, 33 refuted (typical: 5m-vs-10s pane attribution, ±3s clock/boundary offsets, single-digit quote misreads — e.g. 236.57% not 238.57%; substantive: the 09:07 CLRO wick topped ~9.43–9.47 and never breached 9.50; VRAX's daily bar was red-bodied at capture), 7 unverifiable (narration-only: 36-share starter, −$1,600 exact loss, 6.30 fill/slippage cents, "$16k first two days" era stats). V10 session date corrected to **Jul-9** from the ToS panel stamp — the task premise (Jul-8) was wrong.
