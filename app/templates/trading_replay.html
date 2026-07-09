@@ -649,8 +649,14 @@
   var rpVisibleFrame = null;
   var rpFocusChart = null;
   var rpDeferredViewportTimer = null;
+  var rpRenderedSignature = null;
   var RP_MIN_WINDOW_MINUTES = 6;
   var RP_EAGER_ROWS = 5;
+  var RP_STORAGE_PREFIX = 'chili:replay:v4:';
+  var RP_HISTORY_CACHE_KEY = RP_STORAGE_PREFIX + 'history';
+  var RP_RESULT_INDEX_KEY = RP_STORAGE_PREFIX + 'result:index';
+  var RP_RESULT_CACHE_LIMIT = 2;
+  var RP_CACHE_MAX_AGE_MS = 30 * 60 * 1000;
 
   function esc(value) {
     var div = document.createElement('div');
@@ -663,6 +669,83 @@
     if (!el) return;
     el.textContent = text;
     el.className = 'rp-status ' + (cls || '');
+  }
+
+  function storageGet(key) {
+    try {
+      var raw = window.sessionStorage && window.sessionStorage.getItem(key);
+      return raw ? JSON.parse(raw) : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function storageSet(key, value) {
+    try {
+      if (!window.sessionStorage) return false;
+      window.sessionStorage.setItem(key, JSON.stringify(value));
+      return true;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function storageRemove(key) {
+    try {
+      if (window.sessionStorage) window.sessionStorage.removeItem(key);
+    } catch (err) {}
+  }
+
+  function isFreshCache(entry) {
+    return entry && entry.ts && (Date.now() - Number(entry.ts)) < RP_CACHE_MAX_AGE_MS;
+  }
+
+  function resultCacheKey(date, mode) {
+    return RP_STORAGE_PREFIX + 'result:' + encodeURIComponent(date || '') + ':' + encodeURIComponent(mode || 'live');
+  }
+
+  function resultSignature(result) {
+    if (!result) return '';
+    return [
+      result.date || '',
+      result.armed_source || '',
+      result.total_usd == null ? '' : result.total_usd,
+      (result.trades || []).length,
+      (result.decision_trace || []).length,
+      (result.armed_timeline || []).length,
+      Object.keys(result.series || {}).length,
+      result.error || ''
+    ].join('|');
+  }
+
+  function cacheReplayResult(date, mode, result) {
+    if (!date || !result) return;
+    var key = resultCacheKey(date, mode);
+    var index = storageGet(RP_RESULT_INDEX_KEY) || [];
+    index = index.filter(function(row) { return row && row.key !== key; });
+    index.unshift({ key: key, ts: Date.now() });
+    while (index.length > RP_RESULT_CACHE_LIMIT) {
+      var old = index.pop();
+      if (old && old.key) storageRemove(old.key);
+    }
+    storageSet(RP_RESULT_INDEX_KEY, index);
+    if (!storageSet(key, { ts: Date.now(), result: result })) {
+      storageRemove(key);
+    }
+  }
+
+  function cachedReplayResult(date, mode) {
+    var entry = storageGet(resultCacheKey(date, mode));
+    return isFreshCache(entry) ? entry.result : null;
+  }
+
+  function cacheHistoryRows(rows) {
+    storageSet(RP_HISTORY_CACHE_KEY, { ts: Date.now(), rows: rows || [] });
+  }
+
+  function cachedHistoryRows() {
+    var entry = storageGet(RP_HISTORY_CACHE_KEY);
+    return isFreshCache(entry) ? (entry.rows || []) : null;
   }
 
   function fmtMoney(value) {
@@ -1966,8 +2049,16 @@
       '</article>';
   }
 
+  function updateReplaySubtitle(result, fallbackDate) {
+    var subtitle = document.getElementById('rp-subtitle');
+    if (subtitle && result) {
+      subtitle.textContent = 'Loaded ' + (result.date || fallbackDate || '') + ' with ' + ((result.trades || []).length) + ' trades.';
+    }
+  }
+
   function renderReplay(result) {
     rpLastResult = result;
+    rpRenderedSignature = resultSignature(result);
     rpReplayCache = buildReplayCache(result);
     rpIndicatorCache = {};
     var host = document.getElementById('rp-workspace');
@@ -2044,33 +2135,51 @@
     }
     rpFocusChart = null;
     rpReplayCache = null;
+    rpRenderedSignature = null;
     rpIndicatorCache = {};
     host.innerHTML = '<div class="rp-empty">' + esc(text || 'Loading replay...') + '</div>';
   }
 
   function loadResult(date, mode, quiet) {
     if (!date) return Promise.resolve(false);
-    if (!quiet) {
+    var normalizedMode = mode || 'live';
+    var cached = cachedReplayResult(date, normalizedMode);
+    var renderedCached = false;
+    if (!quiet && cached) {
+      renderReplay(cached);
+      updateReplaySubtitle(cached, date);
+      setStatus('loaded', 'done');
+      renderedCached = true;
+    } else if (!quiet) {
       setStatus('loading...', 'running');
       renderLoading('Loading replay...');
     }
-    return fetch('/api/trading/momentum/replay/result/' + encodeURIComponent(date) + '?armed_source=' + encodeURIComponent(mode || 'live'), { credentials: 'same-origin' })
+    return fetch('/api/trading/momentum/replay/result/' + encodeURIComponent(date) + '?armed_source=' + encodeURIComponent(normalizedMode), { credentials: 'same-origin' })
       .then(function(resp) { return resp.json().then(function(body) { return { ok: resp.ok, body: body }; }); })
       .then(function(out) {
         if (!out.ok || !out.body || !out.body.result) {
+          if (renderedCached) {
+            return true;
+          }
           if (!quiet) {
             setStatus('not found', 'error');
             renderLoading('No replay result for that date.');
           }
           return false;
         }
-        renderReplay(out.body.result);
+        cacheReplayResult(date, normalizedMode, out.body.result);
+        if (!renderedCached || resultSignature(out.body.result) !== rpRenderedSignature) {
+          renderReplay(out.body.result);
+        }
         setStatus('loaded', 'done');
-        var subtitle = document.getElementById('rp-subtitle');
-        if (subtitle) subtitle.textContent = 'Loaded ' + (out.body.result.date || date) + ' with ' + ((out.body.result.trades || []).length) + ' trades.';
+        updateReplaySubtitle(out.body.result, date);
         return true;
       })
       .catch(function(err) {
+        if (renderedCached) {
+          setStatus('loaded', 'done');
+          return true;
+        }
         if (!quiet) {
           setStatus('failed', 'error');
           renderLoading(err && err.message ? err.message : 'Replay load failed.');
@@ -2096,24 +2205,48 @@
     }).join('');
   }
 
+  function applyHistoryRows(rows) {
+    rpHistoryRows = rows || [];
+    renderHistory(rpHistoryRows);
+    var pick = pickBestHistory(rpHistoryRows);
+    if (pick) {
+      var date = document.getElementById('rp-date');
+      var mode = document.getElementById('rp-mode');
+      if (date) date.value = pick.date || '';
+      if (mode) mode.value = pick.armed_source || 'live';
+      return pick;
+    }
+    return null;
+  }
+
+  function historyPickKey(pick) {
+    return pick ? ((pick.date || '') + '|' + (pick.armed_source || 'live')) : '';
+  }
+
   function loadHistory() {
+    var cachedRows = cachedHistoryRows();
+    var cachedPick = null;
+    if (cachedRows && cachedRows.length) {
+      cachedPick = applyHistoryRows(cachedRows);
+      if (cachedPick) {
+        loadResult(cachedPick.date, cachedPick.armed_source || 'live', false);
+      }
+    }
     return fetch('/api/trading/momentum/replay/list', { credentials: 'same-origin' })
       .then(function(resp) { return resp.json(); })
       .then(function(body) {
-        rpHistoryRows = body.results || [];
-        renderHistory(rpHistoryRows);
-        var pick = pickBestHistory(rpHistoryRows);
+        var rows = body.results || [];
+        cacheHistoryRows(rows);
+        var pick = applyHistoryRows(rows);
         if (pick) {
-          var date = document.getElementById('rp-date');
-          var mode = document.getElementById('rp-mode');
-          if (date) date.value = pick.date || '';
-          if (mode) mode.value = pick.armed_source || 'live';
+          if (historyPickKey(pick) === historyPickKey(cachedPick)) return true;
           return loadResult(pick.date, pick.armed_source || 'live', false);
         }
         renderLoading('No saved replay yet.');
         return false;
       })
       .catch(function() {
+        if (cachedPick) return true;
         renderLoading('Replay archive unavailable.');
         return false;
       });
