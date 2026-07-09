@@ -447,6 +447,25 @@ class AlpacaSpotAdapter:
         }
         return _MAP.get(key)
 
+    @staticmethod
+    def _equity_limit_price(price, side) -> float:
+        """Alpaca EQUITY sub-penny rule (reject 42210000 'sub-penny increment does not
+        fulfill minimum pricing criteria'): >= $1.00 -> $0.01 increments, < $1.00 ->
+        $0.0001. The lane's trail/target math emits raw floats (1.5345426..., 5.544) —
+        Alpaca REJECTED every such EXIT for 2 days (2026-07-07/08: ~38 failed exit
+        submissions across every symbol; VTAK bled -40%/-$3,390 while its stop,
+        scale-out AND trail submissions all bounced; even winners' scale-outs failed).
+        Entries passed only because 2-decimal quotes fed them. Round TOWARD
+        MARKETABILITY (SELL -> floor, BUY -> ceiling) so a protective exit is never
+        stranded over a fraction of a cent. Decimal-quantized (no float artifacts).
+        Equities only — crypto increments differ and that path is untouched."""
+        from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+
+        d = Decimal(str(float(price)))
+        tick = Decimal("0.01") if d >= Decimal("1") else Decimal("0.0001")
+        rounding = ROUND_CEILING if str(side).lower() == "buy" else ROUND_FLOOR
+        return float(d.quantize(tick, rounding=rounding))
+
     def _submit(self, product_id, side, base_size, client_order_id, *, limit_price,
                 extended_hours: bool = False, position_intent=None) -> dict[str, Any]:
         sym = _to_symbol(product_id)
@@ -477,12 +496,15 @@ class AlpacaSpotAdapter:
                         "client_order_id": getattr(o, "client_order_id", None) or client_order_id,
                         "status": _norm_status(getattr(o, "status", None))}
             if limit_price is not None:
+                # Sub-penny normalization (see _equity_limit_price) — MUST precede the
+                # request build; every raw-float exit limit was rejected 42210000.
+                _lp = self._equity_limit_price(limit_price, side)
                 # Marketable/posting limit. Alpaca rejects extended_hours unless the order
                 # is a LIMIT with DAY tif — so for pre-/after-market (Ross's gap-and-go) we
                 # send DAY + extended_hours=True; the RTH default stays a plain GTC.
                 if extended_hours:
                     req = LimitOrderRequest(symbol=sym, qty=qty, side=_side, time_in_force=TimeInForce.DAY,
-                                            limit_price=float(limit_price), client_order_id=client_order_id,
+                                            limit_price=_lp, client_order_id=client_order_id,
                                             extended_hours=True, **_intent_kw)
                 else:
                     # Fractional-qty orders REQUIRE DAY tif on Alpaca (GTC is
@@ -495,7 +517,7 @@ class AlpacaSpotAdapter:
                     except (TypeError, ValueError):
                         pass
                     req = LimitOrderRequest(symbol=sym, qty=qty, side=_side, time_in_force=_tif,
-                                            limit_price=float(limit_price), client_order_id=client_order_id,
+                                            limit_price=_lp, client_order_id=client_order_id,
                                             **_intent_kw)
             else:
                 req = MarketOrderRequest(symbol=sym, qty=qty, side=_side, time_in_force=TimeInForce.DAY,
