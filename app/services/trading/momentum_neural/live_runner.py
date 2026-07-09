@@ -532,13 +532,37 @@ def _recent_mfe_samples(db: Any, setup_family: Any, *, limit: int = 200) -> list
         from sqlalchemy import text as _sql
 
         _fam = str(setup_family) if setup_family is not None else None
-        rows = db.execute(
-            _sql(
-                "SELECT payload_json FROM trading_automation_events "
-                "WHERE event_type='momentum_mfe_realized' ORDER BY id DESC LIMIT :lim"
-            ),
-            {"lim": int(max(1, min(2000, limit * 4)))},
-        ).fetchall()
+        # MFE-SAMPLE EPOCH (2026-07-09): samples recorded before the exit-chain repair
+        # measured a BROKEN system (winners cut at +0.2R -> pool p60 degenerated to ~0,
+        # observed pctl_r=0.0). Excluding them keeps the data-derived target from
+        # capping winners once a pool crosses the min-samples floor. Fail-open: an
+        # empty/unparseable epoch disables the filter. (chili_momentum_mfe_samples_epoch)
+        _epoch = None
+        try:
+            _epoch_s = str(getattr(settings, "chili_momentum_mfe_samples_epoch", "") or "").strip()
+            if _epoch_s:
+                from datetime import datetime as _dt
+
+                _epoch = _dt.fromisoformat(_epoch_s.replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            _epoch = None
+        if _epoch is not None:
+            rows = db.execute(
+                _sql(
+                    "SELECT payload_json FROM trading_automation_events "
+                    "WHERE event_type='momentum_mfe_realized' AND ts >= :epoch "
+                    "ORDER BY id DESC LIMIT :lim"
+                ),
+                {"lim": int(max(1, min(2000, limit * 4))), "epoch": _epoch},
+            ).fetchall()
+        else:
+            rows = db.execute(
+                _sql(
+                    "SELECT payload_json FROM trading_automation_events "
+                    "WHERE event_type='momentum_mfe_realized' ORDER BY id DESC LIMIT :lim"
+                ),
+                {"lim": int(max(1, min(2000, limit * 4)))},
+            ).fetchall()
         out: list[float] = []
         for (pj,) in rows:
             try:
