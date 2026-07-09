@@ -51,6 +51,15 @@ The transcript garbles the main-account winner as **"CX"**; every visual source 
 6. **Negative-catalyst signatures** for the news gate: 424B3 prospectus / Form-4 dilution filings (WHLR), stale headlines (DSY June-12, AHMA June-16), vs. fresh dual same-morning headlines (CETX 08:30:00 + 08:59:35, CLRO dual 08:00:00).
 7. **Third price-pillar divergence (CWD)** behaves differently from LHAI: it passes the universe floor but its grinder tape never fires an entry gate — evidence that "arm and let gates decide" is safe and price-blocking is unnecessary.
 
+## DB cross-check (CHILI's own tick tape, added post-audit)
+
+Queried `iqfeed_trade_ticks` (observed_at = UTC, disambiguated empirically):
+
+1. **CLRO afternoon leg is REAL: 13:00–14:30 ET lo 6.41 / hi 9.62 (265k ticks).** The prior internal note's "13:22 6.5→9.26 leg" stands — and it belongs to **CLRO**, after BOTH of Ross's recaps were recorded (V6 ToS stamp 08:31, V7 live ~10:14 with CLRO at 3.54). Ross quit the name; it then ran +170% off the morning low. The A1–A10 starvation lesson is INTACT and arguably stronger.
+2. **The only mis-attribution in the prior note is Ross's P&L symbol**: his +$8,917.32 was **CETX** (broker panel), not CLRO. His CLRO money was the small-account +$2,943.22.
+3. **⚠️ NEW CAPTURE GAP — CETX was invisible to CHILI during its move.** First CHILI tick for CETX: **2026-07-02 08:54:57 ET**; CHILI-visible range all day: 2.59–4.66. The $3→6.2 squeeze ran ~**08:31–08:45 ET** (10s-chart x-labels + HOD-scanner prints 08:30:55→08:32:58 following the 08:30:00 headline) — i.e., **the entire winning move completed ~20 minutes before the subscribe-on-alert bridge picked the symbol up**. `momentum_fill_outcomes` has zero CETX rows on Jul-2. This is the concrete, dollar-quantified case (+$8,917 of Ross P&L) for the event-driven `<1s` arming work (pg_notify LISTEN consumer) over the current alert→subscribe latency.
+   - (The "09:00–09:24" squeeze-timing read from the zoomed 5m pane in one window is superseded by this DB check — the 08:31–08:45 timing is the one consistent with scanner prints, the 08:54:57 subscription start, and the 4.66 post-subscription high.)
+
 ## Verification notes
 
 218 claims re-checked: 186 confirmed, 26 refuted (typical: ±2–8s frame/slide boundary shifts, pane-attribution of indicator stacks, one quote-percent digit, narration-timing attribution), 6 unverifiable (narration-only: T2's "+5k→−$300" path, "$16k first two days", "second biggest green day" ranking, ToS avg-fill prices collapsed). Notable verified details: the V7 dashboard's small 10s pane at 10:11 showed the REGULAR session (H 4.05) — the $3→6 squeeze evidence lives on the fullscreen 10s and zoomed 5m panes (premarket); the CETX 1D "7,290.41" readout is a split-adjusted EMA artifact, not VWAP.
