@@ -4295,6 +4295,45 @@ class Settings(BaseSettings):
     # govern the winner; the clock only reaps NOT-working positions (bid <= entry),
     # i.e. the 2.6-3h loser bag-holds. The flat clock exited VRAX at +172% while it
     # was still running. ZERO new constants (green = bid > entry). False = flat clock.
+    # EVENT-DRIVEN ROSS ADMISSION (2026-07-09 P1 port from the concurrency WIP branch):
+    # the <1s tick->admit->arm path. The host bridge pg_notify('momentum_iqfeed_l1')
+    # producer has been LIVE for days; this ports the CONSUMER (live_runner_loop LISTEN
+    # thread + ross_event_admission) onto main. Quantified: JEM +$46k / CETX +$8.9k /
+    # SILO 46s-move all missed on poll latency. Flags copied verbatim from the WIP.
+    chili_momentum_ross_event_admission_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_EVENT_ADMISSION_ENABLED"),
+        description=(
+            "Allow proven Ross small-cap events to create a guarded live watcher "
+            "immediately instead of waiting for scheduler auto-arm."
+        ),
+    )
+    chili_momentum_ross_event_admission_cooldown_seconds: float = Field(
+        default=2.0,
+        ge=0.0,
+        le=60.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_EVENT_ADMISSION_COOLDOWN_SECONDS"),
+    )
+    chili_momentum_ross_event_admission_tick_count: int = Field(
+        default=1,
+        ge=0,
+        le=5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ROSS_EVENT_ADMISSION_TICK_COUNT"),
+        description=(
+            "Synchronous ticks performed inside Ross event admission after arming. "
+            "Default 1 forces an immediate runner evaluation from the event path; "
+            "the IQFeed/live event loop continues quote-speed ticking after that."
+        ),
+    )
+    chili_momentum_independent_smallcap_a_plus_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_INDEPENDENT_SMALLCAP_A_PLUS_ENABLED"),
+        description=(
+            "Allow non-Ross-source small-cap tape events only when independent A+ "
+            "evidence passes the small-cap profile, tape/source, change, float, "
+            "volume, and liquidity checks."
+        ),
+    )
     chili_momentum_adaptive_hold_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_HOLD_ENABLED"),

@@ -24,7 +24,9 @@ close) are Stage 3, after Replay Lab parity validation.
 
 from __future__ import annotations
 
+import json
 import logging
+import select
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -134,6 +136,11 @@ class LiveRunnerLoop:
         self._last_event_exit_log: dict[int, float] = {}
         self._inflight: set[int] = set()
         self._inflight_lock = threading.Lock()
+        # EVENT-DRIVEN ADMISSION (2026-07-09 P1 port): the pg LISTEN consumer thread
+        # + per-symbol notify dedup key. The host bridge's pg_notify producer has been
+        # live for days; this is the missing consumer half (<1s tick->admit->arm).
+        self._notify_thread: threading.Thread | None = None
+        self._last_iqfeed_observed_at: dict[str, str] = {}
 
     def start(self) -> None:
         if self._running:
@@ -146,9 +153,12 @@ class LiveRunnerLoop:
             target=self._refresh_loop, daemon=True, name="live-runner-loop-refresh"
         )
         self._refresher.start()
+        self._start_iqfeed_notify_listener()
         _log.info(
-            "[live_loop] started — event-driven exits armed (%d live sessions tracked)",
+            "[live_loop] started — event-driven exits armed (%d live sessions tracked) "
+            "iqfeed_notify=%s",
             self._tracker.count(),
+            bool(getattr(settings, "chili_momentum_live_runner_loop_iqfeed_notify_enabled", True)),
         )
 
     def stop(self) -> None:
@@ -286,6 +296,128 @@ class LiveRunnerLoop:
         except Exception:
             with self._inflight_lock:
                 self._inflight.discard(session_id)
+
+    # ── EVENT-DRIVEN ADMISSION (2026-07-09 P1 port from the concurrency WIP) ─────
+    # The <1s tick->admit->arm path: the HOST IQFeed bridge pg_notify's every L1 tick
+    # on channel momentum_iqfeed_l1 (producer live for days); this consumer LISTENs,
+    # dispatches ticks to EXISTING sessions instantly, and — when a symbol has NO
+    # session — runs the guarded event admission (ross_event_admission.admit_ross_event
+    # -> the SAME begin_live_arm/confirm_live_arm flow as auto-arm, double-arm-proofed
+    # by the pg_advisory_xact_lock in operator_actions). The 10s scheduler auto-arm
+    # stays on as the backstop (pg_notify is fire-and-forget). Quantified misses this
+    # class fixes: JEM +$46k (hours late), CETX +$8.9k (~20min late), SILO (46s move,
+    # 95s late). Reconnect-on-error loop; fail-open everywhere.
+
+    def _start_iqfeed_notify_listener(self) -> None:
+        if not bool(getattr(settings, "chili_momentum_live_runner_loop_iqfeed_notify_enabled", True)):
+            return
+        self._notify_thread = threading.Thread(
+            target=self._iqfeed_notify_loop,
+            daemon=True,
+            name="live-runner-iqfeed-listen",
+        )
+        self._notify_thread.start()
+
+    def _iqfeed_notify_loop(self) -> None:
+        try:
+            import psycopg2
+        except Exception as exc:
+            _log.warning("[live_loop] IQFeed notify disabled; psycopg2 unavailable: %s", exc)
+            return
+
+        channel = "momentum_iqfeed_l1"
+        db_url = str(getattr(settings, "database_url", "") or "")
+        while self._running:
+            conn = None
+            try:
+                conn = psycopg2.connect(db_url)
+                conn.set_session(autocommit=True)
+                cur = conn.cursor()
+                cur.execute(f"LISTEN {channel};")
+                _log.info("[live_loop] listening for IQFeed events channel=%s", channel)
+                while self._running:
+                    ready, _, _ = select.select([conn], [], [], 1.0)
+                    if not ready:
+                        continue
+                    conn.poll()
+                    while conn.notifies:
+                        notify = conn.notifies.pop(0)
+                        self._handle_iqfeed_notify_payload(notify.payload)
+            except Exception as exc:
+                if self._running:
+                    _log.warning("[live_loop] IQFeed notify listener reconnecting after error: %s", exc)
+                    time.sleep(1.0)
+            finally:
+                try:
+                    if conn is not None:
+                        conn.close()
+                except Exception:
+                    pass
+
+    def _handle_iqfeed_notify_payload(self, payload: str) -> None:
+        try:
+            data = json.loads(payload or "{}")
+        except Exception:
+            data = {"symbol": str(payload or "").upper()}
+        sym = str(data.get("symbol") or "").upper().strip()
+        if not sym:
+            return
+        observed_at = data.get("observed_at")
+        if observed_at is not None and self._last_iqfeed_observed_at.get(sym) == observed_at:
+            return  # duplicate notify for the same tick
+        if observed_at is not None:
+            self._last_iqfeed_observed_at[sym] = observed_at
+        sessions = self._tracker.get_sessions_for_symbol(sym)
+        if not sessions:
+            self._admit_iqfeed_symbol(sym, data)
+            sessions = self._tracker.get_sessions_for_symbol(sym)
+        for sess in sessions:
+            self._dispatch(int(sess["session_id"]))
+
+    def _admit_iqfeed_symbol(self, symbol: str, payload: dict) -> dict | None:
+        db = SessionLocal()
+        try:
+            from .ross_event_admission import admit_ross_event
+
+            result = admit_ross_event(
+                db,
+                symbol=symbol,
+                signal=None,
+                source=str(payload.get("source") or "iqfeed_notify"),
+                # IQFeed is the event source that should CREATE the fresh Ross
+                # candidate when no viability row exists yet. Leaving this false
+                # made the event path circular: watchlist -> tick -> "no candidate"
+                # -> never arm.
+                refresh_viability=True,
+            )
+            db.commit()
+            if result.get("admitted") or result.get("skipped") not in (
+                "no_fresh_live_eligible_candidate",
+                "cooldown",
+                "ross_transcript_context_rejected",
+            ):
+                _log.info(
+                    "[live_loop] iqfeed admission symbol=%s admitted=%s skipped=%s",
+                    symbol,
+                    bool(result.get("admitted")),
+                    result.get("skipped"),
+                )
+            if result.get("admitted"):
+                self._tracker.refresh()
+            return result
+        except Exception as exc:
+            _log.debug("[live_loop] iqfeed admission failed symbol=%s: %s", symbol, exc)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return None
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
 
     def _tick_session(self, session_id: int) -> None:
         db = SessionLocal()
