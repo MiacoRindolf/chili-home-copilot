@@ -4283,6 +4283,15 @@ class Settings(BaseSettings):
         default="2026-07-09T15:45:00+00:00",
         validation_alias=AliasChoices("CHILI_MOMENTUM_MFE_SAMPLES_EPOCH"),
     )
+    # ADAPTIVE HOLD (2026-07-09): a GREEN trade (bid > entry) is never clocked out by
+    # max_hold — structure exits (trail / G4 floor / partials / stop / EOD flatten)
+    # govern the winner; the clock only reaps NOT-working positions (bid <= entry),
+    # i.e. the 2.6-3h loser bag-holds. The flat clock exited VRAX at +172% while it
+    # was still running. ZERO new constants (green = bid > entry). False = flat clock.
+    chili_momentum_adaptive_hold_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ADAPTIVE_HOLD_ENABLED"),
+    )
     chili_momentum_mfe_shadow_logging_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MFE_SHADOW_LOGGING_ENABLED"),

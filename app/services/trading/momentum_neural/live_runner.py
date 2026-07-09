@@ -12039,7 +12039,36 @@ def tick_live_session(
                 if bool(getattr(settings, "chili_momentum_stop_ratchet_strict_enabled", True)):
                     stop_px = tighter_stop
 
-        if held >= max_hold:
+        # ADAPTIVE HOLD (2026-07-09, operator directive: "adaptive, hindi capped"): the flat
+        # max_hold clock kicked VRAX out at +172% WHILE STILL RUNNING (a max_hold exit on the
+        # day's biggest winner) — the inverse of Ross, who exits on STRUCTURE, never on time.
+        # A GREEN trade (bid > entry) is NEVER clocked out: the structure exits govern it
+        # (trail ratchet, G4 grind floor, partials-into-strength, the stop, and the EOD
+        # flatten as the hard equity backstop). The clock only reaps positions that are NOT
+        # working (bid <= entry) at/after the cap — exactly the 2.6-3h loser bag-holds the
+        # data showed bleeding. ZERO new constants: green = bid > entry; everything else is
+        # the existing machinery. Kill-switch restores the flat clock.
+        _mh_green = False
+        try:
+            _mh_green = (
+                bool(getattr(settings, "chili_momentum_adaptive_hold_enabled", True))
+                and bid is not None
+                and float(bid) > float(avg)
+            )
+        except (TypeError, ValueError):
+            _mh_green = False
+        if held >= max_hold and _mh_green:
+            if not le.get("max_hold_deferred_logged"):
+                le["max_hold_deferred_logged"] = True
+                _commit_le(sess, le)
+                _emit(db, sess, "max_hold_deferred_green", {
+                    "held_seconds": held,
+                    "max_hold_seconds": max_hold,
+                    "bid": bid,
+                    "entry": avg,
+                    "high_water_mark": _float_or_none(pos.get("high_water_mark")),
+                })
+        elif held >= max_hold:
             cid = f"chili_ml_t_{sess.id}_{uuid.uuid4().hex[:12]}"
             sr = _submit_live_market_exit(
                 db,
