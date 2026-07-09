@@ -83,6 +83,22 @@ def test_replay_v3_day_result_loads_as_live_fsm(client, tmp_path, monkeypatch):
             "recorded_pnl_usd": 12.34,
         }],
     })
+    rv._persist({
+        "date": "2026-07-09",
+        "armed_source": "live",
+        "total_usd": -99,
+        "wins": 0,
+        "losses": 1,
+        "trades": [{"sym": "OLD", "usd": -99}],
+        "decision_trace": [],
+        "series": {},
+        "tape_symbols": 1,
+        "candidates": 1,
+        "halt_windows": 0,
+        "day_halted": None,
+        "error": None,
+        "ran_at_utc": "2026-07-09T23:00:00+00:00",
+    })
 
     r = client.get("/api/trading/momentum/replay/result/2026-07-09?armed_source=live_fsm")
     assert r.status_code == 200
@@ -90,6 +106,7 @@ def test_replay_v3_day_result_loads_as_live_fsm(client, tmp_path, monkeypatch):
     assert result["engine"] == "v3_day"
     assert result["armed_source"] == "live_fsm"
     assert result["total_usd"] == 12.34
+    assert result["trades"][0]["sym"] == "TEST"
     assert result["replay_v3_day"]["traded_session_count"] == 1
     assert any(row["stage"].startswith("v3 live entry") for row in result["decision_trace"])
 
