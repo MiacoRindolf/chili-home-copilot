@@ -342,6 +342,24 @@ def create_paper_draft_session(
     }
 
 
+
+def _lock_live_symbol_arm(db: Session, *, user_id: int, symbol: str) -> None:
+    """Serialize live arms for one user/symbol across auto-arm AND event admission
+    (pg_advisory_xact_lock releases at COMMIT: the racing second arm blocks, then
+    sees the committed session and dedups — double-arm impossible by construction).
+    Ported 2026-07-09 with the event-admission consumer."""
+    try:
+        bind = db.get_bind()
+        if getattr(getattr(bind, "dialect", None), "name", "") != "postgresql":
+            return
+        from sqlalchemy import text as _sql_text
+
+        key = f"momentum_live_arm:{int(user_id)}:{str(symbol or '').strip().upper()}"
+        db.execute(_sql_text("select pg_advisory_xact_lock(hashtext(:key))"), {"key": key})
+    except Exception:
+        _log.debug("[operator_actions] live symbol advisory lock unavailable", exc_info=True)
+
+
 def begin_live_arm(
     db: Session,
     *,
@@ -356,6 +374,7 @@ def begin_live_arm(
     from ..portfolio_allocator import build_session_allocation_decision
 
     sym = symbol.strip().upper()
+    _lock_live_symbol_arm(db, user_id=int(user_id), symbol=sym)
     # Venue-aware dedup: key on (symbol, variant, mode, EXECUTION_FAMILY) so the SAME name can
     # hold one live session PER VENUE (e.g. an A/B of robinhood_spot real vs alpaca_spot paper).
     # Same-venue same-symbol+variant still dedups -> no double-arm / double real-money exposure

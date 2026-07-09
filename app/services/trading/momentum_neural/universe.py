@@ -318,9 +318,27 @@ def _signal_dollar_volume(signal: dict | None, price: float | None) -> float | N
     return value if value > 0 else None
 
 
+_ROSS_BLOCKED_ETP_SYMBOLS = frozenset({
+    # Leveraged/inverse ETFs and volatility products can pass price/change/volume
+    # screens, but they are not Ross-style small-cap common-stock gappers.
+    # (Ported 2026-07-09 with the event-admission consumer: the <1s tick path must
+    # never event-arm an ETP/warrant — the old 72-live_error/day class.)
+    "SOXL", "SOXS", "SQQQ", "TQQQ", "UVXY", "VXX", "SPXS", "SPXL",
+    "LABD", "LABU", "TZA", "TNA", "FAS", "FAZ",
+})
+
+
 def _normalize_ross_common_stock_symbol(value: object) -> str:
     sym = str(value or "").strip().upper()
     if not sym or "-USD" in sym or "/" in sym:
+        return ""
+    try:
+        from ...symbol_hygiene import normalize_equity_symbol
+
+        sym = normalize_equity_symbol(sym)
+    except Exception:
+        pass  # fail-open to the raw symbol; the blocklist below still applies
+    if not sym or sym in _ROSS_BLOCKED_ETP_SYMBOLS:
         return ""
     return sym
 
@@ -638,7 +656,10 @@ def build_equity_universe(
         try:
             if not isinstance(s, dict):
                 continue
-            ticker = str(s.get("ticker") or "").strip().upper()
+            # instrument-class hygiene (2026-07-09, ported with the event-admission
+            # consumer): warrants/units/rights + the leveraged-ETP blocklist never
+            # enter the Ross universe — the <1s tick path must not event-arm them.
+            ticker = _normalize_ross_common_stock_symbol(s.get("ticker"))
             if not ticker:
                 continue
 
