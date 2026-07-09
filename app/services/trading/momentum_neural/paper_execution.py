@@ -3045,12 +3045,14 @@ def grind_mode_decision(
 
     if prior_active:
         # ── MAINTENANCE (hysteresis) — the grind DIES explicitly here (review M2):
-        # floor break / lower-low / VWAP loss / cadence flip / missing anchors each
-        # force the switch BACK to scalp/ratchet behavior (the pending exhaustion
-        # candidates then apply unclamped). ──
-        if cadence_cls is None or str(cadence_cls) == "SLOW_CHOPPER":
-            out["reason"] = "cadence_dropped"
-            return out
+        # floor break / lower-low / VWAP loss / missing anchors each force the switch
+        # BACK to scalp/ratchet behavior (the pending exhaustion candidates then apply
+        # unclamped). CADENCE NO LONGER DROPS A WORKING GRIND (2026-07-09 probe verdict:
+        # grinders CLASSIFY SLOW_CHOPPER — VRAX was labeled SLOW_CHOPPER on its way to
+        # +172%, so the cadence disqualifier killed exactly the class G4 exists for;
+        # slowness IS the grind signature). Structure alone governs the drop — Ross's
+        # actual method. A None flicker also must not drop a working grind (review M2's
+        # own flicker rule). ──
         if structure_floor is None:
             out["reason"] = "structure_anchors_missing"
             return out
@@ -3076,8 +3078,16 @@ def grind_mode_decision(
     if is_day_leader is not True:
         out["reason"] = "not_day_leader"
         return out
-    if cadence_cls is None or str(cadence_cls) == "SLOW_CHOPPER":
-        out["reason"] = "cadence_not_fast"
+    # CADENCE: readable-only (None still never grinds — fail-closed on an unreadable
+    # classifier). SLOW_CHOPPER is ACCEPTED (2026-07-09 probe verdict: 6/9 probes blocked
+    # grind activation with cadence_not_fast on names like VRAX, which the classifier
+    # labeled SLOW_CHOPPER while it ground to +172% — a grind IS slow by definition, so
+    # excluding SLOW_CHOPPER excluded the exact class this mode was built for; the JLHL
+    # live case passed every other gate: leader+1.7R+higher-low). The remaining 5-gate
+    # AND (leader, >=1R, EMA-hold, higher-low>entry, floor+VWAP-hold) is the real grind
+    # signature and stays fully binding.
+    if cadence_cls is None:
+        out["reason"] = "cadence_unreadable"
         return out
     if peak_r < 1.0:
         out["reason"] = "below_1r"
