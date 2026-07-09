@@ -2198,13 +2198,20 @@ class Settings(BaseSettings):
     # FILL_OUTCOME_LOG (mig308) — WRITE-ONLY per-broker-fill ledger for the live
     # momentum lane (one row per real fill leg). Stage-1 logger only; reconcile +
     # reporting authority-flip + replay consumer are gated as a separate stage.
-    # KILL-SWITCH default OFF: when False the writer returns BEFORE any DB work or
-    # broker read — byte-identical, zero new SQL. Live-mode-only (paper/non-live =>
-    # zero rows). Fail-open + savepoint-isolated so it can never poison a trade txn.
+    # 2026-07-09: default False -> True (a DARK FLAG killed the fill log silently for
+    # 8 days: the env var lived in the pre-compose per-service env files and was NOT
+    # carried into .env by the Jul-1 compose migration — rows stopped exactly 07-01
+    # and nobody noticed until the Ross-audit cross-check; the parallel conversion
+    # investigation then drew a false "zero fills" conclusion from the dead table.
+    # Default-ON per the no-dark-flags rule so env churn can never kill the broker-
+    # truth day-net record again. Writer verified working on alpaca sessions.
+    # KILL-SWITCH: when False the writer returns BEFORE any DB work or broker read —
+    # byte-identical, zero new SQL. Live-mode-only (paper/non-live => zero rows).
+    # Fail-open + savepoint-isolated so it can never poison a trade txn.
     chili_momentum_fill_log_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_FILL_LOG_ENABLED"),
-        description="Kill-switch: True => the momentum live lane records one momentum_fill_outcomes row per real broker fill leg (entry/exit/partial/scale-out). Default OFF (no writes, byte-identical). Write-only Stage-1.",
+        description="True (default) => the momentum live lane records one momentum_fill_outcomes row per real broker fill leg (entry/exit/partial/scale-out). False = kill-switch (no writes, byte-identical).",
     )
     chili_momentum_recycle_entry_state_reset_enabled: bool = Field(
         default=True,
