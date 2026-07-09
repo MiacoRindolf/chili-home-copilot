@@ -242,8 +242,6 @@ def resolve_execution_family_for_symbol(symbol: str, *, mode: str = "live") -> s
     try:
         from .venue.robinhood_spot import _is_crypto_product
 
-        if _is_crypto_product(symbol):
-            return EXECUTION_FAMILY_COINBASE_SPOT
         from ...config import settings
 
         _alpaca_ready = (
@@ -251,6 +249,24 @@ def resolve_execution_family_for_symbol(symbol: str, *, mode: str = "live") -> s
             and bool(getattr(settings, "chili_alpaca_paper", True))
             and str(getattr(settings, "chili_alpaca_api_key", "") or "")
         )
+        if _is_crypto_product(symbol):
+            # CRYPTO -> ALPACA PAPER (2026-07-09, operator option A): route Alpaca-LISTED
+            # crypto majors (BTC/ETH/DOGE class) to the paper account so the repaired exit
+            # chain proves itself 24/7 on fake money. Unlisted low-cap alts keep the
+            # Coinbase default — and while this flag is ON the auto-arm readiness probe
+            # SKIPS them (no accidental live-Coinbase arm; see auto_arm). The listing
+            # probe is cached per process and FAIL-CLOSED (unlisted on error).
+            if _alpaca_ready and bool(
+                getattr(settings, "chili_momentum_crypto_execution_via_alpaca_paper", True)
+            ):
+                try:
+                    from .venue.alpaca_spot import alpaca_lists_symbol
+
+                    if alpaca_lists_symbol(symbol):
+                        return EXECUTION_FAMILY_ALPACA_SPOT
+                except Exception:
+                    pass
+            return EXECUTION_FAMILY_COINBASE_SPOT
         # PRIMARY EQUITY -> ALPACA PAPER (2026-07-07): when the operator flips the momentum lane to
         # Alpaca paper (RH->Alpaca cash transfer in progress), route EQUITIES to alpaca_spot (fake
         # money) instead of the RH live rail — in LIVE mode too, not only paper. alpaca_spot is

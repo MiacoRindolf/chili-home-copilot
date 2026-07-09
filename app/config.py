@@ -10954,9 +10954,21 @@ class Settings(BaseSettings):
         default=3.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_CRYPTO_REWARD_RISK_RATIO"),
     )
+    # 2026-07-09: 0.5 -> 0.30, aligned with the equity Ross-verified partial shape
+    # (sell ~30% into strength, ride the largest share on the structure trail).
     chili_momentum_crypto_scale_out_fraction: Optional[float] = Field(
-        default=0.5,
+        default=0.30,
         validation_alias=AliasChoices("CHILI_MOMENTUM_CRYPTO_SCALE_OUT_FRACTION"),
+    )
+    # CRYPTO -> ALPACA PAPER routing (2026-07-09, operator option A): Alpaca-LISTED
+    # crypto majors route to the PAPER account (fake money, 24/7 — the repaired exit
+    # chain proves itself around the clock); unlisted low-cap alts keep the Coinbase
+    # default BUT the auto-arm readiness probe SKIPS them while this is ON (no
+    # accidental live-Coinbase arm during the paper posture). False => crypto routes
+    # Coinbase live as before.
+    chili_momentum_crypto_execution_via_alpaca_paper: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CRYPTO_EXECUTION_VIA_ALPACA_PAPER"),
     )
     # Optional per-venue notional cap (USD) for CHILI-managed Coinbase
     # autotrader exposure. 0 disables the static cap; sizing, buying power,
