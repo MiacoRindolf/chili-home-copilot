@@ -117,12 +117,19 @@ def run_day(date: str, *, symbols: list[str] | None, database_url: str) -> dict:
             cons = replay_parity_mode_i(fx, fill_mode=FillMode.CONSERVATIVE)
             opt = replay_parity_mode_i(fx, fill_mode=FillMode.OPTIMISTIC)
             diff = replay_counterfactual_mode_ii(fx)
+            entry_fill = fx.recorded_entry_fill or {}
+            exit_fill = fx.recorded_exit_fill or {}
             per_trade.append({
                 "session_id": t["session_id"],
                 "symbol": t["symbol"],
                 "recorded_final_state": fx.recorded_final_state,
                 "trace_matches": cons.trace_matches,
+                "recorded_trace": cons.recorded_trace,
+                "sim_trace": cons.sim_trace,
+                "diffs": cons.diffs,
+                "recorded_entry_ts": entry_fill.get("ts"),
                 "recorded_entry": cons.recorded_entry_price,
+                "recorded_exit_ts": exit_fill.get("ts"),
                 "recorded_exit": cons.recorded_exit_price,
                 "recorded_pnl_usd": cons.recorded_pnl_usd,
                 "sim_entry_conservative": cons.sim_entry_price,

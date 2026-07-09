@@ -585,7 +585,7 @@
     <header class="rp-top">
       <div class="rp-title">
         <h1>Replay Research</h1>
-        <p>FSM Live Audit visual replay by symbol, action, and setup.</p>
+        <p>Replay v3 live-FSM view by symbol, action, and setup.</p>
       </div>
       <a class="rp-link" href="/trading">Trading</a>
     </header>
@@ -593,9 +593,9 @@
     <section class="rp-card" aria-label="Replay timeline">
       <div class="rp-command">
         <div>
-          <div class="rp-eyebrow">Visual Replay</div>
+          <div class="rp-eyebrow">Replay v3</div>
           <h2>Trading behavior timeline</h2>
-          <p id="rp-subtitle">Rows are symbols; markers are Chili actions on the chart.</p>
+          <p id="rp-subtitle">Rows are symbols; markers are live Chili actions on the chart.</p>
         </div>
         <div class="rp-controls">
           <div class="rp-field">
@@ -605,10 +605,10 @@
           <div class="rp-field">
             <label for="rp-mode">Mode</label>
             <select class="rp-select" id="rp-mode">
+              <option value="live_fsm" selected>Live FSM - actual Chili trades</option>
               <option value="asof">As-of selection - rerun system</option>
-              <option value="live">Live armed - actual Chili sessions</option>
             </select>
-            <span class="rp-mode-hint" id="rp-mode-hint">Reruns Chili's selection against the date data.</span>
+            <span class="rp-mode-hint" id="rp-mode-hint">Runs Replay v3 against actual live Chili sessions.</span>
           </div>
           <button class="rp-btn" id="rp-run" type="button" onclick="rpRunReplay()">Run Replay</button>
           <span class="rp-status" id="rp-status">idle</span>
@@ -701,11 +701,12 @@
   }
 
   function resultCacheKey(date, mode) {
-    return RP_STORAGE_PREFIX + 'result:' + encodeURIComponent(date || '') + ':' + encodeURIComponent(mode || 'live');
+    return RP_STORAGE_PREFIX + 'result:' + encodeURIComponent(date || '') + ':' + encodeURIComponent(mode || 'live_fsm');
   }
 
   function resultSignature(result) {
     if (!result) return '';
+    var v3 = result.replay_v3_day || {};
     return [
       result.date || '',
       result.armed_source || '',
@@ -714,6 +715,8 @@
       (result.decision_trace || []).length,
       (result.armed_timeline || []).length,
       Object.keys(result.series || {}).length,
+      v3.traded_session_count || '',
+      v3.recorded_day_pnl_usd == null ? '' : v3.recorded_day_pnl_usd,
       result.error || ''
     ].join('|');
   }
@@ -1143,6 +1146,7 @@
       seen.set(sym, Math.max(seen.get(sym) || 0, score || 0));
     }
     (result.trades || []).forEach(function(t) { add(t.sym, 100); });
+    ((result.replay_v3_day || {}).per_trade || []).forEach(function(t) { add(t.symbol, 100); });
     (result.armed_timeline || []).forEach(function(row) { add(row.sym, row.traded ? 80 : 40); });
     (result.decision_trace || []).forEach(function(row) { add(row.sym, 30); });
     Object.keys(result.series || {}).forEach(function(sym) { if (!seen.size) add(sym, 10); });
@@ -1175,6 +1179,13 @@
       if (m != null) values.push(m);
     });
     return values.length ? Math.min.apply(null, values) : 99999;
+  }
+
+  function v3TradesFor(result, sym) {
+    var target = normalizeSym(sym);
+    return (((result || {}).replay_v3_day || {}).per_trade || []).filter(function(row) {
+      return normalizeSym(row && row.symbol) === target;
+    });
   }
 
   function sampleBars(bars, maxCount) {
@@ -1268,14 +1279,17 @@
   }
 
   function modeHint(mode) {
-    if (mode === 'asof') {
-      return 'Reruns Chili selection against the date data.';
+    if (mode === 'live_fsm') {
+      return 'Replay v3: actual live Chili sessions and recorded broker outcomes.';
     }
-    return 'Replays the sessions Chili actually armed live.';
+    if (mode === 'asof') {
+      return 'Counterfactual: reruns current Chili selection against the date tape.';
+    }
+    return 'Legacy tape replay for live armed sessions.';
   }
 
   function updateModeHint() {
-    var mode = (document.getElementById('rp-mode') || {}).value || 'asof';
+    var mode = (document.getElementById('rp-mode') || {}).value || 'live_fsm';
     var hint = document.getElementById('rp-mode-hint');
     if (hint) hint.textContent = modeHint(mode);
   }
@@ -2039,11 +2053,15 @@
 
   function renderSymbolRow(result, sym, domain, eager) {
     var trades = tradesFor(result, sym);
+    var v3Trades = v3TradesFor(result, sym);
     var bars = barsFor(result, sym);
-    var pnl = trades.reduce(function(sum, t) { return sum + Number(t.usd || 0); }, 0);
-    var badge = trades.length ? fmtMoney(pnl) : (armedFor(result, sym).spans || []).length ? 'armed' : 'watched';
+    var pnl = v3Trades.length
+      ? v3Trades.reduce(function(sum, t) { return sum + Number(t.recorded_pnl_usd || 0); }, 0)
+      : trades.reduce(function(sum, t) { return sum + Number(t.usd || 0); }, 0);
+    var tradeCount = v3Trades.length || trades.length;
+    var badge = tradeCount ? fmtMoney(pnl) : (armedFor(result, sym).spans || []).length ? 'armed' : 'watched';
     return '<article class="rp-row" data-symbol="' + esc(sym) + '">' +
-      '<div class="rp-symbol"><b>' + esc(sym) + '</b><span>' + esc(trades.length + ' trades') + '</span><span>' + esc(fmtNum(bars.length) + ' bars') + '</span><span class="rp-badge ' + (pnl >= 0 ? 'rp-pos' : 'rp-neg') + '">' + esc(badge) + '</span></div>' +
+      '<div class="rp-symbol"><b>' + esc(sym) + '</b><span>' + esc(tradeCount + ' trades') + '</span><span>' + esc(fmtNum(bars.length) + ' bars') + '</span><span class="rp-badge ' + (pnl >= 0 ? 'rp-pos' : 'rp-neg') + '">' + esc(badge) + '</span></div>' +
       '<div class="rp-chart" data-symbol="' + esc(sym) + '" data-domain-min="' + esc(eager ? domain.min : '') + '" data-domain-max="' + esc(eager ? domain.max : '') + '">' + (eager ? chartSvg(result, sym, domain) + chartOverlayHtml() : chartPlaceholderHtml()) + '</div>' +
       '<div class="rp-setup">' + renderChips(result, sym) + renderTraceLines(result, sym, eager) + '</div>' +
       '</article>';
@@ -2052,8 +2070,34 @@
   function updateReplaySubtitle(result, fallbackDate) {
     var subtitle = document.getElementById('rp-subtitle');
     if (subtitle && result) {
-      subtitle.textContent = 'Loaded ' + (result.date || fallbackDate || '') + ' with ' + ((result.trades || []).length) + ' trades.';
+      var v3 = result.replay_v3_day || null;
+      var count = v3 ? Number(v3.traded_session_count || 0) : ((result.trades || []).length);
+      subtitle.textContent = 'Loaded ' + (result.date || fallbackDate || '') + ' with ' + count + ' live trade sessions.';
     }
+  }
+
+  function renderReplayStats(result, symbols) {
+    var v3 = result.replay_v3_day || null;
+    var total = Number(result.total_usd || 0);
+    if (v3) {
+      var band = v3.replay_day_pnl_band_usd || {};
+      var traceMatches = (v3.per_trade || []).filter(function(row) { return row && row.trace_matches; }).length;
+      var tradeCount = Number(v3.traded_session_count || (v3.per_trade || []).length || 0);
+      return '<div class="rp-stats">' +
+        '<div class="rp-stat"><b>' + esc(result.date || '-') + '</b><span>Date</span></div>' +
+        '<div class="rp-stat"><b class="' + (total >= 0 ? 'rp-pos' : 'rp-neg') + '">' + esc(fmtMoney(total)) + '</b><span>Recorded P/L</span></div>' +
+        '<div class="rp-stat"><b>' + esc(fmtMoney(Number(band.low_conservative || 0))) + ' / ' + esc(fmtMoney(Number(band.high_optimistic || 0))) + '</b><span>Replay Band</span></div>' +
+        '<div class="rp-stat"><b>' + esc(traceMatches + '/' + tradeCount) + '</b><span>FSM Trace</span></div>' +
+        '<div class="rp-stat"><b>' + esc(v3.armed_symbol_count || symbols.length || 0) + '</b><span>Armed Symbols</span></div>' +
+        '</div>';
+    }
+    return '<div class="rp-stats">' +
+      '<div class="rp-stat"><b>' + esc(result.date || '-') + '</b><span>Date</span></div>' +
+      '<div class="rp-stat"><b class="' + (total >= 0 ? 'rp-pos' : 'rp-neg') + '">' + esc(fmtMoney(total)) + '</b><span>P/L</span></div>' +
+      '<div class="rp-stat"><b>' + esc((result.trades || []).length) + '</b><span>Trades</span></div>' +
+      '<div class="rp-stat"><b>' + esc(symbols.length) + '</b><span>Symbols</span></div>' +
+      '<div class="rp-stat"><b>' + esc(result.armed_source || 'replay') + '</b><span>Mode</span></div>' +
+      '</div>';
   }
 
   function renderReplay(result) {
@@ -2065,8 +2109,10 @@
     var debug = document.getElementById('rp-debug');
     if (debug) debug.textContent = JSON.stringify({
       date: result.date,
+      engine: result.engine || null,
       armed_source: result.armed_source,
       trades: (result.trades || []).length,
+      replay_v3_trade_sessions: (result.replay_v3_day || {}).traded_session_count || null,
       series_symbols: Object.keys(result.series || {}).length,
       trace_rows: (result.decision_trace || []).length,
       error: result.error || null
@@ -2079,14 +2125,7 @@
     updateModeHint();
     clearPinnedChart();
     var symbols = symbolList(result);
-    var total = Number(result.total_usd || 0);
-    var stats = '<div class="rp-stats">' +
-      '<div class="rp-stat"><b>' + esc(result.date || '-') + '</b><span>Date</span></div>' +
-      '<div class="rp-stat"><b class="' + (total >= 0 ? 'rp-pos' : 'rp-neg') + '">' + esc(fmtMoney(total)) + '</b><span>P/L</span></div>' +
-      '<div class="rp-stat"><b>' + esc((result.trades || []).length) + '</b><span>Trades</span></div>' +
-      '<div class="rp-stat"><b>' + esc(symbols.length) + '</b><span>Symbols</span></div>' +
-      '<div class="rp-stat"><b>' + esc(result.armed_source || 'replay') + '</b><span>Mode</span></div>' +
-      '</div>';
+    var stats = renderReplayStats(result, symbols);
     if (result.error) {
       rpFullDomain = null;
       rpViewDomain = null;
@@ -2142,7 +2181,7 @@
 
   function loadResult(date, mode, quiet) {
     if (!date) return Promise.resolve(false);
-    var normalizedMode = mode || 'live';
+    var normalizedMode = mode || 'live_fsm';
     var cached = cachedReplayResult(date, normalizedMode);
     var renderedCached = false;
     if (!quiet && cached) {
@@ -2189,7 +2228,13 @@
   }
 
   function pickBestHistory(rows) {
-    return rows.find(function(row) { return Number(row.n_trades || 0) > 0 && !row.error; }) || rows[0] || null;
+    var priority = { live_fsm: 3, live: 2, asof: 1 };
+    var sorted = (rows || []).slice().sort(function(a, b) {
+      var byDate = String(b.date || '').localeCompare(String(a.date || ''));
+      if (byDate) return byDate;
+      return (priority[b.armed_source] || 0) - (priority[a.armed_source] || 0);
+    });
+    return sorted.find(function(row) { return Number(row.n_trades || 0) > 0 && !row.error; }) || sorted[0] || null;
   }
 
   function renderHistory(rows) {
@@ -2200,8 +2245,10 @@
       return;
     }
     host.innerHTML = rows.slice(0, 24).map(function(row) {
-      var label = row.date + ' ' + (row.armed_source || 'asof') + ' - ' + (row.n_trades || 0) + ' trades';
-      return '<button type="button" onclick="rpLoadReplay(\'' + esc(row.date) + '\', \'' + esc(row.armed_source || 'asof') + '\')">' + esc(label) + '</button>';
+      var source = row.armed_source || 'asof';
+      var sourceLabel = source === 'live_fsm' ? 'Live FSM' : source;
+      var label = row.date + ' ' + sourceLabel + ' - ' + (row.n_trades || 0) + ' trades';
+      return '<button type="button" onclick="rpLoadReplay(\'' + esc(row.date) + '\', \'' + esc(source) + '\')">' + esc(label) + '</button>';
     }).join('');
   }
 
@@ -2213,14 +2260,14 @@
       var date = document.getElementById('rp-date');
       var mode = document.getElementById('rp-mode');
       if (date) date.value = pick.date || '';
-      if (mode) mode.value = pick.armed_source || 'live';
+      if (mode) mode.value = pick.armed_source || 'live_fsm';
       return pick;
     }
     return null;
   }
 
   function historyPickKey(pick) {
-    return pick ? ((pick.date || '') + '|' + (pick.armed_source || 'live')) : '';
+    return pick ? ((pick.date || '') + '|' + (pick.armed_source || 'live_fsm')) : '';
   }
 
   function loadHistory() {
@@ -2229,7 +2276,7 @@
     if (cachedRows && cachedRows.length) {
       cachedPick = applyHistoryRows(cachedRows);
       if (cachedPick) {
-        loadResult(cachedPick.date, cachedPick.armed_source || 'live', false);
+        loadResult(cachedPick.date, cachedPick.armed_source || 'live_fsm', false);
       }
     }
     return fetch('/api/trading/momentum/replay/list', { credentials: 'same-origin' })
@@ -2240,7 +2287,7 @@
         var pick = applyHistoryRows(rows);
         if (pick) {
           if (historyPickKey(pick) === historyPickKey(cachedPick)) return true;
-          return loadResult(pick.date, pick.armed_source || 'live', false);
+          return loadResult(pick.date, pick.armed_source || 'live_fsm', false);
         }
         renderLoading('No saved replay yet.');
         return false;
@@ -2268,7 +2315,7 @@
         if (btn) btn.disabled = false;
         if (job.state === 'done') {
           setStatus('complete', 'done');
-          loadResult(job.date, job.armed_source || (document.getElementById('rp-mode') || {}).value || 'live', false);
+          loadResult(job.date, job.armed_source || (document.getElementById('rp-mode') || {}).value || 'live_fsm', false);
           loadHistory();
         } else if (job.state === 'error') {
           setStatus(job.error || 'error', 'error');
@@ -2280,7 +2327,7 @@
 
   window.rpRunReplay = function() {
     var date = (document.getElementById('rp-date') || {}).value;
-    var mode = (document.getElementById('rp-mode') || {}).value || 'live';
+    var mode = (document.getElementById('rp-mode') || {}).value || 'live_fsm';
     var btn = document.getElementById('rp-run');
     if (!date) {
       setStatus('pick date', 'error');
@@ -2311,7 +2358,7 @@
   };
 
   window.rpLoadReplay = function(date, mode) {
-    return loadResult(date, mode || 'live', false);
+    return loadResult(date, mode || 'live_fsm', false);
   };
 
   window.rpZoomCharts = function(factor) {
@@ -2335,7 +2382,7 @@
     if (date && !date.value) date.value = new Date().toISOString().slice(0, 10);
     var mode = document.getElementById('rp-mode');
     if (mode) {
-      mode.value = mode.value || 'asof';
+      mode.value = mode.value || 'live_fsm';
       mode.addEventListener('change', updateModeHint);
       updateModeHint();
     }
