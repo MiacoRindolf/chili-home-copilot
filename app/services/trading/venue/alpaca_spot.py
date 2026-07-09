@@ -371,7 +371,12 @@ class AlpacaSpotAdapter:
             logger.debug("[alpaca_spot] get_order(%s) failed: %s", order_id, exc)
             return None, _fresh(5.0)
 
-    def list_open_orders(self, *, product_id: Optional[str] = None, limit: int = 50):
+    def list_open_orders(self, *, product_id: Optional[str] = None, limit: int = 50,
+                         strict: bool = False):
+        """Open orders. strict=True returns (None, meta) on a READ FAILURE so safety-
+        critical callers (the orphan reconciler's in-flight guard) can distinguish
+        'no open orders' from 'unreadable' and fail-open; default keeps the legacy
+        ([], meta)-on-error contract for existing callers."""
         try:
             from alpaca.trading.requests import GetOrdersRequest
             from alpaca.trading.enums import QueryOrderStatus
@@ -381,7 +386,7 @@ class AlpacaSpotAdapter:
             return [self._normalize_order(o) for o in (orders or [])], _fresh(5.0)
         except Exception as exc:
             logger.debug("[alpaca_spot] list_open_orders failed: %s", exc)
-            return [], _fresh(5.0)
+            return (None if strict else []), _fresh(5.0)
 
     def get_fills(self, *, product_id: Optional[str] = None, order_id: Optional[str] = None, limit: int = 50):
         # Alpaca exposes fills via account activities; the runner reads avg_fill_price off the
@@ -401,6 +406,33 @@ class AlpacaSpotAdapter:
         except Exception as exc:
             logger.debug("[alpaca_spot] get_fills failed: %s", exc)
             return [], _fresh(5.0)
+
+    def list_positions(self):
+        """ALL account positions, normalized to plain dicts (read-only; feeds the orphan
+        reconciler + ops views). Returns (list, meta) — or (None, meta) when the account
+        read FAILED, so callers can distinguish 'flat' ([]) from 'unreadable' (None) and
+        fail-open (take no action) on the latter."""
+        try:
+            rows = _trading_client().get_all_positions() or []
+            out = []
+            for p in rows:
+                out.append({
+                    "product_id": _from_alpaca_symbol(str(getattr(p, "symbol", "") or "")),
+                    "raw_symbol": str(getattr(p, "symbol", "") or ""),
+                    "qty": _f(getattr(p, "qty", None)) or 0.0,
+                    "avg_entry_price": _f(getattr(p, "avg_entry_price", None)),
+                    "market_value": _f(getattr(p, "market_value", None)),
+                    "unrealized_pl": _f(getattr(p, "unrealized_pl", None)),
+                    "asset_class": str(
+                        getattr(getattr(p, "asset_class", None), "value", "")
+                        or getattr(p, "asset_class", "")
+                        or ""
+                    ).lower(),
+                })
+            return out, _fresh(5.0)
+        except Exception as exc:
+            logger.debug("[alpaca_spot] list_positions failed: %s", exc)
+            return None, _fresh(5.0)
 
     def place_market_order(self, *, product_id: str, side: str, base_size: str,
                            client_order_id: Optional[str] = None,
