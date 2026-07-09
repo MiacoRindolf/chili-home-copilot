@@ -162,6 +162,33 @@ def _crypto_data_client():
 
 def reset_clients_for_tests() -> None:
     _clients.clear()
+    _LISTED_CACHE.clear()
+
+
+# Per-process listing cache (listings change rarely; a probe is one HTTP call).
+_LISTED_CACHE: dict[str, bool] = {}
+
+
+def alpaca_lists_symbol(product_id: str) -> bool:
+    """True when Alpaca has a TRADABLE asset for this lane symbol (equity ticker or
+    crypto BASE-USD -> BASE/USD). Cached per process. FAIL-CLOSED (False) on any probe
+    error — callers route the symbol to its default venue instead. Used by the
+    crypto->alpaca-paper router: only Alpaca-LISTED majors go to the paper account;
+    unlisted low-cap alts stay on their default (and the arm-side guard skips them
+    while the paper posture is on)."""
+    sym = str(product_id or "").strip().upper()
+    if not sym:
+        return False
+    if sym in _LISTED_CACHE:
+        return _LISTED_CACHE[sym]
+    listed = False
+    try:
+        prod, _ = AlpacaSpotAdapter().get_product(sym)
+        listed = prod is not None and not bool(getattr(prod, "trading_disabled", True))
+    except Exception:
+        listed = False
+    _LISTED_CACHE[sym] = listed
+    return listed
 
 
 class AlpacaSpotAdapter:

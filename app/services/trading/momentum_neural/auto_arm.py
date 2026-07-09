@@ -204,6 +204,17 @@ def _venue_broker_ready_for(symbol: str, cache: dict[str, bool]) -> bool:
         ef = normalize_execution_family(resolve_execution_family_for_symbol(symbol))
     except Exception:
         return True
+    # PAPER-POSTURE GUARD (2026-07-09, operator option A): while crypto routes to the
+    # Alpaca PAPER account, a crypto candidate that resolved to coinbase_spot (an
+    # Alpaca-UNLISTED low-cap alt) must NOT be armed — that would be a LIVE real-money
+    # Coinbase order during the paper-only posture. Skipped at selection (the pass
+    # falls through to the next candidate). Flag off => byte-identical.
+    if (
+        str(symbol or "").strip().upper().endswith("-USD")
+        and ef == "coinbase_spot"
+        and bool(getattr(settings, "chili_momentum_crypto_execution_via_alpaca_paper", True))
+    ):
+        return False
     if ef in cache:
         return cache[ef]
     try:
