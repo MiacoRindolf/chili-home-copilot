@@ -6710,10 +6710,17 @@ class Settings(BaseSettings):
     # thresholds for the high-RVOL / extreme-ATR regime the lane explicitly targets.
     # Risk-first sizing + the #769 max-loss circuit + the cushion-funded pyramid are
     # untouched (they bound the downside regardless).
+    # 2026-07-07 (winner-capping root-cause): flipped False -> True to ACTIVATE the fast-bail
+    # LOCK-IN only. Every OTHER carve-out stays a no-op via its own sub-flag (bid_prop_exempt
+    # False, extension_rvol_boost False, pyramid_skip_recheck False, pyramid_retry_max 0) —
+    # verified all 5 gated sites are doubly-gated. Evidence: breakout_failed_fast_bail cut 6 of
+    # the 10 biggest bailout-WINNERS while green; the documented FCUV case (+21% run lost to a
+    # 4.5s dip-bail) is exactly what the lock-in was built for, but both lock-in values were 0
+    # (dead knob). Ross-verified: a violent squeeze dip-tests the broken level, then resumes.
     chili_momentum_explosive_recalibration_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXPLOSIVE_RECALIBRATION_ENABLED"),
-        description="MASTER kill-switch for the explosive-mover recalibration (bid-prop exempt, fast-bail lock-in, extension/flow RVOL carve-outs, pyramid eligibility-flicker skip). OFF (default) => every carve-out is a no-op, lane byte-identical.",
+        description="MASTER kill-switch for the explosive-mover recalibration (bid-prop exempt, fast-bail lock-in, extension/flow RVOL carve-outs, pyramid eligibility-flicker skip). ON (2026-07-07) to activate the fast-bail LOCK-IN; other carve-outs remain gated by their own sub-flags (all default off). False => every carve-out no-op, lane byte-identical.",
     )
     chili_momentum_explosive_atr_pct_floor: float = Field(
         default=0.045,
@@ -6749,17 +6756,23 @@ class Settings(BaseSettings):
         description="When ON (and master ON), BYPASS the bid-prop deterioration confirmer for explosive names (ATR%% >= floor OR RVOL >= floor): a squeeze legitimately steps the bid down / widens the spread; the structural pullback-break trigger already read volume+structure. OFF => no-op.",
     )
     # GATE 2 — fast-bail lock-in window (give the breakout structural room).
+    # 2026-07-07: 0 -> 10s/20s (was a DEAD knob; the FCUV +21%-lost-to-a-4.5s-bail case is the
+    # documented evidence). ~1 bar of the 15s micropull cadence base; explosive names get ~1.3
+    # bars (they dip-test the level later/harder). The structural stop + #769 max-loss circuit
+    # still fire INSIDE the lock-in (evaluated ahead of this gate) => a genuinely collapsing
+    # position is never held hostage; this only stops treating a momentary retest wick as a
+    # failed breakout. (feedback_adaptive_no_magic: these two are the documented bases)
     chili_momentum_breakout_bailout_lock_in_seconds: float = Field(
-        default=0.0,
+        default=10.0,
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BREAKOUT_BAILOUT_LOCK_IN_SECONDS"),
-        description="Seconds after entry fill during which the fast-bail CANNOT fire (give the breakout time to stabilize through a normal retest). 0 (default) => no lock-in, byte-identical. Master flag must also be ON.",
+        description="Seconds after entry fill during which the fast-bail CANNOT fire (give the breakout time to stabilize through a normal retest). 0 => no lock-in, byte-identical. Master flag must also be ON.",
     )
     chili_momentum_breakout_bailout_lock_in_explosive_seconds: float = Field(
-        default=0.0,
+        default=20.0,
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_BREAKOUT_BAILOUT_LOCK_IN_EXPLOSIVE_SECONDS"),
-        description="Lock-in seconds for EXPLOSIVE names (ATR%% >= floor OR RVOL >= floor) — wider than the base lock-in (a violent squeeze dip-tests the level later). 0 (default) => falls back to the base lock-in. Master flag must also be ON.",
+        description="Lock-in seconds for EXPLOSIVE names (ATR%% >= floor OR RVOL >= floor) — wider than the base lock-in (a violent squeeze dip-tests the level later). 0 => falls back to the base lock-in. Master flag must also be ON.",
     )
     # GATE 3 — entry-extension RVOL boost (more chase room for a true squeeze).
     chili_momentum_entry_extension_rvol_boost_enabled: bool = Field(
