@@ -21,6 +21,26 @@ from .family_regime_stats import family_regime_prefilter_allows
 _log = logging.getLogger(__name__)
 
 
+def _tape_asof_default(as_of):
+    """Resolve the tape-read "now" anchor through live_runner's replay-aware clock
+    chokepoint when the caller didn't thread one (2026-07-09). LIVE: ``_utcnow()``
+    IS naive wall-UTC, so the bounded as-of SQL form is byte-identical to the old
+    wall-``now()`` branch. FSM REPLAY: ``_utcnow()`` is the sim clock, so the read
+    no longer anchors at wall time (empty window / foreign post-sim ticks). Same
+    helper as pipeline._tape_asof_default (kept local: pipeline lazily imports
+    this module, so importing back at module level would be circular)."""
+    if as_of is not None:
+        return as_of
+    try:
+        from .live_runner import _utcnow as _lr_utcnow
+
+        return _lr_utcnow()
+    except Exception:
+        from datetime import datetime as _dt
+
+        return _dt.utcnow()
+
+
 def _compute_confirmed_swing_low_last(df: pd.DataFrame, lookback: int = 10) -> float | None:
     """Most recent confirmed swing low at last bar (aligned with backtest BOS)."""
     if df is None or len(df) < 2 * lookback + 2:
@@ -1939,23 +1959,20 @@ def signed_tape_accel_features(
     try:
         from sqlalchemy import text as _sql
 
-        if as_of is None:
-            q = (
-                "SELECT price, size, bid, ask, "
-                "EXTRACT(EPOCH FROM observed_at) FROM iqfeed_trade_ticks "
-                "WHERE symbol = :s AND observed_at > "
-                "(now() at time zone 'utc') - make_interval(secs => :w) ORDER BY observed_at ASC"
-            )
-            p = {"s": s, "w": w}
-        else:
-            _ao = as_of.replace(tzinfo=None) if getattr(as_of, "tzinfo", None) is not None else as_of
-            q = (
-                "SELECT price, size, bid, ask, "
-                "EXTRACT(EPOCH FROM observed_at) FROM iqfeed_trade_ticks "
-                "WHERE symbol = :s AND observed_at > :as_of - make_interval(secs => :w) "
-                "AND observed_at <= :as_of ORDER BY observed_at ASC"
-            )
-            p = {"s": s, "w": w, "as_of": _ao}
+        # Always the bounded as-of form, anchored through the replay-aware chokepoint
+        # when the caller didn't thread as_of (live: _utcnow() == wall UTC => identical
+        # row set to the old wall-now() branch; replay: the sim clock — this feeds the
+        # WATCH->FILL confirmers (tape_confirms_hold/_l2_entry_confirm) and the
+        # tape-accel reversal exit, which otherwise read an EMPTY window in replay).
+        _ao = _tape_asof_default(as_of)
+        _ao = _ao.replace(tzinfo=None) if getattr(_ao, "tzinfo", None) is not None else _ao
+        q = (
+            "SELECT price, size, bid, ask, "
+            "EXTRACT(EPOCH FROM observed_at) FROM iqfeed_trade_ticks "
+            "WHERE symbol = :s AND observed_at > :as_of - make_interval(secs => :w) "
+            "AND observed_at <= :as_of ORDER BY observed_at ASC"
+        )
+        p = {"s": s, "w": w, "as_of": _ao}
         rows = db.execute(_sql(q), p).fetchall()
     except Exception:
         return None

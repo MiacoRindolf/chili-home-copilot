@@ -149,13 +149,17 @@ def early_premarket_first_mover(
                 "         min(observed_at) OVER (PARTITION BY symbol) first_at,"
                 "         max(observed_at) OVER (PARTITION BY symbol) last_at"
                 "  FROM momentum_nbbo_spread_tape"
-                "  WHERE observed_at >= :since AND mid > 0 AND symbol NOT LIKE '%-USD'"
+                # AS-OF upper bound (2026-07-09): live no-op (no future rows exist yet); in
+                # REPLAY the preloaded tape extends past sim-now, so an unbounded read both
+                # LOOKS AHEAD and scans the whole window per call. Same bound on every
+                # tape read in this module.
+                "  WHERE observed_at >= :since AND observed_at <= :now AND mid > 0 AND symbol NOT LIKE '%-USD'"
                 ") "
                 "SELECT a.symbol, a.mid AS first_mid, d.mid AS last_mid, a.first_at, a.last_at "
                 "FROM recent a JOIN recent d ON d.symbol = a.symbol AND d.rn_d = 1 "
                 "WHERE a.rn_a = 1"
             ),
-            {"since": since},
+            {"since": since, "now": now_utc},
         ).fetchall()
     except Exception as exc:
         logger.debug("[nbbo_tape] early-premarket first-mover read failed: %s", exc)
@@ -240,12 +244,12 @@ def early_premarket_mover_coverage_p75(
                 "  SELECT date_trunc('minute', observed_at) AS m,"
                 "         count(DISTINCT symbol) AS n"
                 "  FROM momentum_nbbo_spread_tape"
-                "  WHERE observed_at >= :since AND mid > 0 AND symbol NOT LIKE '%-USD'"
+                "  WHERE observed_at >= :since AND observed_at <= :now AND mid > 0 AND symbol NOT LIKE '%-USD'"
                 "  GROUP BY 1"
                 ") "
                 "SELECT percentile_cont(0.75) WITHIN GROUP (ORDER BY n) FROM per_min"
             ),
-            {"since": since},
+            {"since": since, "now": now_utc.replace(tzinfo=None)},
         ).fetchone()
     except Exception as exc:
         logger.debug("[nbbo_tape] mover-coverage p75 read failed: %s", exc)
@@ -444,7 +448,7 @@ def _tape_running_up_records(db: Session, *, now_utc: Optional[datetime] = None)
                 "         row_number() OVER (PARTITION BY symbol ORDER BY observed_at DESC) rn_d,"
                 "         count(*) OVER (PARTITION BY symbol) n"
                 "  FROM momentum_nbbo_spread_tape"
-                "  WHERE observed_at >= :since AND mid > 0 AND symbol NOT LIKE '%-USD'"
+                "  WHERE observed_at >= :since AND observed_at <= :now AND mid > 0 AND symbol NOT LIKE '%-USD'"
                 ") "
                 "SELECT a.symbol, a.mid AS first_mid, d.mid AS last_mid, d.day_volume AS last_vol "
                 "FROM recent a JOIN recent d ON d.symbol = a.symbol AND d.rn_d = 1 "
@@ -452,6 +456,7 @@ def _tape_running_up_records(db: Session, *, now_utc: Optional[datetime] = None)
             ),
             {
                 "since": (now_utc.replace(tzinfo=None) - timedelta(minutes=lookback_min)),
+                "now": now_utc.replace(tzinfo=None),
                 "min_n": _MIN_SAMPLES,
             },
         ).fetchall()
@@ -647,12 +652,12 @@ def tape_delta_threshold_crossers(
                 "         row_number() OVER (PARTITION BY symbol ORDER BY observed_at DESC) rn_d,"
                 "         count(*) OVER (PARTITION BY symbol) n"
                 "  FROM momentum_nbbo_spread_tape"
-                "  WHERE observed_at >= :window_start AND mid > 0 AND symbol NOT LIKE '%-USD'"
+                "  WHERE observed_at >= :window_start AND observed_at <= :now AND mid > 0 AND symbol NOT LIKE '%-USD'"
                 "), "
                 "fresh AS ("
                 "  SELECT symbol, max(observed_at) AS sym_hwm"
                 "  FROM momentum_nbbo_spread_tape"
-                "  WHERE observed_at > :since AND mid > 0 AND symbol NOT LIKE '%-USD'"
+                "  WHERE observed_at > :since AND observed_at <= :now AND mid > 0 AND symbol NOT LIKE '%-USD'"
                 "  GROUP BY symbol"
                 ") "
                 "SELECT a.symbol, a.mid AS first_mid, d.mid AS last_mid,"
@@ -662,7 +667,12 @@ def tape_delta_threshold_crossers(
                 "JOIN fresh ON fresh.symbol = a.symbol "
                 "WHERE a.rn_a = 1 AND a.n >= :min_n"
             ),
-            {"window_start": window_start, "since": since, "min_n": _MIN_SAMPLES},
+            {
+                "window_start": window_start,
+                "since": since,
+                "now": now_utc.replace(tzinfo=None),
+                "min_n": _MIN_SAMPLES,
+            },
         ).fetchall()
     except Exception as exc:
         logger.debug("[nbbo_tape] tape-delta crossers read failed: %s", exc)
@@ -715,12 +725,12 @@ def tape_inter_row_gap_p50_seconds(
                 "WITH gaps AS ("
                 "  SELECT EXTRACT(EPOCH FROM (observed_at - lag(observed_at) OVER ("
                 "    ORDER BY observed_at))) AS gap_s"
-                "  FROM momentum_nbbo_spread_tape WHERE observed_at >= :since"
+                "  FROM momentum_nbbo_spread_tape WHERE observed_at >= :since AND observed_at <= :now"
                 ") "
                 "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY gap_s) "
                 "FROM gaps WHERE gap_s IS NOT NULL AND gap_s > 0"
             ),
-            {"since": since},
+            {"since": since, "now": now_utc.replace(tzinfo=None)},
         ).fetchone()
     except Exception as exc:
         logger.debug("[nbbo_tape] tape inter-row gap read failed: %s", exc)
@@ -771,7 +781,11 @@ def print_recency_state(
                 "    EXTRACT(EPOCH FROM (observed_at - lag(observed_at) OVER ("
                 "      ORDER BY observed_at))) AS gap_s"
                 "  FROM iqfeed_trade_ticks"
-                "  WHERE symbol = :s AND observed_at >= :gap_since"
+                # AS-OF bound (2026-07-09): live no-op (no future rows exist yet); in REPLAY
+                # the preloaded tape extends past sim-now, so an unbounded read both LOOKS
+                # AHEAD (halt inference sees post-halt prints => never suspects) and scans
+                # the whole window per call (3.8s/call on a 270k-row day).
+                "  WHERE symbol = :s AND observed_at >= :gap_since AND observed_at <= :now_naive"
                 ") "
                 "SELECT"
                 "  EXTRACT(EPOCH FROM (:now_naive - max(observed_at))) AS last_age_s,"
@@ -825,9 +839,14 @@ def recent_spread_median_bps(
             text(
                 "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY spread_bps), count(*) "
                 "FROM momentum_nbbo_spread_tape "
-                "WHERE symbol = :s AND spread_bps IS NOT NULL AND observed_at >= :since"
+                "WHERE symbol = :s AND spread_bps IS NOT NULL AND observed_at >= :since "
+                "AND observed_at <= :now"
             ),
-            {"s": sym, "since": now_utc.replace(tzinfo=None) - timedelta(seconds=float(window_s))},
+            {
+                "s": sym,
+                "since": now_utc.replace(tzinfo=None) - timedelta(seconds=float(window_s)),
+                "now": now_utc.replace(tzinfo=None),
+            },
         ).fetchone()
     except Exception as exc:
         logger.debug("[nbbo_tape] spread stability read failed: %s", exc)
@@ -857,12 +876,13 @@ def recent_bid_spread_tape(
             text(
                 "SELECT bid, spread_bps FROM momentum_nbbo_spread_tape "
                 "WHERE symbol = :s AND bid > 0 AND spread_bps IS NOT NULL "
-                "AND observed_at >= :since "
+                "AND observed_at >= :since AND observed_at <= :now "
                 "ORDER BY observed_at DESC LIMIT :n"
             ),
             {
                 "s": sym,
                 "since": now_utc.replace(tzinfo=None) - timedelta(seconds=float(window_s)),
+                "now": now_utc.replace(tzinfo=None),
                 "n": n,
             },
         ).fetchall()
