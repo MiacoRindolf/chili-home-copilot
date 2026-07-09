@@ -4258,13 +4258,30 @@ class Settings(BaseSettings):
     # This ONE documented knob is the only number in the asymmetric exit; breakeven
     # is derived (= entry) and the runner trail is derived (chandelier off the frozen
     # entry ATR x stop_atr_mult). Ross = 1/2 (0.5) on the risk-2:1 rule, up to 0.75 on
-    # the micro-pullback; default 0.5 keeps the largest runner (most tail capture).
-    # The learner can raise/lower it per family. docs/DESIGN/MOMENTUM_LANE.md
+    # the micro-pullback; 2026-07-09: 0.5 -> 0.30 (Ross-VERIFIED partial shape: "exiting
+    # ~30% of the position at the most recent high" — sell a PIECE into strength, keep
+    # the LARGEST share riding). With the G4 structure trail now functional (PR #877)
+    # the runner 70% finally has a working ride mechanism; a 50% first partial was
+    # halving the tail capture the inverted-R fix depends on. The learner can still
+    # raise/lower it per family. docs/DESIGN/MOMENTUM_LANE.md
     chili_momentum_scale_out_fraction: float = Field(
-        default=0.5,
+        default=0.30,
         gt=0.0,
         lt=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_SCALE_OUT_FRACTION"),
+    )
+    # MFE sample EPOCH (2026-07-09): momentum_mfe_realized samples recorded BEFORE the
+    # exit-chain repair (sub-penny rejects + fast-bail wick-cuts + dead G4) measured a
+    # BROKEN system — winners were cut at +0.2R, so the pool's p60 degenerated to ~0
+    # (observed pctl_r=0.0 in prod). Once a family pool crosses the 30-sample floor,
+    # that contaminated p60 would set the "data-derived" first target to ~0.5R and CAP
+    # winners all over again. Samples before this epoch are excluded from the exit-target
+    # calibration (the base R:R governs until clean post-fix samples accumulate) — the
+    # operator's segment-by-code-era rule applied to exit calibration. Documented data
+    # epoch, not a tuning knob; clear it ('') to disable the filter.
+    chili_momentum_mfe_samples_epoch: str = Field(
+        default="2026-07-09T15:45:00+00:00",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MFE_SAMPLES_EPOCH"),
     )
     chili_momentum_mfe_shadow_logging_enabled: bool = Field(
         default=True,
