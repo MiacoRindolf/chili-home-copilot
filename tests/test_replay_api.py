@@ -19,7 +19,8 @@ def test_replay_page_exposes_research_fsm_console(client):
     r = client.get("/trading/replay")
     assert r.status_code == 200
     assert b"Replay Research" in r.content
-    assert b"FSM Live Audit" in r.content
+    assert b"Replay v3" in r.content
+    assert b"Live FSM" in r.content
     assert b"/api/trading/momentum/replay/fsm" in r.content
 
 
@@ -43,7 +44,7 @@ def test_replay_list_and_missing_result(client, tmp_path, monkeypatch):
     monkeypatch.setattr(rv, "REPLAY_RESULTS_DIR", str(tmp_path))
     r = client.get("/api/trading/momentum/replay/list")
     assert r.status_code == 200 and r.json()["results"] == []
-    r2 = client.get("/api/trading/momentum/replay/result/2020-01-01")
+    r2 = client.get("/api/trading/momentum/replay/result/2020-01-01?armed_source=asof")
     assert r2.status_code == 404
     # persist one + read it back through the API
     rv._persist({"date": "2026-06-10", "total_usd": -575, "wins": 0, "losses": 1,
@@ -52,8 +53,45 @@ def test_replay_list_and_missing_result(client, tmp_path, monkeypatch):
                  "ran_at_utc": "2026-06-10T23:00:00+00:00"})
     r3 = client.get("/api/trading/momentum/replay/list")
     assert len(r3.json()["results"]) == 1
-    r4 = client.get("/api/trading/momentum/replay/result/2026-06-10")
+    r4 = client.get("/api/trading/momentum/replay/result/2026-06-10?armed_source=asof")
     assert r4.status_code == 200 and r4.json()["result"]["total_usd"] == -575
+
+
+def test_replay_v3_day_result_loads_as_live_fsm(client, tmp_path, monkeypatch):
+    import app.routers.trading_sub.replay_api as ra
+    import app.services.trading.momentum_neural.replay_v2 as rv
+
+    monkeypatch.setattr(rv, "REPLAY_RESULTS_DIR", str(tmp_path))
+    ra._persist_v3_day({
+        "date": "2026-07-09",
+        "armed_symbol_count": 2,
+        "traded_session_count": 1,
+        "recorded_day_pnl_usd": 12.34,
+        "replay_day_pnl_band_usd": {
+            "low_conservative": 10.0,
+            "point": 11.0,
+            "high_optimistic": 12.0,
+        },
+        "per_trade": [{
+            "session_id": 77,
+            "symbol": "TEST",
+            "trace_matches": True,
+            "recorded_entry_ts": "2026-07-09T13:31:00",
+            "recorded_entry": 1.1,
+            "recorded_exit_ts": "2026-07-09T13:36:00",
+            "recorded_exit": 1.2,
+            "recorded_pnl_usd": 12.34,
+        }],
+    })
+
+    r = client.get("/api/trading/momentum/replay/result/2026-07-09?armed_source=live_fsm")
+    assert r.status_code == 200
+    result = r.json()["result"]
+    assert result["engine"] == "v3_day"
+    assert result["armed_source"] == "live_fsm"
+    assert result["total_usd"] == 12.34
+    assert result["replay_v3_day"]["traded_session_count"] == 1
+    assert any(row["stage"].startswith("v3 live entry") for row in result["decision_trace"])
 
 
 def test_replay_result_roundtrips_divergence_and_trace(client, tmp_path, monkeypatch):
