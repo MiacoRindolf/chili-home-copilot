@@ -78,14 +78,9 @@ def _manifest_template(metadata: dict[str, str]) -> dict[str, object]:
             "pr_url": pr_url,
             "commit_sha": head_sha,
         },
-        "post_repair_check_receipt": {
-            "provider": "github_actions",
-            "run_id": run_id,
-            "head_sha": head_sha,
-            "conclusion": "success",
-        },
         "review_thread_transcript_file": "review_thread_transcript.jsonl",
         "publication_transcript_file": "publication_transcript.jsonl",
+        "post_repair_check_receipt_file": "post_repair_check_receipt.json",
     }
 
 

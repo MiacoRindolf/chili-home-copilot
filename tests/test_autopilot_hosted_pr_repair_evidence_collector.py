@@ -35,6 +35,8 @@ def test_evidence_collector_writes_manifest_template_and_safe_readme(tmp_path):
     assert summary["pr_url"].endswith("/pull/282")
     assert template["pr_url"].endswith("/pull/282")
     assert template["current_hosted_green_run_observed"] == "26879809423"
+    assert template["post_repair_check_receipt_file"] == "post_repair_check_receipt.json"
+    assert "post_repair_check_receipt" not in template
     assert "review_thread_transcript.jsonl" in summary["required_files"]
     assert "post_repair_check_receipt.json" in summary["required_files"]
     assert "autopilot_hosted_pr_repair_artifact_assembler.py" in summary["artifact_assembler_command"]
