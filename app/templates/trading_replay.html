@@ -425,6 +425,19 @@
 .rp-chip.exit { color: var(--rp-green); border-color: color-mix(in srgb, var(--rp-green) 42%, transparent); }
 .rp-chip.loss { color: var(--rp-red); border-color: color-mix(in srgb, var(--rp-red) 42%, transparent); }
 .rp-chip.warn { color: var(--rp-amber); border-color: color-mix(in srgb, var(--rp-amber) 42%, transparent); }
+.rp-trade-chip {
+  appearance: none;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.rp-trade-chip:hover,
+.rp-trade-chip:focus {
+  background: color-mix(in srgb, var(--rp-blue) 12%, var(--rp-panel-2));
+  color: var(--rp-text);
+  outline: none;
+}
 .rp-trace-list {
   display: grid;
   gap: 5px;
@@ -755,6 +768,11 @@
     var n = Number(value || 0);
     var sign = n < 0 ? '-' : '';
     return sign + '$' + Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  }
+
+  function fmtSignedMoney(value) {
+    var n = Number(value || 0);
+    return (n > 0 ? '+' : '') + fmtMoney(n);
   }
 
   function fmtNum(value) {
@@ -1503,7 +1521,7 @@
       event.preventDefault();
       return;
     }
-    if (event.target.closest && event.target.closest('.rp-trace-line')) return;
+    if (event.target.closest && event.target.closest('.rp-trace-line, .rp-trade-chip')) return;
     var chart = event.target.closest && event.target.closest('.rp-chart');
     if (!chart) {
       clearPinnedChart();
@@ -1519,10 +1537,12 @@
   }
 
   function handleTraceClick(event) {
-    var btn = event.target.closest && event.target.closest('.rp-trace-line');
+    var btn = event.target.closest && event.target.closest('.rp-trace-line, .rp-trade-chip');
     if (!btn) return;
     event.preventDefault();
-    jumpToTrace(btn.dataset.symbol, Number(btn.dataset.minute));
+    var minute = Number(btn.dataset.minute);
+    if (!Number.isFinite(minute)) return;
+    jumpToTrace(btn.dataset.symbol, minute);
   }
 
   function chartOverlayHtml() {
@@ -1915,6 +1935,23 @@
       var x2 = px(end, domain, width, pad);
       parts.push('<rect x="' + x1.toFixed(1) + '" y="8" width="' + Math.max(2, x2 - x1).toFixed(1) + '" height="6" rx="3" fill="rgba(96,165,250,.35)"/>');
     });
+    visibleTrades.forEach(function(t) {
+      var entryM = tradeEntryMinute(t);
+      var exitM = tradeExitMinute(t);
+      if (entryM == null || exitM == null) return;
+      var leftM = Math.min(entryM, exitM);
+      var rightM = Math.max(entryM, exitM);
+      if (rightM < domain.min || leftM > domain.max) return;
+      var start = Math.max(leftM, domain.min);
+      var end = Math.min(rightM, domain.max);
+      var x1 = px(start, domain, width, pad);
+      var x2 = px(end, domain, width, pad);
+      var good = Number(t.usd || 0) >= 0;
+      var fill = good ? 'rgba(52,211,153,.105)' : 'rgba(251,113,133,.11)';
+      var stroke = good ? 'rgba(52,211,153,.35)' : 'rgba(251,113,133,.36)';
+      parts.push('<rect data-trade-window="1" x="' + x1.toFixed(1) + '" y="' + (top + 2) + '" width="' + Math.max(3, x2 - x1).toFixed(1) + '" height="' + (plotH - 4) + '" rx="5" fill="' + fill + '" stroke="' + stroke + '" stroke-width=".8"/>');
+      parts.push('<rect x="' + x1.toFixed(1) + '" y="' + (top + 2) + '" width="' + Math.max(3, x2 - x1).toFixed(1) + '" height="3" rx="2" fill="' + stroke + '"/>');
+    });
     if (bars.length) {
       var candleW = Math.max(1.4, Math.min(12, (width - pad * 2) / Math.max(1, bars.length * 1.45)));
       bars.forEach(function(bar) {
@@ -1964,6 +2001,18 @@
       }
       if (Number.isFinite(Number(t.target))) {
         parts.push('<line x1="' + pad + '" y1="' + targetY.toFixed(1) + '" x2="' + (width - pad) + '" y2="' + targetY.toFixed(1) + '" stroke="#34d399" stroke-width="1" stroke-dasharray="4 4" opacity=".55"/>');
+      }
+      if (entryM != null && exitM != null && Math.max(entryM, exitM) >= domain.min && Math.min(entryM, exitM) <= domain.max) {
+        var tradeGood = Number(t.usd || 0) >= 0;
+        var tradeColor = tradeGood ? '#34d399' : '#fb7185';
+        var label = fmtSignedMoney(t.usd);
+        var labelW = Math.max(48, label.length * 6 + 14);
+        var midX = (entryX + exitX) / 2;
+        var midY = Math.max(top + 14, Math.min(priceBottom - 20, ((entryY + exitY) / 2) - 13));
+        var labelX = Math.max(pad + 2, Math.min(width - pad - labelW, midX - labelW / 2));
+        parts.push('<line data-trade-connector="1" x1="' + entryX.toFixed(1) + '" y1="' + entryY.toFixed(1) + '" x2="' + exitX.toFixed(1) + '" y2="' + exitY.toFixed(1) + '" stroke="' + tradeColor + '" stroke-width="1.5" opacity=".82"/>');
+        parts.push('<rect data-trade-pnl="1" x="' + labelX.toFixed(1) + '" y="' + midY.toFixed(1) + '" width="' + labelW.toFixed(1) + '" height="16" rx="4" fill="rgba(2,6,23,.78)" stroke="' + tradeColor + '" stroke-width=".8"/>');
+        parts.push('<text x="' + (labelX + labelW / 2).toFixed(1) + '" y="' + (midY + 11.5).toFixed(1) + '" fill="' + tradeColor + '" font-size="10" font-weight="700" text-anchor="middle">' + esc(label) + '</text>');
       }
       if (inDomain(entryM, domain)) {
         parts.push('<line x1="' + entryX.toFixed(1) + '" y1="14" x2="' + entryX.toFixed(1) + '" y2="' + priceBottom + '" stroke="#60a5fa" stroke-width="1.3" opacity=".85"/>');
@@ -2036,12 +2085,14 @@
     var stages = uniqueStages(traces);
     var chips = [];
     trades.forEach(function(t) {
-      if (t.t) chips.push('<span class="rp-chip entry">entry ' + esc(t.t) + '</span>');
-      if (t.exit_t) chips.push('<span class="rp-chip ' + (Number(t.usd || 0) >= 0 ? 'exit' : 'loss') + '">exit ' + esc(t.exit_t) + '</span>');
+      var entryM = tradeEntryMinute(t);
+      var exitM = tradeExitMinute(t);
+      var minute = entryM != null ? entryM : exitM;
+      var outcomeClass = Number(t.usd || 0) >= 0 ? 'exit' : 'loss';
+      var timeText = (t.t || 'entry') + (t.exit_t ? ' -> ' + t.exit_t : '');
+      var tradeLabel = timeText + ' ' + fmtSignedMoney(t.usd);
+      chips.push('<button class="rp-chip rp-trade-chip ' + outcomeClass + '" type="button" data-symbol="' + esc(sym) + '" data-minute="' + esc(minute == null ? '' : minute) + '" title="Jump chart to this trade">' + esc(tradeLabel) + '</button>');
       if (t.why) chips.push('<span class="rp-chip warn">' + esc(String(t.why).replace(/^recorded_live:/, '')) + '</span>');
-      if (t.stop != null) chips.push('<span class="rp-chip">stop ' + esc(t.stop) + '</span>');
-      if (t.target != null) chips.push('<span class="rp-chip">target ' + esc(t.target) + '</span>');
-      if (t.spread_bps != null) chips.push('<span class="rp-chip">spread ' + esc(t.spread_bps) + ' bps</span>');
     });
     stages.forEach(function(stage) {
       chips.push('<span class="rp-chip">' + esc(stage) + '</span>');
