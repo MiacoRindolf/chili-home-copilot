@@ -250,6 +250,81 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.rp-correlation-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  min-width: 0;
+  visibility: hidden;
+}
+.rp-correlation-strip.is-visible {
+  visibility: visible;
+}
+.rp-correlation-time {
+  flex: 0 0 auto;
+  color: var(--rp-gold);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.rp-correlation-events {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.rp-correlation-events::-webkit-scrollbar {
+  display: none;
+}
+.rp-correlation-event {
+  appearance: none;
+  flex: 0 0 auto;
+  max-width: 210px;
+  border: 1px solid var(--rp-line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--rp-panel-2) 84%, transparent);
+  color: var(--rp-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: 0;
+  line-height: 1.2;
+  overflow: hidden;
+  padding: 4px 7px;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+.rp-correlation-event:hover,
+.rp-correlation-event:focus-visible {
+  border-color: color-mix(in srgb, var(--rp-blue) 50%, var(--rp-line));
+  color: var(--rp-text);
+  outline: none;
+}
+.rp-correlation-event.entry {
+  border-color: color-mix(in srgb, var(--rp-blue) 46%, var(--rp-line));
+  color: #bfdbfe;
+}
+.rp-correlation-event.exit {
+  border-color: color-mix(in srgb, var(--rp-green) 46%, var(--rp-line));
+  color: #a7f3d0;
+}
+.rp-correlation-event.loss {
+  border-color: color-mix(in srgb, var(--rp-red) 46%, var(--rp-line));
+  color: #fecdd3;
+}
+.rp-correlation-more {
+  flex: 0 0 auto;
+  color: var(--rp-soft);
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: none;
+}
 .rp-viewport-tools {
   display: inline-flex;
   align-items: center;
@@ -405,6 +480,10 @@
 .rp-chart.is-dragging {
   cursor: grabbing;
 }
+.rp-chart:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--rp-blue) 72%, transparent);
+  outline-offset: 2px;
+}
 .rp-chart svg {
   display: block;
   width: 100%;
@@ -421,9 +500,15 @@
   background: color-mix(in srgb, var(--rp-amber) 80%, transparent);
   opacity: 0;
 }
+.rp-chart.is-synced .rp-crosshair {
+  opacity: .42;
+}
 .rp-chart.is-inspecting .rp-crosshair,
 .rp-chart.is-pinned .rp-crosshair {
   opacity: 1;
+}
+.rp-chart.is-synced:not(.is-inspecting):not(.is-pinned) .rp-crosshair span {
+  opacity: .45;
 }
 .rp-crosshair span {
   position: absolute;
@@ -739,8 +824,15 @@
   var rpSmoothTargetDomain = null;
   var rpSmoothFocusChart = null;
   var rpRenderedSignature = null;
+  var rpInspectionMinute = null;
+  var rpInspectionSource = null;
+  var rpInspectionPinned = false;
+  var rpInspectionFrame = null;
+  var rpPendingInspection = null;
   var RP_MIN_WINDOW_MINUTES = 6;
   var RP_EAGER_ROWS = 5;
+  var RP_CHART_PLOT_LEFT = 22 / 720;
+  var RP_CHART_PLOT_SPAN = (720 - 44) / 720;
   var RP_VIEWPORT_SMOOTHING = 0.34;
   var RP_VIEWPORT_SMOOTH_EPS = 1.1;
   var RP_STORAGE_PREFIX = 'chili:replay:v5:';
@@ -955,6 +1047,8 @@
       indicators: {},
       indicatorMinutes: {},
       firstAction: {},
+      events: [],
+      eventMinutes: [],
       allMinutes: []
     };
   }
@@ -963,6 +1057,17 @@
     var key = normalizeSym(sym);
     if (!map[key]) map[key] = [];
     return map[key];
+  }
+
+  function cacheReplayEvent(cache, sym, minute, kind, detail, usd) {
+    if (!cache || minute == null) return;
+    cache.events.push({
+      sym: normalizeSym(sym),
+      minute: minute,
+      kind: kind || 'setup',
+      detail: detail || '',
+      usd: usd == null ? null : Number(usd)
+    });
   }
 
   function buildReplayCache(result) {
@@ -985,6 +1090,8 @@
       var exit = tradeExitMinute(t);
       if (entry != null) cache.allMinutes.push(entry);
       if (exit != null) cache.allMinutes.push(exit);
+      cacheReplayEvent(cache, t.sym, entry, 'entry', 'entry', t.usd);
+      cacheReplayEvent(cache, t.sym, exit, 'exit', String(t.why || '').replace(/^recorded_live:/, ''), t.usd);
       t._rpStartMin = entry == null ? exit : exit == null ? entry : Math.min(entry, exit);
       t._rpEndMin = entry == null ? exit : exit == null ? entry : Math.max(entry, exit);
       cacheList(cache.trades, t.sym).push(t);
@@ -992,6 +1099,7 @@
     (result && result.decision_trace || []).forEach(function(row) {
       var minute = rowMinute(row);
       if (minute != null) cache.allMinutes.push(minute);
+      cacheReplayEvent(cache, row.sym, minute, 'setup', cleanStage(row.stage), null);
       cacheList(cache.traces, row.sym).push(row);
     });
     (result && result.armed_timeline || []).forEach(function(row) {
@@ -1042,6 +1150,12 @@
         cache.firstAction[sym] = cache.firstAction[sym] == null ? first : Math.min(cache.firstAction[sym], first);
       });
     });
+    cache.events.sort(function(a, b) {
+      if (a.minute !== b.minute) return a.minute - b.minute;
+      var rank = { entry: 0, exit: 1, setup: 2 };
+      return (rank[a.kind] == null ? 3 : rank[a.kind]) - (rank[b.kind] == null ? 3 : rank[b.kind]);
+    });
+    cache.eventMinutes = cache.events.map(function(row) { return row.minute; });
     return cache;
   }
 
@@ -1584,53 +1698,161 @@
     }).join('');
   }
 
+  function correlatedEvents(minute) {
+    var cache = replayCache(rpLastResult || {});
+    if (!cache || !cache.events.length || minute == null) return [];
+    var rows = cache.events.slice(
+      lowerBound(cache.eventMinutes, minute - 1),
+      upperBound(cache.eventMinutes, minute + 1)
+    );
+    rows.sort(function(a, b) {
+      var rank = { entry: 0, exit: 0, setup: 1 };
+      var rankDiff = (rank[a.kind] == null ? 2 : rank[a.kind]) - (rank[b.kind] == null ? 2 : rank[b.kind]);
+      if (rankDiff) return rankDiff;
+      var distanceDiff = Math.abs(a.minute - minute) - Math.abs(b.minute - minute);
+      if (distanceDiff) return distanceDiff;
+      return String(a.sym).localeCompare(String(b.sym));
+    });
+    var bySymbol = {};
+    rows.forEach(function(row) {
+      if (!row.sym || bySymbol[row.sym]) return;
+      bySymbol[row.sym] = row;
+    });
+    return Object.keys(bySymbol).map(function(sym) { return bySymbol[sym]; });
+  }
+
+  function correlationEventLabel(row) {
+    var action = row.kind;
+    if (row.kind === 'exit' && Number.isFinite(row.usd)) {
+      action += ' ' + fmtSignedMoney(row.usd);
+    } else if (row.kind === 'setup' && row.detail) {
+      action = row.detail;
+    }
+    return row.sym + ' ' + timeLabel(row.minute) + ' ' + action;
+  }
+
+  function renderCorrelationStrip(minute, pinned) {
+    var strip = document.getElementById('rp-correlation-strip');
+    var time = document.getElementById('rp-correlation-time');
+    var events = document.getElementById('rp-correlation-events');
+    if (!strip || !time || !events) return;
+    if (minute == null) {
+      strip.classList.remove('is-visible');
+      strip.dataset.minute = '';
+      time.textContent = '';
+      events.innerHTML = '';
+      return;
+    }
+    var rows = correlatedEvents(minute);
+    time.textContent = timeLabel(minute) + ' ET' + (pinned ? ' - pinned' : '');
+    events.innerHTML = rows.slice(0, 8).map(function(row) {
+      var outcomeClass = row.kind === 'exit' && Number(row.usd) < 0 ? 'loss' : row.kind;
+      var label = correlationEventLabel(row);
+      return '<button class="rp-correlation-event ' + esc(outcomeClass) + '" type="button" data-symbol="' +
+        esc(row.sym) + '" data-minute="' + esc(row.minute) + '" aria-label="Focus ' + esc(label) + '">' +
+        esc(label) + '</button>';
+    }).join('') + (rows.length > 8 ? '<span class="rp-correlation-more">+' + esc(rows.length - 8) + '</span>' :
+      '<span class="rp-correlation-more">' + (rows.length ? '' : 'No FSM action') + '</span>');
+    strip.dataset.minute = String(minute);
+    strip.classList.add('is-visible');
+  }
+
+  function chartDomainRatio(chart, clientX) {
+    var rect = chart && chart.getBoundingClientRect ? chart.getBoundingClientRect() : null;
+    if (!rect || !rect.width) return null;
+    var raw = (clientX - rect.left) / rect.width;
+    return Math.max(0, Math.min(1, (raw - RP_CHART_PLOT_LEFT) / RP_CHART_PLOT_SPAN));
+  }
+
+  function chartLeftPercent(minute, domain) {
+    var ratio = domain && domain.max > domain.min ? (minute - domain.min) / (domain.max - domain.min) : .5;
+    ratio = Math.max(0, Math.min(1, ratio));
+    return (RP_CHART_PLOT_LEFT + ratio * RP_CHART_PLOT_SPAN) * 100;
+  }
+
+  function applyInspectionToChart(chart, minute, sourceChart, pinned) {
+    if (!chart || !rpViewDomain || !inDomain(minute, rpViewDomain)) return;
+    var crosshair = chart.querySelector('.rp-crosshair');
+    if (crosshair) crosshair.style.left = chartLeftPercent(minute, rpViewDomain).toFixed(2) + '%';
+    chart.classList.add('is-synced');
+    var isSource = chart === sourceChart;
+    chart.classList.toggle('is-inspecting', isSource);
+    chart.classList.toggle('is-pinned', isSource && pinned);
+    var row = chart.closest('.rp-row');
+    if (row) row.classList.toggle('is-active', isSource);
+    if (!isSource) return;
+    var rect = chart.getBoundingClientRect();
+    var tooltip = chart.querySelector('.rp-tooltip');
+    if (tooltip && rect.width) {
+      var leftPx = chartLeftPercent(minute, rpViewDomain) / 100 * rect.width;
+      tooltip.style.left = Math.max(88, Math.min(rect.width - 88, leftPx)).toFixed(1) + 'px';
+      tooltip.innerHTML = describeInspection(chart.dataset.symbol || '', minute) +
+        (pinned ? '<span class="rp-pinned-note">Pinned across timeline</span>' : '');
+    }
+  }
+
+  function applySynchronizedInspection(chart, minute, pinned) {
+    if (!chart || !rpLastResult || !rpViewDomain || !inDomain(minute, rpViewDomain)) return;
+    chart = ensureChartFresh(chart) || chart;
+    rpInspectionMinute = Number(minute);
+    rpInspectionSource = chart;
+    rpInspectionPinned = !!pinned;
+    rpPinnedChart = pinned ? chart : null;
+    document.querySelectorAll('.rp-chart').forEach(function(rowChart) {
+      applyInspectionToChart(rowChart, rpInspectionMinute, chart, rpInspectionPinned);
+    });
+    renderCorrelationStrip(rpInspectionMinute, rpInspectionPinned);
+  }
+
+  function queueSynchronizedInspection(chart, minute) {
+    rpPendingInspection = { chart: chart, minute: minute };
+    if (rpInspectionFrame) return;
+    rpInspectionFrame = requestAnimationFrame(function() {
+      rpInspectionFrame = null;
+      var pending = rpPendingInspection;
+      rpPendingInspection = null;
+      if (pending && !rpPinnedChart) applySynchronizedInspection(pending.chart, pending.minute, false);
+    });
+  }
+
   function clearPinnedChart() {
-    if (!rpPinnedChart) return;
-    rpPinnedChart.classList.remove('is-pinned');
-    rpPinnedChart.classList.remove('is-inspecting');
+    if (rpInspectionFrame) cancelAnimationFrame(rpInspectionFrame);
+    rpInspectionFrame = null;
+    rpPendingInspection = null;
     rpPinnedChart = null;
+    rpInspectionMinute = null;
+    rpInspectionSource = null;
+    rpInspectionPinned = false;
+    document.querySelectorAll('.rp-chart').forEach(function(chart) {
+      chart.classList.remove('is-synced');
+      chart.classList.remove('is-pinned');
+      chart.classList.remove('is-inspecting');
+    });
     document.querySelectorAll('.rp-row.is-active').forEach(function(row) {
       row.classList.remove('is-active');
     });
     document.querySelectorAll('.rp-trace-line.is-active').forEach(function(btn) {
       btn.classList.remove('is-active');
     });
+    renderCorrelationStrip(null, false);
   }
 
   function updateChartInspection(chart, event, pinned) {
     if (!chart || !rpLastResult) return;
     chart = ensureChartFresh(chart) || chart;
-    var rect = chart.getBoundingClientRect();
-    if (!rect.width) return;
-    var ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    var ratio = chartDomainRatio(chart, event.clientX);
+    if (ratio == null) return;
     var min = Number(chart.dataset.domainMin || 0);
     var max = Number(chart.dataset.domainMax || 0);
     var minute = Math.round(min + (max - min) * ratio);
-    updateChartInspectionAt(chart, minute, pinned);
+    if (pinned) applySynchronizedInspection(chart, minute, true);
+    else queueSynchronizedInspection(chart, minute);
   }
 
   function updateChartInspectionAt(chart, minute, pinned) {
     if (!chart || !rpLastResult) return;
     chart = ensureChartFresh(chart) || chart;
-    var rect = chart.getBoundingClientRect();
-    if (!rect.width) return;
-    var min = Number(chart.dataset.domainMin || 0);
-    var max = Number(chart.dataset.domainMax || 0);
-    var ratio = max > min ? (minute - min) / (max - min) : .5;
-    ratio = Math.max(0, Math.min(1, ratio));
-    var symbol = chart.dataset.symbol || '';
-    var left = ratio * 100;
-    var crosshair = chart.querySelector('.rp-crosshair');
-    var tooltip = chart.querySelector('.rp-tooltip');
-    if (crosshair) crosshair.style.left = left.toFixed(2) + '%';
-    if (tooltip) {
-      tooltip.style.left = Math.max(88, Math.min(rect.width - 88, ratio * rect.width)).toFixed(1) + 'px';
-      tooltip.innerHTML = describeInspection(symbol, minute) + (pinned ? '<span class="rp-pinned-note">Pinned</span>' : '');
-    }
-    chart.classList.add('is-inspecting');
-    if (pinned) chart.classList.add('is-pinned');
-    var row = chart.closest('.rp-row');
-    if (row) row.classList.add('is-active');
+    applySynchronizedInspection(chart, Number(minute), !!pinned);
   }
 
   function handleChartMove(event) {
@@ -1647,9 +1869,7 @@
     var chart = event.target.closest && event.target.closest('.rp-chart');
     if (!chart || chart === rpPinnedChart) return;
     if (event.relatedTarget && chart.contains(event.relatedTarget)) return;
-    chart.classList.remove('is-inspecting');
-    var row = chart.closest('.rp-row');
-    if (row && (!rpPinnedChart || !row.contains(rpPinnedChart))) row.classList.remove('is-active');
+    if (chart === rpInspectionSource && !rpInspectionPinned) clearPinnedChart();
   }
 
   function handleChartClick(event) {
@@ -1657,7 +1877,7 @@
       event.preventDefault();
       return;
     }
-    if (event.target.closest && event.target.closest('.rp-trace-line, .rp-trade-chip')) return;
+    if (event.target.closest && event.target.closest('.rp-trace-line, .rp-trade-chip, .rp-correlation-event, .rp-viewport-tools, .rp-scrubber')) return;
     var chart = event.target.closest && event.target.closest('.rp-chart');
     if (!chart) {
       clearPinnedChart();
@@ -1672,8 +1892,37 @@
     updateChartInspection(chart, event, true);
   }
 
+  function handleChartKeydown(event) {
+    var chart = event.target.closest && event.target.closest('.rp-chart');
+    if (!chart || !rpViewDomain) return;
+    var key = event.key;
+    if (key === 'Escape') {
+      clearPinnedChart();
+      return;
+    }
+    var minute = chart === rpInspectionSource && rpInspectionMinute != null
+      ? rpInspectionMinute
+      : Math.round((rpViewDomain.min + rpViewDomain.max) / 2);
+    var step = event.shiftKey ? 5 : 1;
+    if (key === 'ArrowLeft') minute -= step;
+    else if (key === 'ArrowRight') minute += step;
+    else if (key === 'Home') minute = Math.ceil(rpViewDomain.min);
+    else if (key === 'End') minute = Math.floor(rpViewDomain.max);
+    else if (key === 'Enter' || key === ' ') {
+      event.preventDefault();
+      if (rpPinnedChart === chart) clearPinnedChart();
+      else applySynchronizedInspection(chart, minute, true);
+      return;
+    } else {
+      return;
+    }
+    event.preventDefault();
+    minute = Math.max(Math.ceil(rpViewDomain.min), Math.min(Math.floor(rpViewDomain.max), minute));
+    applySynchronizedInspection(chart, minute, true);
+  }
+
   function handleTraceClick(event) {
-    var btn = event.target.closest && event.target.closest('.rp-trace-line, .rp-trade-chip');
+    var btn = event.target.closest && event.target.closest('.rp-trace-line, .rp-trade-chip, .rp-correlation-event');
     if (!btn) return;
     event.preventDefault();
     var minute = Number(btn.dataset.minute);
@@ -1714,9 +1963,13 @@
     var sym = chart.dataset.symbol || '';
     chart.classList.remove('is-inspecting');
     chart.classList.remove('is-pinned');
+    chart.classList.remove('is-synced');
     chart.dataset.domainMin = domain.min;
     chart.dataset.domainMax = domain.max;
     chart.innerHTML = chartSvg(rpLastResult, sym, domain) + chartOverlayHtml();
+    if (rpInspectionMinute != null && inDomain(rpInspectionMinute, domain)) {
+      applyInspectionToChart(chart, rpInspectionMinute, rpInspectionSource, rpInspectionPinned);
+    }
     return chart;
   }
 
@@ -1777,11 +2030,6 @@
 
   function refreshViewportUi(forceAll, focusChart) {
     if (!rpLastResult || !rpViewDomain) return;
-    clearPinnedChart();
-    rpPinnedChart = null;
-    document.querySelectorAll('.rp-row.is-active').forEach(function(row) {
-      row.classList.remove('is-active');
-    });
     document.querySelectorAll('.rp-chart').forEach(function(chart) {
       chart.classList.remove('is-inspecting');
       chart.classList.remove('is-pinned');
@@ -1794,6 +2042,13 @@
     var label = document.getElementById('rp-viewport-window');
     if (label) label.textContent = viewportLabel();
     syncViewportScrubber();
+    if (rpInspectionMinute != null) {
+      if (inDomain(rpInspectionMinute, rpViewDomain) && rpInspectionSource) {
+        applySynchronizedInspection(rpInspectionSource, rpInspectionMinute, rpInspectionPinned);
+      } else {
+        clearPinnedChart();
+      }
+    }
   }
 
   function requestDeferredViewportRefresh() {
@@ -2364,6 +2619,10 @@
       '</div>' +
       '</div>' +
       scrubber +
+      '<div class="rp-correlation-strip" id="rp-correlation-strip" aria-label="Events at selected replay time">' +
+      '<span class="rp-correlation-time" id="rp-correlation-time"></span>' +
+      '<div class="rp-correlation-events" id="rp-correlation-events"></div>' +
+      '</div>' +
       '</div>' +
       '<div>Scale</div>' +
       '</div>';
@@ -2441,7 +2700,7 @@
     var badge = tradeCount ? fmtMoney(pnl) : (armedFor(result, sym).spans || []).length ? 'armed' : 'watched';
     return '<article class="rp-row" data-symbol="' + esc(sym) + '">' +
       '<div class="rp-symbol"><b>' + esc(sym) + '</b><span>' + esc(tradeCount + ' trades') + '</span><span>' + esc(fmtNum(bars.length) + ' bars') + '</span><span class="rp-badge ' + (pnl >= 0 ? 'rp-pos' : 'rp-neg') + '">' + esc(badge) + '</span></div>' +
-      '<div class="rp-chart" data-symbol="' + esc(sym) + '" data-domain-min="' + esc(eager ? domain.min : '') + '" data-domain-max="' + esc(eager ? domain.max : '') + '">' + (eager ? chartSvg(result, sym, domain) + chartOverlayHtml() : chartPlaceholderHtml()) + '</div>' +
+      '<div class="rp-chart" tabindex="0" aria-label="' + esc(sym) + ' interactive replay chart" data-symbol="' + esc(sym) + '" data-domain-min="' + esc(eager ? domain.min : '') + '" data-domain-max="' + esc(eager ? domain.max : '') + '">' + (eager ? chartSvg(result, sym, domain) + chartOverlayHtml() : chartPlaceholderHtml()) + '</div>' +
       '<div class="rp-setup">' + renderChips(result, sym) + renderTraceLines(result, sym, eager) + '</div>' +
       '</article>';
   }
@@ -2579,6 +2838,7 @@
   function renderLoading(text) {
     var host = document.getElementById('rp-workspace');
     if (!host) return;
+    clearPinnedChart();
     rpFullDomain = null;
     rpViewDomain = null;
     rpDragState = null;
@@ -2816,6 +3076,7 @@
     document.addEventListener('pointercancel', finishScrubberPan);
     document.addEventListener('pointercancel', finishChartPan);
     document.addEventListener('keydown', handleScrubberKeydown);
+    document.addEventListener('keydown', handleChartKeydown);
     document.addEventListener('pointerout', handleChartOut);
     document.addEventListener('click', handleTraceClick);
     document.addEventListener('click', handleChartClick);
