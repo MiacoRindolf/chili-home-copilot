@@ -23,6 +23,9 @@ def test_replay_page_exposes_research_fsm_console(client):
     assert b"Replay v3" in r.content
     assert b"Live FSM" in r.content
     assert b"/api/trading/momentum/replay/fsm" in r.content
+    assert b"rp-correlation-strip" in r.content
+    assert b"applySynchronizedInspection" in r.content
+    assert b"interactive replay chart" in r.content
 
 
 def test_replay_run_starts_thread_and_single_flights(client):
