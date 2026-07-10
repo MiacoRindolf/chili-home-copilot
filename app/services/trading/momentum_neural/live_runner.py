@@ -12743,6 +12743,43 @@ def tick_live_session(
                         })
                 except Exception:
                     pass
+            # NOISE-FLOOR CLAMP (2026-07-09, JEM 06-30 replay forensic): the composed
+            # candidate (cushion + volnorm + ride-lock) may not tighten INSIDE the name's
+            # OWN live noise band — the math-verified 2A vol-normalized width (_vn_dist,
+            # derived from the live tape's realized vol; the SAME read the volnorm layer
+            # trails with). Why: the layers compose via max() (invariant-A, ratchet-only),
+            # so the TIGHTEST layer always wins — on JEM the cold-regime band mult (389bps)
+            # then a ride-lock HARD band on one OFI wobble (268bps) hugged a name whose own
+            # measured noise was 778bps; the first retest wick stopped it at -0.14R seconds
+            # before a +37%-in-1-min squeeze (Ross: retest-wick != failure; structure, not
+            # bands, governs the runner). ADAPTIVE: the floor IS the name's live noise read
+            # — no new knob. Exemptions preserved: (a) flow-CONFIRMED reversals
+            # (tape_accel_reversal / ofi_exhaustion_lock) write their stops AFTER this
+            # compose, unclamped — a genuine confirmed top still tightens hard; (b) the
+            # breakeven floor after a partial stays sacred (never clamped below it);
+            # (c) invariant-A intact — never lowers the PLACED stop (identity when the
+            # placed stop already sits inside the band). Thin tape (_vn_dist None) =>
+            # identity (no data, no clamp).
+            try:
+                if (
+                    _vn_dist is not None
+                    and float(_vn_dist) > 0
+                    and _hwm_trail > 0
+                    and _trailed > stop_px
+                ):
+                    _noise_cap = _hwm_trail * (1.0 - float(_vn_dist))
+                    _cap = max(_noise_cap, _be_floor if pos.get("partial_taken") else stop_px, stop_px)
+                    if _trailed > _cap:
+                        _emit(db, sess, "trail_noise_floor_clamped", {
+                            "candidate": _trailed,
+                            "clamped_to": _cap,
+                            "noise_dist_pct": float(_vn_dist),
+                            "high_water_mark": _hwm_trail,
+                            "placed_stop": stop_px,
+                        })
+                        _trailed = _cap
+            except (TypeError, ValueError):
+                pass
             # G4 P1: GRIND structure clamp — the composed candidate (cushion + volnorm +
             # ride-lock) may not tighten inside the structure floor while the grind holds.
             # Identity when grind is inactive; never lowers the placed stop (INVARIANT-A).

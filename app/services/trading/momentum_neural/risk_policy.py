@@ -2477,8 +2477,25 @@ def reentry_escalation_decision(
             # mode; do not double-block here (fail toward current behavior).
             dbg["reason"] = "no_live_price_fail_open"
         elif px < required:
-            dbg["reason"] = "reclaim_not_met"
-            return False, dbg
+            # DAY-LEADER IGNITION BYPASS (2026-07-09, JEM 06-30 replay forensic):
+            # demanding the PRIOR attempt's HWM back is the wrong proof when the
+            # market re-based LOWER and is now IGNITING off the new base — on JEM
+            # the structural trigger fired at 3.57-3.61 with tape_accel +75k..+110k
+            # (the +37%-in-1-min squeeze's first seconds) while this gate demanded
+            # 3.82; by the time the vertical crossed 3.82 the anti-chase cap owned
+            # the block — between the two, the re-entry window was ~1-2s wide and
+            # the day's biggest winner was forfeited (Ross re-enters on the NEW
+            # structure's break, not the old failure's price). For the DAY-LEADER
+            # with a STRUCTURAL trigger and actively POSITIVE tape, the structural
+            # break itself is the reclaim proof. Non-leaders, non-structural
+            # triggers, and weak tape keep the full price-reclaim bar (the
+            # CLRO-07-02 loss-chase class this gate exists for), and the anti-chase
+            # cap + adaptive cooldown + per-name loss caps all still apply.
+            if is_day_leader and structural_trigger and _tape_positive():
+                dbg["reason"] = "leader_ignition_bypass"
+            else:
+                dbg["reason"] = "reclaim_not_met"
+                return False, dbg
         else:
             dbg["reason"] = "reclaim_met"
             # NOTE: the anti-chase-the-top CAP (do not re-buy far above where the last
