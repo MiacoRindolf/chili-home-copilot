@@ -9448,6 +9448,19 @@ class Settings(BaseSettings):
         default="", validation_alias=AliasChoices("CHILI_ORTEX_API_KEY"),
         description="Ortex short-interest / cost-to-borrow API key for the squeeze-fuel selection tilt. Empty ⇒ no Ortex fetch ⇒ no tilt (fail-open).",
     )
+    # TIME-OF-DAY risk curve (2026-07-10, greenlit #1): scale per-trade risk by the
+    # lane's own measured per-ET-hour expectancy, shrunk toward the Ross discovery-
+    # window prior (risk_policy.time_of_day_risk_multiplier). Default ON (no dark
+    # flags); the shrinkage K is THE one documented base (samples for an hour bucket
+    # to earn half its own weight vs the prior).
+    chili_momentum_time_of_day_risk_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TIME_OF_DAY_RISK_ENABLED"),
+    )
+    chili_momentum_time_of_day_shrinkage_samples: float = Field(
+        default=20.0, ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_TIME_OF_DAY_SHRINKAGE_SAMPLES"),
+    )
     chili_alpaca_api_key: str = Field(
         default="", validation_alias=AliasChoices("CHILI_ALPACA_API_KEY"),
     )
