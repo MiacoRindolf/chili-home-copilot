@@ -195,6 +195,15 @@
   letter-spacing: .05em;
   text-transform: uppercase;
 }
+.rp-stat em {
+  display: block;
+  margin-top: 4px;
+  color: var(--rp-soft);
+  font-size: 10px;
+  font-style: normal;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
 .rp-pos { color: var(--rp-green); }
 .rp-neg { color: var(--rp-red); }
 .rp-empty {
@@ -665,7 +674,7 @@
   var rpRenderedSignature = null;
   var RP_MIN_WINDOW_MINUTES = 6;
   var RP_EAGER_ROWS = 5;
-  var RP_STORAGE_PREFIX = 'chili:replay:v4:';
+  var RP_STORAGE_PREFIX = 'chili:replay:v5:';
   var RP_HISTORY_CACHE_KEY = RP_STORAGE_PREFIX + 'history';
   var RP_RESULT_INDEX_KEY = RP_STORAGE_PREFIX + 'result:index';
   var RP_RESULT_CACHE_LIMIT = 2;
@@ -730,6 +739,8 @@
       Object.keys(result.series || {}).length,
       v3.traded_session_count || '',
       v3.recorded_day_pnl_usd == null ? '' : v3.recorded_day_pnl_usd,
+      ((result.day_truth || {}).total_usd == null ? '' : (result.day_truth || {}).total_usd),
+      ((result.day_truth_gap || {}).delta_usd == null ? '' : (result.day_truth_gap || {}).delta_usd),
       result.error || ''
     ].join('|');
   }
@@ -2150,8 +2161,37 @@
     if (subtitle && result) {
       var v3 = result.replay_v3_day || null;
       var count = v3 ? Number(v3.traded_session_count || 0) : ((result.trades || []).length);
-      subtitle.textContent = 'Loaded ' + (result.date || fallbackDate || '') + ' with ' + count + ' live trade sessions.';
+      var truth = result.day_truth || {};
+      var shown = result.shown_subset || {};
+      if (truth.available) {
+        var shownPnl = shown.total_usd == null ? (result.total_usd || 0) : shown.total_usd;
+        subtitle.textContent = 'Loaded ' + (result.date || fallbackDate || '') + ': day total ' +
+          fmtSignedMoney(truth.total_usd) + ' across ' + fmtNum(truth.trades || 0) +
+          ' live outcomes; shown subset ' + fmtSignedMoney(shownPnl) +
+          ' across ' + fmtNum(shown.trades || count) + ' replay-traced sessions.';
+      } else {
+        subtitle.textContent = 'Loaded ' + (result.date || fallbackDate || '') + ' with ' + count + ' replay-traced live sessions.';
+      }
     }
+  }
+
+  function statCard(value, label, detail, cls) {
+    return '<div class="rp-stat"><b class="' + esc(cls || '') + '">' + esc(value) + '</b><span>' + esc(label) + '</span>' +
+      (detail ? '<em>' + esc(detail) + '</em>' : '') + '</div>';
+  }
+
+  function pnlClass(value) {
+    return Number(value || 0) >= 0 ? 'rp-pos' : 'rp-neg';
+  }
+
+  function gapDetail(gap) {
+    if (!gap || !gap.available) return 'truth unavailable';
+    if (gap.shown_is_full_day) return 'all day outcomes shown';
+    var rows = gap.outside_symbols || [];
+    if (!rows.length) return 'no symbol gap';
+    return rows.slice(0, 3).map(function(row) {
+      return row.symbol + ' ' + fmtSignedMoney(row.delta_usd);
+    }).join(', ');
   }
 
   function renderReplayStats(result, symbols) {
@@ -2159,22 +2199,32 @@
     var total = Number(result.total_usd || 0);
     if (v3) {
       var band = v3.replay_day_pnl_band_usd || {};
+      var truth = result.day_truth || {};
+      var shown = result.shown_subset || {};
+      var gap = result.day_truth_gap || {};
+      var shownTotal = Number(shown.total_usd == null ? total : shown.total_usd);
+      var dayTotal = Number(truth.available ? truth.total_usd : shownTotal);
+      var dayDetail = truth.available
+        ? fmtNum(truth.trades || 0) + ' full-day live outcomes'
+        : 'pair account to compare';
+      var shownDetail = fmtNum(shown.trades || v3.traded_session_count || 0) + ' replay-traced sessions';
+      var gapValue = gap.available ? fmtSignedMoney(gap.delta_usd || 0) : '-';
       var traceMatches = (v3.per_trade || []).filter(function(row) { return row && row.trace_matches; }).length;
       var tradeCount = Number(v3.traded_session_count || (v3.per_trade || []).length || 0);
       return '<div class="rp-stats">' +
-        '<div class="rp-stat"><b>' + esc(result.date || '-') + '</b><span>Date</span></div>' +
-        '<div class="rp-stat"><b class="' + (total >= 0 ? 'rp-pos' : 'rp-neg') + '">' + esc(fmtMoney(total)) + '</b><span>Recorded P/L</span></div>' +
-        '<div class="rp-stat"><b>' + esc(fmtMoney(Number(band.low_conservative || 0))) + ' / ' + esc(fmtMoney(Number(band.high_optimistic || 0))) + '</b><span>Replay Band</span></div>' +
-        '<div class="rp-stat"><b>' + esc(traceMatches + '/' + tradeCount) + '</b><span>FSM Trace</span></div>' +
-        '<div class="rp-stat"><b>' + esc(v3.armed_symbol_count || symbols.length || 0) + '</b><span>Armed Symbols</span></div>' +
+        statCard(result.date || '-', 'Date', 'ET session day') +
+        statCard(fmtSignedMoney(dayTotal), 'Day Total', dayDetail, pnlClass(dayTotal)) +
+        statCard(fmtSignedMoney(shownTotal), 'Shown Subset', shownDetail, pnlClass(shownTotal)) +
+        statCard(gapValue, 'Outside Shown Set', gapDetail(gap), gap.available ? pnlClass(gap.delta_usd || 0) : '') +
+        statCard(traceMatches + '/' + tradeCount, 'FSM Trace', 'Replay v3 trace coverage') +
         '</div>';
     }
     return '<div class="rp-stats">' +
-      '<div class="rp-stat"><b>' + esc(result.date || '-') + '</b><span>Date</span></div>' +
-      '<div class="rp-stat"><b class="' + (total >= 0 ? 'rp-pos' : 'rp-neg') + '">' + esc(fmtMoney(total)) + '</b><span>P/L</span></div>' +
-      '<div class="rp-stat"><b>' + esc((result.trades || []).length) + '</b><span>Trades</span></div>' +
-      '<div class="rp-stat"><b>' + esc(symbols.length) + '</b><span>Symbols</span></div>' +
-      '<div class="rp-stat"><b>' + esc(result.armed_source || 'replay') + '</b><span>Mode</span></div>' +
+      statCard(result.date || '-', 'Date', 'ET session day') +
+      statCard(fmtSignedMoney(total), 'Replay P/L', 'counterfactual result', pnlClass(total)) +
+      statCard((result.trades || []).length, 'Trades') +
+      statCard(symbols.length, 'Symbols') +
+      statCard(result.armed_source || 'replay', 'Mode') +
       '</div>';
   }
 
@@ -2191,6 +2241,9 @@
       armed_source: result.armed_source,
       trades: (result.trades || []).length,
       replay_v3_trade_sessions: (result.replay_v3_day || {}).traded_session_count || null,
+      day_truth_total: (result.day_truth || {}).total_usd == null ? null : (result.day_truth || {}).total_usd,
+      shown_subset_total: (result.shown_subset || {}).total_usd == null ? null : (result.shown_subset || {}).total_usd,
+      day_truth_gap: (result.day_truth_gap || {}).delta_usd == null ? null : (result.day_truth_gap || {}).delta_usd,
       series_symbols: Object.keys(result.series || {}).length,
       trace_rows: (result.decision_trace || []).length,
       error: result.error || null

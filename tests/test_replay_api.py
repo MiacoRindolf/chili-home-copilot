@@ -1,6 +1,7 @@
 """Replay v2 API — run/status/list/result endpoints (engine mocked; it is minutes-heavy)."""
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import patch
 
 
@@ -109,6 +110,87 @@ def test_replay_v3_day_result_loads_as_live_fsm(client, tmp_path, monkeypatch):
     assert result["trades"][0]["sym"] == "TEST"
     assert result["replay_v3_day"]["traded_session_count"] == 1
     assert any(row["stage"].startswith("v3 live entry") for row in result["decision_trace"])
+
+
+def test_replay_day_truth_sums_full_day_live_outcomes(db):
+    import app.routers.trading_sub.replay_api as ra
+    from app.models.core import User
+    from app.models.trading import MomentumAutomationOutcome, MomentumStrategyVariant, TradingAutomationSession
+
+    user = User(name="replay-truth")
+    variant = MomentumStrategyVariant(family="ross", variant_key="truth_v", label="truth", params_json={})
+    db.add_all([user, variant])
+    db.flush()
+
+    def session(symbol, *, family="robinhood_spot"):
+        row = TradingAutomationSession(
+            user_id=int(user.id),
+            symbol=symbol,
+            mode="live",
+            state="live_exited",
+            execution_family=family,
+            variant_id=int(variant.id),
+        )
+        db.add(row)
+        db.flush()
+        return row
+
+    vrax = session("VRAX")
+    rkto = session("RKTO")
+    alpaca = session("FAKE", family="alpaca_spot")
+    db.add_all([
+        MomentumAutomationOutcome(
+            session_id=int(vrax.id), user_id=int(user.id), variant_id=int(variant.id),
+            symbol="VRAX", mode="live", execution_family="robinhood_spot",
+            terminal_state="live_exited", terminal_at=datetime(2026, 7, 9, 15, 0),
+            outcome_class="target_hit", realized_pnl_usd=362.0,
+        ),
+        MomentumAutomationOutcome(
+            session_id=int(rkto.id), user_id=int(user.id), variant_id=int(variant.id),
+            symbol="RKTO", mode="live", execution_family="robinhood_spot",
+            terminal_state="live_exited", terminal_at=datetime(2026, 7, 9, 20, 0),
+            outcome_class="target_hit", realized_pnl_usd=100.0,
+            broker_recon_status="reconciled", broker_realized_pnl_usd=845.0,
+        ),
+        MomentumAutomationOutcome(
+            session_id=int(alpaca.id), user_id=int(user.id), variant_id=int(variant.id),
+            symbol="FAKE", mode="live", execution_family="alpaca_spot",
+            terminal_state="live_exited", terminal_at=datetime(2026, 7, 9, 16, 0),
+            outcome_class="target_hit", realized_pnl_usd=999.0,
+        ),
+    ])
+    db.flush()
+
+    truth = ra._day_truth_for_date(db, date="2026-07-09", user_id=int(user.id))
+    assert truth["available"] is True
+    assert truth["total_usd"] == 2206.0
+    assert truth["trades"] == 3
+    assert truth["source_counts"] == {"automation_outcome": 2, "broker_reconciled": 1}
+    assert {row["symbol"] for row in truth["symbols"]} == {"VRAX", "RKTO", "FAKE"}
+
+
+def test_replay_day_truth_gap_marks_outside_shown_symbols():
+    import app.routers.trading_sub.replay_api as ra
+
+    result = {
+        "engine": "v3_day",
+        "trades": [{"sym": "VRAX", "usd": 362.0}],
+    }
+    day_truth = {
+        "available": True,
+        "total_usd": 1207.0,
+        "trades": 2,
+        "symbols": [
+            {"symbol": "VRAX", "total_usd": 362.0, "trades": 1},
+            {"symbol": "RKTO", "total_usd": 845.0, "trades": 1},
+        ],
+    }
+
+    out = ra._attach_pnl_context(result, day_truth)
+    assert out["shown_subset"]["total_usd"] == 362.0
+    assert out["day_truth_gap"]["delta_usd"] == 845.0
+    assert out["day_truth_gap"]["outside_symbols"][0]["symbol"] == "RKTO"
+    assert out["day_truth_gap"]["shown_is_full_day"] is False
 
 
 def test_replay_result_roundtrips_divergence_and_trace(client, tmp_path, monkeypatch):
