@@ -19,7 +19,7 @@ def test_replay_run_rejects_bad_date(client):
 def test_replay_page_exposes_research_fsm_console(client):
     r = client.get("/trading/replay")
     assert r.status_code == 200
-    assert b"Replay Research" in r.content
+    assert b"Chili Trading Timeline" in r.content
     assert b"Replay v3" in r.content
     assert b"Live FSM" in r.content
     assert b"/api/trading/momentum/replay/fsm" in r.content
@@ -29,6 +29,8 @@ def test_replay_page_exposes_research_fsm_console(client):
     assert b"rp-event-play" in r.content
     assert b"rpToggleEventPlayback" in r.content
     assert b"rpStepReplayEvent" in r.content
+    assert b"Replay | Live" in r.content
+    assert b"/api/trading/momentum/replay/live" in r.content
 
 
 def test_replay_run_starts_thread_and_single_flights(client):

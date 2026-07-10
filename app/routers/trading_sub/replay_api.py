@@ -15,7 +15,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -518,6 +518,24 @@ def run_replay_endpoint(payload: dict):
 def replay_status():
     with _lock:
         return {"ok": True, "job": dict(_job)}
+
+
+@router.get("/live")
+def replay_live_monitor(
+    response: Response,
+    identity_ctx: dict[str, Any] = Depends(get_identity_ctx),
+):
+    """Read-only live observer; no broker, provider, runner, or write calls."""
+
+    user_id = identity_ctx.get("user_id")
+    db = identity_ctx.get("db")
+    if identity_ctx.get("is_guest") or user_id is None or db is None:
+        raise HTTPException(status_code=403, detail="Paired account required for live monitoring.")
+    from ...services.trading.momentum_neural.live_monitor import live_monitor_snapshot
+
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Chili-Live-Observer"] = "read-only"
+    return live_monitor_snapshot(db, user_id=int(user_id))
 
 
 @router.get("/list")
