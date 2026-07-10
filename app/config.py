@@ -9454,6 +9454,17 @@ class Settings(BaseSettings):
     chili_alpaca_api_secret: str = Field(
         default="", validation_alias=AliasChoices("CHILI_ALPACA_API_SECRET"),
     )
+    # LIVE key pair (2026-07-10): both key sets live side-by-side in the deploy .env so
+    # the paper->live switch is ONE flag flip (CHILI_ALPACA_PAPER=0) + worker restart —
+    # no credential edits at switch time. _keys() selects by posture: paper -> the base
+    # pair above; live -> this pair (falling back to the base pair only if unset, so a
+    # single-pair setup keeps working). The operator enters the values themselves.
+    chili_alpaca_live_api_key: str = Field(
+        default="", validation_alias=AliasChoices("CHILI_ALPACA_LIVE_API_KEY"),
+    )
+    chili_alpaca_live_api_secret: str = Field(
+        default="", validation_alias=AliasChoices("CHILI_ALPACA_LIVE_API_SECRET"),
+    )
     chili_alpaca_data_feed: str = Field(
         default="iex", validation_alias=AliasChoices("CHILI_ALPACA_DATA_FEED"),
     )
