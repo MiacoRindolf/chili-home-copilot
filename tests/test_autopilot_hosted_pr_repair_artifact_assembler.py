@@ -10,6 +10,8 @@ def test_artifact_assembler_hashes_transcripts_and_writes_valid_inventory(tmp_pa
     seed_dir = hosted._valid_inventory_dir(tmp_path / "seed")
     seed_inventory = json.loads((seed_dir / "inventory.json").read_text(encoding="utf-8"))
     artifact = seed_inventory["artifacts"][0]
+    review_path = seed_dir / artifact["review_thread_transcript"]["path"]
+    review_path.write_text(review_path.read_text(encoding="utf-8"), encoding="utf-8-sig")
     receipt_path = seed_dir / "post_repair_check_receipt.json"
     receipt_path.write_text(
         json.dumps(artifact["post_repair_check_receipt"], indent=2, sort_keys=True) + "\n",

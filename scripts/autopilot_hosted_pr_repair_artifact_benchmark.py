@@ -130,7 +130,10 @@ def _read_json(path: Path) -> Mapping[str, object]:
 
 def _read_transcript_events(path: Path, *, label: str) -> list[Mapping[str, object]]:
     events: list[Mapping[str, object]] = []
-    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+    for line_number, raw_line in enumerate(
+        path.read_text(encoding="utf-8-sig", errors="replace").splitlines(),
+        start=1,
+    ):
         line = raw_line.strip()
         if not line:
             continue
