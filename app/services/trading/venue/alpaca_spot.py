@@ -499,7 +499,7 @@ class AlpacaSpotAdapter:
             from alpaca.trading.requests import StopOrderRequest
 
             req = StopOrderRequest(
-                symbol=_to_alpaca_symbol(product_id),
+                symbol=_to_symbol(product_id),
                 qty=base_size,
                 side=OrderSide.SELL,
                 time_in_force=TimeInForce.GTC,
