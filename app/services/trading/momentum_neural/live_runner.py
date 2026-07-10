@@ -3253,6 +3253,15 @@ def _is_dup_reference_reject(error: str | None) -> bool:
     e = str(error).lower()
     if "reference id" in e and "unique" in e:
         return True
+    # ALPACA phrasing of the SAME duplicate-id confirm (2026-07-10, JZXN sid 12716):
+    # {"code":40010001,"message":"client_order_id must be unique"} — the first submit
+    # is already live at the venue; treating this as fatal orphaned a filled 12,700sh
+    # position with NO dead-man (the placement hangs off fill-processing the error
+    # path never reached). Match stays narrow: the literal field name + 'unique'.
+    if "client_order_id" in e and "unique" in e:
+        return True
+    if "40010001" in e:
+        return True
     return ("409" in e) and ("reference" in e) and ("unique" in e)
 
 
