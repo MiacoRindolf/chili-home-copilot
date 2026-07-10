@@ -122,7 +122,7 @@ def _resolve_relative_file(raw_path: object, *, base_dir: Path, label: str) -> P
 
 def _read_json(path: Path) -> Mapping[str, object]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as exc:
         raise HostedPrRepairArtifactError(f"{path}: invalid JSON: {exc}") from exc
     return _as_mapping(payload, label=str(path))

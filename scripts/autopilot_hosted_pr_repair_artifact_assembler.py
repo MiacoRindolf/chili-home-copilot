@@ -50,7 +50,7 @@ def _required_text(payload: Mapping[str, object], key: str, *, label: str) -> st
 
 def _read_json(path: Path) -> dict[str, object]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as exc:
         raise HostedPrRepairArtifactAssemblerError(f"{path}: invalid JSON: {exc}") from exc
     return dict(_as_mapping(payload, label=str(path)))

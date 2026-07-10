@@ -13,7 +13,7 @@ def test_artifact_assembler_hashes_transcripts_and_writes_valid_inventory(tmp_pa
     receipt_path = seed_dir / "post_repair_check_receipt.json"
     receipt_path.write_text(
         json.dumps(artifact["post_repair_check_receipt"], indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+        encoding="utf-8-sig",
     )
     source_manifest = seed_dir / "source_manifest.json"
     source_manifest.write_text(
