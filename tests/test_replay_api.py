@@ -168,6 +168,12 @@ def test_replay_day_truth_sums_full_day_live_outcomes(db):
     assert truth["source_counts"] == {"automation_outcome": 2, "broker_reconciled": 1}
     assert {row["symbol"] for row in truth["symbols"]} == {"VRAX", "RKTO", "FAKE"}
 
+    unpaired_truth = ra._day_truth_for_date(db, date="2026-07-09", user_id=None)
+    assert unpaired_truth["available"] is True
+    assert unpaired_truth["scope"] == "all_users"
+    assert unpaired_truth["total_usd"] == truth["total_usd"]
+    assert unpaired_truth["trades"] == truth["trades"]
+
 
 def test_replay_day_truth_gap_marks_outside_shown_symbols():
     import app.routers.trading_sub.replay_api as ra
