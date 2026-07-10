@@ -26,6 +26,8 @@ def test_hosted_pr_repair_artifact_cli_real_inventory_writes_promotion_ready_sco
     assert "- Status: passed" in markdown
     assert "- Evidence mode: real_inventory" in markdown
     assert "- Checks: 18" in markdown
+    assert "- Artifact PRs: https://github.com/MiacoRindolf/chili-home-copilot/pull/282" in markdown
+    assert "- Artifact source runs: gh-pr282-repair-20260603T1112Z" in markdown
     assert "- Promotion eligible: true" in markdown
 
 

@@ -696,9 +696,13 @@ def render_scorecard(
 ) -> str:
     generated_at = generated_at or datetime.now(timezone.utc)
     artifacts: object = "fixture"
+    artifact_prs: object = "fixture"
+    source_runs: object = "fixture"
     promotion_eligible = False
     if evidence_summary is not None:
         artifacts = evidence_summary.get("artifacts", 0)
+        artifact_prs = ", ".join(str(item) for item in evidence_summary.get("prs", [])) or "none"
+        source_runs = ", ".join(str(item) for item in evidence_summary.get("source_runs", [])) or "none"
         promotion_eligible = bool(evidence_summary.get("promotion_eligible"))
     lines = [
         "# CHILI Hosted PR Repair Artifact Benchmark",
@@ -711,6 +715,8 @@ def render_scorecard(
         f"- Checks: {len(results)}",
         f"- Average score: {average_score(results)}/100",
         f"- Artifacts: {artifacts}",
+        f"- Artifact PRs: {artifact_prs}",
+        f"- Artifact source runs: {source_runs}",
         f"- Promotion eligible: {str(promotion_eligible).lower()}",
         f"- Required checks: {', '.join(REQUIRED_CHECKS)}",
         f"- Missing checks: {', '.join(missing_checks(results)) or 'none'}",
