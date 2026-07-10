@@ -1233,6 +1233,22 @@ def _submit_live_market_exit(
             "attempts": attempts,
         }
 
+    # DEAD-MAN release (2026-07-10): before ANY software sell, cancel the resting
+    # broker-side dead-man stop so the shares are free and a double-sell is
+    # impossible even in the cancel/fill race (sell_to_close bounds the race's
+    # worst case at flat, never short). Same chokepoint rationale as the scale-out
+    # cancel below — every exit path crosses here. Fail-open: a cancel failure
+    # logs + proceeds (the broker-qty clamp below still sells only what is free).
+    _dm = le.get("deadman_stop") if isinstance(le.get("deadman_stop"), dict) else None
+    if _dm and _dm.get("order_id") and hasattr(adapter, "cancel_order_by_id"):
+        try:
+            if adapter.cancel_order_by_id(str(_dm["order_id"])):
+                le.pop("deadman_stop", None)
+                _commit_le(sess, le)
+                _emit(db, sess, "live_deadman_stop_released", {"order_id": _dm["order_id"], "reason": reason})
+        except Exception:
+            logger.warning("[live_runner] deadman release failed", exc_info=True)
+
     # Sell-into-strength invariant: a resting scale-out limit may be working this
     # position. Cancel it FIRST and adopt any fill it caught, then clamp the sell
     # quantity to the true remainder — the one chokepoint every exit path crosses.
@@ -8347,6 +8363,44 @@ def tick_live_session(
                         "filled_size": filled,
                     },
                 )
+                # DEAD-MAN broker-side stop (2026-07-10, the GMM -$16k orphan incident):
+                # rest a GTC STOP at the BROKER one risk-buffer BELOW the software stop.
+                # The FSM stays the primary manager (its exits fire first — the dead-man
+                # sits 25% of the risk unit lower, so it triggers ONLY when the software
+                # layer is dead/unreachable: the exact incident was TCP port exhaustion
+                # leaving the worker alive but unable to reach Alpaca while GMM collapsed).
+                # sell_to_close => a double-fire can never flip short. Best-effort: a
+                # placement failure logs + continues (the software stop still manages).
+                # Alpaca-family only; released at the exit chokepoint before any sell.
+                try:
+                    if normalize_execution_family(sess.execution_family) == "alpaca_spot":
+                        _pos_dm = le.get("position") or {}
+                        _dm_stop = _float_or_none(_pos_dm.get("stop_price"))
+                        if _dm_stop is not None and _dm_stop > 0 and float(avg) > _dm_stop:
+                            _dm_risk = float(avg) - float(_dm_stop)
+                            _dm_px = max(0.01, float(_dm_stop) - 0.25 * _dm_risk)
+                            _dm_res = adapter.place_deadman_stop(
+                                product_id=product_id,
+                                base_size=str(filled),
+                                stop_price=_dm_px,
+                                client_order_id=f"chili_dm_{sess.id}_{no.order_id[:8]}",
+                            ) if hasattr(adapter, "place_deadman_stop") else {"ok": False, "error": "adapter_no_deadman"}
+                            if _dm_res.get("ok"):
+                                le["deadman_stop"] = {
+                                    "order_id": _dm_res.get("order_id"),
+                                    "stop_price": _dm_px,
+                                    "qty": float(filled),
+                                }
+                                _commit_le(sess, le)
+                            _emit(db, sess, "live_deadman_stop_placed", {
+                                "ok": bool(_dm_res.get("ok")),
+                                "order_id": _dm_res.get("order_id"),
+                                "stop_price": _dm_px if _dm_res.get("ok") else None,
+                                "software_stop": _dm_stop,
+                                "error": _dm_res.get("error"),
+                            })
+                except Exception:
+                    logger.warning("[live_runner] deadman stop placement failed", exc_info=True)
                 # ENTRY-FEATURE CAPTURE (2026-06-23): record the lookahead-free entry-moment
                 # feature vector onto `le` for the winner/loser META-LABEL dataset (mirrors the
                 # paper path; today entry features are PAPER-ONLY so live has none). POST-

@@ -475,6 +475,49 @@ class AlpacaSpotAdapter:
                             limit_price=limit_price, extended_hours=bool(extended_hours),
                             position_intent=position_intent)
 
+    def place_deadman_stop(self, *, product_id: str, base_size: str, stop_price: float,
+                           client_order_id: Optional[str] = None) -> dict[str, Any]:
+        """DEAD-MAN protective stop (2026-07-10, the GMM -$16k orphan incident): a
+        RESTING GTC STOP order at the BROKER itself, placed BELOW the software stop —
+        not the primary exit (the FSM manages the position), but the FLOOR when the
+        whole machine dies or loses network while holding (the exact incident: TCP
+        ephemeral-port exhaustion -> the worker was alive but could not reach Alpaca
+        -> GMM collapsed unprotected). ``sell_to_close`` means even a double-fire
+        alongside a software exit can never flip the position short. Equity-only
+        (Alpaca equities support stop orders; the crypto lane is separate)."""
+        try:
+            from alpaca.trading.enums import OrderSide, PositionIntent, TimeInForce
+            from alpaca.trading.requests import StopOrderRequest
+
+            req = StopOrderRequest(
+                symbol=_to_alpaca_symbol(product_id),
+                qty=base_size,
+                side=OrderSide.SELL,
+                time_in_force=TimeInForce.GTC,
+                stop_price=round(float(stop_price), 2),
+                client_order_id=client_order_id,
+                position_intent=PositionIntent.SELL_TO_CLOSE,
+            )
+            o = _trading_client().submit_order(req)
+            return {"ok": True, "order_id": str(getattr(o, "id", "") or ""),
+                    "status": str(getattr(getattr(o, "status", None), "value", "") or "")}
+        except Exception as exc:
+            logger.warning("[alpaca_spot] deadman stop place failed for %s: %s", product_id, exc)
+            return {"ok": False, "error": str(exc)}
+
+    def cancel_order_by_id(self, order_id: str) -> bool:
+        """Cancel one resting order by broker id (the dead-man release path).
+        True = cancelled or already gone; False = a real cancel failure."""
+        try:
+            _trading_client().cancel_order_by_id(order_id)
+            return True
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "not found" in msg or "unable to be cancel" in msg or "filled" in msg:
+                return True  # already gone / already terminal — released either way
+            logger.warning("[alpaca_spot] cancel_order_by_id(%s) failed: %s", order_id, exc)
+            return False
+
     def _resolve_position_intent(self, position_intent):
         """Map the lane's intent string to the alpaca-py ``PositionIntent`` enum.
 

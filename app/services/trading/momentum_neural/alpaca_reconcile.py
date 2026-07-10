@@ -64,21 +64,25 @@ def _managed_and_recent_symbols(db: Session) -> tuple[set[str], set[str]] | None
     """(active_symbols, recent_symbols) for the alpaca families — or None on a read
     error (callers FAIL-OPEN: no reconcile action without a trustworthy DB view).
 
-    active = any NON-terminal session (any age): the symbol is owned; hands off.
+    active = any NON-terminal LIVE-mode session: the symbol is owned; hands off.
+    (2026-07-10 GMM incident: two month-old PAPER `watching` rows counted as
+    ownership and the reconciler stood hands-off while an orphaned $54k live
+    position bled −$18k. A paper watcher can never exit a live position — it
+    must never own one.)
     recent = any session CREATED inside the grace window OR any outcome TERMINALIZED
     inside it: a race-guard for fills/exits still settling."""
     try:
         grace = _grace_minutes()
         rows = db.execute(text(
-            "SELECT upper(symbol) AS s, state, "
+            "SELECT upper(symbol) AS s, state, mode, "
             "       (created_at > (now() at time zone 'utc') - (:g * interval '1 minute')) AS is_recent "
             "FROM trading_automation_sessions "
             "WHERE execution_family = ANY(:fams)"
         ), {"fams": list(_ALPACA_FAMILIES), "g": grace}).fetchall()
         active: set[str] = set()
         recent: set[str] = set()
-        for s, state, is_recent in rows:
-            if str(state or "") not in _TERMINAL_OPERATOR_STATES:
+        for s, state, mode, is_recent in rows:
+            if str(state or "") not in _TERMINAL_OPERATOR_STATES and str(mode or "") == "live":
                 active.add(s)
             if bool(is_recent):
                 recent.add(s)
