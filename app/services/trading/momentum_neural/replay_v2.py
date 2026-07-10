@@ -29,6 +29,7 @@ import logging
 import os
 import warnings
 from collections import defaultdict
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 
 warnings.filterwarnings("ignore")
@@ -39,7 +40,7 @@ from sqlalchemy import text
 from ....db import SessionLocal
 from ....config import settings
 from ..indicator_core import compute_atr
-from ..market_data import fetch_ohlcv_df
+from ..market_data import fetch_ohlcv_batch, fetch_ohlcv_df
 from .micro_bars import _resample_micro_bars  # re-exported: shared live+replay util
 from .entry_gates import (
     TICK_ARMED_WAIT_REASONS,
@@ -162,6 +163,50 @@ REPLAY_REVIEW_LATENCY_K = float(
 )
 
 REPLAY_RESULTS_DIR = os.environ.get("CHILI_REPLAY_RESULTS_DIR", "/app/data/replays")
+
+
+def _prefetch_ohlcv_frames(
+    symbols: Iterable[str],
+    *,
+    interval: str,
+    period: str,
+) -> dict[str, object]:
+    """Best-effort batch OHLCV prefetch for replay-local caches.
+
+    The replay previously discovered candidate symbols from the tape, then fetched
+    historical bars one symbol at a time while computing ADV/rvol. That made as-of
+    runs pay a serial provider round-trip tax before the simulation even started.
+    This helper keeps the same data source cascade as ``fetch_ohlcv_df`` via the
+    market-data batch API, but normalizes misses to ``None`` so callers do not fall
+    back to another per-symbol fetch for names the batch already proved absent.
+    """
+    ordered = list(dict.fromkeys(str(s).upper() for s in symbols if str(s or "").strip()))
+    if not ordered:
+        return {}
+    try:
+        frames = fetch_ohlcv_batch(ordered, interval=interval, period=period)
+    except Exception:
+        logger.warning(
+            "[replay_v2] batch OHLCV prefetch failed interval=%s period=%s symbols=%s",
+            interval,
+            period,
+            len(ordered),
+            exc_info=True,
+        )
+        return {}
+
+    out: dict[str, object] = {}
+    for sym in ordered:
+        df = frames.get(sym)
+        if df is None:
+            df = frames.get(sym.upper())
+        try:
+            out[sym] = df if df is not None and len(df) > 0 else None
+        except Exception:
+            out[sym] = None
+    for sym in ordered:
+        out.setdefault(sym, None)
+    return out
 
 
 def _replay_derisk_stack_multiplier(
@@ -970,12 +1015,13 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
     bars_cache: dict[str, object] = {}
 
     def bars(sym: str):
-        if sym not in bars_cache:
+        key = str(sym or "").upper()
+        if key not in bars_cache:
             try:
-                bars_cache[sym] = fetch_ohlcv_df(sym, interval="5m", period="1mo")
+                bars_cache[key] = fetch_ohlcv_df(key, interval="5m", period="1mo")
             except Exception:
-                bars_cache[sym] = None
-        return bars_cache[sym]
+                bars_cache[key] = None
+        return bars_cache[key]
 
     entry_bars_cache: dict[str, object] = {}
 
@@ -983,20 +1029,29 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
         """Bars at the LIVE trigger timeframe (5m today; follows the setting)."""
         if ENTRY_INTERVAL == "5m":
             return bars(sym)
-        if sym not in entry_bars_cache:
+        key = str(sym or "").upper()
+        if key not in entry_bars_cache:
             try:
-                entry_bars_cache[sym] = fetch_ohlcv_df(sym, interval=ENTRY_INTERVAL, period="5d")
+                entry_bars_cache[key] = fetch_ohlcv_df(key, interval=ENTRY_INTERVAL, period="5d")
             except Exception:
-                entry_bars_cache[sym] = None
-        return entry_bars_cache[sym]
+                entry_bars_cache[key] = None
+        return entry_bars_cache[key]
+
+    day_frame_cache: dict[str, tuple[object | None, dict | None]] = {}
 
     def day_frame(sym: str):
+        key = str(sym or "").upper()
+        if key in day_frame_cache:
+            return day_frame_cache[key]
         df = entry_bars(sym)
         if df is None or len(df) == 0:
-            return None, None
+            day_frame_cache[key] = (None, None)
+            return day_frame_cache[key]
         c = {x.lower(): x for x in df.columns}
-        sel = df[[t.strftime("%Y-%m-%d") == date for t in df.index]]
-        return (sel, c) if len(sel) >= 14 else (None, None)
+        day_labels = pd.Index(df.index).strftime("%Y-%m-%d")
+        sel = df[day_labels == date]
+        day_frame_cache[key] = (sel, c) if len(sel) >= 14 else (None, None)
+        return day_frame_cache[key]
 
     def avg_daily_vol_before(sym: str) -> float | None:
         df = bars(sym)
@@ -1031,6 +1086,8 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             break
     cand = sorted(qualify_at, key=lambda s: qualify_at[s])
     result["candidates"] = len(cand)
+    if cand:
+        bars_cache.update(_prefetch_ohlcv_frames(cand, interval="5m", period="1mo"))
     adv: dict[str, float | None] = {s: avg_daily_vol_before(s) for s in cand}
 
     live_spans: dict[str, list] | None = None
@@ -1229,15 +1286,23 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             return _full_pipeline_rank(now)
         return asof_rank(now)
 
+    completed_upto_cache: dict[tuple[str, str], object | None] = {}
+
     def _completed_upto(s: str, now):
         """The completed-bars frame the entry trigger sees at ``now`` (no lookahead:
         a bar indexed by START closes at +ENTRY_BAR_MIN) — the SAME slice the entry
         loop builds, so freshness and the trigger read one frame."""
+        cut = pd.Timestamp(now) - pd.Timedelta(minutes=ENTRY_BAR_MIN)
+        key = (str(s or "").upper(), str(cut))
+        if key in completed_upto_cache:
+            return completed_upto_cache[key]
         df, _c = day_frame(s)
         if df is None:
+            completed_upto_cache[key] = None
             return None
-        upto = df[df.index <= now - pd.Timedelta(minutes=ENTRY_BAR_MIN)]
-        return upto if len(upto) >= 12 else None
+        upto = df[df.index <= cut]
+        completed_upto_cache[key] = upto if len(upto) >= 12 else None
+        return completed_upto_cache[key]
 
     def _trigger_firing_now(s: str, upto) -> bool:
         """Is the generic pullback break firing on the completed bars at ``now``?
@@ -1672,12 +1737,12 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "live") -
             if tape.in_halt_or_cooldown(s, now) and not _dip_window:
                 _tr(s, "gate_fail:halt_window", now)
                 continue
-            df, c = day_frame(s)
-            if df is None:
-                continue
             # completed-bars-only, like live: a bar indexed by START closes at +5min
-            upto = df[df.index <= now - pd.Timedelta(minutes=ENTRY_BAR_MIN)]
-            if len(upto) < 12:
+            upto = _completed_upto(s, now)
+            if upto is None:
+                continue
+            _df_for_cols, c = day_frame(s)
+            if _df_for_cols is None or c is None:
                 continue
             ok = False
             # Per-entry fidelity (tick-faithful): a bar/dip fire is a 1-min snapshot
