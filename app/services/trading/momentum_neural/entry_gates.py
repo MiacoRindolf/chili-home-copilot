@@ -3936,6 +3936,30 @@ def flush_dip_buy_confirmation(
             return False, "flush_dip_rth_only_outside_window", {
                 "entry_interval": entry_interval, "rth_reason": _rth_reason,
             }
+        # MORNING-ONLY (2026-07-10, JZXN 12:30-ET midday backside dip -$889): the SAME
+        # validated 06-10 A/B lesson deep_reclaim already enforces — a dip-buy pays in
+        # the DISCOVERY phase and bleeds in midday/afternoon chop (SPHL -$404, GCDT
+        # -$157, DBGI -$161, all 13:22 ET or later) — was only ever applied to ONE of
+        # the two dip detectors. Mirror it here with the SAME documented knob
+        # (chili_momentum_reclaim_max_hours_after_open; no new magic number).
+        # EQUITY-only; fail-open without a usable clock (same semantics as deep_reclaim).
+        _fd_clock = now if now is not None else _bar_ts
+        if _fd_clock is not None and not (bool(symbol) and str(symbol).upper().endswith("-USD")):
+            try:
+                from zoneinfo import ZoneInfo
+
+                _fts = pd.Timestamp(_fd_clock)
+                _fts = _fts.tz_localize("UTC") if _fts.tzinfo is None else _fts
+                _fet = _fts.tz_convert(ZoneInfo("America/New_York"))
+                _fd_cutoff_min = (9 * 60 + 30) + int(
+                    60 * float(getattr(settings, "chili_momentum_reclaim_max_hours_after_open", 1.0) or 1.0)
+                )
+                if (_fet.hour * 60 + _fet.minute) >= _fd_cutoff_min:
+                    return False, "flush_dip_past_morning_window", {
+                        "entry_interval": entry_interval, "et_time": _fet.strftime("%H:%M"),
+                    }
+            except Exception:
+                pass  # no usable clock -> huwag mag-block sa guard mismo
         close = df["Close"].astype(float)
         high = df["High"].astype(float)
         low = df["Low"].astype(float)
