@@ -26,6 +26,9 @@ def test_replay_page_exposes_research_fsm_console(client):
     assert b"rp-correlation-strip" in r.content
     assert b"applySynchronizedInspection" in r.content
     assert b"interactive replay chart" in r.content
+    assert b"rp-event-play" in r.content
+    assert b"rpToggleEventPlayback" in r.content
+    assert b"rpStepReplayEvent" in r.content
 
 
 def test_replay_run_starts_thread_and_single_flights(client):
