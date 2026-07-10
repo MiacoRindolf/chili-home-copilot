@@ -116,6 +116,15 @@ _clients: dict[str, Any] = {}
 
 
 def _keys() -> tuple[str, str]:
+    """Posture-selected key pair (2026-07-10): paper -> the base pair; LIVE -> the
+    dedicated live pair (CHILI_ALPACA_LIVE_API_KEY/SECRET), falling back to the base
+    pair only when the live pair is unset — so the paper->live switch is ONE flag
+    flip with both credential sets already resting in the deploy .env."""
+    if not _paper():
+        lk = str(getattr(settings, "chili_alpaca_live_api_key", "") or "")
+        ls = str(getattr(settings, "chili_alpaca_live_api_secret", "") or "")
+        if lk and ls:
+            return (lk, ls)
     return (
         str(getattr(settings, "chili_alpaca_api_key", "") or ""),
         str(getattr(settings, "chili_alpaca_api_secret", "") or ""),
