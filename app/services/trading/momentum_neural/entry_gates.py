@@ -3971,7 +3971,24 @@ def flush_dip_buy_confirmation(
         e9_flush = ema9[flush_idx] if flush_idx < len(ema9) and ema9[flush_idx] is not None else None
         e9_prev = ema9[flush_idx - 1] if (flush_idx - 1) < len(ema9) and ema9[flush_idx - 1] is not None else None
         if e9_flush is None or e9_prev is None or float(e9_flush) < float(e9_prev):
-            return False, "flush_dip_not_front_side", debug  # 9-EMA not rising
+            # VWAP-anchored front-side ALTERNATIVE (2026-07-09, VWAV 06-30 forensic):
+            # after a parabolic leg the 9-EMA is falling DURING the retrace by
+            # construction, so the rising-9EMA test rejects exactly the dip Ross buys
+            # — the FIRST touch of RISING VWAP on an intact uptrend day (VWAV: dip to
+            # 7.99 on rising VWAP -> +$10.8k; rejected 1810x as "not_front_side").
+            # The session's own volume-weighted trend is the alternative front-side
+            # proof: VWAP RISING at the flush bar. The other guards still gate the
+            # shape (pre-flush close above VWAP, ATR-scaled bottoming-tail flush INTO
+            # support, green curl reclaim) — this only widens WHICH trend yardstick
+            # may certify "front side". Default-ON per the operator's overfit rule
+            # (small-sample-positive -> ship + live-test; the replay window for this
+            # shape is unadjudicable — its profitable segment predates the recorded
+            # tape — so live IS the test, with per-sha rollback as the net).
+            v_f = vwap[flush_idx] if flush_idx < len(vwap) and vwap[flush_idx] is not None else None
+            v_p = vwap[flush_idx - 1] if (flush_idx - 1) < len(vwap) and vwap[flush_idx - 1] is not None else None
+            if not (v_f is not None and v_p is not None and float(v_f) > float(v_p)):
+                return False, "flush_dip_not_front_side", debug  # 9-EMA not rising, VWAP not rising
+            debug["front_side_via"] = "rising_vwap"
         vwap_flush = vwap[flush_idx] if flush_idx < len(vwap) and vwap[flush_idx] is not None else None
         # Pre-flush strength: the bar BEFORE the flush closed above VWAP (was front-side).
         pre = flush_idx - 1
