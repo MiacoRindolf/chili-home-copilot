@@ -113,17 +113,17 @@ def _preferred_outcome_pnl(
 
 
 def _day_truth_for_date(db: Session | None, *, date: str, user_id: int | None) -> dict[str, Any]:
-    if db is None or user_id is None:
+    if db is None:
         return {
             "available": False,
-            "reason": "unpaired_user",
+            "reason": "no_db_session",
             "basis": "momentum_automation_outcomes_full_et_day",
         }
     try:
         from ...models.trading import MomentumAutomationOutcome, TradingAutomationSession
 
         start_utc, end_utc = _et_day_bounds_for_date(date)
-        rows = (
+        query = (
             db.query(
                 MomentumAutomationOutcome.symbol,
                 MomentumAutomationOutcome.realized_pnl_usd,
@@ -134,7 +134,6 @@ def _day_truth_for_date(db: Session | None, *, date: str, user_id: int | None) -
             )
             .join(TradingAutomationSession, TradingAutomationSession.id == MomentumAutomationOutcome.session_id)
             .filter(
-                MomentumAutomationOutcome.user_id == int(user_id),
                 MomentumAutomationOutcome.mode == "live",
                 MomentumAutomationOutcome.terminal_at >= start_utc,
                 MomentumAutomationOutcome.terminal_at < end_utc,
@@ -143,8 +142,10 @@ def _day_truth_for_date(db: Session | None, *, date: str, user_id: int | None) -
                     MomentumAutomationOutcome.broker_realized_pnl_usd.isnot(None),
                 ),
             )
-            .all()
         )
+        if user_id is not None:
+            query = query.filter(MomentumAutomationOutcome.user_id == int(user_id))
+        rows = query.all()
     except Exception as exc:
         logger.warning("[replay_api] day truth read failed for %s", date, exc_info=True)
         return {
@@ -205,6 +206,7 @@ def _day_truth_for_date(db: Session | None, *, date: str, user_id: int | None) -
         "available": True,
         "date": date,
         "basis": "momentum_automation_outcomes_full_et_day",
+        "scope": "user" if user_id is not None else "all_users",
         "start_utc": start_utc.isoformat(),
         "end_utc": end_utc.isoformat(),
         "total_usd": _round_money(total),
