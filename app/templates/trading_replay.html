@@ -34,6 +34,33 @@
   gap: 16px;
   margin-bottom: 12px;
 }
+.rp-top-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.rp-surface-switch {
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid var(--rp-line);
+  border-radius: 7px;
+  background: var(--rp-panel-2);
+}
+.rp-surface-switch button {
+  min-width: 72px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--rp-muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 6px 10px;
+}
+.rp-surface-switch button[aria-selected="true"] {
+  background: var(--rp-text);
+  color: var(--rp-bg);
+}
 .rp-title h1 {
   margin: 0;
   font-size: 22px;
@@ -94,6 +121,31 @@
   flex-wrap: wrap;
   gap: 8px;
 }
+.rp-command-actions {
+  display: flex;
+  align-items: end;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+}
+.rp-live-controls {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 36px;
+  color: var(--rp-muted);
+  font-size: 11px;
+}
+.rp-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--rp-green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--rp-green) 14%, transparent);
+}
+.rp-live-dot.stale { background: var(--rp-amber); }
+.rp-live-dot.error { background: var(--rp-red); }
+[hidden] { display: none !important; }
 .rp-field {
   display: grid;
   gap: 5px;
@@ -479,6 +531,12 @@
   font-size: 11px;
   line-height: 1.35;
 }
+.rp-symbol-state {
+  color: var(--rp-text) !important;
+  font-weight: 800;
+  text-transform: capitalize;
+}
+.rp-symbol-freshness.stale { color: var(--rp-amber) !important; }
 .rp-badge {
   display: inline-flex;
   width: fit-content;
@@ -582,6 +640,34 @@
   align-content: start;
   gap: 7px;
 }
+.rp-live-pnl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--rp-line);
+}
+.rp-live-pnl span {
+  display: grid;
+  gap: 2px;
+  color: var(--rp-muted);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+.rp-live-pnl b {
+  color: var(--rp-text);
+  font-size: 12px;
+  text-transform: none;
+}
+.rp-live-position {
+  color: var(--rp-muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.rp-live-position b { color: var(--rp-text); }
+.rp-chip.live { color: var(--rp-green); border-color: color-mix(in srgb, var(--rp-green) 42%, transparent); }
+.rp-chip.paper-twin { color: var(--rp-blue); border-color: color-mix(in srgb, var(--rp-blue) 42%, transparent); }
+.rp-chip.paper { color: var(--rp-purple); border-color: color-mix(in srgb, var(--rp-purple) 42%, transparent); }
 .rp-actions {
   display: flex;
   flex-wrap: wrap;
@@ -723,6 +809,7 @@
 #rp-fsm-endpoint {
   display: none;
 }
+#rp-live-endpoint { display: none; }
 @media (max-width: 1100px) {
   .rp-command,
   .rp-viewport,
@@ -755,6 +842,15 @@
   .rp-top {
     align-items: flex-start;
   }
+  .rp-top-actions {
+    align-items: flex-end;
+    flex-direction: column-reverse;
+  }
+  .rp-command-actions,
+  .rp-live-controls {
+    width: 100%;
+    justify-content: flex-start;
+  }
   .rp-controls,
   .rp-field,
   .rp-btn {
@@ -781,33 +877,45 @@
   <div class="rp-shell">
     <header class="rp-top">
       <div class="rp-title">
-        <h1>Replay Research</h1>
-        <p>Replay v3 live-FSM view by symbol, action, and setup.</p>
+        <h1>Chili Trading Timeline</h1>
+        <p id="rp-page-subtitle">Replay v3 live-FSM view by symbol, action, and setup.</p>
       </div>
-      <a class="rp-link" href="/trading">Trading</a>
+      <div class="rp-top-actions">
+        <div class="rp-surface-switch" role="tablist" aria-label="Replay | Live">
+          <button id="rp-surface-replay" type="button" role="tab" aria-selected="true" onclick="rpSetSurfaceMode('replay')">Replay</button>
+          <button id="rp-surface-live" type="button" role="tab" aria-selected="false" onclick="rpSetSurfaceMode('live')">Live</button>
+        </div>
+        <a class="rp-link" href="/trading">Trading</a>
+      </div>
     </header>
 
     <section class="rp-card" aria-label="Replay timeline">
       <div class="rp-command">
         <div>
-          <div class="rp-eyebrow">Replay v3</div>
-          <h2>Trading behavior timeline</h2>
+          <div class="rp-eyebrow" id="rp-command-eyebrow">Replay v3</div>
+          <h2 id="rp-command-title">Trading behavior timeline</h2>
           <p id="rp-subtitle">Rows are symbols; markers are live Chili actions on the chart.</p>
         </div>
-        <div class="rp-controls">
-          <div class="rp-field">
-            <label for="rp-date">Date</label>
-            <input class="rp-input" id="rp-date" type="date" />
+        <div class="rp-command-actions">
+          <div class="rp-controls" id="rp-replay-controls">
+            <div class="rp-field">
+              <label for="rp-date">Date</label>
+              <input class="rp-input" id="rp-date" type="date" />
+            </div>
+            <div class="rp-field">
+              <label for="rp-mode">Mode</label>
+              <select class="rp-select" id="rp-mode">
+                <option value="live_fsm" selected>Live FSM - actual Chili trades</option>
+                <option value="asof">As-of selection - rerun system</option>
+              </select>
+              <span class="rp-mode-hint" id="rp-mode-hint">Runs Replay v3 against actual live Chili sessions.</span>
+            </div>
+            <button class="rp-btn" id="rp-run" type="button" onclick="rpRunReplay()">Run Replay</button>
           </div>
-          <div class="rp-field">
-            <label for="rp-mode">Mode</label>
-            <select class="rp-select" id="rp-mode">
-              <option value="live_fsm" selected>Live FSM - actual Chili trades</option>
-              <option value="asof">As-of selection - rerun system</option>
-            </select>
-            <span class="rp-mode-hint" id="rp-mode-hint">Runs Replay v3 against actual live Chili sessions.</span>
+          <div class="rp-live-controls" id="rp-live-controls" hidden>
+            <span class="rp-live-dot" id="rp-live-dot" aria-hidden="true"></span>
+            <span id="rp-live-freshness">Connecting to persisted Chili state...</span>
           </div>
-          <button class="rp-btn" id="rp-run" type="button" onclick="rpRunReplay()">Run Replay</button>
           <span class="rp-status" id="rp-status">idle</span>
         </div>
       </div>
@@ -817,7 +925,7 @@
       </div>
     </section>
 
-    <details class="rp-details">
+    <details class="rp-details" id="rp-replay-archive">
       <summary>Replay archive</summary>
       <div class="rp-history" id="rp-history"></div>
     </details>
@@ -825,6 +933,7 @@
     <details class="rp-details">
       <summary>Diagnostics</summary>
       <span id="rp-fsm-endpoint">/api/trading/momentum/replay/fsm</span>
+      <span id="rp-live-endpoint">/api/trading/momentum/replay/live</span>
       <pre class="rp-json" id="rp-debug">{}</pre>
     </details>
   </div>
@@ -833,8 +942,17 @@
 <script>
 (function() {
   var rpPoll = null;
+  var rpSurfaceMode = 'replay';
   var rpHistoryRows = [];
   var rpLastResult = null;
+  var rpLastReplayResult = null;
+  var rpLastLivePayload = null;
+  var rpLiveTimer = null;
+  var rpLiveAbort = null;
+  var rpLiveFailureCount = 0;
+  var rpLiveStructureSignature = '';
+  var rpLiveChartSignature = '';
+  var rpLiveFollow = true;
   var rpReplayCache = null;
   var rpPinnedChart = null;
   var rpIndicatorCache = {};
@@ -936,6 +1054,92 @@
     ].join('|');
   }
 
+  function liveLaneLabel(value) {
+    if (value === 'live') return 'Live';
+    if (value === 'paper_twin') return 'Paper twin';
+    return 'Paper';
+  }
+
+  function liveLaneClass(value) {
+    return value === 'paper_twin' ? 'paper-twin' : (value || 'paper');
+  }
+
+  function livePayloadToReplayResult(payload) {
+    var result = {
+      live_observer: true,
+      armed_source: 'live_observer',
+      date: String((payload && payload.as_of_utc) || '').slice(0, 10),
+      total_usd: Number((payload && payload.totals || {}).total_usd || 0),
+      series: (payload && payload.series) || {},
+      trades: [],
+      decision_trace: [],
+      armed_timeline: [],
+      live_meta: {},
+      live_payload: payload || {}
+    };
+    (payload && payload.symbols || []).forEach(function(meta) {
+      var sym = normalizeSym(meta.symbol);
+      if (!sym) return;
+      result.live_meta[sym] = meta;
+      var events = (meta.events || []).slice().sort(function(a, b) {
+        return String(a.ts || '').localeCompare(String(b.ts || ''));
+      });
+      events.forEach(function(event) {
+        result.decision_trace.push({
+          sym: sym,
+          t: event.t,
+          stage: String(event.stage || 'event') + (event.detail ? ': ' + event.detail : ''),
+          kind: event.kind || 'decision'
+        });
+      });
+      if (meta.active) {
+        var bars = result.series[sym] || [];
+        var start = events.length ? events[0].t : (bars.length ? bars[0][0] : null);
+        var end = compactTime(payload.as_of_utc);
+        if (start && end) result.armed_timeline.push({ sym: sym, spans: [[start, end]] });
+      }
+
+      var pendingEntry = null;
+      events.forEach(function(event) {
+        if (event.kind === 'entry') {
+          pendingEntry = event;
+          return;
+        }
+        if (event.kind !== 'exit' || !pendingEntry) return;
+        var position = (meta.positions || [])[0] || {};
+        result.trades.push({
+          sym: sym,
+          session_id: event.session_id || pendingEntry.session_id,
+          t: pendingEntry.t,
+          exit_t: event.t,
+          entry: pendingEntry.price == null ? position.entry : pendingEntry.price,
+          exit: event.price,
+          stop: position.stop,
+          target: position.target,
+          usd: event.pnl_usd == null ? 0 : Number(event.pnl_usd),
+          why: event.detail || event.stage || 'live exit'
+        });
+        pendingEntry = null;
+      });
+      if (pendingEntry && (meta.positions || []).length) {
+        var openPosition = meta.positions[0];
+        result.trades.push({
+          sym: sym,
+          session_id: pendingEntry.session_id,
+          t: pendingEntry.t,
+          exit_t: null,
+          entry: pendingEntry.price == null ? openPosition.entry : pendingEntry.price,
+          exit: null,
+          stop: openPosition.stop,
+          target: openPosition.target,
+          usd: Number((meta.pnl || {}).unrealized_usd || 0),
+          why: 'open position'
+        });
+      }
+    });
+    return result;
+  }
+
   function cacheReplayResult(date, mode, result) {
     if (!date || !result) return;
     var key = resultCacheKey(date, mode);
@@ -981,6 +1185,12 @@
     var n = Number(value || 0);
     if (!Number.isFinite(n)) return '0';
     return n.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  }
+
+  function fmtPrice(value) {
+    var n = Number(value);
+    if (!Number.isFinite(n)) return '-';
+    return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 });
   }
 
   function timeMin(value) {
@@ -1300,10 +1510,12 @@
 
   function replayDomain(result) {
     var cache = replayCache(result);
+    var floor = result && result.live_observer ? 0 : 4 * 60;
+    var ceiling = result && result.live_observer ? 24 * 60 - 1 : 20 * 60;
     if (cache && cache.allMinutes.length) {
       return {
-        min: Math.max(4 * 60, Math.min.apply(null, cache.allMinutes) - 8),
-        max: Math.min(20 * 60, Math.max.apply(null, cache.allMinutes) + 8)
+        min: Math.max(floor, Math.min.apply(null, cache.allMinutes) - 8),
+        max: Math.min(ceiling, Math.max.apply(null, cache.allMinutes) + 8)
       };
     }
     var mins = [];
@@ -1331,10 +1543,10 @@
       var m = rowMinute(row);
       if (m != null) mins.push(m);
     });
-    if (!mins.length) return { min: 8 * 60, max: 20 * 60 };
+    if (!mins.length) return result && result.live_observer ? { min: 0, max: 24 * 60 - 1 } : { min: 8 * 60, max: 20 * 60 };
     return {
-      min: Math.max(4 * 60, Math.min.apply(null, mins) - 8),
-      max: Math.min(20 * 60, Math.max.apply(null, mins) + 8)
+      min: Math.max(floor, Math.min.apply(null, mins) - 8),
+      max: Math.min(ceiling, Math.max.apply(null, mins) + 8)
     };
   }
 
@@ -2326,6 +2538,7 @@
   function smoothSetViewDomain(domain, focusChart) {
     var target = domain ? clampViewDomain(domain.min, domain.max) : null;
     if (!target) return;
+    if (rpSurfaceMode === 'live') rpLiveFollow = false;
     rpSmoothTargetDomain = target;
     if (focusChart) rpSmoothFocusChart = focusChart;
     if (!rpSmoothFrame) rpSmoothFrame = requestAnimationFrame(smoothViewportStep);
@@ -2354,6 +2567,7 @@
     var scrubber = event.target.closest && event.target.closest('.rp-scrubber');
     if (!scrubber || !rpViewDomain || (event.button != null && event.button !== 0)) return;
     stopEventPlayback();
+    if (rpSurfaceMode === 'live') rpLiveFollow = false;
     event.preventDefault();
     cancelSmoothViewport();
     rpScrubState = {
@@ -2422,6 +2636,7 @@
 
   function resetViewport() {
     if (!rpFullDomain) return;
+    if (rpSurfaceMode === 'live') rpLiveFollow = true;
     setViewDomain(cloneDomain(rpFullDomain));
   }
 
@@ -2503,6 +2718,7 @@
     var chart = event.target.closest && event.target.closest('.rp-chart');
     if (!chart || !rpViewDomain || (event.button != null && event.button !== 0)) return;
     stopEventPlayback();
+    if (rpSurfaceMode === 'live') rpLiveFollow = false;
     chart = ensureChartFresh(chart) || chart;
     var rect = chart.getBoundingClientRect();
     if (!rect.width) return;
@@ -2768,7 +2984,8 @@
       var m = Math.round(domain.min + ((domain.max - domain.min) * i / 5));
       ticks.push('<span style="left:' + pct(m, domain).toFixed(1) + '%">' + esc(timeLabel(m)) + '</span>');
     }
-    return '<div class="rp-ruler" id="rp-ruler"><div>Symbol</div><div class="rp-ruler-line">' + ticks.join('') + '</div><div>Setup / indicators</div></div>';
+    var rightLabel = rpSurfaceMode === 'live' ? 'State / P&L / events' : 'Setup / indicators';
+    return '<div class="rp-ruler" id="rp-ruler"><div>Symbol</div><div class="rp-ruler-line">' + ticks.join('') + '</div><div>' + rightLabel + '</div></div>';
   }
 
   function renderViewportControls() {
@@ -2950,7 +3167,193 @@
       '</div>';
   }
 
+  function liveMetaFor(result, sym) {
+    return (result && result.live_meta || {})[normalizeSym(sym)] || {};
+  }
+
+  function liveAgeLabel(meta) {
+    if (!meta || !meta.updated_at) return 'no current runtime tick';
+    var age = Math.max(0, Math.round((Date.now() - new Date(meta.updated_at).getTime()) / 1000));
+    if (!Number.isFinite(age)) return 'runtime age unknown';
+    if (age < 2) return 'updated now';
+    if (age < 60) return 'updated ' + age + 's ago';
+    return 'updated ' + Math.floor(age / 60) + 'm ago';
+  }
+
+  function renderLiveSymbolHeader(result, sym) {
+    var meta = liveMetaFor(result, sym);
+    var pnl = meta.pnl || {};
+    var bars = barsFor(result, sym);
+    var laneParts = (meta.lanes || []).map(function(row) { return liveLaneLabel(row.lane); });
+    Object.keys(pnl.by_lane || {}).forEach(function(lane) {
+      var label = liveLaneLabel(lane) + ' P/L';
+      if (laneParts.indexOf(liveLaneLabel(lane)) === -1 && laneParts.indexOf(label) === -1) laneParts.push(label);
+    });
+    var laneText = laneParts.join(' + ');
+    var state = meta.armed ? 'armed - ' + (meta.state_label || 'watching') : (meta.state_label || 'completed today');
+    var total = Number(pnl.total_usd || 0);
+    var badgeClass = total >= 0 ? 'rp-pos' : 'rp-neg';
+    return '<b>' + esc(sym) + '</b>' +
+      '<span>' + esc(laneText || 'Completed today') + '</span>' +
+      '<span class="rp-symbol-state">' + esc(state) + '</span>' +
+      '<span>' + esc(fmtNum(bars.length) + ' one-minute candles') + '</span>' +
+      '<span class="rp-symbol-freshness' + (meta.stale ? ' stale' : '') + '">' + esc(liveAgeLabel(meta)) + '</span>' +
+      '<span class="rp-badge ' + badgeClass + '">' + esc(fmtSignedMoney(total)) + '</span>';
+  }
+
+  function renderLiveSetup(result, sym, eager) {
+    var meta = liveMetaFor(result, sym);
+    var pnl = meta.pnl || {};
+    var chips = (meta.lanes || []).map(function(row) {
+      return '<span class="rp-chip ' + esc(liveLaneClass(row.lane)) + '">' +
+        esc(liveLaneLabel(row.lane) + ' - ' + (row.state_label || row.state || 'active')) + '</span>';
+    });
+    Object.keys(pnl.by_lane || {}).forEach(function(lane) {
+      var lanePnl = pnl.by_lane[lane] || {};
+      var laneTotal = Number(lanePnl.realized_usd || 0) + Number(lanePnl.unrealized_usd || 0);
+      if (!lanePnl.trades && !lanePnl.realized_usd && !lanePnl.unrealized_usd) return;
+      chips.push('<span class="rp-chip ' + esc(liveLaneClass(lane)) + '">' +
+        esc(liveLaneLabel(lane) + ' P/L ' + fmtSignedMoney(laneTotal)) + '</span>');
+    });
+    if (meta.armed) chips.push('<span class="rp-chip warn">armed</span>');
+    if (meta.pnl && meta.pnl.broker_unconfirmed) chips.push('<span class="rp-chip warn">broker position unconfirmed</span>');
+    var positions = (meta.positions || []).map(function(row) {
+      return '<div class="rp-live-position"><b>' + esc(liveLaneLabel(row.lane)) + ' position</b> - ' +
+        esc(fmtNum(row.quantity || 0) + ' shares @ ' + fmtPrice(row.entry)) +
+        (row.mark == null ? '' : esc(' - mark ' + fmtPrice(row.mark))) +
+        (row.stop == null ? '' : esc(' - stop ' + fmtPrice(row.stop))) +
+        '</div>';
+    }).join('');
+    return '<div class="rp-live-pnl">' +
+      '<span>Realized<b class="' + pnlClass(pnl.realized_usd) + '">' + esc(fmtSignedMoney(pnl.realized_usd || 0)) + '</b></span>' +
+      '<span>Unrealized<b class="' + pnlClass(pnl.unrealized_usd) + '">' + esc(fmtSignedMoney(pnl.unrealized_usd || 0)) + '</b></span>' +
+      '</div>' +
+      '<div class="rp-actions">' + (chips.join('') || '<span class="rp-chip">completed today</span>') + '</div>' +
+      positions + renderTraceLines(result, sym, eager);
+  }
+
+  function renderLiveSymbolRow(result, sym, domain, eager) {
+    return '<article class="rp-row rp-row-live" data-symbol="' + esc(sym) + '">' +
+      '<div class="rp-symbol">' + renderLiveSymbolHeader(result, sym) + '</div>' +
+      '<div class="rp-chart" tabindex="0" aria-label="' + esc(sym) + ' interactive live chart" data-symbol="' + esc(sym) + '" data-domain-min="' + esc(eager ? domain.min : '') + '" data-domain-max="' + esc(eager ? domain.max : '') + '">' +
+        (eager ? chartSvg(result, sym, domain) + chartOverlayHtml() : chartPlaceholderHtml()) + '</div>' +
+      '<div class="rp-setup">' + renderLiveSetup(result, sym, eager) + '</div>' +
+      '</article>';
+  }
+
+  function renderLiveStats(payload) {
+    var totals = payload && payload.totals || {};
+    var symbols = payload && payload.symbols || [];
+    var lanes = payload && payload.lanes || {};
+    var openPositions = Object.keys(lanes).reduce(function(sum, key) {
+      return sum + Number((lanes[key] || {}).open_positions || 0);
+    }, 0);
+    var activeSymbols = Number(payload.active_symbol_count == null
+      ? symbols.filter(function(row) { return row.active; }).length
+      : payload.active_symbol_count);
+    var laneDetail = [
+      Number((lanes.live || {}).symbols || 0) + ' live',
+      Number((lanes.paper_twin || {}).symbols || 0) + ' twins',
+      Number((lanes.paper || {}).symbols || 0) + ' paper'
+    ].join(' - ');
+    return '<div class="rp-stats">' +
+      statCard(fmtSignedMoney(totals.total_usd || 0), 'Today Total', fmtNum(totals.trades || 0) + ' completed trades', pnlClass(totals.total_usd)) +
+      statCard(fmtSignedMoney(totals.realized_usd || 0), 'Realized', 'ET trading day', pnlClass(totals.realized_usd)) +
+      statCard(fmtSignedMoney(totals.unrealized_usd || 0), 'Unrealized', openPositions + ' open positions', pnlClass(totals.unrealized_usd)) +
+      statCard(activeSymbols, 'Active Symbols', laneDetail) +
+      statCard(openPositions, 'Open Positions', 'persisted runner state') +
+      '</div>';
+  }
+
+  function renderLive(payload) {
+    if (rpSurfaceMode !== 'live') return;
+    rpLastLivePayload = payload;
+    var result = livePayloadToReplayResult(payload);
+    var symbols = (payload.symbols || []).map(function(row) { return normalizeSym(row.symbol); }).filter(Boolean);
+    var structure = symbols.slice().sort().join('|');
+    var chartSignature = String(payload.chart_as_of_utc || '') + '|' + Object.keys(payload.series || {}).map(function(sym) {
+      return sym + ':' + (payload.series[sym] || []).length;
+    }).join('|');
+    var host = document.getElementById('rp-workspace');
+    var debug = document.getElementById('rp-debug');
+    if (debug) debug.textContent = JSON.stringify({
+      mode: 'live_observer',
+      as_of_utc: payload.as_of_utc,
+      latest_runtime_utc: payload.latest_runtime_utc,
+      totals: payload.totals,
+      lanes: payload.lanes,
+      symbols: symbols.length,
+      observer: payload.observer
+    }, null, 2);
+    if (!host) return;
+
+    var previousFull = cloneDomain(rpFullDomain);
+    var previousView = cloneDomain(rpViewDomain);
+    var wasFollowing = rpLiveFollow || !previousFull || !previousView || previousView.max >= previousFull.max - 1;
+    rpLastResult = result;
+    rpRenderedSignature = chartSignature;
+    rpReplayCache = buildReplayCache(result);
+    rpIndicatorCache = {};
+    var nextFull = replayDomain(result);
+    var rebuild = host.dataset.liveWorkspace !== '1' || structure !== rpLiveStructureSignature;
+    var chartChanged = chartSignature !== rpLiveChartSignature;
+    rpFullDomain = nextFull;
+    if (!previousView) {
+      var initialSpan = Math.min(60, domainSpan(nextFull));
+      rpViewDomain = clampViewDomain(nextFull.max - initialSpan, nextFull.max);
+    } else if (wasFollowing) {
+      var span = Math.min(domainSpan(previousView), domainSpan(nextFull));
+      rpViewDomain = clampViewDomain(nextFull.max - span, nextFull.max);
+    } else {
+      rpViewDomain = clampViewDomain(previousView.min, previousView.max);
+    }
+    rpLiveStructureSignature = structure;
+    rpLiveChartSignature = chartSignature;
+
+    if (!symbols.length) {
+      host.dataset.liveWorkspace = '1';
+      host.innerHTML = '<div id="rp-live-stats">' + renderLiveStats(payload) + '</div>' +
+        '<div class="rp-empty">No active or completed Chili symbols today.</div>';
+      return;
+    }
+    if (rebuild) {
+      clearPinnedChart();
+      cancelSmoothViewport();
+      host.dataset.liveWorkspace = '1';
+      var rows = symbols.map(function(sym, index) {
+        return renderLiveSymbolRow(result, sym, rpViewDomain, index < RP_EAGER_ROWS);
+      }).join('');
+      host.innerHTML = '<div id="rp-live-stats">' + renderLiveStats(payload) + '</div>' +
+        '<div class="rp-timeline">' + renderViewportControls() + renderRuler(rpViewDomain) + rows + '</div>';
+      syncPlaybackControls();
+      requestVisibleChartRefresh();
+      return;
+    }
+
+    var statsHost = document.getElementById('rp-live-stats');
+    if (statsHost) statsHost.innerHTML = renderLiveStats(payload);
+    document.querySelectorAll('.rp-row-live').forEach(function(row) {
+      var sym = normalizeSym(row.dataset.symbol);
+      var symbolHost = row.querySelector('.rp-symbol');
+      var setupHost = row.querySelector('.rp-setup');
+      if (symbolHost) symbolHost.innerHTML = renderLiveSymbolHeader(result, sym);
+      if (setupHost) setupHost.innerHTML = renderLiveSetup(result, sym, true);
+      if (chartChanged) {
+        var chart = row.querySelector('.rp-chart');
+        if (chart) {
+          chart.dataset.domainMin = '';
+          chart.dataset.domainMax = '';
+        }
+      }
+    });
+    if (!domainsClose(previousView, rpViewDomain)) refreshViewportUi(false, null);
+    else if (chartChanged) requestVisibleChartRefresh();
+    else refreshVisibleTraceLists();
+  }
+
   function renderReplay(result) {
+    rpLastReplayResult = result;
+    if (rpSurfaceMode !== 'replay') return;
     rpLastResult = result;
     rpRenderedSignature = resultSignature(result);
     rpReplayCache = buildReplayCache(result);
@@ -2971,6 +3374,7 @@
       error: result.error || null
     }, null, 2);
     if (!host) return;
+    host.removeAttribute('data-live-workspace');
     var date = document.getElementById('rp-date');
     var mode = document.getElementById('rp-mode');
     if (date && result.date) date.value = result.date;
@@ -3040,12 +3444,12 @@
     var normalizedMode = mode || 'live_fsm';
     var cached = cachedReplayResult(date, normalizedMode);
     var renderedCached = false;
-    if (!quiet && cached) {
+    if (!quiet && cached && rpSurfaceMode === 'replay') {
       renderReplay(cached);
       updateReplaySubtitle(cached, date);
       setStatus('loaded', 'done');
       renderedCached = true;
-    } else if (!quiet) {
+    } else if (!quiet && rpSurfaceMode === 'replay') {
       setStatus('loading...', 'running');
       renderLoading('Loading replay...');
     }
@@ -3056,7 +3460,7 @@
           if (renderedCached) {
             return true;
           }
-          if (!quiet) {
+          if (!quiet && rpSurfaceMode === 'replay') {
             setStatus('not found', 'error');
             renderLoading('No replay result for that date.');
           }
@@ -3066,16 +3470,18 @@
         if (!renderedCached || resultSignature(out.body.result) !== rpRenderedSignature) {
           renderReplay(out.body.result);
         }
-        setStatus('loaded', 'done');
-        updateReplaySubtitle(out.body.result, date);
+        if (rpSurfaceMode === 'replay') {
+          setStatus('loaded', 'done');
+          updateReplaySubtitle(out.body.result, date);
+        }
         return true;
       })
       .catch(function(err) {
         if (renderedCached) {
-          setStatus('loaded', 'done');
+          if (rpSurfaceMode === 'replay') setStatus('loaded', 'done');
           return true;
         }
-        if (!quiet) {
+        if (!quiet && rpSurfaceMode === 'replay') {
           setStatus('failed', 'error');
           renderLoading(err && err.message ? err.message : 'Replay load failed.');
         }
@@ -3145,15 +3551,147 @@
           if (historyPickKey(pick) === historyPickKey(cachedPick)) return true;
           return loadResult(pick.date, pick.armed_source || 'live_fsm', false);
         }
-        renderLoading('No saved replay yet.');
+        if (rpSurfaceMode === 'replay') renderLoading('No saved replay yet.');
         return false;
       })
       .catch(function() {
         if (cachedPick) return true;
-        renderLoading('Replay archive unavailable.');
+        if (rpSurfaceMode === 'replay') renderLoading('Replay archive unavailable.');
         return false;
       });
   }
+
+  function updateLiveFreshness(payload, errorText) {
+    var label = document.getElementById('rp-live-freshness');
+    var dot = document.getElementById('rp-live-dot');
+    if (!label || !dot) return;
+    dot.className = 'rp-live-dot';
+    if (errorText) {
+      dot.classList.add('error');
+      label.textContent = errorText;
+      return;
+    }
+    var runtime = payload && payload.latest_runtime_utc;
+    var age = runtime ? Math.max(0, Math.round((Date.now() - new Date(runtime).getTime()) / 1000)) : null;
+    if (age == null || !Number.isFinite(age)) {
+      dot.classList.add('stale');
+      label.textContent = 'Read-only observer - waiting for a runtime tick';
+      return;
+    }
+    if (age > 30) dot.classList.add('stale');
+    var ageText = age < 2 ? 'updated now' : age < 60 ? 'updated ' + age + 's ago' : 'updated ' + Math.floor(age / 60) + 'm ago';
+    label.textContent = 'Read-only observer - ' + ageText + ' - auto refresh';
+  }
+
+  function stopLivePolling() {
+    if (rpLiveTimer) {
+      clearTimeout(rpLiveTimer);
+      rpLiveTimer = null;
+    }
+    if (rpLiveAbort) {
+      try { rpLiveAbort.abort(); } catch (err) {}
+      rpLiveAbort = null;
+    }
+  }
+
+  function scheduleLivePoll(delay) {
+    if (rpSurfaceMode !== 'live' || document.hidden) return;
+    if (rpLiveTimer) clearTimeout(rpLiveTimer);
+    rpLiveTimer = setTimeout(function() {
+      rpLiveTimer = null;
+      pollLiveSnapshot();
+    }, Math.max(0, Number(delay) || 0));
+  }
+
+  function pollLiveSnapshot() {
+    if (rpSurfaceMode !== 'live' || document.hidden || rpLiveAbort) return;
+    rpLiveAbort = typeof AbortController === 'function' ? new AbortController() : null;
+    var options = { credentials: 'same-origin', cache: 'no-store' };
+    if (rpLiveAbort) options.signal = rpLiveAbort.signal;
+    fetch('/api/trading/momentum/replay/live', options)
+      .then(function(resp) {
+        return resp.json().then(function(body) { return { ok: resp.ok, status: resp.status, body: body }; });
+      })
+      .then(function(out) {
+        rpLiveAbort = null;
+        if (rpSurfaceMode !== 'live') return;
+        if (!out.ok || !out.body || !out.body.ok) {
+          throw new Error(out.status === 403 ? 'Pair this browser to view live trading.' : ((out.body || {}).detail || 'Live observer unavailable.'));
+        }
+        rpLiveFailureCount = 0;
+        updateLiveFreshness(out.body, null);
+        setStatus('live', 'done');
+        renderLive(out.body);
+        scheduleLivePoll(Number(out.body.refresh_after_ms || 3000));
+      })
+      .catch(function(err) {
+        var aborted = err && err.name === 'AbortError';
+        rpLiveAbort = null;
+        if (aborted || rpSurfaceMode !== 'live') return;
+        rpLiveFailureCount += 1;
+        var message = err && err.message ? err.message : 'Live observer unavailable.';
+        updateLiveFreshness(null, message);
+        setStatus('retrying', 'error');
+        if (!rpLastLivePayload) renderLoading(message);
+        scheduleLivePoll(Math.min(30000, 2000 * Math.pow(2, Math.min(4, rpLiveFailureCount))));
+      });
+  }
+
+  function applySurfaceModeUi(mode) {
+    var replay = mode === 'replay';
+    var replayTab = document.getElementById('rp-surface-replay');
+    var liveTab = document.getElementById('rp-surface-live');
+    var replayControls = document.getElementById('rp-replay-controls');
+    var liveControls = document.getElementById('rp-live-controls');
+    var archive = document.getElementById('rp-replay-archive');
+    var eyebrow = document.getElementById('rp-command-eyebrow');
+    var title = document.getElementById('rp-command-title');
+    var pageSubtitle = document.getElementById('rp-page-subtitle');
+    var subtitle = document.getElementById('rp-subtitle');
+    if (replayTab) replayTab.setAttribute('aria-selected', replay ? 'true' : 'false');
+    if (liveTab) liveTab.setAttribute('aria-selected', replay ? 'false' : 'true');
+    if (replayControls) replayControls.hidden = !replay;
+    if (liveControls) liveControls.hidden = replay;
+    if (archive) archive.hidden = !replay;
+    if (eyebrow) eyebrow.textContent = replay ? 'Replay v3' : 'Live observer';
+    if (title) title.textContent = replay ? 'Trading behavior timeline' : 'Chili trading now';
+    if (pageSubtitle) pageSubtitle.textContent = replay
+      ? 'Replay v3 live-FSM view by symbol, action, and setup.'
+      : 'Current Chili decisions, positions, and P/L from persisted runner evidence.';
+    if (subtitle) subtitle.textContent = replay
+      ? 'Rows are symbols; markers are live Chili actions on the chart.'
+      : 'Rows are current or completed symbols; state changes and fills update automatically.';
+  }
+
+  window.rpSetSurfaceMode = function(mode) {
+    var next = mode === 'live' ? 'live' : 'replay';
+    if (next === rpSurfaceMode) return;
+    stopEventPlayback();
+    if (rpPoll) {
+      clearTimeout(rpPoll);
+      rpPoll = null;
+    }
+    stopLivePolling();
+    rpSurfaceMode = next;
+    applySurfaceModeUi(next);
+    clearPinnedChart();
+    rpFullDomain = null;
+    rpViewDomain = null;
+    if (next === 'live') {
+      rpLiveFollow = true;
+      setStatus(rpLastLivePayload ? 'live' : 'connecting', rpLastLivePayload ? 'done' : 'running');
+      if (rpLastLivePayload) renderLive(rpLastLivePayload);
+      else renderLoading('Connecting to persisted Chili state...');
+      updateLiveFreshness(rpLastLivePayload, null);
+      scheduleLivePoll(0);
+      return;
+    }
+    var host = document.getElementById('rp-workspace');
+    if (host) host.removeAttribute('data-live-workspace');
+    setStatus(rpLastReplayResult ? 'loaded' : 'loading...', rpLastReplayResult ? 'done' : 'running');
+    if (rpLastReplayResult) renderReplay(rpLastReplayResult);
+    else loadHistory();
+  };
 
   function pollReplayStatus() {
     if (rpPoll) clearTimeout(rpPoll);
@@ -3163,25 +3701,30 @@
         var job = body.job || {};
         var btn = document.getElementById('rp-run');
         if (job.state === 'running') {
-          setStatus('running...', 'running');
-          renderLoading('Replay is running...');
-          rpPoll = setTimeout(pollReplayStatus, 3000);
+          if (rpSurfaceMode === 'replay') {
+            setStatus('running...', 'running');
+            renderLoading('Replay is running...');
+          }
+          if (rpSurfaceMode === 'replay') rpPoll = setTimeout(pollReplayStatus, 3000);
           return;
         }
         if (btn) btn.disabled = false;
         if (job.state === 'done') {
-          setStatus('complete', 'done');
+          if (rpSurfaceMode === 'replay') setStatus('complete', 'done');
           loadResult(job.date, job.armed_source || (document.getElementById('rp-mode') || {}).value || 'live_fsm', false);
           loadHistory();
         } else if (job.state === 'error') {
-          setStatus(job.error || 'error', 'error');
-          renderLoading(job.error || 'Replay failed.');
+          if (rpSurfaceMode === 'replay') {
+            setStatus(job.error || 'error', 'error');
+            renderLoading(job.error || 'Replay failed.');
+          }
         }
       })
       .catch(function() {});
   }
 
   window.rpRunReplay = function() {
+    if (rpSurfaceMode !== 'replay') return;
     var date = (document.getElementById('rp-date') || {}).value;
     var mode = (document.getElementById('rp-mode') || {}).value || 'live_fsm';
     var btn = document.getElementById('rp-run');
@@ -3268,8 +3811,14 @@
     window.addEventListener('scroll', requestVisibleChartRefresh, { passive: true });
     window.addEventListener('resize', requestVisibleChartRefresh);
     document.addEventListener('visibilitychange', function() {
-      if (document.hidden) stopEventPlayback();
+      if (document.hidden) {
+        stopEventPlayback();
+        if (rpSurfaceMode === 'live') stopLivePolling();
+      } else if (rpSurfaceMode === 'live') {
+        scheduleLivePoll(0);
+      }
     });
+    applySurfaceModeUi(rpSurfaceMode);
     loadHistory();
   });
 })();
