@@ -671,9 +671,14 @@
   var rpVisibleFrame = null;
   var rpFocusChart = null;
   var rpDeferredViewportTimer = null;
+  var rpSmoothFrame = null;
+  var rpSmoothTargetDomain = null;
+  var rpSmoothFocusChart = null;
   var rpRenderedSignature = null;
   var RP_MIN_WINDOW_MINUTES = 6;
   var RP_EAGER_ROWS = 5;
+  var RP_VIEWPORT_SMOOTHING = 0.34;
+  var RP_VIEWPORT_SMOOTH_EPS = 1.1;
   var RP_STORAGE_PREFIX = 'chili:replay:v5:';
   var RP_HISTORY_CACHE_KEY = RP_STORAGE_PREFIX + 'history';
   var RP_RESULT_INDEX_KEY = RP_STORAGE_PREFIX + 'result:index';
@@ -1127,6 +1132,12 @@
 
   function domainSpan(domain) {
     return domain ? Math.max(0, Number(domain.max) - Number(domain.min)) : 0;
+  }
+
+  function domainsClose(a, b) {
+    return !!(a && b) &&
+      Math.abs(Number(a.min) - Number(b.min)) <= RP_VIEWPORT_SMOOTH_EPS &&
+      Math.abs(Number(a.max) - Number(b.max)) <= RP_VIEWPORT_SMOOTH_EPS;
   }
 
   function inDomain(minute, domain) {
@@ -1702,7 +1713,16 @@
     refreshViewportUi();
   }
 
-  function setViewDomain(domain, deferRefresh, focusChart) {
+  function cancelSmoothViewport() {
+    if (rpSmoothFrame) {
+      cancelAnimationFrame(rpSmoothFrame);
+      rpSmoothFrame = null;
+    }
+    rpSmoothTargetDomain = null;
+    rpSmoothFocusChart = null;
+  }
+
+  function applyViewDomain(domain, deferRefresh, focusChart) {
     if (!domain) return;
     var next = clampViewDomain(domain.min, domain.max);
     if (!next) return;
@@ -1715,24 +1735,74 @@
     }
   }
 
-  function zoomViewport(factor, anchorRatio, deferRefresh, focusChart) {
-    if (!rpViewDomain) return;
-    var current = cloneDomain(rpViewDomain);
+  function setViewDomain(domain, deferRefresh, focusChart, preserveSmooth) {
+    if (!preserveSmooth) cancelSmoothViewport();
+    applyViewDomain(domain, deferRefresh, focusChart);
+  }
+
+  function zoomDomain(factor, anchorRatio, baseDomain) {
+    var current = cloneDomain(baseDomain || rpViewDomain);
+    if (!current) return null;
     var span = Math.max(1, domainSpan(current));
     var anchor = Math.max(0, Math.min(1, anchorRatio == null ? 0.5 : anchorRatio));
     var nextSpan = span * factor;
     var anchorMinute = current.min + span * anchor;
-    setViewDomain({
+    return {
       min: anchorMinute - nextSpan * anchor,
       max: anchorMinute + nextSpan * (1 - anchor)
-    }, deferRefresh, focusChart);
+    };
+  }
+
+  function panDomain(deltaRatio, baseDomain) {
+    var source = baseDomain || rpViewDomain;
+    if (!source) return null;
+    var shift = domainSpan(source) * deltaRatio;
+    return { min: source.min + shift, max: source.max + shift };
+  }
+
+  function zoomViewport(factor, anchorRatio, deferRefresh, focusChart) {
+    setViewDomain(zoomDomain(factor, anchorRatio), deferRefresh, focusChart);
   }
 
   function panViewport(deltaRatio, baseDomain, deferRefresh, focusChart) {
-    var source = baseDomain || rpViewDomain;
-    if (!source) return;
-    var shift = domainSpan(source) * deltaRatio;
-    setViewDomain({ min: source.min + shift, max: source.max + shift }, deferRefresh, focusChart);
+    setViewDomain(panDomain(deltaRatio, baseDomain), deferRefresh, focusChart);
+  }
+
+  function smoothViewportStep() {
+    rpSmoothFrame = null;
+    if (!rpSmoothTargetDomain || !rpViewDomain) return;
+    var focusChart = rpSmoothFocusChart;
+    var current = cloneDomain(rpViewDomain);
+    var target = rpSmoothTargetDomain;
+    var done = domainsClose(current, target);
+    var next = done ? target : {
+      min: current.min + (target.min - current.min) * RP_VIEWPORT_SMOOTHING,
+      max: current.max + (target.max - current.max) * RP_VIEWPORT_SMOOTHING
+    };
+    applyViewDomain(next, true, focusChart);
+    if (done) {
+      rpSmoothTargetDomain = null;
+      rpSmoothFocusChart = null;
+      requestDeferredViewportRefresh();
+      return;
+    }
+    rpSmoothFrame = requestAnimationFrame(smoothViewportStep);
+  }
+
+  function smoothSetViewDomain(domain, focusChart) {
+    var target = domain ? clampViewDomain(domain.min, domain.max) : null;
+    if (!target) return;
+    rpSmoothTargetDomain = target;
+    if (focusChart) rpSmoothFocusChart = focusChart;
+    if (!rpSmoothFrame) rpSmoothFrame = requestAnimationFrame(smoothViewportStep);
+  }
+
+  function smoothZoomViewport(factor, anchorRatio, focusChart) {
+    smoothSetViewDomain(zoomDomain(factor, anchorRatio, rpSmoothTargetDomain || rpViewDomain), focusChart);
+  }
+
+  function smoothPanViewport(deltaRatio, focusChart) {
+    smoothSetViewDomain(panDomain(deltaRatio, rpSmoothTargetDomain || rpViewDomain), focusChart);
   }
 
   function resetViewport() {
@@ -1787,6 +1857,13 @@
     activeTraceButton(symbol, minute);
   }
 
+  function wheelDeltaPixels(value, mode) {
+    var v = Number(value) || 0;
+    if (mode === 1) return v * 16;
+    if (mode === 2) return v * 480;
+    return v;
+  }
+
   function handleChartWheel(event) {
     var chart = event.target.closest && event.target.closest('.rp-chart');
     if (!chart || !rpViewDomain) return;
@@ -1794,12 +1871,15 @@
     chart = ensureChartFresh(chart) || chart;
     var rect = chart.getBoundingClientRect();
     if (!rect.width) return;
-    if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
-      panViewport(event.deltaX / rect.width, null, true, chart);
+    var dx = wheelDeltaPixels(event.deltaX, event.deltaMode);
+    var dy = wheelDeltaPixels(event.deltaY, event.deltaMode);
+    if (Math.abs(dx) > Math.abs(dy) || event.shiftKey) {
+      smoothPanViewport((dx || dy) / rect.width, chart);
       return;
     }
     var ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-    zoomViewport(event.deltaY > 0 ? 1.18 : 0.82, ratio, true, chart);
+    var cappedDy = Math.max(-220, Math.min(220, dy));
+    smoothZoomViewport(Math.exp(cappedDy * 0.0018), ratio, chart);
   }
 
   function handleChartPointerDown(event) {
@@ -2255,6 +2335,7 @@
     if (mode && result.armed_source) mode.value = result.armed_source;
     updateModeHint();
     clearPinnedChart();
+    cancelSmoothViewport();
     var symbols = symbolList(result);
     var stats = renderReplayStats(result, symbols);
     if (result.error) {
@@ -2493,11 +2574,11 @@
   };
 
   window.rpZoomCharts = function(factor) {
-    zoomViewport(Number(factor) || 1, 0.5);
+    smoothZoomViewport(Number(factor) || 1, 0.5);
   };
 
   window.rpPanCharts = function(deltaRatio) {
-    panViewport(Number(deltaRatio) || 0);
+    smoothPanViewport(Number(deltaRatio) || 0);
   };
 
   window.rpResetCharts = function() {
