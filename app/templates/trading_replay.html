@@ -230,6 +230,11 @@
   text-transform: uppercase;
 }
 .rp-viewport-main {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+.rp-viewport-top {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -270,6 +275,64 @@
   border-color: color-mix(in srgb, var(--rp-blue) 46%, transparent);
   color: var(--rp-blue);
 }
+.rp-scrubber {
+  position: relative;
+  height: 18px;
+  border: 1px solid color-mix(in srgb, var(--rp-line) 86%, transparent);
+  border-radius: 999px;
+  background:
+    linear-gradient(90deg, rgba(59,130,246,.10), rgba(16,185,129,.08)),
+    #0b1220;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.02);
+  cursor: grab;
+  overflow: hidden;
+  touch-action: none;
+}
+.rp-scrubber:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--rp-blue) 72%, transparent);
+  outline-offset: 2px;
+}
+.rp-scrubber.is-dragging {
+  cursor: grabbing;
+}
+.rp-scrubber-marker {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  border-radius: 2px;
+  transform: translateX(-50%);
+  background: color-mix(in srgb, var(--rp-soft) 70%, transparent);
+  opacity: .45;
+}
+.rp-scrubber-marker.trade {
+  width: 3px;
+  background: var(--rp-gold);
+  opacity: .9;
+}
+.rp-scrubber-window {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  min-width: 12px;
+  border: 1px solid color-mix(in srgb, var(--rp-blue) 78%, white 5%);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--rp-blue) 26%, transparent);
+  box-shadow: 0 0 18px rgba(37,99,235,.24);
+  pointer-events: none;
+}
+.rp-scrubber-window::before,
+.rp-scrubber-window::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  width: 2px;
+  border-radius: 2px;
+  background: rgba(255,255,255,.68);
+}
+.rp-scrubber-window::before { left: 5px; }
+.rp-scrubber-window::after { right: 5px; }
 .rp-ruler {
   display: grid;
   grid-template-columns: 150px minmax(0, 1fr) 300px;
@@ -666,6 +729,7 @@
   var rpFullDomain = null;
   var rpViewDomain = null;
   var rpDragState = null;
+  var rpScrubState = null;
   var rpSuppressClick = false;
   var rpRefreshFrame = null;
   var rpVisibleFrame = null;
@@ -1183,6 +1247,55 @@
     return timeLabel(rpViewDomain.min) + ' - ' + timeLabel(rpViewDomain.max) + ' / ' + scaleText + 'x';
   }
 
+  function viewportScrubberMetrics() {
+    if (!rpFullDomain || !rpViewDomain) return { left: 0, width: 100 };
+    var full = Math.max(1, domainSpan(rpFullDomain));
+    var left = (Number(rpViewDomain.min) - Number(rpFullDomain.min)) / full * 100;
+    var width = domainSpan(rpViewDomain) / full * 100;
+    left = Math.max(0, Math.min(100, left));
+    width = Math.max(1, Math.min(100 - left, width));
+    return { left: left, width: width };
+  }
+
+  function syncViewportScrubber() {
+    var scrubber = document.getElementById('rp-viewport-scrubber');
+    if (!scrubber || !rpFullDomain || !rpViewDomain) return;
+    var windowEl = scrubber.querySelector('.rp-scrubber-window');
+    var metrics = viewportScrubberMetrics();
+    if (windowEl) {
+      windowEl.style.left = metrics.left.toFixed(3) + '%';
+      windowEl.style.width = metrics.width.toFixed(3) + '%';
+    }
+    scrubber.setAttribute('aria-valuenow', String(Math.round(metrics.left + metrics.width / 2)));
+    scrubber.setAttribute('aria-valuetext', viewportLabel());
+  }
+
+  function renderScrubberMarkers(result) {
+    if (!rpFullDomain || !result) return '';
+    var marks = {};
+    function add(minute, cls) {
+      if (minute == null || !inDomain(minute, rpFullDomain)) return;
+      var key = Math.round(Number(minute));
+      marks[key] = marks[key] === 'trade' || cls === 'trade' ? 'trade' : 'trace';
+    }
+    replayTradeRows(result).forEach(function(t) {
+      add(tradeEntryMinute(t), 'trade');
+      add(tradeExitMinute(t), 'trade');
+    });
+    (result.decision_trace || []).forEach(function(row) {
+      add(rowMinute(row), 'trace');
+    });
+    return Object.keys(marks)
+      .map(Number)
+      .sort(function(a, b) { return a - b; })
+      .slice(0, 180)
+      .map(function(minute) {
+        return '<span class="rp-scrubber-marker ' + esc(marks[minute]) + '" style="left:' +
+          pct(minute, rpFullDomain).toFixed(3) + '%"></span>';
+      })
+      .join('');
+  }
+
   function symbolList(result) {
     var seen = new Map();
     function add(sym, score) {
@@ -1521,6 +1634,7 @@
   }
 
   function handleChartMove(event) {
+    if (updateScrubberPan(event)) return;
     if (updateChartPan(event)) return;
     var chart = event.target.closest && event.target.closest('.rp-chart');
     if (!chart) return;
@@ -1679,6 +1793,7 @@
     if (ruler) ruler.outerHTML = renderRuler(rpViewDomain);
     var label = document.getElementById('rp-viewport-window');
     if (label) label.textContent = viewportLabel();
+    syncViewportScrubber();
   }
 
   function requestDeferredViewportRefresh() {
@@ -1803,6 +1918,86 @@
 
   function smoothPanViewport(deltaRatio, focusChart) {
     smoothSetViewDomain(panDomain(deltaRatio, rpSmoothTargetDomain || rpViewDomain), focusChart);
+  }
+
+  function scrubberDomainFromEvent(scrubber, event, span) {
+    if (!scrubber || !rpFullDomain || !rpViewDomain) return null;
+    var rect = scrubber.getBoundingClientRect();
+    if (!rect.width) return null;
+    var ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    var fullSpan = Math.max(1, domainSpan(rpFullDomain));
+    var viewSpan = Math.max(RP_MIN_WINDOW_MINUTES, Math.min(span || domainSpan(rpViewDomain), fullSpan));
+    var center = Number(rpFullDomain.min) + fullSpan * ratio;
+    return { min: center - viewSpan / 2, max: center + viewSpan / 2 };
+  }
+
+  function handleScrubberPointerDown(event) {
+    var scrubber = event.target.closest && event.target.closest('.rp-scrubber');
+    if (!scrubber || !rpViewDomain || (event.button != null && event.button !== 0)) return;
+    event.preventDefault();
+    cancelSmoothViewport();
+    rpScrubState = {
+      scrubber: scrubber,
+      pointerId: event.pointerId,
+      span: domainSpan(rpViewDomain)
+    };
+    scrubber.classList.add('is-dragging');
+    if (scrubber.setPointerCapture) {
+      try { scrubber.setPointerCapture(event.pointerId); } catch (err) {}
+    }
+    var domain = scrubberDomainFromEvent(scrubber, event, rpScrubState.span);
+    if (domain) setViewDomain(domain, true, null);
+  }
+
+  function updateScrubberPan(event) {
+    if (!rpScrubState) return false;
+    event.preventDefault();
+    var domain = scrubberDomainFromEvent(rpScrubState.scrubber, event, rpScrubState.span);
+    if (domain) setViewDomain(domain, true, null);
+    return true;
+  }
+
+  function finishScrubberPan(event) {
+    if (!rpScrubState) return;
+    var scrubber = rpScrubState.scrubber;
+    if (scrubber) {
+      scrubber.classList.remove('is-dragging');
+      if (scrubber.releasePointerCapture) {
+        try { scrubber.releasePointerCapture(rpScrubState.pointerId); } catch (err) {}
+      }
+    }
+    refreshViewportUi(false, null);
+    rpSuppressClick = true;
+    setTimeout(function() { rpSuppressClick = false; }, 0);
+    if (event && event.preventDefault) event.preventDefault();
+    rpScrubState = null;
+  }
+
+  function handleScrubberKeydown(event) {
+    var scrubber = event.target.closest && event.target.closest('.rp-scrubber');
+    if (!scrubber || !rpViewDomain || !rpFullDomain) return;
+    var key = event.key;
+    if (key === 'ArrowLeft') {
+      event.preventDefault();
+      smoothPanViewport(-0.08);
+    } else if (key === 'ArrowRight') {
+      event.preventDefault();
+      smoothPanViewport(0.08);
+    } else if (key === '-' || key === '_') {
+      event.preventDefault();
+      smoothZoomViewport(1.22, 0.5);
+    } else if (key === '+' || key === '=') {
+      event.preventDefault();
+      smoothZoomViewport(0.82, 0.5);
+    } else if (key === 'Home') {
+      event.preventDefault();
+      var span = domainSpan(rpViewDomain);
+      smoothSetViewDomain({ min: rpFullDomain.min, max: rpFullDomain.min + span });
+    } else if (key === 'End') {
+      event.preventDefault();
+      var span2 = domainSpan(rpViewDomain);
+      smoothSetViewDomain({ min: rpFullDomain.max - span2, max: rpFullDomain.max });
+    }
   }
 
   function resetViewport() {
@@ -2154,9 +2349,11 @@
   }
 
   function renderViewportControls() {
+    var scrubber = renderViewportScrubber();
     return '<div class="rp-viewport">' +
       '<div>Viewport</div>' +
       '<div class="rp-viewport-main">' +
+      '<div class="rp-viewport-top">' +
       '<span class="rp-viewport-window" id="rp-viewport-window">' + esc(viewportLabel()) + '</span>' +
       '<div class="rp-viewport-tools">' +
       '<button class="rp-tool" type="button" aria-label="Pan earlier" title="Pan earlier" onclick="rpPanCharts(-0.24)">&lt;</button>' +
@@ -2166,7 +2363,20 @@
       '<button class="rp-tool" type="button" aria-label="Fit full replay" title="Fit full replay" onclick="rpResetCharts()">Fit</button>' +
       '</div>' +
       '</div>' +
+      scrubber +
+      '</div>' +
       '<div>Scale</div>' +
+      '</div>';
+  }
+
+  function renderViewportScrubber() {
+    var metrics = viewportScrubberMetrics();
+    return '<div class="rp-scrubber" id="rp-viewport-scrubber" role="slider" tabindex="0" ' +
+      'aria-label="Replay viewport" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' +
+      esc(Math.round(metrics.left + metrics.width / 2)) + '" aria-valuetext="' + esc(viewportLabel()) + '">' +
+      renderScrubberMarkers(rpLastResult) +
+      '<span class="rp-scrubber-window" style="left:' + metrics.left.toFixed(3) +
+      '%;width:' + metrics.width.toFixed(3) + '%"></span>' +
       '</div>';
   }
 
@@ -2598,10 +2808,14 @@
       mode.addEventListener('change', updateModeHint);
       updateModeHint();
     }
+    document.addEventListener('pointerdown', handleScrubberPointerDown);
     document.addEventListener('pointerdown', handleChartPointerDown);
     document.addEventListener('pointermove', handleChartMove);
+    document.addEventListener('pointerup', finishScrubberPan);
     document.addEventListener('pointerup', finishChartPan);
+    document.addEventListener('pointercancel', finishScrubberPan);
     document.addEventListener('pointercancel', finishChartPan);
+    document.addEventListener('keydown', handleScrubberKeydown);
     document.addEventListener('pointerout', handleChartOut);
     document.addEventListener('click', handleTraceClick);
     document.addEventListener('click', handleChartClick);
