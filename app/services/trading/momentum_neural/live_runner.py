@@ -10161,9 +10161,19 @@ def tick_live_session(
         # exempt — no equity session clock.
         try:
             if not str(sess.symbol or "").upper().endswith("-USD"):
+                from zoneinfo import ZoneInfo as _TodZone
+
                 from .risk_policy import time_of_day_risk_multiplier
 
-                _tod_mult, _tod_dbg = time_of_day_risk_multiplier(db)
+                # SIM-CLOCK anchor (the #890 replay-honesty class): derive the ET hour
+                # from _utcnow() (wall-identical live; the sim clock in replay) — the
+                # helper's own wall-clock default would size a replayed premarket trade
+                # by the wall hour the replay happens to RUN at (caught 2026-07-10:
+                # a 7:34-ET sim entry quarter-sized because the replay ran at 3 PM).
+                _tod_now = _utcnow().replace(tzinfo=timezone.utc).astimezone(_TodZone("America/New_York"))
+                _tod_mult, _tod_dbg = time_of_day_risk_multiplier(
+                    db, now_et_hour_frac=_tod_now.hour + _tod_now.minute / 60.0
+                )
                 if 0.0 < _tod_mult < 1.0:
                     _eff_max_loss = float(_eff_max_loss) * float(_tod_mult)
                     le["time_of_day_risk"] = _tod_dbg
