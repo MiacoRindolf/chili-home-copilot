@@ -2871,6 +2871,87 @@ def bounded_by_rolling_median(
     return raw, deriv
 
 
+_TOD_CACHE: dict[str, Any] = {}
+
+
+def time_of_day_risk_multiplier(db: Any, *, now_et_hour_frac: float | None = None) -> tuple[float, dict[str, Any]]:
+    """ADAPTIVE time-of-day risk multiplier (2026-07-10, greenlit #1): scale per-trade
+    risk by the LANE'S OWN measured per-hour expectancy, shrunk toward the
+    Ross-verified discovery-window prior. Both the prior AND our 30-day data agree (2026-07-10 pull:
+    09:00 ET +25.1R, 10:00 +6.8R, 11:00+ ALL negative — the midday churn that ate the
+    JZXN/CANF mornings), so this is loss-subtraction on a measured curve, not a bet.
+
+    mult(hour) = w * data_mult + (1 - w) * prior_mult
+      * data_mult  — the trailing-30d avg realized-R for the ET hour bucket mapped to
+        [floor, 1]: avg_r >= 0 -> 1.0; avg_r <= -1R -> floor; linear between (the
+        name's own outcomes decide — no hand-tuned schedule).
+      * prior_mult — the Ross discipline as the SMALL-SAMPLE anchor: 1.0 through the
+        discovery window (premarket-10:30 ET), 0.5 to 11:30, else the floor.
+      * w = n/(n + K) — shrinkage by the bucket's own sample count; K is THE one
+        documented base (samples for a bucket to earn half its own weight).
+      * floor — reuses chili_momentum_frontside_strength_floor's convention (0.25):
+        floors are floors; a proven-toxic hour still gets a probe-sized budget so the
+        curve can keep LEARNING (a 0x hour could never update itself).
+
+    MARKET-STRUCTURE derate (applied AFTER the paper full-size floor, like the spread
+    derate): a validated discipline, not capital-preservation psychology — it binds on
+    paper too. Crypto (24/7) is exempt at the CALLER (no equity session clock).
+    10-minute process cache (one aggregate query). Fail-open 1.0 on any error."""
+    try:
+        if not bool(getattr(settings, "chili_momentum_time_of_day_risk_enabled", True)):
+            return 1.0, {"reason": "flag_off"}
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+
+        if now_et_hour_frac is None:
+            _et = _dt.now(ZoneInfo("America/New_York"))
+            now_et_hour_frac = _et.hour + _et.minute / 60.0
+        floor = 0.25
+        # PRIOR: the documented Ross discipline (discovery window full-risk).
+        if now_et_hour_frac < 10.5:
+            prior = 1.0
+        elif now_et_hour_frac < 11.5:
+            prior = 0.5
+        else:
+            prior = floor
+        # DATA: trailing-30d per-hour realized-R buckets (cached 10 min).
+        import time as _time
+
+        _now_mono = _time.monotonic()
+        cached = _TOD_CACHE.get("buckets")
+        if cached is None or (_now_mono - _TOD_CACHE.get("at", 0.0)) > 600.0:
+            from sqlalchemy import text as _sql
+
+            rows = db.execute(_sql(
+                "SELECT extract(hour FROM (ts AT TIME ZONE 'UTC') AT TIME ZONE 'America/New_York')::int AS h, "
+                "       count(*) AS n, avg((payload_json->>'realized_r')::numeric) AS avg_r "
+                "FROM trading_automation_events "
+                "WHERE event_type='momentum_mfe_realized' AND ts > (now() at time zone 'utc') - interval '30 days' "
+                "GROUP BY 1"
+            )).fetchall()
+            cached = {int(r[0]): (int(r[1]), float(r[2])) for r in rows}
+            _TOD_CACHE["buckets"] = cached
+            _TOD_CACHE["at"] = _now_mono
+        hour = int(now_et_hour_frac)
+        n, avg_r = cached.get(hour, (0, 0.0))
+        # avg_r >= 0 -> 1.0; avg_r <= -1 -> floor; linear in between.
+        if avg_r >= 0:
+            data_mult = 1.0
+        else:
+            data_mult = max(floor, 1.0 + (1.0 - floor) * float(avg_r))
+        K = float(getattr(settings, "chili_momentum_time_of_day_shrinkage_samples", 20) or 20)
+        w = float(n) / (float(n) + max(1.0, K))
+        mult = w * data_mult + (1.0 - w) * prior
+        mult = max(floor, min(1.0, mult))
+        return mult, {
+            "et_hour_frac": round(float(now_et_hour_frac), 2), "bucket_n": n,
+            "bucket_avg_r": round(float(avg_r), 3), "data_mult": round(data_mult, 3),
+            "prior_mult": prior, "w": round(w, 3), "mult": round(mult, 3),
+        }
+    except Exception:
+        return 1.0, {"reason": "error_fail_open"}
+
+
 def _recent_realized_r(
     db: Any, *, execution_family: str | None, lookback: int
 ) -> list[float]:

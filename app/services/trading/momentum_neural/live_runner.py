@@ -10152,6 +10152,23 @@ def tick_live_session(
                 _eff_max_loss = float(_base_max_loss)
         except (TypeError, ValueError):
             pass
+        # TIME-OF-DAY risk curve (2026-07-10, greenlit #1): a MARKET-STRUCTURE derate
+        # applied AFTER the paper floor (like the spread derate) — validated discipline,
+        # not psychology, so it binds on paper too. Our own 30d curve: 09:00 ET +25.1R,
+        # 10:00 +6.8R, 11:00+ ALL negative — full risk in the discovery window, probe
+        # size in the proven-toxic hours. Adaptive: the lane's own per-hour expectancy
+        # shrunk toward the Ross prior (see time_of_day_risk_multiplier). Crypto (24/7)
+        # exempt — no equity session clock.
+        try:
+            if not str(sess.symbol or "").upper().endswith("-USD"):
+                from .risk_policy import time_of_day_risk_multiplier
+
+                _tod_mult, _tod_dbg = time_of_day_risk_multiplier(db)
+                if 0.0 < _tod_mult < 1.0:
+                    _eff_max_loss = float(_eff_max_loss) * float(_tod_mult)
+                    le["time_of_day_risk"] = _tod_dbg
+        except Exception:
+            pass  # fail-open: the curve must never block a fill outright
         # COMBINED SIZE-DOWN FLOOR for a genuine front-side A-setup (default ON; OFF /
         # non-A-setup / fail => byte-identical). The product above has a combined CEILING
         # (base x 3.0) but NO combined FLOOR — so unbounded MULTIPLICATIVE STACKING of the
