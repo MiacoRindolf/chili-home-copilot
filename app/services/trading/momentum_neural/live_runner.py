@@ -10065,6 +10065,30 @@ def tick_live_session(
             float(_base_max_loss) * _safe_mult(_streak_mult) * _safe_mult(_graduation_mult) * _safe_mult(_cushion_mult) * _safe_mult(_l2_mult) * _safe_mult(_sched_mult) * _safe_mult(_liq_mult) * _safe_mult(_meta_mult) * _safe_mult(_prior_day_mult) * _safe_mult(_overnight_mult) * _safe_mult(_fatigue_mult) * _safe_mult(_sym_fatigue_mult) * _safe_mult(_hot_cold_mult) * _safe_mult(_time_fatigue_mult) * _safe_mult(_halt_size_mult) * _safe_mult(_dip_velocity_mult) * _safe_mult(_catalyst_conviction_mult) * _safe_mult(_prime_window_mult) * _safe_mult(_extreme_vol_mult) * _safe_mult(_squeeze_size_mult) * _safe_mult(_kelly_conviction_mult) * _safe_mult(_frontside_mult) * _safe_mult(_daily_room_mult) * _safe_mult(_red_intraday_mult) * _safe_mult(_perf_size_mult) * _safe_mult(_day_open_ramp_mult) * _safe_mult(_wildcard_bgrade_mult),
             float(_base_max_loss) * 3.0,  # hard combined-multiplier ceiling (quant pass v2)
         )
+        # PAPER-LANE FULL-SIZE (2026-07-09 operator directive): the size-DOWN stack
+        # above encodes capital-preservation psychology (streak / cushion / fatigue /
+        # hot-cold ...) that protects REAL money — on the PAPER lane the purpose is
+        # DATA, and toy sizes (~0.1% risk measured on VRAX 07-09: $1.9k notional on a
+        # $399k-BP sim account) teach nothing about fill/slippage truth at Ross-scale.
+        # Paper (alpaca_spot + chili_alpaca_paper) floors the stacked budget back to
+        # the DOCUMENTED equity-relative base (1% — never above it), with every
+        # multiplier still computed + logged above for the learning loop. The
+        # MARKET-PHYSICS derates stay live even on paper (they model fill reality):
+        # tape-speed cap, spread-cost derate, liquidity participation, notional
+        # ceiling, aggregate risk budget, max-loss circuit, daily-loss caps.
+        try:
+            if (
+                str(ef or "") == "alpaca_spot"
+                and bool(getattr(settings, "chili_alpaca_paper", True))
+                and _eff_max_loss < float(_base_max_loss)
+            ):
+                le["paper_full_size_floor"] = {
+                    "stacked_budget_usd": round(float(_eff_max_loss), 2),
+                    "restored_base_usd": round(float(_base_max_loss), 2),
+                }
+                _eff_max_loss = float(_base_max_loss)
+        except (TypeError, ValueError):
+            pass
         # COMBINED SIZE-DOWN FLOOR for a genuine front-side A-setup (default ON; OFF /
         # non-A-setup / fail => byte-identical). The product above has a combined CEILING
         # (base x 3.0) but NO combined FLOOR — so unbounded MULTIPLICATIVE STACKING of the
