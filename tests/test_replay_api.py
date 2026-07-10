@@ -31,6 +31,11 @@ def test_replay_page_exposes_research_fsm_console(client):
     assert b"rpStepReplayEvent" in r.content
     assert b"Replay | Live" in r.content
     assert b"/api/trading/momentum/replay/live" in r.content
+    assert b"rp-live-research" in r.content
+    assert b"Focus live symbols" in r.content
+    assert b"rpToggleLivePause" in r.content
+    assert b"rpSetLiveFilter" in r.content
+    assert b"rp-live-activity-events" in r.content
 
 
 def test_replay_run_starts_thread_and_single_flights(client):

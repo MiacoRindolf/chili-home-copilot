@@ -145,6 +145,10 @@
 }
 .rp-live-dot.stale { background: var(--rp-amber); }
 .rp-live-dot.error { background: var(--rp-red); }
+.rp-live-dot.paused {
+  background: var(--rp-blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--rp-blue) 14%, transparent);
+}
 [hidden] { display: none !important; }
 .rp-field {
   display: grid;
@@ -224,6 +228,136 @@
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
   margin-bottom: 12px;
+}
+.rp-live-research {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 9px 0 11px;
+  border-top: 1px solid var(--rp-line);
+  border-bottom: 1px solid var(--rp-line);
+}
+.rp-live-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.rp-live-segments {
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  border: 1px solid var(--rp-line);
+  border-radius: 6px;
+  background: var(--rp-panel-2);
+  scrollbar-width: none;
+}
+.rp-live-segments::-webkit-scrollbar { display: none; }
+.rp-live-filter {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  border: 0;
+  border-right: 1px solid var(--rp-line);
+  background: transparent;
+  color: var(--rp-muted);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 800;
+  padding: 0 9px;
+  white-space: nowrap;
+}
+.rp-live-filter:last-child { border-right: 0; }
+.rp-live-filter b {
+  color: var(--rp-soft);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+.rp-live-filter:hover,
+.rp-live-filter:focus-visible {
+  color: var(--rp-text);
+  outline: none;
+}
+.rp-live-filter[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--rp-blue) 16%, var(--rp-panel-2));
+  color: #dbeafe;
+}
+.rp-live-filter[aria-pressed="true"] b { color: var(--rp-blue); }
+.rp-live-search {
+  flex: 0 1 150px;
+  width: 150px;
+  min-width: 108px;
+  height: 32px;
+  box-sizing: border-box;
+  border: 1px solid var(--rp-line);
+  border-radius: 6px;
+  background: var(--rp-panel-2);
+  color: var(--rp-text);
+  font-size: 11px;
+  outline: none;
+  padding: 0 9px;
+}
+.rp-live-search:focus {
+  border-color: var(--rp-blue);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--rp-blue) 18%, transparent);
+}
+.rp-live-focus-summary {
+  margin-left: auto;
+  color: var(--rp-soft);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.rp-live-pause {
+  flex: 0 0 32px;
+  width: 32px;
+  min-width: 32px;
+  padding: 0;
+}
+.rp-live-pause[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--rp-blue) 56%, var(--rp-line));
+  color: var(--rp-blue);
+}
+.rp-live-activity {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.rp-live-activity-label {
+  color: var(--rp-soft);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.rp-live-activity-events {
+  min-height: 25px;
+}
+.rp-live-event {
+  max-width: 250px;
+}
+.rp-live-event b {
+  margin-right: 4px;
+  color: var(--rp-text);
+  font-variant-numeric: tabular-nums;
+}
+.rp-live-event span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rp-live-activity-empty {
+  align-self: center;
+  color: var(--rp-soft);
+  font-size: 10px;
+}
+.rp-live-filter-empty {
+  margin-top: 2px;
+  padding: 15px;
 }
 .rp-stat {
   border: 1px solid var(--rp-line);
@@ -859,6 +993,24 @@
   .rp-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  .rp-live-toolbar {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+  .rp-live-segments {
+    flex: 1 1 100%;
+  }
+  .rp-live-search {
+    flex: 1 1 130px;
+    width: auto;
+  }
+  .rp-live-focus-summary {
+    align-self: center;
+  }
+  .rp-live-activity {
+    grid-template-columns: 1fr;
+    gap: 5px;
+  }
   .rp-viewport-window {
     flex-basis: 100%;
   }
@@ -953,6 +1105,10 @@
   var rpLiveStructureSignature = '';
   var rpLiveChartSignature = '';
   var rpLiveFollow = true;
+  var rpLiveFilter = 'all';
+  var rpLiveQuery = '';
+  var rpLivePaused = false;
+  var rpLiveActivityHtml = '';
   var rpReplayCache = null;
   var rpPinnedChart = null;
   var rpIndicatorCache = {};
@@ -2303,6 +2459,7 @@
     event.preventDefault();
     var minute = Number(btn.dataset.minute);
     if (!Number.isFinite(minute)) return;
+    if (btn.classList.contains('rp-live-event')) revealLiveSymbol(btn.dataset.symbol);
     jumpToTrace(btn.dataset.symbol, minute);
   }
 
@@ -3180,6 +3337,182 @@
     return 'updated ' + Math.floor(age / 60) + 'm ago';
   }
 
+  function liveMetaHasPosition(meta) {
+    return !!(meta && (meta.positions || []).length);
+  }
+
+  function liveMetaHasPnl(meta) {
+    return Math.abs(Number((meta && meta.pnl || {}).total_usd || 0)) >= 0.005;
+  }
+
+  function liveMetaIsEntry(meta) {
+    if (!meta || liveMetaHasPosition(meta)) return false;
+    var text = [meta.state, meta.state_label, meta.last_action].filter(Boolean).join(' ').toLowerCase();
+    return /(entry candidate|pending entry|entry pending|queued live|trigger ready|triggered|placement pending|order pending|awaiting fill|submitted)/.test(text);
+  }
+
+  function liveMetaNeedsAttention(meta) {
+    return liveMetaHasPosition(meta) || liveMetaIsEntry(meta) || !!(meta && meta.stale) || !!(meta && meta.pnl && meta.pnl.broker_unconfirmed);
+  }
+
+  function liveFilterCounts(payload) {
+    var counts = { all: 0, attention: 0, positions: 0, entries: 0, pnl: 0, stale: 0 };
+    (payload && payload.symbols || []).forEach(function(meta) {
+      counts.all += 1;
+      if (liveMetaNeedsAttention(meta)) counts.attention += 1;
+      if (liveMetaHasPosition(meta)) counts.positions += 1;
+      if (liveMetaIsEntry(meta)) counts.entries += 1;
+      if (liveMetaHasPnl(meta)) counts.pnl += 1;
+      if (meta && meta.stale) counts.stale += 1;
+    });
+    return counts;
+  }
+
+  function liveFilterMatches(meta, sym) {
+    var matches = rpLiveFilter === 'positions' ? liveMetaHasPosition(meta)
+      : rpLiveFilter === 'entries' ? liveMetaIsEntry(meta)
+      : rpLiveFilter === 'pnl' ? liveMetaHasPnl(meta)
+      : rpLiveFilter === 'stale' ? !!(meta && meta.stale)
+      : rpLiveFilter === 'attention' ? liveMetaNeedsAttention(meta)
+      : true;
+    if (!matches || !rpLiveQuery) return matches;
+    var laneText = (meta && meta.lanes || []).map(function(row) { return liveLaneLabel(row.lane); }).join(' ');
+    var haystack = [sym, meta && meta.state, meta && meta.state_label, meta && meta.last_action, meta && meta.strategy, laneText]
+      .filter(Boolean).join(' ').toUpperCase();
+    return haystack.indexOf(rpLiveQuery) !== -1;
+  }
+
+  function liveActivityRows(payload) {
+    var rows = [];
+    var seen = {};
+    (payload && payload.symbols || []).forEach(function(meta) {
+      var sym = normalizeSym(meta.symbol);
+      (meta.events || []).forEach(function(event) {
+        var minute = timeMin(event.t);
+        if (!sym || minute == null) return;
+        var key = sym + '|' + event.t + '|' + (event.kind || '') + '|' + (event.stage || '') + '|' + (event.detail || '');
+        if (seen[key]) return;
+        seen[key] = true;
+        var stamp = Date.parse(event.ts || '');
+        rows.push({
+          sym: sym,
+          minute: minute,
+          t: event.t || timeLabel(minute),
+          kind: event.kind || 'decision',
+          stage: cleanStage(event.stage || event.kind || 'event'),
+          detail: cleanStage(event.detail || ''),
+          pnl_usd: event.pnl_usd,
+          stamp: Number.isFinite(stamp) ? stamp : minute
+        });
+      });
+    });
+    rows.sort(function(a, b) { return b.stamp - a.stamp || b.minute - a.minute || a.sym.localeCompare(b.sym); });
+    return rows.slice(0, 16);
+  }
+
+  function renderLiveActivity(payload) {
+    var rows = liveActivityRows(payload);
+    if (!rows.length) return '<span class="rp-live-activity-empty">No activity yet</span>';
+    return rows.map(function(row) {
+      var outcomeClass = row.kind === 'exit' && Number(row.pnl_usd) < 0 ? 'loss' : (row.kind === 'entry' || row.kind === 'exit' ? row.kind : '');
+      var detail = row.stage + (row.detail && row.detail !== row.stage ? ': ' + row.detail : '');
+      var label = row.t + ' ' + row.sym + ' ' + detail;
+      return '<button class="rp-correlation-event rp-live-event ' + esc(outcomeClass) + '" type="button" data-symbol="' +
+        esc(row.sym) + '" data-minute="' + esc(row.minute) + '" aria-label="Focus ' + esc(label) + '">' +
+        '<b>' + esc(row.t) + '</b><span>' + esc(row.sym + ' ' + detail) + '</span></button>';
+    }).join('');
+  }
+
+  function renderLiveFilterButton(key, label, count) {
+    return '<button class="rp-live-filter" type="button" data-live-filter="' + esc(key) + '" aria-pressed="' +
+      (rpLiveFilter === key ? 'true' : 'false') + '" onclick="rpSetLiveFilter(\'' + esc(key) + '\')">' +
+      '<span>' + esc(label) + '</span><b data-live-count="' + esc(key) + '">' + esc(count) + '</b></button>';
+  }
+
+  function renderLiveResearch(payload) {
+    var counts = liveFilterCounts(payload);
+    return '<div class="rp-live-research" id="rp-live-research">' +
+      '<div class="rp-live-toolbar">' +
+        '<div class="rp-live-segments" role="group" aria-label="Focus live symbols">' +
+          renderLiveFilterButton('all', 'All', counts.all) +
+          renderLiveFilterButton('attention', 'Attention', counts.attention) +
+          renderLiveFilterButton('positions', 'Positions', counts.positions) +
+          renderLiveFilterButton('entries', 'Entries', counts.entries) +
+          renderLiveFilterButton('pnl', 'P/L', counts.pnl) +
+          renderLiveFilterButton('stale', 'Stale', counts.stale) +
+        '</div>' +
+        '<input class="rp-live-search" id="rp-live-search" type="search" value="' + esc(rpLiveQuery) +
+          '" placeholder="Symbol" aria-label="Search live symbols" autocomplete="off" spellcheck="false" oninput="rpSetLiveQuery(this.value)" />' +
+        '<span class="rp-live-focus-summary" id="rp-live-focus-summary"></span>' +
+        '<button class="rp-tool rp-live-pause" id="rp-live-pause" type="button" aria-pressed="' +
+          (rpLivePaused ? 'true' : 'false') + '" aria-label="' + (rpLivePaused ? 'Resume live updates' : 'Pause live updates') +
+          '" title="' + (rpLivePaused ? 'Resume live updates' : 'Pause live updates') + '" onclick="rpToggleLivePause()">' +
+          (rpLivePaused ? '&#9654;' : '&#10074;&#10074;') + '</button>' +
+      '</div>' +
+      '<div class="rp-live-activity">' +
+        '<span class="rp-live-activity-label">Latest actions</span>' +
+        '<div class="rp-correlation-events rp-live-activity-events" id="rp-live-activity-events">' + renderLiveActivity(payload) + '</div>' +
+      '</div>' +
+      '<div class="rp-empty rp-live-filter-empty" id="rp-live-filter-empty" hidden>No symbols match this focus.</div>' +
+    '</div>';
+  }
+
+  function applyLiveFocus() {
+    if (rpSurfaceMode !== 'live' || !rpLastResult) return;
+    var total = 0;
+    var visible = 0;
+    document.querySelectorAll('.rp-row-live').forEach(function(row) {
+      var sym = normalizeSym(row.dataset.symbol);
+      var show = liveFilterMatches(liveMetaFor(rpLastResult, sym), sym);
+      total += 1;
+      if (show) visible += 1;
+      row.hidden = !show;
+    });
+    if (rpPinnedChart && rpPinnedChart.closest('.rp-row-live') && rpPinnedChart.closest('.rp-row-live').hidden) clearPinnedChart();
+    var summary = document.getElementById('rp-live-focus-summary');
+    if (summary) summary.textContent = visible + ' / ' + total;
+    var empty = document.getElementById('rp-live-filter-empty');
+    if (empty) empty.hidden = total === 0 || visible !== 0;
+    requestVisibleChartRefresh();
+  }
+
+  function updateLiveResearch(payload) {
+    var counts = liveFilterCounts(payload);
+    document.querySelectorAll('[data-live-filter]').forEach(function(button) {
+      var key = button.dataset.liveFilter || 'all';
+      button.setAttribute('aria-pressed', rpLiveFilter === key ? 'true' : 'false');
+      var count = button.querySelector('[data-live-count]');
+      if (count) count.textContent = counts[key] == null ? 0 : counts[key];
+    });
+    var search = document.getElementById('rp-live-search');
+    if (search && document.activeElement !== search && search.value !== rpLiveQuery) search.value = rpLiveQuery;
+    var pause = document.getElementById('rp-live-pause');
+    if (pause) {
+      pause.setAttribute('aria-pressed', rpLivePaused ? 'true' : 'false');
+      pause.setAttribute('aria-label', rpLivePaused ? 'Resume live updates' : 'Pause live updates');
+      pause.title = rpLivePaused ? 'Resume live updates' : 'Pause live updates';
+      pause.innerHTML = rpLivePaused ? '&#9654;' : '&#10074;&#10074;';
+    }
+    var activity = document.getElementById('rp-live-activity-events');
+    var nextActivityHtml = renderLiveActivity(payload);
+    if (activity && rpLiveActivityHtml !== nextActivityHtml) activity.innerHTML = nextActivityHtml;
+    rpLiveActivityHtml = nextActivityHtml;
+    applyLiveFocus();
+  }
+
+  function revealLiveSymbol(symbol) {
+    if (rpSurfaceMode !== 'live') return;
+    var target = normalizeSym(symbol);
+    var hidden = false;
+    document.querySelectorAll('.rp-row-live').forEach(function(row) {
+      if (normalizeSym(row.dataset.symbol) === target && row.hidden) hidden = true;
+    });
+    if (!hidden) return;
+    rpLiveFilter = 'all';
+    rpLiveQuery = '';
+    updateLiveResearch(rpLastLivePayload || {});
+  }
+
   function renderLiveSymbolHeader(result, sym) {
     var meta = liveMetaFor(result, sym);
     var pnl = meta.pnl || {};
@@ -3313,7 +3646,9 @@
     if (!symbols.length) {
       host.dataset.liveWorkspace = '1';
       host.innerHTML = '<div id="rp-live-stats">' + renderLiveStats(payload) + '</div>' +
+        renderLiveResearch(payload) +
         '<div class="rp-empty">No active or completed Chili symbols today.</div>';
+      updateLiveResearch(payload);
       return;
     }
     if (rebuild) {
@@ -3324,7 +3659,9 @@
         return renderLiveSymbolRow(result, sym, rpViewDomain, index < RP_EAGER_ROWS);
       }).join('');
       host.innerHTML = '<div id="rp-live-stats">' + renderLiveStats(payload) + '</div>' +
+        renderLiveResearch(payload) +
         '<div class="rp-timeline">' + renderViewportControls() + renderRuler(rpViewDomain) + rows + '</div>';
+      updateLiveResearch(payload);
       syncPlaybackControls();
       requestVisibleChartRefresh();
       return;
@@ -3332,12 +3669,13 @@
 
     var statsHost = document.getElementById('rp-live-stats');
     if (statsHost) statsHost.innerHTML = renderLiveStats(payload);
+    updateLiveResearch(payload);
     document.querySelectorAll('.rp-row-live').forEach(function(row) {
       var sym = normalizeSym(row.dataset.symbol);
       var symbolHost = row.querySelector('.rp-symbol');
       var setupHost = row.querySelector('.rp-setup');
       if (symbolHost) symbolHost.innerHTML = renderLiveSymbolHeader(result, sym);
-      if (setupHost) setupHost.innerHTML = renderLiveSetup(result, sym, true);
+      if (setupHost) setupHost.innerHTML = renderLiveSetup(result, sym, !row.hidden && elementNearViewport(row));
       if (chartChanged) {
         var chart = row.querySelector('.rp-chart');
         if (chart) {
@@ -3561,6 +3899,20 @@
       });
   }
 
+  function liveSnapshotClock(value) {
+    if (!value) return '';
+    try {
+      return new Intl.DateTimeFormat(undefined, {
+        timeZone: 'America/New_York',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      }).format(new Date(value)) + ' ET';
+    } catch (err) {
+      return '';
+    }
+  }
+
   function updateLiveFreshness(payload, errorText) {
     var label = document.getElementById('rp-live-freshness');
     var dot = document.getElementById('rp-live-dot');
@@ -3569,6 +3921,12 @@
     if (errorText) {
       dot.classList.add('error');
       label.textContent = errorText;
+      return;
+    }
+    if (rpLivePaused) {
+      dot.classList.add('paused');
+      var heldAt = liveSnapshotClock(payload && payload.as_of_utc);
+      label.textContent = 'Read-only observer - paused' + (heldAt ? ' at ' + heldAt : '');
       return;
     }
     var runtime = payload && payload.latest_runtime_utc;
@@ -3595,7 +3953,7 @@
   }
 
   function scheduleLivePoll(delay) {
-    if (rpSurfaceMode !== 'live' || document.hidden) return;
+    if (rpSurfaceMode !== 'live' || rpLivePaused || document.hidden) return;
     if (rpLiveTimer) clearTimeout(rpLiveTimer);
     rpLiveTimer = setTimeout(function() {
       rpLiveTimer = null;
@@ -3604,7 +3962,7 @@
   }
 
   function pollLiveSnapshot() {
-    if (rpSurfaceMode !== 'live' || document.hidden || rpLiveAbort) return;
+    if (rpSurfaceMode !== 'live' || rpLivePaused || document.hidden || rpLiveAbort) return;
     rpLiveAbort = typeof AbortController === 'function' ? new AbortController() : null;
     var options = { credentials: 'same-origin', cache: 'no-store' };
     if (rpLiveAbort) options.signal = rpLiveAbort.signal;
@@ -3678,6 +4036,7 @@
     rpFullDomain = null;
     rpViewDomain = null;
     if (next === 'live') {
+      rpLivePaused = false;
       rpLiveFollow = true;
       setStatus(rpLastLivePayload ? 'live' : 'connecting', rpLastLivePayload ? 'done' : 'running');
       if (rpLastLivePayload) renderLive(rpLastLivePayload);
@@ -3780,6 +4139,31 @@
     stepReplayEvent(Number(direction) < 0 ? -1 : 1, false);
   };
 
+  window.rpSetLiveFilter = function(filter) {
+    var allowed = ['all', 'attention', 'positions', 'entries', 'pnl', 'stale'];
+    rpLiveFilter = allowed.indexOf(filter) === -1 ? 'all' : filter;
+    updateLiveResearch(rpLastLivePayload || {});
+  };
+
+  window.rpSetLiveQuery = function(value) {
+    rpLiveQuery = String(value || '').trim().toUpperCase();
+    applyLiveFocus();
+  };
+
+  window.rpToggleLivePause = function() {
+    if (rpSurfaceMode !== 'live') return;
+    rpLivePaused = !rpLivePaused;
+    if (rpLivePaused) {
+      stopLivePolling();
+      setStatus('paused');
+    } else {
+      setStatus('syncing...', 'running');
+      scheduleLivePoll(0);
+    }
+    updateLiveFreshness(rpLastLivePayload, null);
+    updateLiveResearch(rpLastLivePayload || {});
+  };
+
   window.rpToggleEventPlayback = function() {
     if (rpPlaybackRunning) stopEventPlayback();
     else startEventPlayback();
@@ -3814,7 +4198,7 @@
       if (document.hidden) {
         stopEventPlayback();
         if (rpSurfaceMode === 'live') stopLivePolling();
-      } else if (rpSurfaceMode === 'live') {
+      } else if (rpSurfaceMode === 'live' && !rpLivePaused) {
         scheduleLivePoll(0);
       }
     });
