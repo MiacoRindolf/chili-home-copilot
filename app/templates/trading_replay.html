@@ -236,11 +236,13 @@
 }
 .rp-viewport-top {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   min-width: 0;
 }
 .rp-viewport-window {
+  flex: 1 1 170px;
   min-width: 0;
   color: var(--rp-text);
   font-size: 11px;
@@ -331,6 +333,12 @@
   gap: 5px;
   margin-left: auto;
 }
+.rp-event-tools {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
 .rp-tool {
   display: inline-grid;
   place-items: center;
@@ -338,7 +346,7 @@
   height: 28px;
   border: 1px solid var(--rp-line);
   border-radius: 7px;
-  background: #0b1220;
+  background: var(--rp-panel-2);
   color: var(--rp-text);
   cursor: pointer;
   font-size: 12px;
@@ -349,6 +357,19 @@
 .rp-tool:hover {
   border-color: color-mix(in srgb, var(--rp-blue) 46%, transparent);
   color: var(--rp-blue);
+}
+.rp-tool:disabled {
+  cursor: default;
+  opacity: .35;
+}
+.rp-tool:disabled:hover {
+  border-color: var(--rp-line);
+  color: var(--rp-text);
+}
+.rp-event-tool[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--rp-amber) 62%, var(--rp-line));
+  background: color-mix(in srgb, var(--rp-amber) 12%, var(--rp-panel-2));
+  color: var(--rp-amber);
 }
 .rp-scrubber {
   position: relative;
@@ -742,6 +763,12 @@
   .rp-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  .rp-viewport-window {
+    flex-basis: 100%;
+  }
+  .rp-event-tools {
+    margin-right: auto;
+  }
   .rp-chart svg {
     height: 218px;
   }
@@ -829,12 +856,15 @@
   var rpInspectionPinned = false;
   var rpInspectionFrame = null;
   var rpPendingInspection = null;
+  var rpPlaybackTimer = null;
+  var rpPlaybackRunning = false;
   var RP_MIN_WINDOW_MINUTES = 6;
   var RP_EAGER_ROWS = 5;
   var RP_CHART_PLOT_LEFT = 22 / 720;
   var RP_CHART_PLOT_SPAN = (720 - 44) / 720;
   var RP_VIEWPORT_SMOOTHING = 0.34;
   var RP_VIEWPORT_SMOOTH_EPS = 1.1;
+  var RP_PLAYBACK_INTERVAL_MS = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 1300 : 850;
   var RP_STORAGE_PREFIX = 'chili:replay:v5:';
   var RP_HISTORY_CACHE_KEY = RP_STORAGE_PREFIX + 'history';
   var RP_RESULT_INDEX_KEY = RP_STORAGE_PREFIX + 'result:index';
@@ -1049,6 +1079,7 @@
       firstAction: {},
       events: [],
       eventMinutes: [],
+      timelineMinutes: [],
       allMinutes: []
     };
   }
@@ -1156,6 +1187,9 @@
       return (rank[a.kind] == null ? 3 : rank[a.kind]) - (rank[b.kind] == null ? 3 : rank[b.kind]);
     });
     cache.eventMinutes = cache.events.map(function(row) { return row.minute; });
+    cache.timelineMinutes = cache.eventMinutes.filter(function(minute, index, rows) {
+      return index === 0 || minute !== rows[index - 1];
+    });
     return cache;
   }
 
@@ -1731,6 +1765,131 @@
     return row.sym + ' ' + timeLabel(row.minute) + ' ' + action;
   }
 
+  function replayTimelineMinutes() {
+    var cache = replayCache(rpLastResult || {});
+    return cache ? (cache.timelineMinutes || []) : [];
+  }
+
+  function timelineEventAtMinute(minute) {
+    var cache = replayCache(rpLastResult || {});
+    if (!cache || minute == null) return null;
+    var index = lowerBound(cache.eventMinutes, minute);
+    return index < cache.events.length && cache.eventMinutes[index] === minute ? cache.events[index] : null;
+  }
+
+  function playbackIndexForMinute(minutes, minute) {
+    if (!minutes || !minutes.length || minute == null) return -1;
+    var index = lowerBound(minutes, minute);
+    return index < minutes.length && minutes[index] === Number(minute) ? index : -1;
+  }
+
+  function syncPlaybackControls() {
+    var minutes = replayTimelineMinutes();
+    var index = playbackIndexForMinute(minutes, rpInspectionMinute);
+    var previous = document.getElementById('rp-event-previous');
+    var play = document.getElementById('rp-event-play');
+    var next = document.getElementById('rp-event-next');
+    if (previous) previous.disabled = !minutes.length || index === 0;
+    if (next) next.disabled = !minutes.length || index === minutes.length - 1;
+    if (play) {
+      play.disabled = !minutes.length;
+      play.innerHTML = rpPlaybackRunning ? '&#10074;&#10074;' : '&#9654;';
+      play.setAttribute('aria-label', rpPlaybackRunning ? 'Pause FSM event playback' : 'Play FSM events');
+      play.setAttribute('title', rpPlaybackRunning ? 'Pause FSM event playback' : 'Play FSM events');
+      play.setAttribute('aria-pressed', rpPlaybackRunning ? 'true' : 'false');
+    }
+  }
+
+  function stopEventPlayback() {
+    var wasRunning = rpPlaybackRunning;
+    if (rpPlaybackTimer) clearTimeout(rpPlaybackTimer);
+    rpPlaybackTimer = null;
+    rpPlaybackRunning = false;
+    syncPlaybackControls();
+    if (wasRunning && rpInspectionMinute != null) {
+      renderCorrelationStrip(rpInspectionMinute, rpInspectionPinned);
+    }
+  }
+
+  function playbackChartAtMinute(minute) {
+    var event = timelineEventAtMinute(minute);
+    return (event && chartForSymbol(event.sym)) || document.querySelector('.rp-chart');
+  }
+
+  function focusPlaybackEvent(index) {
+    var minutes = replayTimelineMinutes();
+    if (index < 0 || index >= minutes.length || !rpViewDomain) return false;
+    var minute = minutes[index];
+    var chart = playbackChartAtMinute(minute);
+    if (!chart) return false;
+    rpInspectionMinute = minute;
+    rpInspectionSource = chart;
+    rpInspectionPinned = true;
+    rpPinnedChart = chart;
+    var span = Math.max(RP_MIN_WINDOW_MINUTES, domainSpan(rpViewDomain));
+    var margin = Math.min(8, Math.max(1, span * .08));
+    if (minute < rpViewDomain.min + margin || minute > rpViewDomain.max - margin) {
+      setViewDomain({ min: minute - span / 2, max: minute + span / 2 });
+    }
+    applySynchronizedInspection(chart, minute, true);
+    return true;
+  }
+
+  function stepReplayEvent(direction, keepPlaying) {
+    var minutes = replayTimelineMinutes();
+    if (!minutes.length) return false;
+    if (!keepPlaying) stopEventPlayback();
+    var index;
+    if (rpInspectionMinute == null) {
+      var anchor = direction > 0
+        ? (rpViewDomain ? rpViewDomain.min : minutes[0])
+        : (rpViewDomain ? rpViewDomain.max : minutes[minutes.length - 1]);
+      index = direction > 0 ? lowerBound(minutes, anchor) : upperBound(minutes, anchor) - 1;
+    } else {
+      var current = lowerBound(minutes, rpInspectionMinute);
+      if (direction > 0) {
+        index = current < minutes.length && minutes[current] === rpInspectionMinute ? current + 1 : current;
+      } else {
+        index = current - 1;
+      }
+    }
+    if (index < 0 || index >= minutes.length) {
+      if (keepPlaying) stopEventPlayback();
+      else syncPlaybackControls();
+      return false;
+    }
+    return focusPlaybackEvent(index);
+  }
+
+  function schedulePlaybackTick() {
+    if (rpPlaybackTimer) clearTimeout(rpPlaybackTimer);
+    if (!rpPlaybackRunning) return;
+    rpPlaybackTimer = setTimeout(function() {
+      rpPlaybackTimer = null;
+      if (!rpPlaybackRunning) return;
+      if (stepReplayEvent(1, true)) schedulePlaybackTick();
+    }, RP_PLAYBACK_INTERVAL_MS);
+  }
+
+  function startEventPlayback() {
+    var minutes = replayTimelineMinutes();
+    if (!minutes.length || !rpViewDomain) {
+      syncPlaybackControls();
+      return;
+    }
+    rpPlaybackRunning = true;
+    var index = playbackIndexForMinute(minutes, rpInspectionMinute);
+    if (index < 0 || index >= minutes.length - 1) {
+      index = lowerBound(minutes, rpViewDomain.min);
+      if (index >= minutes.length) index = 0;
+      focusPlaybackEvent(index);
+    } else {
+      if (rpInspectionSource) applySynchronizedInspection(rpInspectionSource, rpInspectionMinute, true);
+    }
+    syncPlaybackControls();
+    schedulePlaybackTick();
+  }
+
   function renderCorrelationStrip(minute, pinned) {
     var strip = document.getElementById('rp-correlation-strip');
     var time = document.getElementById('rp-correlation-time');
@@ -1744,7 +1903,7 @@
       return;
     }
     var rows = correlatedEvents(minute);
-    time.textContent = timeLabel(minute) + ' ET' + (pinned ? ' - pinned' : '');
+    time.textContent = timeLabel(minute) + ' ET' + (rpPlaybackRunning ? ' - playing' : pinned ? ' - pinned' : '');
     events.innerHTML = rows.slice(0, 8).map(function(row) {
       var outcomeClass = row.kind === 'exit' && Number(row.usd) < 0 ? 'loss' : row.kind;
       var label = correlationEventLabel(row);
@@ -1802,6 +1961,7 @@
       applyInspectionToChart(rowChart, rpInspectionMinute, chart, rpInspectionPinned);
     });
     renderCorrelationStrip(rpInspectionMinute, rpInspectionPinned);
+    syncPlaybackControls();
   }
 
   function queueSynchronizedInspection(chart, minute) {
@@ -1816,6 +1976,7 @@
   }
 
   function clearPinnedChart() {
+    stopEventPlayback();
     if (rpInspectionFrame) cancelAnimationFrame(rpInspectionFrame);
     rpInspectionFrame = null;
     rpPendingInspection = null;
@@ -1877,7 +2038,7 @@
       event.preventDefault();
       return;
     }
-    if (event.target.closest && event.target.closest('.rp-trace-line, .rp-trade-chip, .rp-correlation-event, .rp-viewport-tools, .rp-scrubber')) return;
+    if (event.target.closest && event.target.closest('.rp-trace-line, .rp-trade-chip, .rp-correlation-event, .rp-event-tools, .rp-viewport-tools, .rp-scrubber')) return;
     var chart = event.target.closest && event.target.closest('.rp-chart');
     if (!chart) {
       clearPinnedChart();
@@ -1899,6 +2060,9 @@
     if (key === 'Escape') {
       clearPinnedChart();
       return;
+    }
+    if (['ArrowLeft', 'ArrowRight', 'Home', 'End', 'Enter', ' '].indexOf(key) !== -1) {
+      stopEventPlayback();
     }
     var minute = chart === rpInspectionSource && rpInspectionMinute != null
       ? rpInspectionMinute
@@ -2189,6 +2353,7 @@
   function handleScrubberPointerDown(event) {
     var scrubber = event.target.closest && event.target.closest('.rp-scrubber');
     if (!scrubber || !rpViewDomain || (event.button != null && event.button !== 0)) return;
+    stopEventPlayback();
     event.preventDefault();
     cancelSmoothViewport();
     rpScrubState = {
@@ -2290,6 +2455,7 @@
 
   function jumpToTrace(symbol, minute) {
     if (!rpFullDomain || minute == null) return;
+    stopEventPlayback();
     var currentSpan = domainSpan(rpViewDomain || rpFullDomain);
     var fullSpan = domainSpan(rpFullDomain);
     var focusSpan = Math.min(currentSpan || fullSpan, fullSpan, 60);
@@ -2317,6 +2483,7 @@
   function handleChartWheel(event) {
     var chart = event.target.closest && event.target.closest('.rp-chart');
     if (!chart || !rpViewDomain) return;
+    stopEventPlayback();
     event.preventDefault();
     chart = ensureChartFresh(chart) || chart;
     var rect = chart.getBoundingClientRect();
@@ -2335,6 +2502,7 @@
   function handleChartPointerDown(event) {
     var chart = event.target.closest && event.target.closest('.rp-chart');
     if (!chart || !rpViewDomain || (event.button != null && event.button !== 0)) return;
+    stopEventPlayback();
     chart = ensureChartFresh(chart) || chart;
     var rect = chart.getBoundingClientRect();
     if (!rect.width) return;
@@ -2610,6 +2778,11 @@
       '<div class="rp-viewport-main">' +
       '<div class="rp-viewport-top">' +
       '<span class="rp-viewport-window" id="rp-viewport-window">' + esc(viewportLabel()) + '</span>' +
+      '<div class="rp-event-tools" role="group" aria-label="FSM event playback">' +
+      '<button class="rp-tool rp-event-tool" id="rp-event-previous" type="button" aria-label="Previous FSM event" title="Previous FSM event" onclick="rpStepReplayEvent(-1)">&#124;&#9664;</button>' +
+      '<button class="rp-tool rp-event-tool" id="rp-event-play" type="button" aria-label="Play FSM events" title="Play FSM events" aria-pressed="false" onclick="rpToggleEventPlayback()">&#9654;</button>' +
+      '<button class="rp-tool rp-event-tool" id="rp-event-next" type="button" aria-label="Next FSM event" title="Next FSM event" onclick="rpStepReplayEvent(1)">&#9654;&#124;</button>' +
+      '</div>' +
       '<div class="rp-viewport-tools">' +
       '<button class="rp-tool" type="button" aria-label="Pan earlier" title="Pan earlier" onclick="rpPanCharts(-0.24)">&lt;</button>' +
       '<button class="rp-tool" type="button" aria-label="Zoom out" title="Zoom out" onclick="rpZoomCharts(1.28)">-</button>' +
@@ -2832,6 +3005,7 @@
     rpFocusChart = null;
     var rows = symbols.map(function(sym, index) { return renderSymbolRow(result, sym, rpViewDomain, index < RP_EAGER_ROWS); }).join('');
     host.innerHTML = stats + '<div class="rp-timeline">' + renderViewportControls() + renderRuler(rpViewDomain) + rows + '</div>';
+    syncPlaybackControls();
     requestVisibleChartRefresh();
   }
 
@@ -3059,6 +3233,15 @@
     jumpToTrace(symbol, Number(minute));
   };
 
+  window.rpStepReplayEvent = function(direction) {
+    stepReplayEvent(Number(direction) < 0 ? -1 : 1, false);
+  };
+
+  window.rpToggleEventPlayback = function() {
+    if (rpPlaybackRunning) stopEventPlayback();
+    else startEventPlayback();
+  };
+
   document.addEventListener('DOMContentLoaded', function() {
     var date = document.getElementById('rp-date');
     if (date && !date.value) date.value = new Date().toISOString().slice(0, 10);
@@ -3084,6 +3267,9 @@
     document.addEventListener('wheel', handleChartWheel, { passive: false });
     window.addEventListener('scroll', requestVisibleChartRefresh, { passive: true });
     window.addEventListener('resize', requestVisibleChartRefresh);
+    document.addEventListener('visibilitychange', function() {
+      if (document.hidden) stopEventPlayback();
+    });
     loadHistory();
   });
 })();
