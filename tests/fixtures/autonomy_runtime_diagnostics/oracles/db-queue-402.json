@@ -1,0 +1,6 @@
+{
+  "case_id": "db-queue-402",
+  "expected_dimension": "state",
+  "expected_probe_kinds": ["log_search", "db_profile"],
+  "expected_retraction_hypothesis": null
+}

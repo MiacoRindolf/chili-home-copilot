@@ -1,0 +1,1277 @@
+{
+  "average_case_duration_ms": 100973.0,
+  "cases": [
+    {
+      "case_id": "log-dependency-401",
+      "checks": {
+        "confirmed": true,
+        "dimension": false,
+        "premium_independence": true,
+        "probe_coverage": true,
+        "retraction": true,
+        "valid": true
+      },
+      "duration_ms": 89375,
+      "final_dimension": "clock",
+      "final_report": {
+        "baseline_drift": [],
+        "case_id": "log-dependency-401",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by clock drift.",
+          "confidence": 0.6,
+          "dimension": "clock",
+          "evidence_ids": [
+            "source-1",
+            "probe-default-log-inventory"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "status": "confirmed"
+        },
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.6,
+            "confirmatory_weight": 1.5,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "source-1",
+              "probe-default-log-inventory"
+            ],
+            "support_weight": 1.5
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-clock",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "final_status": "confirmed",
+      "initial_report": {
+        "baseline_drift": [],
+        "case_id": "log-dependency-401",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by code drift.",
+          "confidence": 0.3939,
+          "dimension": "code",
+          "evidence_ids": [
+            "operator-1",
+            "operator-3"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "decision": "instrument_first",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.3939,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-3"
+            ],
+            "support_weight": 0.65
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.4737,
+            "confirmatory_weight": 0.9,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h2",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "source-1"
+            ],
+            "support_weight": 0.9
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.3939,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h3",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-2"
+            ],
+            "support_weight": 0.65
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "dimension": "code",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "dimension": "clock",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "dimension": "runtime",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 53985,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 759
+        },
+        {
+          "error": null,
+          "latency_ms": 34757,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 355
+        }
+      ],
+      "premium_calls": 0,
+      "probe_kinds": [
+        "log_inventory",
+        "log_search",
+        "repo_state",
+        "git_history"
+      ],
+      "probe_run": {
+        "duration_ms": 103,
+        "errors": [],
+        "evidence": [
+          {
+            "dimension": "unknown",
+            "discriminating": false,
+            "evidence_id": "probe-default-log-inventory",
+            "experiment_id": "default-log-inventory",
+            "independence_key": "diagnostic_probe:default-log-inventory",
+            "kind": "metric",
+            "provenance": "diagnostic_probe:default-log-inventory",
+            "reliability": 0.6,
+            "statement": "Typed log_inventory probe status=completed exit=0: {\"log_files\": [{\"bytes\": 225, \"modified_utc\": \"2026-07-11T12:02:55.867214+00:00\", \"path\": \"logs/market-worker.log\"}], \"returned\": 1}"
+          },
+          {
+            "dimension": "dependency",
+            "discriminating": true,
+            "evidence_id": "probe-default-log-search",
+            "experiment_id": "default-log-search",
+            "independence_key": "diagnostic_probe:default-log-search",
+            "kind": "artifact",
+            "provenance": "diagnostic_probe:default-log-search",
+            "reliability": 0.95,
+            "statement": "Typed log_search probe status=completed exit=0: {\"fixed_query\": \"connection refused\", \"matches\": [{\"path\": \"logs/market-worker.log\", \"tail_line\": 3, \"text\": \"2026-07-11T09:00:02Z ERROR upstream connection refused host=massive\"}], \"returned\": 1, \"searched_files\": 1}"
+          },
+          {
+            "dimension": "unknown",
+            "discriminating": false,
+            "evidence_id": "probe-default-repo-state",
+            "experiment_id": "default-repo-state",
+            "independence_key": "diagnostic_probe:default-repo-state",
+            "kind": "metric",
+            "provenance": "diagnostic_probe:default-repo-state",
+            "reliability": 0.6,
+            "statement": "Typed repo_state probe status=completed exit=0: ## master"
+          },
+          {
+            "dimension": "code",
+            "discriminating": false,
+            "evidence_id": "probe-default-git-history",
+            "experiment_id": "default-git-history",
+            "independence_key": "diagnostic_probe:default-git-history",
+            "kind": "artifact",
+            "provenance": "diagnostic_probe:default-git-history",
+            "reliability": 0.65,
+            "statement": "Typed git_history probe status=completed exit=0: 46d840f seed runtime evidence case"
+          }
+        ],
+        "results": [
+          {
+            "dimension": "runtime",
+            "duration_ms": 4,
+            "exit_code": 0,
+            "kind": "log_inventory",
+            "output": "{\"log_files\": [{\"bytes\": 225, \"modified_utc\": \"2026-07-11T12:02:55.867214+00:00\", \"path\": \"logs/market-worker.log\"}], \"returned\": 1}",
+            "probe_id": "default-log-inventory",
+            "safety": "read_only",
+            "status": "completed"
+          },
+          {
+            "dimension": "runtime",
+            "duration_ms": 4,
+            "exit_code": 0,
+            "kind": "log_search",
+            "output": "{\"fixed_query\": \"connection refused\", \"matches\": [{\"path\": \"logs/market-worker.log\", \"tail_line\": 3, \"text\": \"2026-07-11T09:00:02Z ERROR upstream connection refused host=massive\"}], \"returned\": 1, \"searched_files\": 1}",
+            "probe_id": "default-log-search",
+            "safety": "read_only",
+            "status": "completed"
+          },
+          {
+            "dimension": "code",
+            "duration_ms": 50,
+            "exit_code": 0,
+            "kind": "repo_state",
+            "output": "## master",
+            "probe_id": "default-repo-state",
+            "safety": "read_only",
+            "status": "completed"
+          },
+          {
+            "dimension": "code",
+            "duration_ms": 43,
+            "exit_code": 0,
+            "kind": "git_history",
+            "output": "46d840f seed runtime evidence case",
+            "probe_id": "default-git-history",
+            "safety": "read_only",
+            "status": "completed"
+          }
+        ],
+        "schema": "chili.diagnostic-probe-run.v1"
+      },
+      "probes": [
+        {
+          "aggregate": "",
+          "aggregate_column": "",
+          "case_sensitive": false,
+          "dimension": "runtime",
+          "filters": {},
+          "group_by": "",
+          "kind": "log_inventory",
+          "lookback_minutes": 0,
+          "max_groups": 15,
+          "max_lines": 80,
+          "max_results": 30,
+          "paths": [],
+          "probe_id": "default-log-inventory",
+          "query": "",
+          "safety": "read_only",
+          "schema": "chili.diagnostic-probe.v1",
+          "selector": "",
+          "start_line": 1,
+          "table": "",
+          "tail_lines": 5000,
+          "timeout_sec": 30.0,
+          "timestamp_column": ""
+        },
+        {
+          "aggregate": "",
+          "aggregate_column": "",
+          "case_sensitive": false,
+          "dimension": "runtime",
+          "filters": {},
+          "group_by": "",
+          "kind": "log_search",
+          "lookback_minutes": 0,
+          "max_groups": 15,
+          "max_lines": 80,
+          "max_results": 40,
+          "paths": [],
+          "probe_id": "default-log-search",
+          "query": "connection refused",
+          "safety": "read_only",
+          "schema": "chili.diagnostic-probe.v1",
+          "selector": "",
+          "start_line": 1,
+          "table": "",
+          "tail_lines": 5000,
+          "timeout_sec": 30.0,
+          "timestamp_column": ""
+        },
+        {
+          "aggregate": "",
+          "aggregate_column": "",
+          "case_sensitive": false,
+          "dimension": "code",
+          "filters": {},
+          "group_by": "",
+          "kind": "repo_state",
+          "lookback_minutes": 0,
+          "max_groups": 15,
+          "max_lines": 80,
+          "max_results": 40,
+          "paths": [],
+          "probe_id": "default-repo-state",
+          "query": "",
+          "safety": "read_only",
+          "schema": "chili.diagnostic-probe.v1",
+          "selector": "",
+          "start_line": 1,
+          "table": "",
+          "tail_lines": 5000,
+          "timeout_sec": 10.0,
+          "timestamp_column": ""
+        },
+        {
+          "aggregate": "",
+          "aggregate_column": "",
+          "case_sensitive": false,
+          "dimension": "code",
+          "filters": {},
+          "group_by": "",
+          "kind": "git_history",
+          "lookback_minutes": 0,
+          "max_groups": 15,
+          "max_lines": 80,
+          "max_results": 12,
+          "paths": [
+            "app/provider.py"
+          ],
+          "probe_id": "default-git-history",
+          "query": "",
+          "safety": "read_only",
+          "schema": "chili.diagnostic-probe.v1",
+          "selector": "",
+          "start_line": 1,
+          "table": "",
+          "tail_lines": 5000,
+          "timeout_sec": 15.0,
+          "timestamp_column": ""
+        }
+      ],
+      "retractions": [
+        {
+          "hypothesis_id": "h-clock",
+          "new_status": "superseded",
+          "previous_status": "confirmed",
+          "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+        }
+      ],
+      "score": 65,
+      "split": "holdout"
+    },
+    {
+      "case_id": "db-queue-402",
+      "checks": {
+        "confirmed": true,
+        "dimension": true,
+        "premium_independence": true,
+        "probe_coverage": true,
+        "retraction": true,
+        "valid": true
+      },
+      "duration_ms": 97504,
+      "final_dimension": "state",
+      "final_report": {
+        "baseline_drift": [],
+        "case_id": "db-queue-402",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by state drift.",
+          "confidence": 0.7183,
+          "dimension": "state",
+          "evidence_ids": [
+            "operator-1",
+            "probe-default-log-search",
+            "probe-default-db-profile"
+          ],
+          "hypothesis_id": "h-state",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.7183,
+            "confirmatory_weight": 1.9,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h-state",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-1",
+              "probe-default-log-search",
+              "probe-default-db-profile"
+            ],
+            "support_weight": 2.55
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.5556,
+            "confirmatory_weight": 0.6,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-2",
+              "probe-default-log-inventory"
+            ],
+            "support_weight": 1.25
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.4286,
+            "confirmatory_weight": 0.75,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "probe-default-db-schema"
+            ],
+            "support_weight": 0.75
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "dimension": "clock",
+            "experiment_id": "falsify-h-clock",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "dimension": "data",
+            "experiment_id": "falsify-h-data",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "final_status": "confirmed",
+      "initial_report": {
+        "baseline_drift": [],
+        "case_id": "db-queue-402",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by clock drift.",
+          "confidence": 0.3939,
+          "dimension": "clock",
+          "evidence_ids": [
+            "operator-2"
+          ],
+          "hypothesis_id": "h-clock",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "decision": "instrument_first",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.3939,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-2"
+            ],
+            "support_weight": 0.65
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.3939,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h-state",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-1"
+            ],
+            "support_weight": 0.65
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "dimension": "clock",
+            "experiment_id": "falsify-h-clock",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "dimension": "state",
+            "experiment_id": "falsify-h-state",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 37390,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 555
+        },
+        {
+          "error": null,
+          "latency_ms": 58949,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 748
+        }
+      ],
+      "premium_calls": 0,
+      "probe_kinds": [
+        "log_inventory",
+        "log_search",
+        "db_schema",
+        "db_profile"
+      ],
+      "probe_run": {
+        "duration_ms": 884,
+        "errors": [],
+        "evidence": [
+          {
+            "dimension": "unknown",
+            "discriminating": false,
+            "evidence_id": "probe-default-log-inventory",
+            "experiment_id": "default-log-inventory",
+            "independence_key": "diagnostic_probe:default-log-inventory",
+            "kind": "metric",
+            "provenance": "diagnostic_probe:default-log-inventory",
+            "reliability": 0.6,
+            "statement": "Typed log_inventory probe status=completed exit=0: {\"log_files\": [{\"bytes\": 166, \"modified_utc\": \"2026-07-11T12:04:25.252951+00:00\", \"path\": \"logs/mesh-worker.log\"}], \"returned\": 1}"
+          },
+          {
+            "dimension": "state",
+            "discriminating": true,
+            "evidence_id": "probe-default-log-search",
+            "experiment_id": "default-log-search",
+            "independence_key": "diagnostic_probe:default-log-search",
+            "kind": "artifact",
+            "provenance": "diagnostic_probe:default-log-search",
+            "reliability": 0.95,
+            "statement": "Typed log_search probe status=completed exit=0: {\"fixed_query\": \"queue depth\", \"matches\": [{\"path\": \"logs/mesh-worker.log\", \"tail_line\": 1, \"text\": \"2026-07-11T09:10:00Z queue depth=20 max=20\"}, {\"path\": \"logs/mesh-worker.log\", \"tail_line\": 3, \"text\": \"2026-07-11T09:10:02Z queue depth=20 max=20\"}], \"returned\": 2, \"searched_files\": 1}"
+          },
+          {
+            "dimension": "data",
+            "discriminating": false,
+            "evidence_id": "probe-default-db-schema",
+            "experiment_id": "default-db-schema",
+            "independence_key": "diagnostic_probe:default-db-schema",
+            "kind": "artifact",
+            "provenance": "diagnostic_probe:default-db-schema",
+            "reliability": 0.75,
+            "statement": "Typed db_schema probe status=completed exit=0: {\"columns\": [{\"name\": \"id\", \"nullable\": false, \"primary_key\": true, \"type\": \"INTEGER\"}, {\"name\": \"cause\", \"nullable\": false, \"primary_key\": false, \"type\": \"VARCHAR(80)\"}, {\"name\": \"status\", \"nullable\": false, \"primary_key\": false, \"type\": \"VARCHAR(24)\"}, {\"name\": \"created_at\", \"nullable\": false, \"primary_key\": false, \"type\": \"TIMESTAMP\"}], \"indexes\": [], \"table\": \"project_runtime_queue_events\", \"transaction_read_only\": true}"
+          },
+          {
+            "dimension": "state",
+            "discriminating": true,
+            "evidence_id": "probe-default-db-profile",
+            "experiment_id": "default-db-profile",
+            "independence_key": "diagnostic_probe:default-db-profile",
+            "kind": "artifact",
+            "provenance": "diagnostic_probe:default-db-profile",
+            "reliability": 0.95,
+            "statement": "Typed db_profile probe status=completed exit=0: {\"count\": 20, \"filters\": {}, \"groups\": [{\"count\": 18, \"value\": \"imminent_eval\"}, {\"count\": 2, \"value\": \"brain_market_snapshots\"}], \"latest_timestamp\": \"2026-07-11T12:02:55.782935+00:00\", \"lookback_minutes\": 120, \"table\": \"project_runtime_queue_events\", \"timestamp_column\": \"created_at\", \"transaction_read_only\": true}"
+          }
+        ],
+        "results": [
+          {
+            "dimension": "runtime",
+            "duration_ms": 5,
+            "exit_code": 0,
+            "kind": "log_inventory",
+            "output": "{\"log_files\": [{\"bytes\": 166, \"modified_utc\": \"2026-07-11T12:04:25.252951+00:00\", \"path\": \"logs/mesh-worker.log\"}], \"returned\": 1}",
+            "probe_id": "default-log-inventory",
+            "safety": "read_only",
+            "status": "completed"
+          },
+          {
+            "dimension": "runtime",
+            "duration_ms": 5,
+            "exit_code": 0,
+            "kind": "log_search",
+            "output": "{\"fixed_query\": \"queue depth\", \"matches\": [{\"path\": \"logs/mesh-worker.log\", \"tail_line\": 1, \"text\": \"2026-07-11T09:10:00Z queue depth=20 max=20\"}, {\"path\": \"logs/mesh-worker.log\", \"tail_line\": 3, \"text\": \"2026-07-11T09:10:02Z queue depth=20 max=20\"}], \"returned\": 2, \"searched_files\": 1}",
+            "probe_id": "default-log-search",
+            "safety": "read_only",
+            "status": "completed"
+          },
+          {
+            "dimension": "data",
+            "duration_ms": 660,
+            "exit_code": 0,
+            "kind": "db_schema",
+            "output": "{\"columns\": [{\"name\": \"id\", \"nullable\": false, \"primary_key\": true, \"type\": \"INTEGER\"}, {\"name\": \"cause\", \"nullable\": false, \"primary_key\": false, \"type\": \"VARCHAR(80)\"}, {\"name\": \"status\", \"nullable\": false, \"primary_key\": false, \"type\": \"VARCHAR(24)\"}, {\"name\": \"created_at\", \"nullable\": false, \"primary_key\": false, \"type\": \"TIMESTAMP\"}], \"indexes\": [], \"table\": \"project_runtime_queue_events\", \"transaction_read_only\": true}",
+            "probe_id": "default-db-schema",
+            "safety": "read_only",
+            "status": "completed"
+          },
+          {
+            "dimension": "data",
+            "duration_ms": 211,
+            "exit_code": 0,
+            "kind": "db_profile",
+            "output": "{\"count\": 20, \"filters\": {}, \"groups\": [{\"count\": 18, \"value\": \"imminent_eval\"}, {\"count\": 2, \"value\": \"brain_market_snapshots\"}], \"latest_timestamp\": \"2026-07-11T12:02:55.782935+00:00\", \"lookback_minutes\": 120, \"table\": \"project_runtime_queue_events\", \"timestamp_column\": \"created_at\", \"transaction_read_only\": true}",
+            "probe_id": "default-db-profile",
+            "safety": "read_only",
+            "status": "completed"
+          }
+        ],
+        "schema": "chili.diagnostic-probe-run.v1"
+      },
+      "probes": [
+        {
+          "aggregate": "",
+          "aggregate_column": "",
+          "case_sensitive": false,
+          "dimension": "runtime",
+          "filters": {},
+          "group_by": "",
+          "kind": "log_inventory",
+          "lookback_minutes": 0,
+          "max_groups": 15,
+          "max_lines": 80,
+          "max_results": 30,
+          "paths": [],
+          "probe_id": "default-log-inventory",
+          "query": "",
+          "safety": "read_only",
+          "schema": "chili.diagnostic-probe.v1",
+          "selector": "",
+          "start_line": 1,
+          "table": "",
+          "tail_lines": 5000,
+          "timeout_sec": 30.0,
+          "timestamp_column": ""
+        },
+        {
+          "aggregate": "",
+          "aggregate_column": "",
+          "case_sensitive": false,
+          "dimension": "runtime",
+          "filters": {},
+          "group_by": "",
+          "kind": "log_search",
+          "lookback_minutes": 0,
+          "max_groups": 15,
+          "max_lines": 80,
+          "max_results": 40,
+          "paths": [],
+          "probe_id": "default-log-search",
+          "query": "queue depth",
+          "safety": "read_only",
+          "schema": "chili.diagnostic-probe.v1",
+          "selector": "",
+          "start_line": 1,
+          "table": "",
+          "tail_lines": 5000,
+          "timeout_sec": 30.0,
+          "timestamp_column": ""
+        },
+        {
+          "aggregate": "",
+          "aggregate_column": "",
+          "case_sensitive": false,
+          "dimension": "data",
+          "filters": {},
+          "group_by": "",
+          "kind": "db_schema",
+          "lookback_minutes": 0,
+          "max_groups": 15,
+          "max_lines": 80,
+          "max_results": 40,
+          "paths": [],
+          "probe_id": "default-db-schema",
+          "query": "",
+          "safety": "read_only",
+          "schema": "chili.diagnostic-probe.v1",
+          "selector": "",
+          "start_line": 1,
+          "table": "project_runtime_queue_events",
+          "tail_lines": 5000,
+          "timeout_sec": 30.0,
+          "timestamp_column": ""
+        },
+        {
+          "aggregate": "",
+          "aggregate_column": "",
+          "case_sensitive": false,
+          "dimension": "data",
+          "filters": {},
+          "group_by": "cause",
+          "kind": "db_profile",
+          "lookback_minutes": 120,
+          "max_groups": 15,
+          "max_lines": 80,
+          "max_results": 40,
+          "paths": [],
+          "probe_id": "default-db-profile",
+          "query": "",
+          "safety": "read_only",
+          "schema": "chili.diagnostic-probe.v1",
+          "selector": "",
+          "start_line": 1,
+          "table": "project_runtime_queue_events",
+          "tail_lines": 5000,
+          "timeout_sec": 30.0,
+          "timestamp_column": "created_at"
+        }
+      ],
+      "retractions": [],
+      "score": 100,
+      "split": "holdout"
+    },
+    {
+      "case_id": "runtime-retraction-403",
+      "checks": {
+        "confirmed": true,
+        "dimension": true,
+        "premium_independence": true,
+        "probe_coverage": true,
+        "retraction": true,
+        "valid": true
+      },
+      "duration_ms": 116040,
+      "final_dimension": "state",
+      "final_report": {
+        "baseline_drift": [],
+        "case_id": "runtime-retraction-403",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by state drift.",
+          "confidence": 0.6552,
+          "dimension": "state",
+          "evidence_ids": [
+            "probe-default-log-search",
+            "probe-default-db-profile"
+          ],
+          "hypothesis_id": "h-state",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "status": "confirmed"
+        },
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.7143,
+            "confirmatory_weight": 1.85,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-1",
+              "deploy-image",
+              "restart-heartbeat"
+            ],
+            "support_weight": 2.5
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.5556,
+            "confirmatory_weight": 0.6,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-2",
+              "operator-3",
+              "probe-default-log-inventory"
+            ],
+            "support_weight": 1.25
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.6552,
+            "confirmatory_weight": 1.9,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h-state",
+            "status": "supported",
+            "support_evidence_ids": [
+              "probe-default-log-search",
+              "probe-default-db-profile"
+            ],
+            "support_weight": 1.9
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.4286,
+            "confirmatory_weight": 0.75,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "probe-default-db-schema"
+            ],
+            "support_weight": 0.75
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "dimension": "clock",
+            "experiment_id": "falsify-h-clock",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "dimension": "data",
+            "experiment_id": "falsify-h-data",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-runtime",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "final_status": "confirmed",
+      "initial_report": {
+        "baseline_drift": [],
+        "case_id": "runtime-retraction-403",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by runtime drift.",
+          "confidence": 0.7143,
+          "dimension": "runtime",
+          "evidence_ids": [],
+          "hypothesis_id": "h-runtime",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.7143,
+            "confirmatory_weight": 1.85,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-1",
+              "deploy-image",
+              "restart-heartbeat"
+            ],
+            "support_weight": 2.5
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.3939,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-2",
+              "operator-3"
+            ],
+            "support_weight": 0.65
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "dimension": "clock",
+            "experiment_id": "falsify-h-clock",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 43411,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 635
+        },
+        {
+          "error": null,
+          "latency_ms": 70889,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 900
+        }
+      ],
+      "premium_calls": 0,
+      "probe_kinds": [
+        "log_inventory",
+        "log_search",
+        "db_schema",
+        "db_profile"
+      ],
+      "probe_run": {
+        "duration_ms": 1416,
+        "errors": [],
+        "evidence": [
+          {
+            "dimension": "unknown",
+            "discriminating": false,
+            "evidence_id": "probe-default-log-inventory",
+            "experiment_id": "default-log-inventory",
+            "independence_key": "diagnostic_probe:default-log-inventory",
+            "kind": "metric",
+            "provenance": "diagnostic_probe:default-log-inventory",
+            "reliability": 0.6,
+            "statement": "Typed log_inventory probe status=completed exit=0: {\"log_files\": [{\"bytes\": 154, \"modified_utc\": \"2026-07-11T12:06:02.769255+00:00\", \"path\": \"logs/worker.log\"}], \"returned\": 1}"
+          },
+          {
+            "dimension": "state",
+            "discriminating": true,
+            "evidence_id": "probe-default-log-search",
+            "experiment_id": "default-log-search",
+            "independence_key": "diagnostic_probe:default-log-search",
+            "kind": "artifact",
+            "provenance": "diagnostic_probe:default-log-search",
+            "reliability": 0.95,
+            "statement": "Typed log_search probe status=completed exit=0: {\"fixed_query\": \"queue\", \"matches\": [{\"path\": \"logs/worker.log\", \"tail_line\": 2, \"text\": \"2026-07-11T09:20:01Z queue depth=20 max=20\"}, {\"path\": \"logs/worker.log\", \"tail_line\": 3, \"text\": \"2026-07-11T09:20:02Z enqueue rejected cause=protected_refresh\"}], \"returned\": 2, \"searched_files\": 1}"
+          },
+          {
+            "dimension": "data",
+            "discriminating": false,
+            "evidence_id": "probe-default-db-schema",
+            "experiment_id": "default-db-schema",
+            "independence_key": "diagnostic_probe:default-db-schema",
+            "kind": "artifact",
+            "provenance": "diagnostic_probe:default-db-schema",
+            "reliability": 0.75,
+            "statement": "Typed db_schema probe status=completed exit=0: {\"columns\": [{\"name\": \"id\", \"nullable\": false, \"primary_key\": true, \"type\": \"INTEGER\"}, {\"name\": \"cause\", \"nullable\": false, \"primary_key\": false, \"type\": \"VARCHAR(80)\"}, {\"name\": \"status\", \"nullable\": false, \"primary_key\": false, \"type\": \"VARCHAR(24)\"}, {\"name\": \"created_at\", \"nullable\": false, \"primary_key\": false, \"type\": \"TIMESTAMP\"}], \"indexes\": [], \"table\": \"project_runtime_retraction_events\", \"transaction_read_only\": true}"
+          },
+          {
+            "dimension": "state",
+            "discriminating": true,
+            "evidence_id": "probe-default-db-profile",
+            "experiment_id": "default-db-profile",
+            "independence_key": "diagnostic_probe:default-db-profile",
+            "kind": "artifact",
+            "provenance": "diagnostic_probe:default-db-profile",
+            "reliability": 0.95,
+            "statement": "Typed db_profile probe status=completed exit=0: {\"count\": 20, \"filters\": {}, \"groups\": [{\"count\": 19, \"value\": \"stale_imminent_eval\"}, {\"count\": 1, \"value\": \"protected_refresh\"}], \"latest_timestamp\": \"2026-07-11T12:02:55.782935+00:00\", \"lookback_minutes\": 120, \"table\": \"project_runtime_retraction_events\", \"timestamp_column\": \"created_at\", \"transaction_read_only\": true}"
+          }
+        ],
+        "results": [
+          {
+            "dimension": "runtime",
+            "duration_ms": 4,
+            "exit_code": 0,
+            "kind": "log_inventory",
+            "output": "{\"log_files\": [{\"bytes\": 154, \"modified_utc\": \"2026-07-11T12:06:02.769255+00:00\", \"path\": \"logs/worker.log\"}], \"returned\": 1}",
+            "probe_id": "default-log-inventory",
+            "safety": "read_only",
+            "status": "completed"
+          },
+          {
+            "dimension": "runtime",
+            "duration_ms": 5,
+            "exit_code": 0,
+            "kind": "log_search",
+            "output": "{\"fixed_query\": \"queue\", \"matches\": [{\"path\": \"logs/worker.log\", \"tail_line\": 2, \"text\": \"2026-07-11T09:20:01Z queue depth=20 max=20\"}, {\"path\": \"logs/worker.log\", \"tail_line\": 3, \"text\": \"2026-07-11T09:20:02Z enqueue rejected cause=protected_refresh\"}], \"returned\": 2, \"searched_files\": 1}",
+            "probe_id": "default-log-search",
+            "safety": "read_only",
+            "status": "completed"
+          },
+          {
+            "dimension": "data",
+            "duration_ms": 1140,
+            "exit_code": 0,
+            "kind": "db_schema",
+            "output": "{\"columns\": [{\"name\": \"id\", \"nullable\": false, \"primary_key\": true, \"type\": \"INTEGER\"}, {\"name\": \"cause\", \"nullable\": false, \"primary_key\": false, \"type\": \"VARCHAR(80)\"}, {\"name\": \"status\", \"nullable\": false, \"primary_key\": false, \"type\": \"VARCHAR(24)\"}, {\"name\": \"created_at\", \"nullable\": false, \"primary_key\": false, \"type\": \"TIMESTAMP\"}], \"indexes\": [], \"table\": \"project_runtime_retraction_events\", \"transaction_read_only\": true}",
+            "probe_id": "default-db-schema",
+            "safety": "read_only",
+            "status": "completed"
+          },
+          {
+            "dimension": "data",
+            "duration_ms": 262,
+            "exit_code": 0,
+            "kind": "db_profile",
+            "output": "{\"count\": 20, \"filters\": {}, \"groups\": [{\"count\": 19, \"value\": \"stale_imminent_eval\"}, {\"count\": 1, \"value\": \"protected_refresh\"}], \"latest_timestamp\": \"2026-07-11T12:02:55.782935+00:00\", \"lookback_minutes\": 120, \"table\": \"project_runtime_retraction_events\", \"timestamp_column\": \"created_at\", \"transaction_read_only\": true}",
+            "probe_id": "default-db-profile",
+            "safety": "read_only",
+            "status": "completed"
+          }
+        ],
+        "schema": "chili.diagnostic-probe-run.v1"
+      },
+      "probes": [
+        {
+          "aggregate": "",
+          "aggregate_column": "",
+          "case_sensitive": false,
+          "dimension": "runtime",
+          "filters": {},
+          "group_by": "",
+          "kind": "log_inventory",
+          "lookback_minutes": 0,
+          "max_groups": 15,
+          "max_lines": 80,
+          "max_results": 30,
+          "paths": [],
+          "probe_id": "default-log-inventory",
+          "query": "",
+          "safety": "read_only",
+          "schema": "chili.diagnostic-probe.v1",
+          "selector": "",
+          "start_line": 1,
+          "table": "",
+          "tail_lines": 5000,
+          "timeout_sec": 30.0,
+          "timestamp_column": ""
+        },
+        {
+          "aggregate": "",
+          "aggregate_column": "",
+          "case_sensitive": false,
+          "dimension": "runtime",
+          "filters": {},
+          "group_by": "",
+          "kind": "log_search",
+          "lookback_minutes": 0,
+          "max_groups": 15,
+          "max_lines": 80,
+          "max_results": 40,
+          "paths": [],
+          "probe_id": "default-log-search",
+          "query": "queue",
+          "safety": "read_only",
+          "schema": "chili.diagnostic-probe.v1",
+          "selector": "",
+          "start_line": 1,
+          "table": "",
+          "tail_lines": 5000,
+          "timeout_sec": 30.0,
+          "timestamp_column": ""
+        },
+        {
+          "aggregate": "",
+          "aggregate_column": "",
+          "case_sensitive": false,
+          "dimension": "data",
+          "filters": {},
+          "group_by": "",
+          "kind": "db_schema",
+          "lookback_minutes": 0,
+          "max_groups": 15,
+          "max_lines": 80,
+          "max_results": 40,
+          "paths": [],
+          "probe_id": "default-db-schema",
+          "query": "",
+          "safety": "read_only",
+          "schema": "chili.diagnostic-probe.v1",
+          "selector": "",
+          "start_line": 1,
+          "table": "project_runtime_retraction_events",
+          "tail_lines": 5000,
+          "timeout_sec": 30.0,
+          "timestamp_column": ""
+        },
+        {
+          "aggregate": "",
+          "aggregate_column": "",
+          "case_sensitive": false,
+          "dimension": "data",
+          "filters": {},
+          "group_by": "cause",
+          "kind": "db_profile",
+          "lookback_minutes": 120,
+          "max_groups": 15,
+          "max_lines": 80,
+          "max_results": 40,
+          "paths": [],
+          "probe_id": "default-db-profile",
+          "query": "",
+          "safety": "read_only",
+          "schema": "chili.diagnostic-probe.v1",
+          "selector": "",
+          "start_line": 1,
+          "table": "project_runtime_retraction_events",
+          "tail_lines": 5000,
+          "timeout_sec": 30.0,
+          "timestamp_column": "created_at"
+        }
+      ],
+      "retractions": [
+        {
+          "hypothesis_id": "h-runtime",
+          "new_status": "superseded",
+          "previous_status": "confirmed",
+          "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+        }
+      ],
+      "score": 100,
+      "split": "holdout"
+    }
+  ],
+  "created_at": "2026-07-11T12:07:59.146976+00:00",
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "model": "qwen2.5-coder:7b",
+  "overall_score": 88.33,
+  "premium_calls": 0,
+  "reference_family": "claude-fable-5",
+  "schema": "chili.runtime-evidence-diagnostic-results.v1",
+  "verdict": "needs_improvement"
+}

@@ -7,6 +7,7 @@ shell, strips credentials from subprocess environments, and caps time/output.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -20,11 +21,22 @@ from pathlib import Path
 from typing import Any
 
 from ..coding_task.envelope import subprocess_safe_env
+from . import diagnostic_runtime_evidence
 
 
 PROBE_SCHEMA = "chili.diagnostic-probe.v1"
 READ_ONLY_PROBE_KINDS = frozenset(
-    {"repo_state", "search", "file_excerpt", "git_history", "git_diff"}
+    {
+        "repo_state",
+        "search",
+        "file_excerpt",
+        "git_history",
+        "git_diff",
+        "log_inventory",
+        "log_search",
+        "db_schema",
+        "db_profile",
+    }
 )
 ISOLATED_PROBE_KINDS = frozenset({"compile", "targeted_test"})
 PROBE_KINDS = READ_ONLY_PROBE_KINDS | ISOLATED_PROBE_KINDS
@@ -36,6 +48,7 @@ MAX_TIMEOUT_SEC = 90.0
 _SAFE_SELECTOR_RE = re.compile(
     r"^tests/[A-Za-z0-9_./-]+\.py(?:::[A-Za-z_][A-Za-z0-9_]*(?:\[[A-Za-z0-9_.-]+\])?)*$"
 )
+_SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 _PROMPT_TOKEN_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_.]{3,}\b")
 _PROMPT_STOP = frozenset(
     {
@@ -114,6 +127,14 @@ def normalize_probe_spec(raw: Mapping[str, Any] | None, index: int = 0) -> dict[
         query = ""
     selector = str(raw.get("selector") or "").replace("\\", "/").strip()
     dimension = str(raw.get("dimension") or "unknown").strip().lower()
+    filters: dict[str, Any] = {}
+    raw_filters = raw.get("filters") if isinstance(raw.get("filters"), Mapping) else {}
+    for raw_name, raw_value in list(raw_filters.items())[:4]:
+        name = str(raw_name or "").strip()
+        if not _SAFE_IDENTIFIER_RE.fullmatch(name):
+            continue
+        if raw_value is None or isinstance(raw_value, (bool, int, float, str)):
+            filters[name] = _clip(raw_value, 180) if isinstance(raw_value, str) else raw_value
     return {
         "schema": PROBE_SCHEMA,
         "probe_id": _clean_probe_id(raw.get("probe_id"), f"probe-{index + 1}"),
@@ -126,6 +147,16 @@ def normalize_probe_spec(raw: Mapping[str, Any] | None, index: int = 0) -> dict[
         "max_results": _bounded_int(raw.get("max_results"), 40, 1, 100),
         "timeout_sec": _bounded_float(raw.get("timeout_sec"), 30.0, 1.0, MAX_TIMEOUT_SEC),
         "dimension": dimension,
+        "tail_lines": _bounded_int(raw.get("tail_lines"), 5_000, 1, 20_000),
+        "case_sensitive": bool(raw.get("case_sensitive")),
+        "table": str(raw.get("table") or "").strip()[:63],
+        "timestamp_column": str(raw.get("timestamp_column") or "").strip()[:63],
+        "lookback_minutes": _bounded_int(raw.get("lookback_minutes"), 0, 0, 10_080),
+        "group_by": str(raw.get("group_by") or "").strip()[:63],
+        "max_groups": _bounded_int(raw.get("max_groups"), 15, 1, 25),
+        "aggregate": str(raw.get("aggregate") or "").strip().lower()[:8],
+        "aggregate_column": str(raw.get("aggregate_column") or "").strip()[:63],
+        "filters": filters,
     }
 
 
@@ -141,8 +172,22 @@ def validate_probe_spec(probe: Mapping[str, Any], safety: str) -> list[str]:
         errors.append(f"Probe {kind} requires safety={expected_safety}.")
     if kind in {"file_excerpt", "git_history", "git_diff", "compile"} and not paths:
         errors.append(f"Probe {kind} requires at least one repository-relative path.")
-    if kind == "search" and not str(probe.get("query") or ""):
-        errors.append("Probe search requires a fixed-string query.")
+    if kind in {"search", "log_search"} and not str(probe.get("query") or ""):
+        errors.append(f"Probe {kind} requires a fixed-string query.")
+    if kind in {"db_schema", "db_profile"} and not _SAFE_IDENTIFIER_RE.fullmatch(
+        str(probe.get("table") or "")
+    ):
+        errors.append(f"Probe {kind} requires a safe table identifier.")
+    for field in ("timestamp_column", "group_by", "aggregate_column"):
+        value = str(probe.get(field) or "")
+        if value and not _SAFE_IDENTIFIER_RE.fullmatch(value):
+            errors.append(f"Probe {kind} has an unsafe {field} identifier.")
+    aggregate = str(probe.get("aggregate") or "")
+    aggregate_column = str(probe.get("aggregate_column") or "")
+    if kind == "db_profile" and bool(aggregate) != bool(aggregate_column):
+        errors.append("Probe db_profile requires aggregate and aggregate_column together.")
+    if kind == "db_profile" and aggregate and aggregate not in {"avg", "max", "min", "sum"}:
+        errors.append("Probe db_profile aggregate must be avg, max, min, or sum.")
     if kind == "targeted_test" and not _SAFE_SELECTOR_RE.fullmatch(
         str(probe.get("selector") or "")
     ):
@@ -173,6 +218,50 @@ def probes_from_packet(packet: Mapping[str, Any], max_probes: int = MAX_PROBES) 
     return probes
 
 
+def merge_probe_sets(
+    preferred: Sequence[Mapping[str, Any]],
+    additional: Sequence[Mapping[str, Any]],
+    *,
+    max_probes: int = MAX_PROBES,
+) -> list[dict[str, Any]]:
+    """Merge typed probes while preserving prompt-grounded priority."""
+    merged: list[dict[str, Any]] = []
+    fingerprints: set[str] = set()
+    maximum = max(0, min(MAX_PROBES, int(max_probes)))
+    for raw in [*preferred, *additional]:
+        probe = normalize_probe_spec(raw, len(merged))
+        safety = str(raw.get("safety") or "")
+        if validate_probe_spec(probe, safety):
+            continue
+        fingerprint = json.dumps(
+            {
+                key: probe.get(key)
+                for key in (
+                    "kind",
+                    "paths",
+                    "query",
+                    "selector",
+                    "table",
+                    "timestamp_column",
+                    "lookback_minutes",
+                    "group_by",
+                    "aggregate",
+                    "aggregate_column",
+                    "filters",
+                )
+            },
+            sort_keys=True,
+            default=str,
+        )
+        if fingerprint in fingerprints:
+            continue
+        fingerprints.add(fingerprint)
+        merged.append({**probe, "safety": safety})
+        if len(merged) >= maximum:
+            break
+    return merged
+
+
 def default_followup_probes(
     report: Mapping[str, Any],
     candidate_paths: Sequence[str],
@@ -181,18 +270,128 @@ def default_followup_probes(
     """Provide a conservative fallback when the local judge asks for evidence
     but emits no executable probe. These operations cannot mutate source.
     """
-    if str(report.get("decision") or "") != "instrument_first":
+    prompt_lower = str(prompt or "").lower()
+    explicit_runtime_evidence = any(
+        phrase in prompt_lower
+        for phrase in (
+            "read-only profile",
+            "readonly profile",
+            "worker logs",
+            "runtime logs",
+            "re-evaluate",
+            "reevaluate",
+        )
+    )
+    if (
+        str(report.get("decision") or "") != "instrument_first"
+        and not explicit_runtime_evidence
+    ):
         return []
-    probes = [
+    probes: list[dict[str, Any]] = []
+    if any(
+        token in prompt_lower
+        for token in (
+            " log",
+            "logs",
+            "trace",
+            "worker",
+            "runtime",
+            "connection refused",
+            "timeout",
+        )
+    ):
+        probes.append(
+            normalize_probe_spec(
+                {
+                    "probe_id": "default-log-inventory",
+                    "kind": "log_inventory",
+                    "dimension": "runtime",
+                    "max_results": 30,
+                }
+            )
+        )
+        log_query = next(
+            (
+                phrase
+                for phrase in (
+                    "connection refused",
+                    "statement timeout",
+                    "queue depth",
+                    "enqueue rejected",
+                    "failed",
+                    "error",
+                )
+                if phrase in prompt_lower
+            ),
+            "queue" if any(token in prompt_lower for token in ("state", "stall")) else "error",
+        )
+        probes.append(
+            normalize_probe_spec(
+                {
+                    "probe_id": "default-log-search",
+                    "kind": "log_search",
+                    "query": log_query,
+                    "dimension": "runtime",
+                    "tail_lines": 5_000,
+                    "max_results": 40,
+                },
+                len(probes),
+            )
+        )
+    table_match = re.search(
+        r"\b((?:trading|brain|project)_[a-z][a-z0-9_]{2,61})\b",
+        prompt_lower,
+    )
+    if table_match:
+        probes.append(
+            normalize_probe_spec(
+                {
+                    "probe_id": "default-db-schema",
+                    "kind": "db_schema",
+                    "table": table_match.group(1),
+                    "dimension": "data",
+                },
+                len(probes),
+            )
+        )
+        timestamp_match = re.search(
+            r"\btimestamp_column\s*[=:]\s*([a-z_][a-z0-9_]*)\b",
+            prompt_lower,
+        )
+        lookback_match = re.search(
+            r"\blookback_minutes\s*[=:]\s*(\d{1,5})\b",
+            prompt_lower,
+        )
+        group_match = re.search(
+            r"\bgroup_by\s*[=:]\s*([a-z_][a-z0-9_]*)\b",
+            prompt_lower,
+        )
+        if timestamp_match and lookback_match:
+            probes.append(
+                normalize_probe_spec(
+                    {
+                        "probe_id": "default-db-profile",
+                        "kind": "db_profile",
+                        "table": table_match.group(1),
+                        "timestamp_column": timestamp_match.group(1),
+                        "lookback_minutes": int(lookback_match.group(1)),
+                        "group_by": group_match.group(1) if group_match else "",
+                        "dimension": "data",
+                    },
+                    len(probes),
+                )
+            )
+    probes.append(
         normalize_probe_spec(
             {
                 "probe_id": "default-repo-state",
                 "kind": "repo_state",
                 "dimension": "code",
                 "timeout_sec": 10,
-            }
+            },
+            len(probes),
         )
-    ]
+    )
     safe_candidates = [path for path in (_safe_rel_path(value) for value in candidate_paths) if path]
     if safe_candidates:
         probes.append(
@@ -233,7 +432,7 @@ def default_followup_probes(
         )
     return [
         {**probe, "safety": "read_only"}
-        for probe in probes[:3]
+        for probe in probes[:4]
         if not validate_probe_spec(probe, "read_only")
     ]
 
@@ -366,7 +565,12 @@ def _extract_git_archive(root: Path, destination: Path, timeout_sec: float) -> t
         return False, f"git archive extraction failed: {exc}"
 
 
-def _execute_one(root: Path, probe: Mapping[str, Any]) -> dict[str, Any]:
+def _execute_one(
+    root: Path,
+    probe: Mapping[str, Any],
+    *,
+    explicit_test_database_url: str | None = None,
+) -> dict[str, Any]:
     probe_id = str(probe.get("probe_id") or "probe")
     kind = str(probe.get("kind") or "")
     safety = str(probe.get("safety") or "")
@@ -526,6 +730,31 @@ def _execute_one(root: Path, probe: Mapping[str, Any]) -> dict[str, Any]:
                         env=env,
                     )
         duration_ms = int((time.monotonic() - started) * 1000)
+    elif kind in {"log_inventory", "log_search", "db_schema", "db_profile"}:
+        if kind == "log_inventory":
+            runtime_result = diagnostic_runtime_evidence.execute_log_inventory(root, probe)
+        elif kind == "log_search":
+            runtime_result = diagnostic_runtime_evidence.execute_log_search(root, probe)
+        elif kind == "db_schema":
+            runtime_result = diagnostic_runtime_evidence.execute_db_schema(
+                probe,
+                explicit_test_url=explicit_test_database_url,
+            )
+        else:
+            runtime_result = diagnostic_runtime_evidence.execute_db_profile(
+                probe,
+                explicit_test_url=explicit_test_database_url,
+            )
+        return {
+            "probe_id": probe_id,
+            "kind": kind,
+            "safety": safety,
+            "status": str(runtime_result.get("status") or "failed"),
+            "exit_code": runtime_result.get("exit_code"),
+            "output": _clip(runtime_result.get("output"), MAX_OUTPUT_CHARS),
+            "duration_ms": int(runtime_result.get("duration_ms") or 0),
+            "dimension": str(probe.get("dimension") or "unknown"),
+        }
 
     completed = code in ({0, 1} if kind == "search" else {0})
     return {
@@ -540,12 +769,167 @@ def _execute_one(root: Path, probe: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _probe_evidence_semantics(result: Mapping[str, Any]) -> dict[str, Any]:
+    probe_kind = str(result.get("kind") or "")
+    status = str(result.get("status") or "")
+    requested_dimension = str(result.get("dimension") or "unknown")
+    output = str(result.get("output") or "")
+    lowered = output.lower()
+    if status != "completed":
+        return {
+            "dimension": "unknown",
+            "kind": "metric",
+            "reliability": 0.65,
+            "discriminating": False,
+        }
+    if probe_kind == "log_inventory":
+        return {
+            "dimension": "unknown",
+            "kind": "metric",
+            "reliability": 0.6,
+            "discriminating": False,
+        }
+    if probe_kind == "log_search":
+        try:
+            returned = int((json.loads(output) or {}).get("returned") or 0)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            returned = 0
+        if returned <= 0:
+            return {
+                "dimension": "unknown",
+                "kind": "metric",
+                "reliability": 0.7,
+                "discriminating": False,
+            }
+        if any(
+            token in lowered
+            for token in (
+                "connection refused",
+                "circuit breaker",
+                "dns",
+                "socket",
+                "upstream",
+                "provider unavailable",
+            )
+        ):
+            dimension = "dependency"
+        elif any(
+            token in lowered
+            for token in (
+                "queue depth",
+                "pending depth",
+                "stale_",
+                "enqueue rejected",
+                "admission rejected",
+                "protected refresh",
+            )
+        ):
+            dimension = "state"
+        elif any(token in lowered for token in ("image revision", "container", "restart")):
+            dimension = "runtime"
+        else:
+            return {
+                "dimension": "unknown",
+                "kind": "artifact",
+                "reliability": 0.75,
+                "discriminating": False,
+            }
+        return {
+            "dimension": dimension,
+            "kind": "artifact",
+            "reliability": 0.95,
+            "discriminating": True,
+        }
+    if probe_kind == "db_schema":
+        return {
+            "dimension": "data",
+            "kind": "artifact",
+            "reliability": 0.75,
+            "discriminating": False,
+        }
+    if probe_kind == "db_profile":
+        if any(
+            token in lowered
+            for token in (
+                "queue",
+                "pending",
+                "stale_",
+                "imminent_eval",
+                "protected_refresh",
+                "market_snapshots",
+                "admission",
+            )
+        ):
+            dimension = "state"
+        elif any(token in lowered for token in ("source", "sink", "quote", "nbbo", "row_count")):
+            dimension = "data"
+        elif any(token in lowered for token in ("config", "setting", "feature_gate")):
+            dimension = "config"
+        else:
+            dimension = "data"
+        return {
+            "dimension": dimension,
+            "kind": "artifact",
+            "reliability": 0.95,
+            "discriminating": True,
+        }
+    if probe_kind == "repo_state":
+        dirty_lines = [
+            line
+            for line in output.splitlines()
+            if line.strip() and not line.lstrip().startswith("##")
+        ]
+        return {
+            "dimension": "code" if dirty_lines else "unknown",
+            "kind": "artifact" if dirty_lines else "metric",
+            "reliability": 0.9 if dirty_lines else 0.6,
+            "discriminating": bool(dirty_lines),
+        }
+    if probe_kind == "git_history":
+        return {
+            "dimension": "code",
+            "kind": "artifact",
+            "reliability": 0.65,
+            "discriminating": False,
+        }
+    if probe_kind == "git_diff":
+        has_diff = bool(output.strip()) and "no output" not in lowered
+        return {
+            "dimension": "code" if has_diff else "unknown",
+            "kind": "artifact" if has_diff else "metric",
+            "reliability": 0.95 if has_diff else 0.6,
+            "discriminating": has_diff,
+        }
+    if probe_kind == "search":
+        has_matches = bool(output.strip()) and "no output" not in lowered
+        return {
+            "dimension": requested_dimension if has_matches else "unknown",
+            "kind": "artifact" if has_matches else "metric",
+            "reliability": 0.9 if has_matches else 0.6,
+            "discriminating": has_matches,
+        }
+    if probe_kind == "file_excerpt":
+        return {
+            "dimension": requested_dimension,
+            "kind": "artifact",
+            "reliability": 0.9,
+            "discriminating": True,
+        }
+    return {
+        "dimension": requested_dimension,
+        "kind": "experiment",
+        "reliability": 0.95,
+        "discriminating": True,
+    }
+
+
 def execute_safe_probes(
     repo_path: Path,
     probes: Sequence[Mapping[str, Any]],
     *,
     max_probes: int = MAX_PROBES,
     time_budget_sec: float = 120.0,
+    explicit_test_database_url: str | None = None,
 ) -> dict[str, Any]:
     root = repo_path.resolve()
     if not root.is_dir():
@@ -577,12 +961,19 @@ def execute_safe_probes(
                 }
             )
             continue
-        results.append(_execute_one(root, probe))
+        results.append(
+            _execute_one(
+                root,
+                probe,
+                explicit_test_database_url=explicit_test_database_url,
+            )
+        )
 
     evidence = []
     for index, result in enumerate(results):
         if result.get("status") not in {"completed", "failed", "timeout"}:
             continue
+        semantics = _probe_evidence_semantics(result)
         evidence.append(
             {
                 "evidence_id": f"probe-{_clean_probe_id(result.get('probe_id'), str(index + 1))}",
@@ -590,12 +981,12 @@ def execute_safe_probes(
                     f"Typed {result.get('kind')} probe status={result.get('status')} "
                     f"exit={result.get('exit_code')}: {_clip(result.get('output'), 900)}"
                 ),
-                "dimension": str(result.get("dimension") or "unknown"),
-                "kind": "experiment",
+                "dimension": semantics["dimension"],
+                "kind": semantics["kind"],
                 "provenance": f"diagnostic_probe:{result.get('probe_id')}",
                 "independence_key": f"diagnostic_probe:{result.get('probe_id')}",
-                "reliability": 0.95 if result.get("status") == "completed" else 0.7,
-                "discriminating": True,
+                "reliability": semantics["reliability"],
+                "discriminating": semantics["discriminating"],
                 "experiment_id": str(result.get("probe_id") or ""),
             }
         )

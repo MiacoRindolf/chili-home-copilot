@@ -625,6 +625,74 @@ def _experiment_result_ids(packet: Mapping[str, Any]) -> set[str]:
     }
 
 
+def _typed_probe_fallback_hypotheses(
+    case: Mapping[str, Any],
+    hypotheses: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Recover strong causal families omitted by a small local model.
+
+    The fallback is deliberately narrow: only high-reliability, discriminating
+    evidence emitted by CHILI's typed probes can create a hypothesis. Ordinary
+    prompt or repository evidence still requires the model to propose one.
+    """
+    existing_dimensions = {
+        str(item.get("dimension") or "unknown")
+        for item in hypotheses
+        if isinstance(item, Mapping)
+    }
+    existing_ids = {
+        str(item.get("hypothesis_id") or "")
+        for item in hypotheses
+        if isinstance(item, Mapping)
+    }
+    evidence_by_dimension: dict[str, list[str]] = defaultdict(list)
+    for record in case.get("observations") or []:
+        if not isinstance(record, Mapping):
+            continue
+        dimension = str(record.get("dimension") or "unknown")
+        provenance = str(record.get("provenance") or "")
+        if (
+            dimension not in DIMENSIONS
+            or dimension == "unknown"
+            or dimension in existing_dimensions
+            or not provenance.startswith("diagnostic_probe:")
+            or not bool(record.get("discriminating"))
+            or _clamp_reliability(record.get("reliability")) < 0.9
+        ):
+            continue
+        evidence_id = str(record.get("evidence_id") or "")
+        if evidence_id and evidence_id not in evidence_by_dimension[dimension]:
+            evidence_by_dimension[dimension].append(evidence_id)
+
+    fallbacks: list[dict[str, Any]] = []
+    for dimension in DIMENSIONS:
+        evidence_ids = evidence_by_dimension.get(dimension) or []
+        if not evidence_ids:
+            continue
+        base_id = f"evidence-{dimension}"
+        hypothesis_id = base_id
+        suffix = 2
+        while hypothesis_id in existing_ids:
+            hypothesis_id = f"{base_id}-{suffix}"
+            suffix += 1
+        existing_ids.add(hypothesis_id)
+        label = dimension.replace("_", " ")
+        fallbacks.append(
+            {
+                "hypothesis_id": hypothesis_id,
+                "claim": f"Typed diagnostic evidence identifies {label} as the primary causal dimension.",
+                "dimension": dimension,
+                "support_evidence_ids": evidence_ids,
+                "contradict_evidence_ids": [],
+                "falsification": (
+                    f"Hold other dimensions constant and remove or restore only the observed {label} condition."
+                ),
+                "origin": "deterministic_evidence_gate",
+            }
+        )
+    return fallbacks
+
+
 def _validate_packet(case: Mapping[str, Any], packet: Mapping[str, Any]) -> list[str]:
     errors: list[str] = []
     evidence_by_id = {
@@ -772,8 +840,12 @@ def evaluate_packet(
     completed_result_ids = _experiment_result_ids(packet)
     drift = detect_baseline_drift(case["observations"])
 
+    hypotheses = [
+        *packet["hypotheses"],
+        *_typed_probe_fallback_hypotheses(case, packet["hypotheses"]),
+    ]
     hypothesis_results: list[dict[str, Any]] = []
-    for item in packet["hypotheses"]:
+    for item in hypotheses:
         support_ids = list(dict.fromkeys(item.get("support_evidence_ids") or []))
         contradict_ids = list(dict.fromkeys(item.get("contradict_evidence_ids") or []))
         if not support_ids:
@@ -842,17 +914,20 @@ def evaluate_packet(
             ),
         )
         conclusion_id = str(chosen.get("hypothesis_id") or "")
-    if chosen is not None and chosen.get("status") != "supported":
+    if chosen is not None:
         supported = [item for item in hypothesis_results if item.get("status") == "supported"]
         if supported:
-            chosen = max(
-                supported,
-                key=lambda item: (
+            def support_rank(item: Mapping[str, Any]) -> tuple[bool, float, float]:
+                return (
+                    bool(item.get("discriminating_evidence")),
                     float(item.get("confirmatory_weight") or 0),
                     float(item.get("support_weight") or 0),
-                ),
-            )
-            conclusion_id = str(chosen.get("hypothesis_id") or "")
+                )
+
+            strongest_supported = max(supported, key=support_rank)
+            if chosen.get("status") != "supported" or support_rank(strongest_supported) > support_rank(chosen):
+                chosen = strongest_supported
+                conclusion_id = str(chosen.get("hypothesis_id") or "")
 
     requested_status = str(requested.get("status") or "provisional")
     if chosen is None:
@@ -1005,6 +1080,18 @@ def _packet_shape() -> str:
     )
 
 
+def _typed_probe_examples() -> str:
+    return (
+        'Examples (choose one exact kind, never copy alternatives): '
+        '{"probe_id":"p-log","kind":"log_search","paths":["logs"],"query":"connection refused",'
+        '"tail_lines":5000,"dimension":"runtime"}; '
+        '{"probe_id":"p-schema","kind":"db_schema","table":"trading_events","dimension":"data"}; '
+        '{"probe_id":"p-count","kind":"db_profile","table":"trading_events",'
+        '"timestamp_column":"created_at","lookback_minutes":60,"group_by":"reason",'
+        '"max_groups":15,"filters":{"status":"pending"},"dimension":"data"}.'
+    )
+
+
 def investigator_prompt(raw_case: Mapping[str, Any]) -> str:
     case = normalize_case(raw_case)
     return (
@@ -1014,9 +1101,11 @@ def investigator_prompt(raw_case: Mapping[str, Any]) -> str:
         "means baseline drift, not proof of a code regression. Never request automatic runtime or live mutation. "
         "When evidence is insufficient, you may set auto_execute=true only for a typed probe from the supplied "
         "catalog. Raw shell commands do not exist. search is fixed-string; targeted_test must name one selector "
-        "under tests/. Use read_only for repo_state/search/file_excerpt/git_history/git_diff and isolated for "
-        "compile/targeted_test.\n\n"
-        f"Required shape:\n{_packet_shape()}\n\nCase:\n{_case_prompt(case)}"
+        "under tests/. log_search is fixed-string over bounded log tails. db_schema and db_profile never accept "
+        "SQL; db_profile exposes only count/group/min/max/avg/sum aggregates and production use requires a "
+        "timestamp column plus bounded lookback. Use read_only for repo_state/search/file_excerpt/git_history/"
+        "git_diff/log_inventory/log_search/db_schema/db_profile and isolated for compile/targeted_test.\n\n"
+        f"Required shape:\n{_packet_shape()}\n{_typed_probe_examples()}\n\nCase:\n{_case_prompt(case)}"
     )
 
 
@@ -1027,7 +1116,7 @@ def skeptic_prompt(raw_case: Mapping[str, Any], packet: Mapping[str, Any], repor
         "Try to falsify the leading conclusion. Look for code/data/clock/state/config/dependency/runtime/test-harness confounding, "
         "correlated evidence, and claims that survived no discriminating experiment. Add contradiction evidence links when justified. "
         "Retract a conclusion rather than defending it when the evidence changed. Never request automatic runtime or live mutation.\n\n"
-        f"Required shape:\n{_packet_shape()}\n\nCase:\n{_case_prompt(case)}\n\n"
+        f"Required shape:\n{_packet_shape()}\n{_typed_probe_examples()}\n\nCase:\n{_case_prompt(case)}\n\n"
         f"Investigator packet:\n{json.dumps(packet, indent=2, sort_keys=True)}\n\n"
         f"Deterministic evaluation:\n{json.dumps(report, indent=2, sort_keys=True)}"
     )
@@ -1042,8 +1131,9 @@ def judge_prompt(raw_case: Mapping[str, Any], packet: Mapping[str, Any], report:
         "Preserve safe falsification experiments and never request automatic runtime or live mutation. "
         "If the evidence gate says instrument_first, choose at most two auto_execute typed probes from this "
         "catalog: repo_state, fixed-string search, bounded file_excerpt, git_history, git_diff, isolated compile, "
-        "or one targeted_test selector under tests/. Raw commands are forbidden.\n\n"
-        f"Required shape:\n{_packet_shape()}\n\nCase:\n{_case_prompt(case)}\n\n"
+        "one targeted_test selector under tests/, bounded log_inventory/log_search, or aggregate-only "
+        "db_schema/db_profile. Database probes never accept SQL or raw-row selection. Raw commands are forbidden.\n\n"
+        f"Required shape:\n{_packet_shape()}\n{_typed_probe_examples()}\n\nCase:\n{_case_prompt(case)}\n\n"
         f"Challenged packet:\n{json.dumps(packet, indent=2, sort_keys=True)}\n\n"
         f"Deterministic evaluation:\n{json.dumps(report, indent=2, sort_keys=True)}"
     )

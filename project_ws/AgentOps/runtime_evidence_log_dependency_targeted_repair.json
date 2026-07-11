@@ -1,0 +1,416 @@
+{
+  "average_case_duration_ms": 141858.0,
+  "cases": [
+    {
+      "case_id": "log-dependency-401",
+      "checks": {
+        "confirmed": true,
+        "dimension": true,
+        "premium_independence": true,
+        "probe_coverage": true,
+        "retraction": true,
+        "valid": true
+      },
+      "duration_ms": 141858,
+      "final_dimension": "dependency",
+      "final_report": {
+        "baseline_drift": [],
+        "case_id": "log-dependency-401",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by dependency drift.",
+          "confidence": 0.4872,
+          "dimension": "dependency",
+          "evidence_ids": [
+            "probe-default-log-search"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "status": "confirmed"
+        },
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.4872,
+            "confirmatory_weight": 0.95,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "probe-default-log-search"
+            ],
+            "support_weight": 0.95
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-dependency",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "final_status": "confirmed",
+      "initial_report": {
+        "baseline_drift": [],
+        "case_id": "log-dependency-401",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by code drift.",
+          "confidence": 0.3939,
+          "dimension": "code",
+          "evidence_ids": [
+            "operator-1",
+            "operator-3"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "decision": "instrument_first",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.3939,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-3"
+            ],
+            "support_weight": 0.65
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.4737,
+            "confirmatory_weight": 0.9,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h2",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "source-1"
+            ],
+            "support_weight": 0.9
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.3939,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h3",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-2"
+            ],
+            "support_weight": 0.65
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "dimension": "code",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "dimension": "clock",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "dimension": "runtime",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 80621,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 633
+        },
+        {
+          "error": null,
+          "latency_ms": 60801,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 345
+        }
+      ],
+      "premium_calls": 0,
+      "probe_kinds": [
+        "log_inventory",
+        "log_search",
+        "repo_state",
+        "git_history"
+      ],
+      "probe_run": {
+        "duration_ms": 145,
+        "errors": [],
+        "evidence": [
+          {
+            "dimension": "unknown",
+            "discriminating": false,
+            "evidence_id": "probe-default-log-inventory",
+            "experiment_id": "default-log-inventory",
+            "independence_key": "diagnostic_probe:default-log-inventory",
+            "kind": "metric",
+            "provenance": "diagnostic_probe:default-log-inventory",
+            "reliability": 0.6,
+            "statement": "Typed log_inventory probe status=completed exit=0: {\"log_files\": [{\"bytes\": 225, \"modified_utc\": \"2026-07-11T12:10:16.954596+00:00\", \"path\": \"logs/market-worker.log\"}], \"returned\": 1}"
+          },
+          {
+            "dimension": "dependency",
+            "discriminating": true,
+            "evidence_id": "probe-default-log-search",
+            "experiment_id": "default-log-search",
+            "independence_key": "diagnostic_probe:default-log-search",
+            "kind": "artifact",
+            "provenance": "diagnostic_probe:default-log-search",
+            "reliability": 0.95,
+            "statement": "Typed log_search probe status=completed exit=0: {\"fixed_query\": \"connection refused\", \"matches\": [{\"path\": \"logs/market-worker.log\", \"tail_line\": 3, \"text\": \"2026-07-11T09:00:02Z ERROR upstream connection refused host=massive\"}], \"returned\": 1, \"searched_files\": 1}"
+          },
+          {
+            "dimension": "unknown",
+            "discriminating": false,
+            "evidence_id": "probe-default-repo-state",
+            "experiment_id": "default-repo-state",
+            "independence_key": "diagnostic_probe:default-repo-state",
+            "kind": "metric",
+            "provenance": "diagnostic_probe:default-repo-state",
+            "reliability": 0.6,
+            "statement": "Typed repo_state probe status=completed exit=0: ## master"
+          },
+          {
+            "dimension": "code",
+            "discriminating": false,
+            "evidence_id": "probe-default-git-history",
+            "experiment_id": "default-git-history",
+            "independence_key": "diagnostic_probe:default-git-history",
+            "kind": "artifact",
+            "provenance": "diagnostic_probe:default-git-history",
+            "reliability": 0.65,
+            "statement": "Typed git_history probe status=completed exit=0: e501ec7 seed runtime evidence case"
+          }
+        ],
+        "results": [
+          {
+            "dimension": "runtime",
+            "duration_ms": 4,
+            "exit_code": 0,
+            "kind": "log_inventory",
+            "output": "{\"log_files\": [{\"bytes\": 225, \"modified_utc\": \"2026-07-11T12:10:16.954596+00:00\", \"path\": \"logs/market-worker.log\"}], \"returned\": 1}",
+            "probe_id": "default-log-inventory",
+            "safety": "read_only",
+            "status": "completed"
+          },
+          {
+            "dimension": "runtime",
+            "duration_ms": 5,
+            "exit_code": 0,
+            "kind": "log_search",
+            "output": "{\"fixed_query\": \"connection refused\", \"matches\": [{\"path\": \"logs/market-worker.log\", \"tail_line\": 3, \"text\": \"2026-07-11T09:00:02Z ERROR upstream connection refused host=massive\"}], \"returned\": 1, \"searched_files\": 1}",
+            "probe_id": "default-log-search",
+            "safety": "read_only",
+            "status": "completed"
+          },
+          {
+            "dimension": "code",
+            "duration_ms": 72,
+            "exit_code": 0,
+            "kind": "repo_state",
+            "output": "## master",
+            "probe_id": "default-repo-state",
+            "safety": "read_only",
+            "status": "completed"
+          },
+          {
+            "dimension": "code",
+            "duration_ms": 61,
+            "exit_code": 0,
+            "kind": "git_history",
+            "output": "e501ec7 seed runtime evidence case",
+            "probe_id": "default-git-history",
+            "safety": "read_only",
+            "status": "completed"
+          }
+        ],
+        "schema": "chili.diagnostic-probe-run.v1"
+      },
+      "probes": [
+        {
+          "aggregate": "",
+          "aggregate_column": "",
+          "case_sensitive": false,
+          "dimension": "runtime",
+          "filters": {},
+          "group_by": "",
+          "kind": "log_inventory",
+          "lookback_minutes": 0,
+          "max_groups": 15,
+          "max_lines": 80,
+          "max_results": 30,
+          "paths": [],
+          "probe_id": "default-log-inventory",
+          "query": "",
+          "safety": "read_only",
+          "schema": "chili.diagnostic-probe.v1",
+          "selector": "",
+          "start_line": 1,
+          "table": "",
+          "tail_lines": 5000,
+          "timeout_sec": 30.0,
+          "timestamp_column": ""
+        },
+        {
+          "aggregate": "",
+          "aggregate_column": "",
+          "case_sensitive": false,
+          "dimension": "runtime",
+          "filters": {},
+          "group_by": "",
+          "kind": "log_search",
+          "lookback_minutes": 0,
+          "max_groups": 15,
+          "max_lines": 80,
+          "max_results": 40,
+          "paths": [],
+          "probe_id": "default-log-search",
+          "query": "connection refused",
+          "safety": "read_only",
+          "schema": "chili.diagnostic-probe.v1",
+          "selector": "",
+          "start_line": 1,
+          "table": "",
+          "tail_lines": 5000,
+          "timeout_sec": 30.0,
+          "timestamp_column": ""
+        },
+        {
+          "aggregate": "",
+          "aggregate_column": "",
+          "case_sensitive": false,
+          "dimension": "code",
+          "filters": {},
+          "group_by": "",
+          "kind": "repo_state",
+          "lookback_minutes": 0,
+          "max_groups": 15,
+          "max_lines": 80,
+          "max_results": 40,
+          "paths": [],
+          "probe_id": "default-repo-state",
+          "query": "",
+          "safety": "read_only",
+          "schema": "chili.diagnostic-probe.v1",
+          "selector": "",
+          "start_line": 1,
+          "table": "",
+          "tail_lines": 5000,
+          "timeout_sec": 10.0,
+          "timestamp_column": ""
+        },
+        {
+          "aggregate": "",
+          "aggregate_column": "",
+          "case_sensitive": false,
+          "dimension": "code",
+          "filters": {},
+          "group_by": "",
+          "kind": "git_history",
+          "lookback_minutes": 0,
+          "max_groups": 15,
+          "max_lines": 80,
+          "max_results": 12,
+          "paths": [
+            "app/provider.py"
+          ],
+          "probe_id": "default-git-history",
+          "query": "",
+          "safety": "read_only",
+          "schema": "chili.diagnostic-probe.v1",
+          "selector": "",
+          "start_line": 1,
+          "table": "",
+          "tail_lines": 5000,
+          "timeout_sec": 15.0,
+          "timestamp_column": ""
+        }
+      ],
+      "retractions": [
+        {
+          "hypothesis_id": "h-dependency",
+          "new_status": "superseded",
+          "previous_status": "confirmed",
+          "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+        }
+      ],
+      "score": 100,
+      "split": "holdout"
+    }
+  ],
+  "created_at": "2026-07-11T12:12:39.008883+00:00",
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "model": "qwen2.5-coder:7b",
+  "overall_score": 100.0,
+  "premium_calls": 0,
+  "reference_family": "claude-fable-5",
+  "schema": "chili.runtime-evidence-diagnostic-results.v1",
+  "verdict": "shadow_ready"
+}

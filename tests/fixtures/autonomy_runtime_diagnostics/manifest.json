@@ -1,0 +1,37 @@
+{
+  "schema": "chili.runtime-diagnostic-manifest.v1",
+  "reference_family": "claude-fable-5",
+  "database_tables": [
+    {
+      "name": "project_runtime_queue_events",
+      "groups": {
+        "imminent_eval": 18,
+        "brain_market_snapshots": 2
+      }
+    },
+    {
+      "name": "project_runtime_retraction_events",
+      "groups": {
+        "stale_imminent_eval": 19,
+        "protected_refresh": 1
+      }
+    }
+  ],
+  "cases": [
+    {
+      "case": "cases/log-dependency-401.json",
+      "oracle": "oracles/log-dependency-401.json",
+      "split": "holdout"
+    },
+    {
+      "case": "cases/db-queue-402.json",
+      "oracle": "oracles/db-queue-402.json",
+      "split": "holdout"
+    },
+    {
+      "case": "cases/runtime-retraction-403.json",
+      "oracle": "oracles/runtime-retraction-403.json",
+      "split": "holdout"
+    }
+  ]
+}

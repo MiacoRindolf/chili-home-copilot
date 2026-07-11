@@ -1,0 +1,38 @@
+{
+  "schema": "chili.runtime-diagnostic-case.v1",
+  "case_id": "runtime-retraction-403",
+  "prompt": "A prior confirmed diagnosis blamed a new worker image for a processing stall. Re-evaluate it using worker logs and a read-only profile of project_runtime_retraction_events with timestamp_column=created_at, lookback_minutes=120, group_by=cause. Retract the runtime conclusion if the new evidence identifies a stronger state cause.",
+  "candidate_paths": ["app/worker.py"],
+  "prior_conclusion": {
+    "hypothesis_id": "h-runtime",
+    "status": "confirmed",
+    "dimension": "runtime",
+    "claim": "The new worker image caused the processing stall."
+  },
+  "observations": [
+    {
+      "evidence_id": "deploy-image",
+      "statement": "The worker image label changed before the stall.",
+      "dimension": "runtime",
+      "kind": "artifact",
+      "provenance": "deploy:image-label",
+      "independence_key": "deploy-image",
+      "reliability": 0.95,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "restart-heartbeat",
+      "statement": "A restart briefly restored a heartbeat but not queue throughput.",
+      "dimension": "runtime",
+      "kind": "experiment",
+      "provenance": "runtime:restart",
+      "independence_key": "restart-heartbeat",
+      "reliability": 0.9,
+      "discriminating": true
+    }
+  ],
+  "repo_files": {
+    "app/worker.py": "def consume(pending: list[dict]) -> int:\n    return len(pending)\n",
+    "logs/worker.log": "2026-07-11T09:20:00Z image revision loaded ok\n2026-07-11T09:20:01Z queue depth=20 max=20\n2026-07-11T09:20:02Z enqueue rejected cause=protected_refresh\n"
+  }
+}

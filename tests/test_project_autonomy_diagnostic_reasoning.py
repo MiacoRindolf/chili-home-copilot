@@ -176,6 +176,76 @@ def test_evidence_gate_confirms_strong_root_cause_even_when_model_is_conservativ
     assert report["decision"] == "patch_root_cause"
 
 
+def test_typed_probe_evidence_recovers_causal_family_omitted_by_local_model():
+    case = {
+        "case_id": "typed-probe-omission",
+        "problem_statement": "A provider-backed worker failed while its source revision stayed fixed.",
+        "observations": [
+            {
+                "evidence_id": "clock-source-a",
+                "statement": "The worker reads a wall-clock timestamp.",
+                "dimension": "clock",
+                "kind": "artifact",
+                "provenance": "worker.py:10",
+                "independence_key": "worker.py",
+                "reliability": 0.9,
+                "discriminating": False,
+            },
+            {
+                "evidence_id": "clock-source-b",
+                "statement": "The request includes a timestamp field.",
+                "dimension": "clock",
+                "kind": "artifact",
+                "provenance": "provider.py:20",
+                "independence_key": "provider.py",
+                "reliability": 0.9,
+                "discriminating": False,
+            },
+            {
+                "evidence_id": "probe-log-search",
+                "statement": "Typed log_search found upstream connection refused.",
+                "dimension": "dependency",
+                "kind": "artifact",
+                "provenance": "diagnostic_probe:log-search",
+                "independence_key": "diagnostic_probe:log-search",
+                "reliability": 0.95,
+                "discriminating": True,
+            },
+        ],
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-clock",
+                "claim": "Clock drift caused the provider failure.",
+                "dimension": "clock",
+                "support_evidence_ids": ["clock-source-a", "clock-source-b"],
+                "contradict_evidence_ids": [],
+                "falsification": "Hold code and dependency constant while changing only the clock.",
+            }
+        ],
+        "experiments": [],
+        "conclusion": {
+            "hypothesis_id": "h-clock",
+            "status": "confirmed",
+            "evidence_ids": ["clock-source-a", "clock-source-b"],
+        },
+    }
+
+    report = reasoning.evaluate_packet(case, packet)
+
+    assert report["valid"] is True
+    assert report["conclusion"]["hypothesis_id"] == "evidence-dependency"
+    assert report["conclusion"]["dimension"] == "dependency"
+    assert report["conclusion"]["status"] == "confirmed"
+    assert report["conclusion"]["evidence_ids"] == ["probe-log-search"]
+    assert any(
+        item["hypothesis_id"] == "evidence-dependency"
+        and item["origin"] == "deterministic_evidence_gate"
+        for item in report["hypothesis_results"]
+    )
+
+
 def test_same_code_and_input_with_different_outcome_blocks_code_attribution():
     packet = {
         "hypotheses": [

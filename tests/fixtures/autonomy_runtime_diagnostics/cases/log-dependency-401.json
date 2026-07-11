@@ -1,0 +1,10 @@
+{
+  "schema": "chili.runtime-diagnostic-case.v1",
+  "case_id": "log-dependency-401",
+  "prompt": "A market-data worker stopped ingesting while the code revision and input fingerprint stayed fixed. Operators disagree whether recent worker logs contain a connection refused error. Diagnose code versus dependency using bounded read-only evidence; do not propose a patch until the cause is confirmed.",
+  "candidate_paths": ["app/provider.py"],
+  "repo_files": {
+    "app/provider.py": "def should_retry(status: str) -> bool:\n    return status in {\"timeout\", \"connection_error\"}\n",
+    "logs/market-worker.log": "2026-07-11T09:00:00Z tick started\n2026-07-11T09:00:01Z provider request attempt=1\n2026-07-11T09:00:02Z ERROR upstream connection refused host=massive\n2026-07-11T09:00:03Z circuit breaker opened after consecutive failures\n"
+  }
+}

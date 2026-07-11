@@ -18,6 +18,8 @@ This distinction is intentional. The current evidence proves that CHILI can diag
 | Correct uncertainty behavior | Same code/input with unexplained outcome drift blocks code attribution and chooses `instrument_first` | Proven |
 | Conclusion correction | New evidence can supersede and explicitly retract an earlier confirmed conclusion | Proven |
 | Autonomous evidence acquisition | Typed fixed-string search, file excerpts, repo state, git history/diff, isolated compile, and snapshot-based targeted pytest | Proven for catalog operations |
+| Runtime log evidence | Bounded log inventory and fixed-string tail search with approved suffixes, path containment, file/byte/result caps, and no shell execution | Proven by safety tests and sealed holdouts |
+| Runtime database evidence | Schema metadata and aggregate-only PostgreSQL profiles through an explicit read-only DSN, read-only transactions, short timeouts, bounded lookback, safe identifiers, and no raw SQL or raw rows | Proven in `_test` integration tests and sealed holdouts; live production credential proof not performed |
 | No arbitrary diagnostic shell | Probe schema has no command kind; paths, selectors, time, count, and output are bounded | Proven by source and tests |
 | Workspace isolation for dynamic probes | Compile uses temporary copies; pytest uses a validated `git archive` snapshot and credential-stripped environment | Proven for repository isolation; hardened OS sandboxing remains open |
 | Diagnosis-to-fix autonomy | Local diagnosis, exact tracked-file selection, atomic multi-file edit groups, public+hidden conjunctive validation, assertion-contract extraction, and bounded repair | Proven on seven Python repositories, including four multi-file cases |
@@ -58,9 +60,24 @@ This distinction is intentional. The current evidence proves that CHILI can diag
 - Premium calls: **0**
 - Reports: `project_ws/AgentOps/AUTONOMOUS_DIAGNOSIS_TO_FIX_BENCHMARK.md`, `project_ws/AgentOps/AUTONOMOUS_DIAGNOSIS_TO_FIX_TARGETED_REPAIR.md`, and `project_ws/AgentOps/MULTIFILE_HOLDOUT_FIRST_RUN.md`
 
+### Typed Runtime-Evidence Diagnosis
+
+- Three sealed trading-style cases begin without log or database contents: upstream dependency failure, saturated queue state, and retraction of a prior runtime conclusion
+- First untouched run before generic evidence-semantics improvements: **61.7/100**, with all requested probes completing
+- Second untouched run after evidence classification and probe-priority improvements: **88.3/100**
+- Targeted replay of the remaining dependency-family omission after a generic deterministic-gate repair: **100/100**
+- Final uninterrupted three-case rerun: **100/100**, **3/3 correct dimensions**, **3/3 confirmed**, and required retractions recorded in **2/2** applicable cases
+- Final average wall time: **94.7 seconds/case**
+- Premium calls: **0**
+- Reports: `project_ws/AgentOps/RUNTIME_EVIDENCE_DIAGNOSTIC_FIRST_RUN.md`, `project_ws/AgentOps/RUNTIME_EVIDENCE_DIAGNOSTIC_SECOND_RUN.md`, `project_ws/AgentOps/RUNTIME_EVIDENCE_LOG_DEPENDENCY_TARGETED_REPAIR.md`, and `project_ws/AgentOps/RUNTIME_EVIDENCE_DIAGNOSTIC_BENCHMARK.md`
+- Interpretation: this proves the tested typed runtime-evidence lane is shadow-ready. It is not a direct Fable 5 head-to-head and does not establish broad parity.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
+- Log probes read only approved text-log suffixes under the authorized repository root and enforce file, tail, byte, match, and output limits.
+- Database probes expose schema metadata or bounded aggregates only. They have no raw-SQL field, return no raw rows, use `NullPool`, assert PostgreSQL transaction read-only mode, and require a separate production read-only DSN that differs from `DATABASE_URL`.
+- Production aggregate profiles require an explicit timestamp column and bounded lookback; `_test` databases remain eligible for fixture-driven integration tests.
 - Runtime and live experiments remain non-automatic.
 - Targeted tests must use a selector under `tests/` and run from a temporary committed snapshot.
 - Snapshot execution protects the source workspace but is not a hardened operating-system sandbox; only already-committed, selector-bounded tests are eligible.
@@ -74,8 +91,8 @@ This distinction is intentional. The current evidence proves that CHILI can diag
 
 1. The repair suite has only seven small Python repositories. Four require multi-file changes, but this still does not represent large-repository or multi-language superiority.
 2. No same-task Fable 5 output exists for the sealed repair cases. Current Fable evidence is incident-derived calibration, not a direct tournament.
-3. The generic probe catalog cannot yet query application logs, schemas, or databases through typed read-only adapters. Those were important in the real NBBO investigation.
-4. Local 7B output remains stochastic. Deterministic evidence gates and repair loops contain errors, but difficult tasks can require more calls and higher latency.
+3. Runtime evidence currently covers bounded text logs and aggregate/schema PostgreSQL reads. It does not yet provide typed traces, metrics backends, container state, process inspection, or a live production proof using a separately provisioned SELECT-only role.
+4. Local 7B output remains stochastic. Deterministic evidence gates recovered an omitted causal family and raised the runtime holdout from 61.7 to 100, but the final lane still averaged 94.7 seconds per case and needs unchanged-code repeat runs.
 5. Multi-file interface and state repairs now have initial evidence; dependency migrations, frontend visual validation, true concurrency races, and large cross-service refactors remain under-tested.
 6. The 14B local model was not production-usable on current hardware because it offloaded heavily to CPU. The resident 7B model is the measured production lane.
 

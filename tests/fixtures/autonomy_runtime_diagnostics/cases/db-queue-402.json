@@ -1,0 +1,10 @@
+{
+  "schema": "chili.runtime-diagnostic-case.v1",
+  "case_id": "db-queue-402",
+  "prompt": "A neural-mesh worker rejects protected refreshes at queue depth 20. Distinguish a code regression from saturated state using worker logs and a read-only profile of project_runtime_queue_events with timestamp_column=created_at, lookback_minutes=120, group_by=cause.",
+  "candidate_paths": ["app/queue_policy.py"],
+  "repo_files": {
+    "app/queue_policy.py": "MAX_PENDING = 20\n\n\ndef can_admit(pending: int) -> bool:\n    return pending < MAX_PENDING\n",
+    "logs/mesh-worker.log": "2026-07-11T09:10:00Z queue depth=20 max=20\n2026-07-11T09:10:01Z protected refresh rejected cause=brain_market_snapshots\n2026-07-11T09:10:02Z queue depth=20 max=20\n"
+  }
+}

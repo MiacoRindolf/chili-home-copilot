@@ -6477,13 +6477,17 @@ def _run_local_diagnostic_reasoning(
     )
     report = initial_debate.get("report") if isinstance(initial_debate.get("report"), Mapping) else {}
     packet = initial_debate.get("packet") if isinstance(initial_debate.get("packet"), Mapping) else {}
-    probes = diagnostic_probes.probes_from_packet(packet, max_probes=4)
-    if not probes:
-        probes = diagnostic_probes.default_followup_probes(
-            report,
-            candidate_paths,
-            run.prompt,
-        )
+    model_probes = diagnostic_probes.probes_from_packet(packet, max_probes=4)
+    default_probes = diagnostic_probes.default_followup_probes(
+        report,
+        candidate_paths,
+        run.prompt,
+    )
+    probes = diagnostic_probes.merge_probe_sets(
+        default_probes,
+        model_probes,
+        max_probes=4,
+    )
     probe_run: dict[str, Any] | None = None
     debate = initial_debate
     final_case = case

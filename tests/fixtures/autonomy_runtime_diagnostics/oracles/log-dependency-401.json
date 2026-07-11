@@ -1,0 +1,6 @@
+{
+  "case_id": "log-dependency-401",
+  "expected_dimension": "dependency",
+  "expected_probe_kinds": ["log_inventory", "log_search"],
+  "expected_retraction_hypothesis": null
+}
