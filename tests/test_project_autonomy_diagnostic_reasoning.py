@@ -324,6 +324,116 @@ def test_timeline_detects_illegal_entity_transition_in_event_time_order():
     assert "transition_from_mismatch" in timeline["earliest_break"]["violations"]
 
 
+def test_provenance_graph_finds_consumer_starvation_before_missing_sink():
+    case = {
+        "case_id": "producer-consumer-lineage",
+        "problem_statement": "Published alerts never reach the sink.",
+        "observations": [
+            {
+                "evidence_id": "sink-missing",
+                "statement": "The sink has no row for the alert.",
+                "dimension": "data",
+                "kind": "artifact",
+                "provenance": "sink-profile",
+                "independence_key": "trace:req-42",
+                "reliability": 0.99,
+                "discriminating": True,
+                "observed_at": "2026-07-11T10:02:00Z",
+                "service_id": "sink-db",
+                "sink_id": "sink-db",
+                "edge_from": "consumer-worker",
+                "edge_to": "sink-db",
+                "expected_edge_state": "persisted",
+                "actual_edge_state": "missing",
+                "causal_parent_ids": ["consumer-stalled"],
+                "correlation_id": "req-42-sensitive",
+            },
+            {
+                "evidence_id": "producer-published",
+                "statement": "The scanner published the alert to the queue.",
+                "dimension": "data",
+                "kind": "artifact",
+                "provenance": "producer-trace",
+                "independence_key": "trace:req-42",
+                "reliability": 0.99,
+                "discriminating": True,
+                "observed_at": "2026-07-11T10:00:00Z",
+                "service_id": "scanner",
+                "producer_id": "scanner",
+                "edge_from": "scanner",
+                "edge_to": "alert-queue",
+                "expected_edge_state": "delivered",
+                "actual_edge_state": "delivered",
+                "correlation_id": "req-42-sensitive",
+            },
+            {
+                "evidence_id": "consumer-stalled",
+                "statement": "The consumer stopped draining the delivered alert.",
+                "dimension": "state",
+                "kind": "artifact",
+                "provenance": "consumer-trace",
+                "independence_key": "trace:req-42",
+                "reliability": 0.99,
+                "discriminating": True,
+                "observed_at": "2026-07-11T10:01:00Z",
+                "service_id": "consumer-worker",
+                "consumer_id": "consumer-worker",
+                "edge_from": "alert-queue",
+                "edge_to": "consumer-worker",
+                "expected_edge_state": "consumed",
+                "actual_edge_state": "stalled",
+                "causal_parent_ids": ["producer-published"],
+                "correlation_id": "req-42-sensitive",
+            },
+        ],
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-state",
+                "claim": "The consumer is starved or stalled.",
+                "dimension": "state",
+                "support_evidence_ids": ["consumer-stalled"],
+                "falsification": "Resume only the consumer and trace the same alert.",
+            },
+            {
+                "hypothesis_id": "h-data",
+                "claim": "The sink data is missing.",
+                "dimension": "data",
+                "support_evidence_ids": ["sink-missing"],
+                "falsification": "Hold the consumer fixed and replace only the sink.",
+            },
+        ],
+        "conclusion": {
+            "hypothesis_id": "h-data",
+            "status": "confirmed",
+            "evidence_ids": ["sink-missing"],
+        },
+    }
+
+    normalized = reasoning.normalize_case(case)
+    graph = reasoning.build_provenance_graph(normalized)
+    report = reasoning.evaluate_packet(case, packet)
+
+    assert graph["first_broken_edge"]["evidence_id"] == "consumer-stalled"
+    assert graph["first_broken_edge"]["from"] == "alert-queue"
+    assert graph["first_broken_edge"]["to"] == "consumer-worker"
+    assert graph["flow_classification"] == "consumer_starvation"
+    assert list(graph["correlation_groups"].values()) == [
+        ["producer-published", "consumer-stalled", "sink-missing"]
+    ]
+    assert graph["independence_clusters"]["trace:req-42"] == [
+        "producer-published",
+        "consumer-stalled",
+        "sink-missing",
+    ]
+    assert "req-42-sensitive" not in json.dumps(graph)
+    assert report["conclusion"]["dimension"] == "state"
+    assert report["conclusion"]["status"] == "provisional"
+    assert report["decision"] == "instrument_first"
+    assert "provenance_graph" in reasoning.judge_prompt(case, packet, report)
+
+
 def test_dimension_inference_understands_control_flow_leases_and_tls_chains():
     assert reasoning.infer_dimension(
         "The control-flow trace shows the branch returning only on revision r184."

@@ -52,6 +52,11 @@ _SAFE_SELECTOR_RE = re.compile(
 )
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 _PROMPT_TOKEN_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_.]{3,}\b")
+_CORRELATION_ID_RE = re.compile(
+    r"\b(?:correlation|request|trace|event|run|job)[_-]?id\s*[:=]\s*['\"]?"
+    r"([A-Za-z0-9_.:-]{4,128})",
+    re.IGNORECASE,
+)
 _PROMPT_STOP = frozenset(
     {
         "about",
@@ -1055,6 +1060,37 @@ def _probe_evidence_semantics(result: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _probe_provenance_metadata(result: Mapping[str, Any]) -> dict[str, Any]:
+    if str(result.get("kind") or "") != "log_search":
+        return {}
+    try:
+        payload = json.loads(str(result.get("output") or ""))
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    matches = payload.get("matches") if isinstance(payload, Mapping) else []
+    fingerprints: list[str] = []
+    services: list[str] = []
+    for item in matches or []:
+        if not isinstance(item, Mapping):
+            continue
+        path = str(item.get("path") or "")
+        if path:
+            service = _clean_probe_id(Path(path).stem, "")
+            if service and service not in services:
+                services.append(service)
+        for match in _CORRELATION_ID_RE.finditer(str(item.get("text") or "")):
+            fingerprint = hashlib.sha256(
+                match.group(1).encode("utf-8", errors="replace")
+            ).hexdigest()[:20]
+            if fingerprint not in fingerprints:
+                fingerprints.append(fingerprint)
+    return {
+        "service_id": services[0] if len(services) == 1 else "",
+        "correlation_fingerprints": fingerprints[:12],
+        "matched_service_ids": services[:12],
+    }
+
+
 def execute_safe_probes(
     repo_path: Path,
     probes: Sequence[Mapping[str, Any]],
@@ -1095,10 +1131,10 @@ def execute_safe_probes(
             )
             continue
         result = _execute_one(
-                root,
-                probe,
-                explicit_test_database_url=explicit_test_database_url,
-            )
+            root,
+            probe,
+            explicit_test_database_url=explicit_test_database_url,
+        )
         results.append(
             {
                 **result,
@@ -1111,6 +1147,7 @@ def execute_safe_probes(
         if result.get("status") not in {"completed", "failed", "timeout"}:
             continue
         semantics = _probe_evidence_semantics(result)
+        provenance_metadata = _probe_provenance_metadata(result)
         evidence.append(
             {
                 "evidence_id": f"probe-{_clean_probe_id(result.get('probe_id'), str(index + 1))}",
@@ -1127,9 +1164,14 @@ def execute_safe_probes(
                 "experiment_id": str(result.get("probe_id") or ""),
                 "observed_at": str(result.get("observed_at") or ""),
                 "sequence": index,
-                "entity_id": f"probe:{_clean_probe_id(result.get('probe_id'), str(index + 1))}",
+                "entity_id": str(provenance_metadata.get("service_id") or "")
+                or f"probe:{_clean_probe_id(result.get('probe_id'), str(index + 1))}",
                 "event_type": f"typed_probe_{str(result.get('kind') or 'unknown')}",
                 "actual_state": str(result.get("status") or ""),
+                "service_id": str(provenance_metadata.get("service_id") or ""),
+                "correlation_fingerprints": list(
+                    provenance_metadata.get("correlation_fingerprints") or []
+                ),
             }
         )
     return {

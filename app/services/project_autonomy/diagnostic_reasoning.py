@@ -7,6 +7,7 @@ retraction.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections import defaultdict
@@ -500,6 +501,13 @@ def _optional_int(value: object) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _correlation_fingerprint(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:20]
 
 
 def _dimension_term_present(statement: str, term: str) -> bool:
@@ -1143,6 +1151,38 @@ def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]
             statement,
             discriminating=discriminating,
         )
+    correlation_values = [
+        *(
+            raw.get("correlation_ids")
+            if isinstance(raw.get("correlation_ids"), Sequence)
+            and not isinstance(raw.get("correlation_ids"), (str, bytes))
+            else []
+        ),
+        *(
+            [raw.get("correlation_id")]
+            if raw.get("correlation_id") is not None
+            else []
+        ),
+    ]
+    supplied_fingerprints = [
+        str(value).strip().lower()
+        for value in raw.get("correlation_fingerprints") or []
+        if re.fullmatch(r"[0-9a-fA-F]{12,64}", str(value).strip())
+    ]
+    correlation_fingerprints = list(
+        dict.fromkeys(
+            [
+                *supplied_fingerprints,
+                *(
+                    fingerprint
+                    for fingerprint in (
+                        _correlation_fingerprint(value) for value in correlation_values
+                    )
+                    if fingerprint
+                ),
+            ]
+        )
+    )[:12]
     return {
         "evidence_id": _clean_id(raw.get("evidence_id"), f"evidence-{index + 1}"),
         "statement": statement,
@@ -1174,6 +1214,16 @@ def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]
         ][:12],
         "source_revision": _clip(raw.get("source_revision"), 100),
         "runtime_revision": _clip(raw.get("runtime_revision"), 100),
+        "service_id": _clean_id(raw.get("service_id"), "") if raw.get("service_id") else "",
+        "producer_id": _clean_id(raw.get("producer_id"), "") if raw.get("producer_id") else "",
+        "consumer_id": _clean_id(raw.get("consumer_id"), "") if raw.get("consumer_id") else "",
+        "sink_id": _clean_id(raw.get("sink_id"), "") if raw.get("sink_id") else "",
+        "edge_from": _clean_id(raw.get("edge_from"), "") if raw.get("edge_from") else "",
+        "edge_to": _clean_id(raw.get("edge_to"), "") if raw.get("edge_to") else "",
+        "expected_edge_state": _clip(raw.get("expected_edge_state"), 120),
+        "actual_edge_state": _clip(raw.get("actual_edge_state"), 120),
+        "artifact_hash": _clip(raw.get("artifact_hash"), 160),
+        "correlation_fingerprints": correlation_fingerprints,
     }
 
 
@@ -1392,6 +1442,221 @@ def _structured_causal_timeline(case: Mapping[str, Any]) -> dict[str, Any]:
         (timeline.get("runtime_source_parity") or {}).get("status") or "unknown"
     ) != "unknown"
     return timeline if has_structure else {}
+
+
+def build_provenance_graph(case: Mapping[str, Any]) -> dict[str, Any]:
+    """Build bounded cross-service lineage without retaining raw correlation ids."""
+    observations = [
+        item
+        for item in case.get("observations") or []
+        if isinstance(item, Mapping)
+    ]
+    timeline = reconstruct_causal_timeline(case)
+    order_by_evidence = {
+        str(evidence_id): index
+        for index, evidence_id in enumerate(timeline.get("ordered_evidence_ids") or [])
+    }
+    observations.sort(
+        key=lambda item: order_by_evidence.get(
+            str(item.get("evidence_id") or ""),
+            len(order_by_evidence),
+        )
+    )
+    nodes: dict[str, dict[str, Any]] = {}
+    edges: list[dict[str, Any]] = []
+    correlation_groups: dict[str, list[str]] = defaultdict(list)
+    independence_groups: dict[str, list[str]] = defaultdict(list)
+    producer_ids: set[str] = set()
+    consumer_ids: set[str] = set()
+    sink_ids: set[str] = set()
+    component_hashes: dict[str, set[str]] = defaultdict(set)
+
+    def add_component(component_id: str, role: str) -> None:
+        if not component_id:
+            return
+        node = nodes.setdefault(
+            component_id,
+            {"node_id": component_id, "node_type": "component", "roles": []},
+        )
+        roles = node.setdefault("roles", [])
+        if role and role not in roles:
+            roles.append(role)
+
+    for item in observations:
+        evidence_id = str(item.get("evidence_id") or "")
+        evidence_node_id = f"evidence:{evidence_id}" if evidence_id else ""
+        if evidence_node_id:
+            nodes[evidence_node_id] = {
+                "node_id": evidence_node_id,
+                "node_type": "evidence",
+                "evidence_id": evidence_id,
+                "dimension": str(item.get("dimension") or "unknown"),
+                "service_id": str(item.get("service_id") or ""),
+            }
+        service_id = str(item.get("service_id") or "")
+        producer_id = str(item.get("producer_id") or "")
+        consumer_id = str(item.get("consumer_id") or "")
+        sink_id = str(item.get("sink_id") or "")
+        add_component(service_id, "service")
+        add_component(producer_id, "producer")
+        add_component(consumer_id, "consumer")
+        add_component(sink_id, "sink")
+        producer_ids.update(value for value in (producer_id,) if value)
+        consumer_ids.update(value for value in (consumer_id,) if value)
+        sink_ids.update(value for value in (sink_id,) if value)
+        artifact_hash = str(item.get("artifact_hash") or "")
+        if service_id and artifact_hash:
+            component_hashes[service_id].add(artifact_hash)
+
+        edge_from = str(item.get("edge_from") or "")
+        edge_to = str(item.get("edge_to") or "")
+        expected_edge_state = str(item.get("expected_edge_state") or "")
+        actual_edge_state = str(item.get("actual_edge_state") or "")
+        if not edge_from and producer_id and consumer_id:
+            edge_from, edge_to = producer_id, consumer_id
+        elif not edge_from and consumer_id and sink_id:
+            edge_from, edge_to = consumer_id, sink_id
+        if edge_from and edge_to:
+            add_component(edge_from, "endpoint")
+            add_component(edge_to, "endpoint")
+            edges.append(
+                {
+                    "edge_type": "flow",
+                    "from": edge_from,
+                    "to": edge_to,
+                    "evidence_id": evidence_id,
+                    "dimension": str(item.get("dimension") or "unknown"),
+                    "expected_state": expected_edge_state,
+                    "actual_state": actual_edge_state,
+                    "broken": bool(
+                        expected_edge_state
+                        and actual_edge_state
+                        and expected_edge_state != actual_edge_state
+                    ),
+                    "order": order_by_evidence.get(evidence_id, len(order_by_evidence)),
+                }
+            )
+        for parent_id in item.get("causal_parent_ids") or []:
+            if evidence_node_id and str(parent_id):
+                edges.append(
+                    {
+                        "edge_type": "causal_evidence",
+                        "from": f"evidence:{str(parent_id)}",
+                        "to": evidence_node_id,
+                        "evidence_id": evidence_id,
+                        "broken": False,
+                        "order": order_by_evidence.get(evidence_id, len(order_by_evidence)),
+                    }
+                )
+        for fingerprint in item.get("correlation_fingerprints") or []:
+            if evidence_id and evidence_id not in correlation_groups[str(fingerprint)]:
+                correlation_groups[str(fingerprint)].append(evidence_id)
+        independence_key = str(item.get("independence_key") or "")
+        if independence_key and evidence_id:
+            independence_groups[independence_key].append(evidence_id)
+
+    for fingerprint, evidence_ids in correlation_groups.items():
+        ordered_ids = sorted(
+            evidence_ids,
+            key=lambda evidence_id: order_by_evidence.get(
+                evidence_id,
+                len(order_by_evidence),
+            ),
+        )
+        for left, right in zip(ordered_ids, ordered_ids[1:]):
+            edges.append(
+                {
+                    "edge_type": "correlated_sequence",
+                    "from": f"evidence:{left}",
+                    "to": f"evidence:{right}",
+                    "correlation_fingerprint": fingerprint,
+                    "broken": False,
+                    "order": order_by_evidence.get(right, len(order_by_evidence)),
+                }
+            )
+
+    broken_edges = sorted(
+        (edge for edge in edges if bool(edge.get("broken"))),
+        key=lambda edge: int(edge.get("order") or 0),
+    )
+    first_broken_edge = dict(broken_edges[0]) if broken_edges else {}
+    healthy_producer_edge = any(
+        edge.get("from") in producer_ids
+        and not bool(edge.get("broken"))
+        and str(edge.get("actual_state") or "").lower()
+        in {"delivered", "healthy", "published", "queued", "success"}
+        for edge in edges
+        if edge.get("edge_type") == "flow"
+    )
+    broken_to_consumer = bool(first_broken_edge) and (
+        str(first_broken_edge.get("to") or "") in consumer_ids
+        or str(first_broken_edge.get("actual_state") or "").lower()
+        in {"backlogged", "dropped", "missing", "stalled", "starved", "timed_out"}
+    )
+    flow_classification = (
+        "consumer_starvation"
+        if healthy_producer_edge and broken_to_consumer
+        else "broken_flow_edge"
+        if first_broken_edge
+        else "no_explicit_break"
+    )
+    return {
+        "schema": "chili.provenance-graph.v1",
+        "nodes": sorted(nodes.values(), key=lambda node: str(node.get("node_id") or "")),
+        "edges": sorted(
+            edges,
+            key=lambda edge: (
+                int(edge.get("order") or 0),
+                str(edge.get("edge_type") or ""),
+                str(edge.get("from") or ""),
+            ),
+        ),
+        "first_broken_edge": first_broken_edge,
+        "broken_edge_evidence_ids": [
+            str(edge.get("evidence_id") or "") for edge in broken_edges
+        ],
+        "correlation_groups": {
+            key: sorted(
+                values,
+                key=lambda evidence_id: order_by_evidence.get(
+                    evidence_id,
+                    len(order_by_evidence),
+                ),
+            )
+            for key, values in sorted(correlation_groups.items())
+        },
+        "independence_clusters": {
+            key: values
+            for key, values in sorted(independence_groups.items())
+            if len(values) > 1
+        },
+        "component_hash_mismatches": {
+            key: sorted(values)
+            for key, values in sorted(component_hashes.items())
+            if len(values) > 1
+        },
+        "flow_classification": flow_classification,
+        "producer_ids": sorted(producer_ids),
+        "consumer_ids": sorted(consumer_ids),
+        "sink_ids": sorted(sink_ids),
+        "runtime_source_parity": timeline.get("runtime_source_parity") or {},
+    }
+
+
+def _structured_provenance_graph(case: Mapping[str, Any]) -> dict[str, Any]:
+    has_structure = any(
+        item.get("service_id")
+        or item.get("producer_id")
+        or item.get("consumer_id")
+        or item.get("sink_id")
+        or item.get("edge_from")
+        or item.get("edge_to")
+        or item.get("correlation_fingerprints")
+        or item.get("artifact_hash")
+        for item in case.get("observations") or []
+        if isinstance(item, Mapping)
+    )
+    return build_provenance_graph(case) if has_structure else {}
 
 
 def _prompt_terms(prompt: str) -> list[str]:
@@ -1935,6 +2200,14 @@ def evaluate_packet(
     runtime_source_mismatch = str(
         (causal_timeline.get("runtime_source_parity") or {}).get("status") or ""
     ) == "mismatch"
+    provenance_graph = _structured_provenance_graph(case)
+    first_broken_edge = (
+        provenance_graph.get("first_broken_edge")
+        if isinstance(provenance_graph.get("first_broken_edge"), Mapping)
+        else {}
+    )
+    provenance_break_evidence_id = str(first_broken_edge.get("evidence_id") or "")
+    provenance_break_dimension = str(first_broken_edge.get("dimension") or "unknown")
 
     hypotheses = [
         *packet["hypotheses"],
@@ -2014,6 +2287,7 @@ def evaluate_packet(
                 "discriminating_evidence": discriminating,
                 "typed_probe_evidence": typed_probe_evidence,
                 "earliest_break_support": earliest_break_id in support_ids,
+                "provenance_break_support": provenance_break_evidence_id in support_ids,
                 "downstream_only_support": downstream_only,
                 "blockers": blockers,
             }
@@ -2089,6 +2363,29 @@ def evaluate_packet(
             )
             conclusion_id = str(chosen.get("hypothesis_id") or "")
 
+    if provenance_break_evidence_id and provenance_break_dimension != "unknown":
+        provenance_candidates = [
+            item
+            for item in hypothesis_results
+            if item.get("dimension") == provenance_break_dimension
+            and item.get("status") not in {"refuted", "untested", "blocked"}
+            and (
+                bool(item.get("provenance_break_support"))
+                or provenance_break_evidence_id
+                in (item.get("support_evidence_ids") or [])
+            )
+        ]
+        if provenance_candidates:
+            chosen = max(
+                provenance_candidates,
+                key=lambda item: (
+                    item.get("status") == "supported",
+                    float(item.get("confirmatory_weight") or 0),
+                    float(item.get("support_weight") or 0),
+                ),
+            )
+            conclusion_id = str(chosen.get("hypothesis_id") or "")
+
     problem_dimension = infer_dimension(str(case.get("problem_statement") or ""))
     if (
         chosen is not None
@@ -2153,7 +2450,14 @@ def evaluate_packet(
 
     if effective_status == "confirmed":
         decision = "patch_root_cause"
-    elif drift or any(item.get("status") in {"provisional", "blocked"} for item in hypothesis_results):
+    elif (
+        effective_status == "provisional"
+        or drift
+        or any(
+            item.get("status") in {"provisional", "blocked"}
+            for item in hypothesis_results
+        )
+    ):
         decision = "instrument_first"
     else:
         decision = "investigate"
@@ -2173,6 +2477,7 @@ def evaluate_packet(
         "errors": errors,
         "baseline_drift": drift,
         "causal_timeline": causal_timeline,
+        "provenance_graph": provenance_graph,
         "hypothesis_results": hypothesis_results,
         "conclusion": {
             "hypothesis_id": conclusion_id,
@@ -2363,6 +2668,16 @@ def _case_prompt(case: Mapping[str, Any]) -> str:
         "causal_parent_ids",
         "source_revision",
         "runtime_revision",
+        "service_id",
+        "producer_id",
+        "consumer_id",
+        "sink_id",
+        "edge_from",
+        "edge_to",
+        "expected_edge_state",
+        "actual_edge_state",
+        "artifact_hash",
+        "correlation_fingerprints",
     )
     safe_case = {
         "case_id": case.get("case_id"),
@@ -2382,6 +2697,9 @@ def _case_prompt(case: Mapping[str, Any]) -> str:
     timeline = _structured_causal_timeline(case)
     if timeline:
         safe_case["causal_timeline"] = timeline
+    provenance_graph = _structured_provenance_graph(case)
+    if provenance_graph:
+        safe_case["provenance_graph"] = provenance_graph
     return _prompt_json(safe_case)
 
 
@@ -2449,6 +2767,7 @@ def _report_prompt(report: Mapping[str, Any]) -> str:
             "hypothesis_results": hypothesis_results[:4],
             "next_experiments": list(report.get("next_experiments") or [])[:2],
             "causal_timeline": report.get("causal_timeline") or {},
+            "provenance_graph": report.get("provenance_graph") or {},
         }
     )
 

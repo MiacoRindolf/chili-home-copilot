@@ -50,6 +50,6 @@ The default hard limits remain four attempted probes and 120 seconds total. Envi
 - Structured state earliest-break evidence prioritizes the state profile.
 - The production planning path performs bounded sequential judge rounds and records selection rationale.
 - Focused diagnostic, runtime-evidence, probe, and service suite: **166 passed**.
-- Broad routing, evidence, repair, identity, and autonomy suite: **301 passed**.
+- Broad routing, evidence, repair, identity, and autonomy suite: **303 passed**.
 
-This improves adaptive diagnosis but does not yet provide automatic trace correlation or prove broad Fable 5 parity.
+This improves adaptive diagnosis and bounded log probes now expose hashed correlation identity. It does not yet ingest external trace backends or prove broad Fable 5 parity.

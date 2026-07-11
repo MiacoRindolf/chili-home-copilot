@@ -81,6 +81,42 @@ def test_fixed_string_search_returns_provenanced_evidence(tmp_path):
     assert timeline["ordered_evidence_ids"] == ["probe-find-wall-clock"]
 
 
+def test_log_probe_hashes_correlation_identity_for_provenance_graph(tmp_path):
+    repo = _committed_repo(tmp_path)
+    log_path = repo / "worker.log"
+    log_path.write_text(
+        "2026-07-11T10:00:00Z request_id=req-sensitive-42 connection refused\n",
+        encoding="utf-8",
+    )
+    probe = {
+        "probe_id": "find-provider-failure",
+        "kind": "log_search",
+        "query": "connection refused",
+        "paths": ["worker.log"],
+        "dimension": "dependency",
+        "safety": "read_only",
+    }
+
+    run = diagnostic_probes.execute_safe_probes(repo, [probe])
+    evidence = run["evidence"][0]
+    normalized = diagnostic_reasoning.normalize_case(
+        {
+            "case_id": "log-provenance",
+            "problem_statement": "Trace the provider failure.",
+            "observations": [evidence],
+        }
+    )
+    graph = diagnostic_reasoning.build_provenance_graph(normalized)
+
+    assert evidence["service_id"] == "worker"
+    assert evidence["correlation_fingerprints"] == [
+        diagnostic_reasoning._correlation_fingerprint("req-sensitive-42")
+    ]
+    assert list(graph["correlation_groups"].values()) == [
+        ["probe-find-provider-failure"]
+    ]
+
+
 def test_compile_probe_isolated_from_source_tree(tmp_path):
     repo = _committed_repo(tmp_path)
     target = repo / "app/example.py"

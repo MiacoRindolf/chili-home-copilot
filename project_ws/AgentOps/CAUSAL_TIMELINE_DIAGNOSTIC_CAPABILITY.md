@@ -42,9 +42,9 @@ Every bounded typed probe now emits UTC observation time, sequence, probe entity
 - Code attribution is blocked while source and runtime revisions differ.
 - Illegal entity transitions are detected against the prior state.
 - Existing diagnostic and probe focused suite: **46 passed**.
-- Broad routing, evidence, repair, identity, and autonomy suite: **299 passed**.
+- Broad routing, evidence, repair, identity, and autonomy suite: **303 passed**.
 - Disclosed eight-case heuristic regression remains **100/100**.
 
 ## Remaining Boundary
 
-The graph currently consumes explicit metadata. Automatic correlation-id extraction from logs/traces, metrics-backend queries, container/process inspection, and cross-service lineage are not yet implemented. This capability therefore improves structured diagnosis but does not establish broad Fable 5 parity.
+The graph consumes explicit flow metadata and bounded log probes now extract hashed correlation identities. External trace backends, metrics-backend queries, container/process inspection, and automatic role inference for arbitrary services remain open. This capability therefore improves structured diagnosis but does not establish broad Fable 5 parity.
