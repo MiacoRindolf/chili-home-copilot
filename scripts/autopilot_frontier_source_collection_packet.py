@@ -200,11 +200,17 @@ def _recorder_command(
     no_write: bool = False,
 ) -> str:
     response = response_path or f"<{source_kind}-response.txt>"
+    identity_transcript = (
+        f"--transcript <provider-native-{source_kind}-transcript.jsonl> "
+        if source_kind in {"codex", "claude"}
+        else ""
+    )
     command = (
         "python scripts/autopilot_frontier_source_evidence_recorder.py "
         f"--source-kind {source_kind} "
         "--case-id <case-id> "
         f"--response {_response_argument(response)} "
+        f"{identity_transcript}"
         f"--run-id <real-{source_kind}-run-id> "
         f"--source-command <exact-{source_kind}-command-or-session-export> --json"
     )
@@ -220,11 +226,17 @@ def _all_cases_recorder_command(
     no_write: bool = False,
 ) -> str:
     response = response_path or f"<{source_kind}-all-cases-response.txt>"
+    identity_transcript = (
+        f"--transcript <provider-native-{source_kind}-transcript.jsonl> "
+        if source_kind in {"codex", "claude"}
+        else ""
+    )
     command = (
         "python scripts/autopilot_frontier_source_evidence_recorder.py "
         f"--source-kind {source_kind} "
         "--all-cases "
         f"--response {_response_argument(response)} "
+        f"{identity_transcript}"
         f"--run-id <real-{source_kind}-run-id> "
         f"--source-command <exact-{source_kind}-command-or-session-export> --json"
     )
@@ -339,6 +351,7 @@ def _render_packet(
             "",
             "- At least 3 non-empty JSONL events.",
             f"- Include source kind `{source_kind}` and model name `{model_name}`.",
+            "- For Codex or Claude promotion evidence, preserve the full original response and a provider transcript whose exact matching assistant event has native `message.model`, or a provider-UI identity event bound to that response SHA-256. Recorder labels and unrelated model events are not identity evidence.",
             "- Include the prompt-pack SHA-256, run id, case id, and final patch/drop decision.",
             "- Claims about PR state, readiness, or current-head status are not promotion evidence.",
             "",

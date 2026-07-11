@@ -26,7 +26,7 @@ This distinction is intentional. The current evidence proves that CHILI can diag
 | Cross-language syntax validation | Python AST, parser-only Node TypeScript/JavaScript validation, and Dart analysis with isolated analyzer state; exact changed-file coverage required | Proven by safety and orchestration tests |
 | Recognized contract repair | Prompt-derived invariants and repository-shape checks for single-flight eviction, cancellation propagation, injected-clock TTL, subscription lifecycle, partial uniqueness, and sibling pre-aggregation | Proven by variant unit tests and six real regression fixtures; deliberately narrow |
 | Production validation repair | Project Autonomy preserves operator/assertion contracts and retries validation locally | Default three rounds, hard maximum five; proven by tests, not yet by a large live inventory |
-| Fable 5 reference accuracy | Active reference is `claude-fable-5`; calibration incidents come from an authenticated Fable 5 task ledger and merged fixes | Proven for three incident contracts |
+| Fable 5 reference accuracy | Active target is `claude-fable-5`; exact candidate responses must bind to provider-native or provider-UI identity evidence | Proven for archive identity and collection controls; no same-task score yet |
 | Direct blinded Fable 5 head-to-head | Same unseen task set independently run by Fable 5 and CHILI, with human adjudication | Missing |
 | Broad language/repository coverage | Initial Python, TypeScript, Dart, and SQL repair coverage | Partial; large repositories, Go, Rust, and mixed stacks remain incomplete |
 | Universal superiority claim | Statistically defensible quality, safety, latency, and cost advantage across broad tasks | Not proven |
@@ -92,6 +92,17 @@ The older reports use `holdout` in their structural split labels. Because those 
 - Reports: `project_ws/AgentOps/RUNTIME_EVIDENCE_DIAGNOSTIC_FIRST_RUN.md`, `project_ws/AgentOps/RUNTIME_EVIDENCE_DIAGNOSTIC_SECOND_RUN.md`, `project_ws/AgentOps/RUNTIME_EVIDENCE_LOG_DEPENDENCY_TARGETED_REPAIR.md`, and `project_ws/AgentOps/RUNTIME_EVIDENCE_DIAGNOSTIC_BENCHMARK.md`
 - Interpretation: this proves the tested typed runtime-evidence lane is shadow-ready. It is not a direct Fable 5 head-to-head and does not establish broad parity.
 
+### Reference Transcript Audit
+
+- Full junction-target archive: **5,329 JSONL files**, about 2.55 GiB, including 982 top-level and 4,347 subagent files
+- Provider-native `claude-fable-5`: **30,567 assistant-event lines across 367 files**, including 19 top-level and 348 subagent files
+- Privacy-minimized direct-child analysis found **165 meaningful Fable-directed prompts**, including **160 trading prompts** across nine top-level sessions
+- Dominant task shapes cover strategy/observed-behavior gaps, counterfactual replay, safety/microstructure, data coverage, live-state reconciliation, queue/lifecycle state, and runtime/deployment drift
+- These are historical development replays, not unseen holdouts; some fixes and mechanics already informed CHILI source or tests
+- Frontier tournament provenance now binds the original response hash to the exact matching assistant event and its native model label. A stray Fable event cannot attest an Opus response, and recorder-declared labels remain unverified.
+- The fresh same-task Fable 5 comparison count therefore remains **0**
+- Full audit: `project_ws/AgentOps/CLAUDE_HISTORY_MODEL_AUDIT.md`
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
@@ -112,7 +123,7 @@ The older reports use `holdout` in their structural split labels. Because those 
 ## Remaining Gaps
 
 1. The repair suite has only 13 small development repositories: seven Python and six TypeScript/Dart/SQL. It does not represent large-repository, mixed-stack, Go, or Rust superiority.
-2. No same-task Fable 5 output exists for these repair cases. Current Fable evidence is incident-derived calibration, not a direct tournament.
+2. Provider-attested Fable 5 history exists, but no provider-attested Fable output exists for the same frozen repair cases. Historical answers are excluded from a blinded score because current CHILI development may be contaminated by their fixes and task mechanics.
 3. Runtime evidence currently covers bounded text logs and aggregate/schema PostgreSQL reads. It does not yet provide typed traces, metrics backends, container state, process inspection, or a live production proof using a separately provisioned SELECT-only role.
 4. Local 7B output remains stochastic. Five of six final cross-language successes required recognized deterministic rescue. That demonstrates system resilience, not frontier-model-level free-form reasoning.
 5. Recognized repair synthesis is intentionally narrow. Unknown mechanisms, dependency migrations, frontend visual validation, true concurrency races, and large cross-service refactors remain under-tested.

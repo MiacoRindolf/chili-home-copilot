@@ -107,6 +107,51 @@ def _nbbo_drift_case():
     }
 
 
+def test_taglish_incident_requests_enter_diagnostic_reasoning():
+    assert reasoning.looks_like_diagnostic_request(
+        "Bakit puro bug at nagregress ang worker? Tingnan mo kung may mali sa live state."
+    )
+    assert reasoning.looks_like_diagnostic_request(
+        "Ayusin mo: hindi gumagana ang replay kahit pareho ang input."
+    )
+
+
+def test_realworld_lenses_cover_fable_history_incident_shapes_without_assuming_cause():
+    prompt = (
+        "Bakit iba ang Ross-style live entry at replay PnL? Alpaca still has a pending "
+        "position after the worker image deploy, then the ticker halted with a wide BBO spread."
+    )
+
+    lenses = reasoning.derive_diagnostic_lenses(prompt)
+
+    assert lenses[:5] == [
+        "expected_vs_observed",
+        "causal_timeline",
+        "root_cause_vs_downstream_symptom",
+        "safety_boundary",
+        "post_change_proof",
+    ]
+    assert "strategy_contract" in lenses
+    assert "counterfactual_integrity" in lenses
+    assert "state_reconciliation" in lenses
+    assert "runtime_source_parity" in lenses
+    assert "external_market_state" in lenses
+
+
+def test_normalized_case_and_prompts_preserve_deep_diagnostic_lenses():
+    case = reasoning.build_case_from_prompt(
+        "Diagnose why broker state diverged from the local pending entry after a worker deploy."
+    )
+
+    assert "state_reconciliation" in case["constraints"]["diagnostic_lenses"]
+    assert "runtime_source_parity" in case["constraints"]["diagnostic_lenses"]
+    investigator = reasoning.investigator_prompt(case)
+    judge = reasoning.judge_prompt(case, reasoning.heuristic_packet(case), {})
+    assert "earliest causal break" in investigator
+    assert "source-versus-running-revision parity" in investigator
+    assert "profitable counterfactual is not proof" in judge
+
+
 def test_fable5_sim_clock_case_confirms_clock_root_cause():
     packet = {
         "problem_statement": "Replay sizing used the wrong clock.",

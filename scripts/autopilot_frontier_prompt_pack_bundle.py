@@ -57,6 +57,13 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _display_path(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(REPO_ROOT.resolve()).as_posix()
+    except ValueError:
+        return str(path.resolve())
+
+
 def _as_mapping(value: object, *, label: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise PromptPackBundleError(f"{label} must be an object")
@@ -140,7 +147,7 @@ def build_prompt_pack_bundle(
         "generated_utc": generated_utc,
         "required_source_kinds": list(REQUIRED_SOURCE_KINDS),
         "required_frontier_model_targets": frontier_model_targets_summary(),
-        "output_dir": str(output_dir),
+        "output_dir": _display_path(output_dir),
         "entries": [dataclasses.asdict(entry) for entry in entries],
     }
     if write:

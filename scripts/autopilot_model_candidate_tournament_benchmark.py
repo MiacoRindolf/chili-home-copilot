@@ -475,6 +475,11 @@ def _has_verified_candidate_provenance(candidate: Mapping[str, object]) -> bool:
         return False
     if provenance.get("transcript_verified") is not True:
         return False
+    if (
+        str(candidate.get("source_kind") or "") in REQUIRED_FRONTIER_MODEL_TARGETS
+        and provenance.get("model_identity_verified") is not True
+    ):
+        return False
     events = provenance.get("transcript_events")
     if not isinstance(events, int) or events < TRANSCRIPT_MIN_EVENTS:
         return False

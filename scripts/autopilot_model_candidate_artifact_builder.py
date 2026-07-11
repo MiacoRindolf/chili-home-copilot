@@ -36,6 +36,8 @@ MODEL_CANDIDATE_ARTIFACT_BUILDER_SCHEMA_VERSION = "chili.model-candidate-artifac
 MODEL_CANDIDATE_DROP_PROMPT_PACK_SCHEMA_VERSION = "chili.model-candidate-drop-prompt-pack.v1"
 MODEL_CANDIDATE_DROP_PROVENANCE_SCHEMA_VERSION = "chili.model-candidate-drop-provenance.v1"
 TRANSCRIPT_MIN_EVENTS = 3
+FRONTIER_IDENTITY_SOURCE_KINDS = frozenset({"codex", "claude"})
+PROVIDER_IDENTITY_SOURCES = frozenset({"provider_export", "provider_native", "provider_ui_capture"})
 SOURCE_SPECIFIC_PROMPT_CONTRACTS = {
     "codex": (
         "Source contract: hosted-codex-frontier-candidate",
@@ -47,6 +49,7 @@ SOURCE_SPECIFIC_PROMPT_CONTRACTS = {
         "Source contract: hosted-claude-frontier-candidate",
         "Collector source: claude",
         "Use the hosted Claude session as transcript evidence, but keep assertions tied to the fixture files and required behavior command.",
+        "Promotion requires the original response to match the provider-native or response-hash-bound provider-UI Fable 5 event; a recorder-declared model label or unrelated Fable event is not identity evidence.",
         "Return one minimal unified-diff patch per case and avoid broad rewrites when the fixture has a smaller repair path.",
     ),
     "local_model": (
@@ -143,6 +146,131 @@ def _transcript_event_count(path: Path, *, label: str, required: bool) -> int:
     return len(lines)
 
 
+def _normalized_model_name(value: object) -> str:
+    return "-".join(str(value or "").strip().lower().replace("_", "-").split())
+
+
+def _model_identity_matches(source_kind: str, expected: str, observed: str) -> bool:
+    expected_name = _normalized_model_name(expected)
+    observed_name = _normalized_model_name(observed)
+    if not expected_name or not observed_name:
+        return False
+    if source_kind == "claude" and expected_name == "claude-fable-5":
+        return observed_name == expected_name or observed_name.startswith(expected_name + "-")
+    if source_kind == "codex" and expected_name == "gpt-5.5":
+        return observed_name == expected_name or observed_name.startswith(expected_name + "-")
+    return expected_name == observed_name
+
+
+def _normalized_response_text(value: object) -> str:
+    return str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _assistant_event_text(event: Mapping[str, object]) -> str:
+    message = event.get("message")
+    if isinstance(message, Mapping):
+        role = str(message.get("role") or "").strip().lower()
+        if role != "assistant":
+            return ""
+        content = message.get("content")
+    else:
+        role = str(event.get("role") or "").strip().lower()
+        if role != "assistant":
+            return ""
+        content = event.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            str(block.get("text") or "")
+            for block in content
+            if isinstance(block, Mapping)
+            and str(block.get("type") or "").strip().lower() == "text"
+            and str(block.get("text") or "").strip()
+        )
+    return ""
+
+
+def _transcript_model_identity(
+    path: Path,
+    *,
+    source_kind: str,
+    expected_model_name: str,
+    expected_response_text: str | None = None,
+    expected_response_sha256: str = "",
+    require_response_binding: bool = False,
+) -> dict[str, object]:
+    observed: list[str] = []
+    identity_sources: list[str] = []
+    response_models: list[str] = []
+    expected_text = (
+        _normalized_response_text(expected_response_text)
+        if expected_response_text is not None
+        else None
+    )
+    expected_sha256 = str(expected_response_sha256 or "").strip().lower()
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, Mapping):
+            continue
+        message = event.get("message")
+        if isinstance(message, Mapping):
+            model = message.get("model")
+            if isinstance(model, str) and model.strip() and not model.strip().startswith("<"):
+                clean_model = model.strip()
+                observed.append(clean_model)
+                identity_sources.append("provider_native_message")
+                assistant_text = _normalized_response_text(_assistant_event_text(event))
+                if expected_text is not None and assistant_text == expected_text:
+                    response_models.append(clean_model)
+        identity_source = str(event.get("identity_source") or "").strip().lower()
+        provider_model = event.get("provider_model_name")
+        if (
+            identity_source in PROVIDER_IDENTITY_SOURCES
+            and isinstance(provider_model, str)
+            and provider_model.strip()
+        ):
+            clean_model = provider_model.strip()
+            observed.append(clean_model)
+            identity_sources.append(identity_source)
+            response_sha256 = str(event.get("response_sha256") or "").strip().lower()
+            if expected_sha256 and response_sha256 == expected_sha256:
+                response_models.append(clean_model)
+    unique_models = list(dict.fromkeys(observed))
+    unique_response_models = list(dict.fromkeys(response_models))
+    session_verified = source_kind not in FRONTIER_IDENTITY_SOURCE_KINDS or any(
+        _model_identity_matches(source_kind, expected_model_name, model)
+        for model in unique_models
+    )
+    response_bound = bool(unique_response_models)
+    response_verified = response_bound and all(
+        _model_identity_matches(source_kind, expected_model_name, model)
+        for model in unique_response_models
+    )
+    verified = response_verified if require_response_binding else session_verified
+    return {
+        "model_identity_expected": expected_model_name,
+        "model_identity_models": unique_models,
+        "model_identity_sources": list(dict.fromkeys(identity_sources)),
+        "model_identity_session_verified": session_verified,
+        "model_identity_response_bound": response_bound,
+        "model_identity_response_models": unique_response_models,
+        "model_identity_scope": (
+            "candidate_response"
+            if response_bound
+            else "unbound"
+            if require_response_binding
+            else "transcript_session"
+        ),
+        "model_identity_verified": verified,
+    }
+
+
 def _required_sha256(payload: Mapping[str, object], key: str, *, label: str) -> str:
     value = _required_text(payload, key, label=label).lower()
     if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
@@ -234,6 +362,47 @@ def validate_drop_provenance(
         label=label,
         required=required,
     )
+    provider_response_file = provenance.get("provider_response_file")
+    provider_response_sha256 = provenance.get("provider_response_sha256")
+    provider_response_text: str | None = None
+    provider_response_verified = False
+    verified_provider_response_file: str | None = None
+    if provider_response_file is not None or provider_response_sha256 is not None:
+        if not isinstance(provider_response_file, str) or not provider_response_file.strip():
+            raise ArtifactBuildError(
+                f"{label}.provenance.provider_response_file is required"
+            )
+        response_sha256 = _required_sha256(
+            provenance,
+            "provider_response_sha256",
+            label=f"{label}.provenance",
+        )
+        response_path = _safe_relative_file(
+            drop_dir,
+            provider_response_file,
+            field_name="provenance.provider_response_file",
+        )
+        actual_response_sha256 = sha256_file(response_path)
+        if actual_response_sha256 != response_sha256:
+            raise ArtifactBuildError(
+                f"{label}.provenance.provider_response_sha256 mismatch: "
+                f"expected {response_sha256}, got {actual_response_sha256}"
+            )
+        provider_response_text = response_path.read_text(
+            encoding="utf-8",
+            errors="replace",
+        )
+        provider_response_sha256 = response_sha256
+        provider_response_verified = True
+        verified_provider_response_file = provider_response_file.strip()
+    model_identity = _transcript_model_identity(
+        transcript_path,
+        source_kind=source_kind,
+        expected_model_name=model_name,
+        expected_response_text=provider_response_text,
+        expected_response_sha256=str(provider_response_sha256 or ""),
+        require_response_binding=source_kind in FRONTIER_IDENTITY_SOURCE_KINDS,
+    )
 
     prompt_pack_verified = False
     verified_prompt_pack_file: str | None = None
@@ -280,6 +449,12 @@ def validate_drop_provenance(
         "transcript_verified": True,
         "transcript_events": transcript_events,
         "transcript_size_bytes": transcript_path.stat().st_size,
+        "provider_response_file": verified_provider_response_file,
+        "provider_response_sha256": (
+            str(provider_response_sha256) if provider_response_verified else None
+        ),
+        "provider_response_verified": provider_response_verified,
+        **model_identity,
     }
 
 

@@ -53,6 +53,71 @@ _DIAGNOSTIC_MARKERS = (
     "failed only",
     "works locally",
     "environment drift",
+    "bakit",
+    "ayusin",
+    "tingnan mo",
+    "may mali",
+    "ano nangyari",
+    "anong nangyari",
+    "anyare",
+    "di gumagana",
+    "hindi gumagana",
+    "puro bug",
+    "nagregress",
+    "nasira",
+    "nasisira",
+)
+_BASE_DIAGNOSTIC_LENSES = (
+    "expected_vs_observed",
+    "causal_timeline",
+    "root_cause_vs_downstream_symptom",
+    "safety_boundary",
+    "post_change_proof",
+)
+_DIAGNOSTIC_LENS_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "strategy_contract",
+        (
+            "ross",
+            "strategy",
+            "setup",
+            "entry",
+            "exit",
+            "hold",
+            "scalp",
+            "pnl",
+            "profit",
+            "losing trade",
+        ),
+    ),
+    (
+        "counterfactual_integrity",
+        ("replay", "counterfactual", "a/b", "baseline", "harness", "backtest"),
+    ),
+    (
+        "state_reconciliation",
+        (
+            "broker",
+            "alpaca",
+            "position",
+            "pending entry",
+            "duplicate",
+            "orphan",
+            "local state",
+        ),
+    ),
+    (
+        "producer_consumer_evidence_chain",
+        ("queue", "starvation", "coverage", "missing", "consumer", "producer", "zero rows"),
+    ),
+    (
+        "runtime_source_parity",
+        ("deploy", "container", "docker", "worker", "image", "runtime", "restart", "revision"),
+    ),
+    (
+        "external_market_state",
+        ("halt", "spread", "bbo", "liquidity", "catalyst", "news", "market regime", "price action"),
+    ),
 )
 _DIMENSION_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("clock", ("clock", "time", "timestamp", "timezone", "wall hour", "sim hour", "utc", "et hour")),
@@ -834,6 +899,16 @@ def looks_like_diagnostic_request(prompt: str) -> bool:
     return any(marker in lower for marker in _DIAGNOSTIC_MARKERS)
 
 
+def derive_diagnostic_lenses(statement: str) -> list[str]:
+    """Select generic deep-diagnosis lenses without asserting any root cause."""
+    lower = str(statement or "").lower()
+    lenses = list(_BASE_DIAGNOSTIC_LENSES)
+    for lens, markers in _DIAGNOSTIC_LENS_RULES:
+        if any(marker in lower for marker in markers):
+            lenses.append(lens)
+    return list(dict.fromkeys(lenses))[:12]
+
+
 def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]:
     statement = _clip(raw.get("statement"), 900)
     explicit_dimension = str(raw.get("dimension") or "").strip().lower()
@@ -876,6 +951,15 @@ def normalize_case(raw: Mapping[str, Any]) -> dict[str, Any]:
     prior_dimension = str(prior_raw.get("dimension") or "unknown").strip().lower()
     if prior_dimension not in DIMENSIONS:
         prior_dimension = infer_dimension(str(prior_raw.get("claim") or ""))
+    raw_constraints = (
+        dict(raw.get("constraints"))
+        if isinstance(raw.get("constraints"), Mapping)
+        else {}
+    )
+    raw_constraints.setdefault(
+        "diagnostic_lenses",
+        derive_diagnostic_lenses(str(raw.get("problem_statement") or "")),
+    )
     return {
         "schema": DIAGNOSTIC_SCHEMA,
         "case_id": _clean_id(raw.get("case_id"), "diagnostic-case"),
@@ -890,11 +974,7 @@ def normalize_case(raw: Mapping[str, Any]) -> dict[str, Any]:
         } if prior_status else {},
         "constraints": {
             "auto_safety_levels": sorted(AUTO_SAFE_LEVELS),
-            **(
-                dict(raw.get("constraints"))
-                if isinstance(raw.get("constraints"), Mapping)
-                else {}
-            ),
+            **raw_constraints,
         },
     }
 
@@ -1052,6 +1132,7 @@ def build_case_from_prompt(
             "observations": observations,
             "constraints": {
                 "contract_invariants": derive_contract_invariants(prompt),
+                "diagnostic_lenses": derive_diagnostic_lenses(prompt),
             },
         }
     )
@@ -1626,6 +1707,9 @@ def evaluate_packet(
         "retractions": retractions,
         "next_experiments": recommendations,
         "contract_invariants": derive_contract_invariants(case["problem_statement"]),
+        "diagnostic_lenses": list(
+            (case.get("constraints") or {}).get("diagnostic_lenses") or []
+        ),
         "premium_calls": 0,
     }
 
@@ -1729,6 +1813,11 @@ def investigator_prompt(raw_case: Mapping[str, Any]) -> str:
     return (
         "You are the investigator in a local-only diagnostic team. Return JSON only. "
         "Generate competing hypotheses across different dimensions. Link every claim to supplied evidence ids. "
+        "Reconstruct expected behavior, observed behavior, and the causal timeline before selecting a root cause. "
+        "Separate the earliest causal break from downstream symptoms. Treat every diagnostic lens in the case "
+        "as a question to test, not as an assumed answer. For trading or operational incidents, distinguish the "
+        "strategy/requirements contract, external conditions, broker or persisted state, evidence-pipeline "
+        "coverage, and source-versus-running-revision parity. "
         "A hypothesis without a falsification experiment is invalid. Same code and input with different outcomes "
         "means baseline drift, not proof of a code regression. Never request automatic runtime or live mutation. "
         "When evidence is insufficient, you may set auto_execute=true only for a typed probe from the supplied "
@@ -1747,6 +1836,8 @@ def skeptic_prompt(raw_case: Mapping[str, Any], packet: Mapping[str, Any], repor
         "You are the skeptic in a local-only diagnostic team. Return one full revised diagnostic packet as JSON only. "
         "Try to falsify the leading conclusion. Look for code/data/clock/state/config/dependency/runtime/test-harness confounding, "
         "correlated evidence, and claims that survived no discriminating experiment. Add contradiction evidence links when justified. "
+        "Challenge post-hoc metric optimization, replay leakage, source/runtime drift, producer-consumer starvation, "
+        "broker/local-state divergence, external-condition confounding, and fixes aimed only at a downstream symptom. "
         "Retract a conclusion rather than defending it when the evidence changed. Never request automatic runtime or live mutation.\n\n"
         f"Required shape:\n{_packet_shape()}\n{_typed_probe_examples()}\n\nCase:\n{_case_prompt(case)}\n\n"
         f"Investigator packet:\n{json.dumps(packet, indent=2, sort_keys=True)}\n\n"
@@ -1759,6 +1850,10 @@ def judge_prompt(raw_case: Mapping[str, Any], packet: Mapping[str, Any], report:
     return (
         "You are the judge in a local-only diagnostic team. Return one final full diagnostic packet as JSON only. "
         "Confirm only a hypothesis with independent, discriminating evidence and no unresolved contradiction. "
+        "Require a coherent expected-to-observed timeline, identify the earliest supported causal break, and keep "
+        "the strategy contract separate from implementation correctness. A profitable counterfactual is not proof "
+        "unless its inputs, clock, data coverage, and execution assumptions match. Include a bounded post-change "
+        "proof or keep the conclusion provisional. "
         "If baseline drift remains unexplained, reject code attribution and choose instrument-first. "
         "Preserve safe falsification experiments and never request automatic runtime or live mutation. "
         "If the evidence gate says instrument_first, choose at most two auto_execute typed probes from this "
@@ -1860,4 +1955,6 @@ def report_context(report: Mapping[str, Any]) -> str:
             lines.append(f"- next experiment ({item.get('safety')}): {_clip(item.get('action'), 300)}")
     for invariant in (report.get("contract_invariants") or [])[:8]:
         lines.append(f"- mechanism invariant: {_clip(invariant, 500)}")
+    for lens in (report.get("diagnostic_lenses") or [])[:12]:
+        lines.append(f"- diagnostic lens: {_clip(lens, 120)}")
     return "\n".join(lines)

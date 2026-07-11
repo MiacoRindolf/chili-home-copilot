@@ -1,0 +1,35 @@
+{
+  "entries": [
+    {
+      "bytes": 14377,
+      "model_name": "gpt-5.5",
+      "path": "codex/prompt_pack.md",
+      "sha256": "f9f5b99196fc2111fa8696c45dbf22d70be652dfc14715b26c969ddee77c20ce",
+      "source_kind": "codex"
+    },
+    {
+      "bytes": 14655,
+      "model_name": "claude-fable-5",
+      "path": "claude/prompt_pack.md",
+      "sha256": "79e03b492dab3ec1d804de2d402131d45b787f1bd9b72e61e021e8343b624120",
+      "source_kind": "claude"
+    },
+    {
+      "bytes": 14467,
+      "model_name": "qwen3:4b",
+      "path": "local_model/prompt_pack.md",
+      "sha256": "64ae1ee422b7a7035889a3d94091778768621a8d57db13aa3ae44cc4b6ee3e7c",
+      "source_kind": "local_model"
+    }
+  ],
+  "generated_utc": "2026-07-11T16:01:18.441851Z",
+  "output_dir": "project_ws/AgentOps/frontier_model_prompt_packs",
+  "prompt_pack_schema": "chili.model-candidate-drop-prompt-pack.v1",
+  "required_frontier_model_targets": "codex=gpt-5.5, claude=fable-5",
+  "required_source_kinds": [
+    "codex",
+    "claude",
+    "local_model"
+  ],
+  "schema": "chili.frontier-prompt-pack-bundle.v1"
+}

@@ -82,6 +82,38 @@ def _prepare_response_file(
     return response, str(drop["case_id"])
 
 
+def _prepare_native_transcript(
+    tmp_path: Path,
+    *,
+    model_name: str,
+    response_text: str,
+) -> Path:
+    transcript = tmp_path / "provider-native-transcript.jsonl"
+    events = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "prompt pack"},
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "model": model_name,
+                "content": response_text,
+            },
+        },
+        {
+            "type": "system",
+            "event": "complete",
+        },
+    ]
+    transcript.write_text(
+        "\n".join(json.dumps(event, sort_keys=True) for event in events) + "\n",
+        encoding="utf-8",
+    )
+    return transcript
+
+
 def test_frontier_source_recorder_writes_codex_bundle(tmp_path):
     recorder = _load_recorder_module()
     source_dir = _prepare_source_dir(tmp_path, source_kind="codex", model_name="gpt-5.5")
@@ -231,6 +263,86 @@ def test_frontier_source_recorder_imports_all_cases_response_without_drop_dir(tm
     transcript = (source_dir / "transcript.jsonl").read_text(encoding="utf-8")
     assert "codex-all-cases-response-run" in transcript
     assert "real-chili-runtime-control-unscoped-loses" in transcript
+
+
+def test_frontier_source_recorder_combines_response_with_native_model_transcript(tmp_path):
+    from scripts import autopilot_model_candidate_artifact_builder as artifact_builder
+
+    recorder = _load_recorder_module()
+    source_dir = _prepare_source_dir(
+        tmp_path,
+        source_kind="claude",
+        model_name="claude-fable-5",
+    )
+    response, case_id = _prepare_response_file(
+        tmp_path,
+        source_kind="claude",
+        model_name="claude-fable-5",
+    )
+    native_transcript = _prepare_native_transcript(
+        tmp_path,
+        model_name="claude-fable-5",
+        response_text=response.read_text(encoding="utf-8"),
+    )
+
+    summary = recorder.record_frontier_source_evidence(
+        source_kind="claude",
+        source_dir=source_dir,
+        response_path=response,
+        transcript_path=native_transcript,
+        case_id=case_id,
+        run_id="fable-native-transcript-run",
+        source_command="provider-native Claude export",
+    )
+    stored_transcript = source_dir / "transcript.jsonl"
+    identity = artifact_builder._transcript_model_identity(
+        stored_transcript,
+        source_kind="claude",
+        expected_model_name="claude-fable-5",
+        expected_response_text=response.read_text(encoding="utf-8"),
+        require_response_binding=True,
+    )
+
+    assert summary["status"] == "passed"
+    assert summary["response_imported"] is True
+    assert summary["provider_identity_verified"] is True
+    assert identity["model_identity_verified"] is True
+    assert identity["model_identity_response_bound"] is True
+    assert identity["model_identity_models"] == ["claude-fable-5"]
+
+
+def test_frontier_source_recorder_rejects_unrelated_native_identity_event(tmp_path):
+    recorder = _load_recorder_module()
+    source_dir = _prepare_source_dir(
+        tmp_path,
+        source_kind="claude",
+        model_name="claude-fable-5",
+    )
+    response, case_id = _prepare_response_file(
+        tmp_path,
+        source_kind="claude",
+        model_name="claude-fable-5",
+    )
+    native_transcript = _prepare_native_transcript(
+        tmp_path,
+        model_name="claude-fable-5",
+        response_text="an unrelated Fable response",
+    )
+
+    try:
+        recorder.record_frontier_source_evidence(
+            source_kind="claude",
+            source_dir=source_dir,
+            response_path=response,
+            transcript_path=native_transcript,
+            case_id=case_id,
+            run_id="fable-unrelated-native-event",
+            source_command="provider-native Claude export",
+        )
+    except recorder.FrontierSourceEvidenceRecorderError as exc:
+        assert "does not bind the imported response" in str(exc)
+    else:
+        raise AssertionError("an unrelated Fable event must not attest the candidate")
 
 
 def test_frontier_source_recorder_emits_post_import_validation_commands(tmp_path):

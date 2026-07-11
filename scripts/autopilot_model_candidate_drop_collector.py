@@ -18,9 +18,12 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.autopilot_model_candidate_artifact_bakeoff import ALLOWED_SOURCE_KINDS  # noqa: E402
 from scripts.autopilot_model_candidate_artifact_builder import (  # noqa: E402
     ArtifactBuildError,
+    FRONTIER_IDENTITY_SOURCE_KINDS,
     MODEL_CANDIDATE_DROP_PROMPT_PACK_SCHEMA_VERSION,
     MODEL_CANDIDATE_DROP_PROVENANCE_SCHEMA_VERSION,
     MODEL_CANDIDATE_DROP_SCHEMA_VERSION,
+    PROVIDER_IDENTITY_SOURCES,
+    _model_identity_matches,
     build_artifact,
     load_drops,
     render_prompt_pack,
@@ -99,18 +102,68 @@ def _validate_transcript_quality(
         raise DropCollectionError(
             f"transcript must contain at least {TRANSCRIPT_MIN_EVENTS} non-empty events"
         )
+    events: list[Mapping[str, object]] = []
+    for index, line in enumerate(lines, start=1):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise DropCollectionError(
+                f"transcript event {index} must be valid JSON"
+            ) from exc
+        if not isinstance(event, Mapping):
+            raise DropCollectionError(f"transcript event {index} must be an object")
+        events.append(event)
+
     combined = "\n".join(lines).lower()
-    if not any(marker in combined for marker in ("prompt", "user", "input")):
+    has_user = False
+    has_assistant = False
+    attested_models: list[str] = []
+    for event in events:
+        message = event.get("message")
+        if isinstance(message, Mapping):
+            role = str(message.get("role") or "").strip().lower()
+            has_user = has_user or role == "user"
+            has_assistant = has_assistant or role == "assistant"
+            native_model = message.get("model")
+            if isinstance(native_model, str) and native_model.strip():
+                attested_models.append(native_model.strip())
+        role = str(event.get("role") or "").strip().lower()
+        has_user = has_user or role == "user"
+        has_assistant = has_assistant or role == "assistant"
+        identity_source = str(event.get("identity_source") or "").strip().lower()
+        provider_model = event.get("provider_model_name")
+        if (
+            identity_source in PROVIDER_IDENTITY_SOURCES
+            and isinstance(provider_model, str)
+            and provider_model.strip()
+        ):
+            attested_models.append(provider_model.strip())
+
+    if not has_user and not any(marker in combined for marker in ("prompt", "user", "input")):
         raise DropCollectionError("transcript must include prompt or user input evidence")
-    if not any(marker in combined for marker in ("assistant", "response", "completion", "output", "patch")):
-        raise DropCollectionError("transcript must include model response evidence")
-    for field_name, expected in (
-        ("run_id", run_id),
-        ("model_name", model_name),
-        ("source_kind", source_kind),
+    if not has_assistant and not any(
+        marker in combined for marker in ("assistant", "response", "completion", "output", "patch")
     ):
-        if expected.lower() not in combined:
-            raise DropCollectionError(f"transcript must include {field_name} evidence: {expected}")
+        raise DropCollectionError("transcript must include model response evidence")
+    if source_kind in FRONTIER_IDENTITY_SOURCE_KINDS:
+        if attested_models and not any(
+            _model_identity_matches(source_kind, model_name, observed)
+            for observed in attested_models
+        ):
+            raise DropCollectionError(
+                "provider transcript must include native or provider-UI model identity "
+                f"for {model_name}"
+            )
+    else:
+        for field_name, expected in (
+            ("run_id", run_id),
+            ("model_name", model_name),
+            ("source_kind", source_kind),
+        ):
+            if expected.lower() not in combined:
+                raise DropCollectionError(
+                    f"transcript must include {field_name} evidence: {expected}"
+                )
     return len(lines)
 
 
@@ -124,6 +177,40 @@ def _copy_patch_file(drop: Mapping[str, object], *, output_dir: Path, label: str
     destination_name = f"{case_id}.patch"
     _copy_file(source, output_dir / destination_name)
     return destination_name
+
+
+def _copy_provider_response_file(
+    drop: Mapping[str, object],
+    *,
+    output_dir: Path,
+    label: str,
+) -> tuple[str | None, str | None]:
+    raw_file = drop.get("provider_response_file")
+    raw_sha256 = drop.get("provider_response_sha256")
+    if raw_file is None and raw_sha256 is None:
+        return None, None
+    if not isinstance(raw_file, str) or not raw_file.strip():
+        raise DropCollectionError(f"{label}.provider_response_file is required")
+    if not isinstance(raw_sha256, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", raw_sha256):
+        raise DropCollectionError(
+            f"{label}.provider_response_sha256 must be a 64-character SHA-256"
+        )
+    drop_dir = Path(str(drop.get("_drop_dir") or "."))
+    source = _safe_relative_file(
+        drop_dir,
+        raw_file,
+        field_name=f"{label}.provider_response_file",
+    )
+    actual_sha256 = sha256_file(source)
+    if actual_sha256.lower() != raw_sha256.lower():
+        raise DropCollectionError(
+            f"{label}.provider_response_sha256 mismatch: "
+            f"expected {raw_sha256.lower()}, got {actual_sha256.lower()}"
+        )
+    case_id = _safe_name(drop.get("case_id"), fallback=f"case-{label}")
+    destination_name = f"{case_id}.provider-response.txt"
+    _copy_file(source, output_dir / destination_name)
+    return destination_name, actual_sha256.lower()
 
 
 def _drop_without_internal_fields(drop: Mapping[str, object]) -> dict[str, object]:
@@ -184,9 +271,16 @@ def _stamp_drop(
     )
     case_id = _required_text(payload, "case_id", label=label)
     patch_file = _copy_patch_file(drop, output_dir=output_dir, label=label)
+    provider_response_file, provider_response_sha256 = _copy_provider_response_file(
+        drop,
+        output_dir=output_dir,
+        label=label,
+    )
     if patch_file:
         payload.pop("patch", None)
         payload["patch_file"] = patch_file
+    payload.pop("provider_response_file", None)
+    payload.pop("provider_response_sha256", None)
 
     payload["schema"] = MODEL_CANDIDATE_DROP_SCHEMA_VERSION
     payload["case_id"] = case_id
@@ -206,6 +300,13 @@ def _stamp_drop(
         "transcript_sha256": transcript_sha256,
         "transcript_events": transcript_events,
     }
+    if provider_response_file and provider_response_sha256:
+        payload["provenance"].update(
+            {
+                "provider_response_file": provider_response_file,
+                "provider_response_sha256": provider_response_sha256,
+            }
+        )
     return payload
 
 
@@ -283,6 +384,16 @@ def collect_candidate_drops(
         require_provenance=True,
         prompt_pack_path=prompt_pack_path,
     )
+    artifact_candidates = [
+        entry.get("challenger")
+        for entry in artifact.get("entries") or []
+        if isinstance(entry, Mapping) and isinstance(entry.get("challenger"), Mapping)
+    ]
+    provider_identity_verified = all(
+        bool((candidate.get("provenance") or {}).get("model_identity_verified"))
+        for candidate in artifact_candidates
+        if str(candidate.get("source_kind") or "") in FRONTIER_IDENTITY_SOURCE_KINDS
+    )
     manifest = {
         "schema": MODEL_CANDIDATE_DROP_COLLECTOR_SCHEMA_VERSION,
         "generated_utc": collected_at,
@@ -302,6 +413,7 @@ def collect_candidate_drops(
         "artifact_schema": artifact.get("schema"),
         "evaluation_mode": artifact.get("evaluation_mode"),
         "validated_with_provenance": True,
+        "provider_identity_verified": provider_identity_verified,
     }
     return stamped, manifest
 

@@ -44,7 +44,10 @@ def _write_source_bundle(input_root: Path, source_kind: str, candidates: list[di
         + "\n",
         encoding="utf-8",
     )
-    from scripts.autopilot_model_candidate_artifact_builder import render_prompt_pack
+    from scripts.autopilot_model_candidate_artifact_builder import (
+        render_prompt_pack,
+        sha256_file,
+    )
 
     (source_dir / "prompt_pack.md").write_text(
         render_prompt_pack(source_kind=source_kind, model_name=model_name),
@@ -66,6 +69,11 @@ def _write_source_bundle(input_root: Path, source_kind: str, candidates: list[di
             "model_name": model_name,
             "role": "assistant",
             "content": "Produced candidate patches.",
+            "message": {
+                "role": "assistant",
+                "model": model_name,
+                "content": "Produced candidate patches.",
+            },
         },
         {
             "event": "model_output_recorded",
@@ -79,6 +87,9 @@ def _write_source_bundle(input_root: Path, source_kind: str, candidates: list[di
         "\n".join(json.dumps(event, sort_keys=True) for event in transcript_events) + "\n",
         encoding="utf-8",
     )
+    provider_response = raw_dir / "provider-response.txt"
+    provider_response.write_text("Produced candidate patches.", encoding="utf-8")
+    provider_response_sha256 = sha256_file(provider_response)
     for candidate in candidates:
         case_id = str(candidate["case_id"])
         patch_path = raw_dir / f"{case_id}.patch"
@@ -89,6 +100,8 @@ def _write_source_bundle(input_root: Path, source_kind: str, candidates: list[di
             if key not in {"patch", "collected_at"}
         }
         drop["patch_file"] = patch_path.name
+        drop["provider_response_file"] = provider_response.name
+        drop["provider_response_sha256"] = provider_response_sha256
         (raw_dir / f"{case_id}.json").write_text(
             json.dumps(drop, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",

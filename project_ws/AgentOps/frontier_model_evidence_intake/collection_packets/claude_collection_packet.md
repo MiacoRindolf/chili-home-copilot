@@ -1,17 +1,17 @@
 # CHILI claude Frontier Source Collection Packet
 
 - Schema: chili.frontier-source-collection-packet.v1
-- Generated UTC: 2026-06-03T15:02:15.491818Z
+- Generated UTC: 2026-07-11T16:01:22.996662Z
 - Source kind: claude
 - Model name: claude-fable-5
-- Current source status: partial
-- Prompt pack: D:\dev\chili-home-copilot\project_ws\AgentOps\frontier_model_prompt_packs\claude\prompt_pack.md
-- Prompt pack SHA-256: 1160abd9a2d081007b1eb1404a963562b616003bddc701578a91a0d02ebb0cb3
-- Raw source dir: D:\dev\chili-home-copilot\project_ws\AgentOps\frontier_model_evidence_intake\raw_sources\claude
+- Current source status: missing
+- Prompt pack: D:\dev\chili-home-copilot-codex-fable5-diagnostics\project_ws\AgentOps\frontier_model_prompt_packs\claude\prompt_pack.md
+- Prompt pack SHA-256: 79e03b492dab3ec1d804de2d402131d45b787f1bd9b72e61e021e8343b624120
+- Raw source dir: D:\dev\chili-home-copilot-codex-fable5-diagnostics\project_ws\AgentOps\frontier_model_evidence_intake\raw_sources\claude
 - Response staging file: project_ws/AgentOps/frontier_model_evidence_intake/collection_packets/claude_all_cases_response.txt
-- Recommended recorder command: python scripts/autopilot_frontier_source_evidence_recorder.py --source-kind claude --all-cases --response project_ws/AgentOps/frontier_model_evidence_intake/collection_packets/claude_all_cases_response.txt --run-id <real-claude-run-id> --source-command <exact-claude-command-or-session-export> --json --no-write
-- Write/import recorder command: python scripts/autopilot_frontier_source_evidence_recorder.py --source-kind claude --all-cases --response project_ws/AgentOps/frontier_model_evidence_intake/collection_packets/claude_all_cases_response.txt --run-id <real-claude-run-id> --source-command <exact-claude-command-or-session-export> --json
-- Single-case fallback command: python scripts/autopilot_frontier_source_evidence_recorder.py --source-kind claude --case-id <case-id> --response <claude-response.txt> --run-id <real-claude-run-id> --source-command <exact-claude-command-or-session-export> --json
+- Recommended recorder command: python scripts/autopilot_frontier_source_evidence_recorder.py --source-kind claude --all-cases --response project_ws/AgentOps/frontier_model_evidence_intake/collection_packets/claude_all_cases_response.txt --transcript <provider-native-claude-transcript.jsonl> --run-id <real-claude-run-id> --source-command <exact-claude-command-or-session-export> --json --no-write
+- Write/import recorder command: python scripts/autopilot_frontier_source_evidence_recorder.py --source-kind claude --all-cases --response project_ws/AgentOps/frontier_model_evidence_intake/collection_packets/claude_all_cases_response.txt --transcript <provider-native-claude-transcript.jsonl> --run-id <real-claude-run-id> --source-command <exact-claude-command-or-session-export> --json
+- Single-case fallback command: python scripts/autopilot_frontier_source_evidence_recorder.py --source-kind claude --case-id <case-id> --response <claude-response.txt> --transcript <provider-native-claude-transcript.jsonl> --run-id <real-claude-run-id> --source-command <exact-claude-command-or-session-export> --json
 - Intake validation command: python scripts/autopilot_frontier_model_evidence_intake.py --input-root project_ws/AgentOps/frontier_model_evidence_intake/raw_sources --allow-partial --json --no-write
 - Publish scorecards command: python scripts/autopilot_frontier_model_evidence_intake.py --input-root project_ws/AgentOps/frontier_model_evidence_intake/raw_sources --publish-scorecards --json
 - Success criteria: metadata.json, transcript.jsonl, prompt_pack.md, and raw candidate artifacts validate through the frontier source recorder.
@@ -50,9 +50,9 @@
 ## Post-Import Validation Loop
 
 1. Dry-run parse and provenance recording:
-   `python scripts/autopilot_frontier_source_evidence_recorder.py --source-kind claude --all-cases --response project_ws/AgentOps/frontier_model_evidence_intake/collection_packets/claude_all_cases_response.txt --run-id <real-claude-run-id> --source-command <exact-claude-command-or-session-export> --json --no-write`
+   `python scripts/autopilot_frontier_source_evidence_recorder.py --source-kind claude --all-cases --response project_ws/AgentOps/frontier_model_evidence_intake/collection_packets/claude_all_cases_response.txt --transcript <provider-native-claude-transcript.jsonl> --run-id <real-claude-run-id> --source-command <exact-claude-command-or-session-export> --json --no-write`
 2. Write/import only after the dry run passes:
-   `python scripts/autopilot_frontier_source_evidence_recorder.py --source-kind claude --all-cases --response project_ws/AgentOps/frontier_model_evidence_intake/collection_packets/claude_all_cases_response.txt --run-id <real-claude-run-id> --source-command <exact-claude-command-or-session-export> --json`
+   `python scripts/autopilot_frontier_source_evidence_recorder.py --source-kind claude --all-cases --response project_ws/AgentOps/frontier_model_evidence_intake/collection_packets/claude_all_cases_response.txt --transcript <provider-native-claude-transcript.jsonl> --run-id <real-claude-run-id> --source-command <exact-claude-command-or-session-export> --json`
 3. Validate source readiness without writing:
    `python scripts/autopilot_frontier_model_evidence_intake.py --input-root project_ws/AgentOps/frontier_model_evidence_intake/raw_sources --allow-partial --json --no-write`
 4. Publish scorecards only when all required sources are ready:
@@ -62,11 +62,13 @@
 
 - At least 3 non-empty JSONL events.
 - Include source kind `claude` and model name `claude-fable-5`.
+- For Codex or Claude promotion evidence, preserve the full original response and a provider transcript whose exact matching assistant event has native `message.model`, or a provider-UI identity event bound to that response SHA-256. Recorder labels and unrelated model events are not identity evidence.
 - Include the prompt-pack SHA-256, run id, case id, and final patch/drop decision.
 - Claims about PR state, readiness, or current-head status are not promotion evidence.
 
 ## Missing Artifacts
 
-- D:\dev\chili-home-copilot\project_ws\AgentOps\frontier_model_evidence_intake\raw_sources\claude\metadata.json
-- D:\dev\chili-home-copilot\project_ws\AgentOps\frontier_model_evidence_intake\raw_sources\claude\transcript.jsonl
-- D:\dev\chili-home-copilot\project_ws\AgentOps\frontier_model_evidence_intake\raw_sources\claude\raw\*
+- D:\dev\chili-home-copilot-codex-fable5-diagnostics\project_ws\AgentOps\frontier_model_evidence_intake\raw_sources\claude\metadata.json
+- D:\dev\chili-home-copilot-codex-fable5-diagnostics\project_ws\AgentOps\frontier_model_evidence_intake\raw_sources\claude\prompt_pack.md
+- D:\dev\chili-home-copilot-codex-fable5-diagnostics\project_ws\AgentOps\frontier_model_evidence_intake\raw_sources\claude\transcript.jsonl
+- D:\dev\chili-home-copilot-codex-fable5-diagnostics\project_ws\AgentOps\frontier_model_evidence_intake\raw_sources\claude\raw\*

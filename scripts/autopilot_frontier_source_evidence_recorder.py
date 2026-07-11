@@ -27,6 +27,7 @@ from scripts.autopilot_model_candidate_artifact_bakeoff import (  # noqa: E402
 )
 from scripts.autopilot_model_candidate_artifact_builder import (  # noqa: E402
     ArtifactBuildError,
+    FRONTIER_IDENTITY_SOURCE_KINDS,
     MODEL_CANDIDATE_DROP_SCHEMA_VERSION,
     sha256_file,
     validate_prompt_pack_markdown,
@@ -62,6 +63,7 @@ PROMPT_PACK_FILE = "prompt_pack.md"
 METADATA_FILE = "metadata.json"
 TRANSCRIPT_FILE = "transcript.jsonl"
 RAW_DIR = "raw"
+PROVIDER_RESPONSE_FILE = "provider-response.txt"
 PLACEHOLDER_MARKERS = (
     "<replace-with-real",
     "<paste exact",
@@ -322,6 +324,20 @@ def _candidate_id_from_payload(
     return f"{source_kind}-{_safe_name(case_id, fallback='case')}"
 
 
+def _store_provider_response(response_path: Path, *, raw_dir: Path) -> tuple[str, str]:
+    if not response_path.is_file():
+        raise FrontierSourceEvidenceRecorderError(
+            f"response file does not exist: {response_path}"
+        )
+    response_text = response_path.read_text(encoding="utf-8", errors="replace")
+    _reject_placeholder_text(response_text, label=str(response_path))
+    destination = raw_dir / PROVIDER_RESPONSE_FILE
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if response_path.resolve() != destination.resolve():
+        shutil.copyfile(response_path, destination)
+    return destination.name, sha256_file(destination)
+
+
 def _build_response_drop_dir(
     *,
     response_path: Path,
@@ -384,6 +400,10 @@ def _build_response_drop_dir(
     )
 
     raw_dir.mkdir(parents=True, exist_ok=True)
+    provider_response_file, provider_response_sha256 = _store_provider_response(
+        response_path,
+        raw_dir=raw_dir,
+    )
     safe_case_id = _safe_name(case.case_id, fallback="case")
     patch_path = raw_dir / f"{safe_case_id}.patch"
     patch_path.write_text(patch_text, encoding="utf-8")
@@ -407,6 +427,8 @@ def _build_response_drop_dir(
         "duration_seconds": _optional_number(payload, "duration_seconds", default=0.0),
         "cost_units": _optional_number(payload, "cost_units", default=0.0),
         "notes": str(notes).strip(),
+        "provider_response_file": provider_response_file,
+        "provider_response_sha256": provider_response_sha256,
     }
     (raw_dir / f"{safe_case_id}.json").write_text(
         json.dumps(drop, indent=2, sort_keys=True) + "\n",
@@ -435,6 +457,10 @@ def _build_response_suite_drop_dir(
         ) from exc
 
     raw_dir.mkdir(parents=True, exist_ok=True)
+    provider_response_file, provider_response_sha256 = _store_provider_response(
+        response_path,
+        raw_dir=raw_dir,
+    )
     for payload in payloads:
         case_id = _required_text(payload.get("case_id"), label="model_response.case_id")
         patch_text = _patch_from_model_payload(payload)
@@ -500,6 +526,8 @@ def _build_response_suite_drop_dir(
             "duration_seconds": _optional_number(payload, "duration_seconds", default=0.0),
             "cost_units": _optional_number(payload, "cost_units", default=0.0),
             "notes": str(notes).strip(),
+            "provider_response_file": provider_response_file,
+            "provider_response_sha256": provider_response_sha256,
         }
         (raw_dir / f"{safe_case_id}.json").write_text(
             json.dumps(drop, indent=2, sort_keys=True) + "\n",
@@ -624,8 +652,6 @@ def _copy_or_build_transcript(
     raw_files: Sequence[str],
     case_ids: Sequence[str],
 ) -> None:
-    if transcript_path and response_path:
-        raise FrontierSourceEvidenceRecorderError("use --transcript or --response, not both")
     if transcript_path:
         if not transcript_path.is_file():
             raise FrontierSourceEvidenceRecorderError(
@@ -718,6 +744,16 @@ def _prepare_recording_target(
             source_command=source_command,
             allow_partial=True,
         )
+    if (
+        source_kind in FRONTIER_IDENTITY_SOURCE_KINDS
+        and transcript_path is not None
+        and response_path is not None
+        and not bool(manifest.get("provider_identity_verified"))
+    ):
+        raise FrontierSourceEvidenceRecorderError(
+            "provider transcript does not bind the imported response to the expected "
+            f"native model {model_name}"
+        )
     return {
         "recorded_at": recorded_at,
         "raw_files": raw_files,
@@ -767,11 +803,6 @@ def record_frontier_source_evidence(
     input_drop_dir = drop_dir
     effective_drop_dir = drop_dir
     if effective_drop_dir is None:
-        if transcript_path is not None:
-            raise FrontierSourceEvidenceRecorderError(
-                "response-only recording cannot use --transcript; provide --response so "
-                "the recorder can parse a patch into raw candidate files"
-            )
         if response_path is None:
             raise FrontierSourceEvidenceRecorderError(
                 "either --drop-dir or --response with --case-id is required"
@@ -863,6 +894,11 @@ def record_frontier_source_evidence(
 
     manifest = recording["validation_manifest"]
     cases = int(manifest.get("cases") or 0) if isinstance(manifest, Mapping) else 0
+    provider_identity_verified = (
+        bool(manifest.get("provider_identity_verified"))
+        if isinstance(manifest, Mapping)
+        else False
+    )
     validation_command = _intake_validation_command(effective_source_root)
     publish_command = _intake_publish_command(effective_source_root)
     return {
@@ -890,6 +926,7 @@ def record_frontier_source_evidence(
         "raw_files": recording["raw_files"],
         "cases": cases,
         "validated_with_provenance": True,
+        "provider_identity_verified": provider_identity_verified,
         "promotion_ready": False,
         "validation_command": validation_command,
         "publish_command": publish_command,
@@ -920,6 +957,7 @@ def render_recording_summary(summary: Mapping[str, object]) -> str:
         f"- Case id: {summary.get('case_id')}",
         f"- Cases: {summary.get('cases')}",
         f"- Validated with provenance: {summary.get('validated_with_provenance')}",
+        f"- Provider response identity verified: {summary.get('provider_identity_verified')}",
         f"- Promotion ready: {summary.get('promotion_ready')}",
         f"- Source dir: {summary.get('source_dir')}",
         f"- Validation command: {summary.get('validation_command')}",
