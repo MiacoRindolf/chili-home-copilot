@@ -17,6 +17,7 @@ import tarfile
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -968,15 +969,20 @@ def execute_safe_probes(
                     "output": "Probe run time budget was exhausted.",
                     "duration_ms": 0,
                     "dimension": probe["dimension"],
+                    "observed_at": datetime.now(timezone.utc).isoformat(),
                 }
             )
             continue
-        results.append(
-            _execute_one(
+        result = _execute_one(
                 root,
                 probe,
                 explicit_test_database_url=explicit_test_database_url,
             )
+        results.append(
+            {
+                **result,
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            }
         )
 
     evidence = []
@@ -998,6 +1004,11 @@ def execute_safe_probes(
                 "reliability": semantics["reliability"],
                 "discriminating": semantics["discriminating"],
                 "experiment_id": str(result.get("probe_id") or ""),
+                "observed_at": str(result.get("observed_at") or ""),
+                "sequence": index,
+                "entity_id": f"probe:{_clean_probe_id(result.get('probe_id'), str(index + 1))}",
+                "event_type": f"typed_probe_{str(result.get('kind') or 'unknown')}",
+                "actual_state": str(result.get("status") or ""),
             }
         )
     return {

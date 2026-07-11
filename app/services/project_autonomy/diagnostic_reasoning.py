@@ -11,6 +11,7 @@ import json
 import re
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -490,6 +491,15 @@ def _clamp_reliability(value: object) -> float:
     except (TypeError, ValueError):
         number = 0.7
     return max(0.0, min(1.0, number))
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _dimension_term_present(statement: str, term: str) -> bool:
@@ -1149,6 +1159,21 @@ def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]
         "environment_fingerprint": _clip(raw.get("environment_fingerprint"), 160),
         "outcome_fingerprint": _clip(raw.get("outcome_fingerprint"), 200),
         "experiment_id": _clean_id(raw.get("experiment_id"), "") if raw.get("experiment_id") else "",
+        "observed_at": _clip(raw.get("observed_at"), 80),
+        "sequence": _optional_int(raw.get("sequence")),
+        "entity_id": _clean_id(raw.get("entity_id"), "") if raw.get("entity_id") else "",
+        "event_type": _clean_id(raw.get("event_type"), "") if raw.get("event_type") else "",
+        "expected_state": _clip(raw.get("expected_state"), 160),
+        "actual_state": _clip(raw.get("actual_state"), 160),
+        "transition_from": _clip(raw.get("transition_from"), 160),
+        "transition_to": _clip(raw.get("transition_to"), 160),
+        "causal_parent_ids": [
+            _clean_id(value, "")
+            for value in raw.get("causal_parent_ids") or []
+            if str(value).strip()
+        ][:12],
+        "source_revision": _clip(raw.get("source_revision"), 100),
+        "runtime_revision": _clip(raw.get("runtime_revision"), 100),
     }
 
 
@@ -1216,6 +1241,157 @@ def normalize_case(raw: Mapping[str, Any]) -> dict[str, Any]:
             **raw_constraints,
         },
     }
+
+
+def _timeline_sort_key(item: Mapping[str, Any], index: int) -> tuple[float, int, int]:
+    observed_at = str(item.get("observed_at") or "").strip()
+    timestamp = float("inf")
+    if observed_at:
+        candidate = observed_at[:-1] + "+00:00" if observed_at.endswith("Z") else observed_at
+        try:
+            parsed = datetime.fromisoformat(candidate)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            timestamp = parsed.astimezone(timezone.utc).timestamp()
+        except ValueError:
+            timestamp = float("inf")
+    sequence = _optional_int(item.get("sequence"))
+    return timestamp, sequence if sequence is not None else index, index
+
+
+def reconstruct_causal_timeline(case: Mapping[str, Any]) -> dict[str, Any]:
+    """Build a deterministic event/state graph from explicit evidence metadata."""
+    observations = [
+        item
+        for item in case.get("observations") or []
+        if isinstance(item, Mapping)
+    ]
+    ordered = sorted(
+        enumerate(observations),
+        key=lambda pair: _timeline_sort_key(pair[1], pair[0]),
+    )
+    last_state_by_entity: dict[str, str] = {}
+    events: list[dict[str, Any]] = []
+    source_revisions: list[str] = []
+    runtime_revisions: list[str] = []
+    for order, (_original_index, item) in enumerate(ordered):
+        evidence_id = str(item.get("evidence_id") or "")
+        entity_id = str(item.get("entity_id") or "")
+        expected_state = str(item.get("expected_state") or "")
+        actual_state = str(item.get("actual_state") or item.get("transition_to") or "")
+        transition_from = str(item.get("transition_from") or "")
+        transition_to = str(item.get("transition_to") or "")
+        violations: list[str] = []
+        if expected_state and actual_state and expected_state != actual_state:
+            violations.append("expected_actual_mismatch")
+        prior_state = last_state_by_entity.get(entity_id, "") if entity_id else ""
+        if transition_from and prior_state and transition_from != prior_state:
+            violations.append("transition_from_mismatch")
+        if entity_id and (transition_to or actual_state):
+            last_state_by_entity[entity_id] = transition_to or actual_state
+        source_revision = str(item.get("source_revision") or "")
+        runtime_revision = str(item.get("runtime_revision") or "")
+        if source_revision:
+            source_revisions.append(source_revision)
+        if runtime_revision:
+            runtime_revisions.append(runtime_revision)
+        if source_revision and runtime_revision and source_revision != runtime_revision:
+            violations.append("source_runtime_revision_mismatch")
+        events.append(
+            {
+                "order": order,
+                "evidence_id": evidence_id,
+                "observed_at": str(item.get("observed_at") or ""),
+                "sequence": item.get("sequence"),
+                "entity_id": entity_id,
+                "event_type": str(item.get("event_type") or ""),
+                "dimension": str(item.get("dimension") or "unknown"),
+                "prior_state": prior_state,
+                "expected_state": expected_state,
+                "actual_state": actual_state,
+                "transition_from": transition_from,
+                "transition_to": transition_to,
+                "causal_parent_ids": list(item.get("causal_parent_ids") or []),
+                "violations": violations,
+            }
+        )
+
+    source_revision = source_revisions[-1] if source_revisions else ""
+    runtime_revision = runtime_revisions[-1] if runtime_revisions else ""
+    parity_status = (
+        "mismatch"
+        if source_revision and runtime_revision and source_revision != runtime_revision
+        else "match"
+        if source_revision and runtime_revision
+        else "unknown"
+    )
+    earliest_break = next((event for event in events if event["violations"]), None)
+    if earliest_break is None and parity_status == "mismatch":
+        earliest_break = next(
+            (
+                event
+                for event in events
+                if str(event.get("evidence_id") or "")
+                and any(
+                    str(item.get("evidence_id") or "") == event["evidence_id"]
+                    and str(item.get("runtime_revision") or "") == runtime_revision
+                    for item in observations
+                )
+            ),
+            None,
+        )
+
+    children: dict[str, list[str]] = defaultdict(list)
+    for event in events:
+        child_id = str(event.get("evidence_id") or "")
+        for parent_id in event.get("causal_parent_ids") or []:
+            if child_id and parent_id:
+                children[str(parent_id)].append(child_id)
+    downstream: list[str] = []
+    root_id = str((earliest_break or {}).get("evidence_id") or "")
+    frontier = list(children.get(root_id, [])) if root_id else []
+    seen: set[str] = set()
+    while frontier:
+        evidence_id = frontier.pop(0)
+        if evidence_id in seen:
+            continue
+        seen.add(evidence_id)
+        downstream.append(evidence_id)
+        frontier.extend(children.get(evidence_id, []))
+
+    return {
+        "schema": "chili.causal-timeline.v1",
+        "ordered_evidence_ids": [
+            str(event.get("evidence_id") or "") for event in events
+        ],
+        "events": events,
+        "earliest_break": dict(earliest_break) if earliest_break else {},
+        "downstream_evidence_ids": downstream,
+        "runtime_source_parity": {
+            "status": parity_status,
+            "source_revision": source_revision,
+            "runtime_revision": runtime_revision,
+        },
+    }
+
+
+def _structured_causal_timeline(case: Mapping[str, Any]) -> dict[str, Any]:
+    timeline = reconstruct_causal_timeline(case)
+    has_structure = bool(timeline.get("earliest_break")) or any(
+        event.get("observed_at")
+        or event.get("entity_id")
+        or event.get("event_type")
+        or event.get("expected_state")
+        or event.get("actual_state")
+        or event.get("transition_from")
+        or event.get("transition_to")
+        or event.get("causal_parent_ids")
+        for event in timeline.get("events") or []
+        if isinstance(event, Mapping)
+    ) or str(
+        (timeline.get("runtime_source_parity") or {}).get("status") or "unknown"
+    ) != "unknown"
+    return timeline if has_structure else {}
 
 
 def _prompt_terms(prompt: str) -> list[str]:
@@ -1743,6 +1919,22 @@ def evaluate_packet(
     evidence = {str(item.get("evidence_id")): item for item in case["observations"]}
     completed_result_ids = _experiment_result_ids(packet)
     drift = detect_baseline_drift(case["observations"])
+    causal_timeline = _structured_causal_timeline(case)
+    downstream_evidence_ids = {
+        str(value)
+        for value in causal_timeline.get("downstream_evidence_ids") or []
+        if str(value)
+    }
+    earliest_break = (
+        causal_timeline.get("earliest_break")
+        if isinstance(causal_timeline.get("earliest_break"), Mapping)
+        else {}
+    )
+    earliest_break_id = str(earliest_break.get("evidence_id") or "")
+    earliest_break_dimension = str(earliest_break.get("dimension") or "unknown")
+    runtime_source_mismatch = str(
+        (causal_timeline.get("runtime_source_parity") or {}).get("status") or ""
+    ) == "mismatch"
 
     hypotheses = [
         *packet["hypotheses"],
@@ -1755,15 +1947,20 @@ def evaluate_packet(
         support_records = [evidence[value] for value in support_ids if value in evidence]
         contradict_records = [evidence[value] for value in contradict_ids if value in evidence]
         support_weight = _independent_weight(support_records)
-        confirmatory_weight = _confirmatory_weight(support_records)
+        causal_support_records = [
+            record
+            for record in support_records
+            if str(record.get("evidence_id") or "") not in downstream_evidence_ids
+        ]
+        confirmatory_weight = _confirmatory_weight(causal_support_records)
         contradict_weight = _independent_weight(contradict_records)
         discriminating = any(
             bool(record.get("discriminating")) or str(record.get("evidence_id")) in completed_result_ids
-            for record in support_records
+            for record in causal_support_records
         )
         direct_artifact = any(
             record.get("kind") == "artifact" and float(record.get("reliability") or 0) >= 0.9
-            for record in support_records
+            for record in causal_support_records
         )
         typed_probe_evidence = any(
             str(record.get("provenance") or "").startswith("diagnostic_probe:")
@@ -1785,12 +1982,23 @@ def evaluate_packet(
         else:
             status = "untested"
         blockers: list[str] = []
+        downstream_only = bool(support_records) and not causal_support_records
+        if downstream_only:
+            blockers.append(
+                "Support is downstream of the earliest structured causal break."
+            )
         if item.get("dimension") == "unknown" and status == "supported":
             status = "provisional"
             blockers.append("Unknown is not a confirmable causal family; isolate a known dimension first.")
-        if drift and item.get("dimension") == "code" and status in {"supported", "provisional"}:
+        if (
+            (drift or runtime_source_mismatch)
+            and item.get("dimension") == "code"
+            and status in {"supported", "provisional"}
+        ):
             status = "blocked"
-            blockers.append("Same code and input produced different outcomes; code causality is not isolated.")
+            blockers.append(
+                "Code causality is not isolated while baseline or source/runtime revision parity differs."
+            )
         denominator = support_weight + contradict_weight + 1.0
         confidence = max(0.0, min(0.99, support_weight / denominator))
         if status in {"refuted", "blocked"}:
@@ -1805,6 +2013,8 @@ def evaluate_packet(
                 "contradict_weight": contradict_weight,
                 "discriminating_evidence": discriminating,
                 "typed_probe_evidence": typed_probe_evidence,
+                "earliest_break_support": earliest_break_id in support_ids,
+                "downstream_only_support": downstream_only,
                 "blockers": blockers,
             }
         )
@@ -1856,6 +2066,28 @@ def evaluate_packet(
             if chosen.get("status") != "supported" or support_rank(strongest_supported) > support_rank(chosen):
                 chosen = strongest_supported
                 conclusion_id = str(chosen.get("hypothesis_id") or "")
+
+    if earliest_break_id and earliest_break_dimension != "unknown":
+        causal_candidates = [
+            item
+            for item in hypothesis_results
+            if item.get("dimension") == earliest_break_dimension
+            and item.get("status") not in {"refuted", "untested", "blocked"}
+            and (
+                bool(item.get("earliest_break_support"))
+                or earliest_break_id in (item.get("support_evidence_ids") or [])
+            )
+        ]
+        if causal_candidates:
+            chosen = max(
+                causal_candidates,
+                key=lambda item: (
+                    item.get("status") == "supported",
+                    float(item.get("confirmatory_weight") or 0),
+                    float(item.get("support_weight") or 0),
+                ),
+            )
+            conclusion_id = str(chosen.get("hypothesis_id") or "")
 
     problem_dimension = infer_dimension(str(case.get("problem_statement") or ""))
     if (
@@ -1940,6 +2172,7 @@ def evaluate_packet(
         "valid": not errors,
         "errors": errors,
         "baseline_drift": drift,
+        "causal_timeline": causal_timeline,
         "hypothesis_results": hypothesis_results,
         "conclusion": {
             "hypothesis_id": conclusion_id,
@@ -2119,6 +2352,17 @@ def _case_prompt(case: Mapping[str, Any]) -> str:
         "environment_fingerprint",
         "outcome_fingerprint",
         "experiment_id",
+        "observed_at",
+        "sequence",
+        "entity_id",
+        "event_type",
+        "expected_state",
+        "actual_state",
+        "transition_from",
+        "transition_to",
+        "causal_parent_ids",
+        "source_revision",
+        "runtime_revision",
     )
     safe_case = {
         "case_id": case.get("case_id"),
@@ -2135,6 +2379,9 @@ def _case_prompt(case: Mapping[str, Any]) -> str:
         "prior_conclusion": case.get("prior_conclusion"),
         "constraints": case.get("constraints"),
     }
+    timeline = _structured_causal_timeline(case)
+    if timeline:
+        safe_case["causal_timeline"] = timeline
     return _prompt_json(safe_case)
 
 
@@ -2201,6 +2448,7 @@ def _report_prompt(report: Mapping[str, Any]) -> str:
             "conclusion": report.get("conclusion") or {},
             "hypothesis_results": hypothesis_results[:4],
             "next_experiments": list(report.get("next_experiments") or [])[:2],
+            "causal_timeline": report.get("causal_timeline") or {},
         }
     )
 

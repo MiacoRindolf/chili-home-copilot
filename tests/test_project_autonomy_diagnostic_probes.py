@@ -65,6 +65,20 @@ def test_fixed_string_search_returns_provenanced_evidence(tmp_path):
     assert "app/gate.py" in run["results"][0]["output"]
     assert "datetime.now" in run["evidence"][0]["statement"]
     assert run["evidence"][0]["provenance"] == "diagnostic_probe:find-wall-clock"
+    assert run["evidence"][0]["observed_at"].endswith("+00:00")
+    assert run["evidence"][0]["sequence"] == 0
+    assert run["evidence"][0]["entity_id"] == "probe:find-wall-clock"
+    assert run["evidence"][0]["event_type"] == "typed_probe_search"
+    timeline = diagnostic_reasoning.reconstruct_causal_timeline(
+        diagnostic_reasoning.normalize_case(
+            {
+                "case_id": "probe-timeline",
+                "problem_statement": "Find the wall clock read.",
+                "observations": run["evidence"],
+            }
+        )
+    )
+    assert timeline["ordered_evidence_ids"] == ["probe-find-wall-clock"]
 
 
 def test_compile_probe_isolated_from_source_tree(tmp_path):

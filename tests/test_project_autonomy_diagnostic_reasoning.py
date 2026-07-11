@@ -154,6 +154,176 @@ def test_normalized_case_and_prompts_preserve_deep_diagnostic_lenses():
     assert "profitable counterfactual is not proof" in judge
 
 
+def test_reconstructs_earliest_break_from_shuffled_cross_service_events():
+    case = {
+        "case_id": "causal-timeline",
+        "problem_statement": "A stale worker revision caused queue pressure and a provider timeout.",
+        "observations": [
+            {
+                "evidence_id": "dependency-timeout",
+                "statement": "The provider call timed out after queue delay.",
+                "dimension": "dependency",
+                "kind": "metric",
+                "provenance": "provider-metric",
+                "independence_key": "provider-metric",
+                "reliability": 0.99,
+                "discriminating": True,
+                "observed_at": "2026-07-11T10:02:00Z",
+                "entity_id": "request-17",
+                "event_type": "provider_timeout",
+                "expected_state": "completed",
+                "actual_state": "timed_out",
+                "causal_parent_ids": ["queue-saturated"],
+            },
+            {
+                "evidence_id": "source-current",
+                "statement": "The checked-out source is revision r2.",
+                "dimension": "code",
+                "kind": "artifact",
+                "provenance": "git-head",
+                "independence_key": "git-head",
+                "reliability": 0.99,
+                "discriminating": True,
+                "observed_at": "2026-07-11T09:59:00Z",
+                "entity_id": "worker-a",
+                "event_type": "source_revision",
+                "source_revision": "r2",
+            },
+            {
+                "evidence_id": "queue-saturated",
+                "statement": "The stale worker stopped consuming and the queue saturated.",
+                "dimension": "state",
+                "kind": "metric",
+                "provenance": "queue-depth",
+                "independence_key": "queue-depth",
+                "reliability": 0.99,
+                "discriminating": True,
+                "observed_at": "2026-07-11T10:01:00Z",
+                "entity_id": "queue-a",
+                "event_type": "queue_depth",
+                "expected_state": "draining",
+                "actual_state": "saturated",
+                "causal_parent_ids": ["runtime-stale"],
+            },
+            {
+                "evidence_id": "runtime-stale",
+                "statement": "The running worker still loads revision r1.",
+                "dimension": "runtime",
+                "kind": "artifact",
+                "provenance": "runtime-image",
+                "independence_key": "runtime-image",
+                "reliability": 0.99,
+                "discriminating": True,
+                "observed_at": "2026-07-11T10:00:00Z",
+                "entity_id": "worker-a",
+                "event_type": "runtime_revision",
+                "expected_state": "revision-r2",
+                "actual_state": "revision-r1",
+                "source_revision": "r2",
+                "runtime_revision": "r1",
+            },
+        ],
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-code",
+                "claim": "The checked-out source is defective.",
+                "dimension": "code",
+                "support_evidence_ids": ["source-current"],
+                "falsification": "Run the same source revision in the worker.",
+            },
+            {
+                "hypothesis_id": "h-runtime",
+                "claim": "The worker runs a stale revision.",
+                "dimension": "runtime",
+                "support_evidence_ids": ["runtime-stale"],
+                "falsification": "Align only the worker revision.",
+            },
+            {
+                "hypothesis_id": "h-state",
+                "claim": "Queue saturation is the root cause.",
+                "dimension": "state",
+                "support_evidence_ids": ["queue-saturated"],
+                "falsification": "Drain only the queue.",
+            },
+            {
+                "hypothesis_id": "h-dependency",
+                "claim": "The provider caused the timeout.",
+                "dimension": "dependency",
+                "support_evidence_ids": ["dependency-timeout"],
+                "falsification": "Replace only the provider.",
+            },
+        ],
+        "conclusion": {
+            "hypothesis_id": "h-dependency",
+            "status": "confirmed",
+            "evidence_ids": ["dependency-timeout"],
+        },
+    }
+
+    normalized = reasoning.normalize_case(case)
+    timeline = reasoning.reconstruct_causal_timeline(normalized)
+    report = reasoning.evaluate_packet(case, packet)
+    results = {
+        item["hypothesis_id"]: item for item in report["hypothesis_results"]
+    }
+
+    assert timeline["ordered_evidence_ids"] == [
+        "source-current",
+        "runtime-stale",
+        "queue-saturated",
+        "dependency-timeout",
+    ]
+    assert timeline["earliest_break"]["evidence_id"] == "runtime-stale"
+    assert timeline["downstream_evidence_ids"] == [
+        "queue-saturated",
+        "dependency-timeout",
+    ]
+    assert timeline["runtime_source_parity"]["status"] == "mismatch"
+    assert results["h-code"]["status"] == "blocked"
+    assert results["h-state"]["downstream_only_support"] is True
+    assert results["h-dependency"]["downstream_only_support"] is True
+    assert report["conclusion"]["dimension"] == "runtime"
+    assert report["conclusion"]["status"] == "provisional"
+    assert report["decision"] == "instrument_first"
+    assert "causal_timeline" in reasoning.judge_prompt(case, packet, report)
+
+
+def test_timeline_detects_illegal_entity_transition_in_event_time_order():
+    case = reasoning.normalize_case(
+        {
+            "case_id": "transition-order",
+            "problem_statement": "A job completed through an illegal transition.",
+            "observations": [
+                {
+                    "evidence_id": "completed",
+                    "statement": "The job jumped to complete.",
+                    "dimension": "state",
+                    "observed_at": "2026-07-11T10:01:00Z",
+                    "entity_id": "job-1",
+                    "transition_from": "running",
+                    "transition_to": "complete",
+                },
+                {
+                    "evidence_id": "queued",
+                    "statement": "The job entered the queue.",
+                    "dimension": "state",
+                    "observed_at": "2026-07-11T10:00:00Z",
+                    "entity_id": "job-1",
+                    "transition_to": "queued",
+                },
+            ],
+        }
+    )
+
+    timeline = reasoning.reconstruct_causal_timeline(case)
+
+    assert timeline["ordered_evidence_ids"] == ["queued", "completed"]
+    assert timeline["earliest_break"]["evidence_id"] == "completed"
+    assert "transition_from_mismatch" in timeline["earliest_break"]["violations"]
+
+
 def test_dimension_inference_understands_control_flow_leases_and_tls_chains():
     assert reasoning.infer_dimension(
         "The control-flow trace shows the branch returning only on revision r184."
