@@ -192,6 +192,8 @@ def test_build_local_plan_runs_local_diagnostic_council_before_planning(monkeypa
             "select_local_model",
             lambda: {"model": "qwen", "available": True, "installed_models": ["qwen"]},
         )
+        monkeypatch.setattr(orchestrator, "_DIAGNOSTIC_MEMORY_ENABLED", True)
+        monkeypatch.setattr(orchestrator, "_DIAGNOSTIC_EVALUATION_MODE", False)
         monkeypatch.setattr(
             orchestrator,
             "_gather_context",
@@ -275,6 +277,19 @@ def test_build_local_plan_runs_local_diagnostic_council_before_planning(monkeypa
         )
         assert "requested_probes" in (probe_artifact.content_json or "")
         assert payload["premium_calls"] == 0
+        memory_artifact = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(
+                ProjectAutonomyArtifact.run_id == run.run_id,
+                ProjectAutonomyArtifact.name == "diagnostic_memory_retrieval",
+            )
+            .one()
+        )
+        memory_payload = json.loads(memory_artifact.content_json or "{}")
+        assert memory_payload["selected"] == []
+        assert memory_payload["excluded"] == [
+            {"reason": "missing_memory_scope"}
+        ]
     finally:
         db.close()
 

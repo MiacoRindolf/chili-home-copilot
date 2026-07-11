@@ -63,7 +63,7 @@ from ..coding_task.validator_runner import (
 )
 from ..context_brain import ollama_client
 from ..project_domain_runs import finish_run, start_run
-from . import diagnostic_probes, diagnostic_reasoning
+from . import diagnostic_memory, diagnostic_probes, diagnostic_reasoning
 
 AUTONOMOUS_KIND = "autonomous"
 EXECUTION_MODE_PLAN_APPROVAL = "plan_approval"
@@ -2508,6 +2508,12 @@ _DIAGNOSTIC_PROBE_TIME_BUDGET_SEC = max(
         ),
     ),
 )
+_DIAGNOSTIC_MEMORY_ENABLED = str(
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_MEMORY_ENABLED") or "true"
+).strip().lower() in {"1", "true", "yes", "on"}
+_DIAGNOSTIC_EVALUATION_MODE = str(
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_EVALUATION_MODE") or "false"
+).strip().lower() in {"1", "true", "yes", "on"}
 _PLAN_PROMPT_CHAR_LIMIT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_PROMPT_CHARS") or "9000")
 _EDIT_TIMEOUT_SEC = float(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_TIMEOUT_SEC") or "150")
 _EDIT_NUM_PREDICT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_NUM_PREDICT") or "350")
@@ -6443,6 +6449,46 @@ def _run_local_diagnostic_reasoning(
         repo_path=repo_path,
         candidate_paths=candidate_paths,
     )
+    memory_retrieval = {
+        "schema": diagnostic_memory.RETRIEVAL_SCHEMA,
+        "selected": [],
+        "excluded": [{"reason": "diagnostic_memory_disabled"}],
+    }
+    if _DIAGNOSTIC_MEMORY_ENABLED:
+        memory_retrieval = diagnostic_memory.retrieve_memories(
+            db,
+            user_id=run.user_id,
+            repo_id=run.repo_id,
+            problem_statement=run.prompt,
+            diagnostic_lenses=(case.get("constraints") or {}).get(
+                "diagnostic_lenses"
+            )
+            or [],
+            evaluation_mode=_DIAGNOSTIC_EVALUATION_MODE,
+        )
+    selected_memories = [
+        item
+        for item in memory_retrieval.get("selected") or []
+        if isinstance(item, Mapping)
+    ]
+    if selected_memories:
+        case = diagnostic_reasoning.normalize_case(
+            {
+                **case,
+                "constraints": {
+                    **(case.get("constraints") or {}),
+                    "retrieved_mechanisms": selected_memories,
+                },
+            }
+        )
+    _add_artifact(
+        db,
+        run.run_id,
+        "diagnostic",
+        "diagnostic_memory_retrieval",
+        content_json=memory_retrieval,
+        commit=False,
+    )
     model_name = str(model_info.get("model") or "").strip()
     model_calls: list[dict[str, Any]] = []
     reasoning_round = "initial"
@@ -8191,13 +8237,33 @@ def _record_learning(
     plan: dict[str, Any],
     validation: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    did_validation_pass = validation_passed(validation) if validation else False
+    memory_validation_passed = bool(validation)
+    saw_executed_validation = False
+    for item in validation:
+        if not isinstance(item, Mapping) or "exit_code" not in item:
+            memory_validation_passed = False
+            continue
+        try:
+            exit_code = int(item.get("exit_code"))
+        except (TypeError, ValueError):
+            memory_validation_passed = False
+            continue
+        if exit_code != 0 or bool(item.get("timed_out")):
+            memory_validation_passed = False
+        if not bool(item.get("skipped")):
+            saw_executed_validation = True
+    memory_validation_passed = (
+        memory_validation_passed and saw_executed_validation
+    )
     payload = {
         "evidence_gated": True,
         "fine_tune_candidate": outcome in {"merged", "blocked", "completed"} and bool(validation),
         "promotion_status": "pending_eval",
         "outcome": outcome,
         "branch": run.integration_branch,
-        "validation_passed": validation_passed(validation) if validation else False,
+        "validation_passed": did_validation_pass,
+        "diagnostic_memory_validation_passed": memory_validation_passed,
     }
     run.learning_json = _json_text(payload)
     db.add(
@@ -8210,6 +8276,56 @@ def _record_learning(
             payload_json=_json_text({"plan": plan, "validation": validation, "learning": payload}),
             promoted=False,
         )
+    )
+    diagnostic_artifact = (
+        db.query(ProjectAutonomyArtifact)
+        .filter(
+            ProjectAutonomyArtifact.run_id == run.run_id,
+            ProjectAutonomyArtifact.artifact_type == "diagnostic",
+            ProjectAutonomyArtifact.name == "local_diagnostic_debate",
+        )
+        .order_by(ProjectAutonomyArtifact.id.desc())
+        .first()
+    )
+    diagnostic_payload = _json_load(
+        diagnostic_artifact.content_json if diagnostic_artifact is not None else None,
+        {},
+    )
+    diagnostic_report = (
+        diagnostic_payload.get("report")
+        if isinstance(diagnostic_payload, Mapping)
+        and isinstance(diagnostic_payload.get("report"), Mapping)
+        else {}
+    )
+    if not _DIAGNOSTIC_MEMORY_ENABLED:
+        memory_result = {"recorded": False, "reason": "diagnostic_memory_disabled"}
+    elif _DIAGNOSTIC_EVALUATION_MODE:
+        memory_result = {
+            "recorded": False,
+            "reason": "evaluation_mode_memory_disabled",
+        }
+    else:
+        memory_classification = (
+            "operator_validated"
+            if run.execution_mode == EXECUTION_MODE_PLAN_APPROVAL
+            and run.plan_status == PLAN_STATUS_APPROVED
+            else "autonomous_local_validation"
+        )
+        memory_result = diagnostic_memory.record_validated_memory(
+            db,
+            run,
+            diagnostic_report,
+            outcome=outcome,
+            validation_passed=memory_validation_passed,
+            evidence_classification=memory_classification,
+        )
+    _add_artifact(
+        db,
+        run.run_id,
+        "learning",
+        "diagnostic_memory_record",
+        content_json=memory_result,
+        commit=False,
     )
     _add_artifact(db, run.run_id, "learning", "trajectory_sample", content_json=payload, commit=False)
     db.flush()

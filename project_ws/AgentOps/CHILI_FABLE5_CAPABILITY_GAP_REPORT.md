@@ -19,6 +19,7 @@ This distinction is intentional. The current evidence proves that CHILI can diag
 | Cross-service provenance graph | Bounded component/evidence nodes, producer-consumer-sink flow edges, hashed correlation groups, independence clusters, artifact-hash divergence, and first broken edge selection | Proven for explicit flow metadata and bounded log correlation extraction; external trace backends remain open |
 | Correct uncertainty behavior | Same code/input with unexplained outcome drift blocks code attribution and chooses `instrument_first` | Proven |
 | Conclusion correction | New evidence can supersede and explicitly retract an earlier confirmed conclusion | Proven |
+| Leakage-safe diagnostic memory | Same-user/same-repo database scope, controlled reconstruction, evidence-grounded promotion, validation trust ranking, PostgreSQL concurrency lock, supersession, zero-overlap rejection, evaluation-mode read/write shutdown, and no raw prompt/evidence/oracle retrieval | Proven by focused and integration tests; semantic cross-repository transfer remains open |
 | Autonomous evidence acquisition | Typed fixed-string search, file excerpts, repo state, git history/diff, isolated compile, snapshot-based targeted pytest, and bounded sequential information-gain selection | Proven for catalog operations and adaptive probe rounds |
 | Runtime log evidence | Bounded log inventory and fixed-string tail search with approved suffixes, path containment, file/byte/result caps, and no shell execution | Proven by safety and development-regression tests |
 | Runtime database evidence | Schema metadata and aggregate-only PostgreSQL profiles through an explicit read-only DSN, read-only transactions, short timeouts, bounded lookback, safe identifiers, and no raw SQL or raw rows | Proven in `_test` integration and development-regression tests; live production credential proof not performed |
@@ -79,7 +80,7 @@ The older reports use `holdout` in their structural split labels. Because those 
 - Final reviewed-code average wall time: **73.9 seconds/case**, down from **205.1 seconds/case** on the earlier strict full run; a prior green run measured **65.9 seconds/case**
 - Premium calls: **0**
 - Development-regression score: **100/100**; blinded holdout count: **0**; Fable 5 parity claim: **No**
-- Broad relevant regression suite after cross-service provenance integration: **303 passed**
+- Broad relevant regression coverage after leakage-safe memory integration: **334 passed** in one combined run
 - Reports: `project_ws/AgentOps/CROSS_LANGUAGE_DIAGNOSIS_TO_FIX_FIRST_RUN.md`, `project_ws/AgentOps/CROSS_LANGUAGE_DIAGNOSIS_TO_FIX_PRE_DART_CONTRACT_FULL.md`, `project_ws/AgentOps/CROSS_LANGUAGE_DIAGNOSIS_TO_FIX_PRE_ALL_CONTRACT_FULL.md`, and `project_ws/AgentOps/CROSS_LANGUAGE_DIAGNOSIS_TO_FIX_BENCHMARK.md`
 - Interpretation: this proves repeatable coverage for six recognized mechanism families. It measures the autonomous system, not free-form 7B model parity, and it is not unseen generalization evidence.
 
@@ -146,6 +147,7 @@ After preserving the untouched result, generic token-boundary matching, evidence
 - Snapshot execution protects the source workspace but is not a hardened operating-system sandbox; only already-committed, selector-bounded tests are eligible.
 - Subprocess environments omit API keys, broker credentials, database credentials other than an explicitly `_test`-suffixed test URL, and user-provided environment maps.
 - Model edits are accepted only as exact SEARCH/REPLACE blocks, validated diffs, or one guarded full-file fence with syntax, similarity, and size checks.
+- Diagnostic memory stores controlled mechanism abstractions only. Retrieval requires same-user/same-repo database scope, approved validation provenance, positive query overlap, and non-superseded promotion; benchmark/evaluation mode disables it entirely.
 - TypeScript validation invokes Node's parser-only type transformation and never evaluates repository source. Dart analysis receives isolated writable state instead of user profile/plugin state.
 - Python true/false constant sets receive a semantic-polarity check before a local patch is accepted.
 - Hidden-test failure is evidence for a bounded repair loop; tests cannot be edited because only manifest-approved source candidates are eligible.
@@ -162,6 +164,7 @@ After preserving the untouched result, generic token-boundary matching, evidence
 6. Recognized repair synthesis is intentionally narrow. Unknown mechanisms, dependency migrations, frontend visual validation, true concurrency races, and large cross-service refactors remain under-tested.
 7. Final reviewed-code cross-language latency averaged 73.9 seconds/case. Diagnostic calls averaged 51.6 and 61.2 seconds on the two untouched slices; compact development prompts reduced the second suite to 15.7 seconds/call, but that speedup still needs fresh-holdout reproduction.
 8. The 14B local model was not production-usable on current hardware because it offloaded heavily to CPU. The resident 7B model is the measured production lane.
+9. Diagnostic memory is same-repository and lexical. It cannot yet transfer validated mechanisms across unrelated repositories, and unattended full-autopilot runs cannot self-promote their conclusions.
 
 ## Promotion Gate
 
