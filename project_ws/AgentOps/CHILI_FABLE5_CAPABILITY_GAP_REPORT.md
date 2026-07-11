@@ -170,6 +170,10 @@ The disclosed repair replay is not unseen evidence. Its 95.0 score does not over
 
 This fourth result is the strongest evidence against a current broad parity claim. The inventory now contains **32 independently authored diagnostic cases**, clearing the numeric case-count target, but every untouched slice remains below 90 and the newest slice fell to 69.38 despite fully usable local-model output.
 
+After preserving the untouched result, commit `8628ddea503814dced347792aaf1c56c0d67c243` added generic proof-precedence, mechanism-vocabulary, ambiguous-experiment, decisive-attribution, baseline-comparability, and minimum-breadth repairs. The disclosed fourth-slice heuristic replay and full 24-call council replay both reached **100/100**; the council had **24/24 successful calls**, **24/24 accepted stages**, zero unsafe automatic experiments, and zero premium calls. Focused validation passed **64 tests** and the broad autonomy slice passed **208 tests**. Full details: `project_ws/AgentOps/FABLE5_CLASS_DIAGNOSTIC_FOURTH_SLICE_REPAIR.md`.
+
+These are development results. They do not overwrite the untouched 69.38 score and cannot support a parity claim until a new post-freeze slice reproduces the improvement.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
