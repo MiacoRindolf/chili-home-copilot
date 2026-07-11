@@ -1,0 +1,12 @@
+{
+  "schema": "chili.realworld-diagnostic-oracle.v1",
+  "case_id": "bh3-301",
+  "primary_causal_dimension": "code",
+  "expected_dimensions": ["code"],
+  "expected_decisions": ["patch_root_cause"],
+  "expected_statuses": ["confirmed"],
+  "expected_baseline_drift": false,
+  "minimum_hypothesis_dimensions": 4,
+  "minimum_retractions": 0,
+  "forbid_confirmed_code": false
+}

@@ -1,0 +1,139 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh3-308",
+  "problem_statement": "A documentation portal's visual qualification gate reports widespread page-layout changes even though the product source and captured page inputs are held constant. The stored comparison records were produced a month apart, most differences disappear under a partially reconstructed environment, and the original comparison environment is no longer available. Determine the defensible disposition and the next measurement needed before blocking or changing the product.",
+  "observations": [
+    {
+      "evidence_id": "BH3-308-E01",
+      "statement": "The qualification report flags 184 of 620 screenshots, concentrated in text wrapping, line height, and glyph width rather than missing content or failed requests.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "visual qualification summary",
+      "independence_key": "visual-diff-shape-count",
+      "reliability": 0.98,
+      "discriminating": true,
+      "observed_at": "2026-07-11T03:20:00Z",
+      "service_id": "portal-qualification-runner"
+    },
+    {
+      "evidence_id": "BH3-308-E02",
+      "statement": "The stored reference record for the portal home page used the listed code and input fingerprints and produced outcome ref-44a9 in environment runner-june-browser125-fontset-a.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "reference screenshot metadata record",
+      "independence_key": "reference-comparison-record",
+      "reliability": 1.0,
+      "discriminating": true,
+      "observed_at": "2026-06-11T03:18:04Z",
+      "comparison_key": "portal-home-1366x768-en-US",
+      "code_revision": "portal-4f6c",
+      "input_fingerprint": "sha256:c642d6062d330af35602f25c05d29cbb",
+      "environment_fingerprint": "runner-june-browser125-fontset-a",
+      "outcome_fingerprint": "ref-44a9",
+      "artifact_hash": "sha256:44a999fb7b1b677cf6010cc5f3e02187"
+    },
+    {
+      "evidence_id": "BH3-308-E03",
+      "statement": "The candidate record for the same comparison key holds the code and input fingerprints unchanged but produces outcome cand-b71e in environment runner-july-browser126-fontset-b.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "candidate screenshot metadata record",
+      "independence_key": "candidate-comparison-record",
+      "reliability": 1.0,
+      "discriminating": true,
+      "observed_at": "2026-07-11T03:18:06Z",
+      "comparison_key": "portal-home-1366x768-en-US",
+      "code_revision": "portal-4f6c",
+      "input_fingerprint": "sha256:c642d6062d330af35602f25c05d29cbb",
+      "environment_fingerprint": "runner-july-browser126-fontset-b",
+      "outcome_fingerprint": "cand-b71e",
+      "artifact_hash": "sha256:b71e22db6d2a86fdb837767b28f7d475"
+    },
+    {
+      "evidence_id": "BH3-308-E04",
+      "statement": "Reference metadata preserved only a floating runner tag; registry retention shows that tag now resolves to the July image, and neither the June image digest nor its complete font inventory was recorded.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "runner registry retention report and metadata audit",
+      "independence_key": "reference-environment-provenance-gap",
+      "reliability": 0.99,
+      "discriminating": true,
+      "actual_state": "original_runner_digest_and_font_inventory_unavailable"
+    },
+    {
+      "evidence_id": "BH3-308-E05",
+      "statement": "An offline replay using the current page bundle with a reconstructed browser-125 and June font set removes 181 of the 184 flagged differences, while three small glyph-boundary differences remain and the reconstruction cannot be proven identical to the original runner.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated partial-environment reconstruction report",
+      "independence_key": "partial-environment-replay",
+      "reliability": 0.94,
+      "discriminating": true,
+      "comparison_key": "portal-visual-suite-620",
+      "code_revision": "portal-4f6c",
+      "input_fingerprint": "sha256:44ee916a50da6b86efb10777b40a510b",
+      "environment_fingerprint": "reconstructed-browser125-fontset-a-partial",
+      "outcome_fingerprint": "3-of-184-differences-remain",
+      "experiment_id": "portal-reconstructed-env-replay"
+    },
+    {
+      "evidence_id": "BH3-308-E06",
+      "statement": "Two clean reruns in the fully pinned July environment produce identical screenshot hashes for all 620 pages, arguing against ordinary run-to-run nondeterminism in that environment.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "pinned-current-environment repeatability report",
+      "independence_key": "current-environment-repeatability-control",
+      "reliability": 0.98,
+      "discriminating": true,
+      "comparison_key": "portal-visual-suite-repeatability",
+      "environment_fingerprint": "runner-july-browser126-fontset-b-pinned",
+      "outcome_fingerprint": "620-of-620-repeatable",
+      "experiment_id": "portal-july-repeatability"
+    },
+    {
+      "evidence_id": "BH3-308-E07",
+      "statement": "For the 184 flagged pages, captured HTML, API-response, stylesheet, and web-font response hashes match between the two stored runs; only raster outputs and their environment records differ.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "qualification artifact bundle comparison",
+      "independence_key": "page-input-negative-control",
+      "reliability": 0.98,
+      "discriminating": true,
+      "input_fingerprint": "sha256:44ee916a50da6b86efb10777b40a510b",
+      "artifact_hash": "sha256:150fe07eb5d3c35f42f4c12bb19973af"
+    },
+    {
+      "evidence_id": "BH3-308-E08",
+      "statement": "Synthetic layout telemetry from the deployed portal and sampled user sessions shows no step change in overflow, layout-shift, or font-load failure rates during the qualification window.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "production layout health summary",
+      "independence_key": "production-symptom-negative-control",
+      "reliability": 0.91,
+      "discriminating": true,
+      "observed_at": "2026-07-11T05:00:00Z",
+      "service_id": "portal-layout-monitor"
+    },
+    {
+      "evidence_id": "BH3-308-E09",
+      "statement": "The comparison service did not record browser build, font-file checksums, device-scale rounding mode, or image digest as first-class fields in June, so no retained artifact can isolate which environmental component accounts for the remaining three differences.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "comparison record schema and June artifact inventory",
+      "independence_key": "missing-comparison-instrumentation",
+      "reliability": 0.99,
+      "discriminating": true,
+      "actual_state": "environment_components_not_individually_attributable"
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

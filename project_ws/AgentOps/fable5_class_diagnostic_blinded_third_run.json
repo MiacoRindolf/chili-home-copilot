@@ -1,0 +1,5903 @@
+{
+  "accepted_model_stages": 22,
+  "average_local_latency_ms": 21330.79,
+  "cases": [
+    {
+      "case_id": "bh3-301",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 20104,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 458
+        },
+        {
+          "error": null,
+          "latency_ms": 24224,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 651
+        },
+        {
+          "error": null,
+          "latency_ms": 20279,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 492
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "BH3-301-E07"
+          ],
+          "hypothesis_id": "h2",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-2",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The issue is due to a configuration change.",
+            "contradict_evidence_ids": [],
+            "dimension": "config",
+            "falsification": "No config changes detected.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "BH3-301-E06"
+            ]
+          },
+          {
+            "claim": "The problem is caused by a dependency update.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "No dependency changes detected.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "BH3-301-E07"
+            ]
+          },
+          {
+            "claim": "The root cause is a bug in the runtime code.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "No runtime issues detected.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "BH3-301-E04"
+            ]
+          },
+          {
+            "claim": "The issue is due to a data inconsistency.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "No data inconsistencies detected.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "BH3-301-E05"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "bh3-301",
+        "causal_timeline": {
+          "downstream_evidence_ids": [],
+          "earliest_break": {
+            "actual_state": "orientation_1_defaulted",
+            "causal_parent_ids": [
+              "BH3-301-E03"
+            ],
+            "dimension": "unknown",
+            "entity_id": "M-88421",
+            "event_type": "orientation_resolved",
+            "evidence_id": "BH3-301-E02",
+            "expected_state": "orientation_6_available",
+            "observed_at": "2026-07-08T09:14:07Z",
+            "order": 1,
+            "prior_state": "",
+            "sequence": 42,
+            "transition_from": "metadata_populated",
+            "transition_to": "metadata_empty",
+            "violations": [
+              "expected_actual_mismatch"
+            ]
+          },
+          "events": [
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "M-88421",
+              "event_type": "original_ingested",
+              "evidence_id": "BH3-301-E03",
+              "expected_state": "",
+              "observed_at": "2026-07-08T09:12:51Z",
+              "order": 0,
+              "prior_state": "",
+              "sequence": 11,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "orientation_1_defaulted",
+              "causal_parent_ids": [
+                "BH3-301-E03"
+              ],
+              "dimension": "unknown",
+              "entity_id": "M-88421",
+              "event_type": "orientation_resolved",
+              "evidence_id": "BH3-301-E02",
+              "expected_state": "orientation_6_available",
+              "observed_at": "2026-07-08T09:14:07Z",
+              "order": 1,
+              "prior_state": "",
+              "sequence": 42,
+              "transition_from": "metadata_populated",
+              "transition_to": "metadata_empty",
+              "violations": [
+                "expected_actual_mismatch"
+              ]
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "runtime",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-301-E01",
+              "expected_state": "",
+              "observed_at": "2026-07-08T10:31:44Z",
+              "order": 2,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "runtime",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-301-E04",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 3,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-301-E05",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 4,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-301-E06",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 5,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "dependency",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-301-E07",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 6,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "runtime",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-301-E08",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 7,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-301-E09",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 8,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            }
+          ],
+          "ordered_evidence_ids": [
+            "BH3-301-E03",
+            "BH3-301-E02",
+            "BH3-301-E01",
+            "BH3-301-E04",
+            "BH3-301-E05",
+            "BH3-301-E06",
+            "BH3-301-E07",
+            "BH3-301-E08",
+            "BH3-301-E09"
+          ],
+          "runtime_source_parity": {
+            "runtime_revision": "",
+            "source_revision": "dig-91af",
+            "status": "unknown"
+          },
+          "schema": "chili.causal-timeline.v1"
+        },
+        "conclusion": {
+          "claim": "The problem is caused by a dependency update.",
+          "confidence": 0.4949,
+          "dimension": "dependency",
+          "evidence_ids": [
+            "BH3-301-E07"
+          ],
+          "hypothesis_id": "h2",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The issue is due to a configuration change.",
+            "confidence": 0.4924,
+            "confirmatory_weight": 0.97,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "config",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "No config changes detected.",
+            "hypothesis_id": "h1",
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "BH3-301-E06"
+            ],
+            "support_weight": 0.97,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The problem is caused by a dependency update.",
+            "confidence": 0.4949,
+            "confirmatory_weight": 0.98,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "No dependency changes detected.",
+            "hypothesis_id": "h2",
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "BH3-301-E07"
+            ],
+            "support_weight": 0.98,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The root cause is a bug in the runtime code.",
+            "confidence": 0.4975,
+            "confirmatory_weight": 0.99,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "No runtime issues detected.",
+            "hypothesis_id": "h3",
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "BH3-301-E04"
+            ],
+            "support_weight": 0.99,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The issue is due to a data inconsistency.",
+            "confidence": 0.4949,
+            "confirmatory_weight": 0.98,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "No data inconsistencies detected.",
+            "hypothesis_id": "h4",
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "BH3-301-E05"
+            ],
+            "support_weight": 0.98,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "No runtime issues detected.",
+            "dimension": "runtime",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {
+          "broken_edge_evidence_ids": [],
+          "component_hash_mismatches": {},
+          "consumer_ids": [],
+          "correlation_groups": {
+            "73b633af2ad5249e62a4": [
+              "BH3-301-E03",
+              "BH3-301-E02"
+            ]
+          },
+          "edges": [
+            {
+              "broken": false,
+              "edge_type": "causal_evidence",
+              "evidence_id": "BH3-301-E02",
+              "from": "evidence:BH3-301-E03",
+              "order": 1,
+              "to": "evidence:BH3-301-E02"
+            },
+            {
+              "broken": false,
+              "correlation_fingerprint": "73b633af2ad5249e62a4",
+              "edge_type": "correlated_sequence",
+              "from": "evidence:BH3-301-E03",
+              "order": 1,
+              "to": "evidence:BH3-301-E02"
+            }
+          ],
+          "first_broken_edge": {},
+          "flow_classification": "no_explicit_break",
+          "independence_clusters": {},
+          "nodes": [
+            {
+              "node_id": "collection-web",
+              "node_type": "component",
+              "roles": [
+                "sink"
+              ]
+            },
+            {
+              "node_id": "derivative-transformer",
+              "node_type": "component",
+              "roles": [
+                "service"
+              ]
+            },
+            {
+              "dimension": "runtime",
+              "evidence_id": "BH3-301-E01",
+              "node_id": "evidence:BH3-301-E01",
+              "node_type": "evidence",
+              "service_id": "public-image-monitor"
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-301-E02",
+              "node_id": "evidence:BH3-301-E02",
+              "node_type": "evidence",
+              "service_id": "derivative-transformer"
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-301-E03",
+              "node_id": "evidence:BH3-301-E03",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "runtime",
+              "evidence_id": "BH3-301-E04",
+              "node_id": "evidence:BH3-301-E04",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-301-E05",
+              "node_id": "evidence:BH3-301-E05",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-301-E06",
+              "node_id": "evidence:BH3-301-E06",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "dependency",
+              "evidence_id": "BH3-301-E07",
+              "node_id": "evidence:BH3-301-E07",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "runtime",
+              "evidence_id": "BH3-301-E08",
+              "node_id": "evidence:BH3-301-E08",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-301-E09",
+              "node_id": "evidence:BH3-301-E09",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "node_id": "public-image-monitor",
+              "node_type": "component",
+              "roles": [
+                "service"
+              ]
+            }
+          ],
+          "producer_ids": [],
+          "runtime_source_parity": {
+            "runtime_revision": "",
+            "source_revision": "dig-91af",
+            "status": "unknown"
+          },
+          "schema": "chili.provenance-graph.v1",
+          "sink_ids": [
+            "collection-web"
+          ]
+        },
+        "retractions": [
+          {
+            "hypothesis_id": "h-runtime",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "dependency",
+          "hypothesis_dimensions": [
+            "config",
+            "data",
+            "dependency",
+            "runtime"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": false,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 75
+      },
+      "source": "sealed_third_holdout_case_01",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The problem is caused by a dependency update.",
+            "confidence": 0.4949,
+            "dimension": "dependency",
+            "evidence_ids": [
+              "BH3-301-E07"
+            ],
+            "hypothesis_id": "h2",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1594,
+          "retractions": [
+            {
+              "hypothesis_id": "h-runtime",
+              "new_status": "superseded",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The problem is caused by a dependency update.",
+            "confidence": 0.4949,
+            "dimension": "dependency",
+            "evidence_ids": [
+              "BH3-301-E07"
+            ],
+            "hypothesis_id": "h2",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 2489,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The problem is caused by a dependency update.",
+            "confidence": 0.4949,
+            "dimension": "dependency",
+            "evidence_ids": [
+              "BH3-301-E07"
+            ],
+            "hypothesis_id": "h2",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1735,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh3-302",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 17171,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 478
+        },
+        {
+          "error": null,
+          "latency_ms": 21021,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 502
+        },
+        {
+          "error": null,
+          "latency_ms": 20983,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 492
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "BH3-302-E07"
+          ],
+          "hypothesis_id": "h2",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-2",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "dependency"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing dependency changes or restores the outcome.",
+            "experiment_id": "isolate-dependency",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-dependency"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "Source code revision mismatch.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Deploy source revision gis-contract-12.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "BH3-302-E08"
+            ]
+          },
+          {
+            "claim": "Incorrect route identifier comparison.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Replace U+2011 with U+002D in the source code.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "BH3-302-E07"
+            ]
+          },
+          {
+            "claim": "Consumer trace issue.",
+            "contradict_evidence_ids": [],
+            "dimension": "unknown",
+            "falsification": "Replay the consumer trace with fixed route identifiers.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "BH3-302-E02"
+            ]
+          },
+          {
+            "claim": "Database state corruption.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Restore database from a known good snapshot.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "BH3-302-E05"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h-dependency",
+            "support_evidence_ids": []
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "bh3-302",
+        "causal_timeline": {
+          "downstream_evidence_ids": [],
+          "earliest_break": {
+            "actual_state": "route_unmatched",
+            "causal_parent_ids": [
+              "BH3-302-E03"
+            ],
+            "dimension": "unknown",
+            "entity_id": "address-set-d4",
+            "event_type": "route_join_attempted",
+            "evidence_id": "BH3-302-E02",
+            "expected_state": "route_matched",
+            "observed_at": "2026-07-06T02:14:18Z",
+            "order": 1,
+            "prior_state": "",
+            "sequence": 3910,
+            "transition_from": "",
+            "transition_to": "",
+            "violations": [
+              "expected_actual_mismatch"
+            ]
+          },
+          "events": [
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "data",
+              "entity_id": "address-set-d4",
+              "event_type": "routing_artifact_published",
+              "evidence_id": "BH3-302-E03",
+              "expected_state": "",
+              "observed_at": "2026-07-06T02:11:03Z",
+              "order": 0,
+              "prior_state": "",
+              "sequence": 3882,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "route_unmatched",
+              "causal_parent_ids": [
+                "BH3-302-E03"
+              ],
+              "dimension": "unknown",
+              "entity_id": "address-set-d4",
+              "event_type": "route_join_attempted",
+              "evidence_id": "BH3-302-E02",
+              "expected_state": "route_matched",
+              "observed_at": "2026-07-06T02:14:18Z",
+              "order": 1,
+              "prior_state": "",
+              "sequence": 3910,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": [
+                "expected_actual_mismatch"
+              ]
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "data",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-302-E01",
+              "expected_state": "",
+              "observed_at": "2026-07-06T18:20:00Z",
+              "order": 2,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-302-E04",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 3,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "state",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-302-E05",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 4,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "data",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-302-E06",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 5,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "data",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-302-E07",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 6,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "code",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-302-E08",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 7,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": [
+                "source_runtime_revision_mismatch"
+              ]
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "data",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-302-E09",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 8,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            }
+          ],
+          "ordered_evidence_ids": [
+            "BH3-302-E03",
+            "BH3-302-E02",
+            "BH3-302-E01",
+            "BH3-302-E04",
+            "BH3-302-E05",
+            "BH3-302-E06",
+            "BH3-302-E07",
+            "BH3-302-E08",
+            "BH3-302-E09"
+          ],
+          "runtime_source_parity": {
+            "runtime_revision": "route-resolver-5d28",
+            "source_revision": "gis-contract-12",
+            "status": "mismatch"
+          },
+          "schema": "chili.causal-timeline.v1"
+        },
+        "conclusion": {
+          "claim": "Incorrect route identifier comparison.",
+          "confidence": 0.4975,
+          "dimension": "data",
+          "evidence_ids": [
+            "BH3-302-E07"
+          ],
+          "hypothesis_id": "h2",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [
+              "Code causality is not isolated while baseline or source/runtime revision parity differs."
+            ],
+            "claim": "Source code revision mismatch.",
+            "confidence": 0.4898,
+            "confirmatory_weight": 0.96,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Deploy source revision gis-contract-12.",
+            "hypothesis_id": "h1",
+            "provenance_break_support": false,
+            "status": "blocked",
+            "support_evidence_ids": [
+              "BH3-302-E08"
+            ],
+            "support_weight": 0.96,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "Incorrect route identifier comparison.",
+            "confidence": 0.4975,
+            "confirmatory_weight": 0.99,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Replace U+2011 with U+002D in the source code.",
+            "hypothesis_id": "h2",
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "BH3-302-E07"
+            ],
+            "support_weight": 0.99,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "Consumer trace issue.",
+            "confidence": 0.4975,
+            "confirmatory_weight": 0.99,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "unknown",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": true,
+            "falsification": "Replay the consumer trace with fixed route identifiers.",
+            "hypothesis_id": "h3",
+            "provenance_break_support": true,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "BH3-302-E02"
+            ],
+            "support_weight": 0.99,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "Database state corruption.",
+            "confidence": 0.4975,
+            "confirmatory_weight": 0.99,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Restore database from a known good snapshot.",
+            "hypothesis_id": "h4",
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "BH3-302-E05"
+            ],
+            "support_weight": 0.99,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h-dependency",
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Deploy source revision gis-contract-12.",
+            "dimension": "code",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Replay the consumer trace with fixed route identifiers.",
+            "dimension": "unknown",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Restore database from a known good snapshot.",
+            "dimension": "state",
+            "experiment_id": "falsify-h4",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "dimension": "dependency",
+            "experiment_id": "falsify-h-dependency",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {
+          "broken_edge_evidence_ids": [
+            "BH3-302-E02"
+          ],
+          "component_hash_mismatches": {},
+          "consumer_ids": [
+            "route-resolver"
+          ],
+          "correlation_groups": {
+            "9d7b5cf2824a9e3664d7": [
+              "BH3-302-E03",
+              "BH3-302-E02"
+            ]
+          },
+          "edges": [
+            {
+              "broken": false,
+              "edge_type": "causal_evidence",
+              "evidence_id": "BH3-302-E02",
+              "from": "evidence:BH3-302-E03",
+              "order": 1,
+              "to": "evidence:BH3-302-E02"
+            },
+            {
+              "broken": false,
+              "correlation_fingerprint": "9d7b5cf2824a9e3664d7",
+              "edge_type": "correlated_sequence",
+              "from": "evidence:BH3-302-E03",
+              "order": 1,
+              "to": "evidence:BH3-302-E02"
+            },
+            {
+              "actual_state": "record_consumed_unmatched",
+              "broken": true,
+              "dimension": "unknown",
+              "edge_type": "flow",
+              "evidence_id": "BH3-302-E02",
+              "expected_state": "record_consumable",
+              "from": "gis-exporter",
+              "order": 1,
+              "to": "route-resolver"
+            },
+            {
+              "actual_state": "",
+              "broken": false,
+              "dimension": "data",
+              "edge_type": "flow",
+              "evidence_id": "BH3-302-E06",
+              "expected_state": "",
+              "from": "gis-exporter",
+              "order": 5,
+              "to": "route-resolver"
+            }
+          ],
+          "first_broken_edge": {
+            "actual_state": "record_consumed_unmatched",
+            "broken": true,
+            "dimension": "unknown",
+            "edge_type": "flow",
+            "evidence_id": "BH3-302-E02",
+            "expected_state": "record_consumable",
+            "from": "gis-exporter",
+            "order": 1,
+            "to": "route-resolver"
+          },
+          "flow_classification": "broken_flow_edge",
+          "independence_clusters": {},
+          "nodes": [
+            {
+              "dimension": "data",
+              "evidence_id": "BH3-302-E01",
+              "node_id": "evidence:BH3-302-E01",
+              "node_type": "evidence",
+              "service_id": "resident-notifier"
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-302-E02",
+              "node_id": "evidence:BH3-302-E02",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "data",
+              "evidence_id": "BH3-302-E03",
+              "node_id": "evidence:BH3-302-E03",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-302-E04",
+              "node_id": "evidence:BH3-302-E04",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "state",
+              "evidence_id": "BH3-302-E05",
+              "node_id": "evidence:BH3-302-E05",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "data",
+              "evidence_id": "BH3-302-E06",
+              "node_id": "evidence:BH3-302-E06",
+              "node_type": "evidence",
+              "service_id": "route-resolver"
+            },
+            {
+              "dimension": "data",
+              "evidence_id": "BH3-302-E07",
+              "node_id": "evidence:BH3-302-E07",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "code",
+              "evidence_id": "BH3-302-E08",
+              "node_id": "evidence:BH3-302-E08",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "data",
+              "evidence_id": "BH3-302-E09",
+              "node_id": "evidence:BH3-302-E09",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "node_id": "gis-exporter",
+              "node_type": "component",
+              "roles": [
+                "producer",
+                "endpoint"
+              ]
+            },
+            {
+              "node_id": "municipal-message-sink",
+              "node_type": "component",
+              "roles": [
+                "sink"
+              ]
+            },
+            {
+              "node_id": "non-delivery-capture",
+              "node_type": "component",
+              "roles": [
+                "sink"
+              ]
+            },
+            {
+              "node_id": "resident-notifier",
+              "node_type": "component",
+              "roles": [
+                "service",
+                "sink"
+              ]
+            },
+            {
+              "node_id": "route-resolver",
+              "node_type": "component",
+              "roles": [
+                "consumer",
+                "endpoint",
+                "service"
+              ]
+            }
+          ],
+          "producer_ids": [
+            "gis-exporter"
+          ],
+          "runtime_source_parity": {
+            "runtime_revision": "route-resolver-5d28",
+            "source_revision": "gis-contract-12",
+            "status": "mismatch"
+          },
+          "schema": "chili.provenance-graph.v1",
+          "sink_ids": [
+            "municipal-message-sink",
+            "non-delivery-capture",
+            "resident-notifier"
+          ]
+        },
+        "retractions": [
+          {
+            "hypothesis_id": "h-data",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "data",
+          "hypothesis_dimensions": [
+            "code",
+            "data",
+            "dependency",
+            "state",
+            "unknown"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 100
+      },
+      "source": "sealed_third_holdout_case_02",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "Incorrect route identifier comparison.",
+            "confidence": 0.4975,
+            "dimension": "data",
+            "evidence_ids": [
+              "BH3-302-E07"
+            ],
+            "hypothesis_id": "h2",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "dependency"
+          ],
+          "response_chars": 1646,
+          "retractions": [
+            {
+              "hypothesis_id": "h-data",
+              "new_status": "superseded",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "Incorrect route identifier comparison.",
+            "confidence": 0.4975,
+            "dimension": "data",
+            "evidence_ids": [
+              "BH3-302-E07"
+            ],
+            "hypothesis_id": "h2",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "dependency"
+          ],
+          "response_chars": 1709,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "Incorrect route identifier comparison.",
+            "confidence": 0.4975,
+            "dimension": "data",
+            "evidence_ids": [
+              "BH3-302-E07"
+            ],
+            "hypothesis_id": "h2",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "dependency"
+          ],
+          "response_chars": 1688,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh3-303",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 17181,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 490
+        },
+        {
+          "error": null,
+          "latency_ms": 26358,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 703
+        },
+        {
+          "error": null,
+          "latency_ms": 27888,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 749
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "BH3-303-E02",
+            "BH3-303-E03",
+            "BH3-303-E04",
+            "BH3-303-E05",
+            "BH3-303-E06"
+          ],
+          "hypothesis_id": "h-clock",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-2",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "support_evidence_ids": [
+              "BH3-303-E02",
+              "BH3-303-E03",
+              "BH3-303-E04",
+              "BH3-303-E05",
+              "BH3-303-E06"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by code drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "support_evidence_ids": [
+              "BH3-303-E08"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "contradict_evidence_ids": [
+              "BH3-303-E02",
+              "BH3-303-E03",
+              "BH3-303-E04",
+              "BH3-303-E05",
+              "BH3-303-E06"
+            ],
+            "dimension": "dependency",
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h-dependency",
+            "support_evidence_ids": []
+          },
+          {
+            "claim": "The observed failure is primarily caused by state drift.",
+            "contradict_evidence_ids": [
+              "BH3-303-E02",
+              "BH3-303-E03",
+              "BH3-303-E04",
+              "BH3-303-E05",
+              "BH3-303-E06"
+            ],
+            "dimension": "state",
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h-state",
+            "support_evidence_ids": []
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "bh3-303",
+        "causal_timeline": {
+          "downstream_evidence_ids": [
+            "BH3-303-E02",
+            "BH3-303-E04"
+          ],
+          "earliest_break": {
+            "actual_state": "IN_PROGRESS",
+            "causal_parent_ids": [],
+            "dimension": "clock",
+            "entity_id": "WO-55219",
+            "event_type": "work_started",
+            "evidence_id": "BH3-303-E03",
+            "expected_state": "",
+            "observed_at": "2026-07-07T14:58:04Z",
+            "order": 1,
+            "prior_state": "CLOSED",
+            "sequence": 8831,
+            "transition_from": "ASSIGNED",
+            "transition_to": "IN_PROGRESS",
+            "violations": [
+              "transition_from_mismatch"
+            ]
+          },
+          "events": [
+            {
+              "actual_state": "CLOSED",
+              "causal_parent_ids": [
+                "BH3-303-E03"
+              ],
+              "dimension": "clock",
+              "entity_id": "WO-55219",
+              "event_type": "work_order_closed",
+              "evidence_id": "BH3-303-E02",
+              "expected_state": "",
+              "observed_at": "2026-07-07T14:52:21Z",
+              "order": 0,
+              "prior_state": "",
+              "sequence": 8842,
+              "transition_from": "IN_PROGRESS",
+              "transition_to": "CLOSED",
+              "violations": []
+            },
+            {
+              "actual_state": "IN_PROGRESS",
+              "causal_parent_ids": [],
+              "dimension": "clock",
+              "entity_id": "WO-55219",
+              "event_type": "work_started",
+              "evidence_id": "BH3-303-E03",
+              "expected_state": "",
+              "observed_at": "2026-07-07T14:58:04Z",
+              "order": 1,
+              "prior_state": "CLOSED",
+              "sequence": 8831,
+              "transition_from": "ASSIGNED",
+              "transition_to": "IN_PROGRESS",
+              "violations": [
+                "transition_from_mismatch"
+              ]
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "clock",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-303-E05",
+              "expected_state": "",
+              "observed_at": "2026-07-07T14:58:28Z",
+              "order": 2,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-303-E01",
+              "expected_state": "",
+              "observed_at": "2026-07-07T16:40:00Z",
+              "order": 3,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "IN_PROGRESS",
+              "causal_parent_ids": [
+                "BH3-303-E02",
+                "BH3-303-E03"
+              ],
+              "dimension": "clock",
+              "entity_id": "WO-55219",
+              "event_type": "projection_rebuilt",
+              "evidence_id": "BH3-303-E04",
+              "expected_state": "CLOSED",
+              "observed_at": "",
+              "order": 4,
+              "prior_state": "IN_PROGRESS",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": [
+                "expected_actual_mismatch"
+              ]
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "clock",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-303-E06",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 5,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-303-E07",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 6,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "code",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-303-E08",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 7,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            }
+          ],
+          "ordered_evidence_ids": [
+            "BH3-303-E02",
+            "BH3-303-E03",
+            "BH3-303-E05",
+            "BH3-303-E01",
+            "BH3-303-E04",
+            "BH3-303-E06",
+            "BH3-303-E07",
+            "BH3-303-E08"
+          ],
+          "runtime_source_parity": {
+            "runtime_revision": "projection-2b19",
+            "source_revision": "projection-2b19",
+            "status": "match"
+          },
+          "schema": "chili.causal-timeline.v1"
+        },
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by clock drift.",
+          "confidence": 0.8325,
+          "dimension": "clock",
+          "evidence_ids": [
+            "BH3-303-E02",
+            "BH3-303-E03",
+            "BH3-303-E04",
+            "BH3-303-E05",
+            "BH3-303-E06"
+          ],
+          "hypothesis_id": "h-clock",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.8325,
+            "confirmatory_weight": 2.98,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": true,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "BH3-303-E02",
+              "BH3-303-E03",
+              "BH3-303-E04",
+              "BH3-303-E05",
+              "BH3-303-E06"
+            ],
+            "support_weight": 4.97,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.4924,
+            "confirmatory_weight": 0.97,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "BH3-303-E08"
+            ],
+            "support_weight": 0.97,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [
+              "BH3-303-E02",
+              "BH3-303-E03",
+              "BH3-303-E04",
+              "BH3-303-E05",
+              "BH3-303-E06"
+            ],
+            "contradict_weight": 4.97,
+            "dimension": "dependency",
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h-dependency",
+            "provenance_break_support": false,
+            "status": "refuted",
+            "support_evidence_ids": [],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [
+              "BH3-303-E02",
+              "BH3-303-E03",
+              "BH3-303-E04",
+              "BH3-303-E05",
+              "BH3-303-E06"
+            ],
+            "contradict_weight": 4.97,
+            "dimension": "state",
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h-state",
+            "provenance_break_support": false,
+            "status": "refuted",
+            "support_evidence_ids": [],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "provenance_graph": {
+          "broken_edge_evidence_ids": [],
+          "component_hash_mismatches": {},
+          "consumer_ids": [
+            "projection-rebuilder"
+          ],
+          "correlation_groups": {
+            "c9c71a2a899ca91e1409": [
+              "BH3-303-E02",
+              "BH3-303-E03"
+            ]
+          },
+          "edges": [
+            {
+              "broken": false,
+              "edge_type": "causal_evidence",
+              "evidence_id": "BH3-303-E02",
+              "from": "evidence:BH3-303-E03",
+              "order": 0,
+              "to": "evidence:BH3-303-E02"
+            },
+            {
+              "actual_state": "",
+              "broken": false,
+              "dimension": "clock",
+              "edge_type": "flow",
+              "evidence_id": "BH3-303-E02",
+              "expected_state": "",
+              "from": "workflow-worker-6",
+              "order": 0,
+              "to": "projection-rebuilder"
+            },
+            {
+              "broken": false,
+              "correlation_fingerprint": "c9c71a2a899ca91e1409",
+              "edge_type": "correlated_sequence",
+              "from": "evidence:BH3-303-E02",
+              "order": 1,
+              "to": "evidence:BH3-303-E03"
+            },
+            {
+              "actual_state": "",
+              "broken": false,
+              "dimension": "clock",
+              "edge_type": "flow",
+              "evidence_id": "BH3-303-E03",
+              "expected_state": "",
+              "from": "field-client-22",
+              "order": 1,
+              "to": "projection-rebuilder"
+            },
+            {
+              "broken": false,
+              "edge_type": "causal_evidence",
+              "evidence_id": "BH3-303-E04",
+              "from": "evidence:BH3-303-E02",
+              "order": 4,
+              "to": "evidence:BH3-303-E04"
+            },
+            {
+              "broken": false,
+              "edge_type": "causal_evidence",
+              "evidence_id": "BH3-303-E04",
+              "from": "evidence:BH3-303-E03",
+              "order": 4,
+              "to": "evidence:BH3-303-E04"
+            }
+          ],
+          "first_broken_edge": {},
+          "flow_classification": "no_explicit_break",
+          "independence_clusters": {},
+          "nodes": [
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-303-E01",
+              "node_id": "evidence:BH3-303-E01",
+              "node_type": "evidence",
+              "service_id": "maintenance-dashboard"
+            },
+            {
+              "dimension": "clock",
+              "evidence_id": "BH3-303-E02",
+              "node_id": "evidence:BH3-303-E02",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "clock",
+              "evidence_id": "BH3-303-E03",
+              "node_id": "evidence:BH3-303-E03",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "clock",
+              "evidence_id": "BH3-303-E04",
+              "node_id": "evidence:BH3-303-E04",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "clock",
+              "evidence_id": "BH3-303-E05",
+              "node_id": "evidence:BH3-303-E05",
+              "node_type": "evidence",
+              "service_id": "workflow-worker-6"
+            },
+            {
+              "dimension": "clock",
+              "evidence_id": "BH3-303-E06",
+              "node_id": "evidence:BH3-303-E06",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-303-E07",
+              "node_id": "evidence:BH3-303-E07",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "code",
+              "evidence_id": "BH3-303-E08",
+              "node_id": "evidence:BH3-303-E08",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "node_id": "field-client-22",
+              "node_type": "component",
+              "roles": [
+                "producer",
+                "endpoint"
+              ]
+            },
+            {
+              "node_id": "maintenance-dashboard",
+              "node_type": "component",
+              "roles": [
+                "service"
+              ]
+            },
+            {
+              "node_id": "projection-rebuilder",
+              "node_type": "component",
+              "roles": [
+                "consumer",
+                "endpoint"
+              ]
+            },
+            {
+              "node_id": "work-order-projection",
+              "node_type": "component",
+              "roles": [
+                "sink"
+              ]
+            },
+            {
+              "node_id": "workflow-worker-6",
+              "node_type": "component",
+              "roles": [
+                "producer",
+                "endpoint",
+                "service"
+              ]
+            }
+          ],
+          "producer_ids": [
+            "field-client-22",
+            "workflow-worker-6"
+          ],
+          "runtime_source_parity": {
+            "runtime_revision": "projection-2b19",
+            "source_revision": "projection-2b19",
+            "status": "match"
+          },
+          "schema": "chili.provenance-graph.v1",
+          "sink_ids": [
+            "work-order-projection"
+          ]
+        },
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "clock",
+          "hypothesis_dimensions": [
+            "clock",
+            "code",
+            "dependency",
+            "state"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 100
+      },
+      "source": "sealed_third_holdout_case_03",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": false,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.8325,
+            "dimension": "clock",
+            "evidence_ids": [
+              "BH3-303-E02",
+              "BH3-303-E03",
+              "BH3-303-E04",
+              "BH3-303-E05",
+              "BH3-303-E06"
+            ],
+            "hypothesis_id": "h-clock",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [
+            "h1 links support from a different evidence family: BH3-303-E04",
+            "h3 links support from a different evidence family: BH3-303-E02",
+            "h4 links support from a different evidence family: BH3-303-E08"
+          ],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1677,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.8325,
+            "dimension": "clock",
+            "evidence_ids": [
+              "BH3-303-E02",
+              "BH3-303-E03",
+              "BH3-303-E04",
+              "BH3-303-E05",
+              "BH3-303-E06"
+            ],
+            "hypothesis_id": "h-clock",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 2237,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.8325,
+            "dimension": "clock",
+            "evidence_ids": [
+              "BH3-303-E02",
+              "BH3-303-E03",
+              "BH3-303-E04",
+              "BH3-303-E05",
+              "BH3-303-E06"
+            ],
+            "hypothesis_id": "h-clock",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 2398,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh3-304",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 17925,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 494
+        },
+        {
+          "error": null,
+          "latency_ms": 24329,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 610
+        },
+        {
+          "error": null,
+          "latency_ms": 23326,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 560
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "BH3-304-E08"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "State mismatch between archive and derivative workers.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-2",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The missing derivatives are due to a state mismatch between the archive and derivative workers.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Rebuild the checkpoint with matching revisions.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "BH3-304-E01",
+              "BH3-304-E02",
+              "BH3-304-E04",
+              "BH3-304-E05",
+              "BH3-304-E06",
+              "BH3-304-E07"
+            ]
+          },
+          {
+            "claim": "The issue is caused by a configuration error in the derivative worker.",
+            "contradict_evidence_ids": [],
+            "dimension": "config",
+            "falsification": "Roll back to a known good configuration.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "BH3-304-E09"
+            ]
+          },
+          {
+            "claim": "The problem is due to an external dependency issue.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "Isolate and test the external dependencies.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "BH3-304-E08"
+            ]
+          },
+          {
+            "claim": "The issue is related to a bug in the runtime environment.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Rebuild the runtime with known good revisions.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "BH3-304-E03"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "bh3-304",
+        "causal_timeline": {
+          "downstream_evidence_ids": [
+            "BH3-304-E03"
+          ],
+          "earliest_break": {
+            "actual_state": "checkpoint_ahead_by_551",
+            "causal_parent_ids": [],
+            "dimension": "state",
+            "entity_id": "archive-partition-oral-history",
+            "event_type": "restore_boundary_loaded",
+            "evidence_id": "BH3-304-E04",
+            "expected_state": "checkpoint_at_or_below_queue_boundary",
+            "observed_at": "2026-07-05T01:56:12Z",
+            "order": 0,
+            "prior_state": "",
+            "sequence": null,
+            "transition_from": "",
+            "transition_to": "",
+            "violations": [
+              "expected_actual_mismatch"
+            ]
+          },
+          "events": [
+            {
+              "actual_state": "checkpoint_ahead_by_551",
+              "causal_parent_ids": [],
+              "dimension": "state",
+              "entity_id": "archive-partition-oral-history",
+              "event_type": "restore_boundary_loaded",
+              "evidence_id": "BH3-304-E04",
+              "expected_state": "checkpoint_at_or_below_queue_boundary",
+              "observed_at": "2026-07-05T01:56:12Z",
+              "order": 0,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": [
+                "expected_actual_mismatch"
+              ]
+            },
+            {
+              "actual_state": "mixed_snapshot_markers",
+              "causal_parent_ids": [],
+              "dimension": "state",
+              "entity_id": "",
+              "event_type": "restore_completed",
+              "evidence_id": "BH3-304-E05",
+              "expected_state": "common_recovery_marker",
+              "observed_at": "2026-07-05T02:27:10Z",
+              "order": 1,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": [
+                "expected_actual_mismatch"
+              ]
+            },
+            {
+              "actual_state": "QUEUED",
+              "causal_parent_ids": [],
+              "dimension": "state",
+              "entity_id": "OH-2026-771",
+              "event_type": "recording_accepted",
+              "evidence_id": "BH3-304-E02",
+              "expected_state": "",
+              "observed_at": "2026-07-05T07:45:22Z",
+              "order": 2,
+              "prior_state": "",
+              "sequence": 742515,
+              "transition_from": "RECEIVED",
+              "transition_to": "QUEUED",
+              "violations": []
+            },
+            {
+              "actual_state": "SKIPPED",
+              "causal_parent_ids": [
+                "BH3-304-E02",
+                "BH3-304-E04"
+              ],
+              "dimension": "runtime",
+              "entity_id": "OH-2026-771",
+              "event_type": "job_deduplication_checked",
+              "evidence_id": "BH3-304-E03",
+              "expected_state": "PROCESSING",
+              "observed_at": "2026-07-05T07:45:24Z",
+              "order": 3,
+              "prior_state": "QUEUED",
+              "sequence": 742515,
+              "transition_from": "QUEUED",
+              "transition_to": "SKIPPED",
+              "violations": [
+                "expected_actual_mismatch"
+              ]
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "state",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-304-E01",
+              "expected_state": "",
+              "observed_at": "2026-07-05T08:30:00Z",
+              "order": 4,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "COMPLETE",
+              "causal_parent_ids": [],
+              "dimension": "state",
+              "entity_id": "OH-2026-809",
+              "event_type": "derivative_completed",
+              "evidence_id": "BH3-304-E07",
+              "expected_state": "",
+              "observed_at": "2026-07-05T09:14:31Z",
+              "order": 5,
+              "prior_state": "",
+              "sequence": 743002,
+              "transition_from": "PROCESSING",
+              "transition_to": "COMPLETE",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "state",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-304-E06",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 6,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "dependency",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-304-E08",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 7,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": [
+                "source_runtime_revision_mismatch"
+              ]
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-304-E09",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 8,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            }
+          ],
+          "ordered_evidence_ids": [
+            "BH3-304-E04",
+            "BH3-304-E05",
+            "BH3-304-E02",
+            "BH3-304-E03",
+            "BH3-304-E01",
+            "BH3-304-E07",
+            "BH3-304-E06",
+            "BH3-304-E08",
+            "BH3-304-E09"
+          ],
+          "runtime_source_parity": {
+            "runtime_revision": "archive-runtime-71b0",
+            "source_revision": "derivative-worker-18e4",
+            "status": "mismatch"
+          },
+          "schema": "chili.causal-timeline.v1"
+        },
+        "conclusion": {
+          "claim": "The missing derivatives are due to a state mismatch between the archive and derivative workers.",
+          "confidence": 0.8561,
+          "dimension": "state",
+          "evidence_ids": [
+            "BH3-304-E08"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "State mismatch between archive and derivative workers.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The missing derivatives are due to a state mismatch between the archive and derivative workers.",
+            "confidence": 0.8561,
+            "confirmatory_weight": 5.95,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": true,
+            "falsification": "Rebuild the checkpoint with matching revisions.",
+            "hypothesis_id": "h1",
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "BH3-304-E01",
+              "BH3-304-E02",
+              "BH3-304-E04",
+              "BH3-304-E05",
+              "BH3-304-E06",
+              "BH3-304-E07"
+            ],
+            "support_weight": 5.95,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The issue is caused by a configuration error in the derivative worker.",
+            "confidence": 0.4975,
+            "confirmatory_weight": 0.99,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "config",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Roll back to a known good configuration.",
+            "hypothesis_id": "h2",
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "BH3-304-E09"
+            ],
+            "support_weight": 0.99,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The problem is due to an external dependency issue.",
+            "confidence": 0.4924,
+            "confirmatory_weight": 0.97,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Isolate and test the external dependencies.",
+            "hypothesis_id": "h3",
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "BH3-304-E08"
+            ],
+            "support_weight": 0.97,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [
+              "Support is downstream of the earliest structured causal break."
+            ],
+            "claim": "The issue is related to a bug in the runtime environment.",
+            "confidence": 0.4975,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "discriminating_evidence": false,
+            "downstream_only_support": true,
+            "earliest_break_support": false,
+            "falsification": "Rebuild the runtime with known good revisions.",
+            "hypothesis_id": "h4",
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "BH3-304-E03"
+            ],
+            "support_weight": 0.99,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Isolate and test the external dependencies.",
+            "dimension": "dependency",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Rebuild the runtime with known good revisions.",
+            "dimension": "runtime",
+            "experiment_id": "falsify-h4",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {
+          "broken_edge_evidence_ids": [],
+          "component_hash_mismatches": {},
+          "consumer_ids": [
+            "derivative-worker"
+          ],
+          "correlation_groups": {
+            "0751f346c5f1aedda597": [
+              "BH3-304-E02",
+              "BH3-304-E03"
+            ]
+          },
+          "edges": [
+            {
+              "actual_state": "",
+              "broken": false,
+              "dimension": "state",
+              "edge_type": "flow",
+              "evidence_id": "BH3-304-E02",
+              "expected_state": "",
+              "from": "archive-ingress",
+              "order": 2,
+              "to": "derivative-worker"
+            },
+            {
+              "broken": false,
+              "edge_type": "causal_evidence",
+              "evidence_id": "BH3-304-E03",
+              "from": "evidence:BH3-304-E02",
+              "order": 3,
+              "to": "evidence:BH3-304-E03"
+            },
+            {
+              "broken": false,
+              "edge_type": "causal_evidence",
+              "evidence_id": "BH3-304-E03",
+              "from": "evidence:BH3-304-E04",
+              "order": 3,
+              "to": "evidence:BH3-304-E03"
+            },
+            {
+              "broken": false,
+              "correlation_fingerprint": "0751f346c5f1aedda597",
+              "edge_type": "correlated_sequence",
+              "from": "evidence:BH3-304-E02",
+              "order": 3,
+              "to": "evidence:BH3-304-E03"
+            }
+          ],
+          "first_broken_edge": {},
+          "flow_classification": "no_explicit_break",
+          "independence_clusters": {},
+          "nodes": [
+            {
+              "node_id": "archive-ingress",
+              "node_type": "component",
+              "roles": [
+                "producer",
+                "endpoint"
+              ]
+            },
+            {
+              "node_id": "archive-reconciler",
+              "node_type": "component",
+              "roles": [
+                "service"
+              ]
+            },
+            {
+              "node_id": "derivative-worker",
+              "node_type": "component",
+              "roles": [
+                "consumer",
+                "endpoint"
+              ]
+            },
+            {
+              "dimension": "state",
+              "evidence_id": "BH3-304-E01",
+              "node_id": "evidence:BH3-304-E01",
+              "node_type": "evidence",
+              "service_id": "archive-reconciler"
+            },
+            {
+              "dimension": "state",
+              "evidence_id": "BH3-304-E02",
+              "node_id": "evidence:BH3-304-E02",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "runtime",
+              "evidence_id": "BH3-304-E03",
+              "node_id": "evidence:BH3-304-E03",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "state",
+              "evidence_id": "BH3-304-E04",
+              "node_id": "evidence:BH3-304-E04",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "state",
+              "evidence_id": "BH3-304-E05",
+              "node_id": "evidence:BH3-304-E05",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "state",
+              "evidence_id": "BH3-304-E06",
+              "node_id": "evidence:BH3-304-E06",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "state",
+              "evidence_id": "BH3-304-E07",
+              "node_id": "evidence:BH3-304-E07",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "dependency",
+              "evidence_id": "BH3-304-E08",
+              "node_id": "evidence:BH3-304-E08",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-304-E09",
+              "node_id": "evidence:BH3-304-E09",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "node_id": "searchable-derivative-store",
+              "node_type": "component",
+              "roles": [
+                "sink"
+              ]
+            }
+          ],
+          "producer_ids": [
+            "archive-ingress"
+          ],
+          "runtime_source_parity": {
+            "runtime_revision": "archive-runtime-71b0",
+            "source_revision": "derivative-worker-18e4",
+            "status": "mismatch"
+          },
+          "schema": "chili.provenance-graph.v1",
+          "sink_ids": [
+            "searchable-derivative-store"
+          ]
+        },
+        "retractions": [
+          {
+            "hypothesis_id": "h-state",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "state",
+          "hypothesis_dimensions": [
+            "config",
+            "dependency",
+            "runtime",
+            "state"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 100
+      },
+      "source": "sealed_third_holdout_case_04",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The missing derivatives are due to a state mismatch between the archive and derivative workers.",
+            "confidence": 0.8561,
+            "dimension": "state",
+            "evidence_ids": [
+              "BH3-304-E08"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "State mismatch between archive and derivative workers.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [
+            "h1:dropped_mismatched_support",
+            "h1:restored_grounded_support",
+            "h4:dropped_mismatched_support",
+            "h4:restored_grounded_support"
+          ],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1803,
+          "retractions": [
+            {
+              "hypothesis_id": "h-state",
+              "new_status": "superseded",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The missing derivatives are due to a state mismatch between the archive and derivative workers.",
+            "confidence": 0.8561,
+            "dimension": "state",
+            "evidence_ids": [
+              "BH3-304-E08"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "State mismatch between archive and derivative workers.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 2107,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The missing derivatives are due to a state mismatch between the archive and derivative workers.",
+            "confidence": 0.8561,
+            "dimension": "state",
+            "evidence_ids": [
+              "BH3-304-E08"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "State mismatch between archive and derivative workers.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1899,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh3-305",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 19754,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 560
+        },
+        {
+          "error": null,
+          "latency_ms": 25261,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 626
+        },
+        {
+          "error": null,
+          "latency_ms": 27539,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 594
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "BH3-305-E04",
+            "BH3-305-E07"
+          ],
+          "hypothesis_id": "h-data",
+          "reason": "Data drift is a plausible cause, but further evidence is needed.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-2",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "support_evidence_ids": [
+              "BH3-305-E04",
+              "BH3-305-E07"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h-dependency",
+            "support_evidence_ids": [
+              "BH3-305-E05"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by code drift.",
+            "contradict_evidence_ids": [
+              "BH3-305-E01",
+              "BH3-305-E02",
+              "BH3-305-E06"
+            ],
+            "dimension": "code",
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "support_evidence_ids": []
+          },
+          {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "contradict_evidence_ids": [
+              "BH3-305-E01",
+              "BH3-305-E02",
+              "BH3-305-E06"
+            ],
+            "dimension": "runtime",
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "support_evidence_ids": []
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "bh3-305",
+        "causal_timeline": {
+          "downstream_evidence_ids": [],
+          "earliest_break": {
+            "actual_state": "router_receipt_absent",
+            "causal_parent_ids": [],
+            "dimension": "data",
+            "entity_id": "meeting-1842",
+            "event_type": "publication_receipt_search",
+            "evidence_id": "BH3-305-E04",
+            "expected_state": "router_receipt_present",
+            "observed_at": "2026-07-09T09:05:00Z",
+            "order": 2,
+            "prior_state": "READY",
+            "sequence": null,
+            "transition_from": "",
+            "transition_to": "",
+            "violations": [
+              "expected_actual_mismatch"
+            ]
+          },
+          "events": [
+            {
+              "actual_state": "READY",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "meeting-1842",
+              "event_type": "caption_package_ready",
+              "evidence_id": "BH3-305-E02",
+              "expected_state": "",
+              "observed_at": "2026-07-09T09:03:11Z",
+              "order": 0,
+              "prior_state": "",
+              "sequence": 60177,
+              "transition_from": "PACKAGING",
+              "transition_to": "READY",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [
+                "BH3-305-E02"
+              ],
+              "dimension": "unknown",
+              "entity_id": "meeting-1842",
+              "event_type": "edge_authorization_evaluated",
+              "evidence_id": "BH3-305-E03",
+              "expected_state": "",
+              "observed_at": "2026-07-09T09:03:11.014Z",
+              "order": 1,
+              "prior_state": "READY",
+              "sequence": 921108,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "router_receipt_absent",
+              "causal_parent_ids": [],
+              "dimension": "data",
+              "entity_id": "meeting-1842",
+              "event_type": "publication_receipt_search",
+              "evidence_id": "BH3-305-E04",
+              "expected_state": "router_receipt_present",
+              "observed_at": "2026-07-09T09:05:00Z",
+              "order": 2,
+              "prior_state": "READY",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": [
+                "expected_actual_mismatch"
+              ]
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-305-E01",
+              "expected_state": "",
+              "observed_at": "2026-07-09T11:20:00Z",
+              "order": 3,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "dependency",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-305-E05",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 4,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-305-E06",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 5,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "data",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-305-E07",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 6,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-305-E08",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 7,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-305-E09",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 8,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": [
+                "source_runtime_revision_mismatch"
+              ]
+            }
+          ],
+          "ordered_evidence_ids": [
+            "BH3-305-E02",
+            "BH3-305-E03",
+            "BH3-305-E04",
+            "BH3-305-E01",
+            "BH3-305-E05",
+            "BH3-305-E06",
+            "BH3-305-E07",
+            "BH3-305-E08",
+            "BH3-305-E09"
+          ],
+          "runtime_source_parity": {
+            "runtime_revision": "publication-router-f185",
+            "source_revision": "caption-packager-a44e",
+            "status": "mismatch"
+          },
+          "schema": "chili.causal-timeline.v1"
+        },
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by data drift.",
+          "confidence": 0.6633,
+          "dimension": "data",
+          "evidence_ids": [
+            "BH3-305-E04",
+            "BH3-305-E07"
+          ],
+          "hypothesis_id": "h-data",
+          "reason": "Data drift is a plausible cause, but further evidence is needed.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.6633,
+            "confirmatory_weight": 1.97,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": true,
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "BH3-305-E04",
+              "BH3-305-E07"
+            ],
+            "support_weight": 1.97,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.5,
+            "confirmatory_weight": 1.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h-dependency",
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "BH3-305-E05"
+            ],
+            "support_weight": 1.0,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [
+              "BH3-305-E01",
+              "BH3-305-E02",
+              "BH3-305-E06"
+            ],
+            "contradict_weight": 2.98,
+            "dimension": "code",
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "provenance_break_support": false,
+            "status": "refuted",
+            "support_evidence_ids": [],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [
+              "BH3-305-E01",
+              "BH3-305-E02",
+              "BH3-305-E06"
+            ],
+            "contradict_weight": 2.98,
+            "dimension": "runtime",
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "provenance_break_support": false,
+            "status": "refuted",
+            "support_evidence_ids": [],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "provenance_graph": {
+          "broken_edge_evidence_ids": [
+            "BH3-305-E03"
+          ],
+          "component_hash_mismatches": {},
+          "consumer_ids": [
+            "publication-router"
+          ],
+          "correlation_groups": {
+            "218b22d1caaf88133dd6": [
+              "BH3-305-E02",
+              "BH3-305-E03",
+              "BH3-305-E04"
+            ]
+          },
+          "edges": [
+            {
+              "actual_state": "",
+              "broken": false,
+              "dimension": "unknown",
+              "edge_type": "flow",
+              "evidence_id": "BH3-305-E02",
+              "expected_state": "",
+              "from": "caption-packager-v2",
+              "order": 0,
+              "to": "publication-router"
+            },
+            {
+              "broken": false,
+              "edge_type": "causal_evidence",
+              "evidence_id": "BH3-305-E03",
+              "from": "evidence:BH3-305-E02",
+              "order": 1,
+              "to": "evidence:BH3-305-E03"
+            },
+            {
+              "broken": false,
+              "correlation_fingerprint": "218b22d1caaf88133dd6",
+              "edge_type": "correlated_sequence",
+              "from": "evidence:BH3-305-E02",
+              "order": 1,
+              "to": "evidence:BH3-305-E03"
+            },
+            {
+              "actual_state": "denied",
+              "broken": true,
+              "dimension": "unknown",
+              "edge_type": "flow",
+              "evidence_id": "BH3-305-E03",
+              "expected_state": "allowed",
+              "from": "caption-packager-v2",
+              "order": 1,
+              "to": "publication-router"
+            },
+            {
+              "broken": false,
+              "correlation_fingerprint": "218b22d1caaf88133dd6",
+              "edge_type": "correlated_sequence",
+              "from": "evidence:BH3-305-E03",
+              "order": 2,
+              "to": "evidence:BH3-305-E04"
+            },
+            {
+              "actual_state": "",
+              "broken": false,
+              "dimension": "data",
+              "edge_type": "flow",
+              "evidence_id": "BH3-305-E04",
+              "expected_state": "",
+              "from": "publication-router",
+              "order": 2,
+              "to": "public-meeting-archive"
+            },
+            {
+              "actual_state": "",
+              "broken": false,
+              "dimension": "data",
+              "edge_type": "flow",
+              "evidence_id": "BH3-305-E07",
+              "expected_state": "",
+              "from": "caption-packager-v1",
+              "order": 6,
+              "to": "publication-router"
+            }
+          ],
+          "first_broken_edge": {
+            "actual_state": "denied",
+            "broken": true,
+            "dimension": "unknown",
+            "edge_type": "flow",
+            "evidence_id": "BH3-305-E03",
+            "expected_state": "allowed",
+            "from": "caption-packager-v2",
+            "order": 1,
+            "to": "publication-router"
+          },
+          "flow_classification": "broken_flow_edge",
+          "independence_clusters": {},
+          "nodes": [
+            {
+              "node_id": "archive-freshness-monitor",
+              "node_type": "component",
+              "roles": [
+                "service"
+              ]
+            },
+            {
+              "node_id": "caption-packager-v1",
+              "node_type": "component",
+              "roles": [
+                "producer",
+                "endpoint"
+              ]
+            },
+            {
+              "node_id": "caption-packager-v2",
+              "node_type": "component",
+              "roles": [
+                "producer",
+                "endpoint"
+              ]
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-305-E01",
+              "node_id": "evidence:BH3-305-E01",
+              "node_type": "evidence",
+              "service_id": "archive-freshness-monitor"
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-305-E02",
+              "node_id": "evidence:BH3-305-E02",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-305-E03",
+              "node_id": "evidence:BH3-305-E03",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "data",
+              "evidence_id": "BH3-305-E04",
+              "node_id": "evidence:BH3-305-E04",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "dependency",
+              "evidence_id": "BH3-305-E05",
+              "node_id": "evidence:BH3-305-E05",
+              "node_type": "evidence",
+              "service_id": "message-gateway"
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-305-E06",
+              "node_id": "evidence:BH3-305-E06",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "data",
+              "evidence_id": "BH3-305-E07",
+              "node_id": "evidence:BH3-305-E07",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-305-E08",
+              "node_id": "evidence:BH3-305-E08",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-305-E09",
+              "node_id": "evidence:BH3-305-E09",
+              "node_type": "evidence",
+              "service_id": "message-gateway"
+            },
+            {
+              "node_id": "message-gateway",
+              "node_type": "component",
+              "roles": [
+                "service"
+              ]
+            },
+            {
+              "node_id": "non-public-capture",
+              "node_type": "component",
+              "roles": [
+                "sink"
+              ]
+            },
+            {
+              "node_id": "public-meeting-archive",
+              "node_type": "component",
+              "roles": [
+                "sink",
+                "endpoint"
+              ]
+            },
+            {
+              "node_id": "publication-router",
+              "node_type": "component",
+              "roles": [
+                "consumer",
+                "endpoint"
+              ]
+            }
+          ],
+          "producer_ids": [
+            "caption-packager-v1",
+            "caption-packager-v2"
+          ],
+          "runtime_source_parity": {
+            "runtime_revision": "publication-router-f185",
+            "source_revision": "caption-packager-a44e",
+            "status": "mismatch"
+          },
+          "schema": "chili.provenance-graph.v1",
+          "sink_ids": [
+            "non-public-capture",
+            "public-meeting-archive"
+          ]
+        },
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "data",
+          "hypothesis_dimensions": [
+            "code",
+            "data",
+            "dependency",
+            "runtime"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": false,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 75
+      },
+      "source": "sealed_third_holdout_case_05",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": false,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.6633,
+            "dimension": "data",
+            "evidence_ids": [
+              "BH3-305-E04",
+              "BH3-305-E07"
+            ],
+            "hypothesis_id": "h-data",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [
+            "h2 links support from a different evidence family: BH3-305-E05",
+            "h3 links support from a different evidence family: BH3-305-E04",
+            "h4 links support from a different evidence family: BH3-305-E07"
+          ],
+          "preserved_hypothesis_dimensions": [
+            "data",
+            "dependency"
+          ],
+          "response_chars": 2101,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.6633,
+            "dimension": "data",
+            "evidence_ids": [
+              "BH3-305-E04",
+              "BH3-305-E07"
+            ],
+            "hypothesis_id": "h-data",
+            "reason": "Data drift is a plausible cause, but further evidence is needed.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 2219,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.6633,
+            "dimension": "data",
+            "evidence_ids": [
+              "BH3-305-E04",
+              "BH3-305-E07"
+            ],
+            "hypothesis_id": "h-data",
+            "reason": "Data drift is a plausible cause, but further evidence is needed.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 2106,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh3-306",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 19438,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 519
+        },
+        {
+          "error": null,
+          "latency_ms": 19694,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 514
+        },
+        {
+          "error": null,
+          "latency_ms": 20535,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 537
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "BH3-306-E05"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "font-subsetter-paired-build-20260709",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "Font-subsetting library version mismatch.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "Rebuild with font-subsetter 4.8.1.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "BH3-306-E05"
+            ]
+          },
+          {
+            "claim": "Document assembly error.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Re-run document assembly with known good inputs.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "BH3-306-E01",
+              "BH3-306-E02"
+            ]
+          },
+          {
+            "claim": "Preservation pipeline configuration error.",
+            "contradict_evidence_ids": [],
+            "dimension": "config",
+            "falsification": "Review and reset preservation pipeline settings.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "BH3-306-E02"
+            ]
+          },
+          {
+            "claim": "Runtime environment issue.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Isolate and test runtime environment.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "BH3-306-E08"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "bh3-306",
+        "causal_timeline": {
+          "downstream_evidence_ids": [],
+          "earliest_break": {
+            "actual_state": "zero_font_objects",
+            "causal_parent_ids": [
+              "BH3-306-E03"
+            ],
+            "dimension": "unknown",
+            "entity_id": "T-2026-0441",
+            "event_type": "font_subset_completed",
+            "evidence_id": "BH3-306-E02",
+            "expected_state": "four_font_objects",
+            "observed_at": "2026-07-08T11:02:18Z",
+            "order": 1,
+            "prior_state": "",
+            "sequence": 67,
+            "transition_from": "",
+            "transition_to": "",
+            "violations": [
+              "expected_actual_mismatch"
+            ]
+          },
+          "events": [
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "T-2026-0441",
+              "event_type": "source_package_validated",
+              "evidence_id": "BH3-306-E03",
+              "expected_state": "",
+              "observed_at": "2026-07-08T10:55:40Z",
+              "order": 0,
+              "prior_state": "",
+              "sequence": 28,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "zero_font_objects",
+              "causal_parent_ids": [
+                "BH3-306-E03"
+              ],
+              "dimension": "unknown",
+              "entity_id": "T-2026-0441",
+              "event_type": "font_subset_completed",
+              "evidence_id": "BH3-306-E02",
+              "expected_state": "four_font_objects",
+              "observed_at": "2026-07-08T11:02:18Z",
+              "order": 1,
+              "prior_state": "",
+              "sequence": 67,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": [
+                "expected_actual_mismatch"
+              ]
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "data",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-306-E01",
+              "expected_state": "",
+              "observed_at": "2026-07-08T14:10:00Z",
+              "order": 2,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "runtime",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-306-E04",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 3,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": [
+                "source_runtime_revision_mismatch"
+              ]
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-306-E05",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 4,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "test_harness",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-306-E06",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 5,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "dependency",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-306-E07",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 6,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-306-E08",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 7,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-306-E09",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 8,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            }
+          ],
+          "ordered_evidence_ids": [
+            "BH3-306-E03",
+            "BH3-306-E02",
+            "BH3-306-E01",
+            "BH3-306-E04",
+            "BH3-306-E05",
+            "BH3-306-E06",
+            "BH3-306-E07",
+            "BH3-306-E08",
+            "BH3-306-E09"
+          ],
+          "runtime_source_parity": {
+            "runtime_revision": "preservation-image-9e20",
+            "source_revision": "preserve-63d1",
+            "status": "mismatch"
+          },
+          "schema": "chili.causal-timeline.v1"
+        },
+        "conclusion": {
+          "claim": "Document assembly error.",
+          "confidence": 0.6644,
+          "dimension": "data",
+          "evidence_ids": [
+            "BH3-306-E01",
+            "BH3-306-E02"
+          ],
+          "hypothesis_id": "h2",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "status": "provisional"
+        },
+        "contract_invariants": [],
+        "decision": "instrument_first",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "Font-subsetting library version mismatch.",
+            "confidence": 0.4975,
+            "confirmatory_weight": 0.99,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Rebuild with font-subsetter 4.8.1.",
+            "hypothesis_id": "h1",
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "BH3-306-E05"
+            ],
+            "support_weight": 0.99,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "Document assembly error.",
+            "confidence": 0.6644,
+            "confirmatory_weight": 1.98,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": true,
+            "falsification": "Re-run document assembly with known good inputs.",
+            "hypothesis_id": "h2",
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "BH3-306-E01",
+              "BH3-306-E02"
+            ],
+            "support_weight": 1.98,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "Preservation pipeline configuration error.",
+            "confidence": 0.4975,
+            "confirmatory_weight": 0.99,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "config",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": true,
+            "falsification": "Review and reset preservation pipeline settings.",
+            "hypothesis_id": "h3",
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "BH3-306-E02"
+            ],
+            "support_weight": 0.99,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "Runtime environment issue.",
+            "confidence": 0.4924,
+            "confirmatory_weight": 0.97,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Isolate and test runtime environment.",
+            "hypothesis_id": "h4",
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "BH3-306-E08"
+            ],
+            "support_weight": 0.97,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Rebuild with font-subsetter 4.8.1.",
+            "dimension": "dependency",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Review and reset preservation pipeline settings.",
+            "dimension": "config",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {
+          "broken_edge_evidence_ids": [],
+          "component_hash_mismatches": {},
+          "consumer_ids": [
+            "font-subset-stage"
+          ],
+          "correlation_groups": {
+            "1a1cc66044c8c2221a68": [
+              "BH3-306-E03",
+              "BH3-306-E02"
+            ]
+          },
+          "edges": [
+            {
+              "broken": false,
+              "edge_type": "causal_evidence",
+              "evidence_id": "BH3-306-E02",
+              "from": "evidence:BH3-306-E03",
+              "order": 1,
+              "to": "evidence:BH3-306-E02"
+            },
+            {
+              "broken": false,
+              "correlation_fingerprint": "1a1cc66044c8c2221a68",
+              "edge_type": "correlated_sequence",
+              "from": "evidence:BH3-306-E03",
+              "order": 1,
+              "to": "evidence:BH3-306-E02"
+            },
+            {
+              "actual_state": "",
+              "broken": false,
+              "dimension": "unknown",
+              "edge_type": "flow",
+              "evidence_id": "BH3-306-E02",
+              "expected_state": "",
+              "from": "document-assembler",
+              "order": 1,
+              "to": "font-subset-stage"
+            }
+          ],
+          "first_broken_edge": {},
+          "flow_classification": "no_explicit_break",
+          "independence_clusters": {},
+          "nodes": [
+            {
+              "node_id": "document-assembler",
+              "node_type": "component",
+              "roles": [
+                "producer",
+                "endpoint"
+              ]
+            },
+            {
+              "dimension": "data",
+              "evidence_id": "BH3-306-E01",
+              "node_id": "evidence:BH3-306-E01",
+              "node_type": "evidence",
+              "service_id": "preservation-validator"
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-306-E02",
+              "node_id": "evidence:BH3-306-E02",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-306-E03",
+              "node_id": "evidence:BH3-306-E03",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "runtime",
+              "evidence_id": "BH3-306-E04",
+              "node_id": "evidence:BH3-306-E04",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-306-E05",
+              "node_id": "evidence:BH3-306-E05",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "test_harness",
+              "evidence_id": "BH3-306-E06",
+              "node_id": "evidence:BH3-306-E06",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "dependency",
+              "evidence_id": "BH3-306-E07",
+              "node_id": "evidence:BH3-306-E07",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-306-E08",
+              "node_id": "evidence:BH3-306-E08",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-306-E09",
+              "node_id": "evidence:BH3-306-E09",
+              "node_type": "evidence",
+              "service_id": "reading-copy-generator"
+            },
+            {
+              "node_id": "font-subset-stage",
+              "node_type": "component",
+              "roles": [
+                "consumer",
+                "endpoint"
+              ]
+            },
+            {
+              "node_id": "long-term-archive",
+              "node_type": "component",
+              "roles": [
+                "sink"
+              ]
+            },
+            {
+              "node_id": "preservation-validator",
+              "node_type": "component",
+              "roles": [
+                "sink",
+                "service"
+              ]
+            },
+            {
+              "node_id": "reading-copy-generator",
+              "node_type": "component",
+              "roles": [
+                "service"
+              ]
+            }
+          ],
+          "producer_ids": [
+            "document-assembler"
+          ],
+          "runtime_source_parity": {
+            "runtime_revision": "preservation-image-9e20",
+            "source_revision": "preserve-63d1",
+            "status": "mismatch"
+          },
+          "schema": "chili.provenance-graph.v1",
+          "sink_ids": [
+            "long-term-archive",
+            "preservation-validator"
+          ]
+        },
+        "retractions": [
+          {
+            "hypothesis_id": "h-runtime",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          },
+          {
+            "hypothesis_id": "h2",
+            "new_status": "provisional",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "instrument_first",
+          "dimension": "data",
+          "hypothesis_dimensions": [
+            "config",
+            "data",
+            "dependency",
+            "runtime"
+          ],
+          "premium_calls": 0,
+          "status": "provisional",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": false,
+          "dimension": false,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": false
+        },
+        "score": 45
+      },
+      "source": "sealed_third_holdout_case_06",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "Document assembly error.",
+            "confidence": 0.6644,
+            "dimension": "data",
+            "evidence_ids": [
+              "BH3-306-E01",
+              "BH3-306-E02"
+            ],
+            "hypothesis_id": "h2",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "status": "provisional"
+          },
+          "contract_repairs": [
+            "h1:dropped_mismatched_support",
+            "h3:dropped_mismatched_support"
+          ],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1749,
+          "retractions": [
+            {
+              "hypothesis_id": "h-runtime",
+              "new_status": "superseded",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "Document assembly error.",
+            "confidence": 0.6644,
+            "dimension": "data",
+            "evidence_ids": [
+              "BH3-306-E01",
+              "BH3-306-E02"
+            ],
+            "hypothesis_id": "h2",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1782,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "Document assembly error.",
+            "confidence": 0.6644,
+            "dimension": "data",
+            "evidence_ids": [
+              "BH3-306-E01",
+              "BH3-306-E02"
+            ],
+            "hypothesis_id": "h2",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1885,
+          "retractions": [
+            {
+              "hypothesis_id": "h2",
+              "new_status": "provisional",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh3-307",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 16609,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 506
+        },
+        {
+          "error": null,
+          "latency_ms": 19973,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 520
+        },
+        {
+          "error": null,
+          "latency_ms": 23168,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 580
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "BH3-307-E03",
+            "BH3-307-E04"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Worker image mismatch observed, offline replay confirms single confirmation.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "duplicate_confirmations",
+            "expected_if_true": "single_confirmation",
+            "experiment_id": "falsify-h3",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "duplicate_confirmations",
+            "expected_if_true": "single_confirmation",
+            "experiment_id": "falsify-h4",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "code"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing code changes or restores the outcome.",
+            "experiment_id": "isolate-code",
+            "held_constant_dimensions": [
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-code"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "Worker image mismatch caused duplicate confirmations.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Offline replay confirms single confirmation.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "BH3-307-E03",
+              "BH3-307-E04"
+            ]
+          },
+          {
+            "claim": "Incorrect process identity caused duplicate confirmations.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Replay with correct worker identity confirms single confirmation.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "BH3-307-E08"
+            ]
+          },
+          {
+            "claim": "Fleet restart caused duplicate confirmations.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Offline replay confirms single confirmation.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "BH3-307-E07"
+            ]
+          },
+          {
+            "claim": "Data corruption caused duplicate confirmations.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Offline replay confirms single confirmation.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "BH3-307-E01"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by code drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "support_evidence_ids": []
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "bh3-307",
+        "causal_timeline": {
+          "downstream_evidence_ids": [],
+          "earliest_break": {
+            "actual_state": "two_confirmations",
+            "causal_parent_ids": [],
+            "dimension": "runtime",
+            "entity_id": "R-66120",
+            "event_type": "confirmation_accepted_twice",
+            "evidence_id": "BH3-307-E02",
+            "expected_state": "one_confirmation",
+            "observed_at": "2026-07-10T14:06:51Z",
+            "order": 0,
+            "prior_state": "",
+            "sequence": 311902,
+            "transition_from": "",
+            "transition_to": "",
+            "violations": [
+              "expected_actual_mismatch"
+            ]
+          },
+          "events": [
+            {
+              "actual_state": "two_confirmations",
+              "causal_parent_ids": [],
+              "dimension": "runtime",
+              "entity_id": "R-66120",
+              "event_type": "confirmation_accepted_twice",
+              "evidence_id": "BH3-307-E02",
+              "expected_state": "one_confirmation",
+              "observed_at": "2026-07-10T14:06:51Z",
+              "order": 0,
+              "prior_state": "",
+              "sequence": 311902,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": [
+                "expected_actual_mismatch"
+              ]
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "runtime",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-307-E03",
+              "expected_state": "",
+              "observed_at": "2026-07-10T14:11:09Z",
+              "order": 1,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": [
+                "source_runtime_revision_mismatch"
+              ]
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "runtime",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-307-E04",
+              "expected_state": "",
+              "observed_at": "2026-07-10T14:13:42Z",
+              "order": 2,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": [
+                "source_runtime_revision_mismatch"
+              ]
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "data",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-307-E01",
+              "expected_state": "",
+              "observed_at": "2026-07-10T17:30:00Z",
+              "order": 3,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "fresh_processes_and_reassigned_shards",
+              "causal_parent_ids": [],
+              "dimension": "state",
+              "entity_id": "",
+              "event_type": "fleet_restart_completed",
+              "evidence_id": "BH3-307-E07",
+              "expected_state": "",
+              "observed_at": "2026-07-10T19:00:00Z",
+              "order": 4,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "mixed_process_snapshots",
+              "transition_to": "fresh_processes_and_reassigned_shards",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-307-E05",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 5,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "state",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-307-E06",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 6,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "process_identity_and_overlay_absent",
+              "causal_parent_ids": [],
+              "dimension": "state",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-307-E08",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 7,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "state",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-307-E09",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 8,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": [
+                "source_runtime_revision_mismatch"
+              ]
+            }
+          ],
+          "ordered_evidence_ids": [
+            "BH3-307-E02",
+            "BH3-307-E03",
+            "BH3-307-E04",
+            "BH3-307-E01",
+            "BH3-307-E07",
+            "BH3-307-E05",
+            "BH3-307-E06",
+            "BH3-307-E08",
+            "BH3-307-E09"
+          ],
+          "runtime_source_parity": {
+            "runtime_revision": "declared-img-a91-mod-b21",
+            "source_revision": "src-8f41",
+            "status": "mismatch"
+          },
+          "schema": "chili.causal-timeline.v1"
+        },
+        "conclusion": {
+          "claim": "Worker image mismatch caused duplicate confirmations.",
+          "confidence": 0.6599,
+          "dimension": "runtime",
+          "evidence_ids": [
+            "BH3-307-E03",
+            "BH3-307-E04"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Worker image mismatch observed, offline replay confirms single confirmation.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "Worker image mismatch caused duplicate confirmations.",
+            "confidence": 0.6599,
+            "confirmatory_weight": 1.94,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Offline replay confirms single confirmation.",
+            "hypothesis_id": "h1",
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "BH3-307-E03",
+              "BH3-307-E04"
+            ],
+            "support_weight": 1.94,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "Incorrect process identity caused duplicate confirmations.",
+            "confidence": 0.4975,
+            "confirmatory_weight": 0.99,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Replay with correct worker identity confirms single confirmation.",
+            "hypothesis_id": "h2",
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "BH3-307-E08"
+            ],
+            "support_weight": 0.99,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "Fleet restart caused duplicate confirmations.",
+            "confidence": 0.4872,
+            "confirmatory_weight": 0.95,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Offline replay confirms single confirmation.",
+            "hypothesis_id": "h3",
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "BH3-307-E07"
+            ],
+            "support_weight": 0.95,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "Data corruption caused duplicate confirmations.",
+            "confidence": 0.4975,
+            "confirmatory_weight": 0.99,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Offline replay confirms single confirmation.",
+            "hypothesis_id": "h4",
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "BH3-307-E01"
+            ],
+            "support_weight": 0.99,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Offline replay confirms single confirmation.",
+            "dimension": "state",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Offline replay confirms single confirmation.",
+            "dimension": "data",
+            "experiment_id": "falsify-h4",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "dimension": "code",
+            "experiment_id": "falsify-h-code",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {
+          "broken_edge_evidence_ids": [],
+          "component_hash_mismatches": {},
+          "consumer_ids": [
+            "confirmation-sink"
+          ],
+          "correlation_groups": {
+            "eb6d6c1b0f9d58ee72d7": [
+              "BH3-307-E02"
+            ]
+          },
+          "edges": [
+            {
+              "actual_state": "",
+              "broken": false,
+              "dimension": "runtime",
+              "edge_type": "flow",
+              "evidence_id": "BH3-307-E02",
+              "expected_state": "",
+              "from": "reservation-worker-pool",
+              "order": 0,
+              "to": "confirmation-sink"
+            }
+          ],
+          "first_broken_edge": {},
+          "flow_classification": "no_explicit_break",
+          "independence_clusters": {},
+          "nodes": [
+            {
+              "node_id": "confirmation-sink",
+              "node_type": "component",
+              "roles": [
+                "consumer",
+                "endpoint",
+                "service"
+              ]
+            },
+            {
+              "dimension": "data",
+              "evidence_id": "BH3-307-E01",
+              "node_id": "evidence:BH3-307-E01",
+              "node_type": "evidence",
+              "service_id": "confirmation-sink"
+            },
+            {
+              "dimension": "runtime",
+              "evidence_id": "BH3-307-E02",
+              "node_id": "evidence:BH3-307-E02",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "runtime",
+              "evidence_id": "BH3-307-E03",
+              "node_id": "evidence:BH3-307-E03",
+              "node_type": "evidence",
+              "service_id": "reservation-worker-07"
+            },
+            {
+              "dimension": "runtime",
+              "evidence_id": "BH3-307-E04",
+              "node_id": "evidence:BH3-307-E04",
+              "node_type": "evidence",
+              "service_id": "reservation-worker-02"
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-307-E05",
+              "node_id": "evidence:BH3-307-E05",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "state",
+              "evidence_id": "BH3-307-E06",
+              "node_id": "evidence:BH3-307-E06",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "state",
+              "evidence_id": "BH3-307-E07",
+              "node_id": "evidence:BH3-307-E07",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "state",
+              "evidence_id": "BH3-307-E08",
+              "node_id": "evidence:BH3-307-E08",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "state",
+              "evidence_id": "BH3-307-E09",
+              "node_id": "evidence:BH3-307-E09",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "node_id": "patron-message-provider",
+              "node_type": "component",
+              "roles": [
+                "sink"
+              ]
+            },
+            {
+              "node_id": "reservation-worker-02",
+              "node_type": "component",
+              "roles": [
+                "service"
+              ]
+            },
+            {
+              "node_id": "reservation-worker-07",
+              "node_type": "component",
+              "roles": [
+                "service"
+              ]
+            },
+            {
+              "node_id": "reservation-worker-pool",
+              "node_type": "component",
+              "roles": [
+                "producer",
+                "endpoint"
+              ]
+            }
+          ],
+          "producer_ids": [
+            "reservation-worker-pool"
+          ],
+          "runtime_source_parity": {
+            "runtime_revision": "declared-img-a91-mod-b21",
+            "source_revision": "src-8f41",
+            "status": "mismatch"
+          },
+          "schema": "chili.provenance-graph.v1",
+          "sink_ids": [
+            "patron-message-provider"
+          ]
+        },
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "runtime",
+          "hypothesis_dimensions": [
+            "code",
+            "data",
+            "runtime",
+            "state"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": false,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": false
+        },
+        "score": 70
+      },
+      "source": "sealed_third_holdout_case_07",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "Worker image mismatch caused duplicate confirmations.",
+            "confidence": 0.6599,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "BH3-307-E03",
+              "BH3-307-E04"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Worker image mismatch observed, offline replay confirms single confirmation.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "code"
+          ],
+          "response_chars": 1750,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "Worker image mismatch caused duplicate confirmations.",
+            "confidence": 0.6599,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "BH3-307-E03",
+              "BH3-307-E04"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Worker image mismatch observed, offline replay confirms single confirmation.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "code"
+          ],
+          "response_chars": 1898,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "Worker image mismatch caused duplicate confirmations.",
+            "confidence": 0.6599,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "BH3-307-E03",
+              "BH3-307-E04"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Worker image mismatch observed, offline replay confirms single confirmation.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "code"
+          ],
+          "response_chars": 2145,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh3-308",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 17522,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 499
+        },
+        {
+          "error": null,
+          "latency_ms": 21289,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 544
+        },
+        {
+          "error": null,
+          "latency_ms": 20368,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 497
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "BH3-308-E04"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Further investigation needed to confirm.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-2",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The original comparison environment is no longer available.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Environment components are individually attributable.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "BH3-308-E04"
+            ]
+          },
+          {
+            "claim": "The comparison service did not record necessary environmental details.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "All environmental components are recorded.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "BH3-308-E09"
+            ]
+          },
+          {
+            "claim": "The qualification gate is incorrectly flagging differences.",
+            "contradict_evidence_ids": [],
+            "dimension": "test_harness",
+            "falsification": "Qualification gate flags no differences.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "BH3-308-E05"
+            ]
+          },
+          {
+            "claim": "The product source and captured page inputs are not truly constant.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Source and input hashes match between runs.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "BH3-308-E02",
+              "BH3-308-E03"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [
+          {
+            "code_revision": "portal-4f6c",
+            "comparison_key": "portal-home-1366x768-en-US",
+            "environment_fingerprints": [
+              "runner-july-browser126-fontset-b",
+              "runner-june-browser125-fontset-a"
+            ],
+            "evidence_ids": [
+              "BH3-308-E02",
+              "BH3-308-E03"
+            ],
+            "input_fingerprint": "sha256:c642d6062d330af35602f25c05d29cbb",
+            "outcome_fingerprints": [
+              "cand-b71e",
+              "ref-44a9"
+            ]
+          }
+        ],
+        "case_id": "bh3-308",
+        "causal_timeline": {
+          "downstream_evidence_ids": [],
+          "earliest_break": {},
+          "events": [
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "code",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-308-E02",
+              "expected_state": "",
+              "observed_at": "2026-06-11T03:18:04Z",
+              "order": 0,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "code",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-308-E03",
+              "expected_state": "",
+              "observed_at": "2026-07-11T03:18:06Z",
+              "order": 1,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-308-E01",
+              "expected_state": "",
+              "observed_at": "2026-07-11T03:20:00Z",
+              "order": 2,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-308-E08",
+              "expected_state": "",
+              "observed_at": "2026-07-11T05:00:00Z",
+              "order": 3,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "original_runner_digest_and_font_inventory_unavailable",
+              "causal_parent_ids": [],
+              "dimension": "runtime",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-308-E04",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 4,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "test_harness",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-308-E05",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 5,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-308-E06",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 6,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-308-E07",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 7,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_state": "environment_components_not_individually_attributable",
+              "causal_parent_ids": [],
+              "dimension": "dependency",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "BH3-308-E09",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 8,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            }
+          ],
+          "ordered_evidence_ids": [
+            "BH3-308-E02",
+            "BH3-308-E03",
+            "BH3-308-E01",
+            "BH3-308-E08",
+            "BH3-308-E04",
+            "BH3-308-E05",
+            "BH3-308-E06",
+            "BH3-308-E07",
+            "BH3-308-E09"
+          ],
+          "runtime_source_parity": {
+            "runtime_revision": "",
+            "source_revision": "",
+            "status": "unknown"
+          },
+          "schema": "chili.causal-timeline.v1"
+        },
+        "conclusion": {
+          "claim": "The original comparison environment is no longer available.",
+          "confidence": 0.4975,
+          "dimension": "runtime",
+          "evidence_ids": [
+            "BH3-308-E04"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Further investigation needed to confirm.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The original comparison environment is no longer available.",
+            "confidence": 0.4975,
+            "confirmatory_weight": 0.99,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Environment components are individually attributable.",
+            "hypothesis_id": "h1",
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "BH3-308-E04"
+            ],
+            "support_weight": 0.99,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The comparison service did not record necessary environmental details.",
+            "confidence": 0.4975,
+            "confirmatory_weight": 0.99,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "All environmental components are recorded.",
+            "hypothesis_id": "h2",
+            "provenance_break_support": false,
+            "status": "supported",
+            "support_evidence_ids": [
+              "BH3-308-E09"
+            ],
+            "support_weight": 0.99,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The qualification gate is incorrectly flagging differences.",
+            "confidence": 0.4845,
+            "confirmatory_weight": 0.94,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "test_harness",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Qualification gate flags no differences.",
+            "hypothesis_id": "h3",
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "BH3-308-E05"
+            ],
+            "support_weight": 0.94,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [
+              "Code causality is not isolated while baseline or source/runtime revision parity differs."
+            ],
+            "claim": "The product source and captured page inputs are not truly constant.",
+            "confidence": 0.49,
+            "confirmatory_weight": 2.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_support": false,
+            "falsification": "Source and input hashes match between runs.",
+            "hypothesis_id": "h4",
+            "provenance_break_support": false,
+            "status": "blocked",
+            "support_evidence_ids": [
+              "BH3-308-E02",
+              "BH3-308-E03"
+            ],
+            "support_weight": 2.0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold code and inputs constant; measure whether changing only data restores the baseline outcome.",
+            "dimension": "data",
+            "experiment_id": "isolate-data",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only clock restores the baseline outcome.",
+            "dimension": "clock",
+            "experiment_id": "isolate-clock",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only state restores the baseline outcome.",
+            "dimension": "state",
+            "experiment_id": "isolate-state",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only config restores the baseline outcome.",
+            "dimension": "config",
+            "experiment_id": "isolate-config",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only dependency restores the baseline outcome.",
+            "dimension": "dependency",
+            "experiment_id": "isolate-dependency",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Qualification gate flags no differences.",
+            "dimension": "test_harness",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {
+          "broken_edge_evidence_ids": [],
+          "component_hash_mismatches": {},
+          "consumer_ids": [],
+          "correlation_groups": {},
+          "edges": [],
+          "first_broken_edge": {},
+          "flow_classification": "no_explicit_break",
+          "independence_clusters": {},
+          "nodes": [
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-308-E01",
+              "node_id": "evidence:BH3-308-E01",
+              "node_type": "evidence",
+              "service_id": "portal-qualification-runner"
+            },
+            {
+              "dimension": "code",
+              "evidence_id": "BH3-308-E02",
+              "node_id": "evidence:BH3-308-E02",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "code",
+              "evidence_id": "BH3-308-E03",
+              "node_id": "evidence:BH3-308-E03",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "runtime",
+              "evidence_id": "BH3-308-E04",
+              "node_id": "evidence:BH3-308-E04",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "test_harness",
+              "evidence_id": "BH3-308-E05",
+              "node_id": "evidence:BH3-308-E05",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-308-E06",
+              "node_id": "evidence:BH3-308-E06",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-308-E07",
+              "node_id": "evidence:BH3-308-E07",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "dimension": "unknown",
+              "evidence_id": "BH3-308-E08",
+              "node_id": "evidence:BH3-308-E08",
+              "node_type": "evidence",
+              "service_id": "portal-layout-monitor"
+            },
+            {
+              "dimension": "dependency",
+              "evidence_id": "BH3-308-E09",
+              "node_id": "evidence:BH3-308-E09",
+              "node_type": "evidence",
+              "service_id": ""
+            },
+            {
+              "node_id": "portal-layout-monitor",
+              "node_type": "component",
+              "roles": [
+                "service"
+              ]
+            },
+            {
+              "node_id": "portal-qualification-runner",
+              "node_type": "component",
+              "roles": [
+                "service"
+              ]
+            }
+          ],
+          "producer_ids": [],
+          "runtime_source_parity": {
+            "runtime_revision": "",
+            "source_revision": "",
+            "status": "unknown"
+          },
+          "schema": "chili.provenance-graph.v1",
+          "sink_ids": []
+        },
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": true,
+          "decision": "patch_root_cause",
+          "dimension": "runtime",
+          "hypothesis_dimensions": [
+            "clock",
+            "code",
+            "config",
+            "data",
+            "dependency",
+            "runtime",
+            "state",
+            "test_harness"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": false,
+          "dimension": false,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": false
+        },
+        "score": 45
+      },
+      "source": "sealed_third_holdout_case_08",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The original comparison environment is no longer available.",
+            "confidence": 0.4975,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "BH3-308-E04"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Evidence suggests the original environment is unavailable.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1850,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The original comparison environment is no longer available.",
+            "confidence": 0.4975,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "BH3-308-E04"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Evidence suggests the original environment is unavailable.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 2006,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The original comparison environment is no longer available.",
+            "confidence": 0.4975,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "BH3-308-E04"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Further investigation needed to confirm.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1829,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    }
+  ],
+  "cases_with_accepted_model_stage": 8,
+  "created_at": "2026-07-11T20:12:41.720880+00:00",
+  "expected_model_calls": 24,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "holdout_score": 76.25,
+  "max_local_latency_ms": 27888,
+  "model": "qwen2.5-coder:7b",
+  "model_output_gate_passed": true,
+  "model_output_usable_rate": 0.9167,
+  "overall_score": 76.25,
+  "premium_calls": 0,
+  "recorded_model_calls": 24,
+  "reference_model": "claude-fable-5",
+  "schema": "chili.realworld-diagnostic-results.v1",
+  "successful_model_calls": 24,
+  "verdict": "needs_improvement"
+}

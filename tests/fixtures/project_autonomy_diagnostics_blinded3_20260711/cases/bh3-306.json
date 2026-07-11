@@ -1,0 +1,142 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh3-306",
+  "problem_statement": "A university library's preservation pipeline began producing PDF/A files that its archive rejects for missing embedded font structures after a routine image rebuild. The application source did not intentionally change, ordinary reading copies remain usable, and the rejection appears downstream of document assembly. Determine the supported cause and a controlled remedy using copied documents and isolated builds only.",
+  "observations": [
+    {
+      "evidence_id": "BH3-306-E01",
+      "statement": "The preservation sink rejected 318 of 327 PDF/A submissions between 12:40Z and 14:10Z with conformance findings that four expected embedded font objects were absent.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "preservation conformance sink export",
+      "independence_key": "archive-rejection-count",
+      "reliability": 0.99,
+      "discriminating": true,
+      "observed_at": "2026-07-08T14:10:00Z",
+      "service_id": "preservation-validator",
+      "sink_id": "long-term-archive"
+    },
+    {
+      "evidence_id": "BH3-306-E02",
+      "statement": "For thesis T-2026-0441, the font-subset stage emitted zero embedded font objects at 11:02:18Z even though assembly had registered four font resources seven seconds earlier.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "retained preservation pipeline spans",
+      "independence_key": "font-stage-first-break",
+      "reliability": 0.99,
+      "discriminating": true,
+      "observed_at": "2026-07-08T11:02:18Z",
+      "sequence": 67,
+      "entity_id": "T-2026-0441",
+      "event_type": "font_subset_completed",
+      "expected_state": "four_font_objects",
+      "actual_state": "zero_font_objects",
+      "producer_id": "document-assembler",
+      "consumer_id": "font-subset-stage",
+      "sink_id": "preservation-validator",
+      "causal_parent_ids": ["BH3-306-E03"],
+      "correlation_id": "preserve-T-2026-0441"
+    },
+    {
+      "evidence_id": "BH3-306-E03",
+      "statement": "The source package for T-2026-0441 contains four licensed embeddable fonts, and an independent font inspector reports intact tables and embedding permissions for each file.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "source package and independent font inspection report",
+      "independence_key": "source-font-integrity",
+      "reliability": 0.99,
+      "discriminating": true,
+      "observed_at": "2026-07-08T10:55:40Z",
+      "sequence": 28,
+      "entity_id": "T-2026-0441",
+      "event_type": "source_package_validated",
+      "artifact_hash": "sha256:8b1c68e0d3f7c60be02cdf9ba185a4e0",
+      "correlation_id": "preserve-T-2026-0441"
+    },
+    {
+      "evidence_id": "BH3-306-E04",
+      "statement": "Build inventories hold application revision preserve-63d1 and settings fingerprint cfg-17c8 constant, but the rebuilt image resolves the transitive font-subsetter package to 4.9.0 instead of 4.8.1.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "signed software inventories from healthy and affected images",
+      "independence_key": "software-inventory-version-delta",
+      "reliability": 1.0,
+      "discriminating": true,
+      "source_revision": "preserve-63d1",
+      "runtime_revision": "preservation-image-9e20",
+      "artifact_hash": "sha256:4a41dd40020c43d208f9d0d651b53ade"
+    },
+    {
+      "evidence_id": "BH3-306-E05",
+      "statement": "Paired isolated builds differing only in font-subsetter 4.8.1 versus 4.9.0 produce respectively four versus zero embedded font objects for all 30 copied affected documents.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "reproducible isolated build matrix",
+      "independence_key": "single-package-version-replay",
+      "reliability": 0.99,
+      "discriminating": true,
+      "comparison_key": "pdfa-font-subset-30-documents",
+      "code_revision": "preserve-63d1",
+      "input_fingerprint": "sha256:5072498241b719386b6ee87fa207fd54",
+      "environment_fingerprint": "builder-d2f0-except-font-subsetter",
+      "outcome_fingerprint": "4.8.1:30-pass|4.9.0:30-fail",
+      "experiment_id": "font-subsetter-paired-build-20260709"
+    },
+    {
+      "evidence_id": "BH3-306-E06",
+      "statement": "Running each package's bundled conformance fixture outside the library application yields an embedded font object with 4.8.1 and an empty font-object set with 4.9.0 under the package's new automatic-pruning default.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "standalone package conformance execution",
+      "independence_key": "standalone-package-fixture",
+      "reliability": 0.98,
+      "discriminating": true,
+      "experiment_id": "font-package-standalone-fixture",
+      "environment_fingerprint": "isolated-package-runner-1b33"
+    },
+    {
+      "evidence_id": "BH3-306-E07",
+      "statement": "The same copied inputs pass when the prior signed dependency bundle is restored without changing application source, document bytes, or preservation settings.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "prior-bundle restoration control",
+      "independence_key": "prior-bundle-negative-control",
+      "reliability": 0.99,
+      "discriminating": true,
+      "experiment_id": "preservation-prior-bundle-control",
+      "artifact_hash": "sha256:46fa4311e9be905a348bf92b821b39e1"
+    },
+    {
+      "evidence_id": "BH3-306-E08",
+      "statement": "All affected workers produce identical failing artifacts, and their operating-system, locale, CPU architecture, and font-directory fingerprints match the last healthy fleet.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "fleet attestation comparison",
+      "independence_key": "host-runtime-negative-control",
+      "reliability": 0.97,
+      "discriminating": true,
+      "artifact_hash": "sha256:5ca10557481c1ed417e93f7b51fd60b1"
+    },
+    {
+      "evidence_id": "BH3-306-E09",
+      "statement": "Reading-copy generation bypasses the font-subset stage and succeeds for the same 318 documents, while object storage and archive transport health remain normal.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "parallel output-path reconciliation",
+      "independence_key": "bypass-path-negative-control",
+      "reliability": 0.97,
+      "discriminating": true,
+      "service_id": "reading-copy-generator"
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

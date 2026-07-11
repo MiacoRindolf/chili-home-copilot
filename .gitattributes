@@ -28,3 +28,8 @@
 *.7z binary
 *.db binary
 *.sqlite binary
+
+# Preserve the exact post-freeze bytes used by the third blinded holdout.
+tests/fixtures/project_autonomy_diagnostics_blinded3_20260711/manifest.json -text
+tests/fixtures/project_autonomy_diagnostics_blinded3_20260711/cases/*.json -text
+tests/fixtures/project_autonomy_diagnostics_blinded3_20260711/oracles/*.json -text

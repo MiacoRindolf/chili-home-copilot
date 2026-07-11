@@ -4,7 +4,7 @@ Date: 2026-07-11
 
 ## Current Verdict
 
-CHILI is now **qualified for local-only development shadow use** on the tested diagnostic and repair contracts. Both untouched independent diagnostic slices remain below the promotion threshold, so it is **not yet proven universally better than Claude Fable 5** on arbitrary complex coding work.
+CHILI is now **qualified for local-only development shadow use** on the tested diagnostic and repair contracts. All three untouched independent diagnostic slices remain below the promotion threshold, so it is **not yet proven universally better than Claude Fable 5** on arbitrary complex coding work.
 
 This distinction is intentional. The current evidence proves that CHILI can diagnose, gather bounded evidence, select owning files, generate local patches, use validation failures as new evidence, repair or roll back its own patch, and pass cross-language development regressions without premium calls. It does not yet provide a blinded, statistically meaningful head-to-head against Fable 5.
 
@@ -30,7 +30,7 @@ This distinction is intentional. The current evidence proves that CHILI can diag
 | Recognized contract repair | Prompt-derived invariants and repository-shape checks for single-flight eviction, cancellation propagation, injected-clock TTL, subscription lifecycle, partial uniqueness, and sibling pre-aggregation | Proven by variant unit tests and six real regression fixtures; deliberately narrow |
 | Production validation repair | Project Autonomy preserves operator/assertion contracts and retries validation locally | Default three rounds, hard maximum five; proven by tests, not yet by a large live inventory |
 | Fable 5 reference accuracy | Active target is `claude-fable-5`; exact candidate responses must bind to provider-native or provider-UI identity evidence | Proven for archive identity and collection controls; no same-task score yet |
-| Independent post-freeze diagnostic holdout | Cases authored only after the tested source SHA was frozen; case/oracle hashes unchanged through the run | Two eight-case slices completed at 88.12/100 and 87.5/100; both below the 90 shadow threshold |
+| Independent post-freeze diagnostic holdout | Cases authored only after the tested source SHA was frozen; case/oracle hashes unchanged through the run | Three eight-case slices completed at 88.12/100, 87.5/100, and 76.25/100; all below the 90 shadow threshold |
 | Direct blinded Fable 5 head-to-head | Same unseen task set independently run by Fable 5 and CHILI, with human adjudication | Missing |
 | Broad language/repository coverage | Initial Python, TypeScript, Dart, and SQL repair coverage | Partial; large repositories, Go, Rust, and mixed stacks remain incomplete |
 | Universal superiority claim | Statistically defensible quality, safety, latency, and cost advantage across broad tasks | Not proven |
@@ -136,6 +136,21 @@ After preserving the untouched result, the disclosed cases became development re
 
 After preserving the untouched result, generic token-boundary matching, evidence polarity, discriminating-proof ranking, compact JSON contracts, fail-closed packet repair, probe-evidence retention, and a model-output promotion gate were added. The full disclosed development replay reached **99.38/100**, with **24/24 successful calls**, **21/24 accepted packets**, at least one accepted packet in **8/8 cases**, and average latency reduced to **15.7 seconds/call**. A final targeted breadth repair scored **100/100** with the promotion gate passing. These are development results and do not rewrite the untouched 87.5/100 score.
 
+### Third Independent Post-Freeze Diagnostic Slice
+
+- Frozen implementation: `851f14119f17703f4c6f7f07430b023c612f4036`
+- Eight newly authored non-trading incidents covering all eight diagnostic dimensions, including two deliberately unresolved instrument-first cases
+- All 17 case/oracle/manifest hashes matched before and after the run; tracked source diff remained empty
+- Local model: `qwen2.5-coder:7b`; investigator, skeptic, and judge for every case; **24/24 calls completed**
+- Accepted model stages: **22/24**; every case had at least one accepted stage; promotion gate passed
+- Untouched score: **76.25/100**; verdict: **needs_improvement**
+- Untouched failures: three causal-family selections plus decision/status over-attribution on both unresolved cases
+- Safety violations: **0**; premium calls: **0**
+- Average local-call latency: **21.33 seconds**; maximum: **27.89 seconds**
+- Reports: `project_ws/AgentOps/FABLE5_CLASS_DIAGNOSTIC_BLINDED_THIRD_RUN.md`, `project_ws/AgentOps/FABLE5_CLASS_DIAGNOSTIC_BLINDED_THIRD_RUN_RECEIPT.md`, and `project_ws/AgentOps/fable5_class_diagnostic_blinded_third_run.json`
+
+This third result is stronger evidence against a current broad parity claim: unlike the second slice, model packets were structurally usable, but causal-family calibration and uncertainty behavior still failed. Any repair replay is development evidence and cannot replace the untouched 76.25/100 score.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
@@ -158,7 +173,7 @@ After preserving the untouched result, generic token-boundary matching, evidence
 
 1. The repair suite has only 13 small development repositories: seven Python and six TypeScript/Dart/SQL. It does not represent large-repository, mixed-stack, Go, or Rust superiority.
 2. Provider-attested Fable 5 history exists, but no provider-attested Fable output exists for the same frozen repair cases. Historical answers are excluded from a blinded score because current CHILI development may be contaminated by their fixes and task mechanics.
-3. Two independent eight-case diagnostic slices scored 88.12/100 and 87.5/100, both below the 90 shadow threshold. Their repaired reruns are development evidence only; 14 more independently authored cases and a fresh post-repair slice remain required.
+3. Three independent eight-case diagnostic slices scored 88.12/100, 87.5/100, and 76.25/100, all below the 90 shadow threshold. Their repaired reruns are development evidence only; six more independently authored cases and a fresh post-repair slice remain required.
 4. Runtime evidence currently covers bounded text logs, aggregate/schema PostgreSQL reads, typed-probe timestamps, structured causal timelines, hashed log correlation identities, and explicit cross-service flow edges. It does not yet provide external trace-backend ingestion, metrics backends, container state, process inspection, automatic producer/consumer role inference for arbitrary systems, or a live production proof using a separately provisioned SELECT-only role.
 5. Local 7B output remains stochastic. The second untouched diagnostic slice produced 0/24 usable packets before compact contracts; the repaired development replay produced 21/24 accepted packets. Five of six final cross-language successes also required recognized deterministic rescue. That demonstrates system resilience, not frontier-model-level free-form reasoning.
 6. Recognized repair synthesis is intentionally narrow. Unknown mechanisms, dependency migrations, frontend visual validation, true concurrency races, and large cross-service refactors remain under-tested.

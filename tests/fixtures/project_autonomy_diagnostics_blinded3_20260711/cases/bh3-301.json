@@ -1,0 +1,139 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh3-301",
+  "problem_statement": "After a routine release, a regional museum's digitization service began publishing sideways portrait derivatives for newly scanned collection items. The archival originals remain correctly oriented, and the public symptom appears only after several asynchronous processing stages. Determine the defensible cause and next action using archived traces and offline replays only; production collection objects must not be mutated during diagnosis.",
+  "observations": [
+    {
+      "evidence_id": "BH3-301-E01",
+      "statement": "The public-image quality monitor first alerted at 2026-07-08T10:31:44Z after 63 of 211 new portrait derivatives had width greater than height while their catalog records declared portrait orientation.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "public-image quality monitor export",
+      "independence_key": "quality-monitor-orientation-ratio",
+      "reliability": 0.98,
+      "discriminating": true,
+      "observed_at": "2026-07-08T10:31:44Z",
+      "service_id": "public-image-monitor",
+      "sink_id": "collection-web"
+    },
+    {
+      "evidence_id": "BH3-301-E02",
+      "statement": "For item M-88421, the transform trace resolved orientation as 1 after its working metadata map had already transitioned from populated to empty; the ingest record for the same item carried orientation value 6.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "archived transform span and ingest envelope",
+      "independence_key": "transform-stage-trace-order",
+      "reliability": 0.99,
+      "discriminating": true,
+      "observed_at": "2026-07-08T09:14:07Z",
+      "sequence": 42,
+      "entity_id": "M-88421",
+      "event_type": "orientation_resolved",
+      "expected_state": "orientation_6_available",
+      "actual_state": "orientation_1_defaulted",
+      "transition_from": "metadata_populated",
+      "transition_to": "metadata_empty",
+      "causal_parent_ids": ["BH3-301-E03"],
+      "service_id": "derivative-transformer",
+      "correlation_id": "museum-M-88421-r17"
+    },
+    {
+      "evidence_id": "BH3-301-E03",
+      "statement": "The immutable ingest envelope for M-88421 contains a valid orientation value of 6, and an independent metadata parser reads the same value from the original TIFF.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "object-store ingest envelope and preservation metadata report",
+      "independence_key": "original-metadata-validation",
+      "reliability": 0.99,
+      "discriminating": true,
+      "observed_at": "2026-07-08T09:12:51Z",
+      "sequence": 11,
+      "entity_id": "M-88421",
+      "event_type": "original_ingested",
+      "artifact_hash": "sha256:2ee2f622178d57d57421835b180ed4ee",
+      "correlation_id": "museum-M-88421-r17"
+    },
+    {
+      "evidence_id": "BH3-301-E04",
+      "statement": "A read-only replay of 24 affected originals produced correctly oriented derivatives at source revision dig-7c12 and sideways derivatives at dig-91af, with identical inputs, dependency bundle, runtime image, and settings.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated replay report signed by preservation QA",
+      "independence_key": "held-input-revision-replay",
+      "reliability": 0.99,
+      "discriminating": true,
+      "comparison_key": "portrait-derivative-replay-24",
+      "input_fingerprint": "sha256:9b68713d8ef0496d5fdb5bd1c1e24382",
+      "environment_fingerprint": "replay-image-44f1-lock-8ac0-settings-10d7",
+      "experiment_id": "museum-offline-replay-20260709",
+      "result_evidence_ids": ["BH3-301-E02", "BH3-301-E05"]
+    },
+    {
+      "evidence_id": "BH3-301-E05",
+      "statement": "The compiled stage plan differs at one local ordering point: dig-7c12 resolves orientation before metadata disposal, while dig-91af disposes the working map before orientation resolution; subsequent resize and encode stages are identical.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "build-generated stage-plan comparison",
+      "independence_key": "compiled-stage-plan-diff",
+      "reliability": 0.98,
+      "discriminating": true,
+      "source_revision": "dig-91af",
+      "artifact_hash": "sha256:72096e118bfcc4fb4c0018974ed94072"
+    },
+    {
+      "evidence_id": "BH3-301-E06",
+      "statement": "Configuration snapshots before and after the release have the same orientation policy, derivative dimensions, and metadata-retention flags.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "configuration registry snapshot diff",
+      "independence_key": "configuration-negative-control",
+      "reliability": 0.97,
+      "discriminating": true,
+      "artifact_hash": "sha256:df73f377bc0c6d31ef05d8e69de7eb90"
+    },
+    {
+      "evidence_id": "BH3-301-E07",
+      "statement": "The dependency lock and native imaging library checksums are identical for the last healthy build and the affected build.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "software bill of materials comparison",
+      "independence_key": "dependency-negative-control",
+      "reliability": 0.98,
+      "discriminating": true,
+      "artifact_hash": "sha256:c8457e308d28c69a18f69f690584c326"
+    },
+    {
+      "evidence_id": "BH3-301-E08",
+      "statement": "The affected revision reproduces on both x86 and arm64 offline workers, while the earlier revision remains correct on both worker types.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "cross-architecture offline replay matrix",
+      "independence_key": "runtime-negative-control",
+      "reliability": 0.96,
+      "discriminating": true,
+      "experiment_id": "museum-arch-matrix-20260709",
+      "comparison_key": "M-88421-cross-architecture"
+    },
+    {
+      "evidence_id": "BH3-301-E09",
+      "statement": "Landscape originals whose embedded orientation is already 1 produce the same output under both revisions, providing an input-shape control for the broader pipeline.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "offline landscape control set",
+      "independence_key": "input-shape-negative-control",
+      "reliability": 0.96,
+      "discriminating": true,
+      "experiment_id": "museum-landscape-control-20260709"
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}
