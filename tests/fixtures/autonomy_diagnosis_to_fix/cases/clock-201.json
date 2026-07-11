@@ -1,0 +1,11 @@
+{
+  "schema": "chili.diagnosis-to-fix-case.v1",
+  "case_id": "clock-201",
+  "prompt": "A deterministic replay frame at 10:15 is rejected as outside regular session on machines running before the open. Diagnose the causal family and implement the minimal fix without changing session boundaries.",
+  "candidate_paths": ["session_gate.py", "formatting.py"],
+  "repo_files": {
+    "session_gate.py": "from datetime import datetime\n\n\ndef in_regular_session(frame_time: datetime) -> bool:\n    \"\"\"Return whether a replay frame belongs to the regular session.\"\"\"\n    hour = datetime.now().hour\n    return 9 <= hour < 16\n",
+    "formatting.py": "def display_hour(value: int) -> str:\n    return f\"{value:02d}:00\"\n",
+    "tests/test_public.py": "from session_gate import in_regular_session\n\n\ndef test_function_is_callable():\n    assert callable(in_regular_session)\n"
+  }
+}

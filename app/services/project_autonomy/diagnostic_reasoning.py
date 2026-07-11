@@ -14,6 +14,8 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from . import diagnostic_probes
+
 
 DIAGNOSTIC_SCHEMA = "chili.diagnostic-case.v1"
 PACKET_SCHEMA = "chili.diagnostic-packet.v1"
@@ -100,6 +102,9 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("resolved settings", 5),
             ("feature gate", 4),
             ("setting toggle", 4),
+            ("gate_enabled", 5),
+            ("_true_values", 5),
+            ("env.get", 4),
         ),
     ),
     (
@@ -191,6 +196,17 @@ _SOURCE_SUFFIXES = frozenset(
     }
 )
 _SKIP_DIRS = frozenset({".git", ".venv", "node_modules", "vendor", "dist", "build", "logs", "data"})
+_DIRECT_SOURCE_SIGNALS = (
+    "datetime.now",
+    "simulated_at",
+    "wall_clock",
+    "source_rows",
+    "sink_rows",
+    "return bool(",
+    "os.environ",
+    "queue depth",
+    "pending depth",
+)
 
 
 def _clip(value: object, limit: int) -> str:
@@ -371,7 +387,14 @@ def collect_repo_evidence(
             if not matched:
                 continue
             score = matched * 10 + (4 if any(term in Path(rel).name.lower() for term in terms) else 0)
-            scored.append((score, rel, line_number, _clip(line.strip(), 420)))
+            context_start = max(0, line_number - 3)
+            context_end = min(len(lines), line_number + 2)
+            snippet = " | ".join(
+                f"{offset + 1}:{lines[offset].strip()}"
+                for offset in range(context_start, context_end)
+                if lines[offset].strip()
+            )
+            scored.append((score, rel, line_number, _clip(snippet, 700)))
             per_file += 1
             if per_file >= 3:
                 break
@@ -389,8 +412,10 @@ def collect_repo_evidence(
                     "kind": "artifact",
                     "provenance": provenance,
                     "independence_key": rel,
-                    "reliability": 0.9,
-                    "discriminating": False,
+                    "reliability": 0.75 if rel.startswith("tests/") else 0.9,
+                    "discriminating": any(
+                        signal in snippet.lower() for signal in _DIRECT_SOURCE_SIGNALS
+                    ),
                 },
                 index,
             )
@@ -481,6 +506,11 @@ def _normalize_experiment(raw: Mapping[str, Any], index: int) -> dict[str, Any]:
     status = str(raw.get("status") or "planned").strip().lower()
     if status not in {"planned", "completed", "blocked"}:
         status = "planned"
+    auto_execute = bool(raw.get("auto_execute"))
+    raw_probe = raw.get("probe") if isinstance(raw.get("probe"), Mapping) else {}
+    probe = diagnostic_probes.normalize_probe_spec(raw_probe, index)
+    if not auto_execute and probe.get("kind") not in diagnostic_probes.PROBE_KINDS:
+        probe = {}
     return {
         "experiment_id": _clean_id(raw.get("experiment_id"), f"experiment-{index + 1}"),
         "hypothesis_ids": [_clean_id(value, "") for value in raw.get("hypothesis_ids") or [] if str(value).strip()][:12],
@@ -496,7 +526,8 @@ def _normalize_experiment(raw: Mapping[str, Any], index: int) -> dict[str, Any]:
         "result_evidence_ids": [_clean_id(value, "") for value in raw.get("result_evidence_ids") or [] if str(value).strip()][:20],
         "safety": safety,
         "status": status,
-        "auto_execute": bool(raw.get("auto_execute")),
+        "auto_execute": auto_execute,
+        "probe": probe if probe.get("kind") else {},
     }
 
 
@@ -568,6 +599,14 @@ def _independent_weight(records: Iterable[Mapping[str, Any]]) -> float:
     return round(sum(strongest.values()), 4)
 
 
+def _confirmatory_weight(records: Iterable[Mapping[str, Any]]) -> float:
+    return _independent_weight(
+        item
+        for item in records
+        if str(item.get("independence_key") or "") != "operator_prompt"
+    )
+
+
 def _experiment_result_ids(packet: Mapping[str, Any]) -> set[str]:
     return {
         str(evidence_id)
@@ -622,6 +661,17 @@ def _validate_packet(case: Mapping[str, Any], packet: Mapping[str, Any]) -> list
         experiment_ids.add(experiment_id)
         if item.get("auto_execute") and item.get("safety") not in AUTO_SAFE_LEVELS:
             errors.append(f"{experiment_id} requests unsafe automatic execution.")
+        probe = item.get("probe") if isinstance(item.get("probe"), Mapping) else {}
+        if item.get("auto_execute") and not probe:
+            errors.append(f"{experiment_id} requests automatic execution without a typed probe.")
+        if probe:
+            errors.extend(
+                f"{experiment_id}: {error}"
+                for error in diagnostic_probes.validate_probe_spec(
+                    probe,
+                    str(item.get("safety") or ""),
+                )
+            )
         unknown_hypotheses = sorted(
             {str(value) for value in item.get("hypothesis_ids") or [] if str(value) not in hypothesis_ids}
         )
@@ -726,6 +776,7 @@ def evaluate_packet(
         support_records = [evidence[value] for value in support_ids if value in evidence]
         contradict_records = [evidence[value] for value in contradict_ids if value in evidence]
         support_weight = _independent_weight(support_records)
+        confirmatory_weight = _confirmatory_weight(support_records)
         contradict_weight = _independent_weight(contradict_records)
         discriminating = any(
             bool(record.get("discriminating")) or str(record.get("evidence_id")) in completed_result_ids
@@ -737,7 +788,11 @@ def evaluate_packet(
         )
         if contradict_weight >= 0.7:
             status = "refuted"
-        elif support_weight >= 1.25 and (discriminating or direct_artifact):
+        elif (
+            confirmatory_weight >= 1.25 and (discriminating or direct_artifact)
+        ) or (
+            confirmatory_weight >= 0.85 and discriminating and direct_artifact
+        ):
             status = "supported"
         elif support_weight > 0:
             status = "provisional"
@@ -757,6 +812,7 @@ def evaluate_packet(
                 "status": status,
                 "confidence": round(confidence, 4),
                 "support_weight": support_weight,
+                "confirmatory_weight": confirmatory_weight,
                 "contradict_weight": contradict_weight,
                 "discriminating_evidence": discriminating,
                 "blockers": blockers,
@@ -767,6 +823,7 @@ def evaluate_packet(
     requested = packet["conclusion"]
     conclusion_id = str(requested.get("hypothesis_id") or "")
     chosen = results_by_id.get(conclusion_id)
+    requested_choice_id = conclusion_id
     if chosen is None and hypothesis_results:
         chosen = max(
             hypothesis_results,
@@ -776,6 +833,17 @@ def evaluate_packet(
             ),
         )
         conclusion_id = str(chosen.get("hypothesis_id") or "")
+    if chosen is not None and chosen.get("status") != "supported":
+        supported = [item for item in hypothesis_results if item.get("status") == "supported"]
+        if supported:
+            chosen = max(
+                supported,
+                key=lambda item: (
+                    float(item.get("confirmatory_weight") or 0),
+                    float(item.get("support_weight") or 0),
+                ),
+            )
+            conclusion_id = str(chosen.get("hypothesis_id") or "")
 
     requested_status = str(requested.get("status") or "provisional")
     if chosen is None:
@@ -816,6 +884,13 @@ def evaluate_packet(
         decision = "investigate"
 
     recommendations = recommend_counterfactuals(case, packet, hypothesis_results, drift)
+    selected_evidence_ids = list(requested.get("evidence_ids") or [])
+    selected_reason = str(requested.get("reason") or "")
+    if conclusion_id and conclusion_id != requested_choice_id and chosen is not None:
+        selected_evidence_ids = list(chosen.get("support_evidence_ids") or [])
+        selected_reason = (
+            "Deterministic evidence gate selected a stronger supported competing hypothesis."
+        )
     return {
         "schema": REPORT_SCHEMA,
         "case_id": case["case_id"],
@@ -829,8 +904,8 @@ def evaluate_packet(
             "dimension": str(chosen.get("dimension") or "unknown") if chosen else "unknown",
             "claim": str(chosen.get("claim") or "") if chosen else "",
             "confidence": float(chosen.get("confidence") or 0) if chosen else 0.0,
-            "evidence_ids": list(requested.get("evidence_ids") or []),
-            "reason": str(requested.get("reason") or ""),
+            "evidence_ids": selected_evidence_ids,
+            "reason": selected_reason,
         },
         "decision": decision,
         "retractions": retractions,
@@ -915,7 +990,7 @@ def _packet_shape() -> str:
         '"experiments":[{"experiment_id":"x1","hypothesis_ids":["h1"],"changed_dimensions":["code"],'
         '"held_constant_dimensions":["data"],"expected_if_true":"...","expected_if_false":"...",'
         '"evidence_required":["..."],"result_evidence_ids":[],"safety":"read_only|isolated|runtime|live",'
-        '"status":"planned|completed|blocked","auto_execute":false}],'
+        '"status":"planned|completed|blocked","auto_execute":false,"probe":{}}],'
         '"conclusion":{"hypothesis_id":"h1","status":"confirmed|provisional|inconclusive|rejected",'
         '"evidence_ids":["e1"],"reason":"..."}}'
     )
@@ -927,7 +1002,11 @@ def investigator_prompt(raw_case: Mapping[str, Any]) -> str:
         "You are the investigator in a local-only diagnostic team. Return JSON only. "
         "Generate competing hypotheses across different dimensions. Link every claim to supplied evidence ids. "
         "A hypothesis without a falsification experiment is invalid. Same code and input with different outcomes "
-        "means baseline drift, not proof of a code regression. Never request automatic runtime or live mutation.\n\n"
+        "means baseline drift, not proof of a code regression. Never request automatic runtime or live mutation. "
+        "When evidence is insufficient, you may set auto_execute=true only for a typed probe from the supplied "
+        "catalog. Raw shell commands do not exist. search is fixed-string; targeted_test must name one selector "
+        "under tests/. Use read_only for repo_state/search/file_excerpt/git_history/git_diff and isolated for "
+        "compile/targeted_test.\n\n"
         f"Required shape:\n{_packet_shape()}\n\nCase:\n{_case_prompt(case)}"
     )
 
@@ -951,7 +1030,10 @@ def judge_prompt(raw_case: Mapping[str, Any], packet: Mapping[str, Any], report:
         "You are the judge in a local-only diagnostic team. Return one final full diagnostic packet as JSON only. "
         "Confirm only a hypothesis with independent, discriminating evidence and no unresolved contradiction. "
         "If baseline drift remains unexplained, reject code attribution and choose instrument-first. "
-        "Preserve safe falsification experiments and never request automatic runtime or live mutation.\n\n"
+        "Preserve safe falsification experiments and never request automatic runtime or live mutation. "
+        "If the evidence gate says instrument_first, choose at most two auto_execute typed probes from this "
+        "catalog: repo_state, fixed-string search, bounded file_excerpt, git_history, git_diff, isolated compile, "
+        "or one targeted_test selector under tests/. Raw commands are forbidden.\n\n"
         f"Required shape:\n{_packet_shape()}\n\nCase:\n{_case_prompt(case)}\n\n"
         f"Challenged packet:\n{json.dumps(packet, indent=2, sort_keys=True)}\n\n"
         f"Deterministic evaluation:\n{json.dumps(report, indent=2, sort_keys=True)}"
@@ -966,15 +1048,18 @@ def run_local_diagnostic_debate(
     model_call: ModelCall | None,
     *,
     stages_to_run: Sequence[str] = ("investigator", "skeptic", "judge"),
+    previous_report: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     case = normalize_case(raw_case)
     packet = heuristic_packet(case)
     prior_conclusion = case.get("prior_conclusion")
-    prior_report = (
-        {"conclusion": dict(prior_conclusion)}
-        if isinstance(prior_conclusion, Mapping) and prior_conclusion.get("status")
-        else None
-    )
+    prior_report = dict(previous_report) if isinstance(previous_report, Mapping) else None
+    if prior_report is None:
+        prior_report = (
+            {"conclusion": dict(prior_conclusion)}
+            if isinstance(prior_conclusion, Mapping) and prior_conclusion.get("status")
+            else None
+        )
     report = evaluate_packet(case, packet, previous_report=prior_report)
     stages: list[dict[str, Any]] = []
     all_retractions = list(report.get("retractions") or [])

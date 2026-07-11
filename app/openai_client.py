@@ -724,6 +724,11 @@ def _local_code_configured() -> bool:
     )
 
 
+def is_local_code_configured() -> bool:
+    """Public capability check for premium-independent coding callers."""
+    return _local_code_configured()
+
+
 def _is_local_code_model(model: str | None) -> bool:
     if not model or not (settings.chili_code_local_model or "").strip():
         return False

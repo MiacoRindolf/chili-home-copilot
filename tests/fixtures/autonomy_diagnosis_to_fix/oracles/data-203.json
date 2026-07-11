@@ -1,0 +1,8 @@
+{
+  "case_id": "data-203",
+  "expected_dimension": "data",
+  "expected_file": "replay_copy.py",
+  "hidden_files": {
+    "tests/test_hidden_data.py": "from replay_copy import mirror_window\n\n\ndef test_source_rows_are_copied_to_empty_sink():\n    source = {\"XYZ\": [{\"bid\": 10.0}, {\"bid\": 10.1}]}\n    sink = {}\n    assert mirror_window(source, sink, \"XYZ\") == 2\n    assert sink[\"XYZ\"] == source[\"XYZ\"]\n    assert sink[\"XYZ\"] is not source[\"XYZ\"]\n\n\ndef test_existing_sink_is_replaced_by_source_window():\n    source = {\"XYZ\": [{\"bid\": 11.0}]}\n    sink = {\"XYZ\": [{\"bid\": 1.0}]}\n    assert mirror_window(source, sink, \"XYZ\") == 1\n    assert sink[\"XYZ\"] == [{\"bid\": 11.0}]\n"
+  }
+}

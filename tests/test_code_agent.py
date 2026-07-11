@@ -11,6 +11,7 @@ from app.services.code_brain.agent import (
     _validate_diff,
     _build_plan_prompt,
     _build_edit_prompt,
+    _extract_full_file_replacement,
 )
 
 
@@ -110,6 +111,52 @@ class TestBuildEditPrompt:
         prompt = _build_edit_prompt("f.py", "x = 1", "change x", [])
         assert "MUST be based ONLY" in prompt
         assert "placeholder" in prompt.lower() or "Do NOT" in prompt
+
+
+class TestFullFileFallback:
+    def test_accepts_one_similar_syntax_valid_replacement(self):
+        original = "def value():\n    return 1\n"
+        reply = "```python\ndef value():\n    return 2\n```"
+
+        result = _extract_full_file_replacement(reply, "example.py", original)
+
+        assert result["new_content"] == "def value():\n    return 2\n"
+        assert "accepted guarded full-file fallback" in result["warnings"][0]
+
+    def test_rejects_multiple_fences_and_invalid_python(self):
+        original = "def value():\n    return 1\n"
+        multiple = _extract_full_file_replacement(
+            "```python\ndef value():\n    return 2\n```\n```text\nextra\n```",
+            "example.py",
+            original,
+        )
+        invalid = _extract_full_file_replacement(
+            "```python\ndef value(:\n    return 2\n```",
+            "example.py",
+            original,
+        )
+
+        assert multiple["new_content"] is None
+        assert invalid["new_content"] is None
+        assert "syntax error" in invalid["warnings"][0]
+
+    def test_rejects_diff_fence_instead_of_treating_it_as_non_python_source(self):
+        original = "export const value = 1;\nexport const stable = true;\n"
+        reply = (
+            "```diff\n"
+            "--- a/example.js\n"
+            "+++ b/example.js\n"
+            "@@ -1,2 +1,2 @@\n"
+            "-export const value = 1;\n"
+            "+export const value = 2;\n"
+            " export const stable = true;\n"
+            "```"
+        )
+
+        result = _extract_full_file_replacement(reply, "example.js", original)
+
+        assert result["new_content"] is None
+        assert "unified diff" in result["warnings"][0]
 
 
 class TestGatherContext:

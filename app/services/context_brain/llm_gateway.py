@@ -346,6 +346,15 @@ def _is_code_frontier_purpose(purpose: str) -> bool:
     return p.startswith("code_dispatch") or p in _CODE_FRONTIER_EXACT_PURPOSES
 
 
+def _is_autonomy_local_purpose(purpose: str) -> bool:
+    p = (purpose or "").strip()
+    return (
+        _is_code_frontier_purpose(p)
+        or p == "code_search"
+        or p.startswith("project_")
+    )
+
+
 def _local_only_code_routing(purpose: str, requested: bool | None) -> bool:
     """Resolve the premium-independent production policy for code work.
 
@@ -355,7 +364,7 @@ def _local_only_code_routing(purpose: str, requested: bool | None) -> bool:
     """
     if requested is not None:
         return bool(requested)
-    if not _is_code_frontier_purpose(purpose):
+    if not _is_autonomy_local_purpose(purpose):
         return False
     return not bool(
         getattr(settings, "chili_code_premium_fallback_enabled", False)

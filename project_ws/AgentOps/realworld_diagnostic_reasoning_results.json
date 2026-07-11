@@ -1,15 +1,15 @@
 {
-  "average_local_latency_ms": 26811.29,
+  "average_local_latency_ms": 27561.29,
   "cases": [
     {
       "case_id": "cal-001",
       "model_calls": [
         {
           "error": null,
-          "latency_ms": 26266,
+          "latency_ms": 18621,
           "ok": true,
           "stage": "judge",
-          "tokens_out": 334
+          "tokens_out": 336
         }
       ],
       "packet": {
@@ -20,7 +20,7 @@
             "e3"
           ],
           "hypothesis_id": "h-clock",
-          "reason": "The hypothesis is supported by the evidence and falsification criteria are met.",
+          "reason": "The hypothesis is supported by the evidence and experiments conducted.",
           "status": "confirmed"
         },
         "experiments": [
@@ -49,6 +49,7 @@
             "hypothesis_ids": [
               "h-clock"
             ],
+            "probe": {},
             "result_evidence_ids": [],
             "safety": "isolated",
             "status": "planned"
@@ -85,7 +86,7 @@
             "e3"
           ],
           "hypothesis_id": "h-clock",
-          "reason": "The hypothesis is supported by the evidence and falsification criteria are met.",
+          "reason": "The hypothesis is supported by the evidence and experiments conducted.",
           "status": "confirmed"
         },
         "decision": "patch_root_cause",
@@ -95,6 +96,7 @@
             "blockers": [],
             "claim": "The observed failure is primarily caused by clock drift.",
             "confidence": 0.7442,
+            "confirmatory_weight": 2.91,
             "contradict_evidence_ids": [],
             "contradict_weight": 0,
             "dimension": "clock",
@@ -155,11 +157,11 @@
               "e3"
             ],
             "hypothesis_id": "h-clock",
-            "reason": "The hypothesis is supported by the evidence and falsification criteria are met.",
+            "reason": "The hypothesis is supported by the evidence and experiments conducted.",
             "status": "confirmed"
           },
           "errors": [],
-          "response_chars": 1434,
+          "response_chars": 1443,
           "retractions": [],
           "stage": "judge"
         }
@@ -170,10 +172,10 @@
       "model_calls": [
         {
           "error": null,
-          "latency_ms": 20008,
+          "latency_ms": 21366,
           "ok": true,
           "stage": "judge",
-          "tokens_out": 328
+          "tokens_out": 331
         }
       ],
       "packet": {
@@ -184,7 +186,7 @@
             "e3"
           ],
           "hypothesis_id": "h-data",
-          "reason": "The hypothesis is supported by the evidence and falsification criteria are met.",
+          "reason": "The hypothesis is supported by the evidence and falsification criteria.",
           "status": "confirmed"
         },
         "experiments": [
@@ -213,6 +215,7 @@
             "hypothesis_ids": [
               "h-data"
             ],
+            "probe": {},
             "result_evidence_ids": [],
             "safety": "isolated",
             "status": "planned"
@@ -249,7 +252,7 @@
             "e3"
           ],
           "hypothesis_id": "h-data",
-          "reason": "The hypothesis is supported by the evidence and falsification criteria are met.",
+          "reason": "The hypothesis is supported by the evidence and falsification criteria.",
           "status": "confirmed"
         },
         "decision": "patch_root_cause",
@@ -259,6 +262,7 @@
             "blockers": [],
             "claim": "The observed failure is primarily caused by data drift.",
             "confidence": 0.7442,
+            "confirmatory_weight": 2.91,
             "contradict_evidence_ids": [],
             "contradict_weight": 0,
             "dimension": "data",
@@ -319,11 +323,11 @@
               "e3"
             ],
             "hypothesis_id": "h-data",
-            "reason": "The hypothesis is supported by the evidence and falsification criteria are met.",
+            "reason": "The hypothesis is supported by the evidence and falsification criteria.",
             "status": "confirmed"
           },
           "errors": [],
-          "response_chars": 1383,
+          "response_chars": 1393,
           "retractions": [],
           "stage": "judge"
         }
@@ -334,10 +338,10 @@
       "model_calls": [
         {
           "error": null,
-          "latency_ms": 37352,
+          "latency_ms": 39972,
           "ok": true,
           "stage": "judge",
-          "tokens_out": 600
+          "tokens_out": 724
         }
       ],
       "packet": {
@@ -349,7 +353,7 @@
           ],
           "hypothesis_id": "h-data",
           "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
-          "status": "provisional"
+          "status": "confirmed"
         },
         "experiments": [
           {
@@ -377,6 +381,7 @@
             "hypothesis_ids": [
               "h-data"
             ],
+            "probe": {},
             "result_evidence_ids": [],
             "safety": "isolated",
             "status": "planned"
@@ -406,6 +411,7 @@
             "hypothesis_ids": [
               "h-code"
             ],
+            "probe": {},
             "result_evidence_ids": [],
             "safety": "isolated",
             "status": "planned"
@@ -435,6 +441,7 @@
             "hypothesis_ids": [
               "h-test_harness"
             ],
+            "probe": {},
             "result_evidence_ids": [],
             "safety": "isolated",
             "status": "planned"
@@ -519,6 +526,7 @@
             "blockers": [],
             "claim": "The observed failure is primarily caused by data drift.",
             "confidence": 0.7468,
+            "confirmatory_weight": 2.95,
             "contradict_evidence_ids": [],
             "contradict_weight": 0,
             "dimension": "data",
@@ -539,6 +547,7 @@
             ],
             "claim": "The observed failure is primarily caused by code drift.",
             "confidence": 0.49,
+            "confirmatory_weight": 0.98,
             "contradict_evidence_ids": [],
             "contradict_weight": 0,
             "dimension": "code",
@@ -555,6 +564,7 @@
             "blockers": [],
             "claim": "The observed failure is primarily caused by test_harness drift.",
             "confidence": 0.4949,
+            "confirmatory_weight": 0.98,
             "contradict_evidence_ids": [],
             "contradict_weight": 0,
             "dimension": "test_harness",
@@ -689,7 +699,7 @@
       "split": "calibration",
       "stages": [
         {
-          "accepted": false,
+          "accepted": true,
           "conclusion": {
             "claim": "The observed failure is primarily caused by data drift.",
             "confidence": 0.7468,
@@ -704,7 +714,7 @@
             "status": "confirmed"
           },
           "errors": [],
-          "response_chars": 2662,
+          "response_chars": 3187,
           "retractions": [],
           "stage": "judge"
         }
@@ -715,10 +725,10 @@
       "model_calls": [
         {
           "error": null,
-          "latency_ms": 30774,
+          "latency_ms": 33802,
           "ok": true,
           "stage": "judge",
-          "tokens_out": 533
+          "tokens_out": 540
         }
       ],
       "packet": {
@@ -728,7 +738,7 @@
             "e3"
           ],
           "hypothesis_id": "h-runtime",
-          "reason": "The evidence strongly supports that runtime drift is the primary cause of the observed failure.",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
           "status": "confirmed"
         },
         "experiments": [
@@ -757,6 +767,7 @@
             "hypothesis_ids": [
               "h-runtime"
             ],
+            "probe": {},
             "result_evidence_ids": [],
             "safety": "isolated",
             "status": "planned"
@@ -786,6 +797,7 @@
             "hypothesis_ids": [
               "h-test_harness"
             ],
+            "probe": {},
             "result_evidence_ids": [],
             "safety": "isolated",
             "status": "planned"
@@ -830,7 +842,7 @@
             "e3"
           ],
           "hypothesis_id": "h-runtime",
-          "reason": "The evidence strongly supports that runtime drift is the primary cause of the observed failure.",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
           "status": "confirmed"
         },
         "decision": "patch_root_cause",
@@ -840,6 +852,7 @@
             "blockers": [],
             "claim": "The observed failure is primarily caused by runtime drift.",
             "confidence": 0.6622,
+            "confirmatory_weight": 1.96,
             "contradict_evidence_ids": [],
             "contradict_weight": 0,
             "dimension": "runtime",
@@ -857,33 +870,21 @@
             "blockers": [],
             "claim": "The observed failure is primarily caused by test_harness drift.",
             "confidence": 0.4872,
+            "confirmatory_weight": 0.95,
             "contradict_evidence_ids": [],
             "contradict_weight": 0,
             "dimension": "test_harness",
             "discriminating_evidence": true,
             "falsification": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
             "hypothesis_id": "h-test_harness",
-            "status": "provisional",
+            "status": "supported",
             "support_evidence_ids": [
               "e1"
             ],
             "support_weight": 0.95
           }
         ],
-        "next_experiments": [
-          {
-            "action": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
-            "dimension": "test_harness",
-            "experiment_id": "falsify-h-test_harness",
-            "required_evidence": [
-              "held constants",
-              "changed dimension",
-              "expected outcomes",
-              "actual outcome"
-            ],
-            "safety": "isolated"
-          }
-        ],
+        "next_experiments": [],
         "premium_calls": 0,
         "retractions": [],
         "schema": "chili.diagnostic-report.v1",
@@ -928,11 +929,11 @@
               "e3"
             ],
             "hypothesis_id": "h-runtime",
-            "reason": "The evidence strongly supports that runtime drift is the primary cause of the observed failure.",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
             "status": "confirmed"
           },
           "errors": [],
-          "response_chars": 2367,
+          "response_chars": 2384,
           "retractions": [],
           "stage": "judge"
         }
@@ -943,20 +944,17 @@
       "model_calls": [
         {
           "error": null,
-          "latency_ms": 32172,
+          "latency_ms": 34698,
           "ok": true,
           "stage": "judge",
-          "tokens_out": 546
+          "tokens_out": 629
         }
       ],
       "packet": {
         "conclusion": {
-          "evidence_ids": [
-            "e2",
-            "e3"
-          ],
+          "evidence_ids": [],
           "hypothesis_id": "h-config",
-          "reason": "The hypothesis that the observed failure is primarily caused by config drift is supported by evidence e2 and e3, which show a clear difference in outcomes between worker A and B when only the config dimension differs.",
+          "reason": "The hypothesis is supported by evidence e2 and e3, which indicate that the environment difference (CHILI_EXPERIMENTAL_GATE=1 vs 0) leads to different outcomes. Changing only the config dimension in isolated processes swaps the outcomes while revision, fixture, dependency versions, and clock remain fixed.",
           "status": "confirmed"
         },
         "experiments": [
@@ -985,6 +983,7 @@
             "hypothesis_ids": [
               "h-config"
             ],
+            "probe": {},
             "result_evidence_ids": [],
             "safety": "isolated",
             "status": "planned"
@@ -1014,6 +1013,7 @@
             "hypothesis_ids": [
               "h-runtime"
             ],
+            "probe": {},
             "result_evidence_ids": [],
             "safety": "isolated",
             "status": "planned"
@@ -1071,12 +1071,9 @@
           "claim": "The observed failure is primarily caused by config drift.",
           "confidence": 0.6633,
           "dimension": "config",
-          "evidence_ids": [
-            "e2",
-            "e3"
-          ],
+          "evidence_ids": [],
           "hypothesis_id": "h-config",
-          "reason": "The hypothesis that the observed failure is primarily caused by config drift is supported by evidence e2 and e3, which show a clear difference in outcomes between worker A and B when only the config dimension differs.",
+          "reason": "The hypothesis is supported by evidence e2 and e3, which indicate that the environment difference (CHILI_EXPERIMENTAL_GATE=1 vs 0) leads to different outcomes. Changing only the config dimension in isolated processes swaps the outcomes while revision, fixture, dependency versions, and clock remain fixed.",
           "status": "confirmed"
         },
         "decision": "patch_root_cause",
@@ -1086,6 +1083,7 @@
             "blockers": [],
             "claim": "The observed failure is primarily caused by config drift.",
             "confidence": 0.6633,
+            "confirmatory_weight": 1.97,
             "contradict_evidence_ids": [],
             "contradict_weight": 0,
             "dimension": "config",
@@ -1103,6 +1101,7 @@
             "blockers": [],
             "claim": "The observed failure is primarily caused by runtime drift.",
             "confidence": 0.4845,
+            "confirmatory_weight": 0.94,
             "contradict_evidence_ids": [],
             "contradict_weight": 0,
             "dimension": "runtime",
@@ -1217,13 +1216,13 @@
           "baseline_drift": true,
           "decision": true,
           "dimension": true,
-          "grounded": true,
+          "grounded": false,
           "hypothesis_breadth": true,
           "premium_independence": true,
           "safety": true,
           "status": true
         },
-        "score": 100
+        "score": 90
       },
       "source": "sealed_config_drift_variant",
       "split": "holdout",
@@ -1234,16 +1233,13 @@
             "claim": "The observed failure is primarily caused by config drift.",
             "confidence": 0.6633,
             "dimension": "config",
-            "evidence_ids": [
-              "e2",
-              "e3"
-            ],
+            "evidence_ids": [],
             "hypothesis_id": "h-config",
-            "reason": "The hypothesis that the observed failure is primarily caused by config drift is supported by evidence e2 and e3, which show a clear difference in outcomes between worker A and B when only the config dimension differs.",
+            "reason": "The hypothesis is supported by evidence e2 and e3, which indicate that the environment difference (CHILI_EXPERIMENTAL_GATE=1 vs 0) leads to different outcomes. Changing only the config dimension in isolated processes swaps the outcomes while revision, fixture, dependency versions, and clock remain fixed.",
             "status": "confirmed"
           },
           "errors": [],
-          "response_chars": 2458,
+          "response_chars": 2841,
           "retractions": [],
           "stage": "judge"
         }
@@ -1254,10 +1250,10 @@
       "model_calls": [
         {
           "error": null,
-          "latency_ms": 19261,
+          "latency_ms": 21073,
           "ok": true,
           "stage": "judge",
-          "tokens_out": 325
+          "tokens_out": 333
         }
       ],
       "packet": {
@@ -1268,8 +1264,8 @@
             "e3"
           ],
           "hypothesis_id": "h-state",
-          "reason": "The hypothesis is supported by the evidence and falsification experiment.",
-          "status": "confirmed"
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
         },
         "experiments": [
           {
@@ -1297,6 +1293,7 @@
             "hypothesis_ids": [
               "h-state"
             ],
+            "probe": {},
             "result_evidence_ids": [],
             "safety": "isolated",
             "status": "planned"
@@ -1333,7 +1330,7 @@
             "e3"
           ],
           "hypothesis_id": "h-state",
-          "reason": "The hypothesis is supported by the evidence and falsification experiment.",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
           "status": "confirmed"
         },
         "decision": "patch_root_cause",
@@ -1343,6 +1340,7 @@
             "blockers": [],
             "claim": "The observed failure is primarily caused by state drift.",
             "confidence": 0.7436,
+            "confirmatory_weight": 2.9,
             "contradict_evidence_ids": [],
             "contradict_weight": 0,
             "dimension": "state",
@@ -1403,11 +1401,11 @@
               "e3"
             ],
             "hypothesis_id": "h-state",
-            "reason": "The hypothesis is supported by the evidence and falsification experiment.",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
             "status": "confirmed"
           },
           "errors": [],
-          "response_chars": 1391,
+          "response_chars": 1414,
           "retractions": [],
           "stage": "judge"
         }
@@ -1418,7 +1416,7 @@
       "model_calls": [
         {
           "error": null,
-          "latency_ms": 21846,
+          "latency_ms": 23397,
           "ok": true,
           "stage": "judge",
           "tokens_out": 338
@@ -1431,7 +1429,7 @@
             "e2"
           ],
           "hypothesis_id": "h-code",
-          "reason": "The baseline drift is not isolated to code. Further experiments are needed to determine the root cause.",
+          "reason": "The baseline drift is unexplained; code causality cannot be isolated.",
           "status": "inconclusive"
         },
         "experiments": [
@@ -1460,6 +1458,7 @@
             "hypothesis_ids": [
               "h-code"
             ],
+            "probe": {},
             "result_evidence_ids": [],
             "safety": "isolated",
             "status": "planned"
@@ -1511,7 +1510,7 @@
             "e2"
           ],
           "hypothesis_id": "h-code",
-          "reason": "The baseline drift is not isolated to code. Further experiments are needed to determine the root cause.",
+          "reason": "The baseline drift is unexplained; code causality cannot be isolated.",
           "status": "inconclusive"
         },
         "decision": "instrument_first",
@@ -1523,6 +1522,7 @@
             ],
             "claim": "The observed failure is primarily caused by code drift.",
             "confidence": 0.49,
+            "confirmatory_weight": 1.8,
             "contradict_evidence_ids": [],
             "contradict_weight": 0,
             "dimension": "code",
@@ -1659,24 +1659,24 @@
               "e2"
             ],
             "hypothesis_id": "h-code",
-            "reason": "The baseline drift is not isolated to code. Further experiments are needed to determine the root cause.",
+            "reason": "The baseline drift is unexplained; code causality cannot be isolated.",
             "status": "inconclusive"
           },
           "errors": [],
-          "response_chars": 1468,
+          "response_chars": 1452,
           "retractions": [],
           "stage": "judge"
         }
       ]
     }
   ],
-  "created_at": "2026-07-11T09:24:21.519895+00:00",
+  "created_at": "2026-07-11T10:26:24.492443+00:00",
   "fable5_head_to_head_run": false,
   "fable5_parity_claim": false,
-  "holdout_score": 98.75,
-  "max_local_latency_ms": 37352,
+  "holdout_score": 96.25,
+  "max_local_latency_ms": 39972,
   "model": "qwen2.5-coder:7b",
-  "overall_score": 97.86,
+  "overall_score": 96.43,
   "premium_calls": 0,
   "reference_model": "claude-fable-5",
   "schema": "chili.realworld-diagnostic-results.v1",

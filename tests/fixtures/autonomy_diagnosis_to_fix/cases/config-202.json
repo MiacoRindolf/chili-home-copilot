@@ -1,0 +1,11 @@
+{
+  "schema": "chili.diagnosis-to-fix-case.v1",
+  "case_id": "config-202",
+  "prompt": "Two workers on the same revision disagree because one receives CHILI_EXPERIMENTAL_GATE=0, yet the gate is reported enabled. Diagnose and fix the environment-value interpretation without renaming the flag.",
+  "candidate_paths": ["feature_gate.py", "env_report.py"],
+  "repo_files": {
+    "feature_gate.py": "_TRUE_VALUES = {\"1\", \"true\", \"yes\", \"on\"}\n\n\ndef gate_enabled(env: dict[str, str], name: str) -> bool:\n    value = env.get(name, \"0\")\n    return bool(value)\n",
+    "env_report.py": "def present_setting(name: str, value: str) -> str:\n    return f\"{name}={value}\"\n",
+    "tests/test_public.py": "from feature_gate import gate_enabled\n\n\ndef test_explicit_one_is_enabled():\n    name = \"CHILI_EXPERIMENTAL_GATE\"\n    assert gate_enabled({name: \"1\"}, name) is True\n"
+  }
+}

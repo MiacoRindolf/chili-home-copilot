@@ -229,10 +229,12 @@ def test_build_local_plan_runs_local_diagnostic_council_before_planning(monkeypa
         plan = orchestrator.build_local_plan(db, run, repo)
 
         assert plan["files"][0]["path"] == "app/service.py"
-        assert len(calls) == 2
+        assert len(calls) == 3
         assert calls[0]["options"]["format"] == "json"
         assert "local-only diagnostic team" in calls[0]["messages"][1]["content"]
-        assert "Diagnostic evidence gate:" in calls[1]["messages"][1]["content"]
+        assert calls[1]["options"]["format"] == "json"
+        assert "diagnostic_probe" in calls[1]["messages"][1]["content"]
+        assert "Diagnostic evidence gate:" in calls[2]["messages"][1]["content"]
         artifact = (
             db.query(ProjectAutonomyArtifact)
             .filter(
@@ -242,8 +244,18 @@ def test_build_local_plan_runs_local_diagnostic_council_before_planning(monkeypa
             .one()
         )
         payload = json.loads(artifact.content_json or "{}")
-        assert len(payload["model_calls"]) == 1
-        assert payload["council_mode"] == "adaptive_judge"
+        assert len(payload["model_calls"]) == 2
+        assert payload["council_mode"] == "adaptive_probe_judge"
+        assert payload["probe_run"]["evidence"]
+        probe_artifact = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(
+                ProjectAutonomyArtifact.run_id == run.run_id,
+                ProjectAutonomyArtifact.name == "typed_diagnostic_probe_run",
+            )
+            .one()
+        )
+        assert "requested_probes" in (probe_artifact.content_json or "")
         assert payload["premium_calls"] == 0
     finally:
         db.close()

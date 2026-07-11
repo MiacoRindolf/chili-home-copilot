@@ -317,7 +317,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="qwen2.5-coder:7b")
     parser.add_argument("--case", action="append")
     parser.add_argument("--timeout", type=float, default=150.0)
-    parser.add_argument("--num-predict", type=int, default=600)
+    parser.add_argument("--num-predict", type=int, default=900)
     parser.add_argument("--num-ctx", type=int, default=8192)
     parser.add_argument("--keep-alive", default="20m")
     parser.add_argument(

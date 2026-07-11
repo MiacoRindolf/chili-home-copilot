@@ -98,6 +98,9 @@ def _cache_policy_salt(purpose: str | None) -> str:
             "default_cheap": getattr(settings, "chili_llm_default_cheap_model", ""),
             "escalation": getattr(settings, "chili_llm_escalation_model", ""),
             "purpose_overrides": getattr(settings, "chili_llm_purpose_model_overrides_json", ""),
+            "local_code_model": getattr(settings, "chili_code_local_model", ""),
+            "premium_fallback": getattr(settings, "chili_code_premium_fallback_enabled", False),
+            "frontier_enabled": getattr(settings, "chili_code_frontier_enabled", False),
         }, sort_keys=True, default=str)
     except Exception:
         return ""
@@ -230,6 +233,7 @@ def call_llm(
     purpose: str | None = None,
     user_id: int | None = None,
     return_meta: bool = False,
+    local_only: bool | None = None,
 ) -> "str | dict[str, Any]":
     """Call the configured LLM and return the reply text (or empty string on failure).
 
@@ -245,14 +249,37 @@ def call_llm(
     instead of just the reply text — used by call sites that want to
     record outcomes.
     """
-    from ..openai_client import chat as llm_chat, is_configured
-
-    if not is_configured():
-        logger.debug("[llm_caller] LLM not configured")
-        return {"reply": "", "gateway_log_id": None} if return_meta else ""
-
     if not purpose:
         purpose = _infer_purpose_from_stack()
+
+    from ..openai_client import (
+        chat as llm_chat,
+        is_configured,
+        is_local_code_configured,
+    )
+
+    effective_local_only = bool(local_only)
+    autonomy_local_purpose = False
+    if purpose:
+        try:
+            from .context_brain.llm_gateway import (
+                _is_autonomy_local_purpose,
+                _local_only_code_routing,
+            )
+
+            autonomy_local_purpose = _is_autonomy_local_purpose(purpose)
+            effective_local_only = _local_only_code_routing(purpose, local_only)
+        except Exception:
+            effective_local_only = bool(local_only)
+    if effective_local_only:
+        if not is_local_code_configured():
+            logger.debug("[llm_caller] local coding model not configured")
+            return {"reply": "", "gateway_log_id": None} if return_meta else ""
+    elif not is_configured() and not (
+        autonomy_local_purpose and is_local_code_configured()
+    ):
+        logger.debug("[llm_caller] cloud LLM not configured")
+        return {"reply": "", "gateway_log_id": None} if return_meta else ""
 
     cache_key = None
     inflight_owner = False
@@ -290,6 +317,7 @@ def call_llm(
                     "trace_id": trace_id,
                     "strict_escalation": False,
                     "user_id": user_id,
+                    "local_only": effective_local_only,
                 }
                 if system_prompt is not None:
                     gw_kwargs["system_prompt"] = system_prompt
@@ -309,6 +337,7 @@ def call_llm(
                 "max_tokens": max_tokens,
                 "trace_id": trace_id,
                 "strict_escalation": False,
+                "local_only": effective_local_only,
             }
             if system_prompt is not None:
                 chat_kwargs["system_prompt"] = system_prompt

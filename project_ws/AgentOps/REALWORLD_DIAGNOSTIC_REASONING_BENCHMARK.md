@@ -1,23 +1,23 @@
 # Real-World Diagnostic Reasoning Benchmark
 
-- Run: 2026-07-11T09:24:21.519895+00:00
+- Run: 2026-07-11T10:26:24.492443+00:00
 - Local model: `qwen2.5-coder:7b`
 - Reference family: `claude-fable-5`
-- Overall score: **97.9/100**
-- Holdout score: **98.8/100**
+- Overall score: **96.4/100**
+- Holdout score: **96.2/100**
 - Verdict: **shadow_ready**
 - Premium calls: **0**
-- Average local model latency: **26.8s/case**
-- Maximum local model latency: **37.4s**
+- Average local model latency: **27.6s/case**
+- Maximum local model latency: **40.0s**
 - Fable 5 parity claim: **No**. This run does not include a blinded Fable 5 head-to-head.
 
 | Case | Split | Score | Dimension | Decision | Status | Valid stages |
 |---|---:|---:|---|---|---|---:|
 | cal-001 | calibration | 95 | clock | patch_root_cause | confirmed | 1/1 |
 | cal-002 | calibration | 95 | data | patch_root_cause | confirmed | 1/1 |
-| cal-003 | calibration | 100 | data | patch_root_cause | confirmed | 0/1 |
+| cal-003 | calibration | 100 | data | patch_root_cause | confirmed | 1/1 |
 | hold-101 | holdout | 100 | runtime | patch_root_cause | confirmed | 1/1 |
-| hold-102 | holdout | 100 | config | patch_root_cause | confirmed | 1/1 |
+| hold-102 | holdout | 90 | config | patch_root_cause | confirmed | 1/1 |
 | hold-103 | holdout | 95 | state | patch_root_cause | confirmed | 1/1 |
 | hold-104 | holdout | 100 | code | instrument_first | inconclusive | 1/1 |
 

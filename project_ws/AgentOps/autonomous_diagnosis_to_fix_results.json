@@ -1,0 +1,867 @@
+{
+  "average_case_duration_ms": 56221.67,
+  "cases": [
+    {
+      "baseline_hidden_tests": {
+        "duration_ms": 601,
+        "exit_code": 1,
+        "output": "F\n================================== FAILURES ===================================\n________________ test_replay_frame_inside_session_is_accepted _________________\n\n    def test_replay_frame_inside_session_is_accepted():\n>       assert in_regular_session(datetime(2026, 7, 10, 10, 15)) is True\nE       assert False is True\nE        +  where False = in_regular_session(datetime.datetime(2026, 7, 10, 10, 15))\nE        +    where datetime.datetime(2026, 7, 10, 10, 15) = datetime(2026, 7, 10, 10, 15)\n\ntests\\test_hidden_clock.py:7: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_hidden_clock.py::test_replay_frame_inside_session_is_accepted\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.08s",
+        "passed": false
+      },
+      "case_id": "clock-201",
+      "checks": {
+        "baseline_hidden_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "hidden_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "diagnosis_dimension": "clock",
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "source-3",
+            "source-4"
+          ],
+          "hypothesis_id": "h-state",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "state"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing state changes or restores the outcome.",
+            "experiment_id": "isolate-state",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-state"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "clock"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing clock changes or restores the outcome.",
+            "experiment_id": "isolate-clock",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-clock"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by state drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h-state",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "source-3",
+              "source-4"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "support_evidence_ids": [
+              "source-1",
+              "source-2"
+            ]
+          }
+        ],
+        "problem_statement": "A deterministic replay frame at 10:15 is rejected as outside regular session on machines running before the open. Diagnose the causal family and implement the minimal fix without changing session boundaries.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "baseline_drift": [],
+        "case_id": "clock-201",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by clock drift.",
+          "confidence": 0.4737,
+          "dimension": "clock",
+          "evidence_ids": [
+            "source-1",
+            "source-2"
+          ],
+          "hypothesis_id": "h-clock",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "status": "confirmed"
+        },
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.5833,
+            "confirmatory_weight": 0.75,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h-state",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "source-3",
+              "source-4"
+            ],
+            "support_weight": 1.4
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.4737,
+            "confirmatory_weight": 0.9,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "status": "supported",
+            "support_evidence_ids": [
+              "source-1",
+              "source-2"
+            ],
+            "support_weight": 0.9
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "dimension": "state",
+            "experiment_id": "falsify-h-state",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_status": "confirmed",
+      "duration_ms": 48025,
+      "hidden_tests": {
+        "duration_ms": 543,
+        "exit_code": 0,
+        "output": "...                                                                      [100%]\n3 passed in 0.02s",
+        "passed": true
+      },
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 30641,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"A deterministic replay frame at 10:15 is rejected as outside regular session on machines running before the open. Diagnose the causal family and implement the minimal fix without changing session boundaries.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h-state\",\n      \"claim\":\"The observed failure is primarily caused by state drift.\",\n      \"dimension\":\"state\",\n      \"support_evidence_ids\":[\"operator-1\",\"operator-2\",\"source-3\",\"source-4\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing state does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\":\"h-clock\",\n      \"claim\":\"The observed failure is primarily caused by clock drift.\",\n      \"dimension\":\"clock\",\n      \"support_evidence_ids\":[\"source-1\",\"source-2\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing clock does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-state\",\n      \"hypothesis_ids\":[\"h-state\"],\n      \"changed_dimensions\":[\"state\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing state changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{\"probe_id\":\"p1\",\"kind\":\"repo_state|search|file_excerpt|git_history|git_diff|compile|targeted_test\",\"paths\":[\"session_gate.py\"],\"query\":\"fixed text\",\"selector\":\"tests/test_public.py::test_function_is_callable\",\"dimension\":\"code\"}\n    },\n    {\n      \"experiment_id\":\"isolate-clock\",\n      \"hypothesis_ids\":[\"h-clock\"],\n      \"changed_dimensions\":[\"clock\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing clock changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{\"probe_id\":\"p2\",\"kind\":\"repo_state|search|file_excerpt|git_history|git_diff|compile|targeted_test\",\"paths\":[\"session_gate.py\"],\"query\":\"fixed text\",\"selector\":\"tests/test_public.py::test_function_is_callable\",\"dimension\":\"code\"}\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h-clock\",\n    \"status\":\"confirmed\",\n    \"evidence_ids\":[\"source-1\",\"source-2\"],\n    \"reason\":\"Deterministic evidence",
+          "stage": "diagnosis_judge",
+          "tokens_out": 650,
+          "wall_ms": 30641
+        },
+        {
+          "error": null,
+          "latency_ms": 10851,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The observed failure is primarily caused by clock drift. The function `in_regular_session` in `session_gate.py` checks if the current hour is within the regular session (9 AM to 4 PM). However, this check uses the current system time, which can be affected by clock drift, leading to incorrect session determination.\",\n  \"files\": [\n    {\n      \"path\": \"session_gate.py\",\n      \"action\": \"modify\",\n      \"description\": \"Replace `datetime.now().hour` with `frame_time.hour` to use the provided frame time instead of the current system time.\"\n    }\n  ],\n  \"notes\": \"This fix ensures that the session determination is based on the provided frame time rather than the potentially drifted system time. This change does not alter the session boundaries but corrects the logic for determining if a frame belongs to the regular session.\"\n}",
+          "stage": "plan",
+          "tokens_out": 182,
+          "wall_ms": 10851
+        },
+        {
+          "error": null,
+          "latency_ms": 4236,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    hour = datetime.now().hour\n=======\n    hour = frame_time.hour\n>>>>>>> REPLACE\n```",
+          "stage": "edit",
+          "tokens_out": 26,
+          "wall_ms": 4236
+        }
+      ],
+      "patch_applied": true,
+      "patch_warnings": [],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 530,
+        "exit_code": 0,
+        "output": ".                                                                        [100%]\n1 passed in 0.01s",
+        "passed": true
+      },
+      "repair_attempts": [],
+      "score": 100,
+      "selected_file": "session_gate.py"
+    },
+    {
+      "baseline_hidden_tests": {
+        "duration_ms": 533,
+        "exit_code": 1,
+        "output": "F\n================================== FAILURES ===================================\n___________________ test_explicit_false_values_are_disabled ___________________\n\n    def test_explicit_false_values_are_disabled():\n        name = \"CHILI_EXPERIMENTAL_GATE\"\n        for value in (\"0\", \"false\", \"no\", \"off\", \"\"):\n>           assert gate_enabled({name: value}, name) is False\nE           AssertionError: assert True is False\nE            +  where True = gate_enabled({'CHILI_EXPERIMENTAL_GATE': '0'}, 'CHILI_EXPERIMENTAL_GATE')\n\ntests\\test_hidden_config.py:7: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_hidden_config.py::test_explicit_false_values_are_disabled\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.08s",
+        "passed": false
+      },
+      "case_id": "config-202",
+      "checks": {
+        "baseline_hidden_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "hidden_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "diagnosis_dimension": "config",
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-2",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-5",
+            "source-6",
+            "source-7",
+            "source-8"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "config"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing config changes or restores the outcome.",
+            "experiment_id": "isolate-config",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by config drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "config",
+            "falsification": "Hold every other dimension constant and show that changing config does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-2",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-4",
+              "source-5",
+              "source-6",
+              "source-7",
+              "source-8"
+            ]
+          }
+        ],
+        "problem_statement": "Two workers on the same revision disagree because one receives CHILI_EXPERIMENTAL_GATE=0, yet the gate is reported enabled. Diagnose and fix the environment-value interpretation without renaming the flag.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "baseline_drift": [],
+        "case_id": "config-202",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by config drift.",
+          "confidence": 0.7619,
+          "dimension": "config",
+          "evidence_ids": [
+            "operator-2",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-5",
+            "source-6",
+            "source-7",
+            "source-8"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by config drift.",
+            "confidence": 0.7619,
+            "confirmatory_weight": 2.55,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "config",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing config does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-2",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-4",
+              "source-5",
+              "source-6",
+              "source-7",
+              "source-8"
+            ],
+            "support_weight": 3.2
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-config",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_status": "confirmed",
+      "duration_ms": 37191,
+      "hidden_tests": {
+        "duration_ms": 465,
+        "exit_code": 0,
+        "output": "...                                                                      [100%]\n3 passed in 0.02s",
+        "passed": true
+      },
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 19324,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"Two workers on the same revision disagree because one receives CHILI_EXPERIMENTAL_GATE=0, yet the gate is reported enabled. Diagnose and fix the environment-value interpretation without renaming the flag.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by config drift.\",\n      \"dimension\":\"config\",\n      \"support_evidence_ids\":[\"operator-2\",\"source-1\",\"source-2\",\"source-3\",\"source-4\",\"source-5\",\"source-6\",\"source-7\",\"source-8\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing config does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-config\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"config\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"state\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing config changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\"\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"confirmed\",\n    \"evidence_ids\":[\"operator-2\",\"source-1\",\"source-2\",\"source-3\",\"source-4\",\"source-5\",\"source-6\",\"source-7\",\"source-8\"],\n    \"reason\":\"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 385,
+          "wall_ms": 19324
+        },
+        {
+          "error": null,
+          "latency_ms": 9376,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The issue arises because the `gate_enabled` function in `feature_gate.py` converts any non-empty string to `True`, including '0'. This causes the gate to be reported as enabled when it should not be.\",\n  \"files\": [\n    {\n      \"path\": \"feature_gate.py\",\n      \"action\": \"modify\",\n      \"description\": \"Update the `gate_enabled` function to correctly interpret '0' as `False`.\"\n    }\n  ],\n  \"notes\": \"The flag name 'CHILI_EXPERIMENTAL_GATE' should not be renamed as per the request. The fix involves modifying the logic in `feature_gate.py` to handle the specific value '0' appropriately.\"\n}",
+          "stage": "plan",
+          "tokens_out": 150,
+          "wall_ms": 9376
+        },
+        {
+          "error": null,
+          "latency_ms": 6483,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\ndef gate_enabled(env: dict[str, str], name: str) -> bool:\n    value = env.get(name, \"0\")\n    return bool(value)\n=======\ndef gate_enabled(env: dict[str, str], name: str) -> bool:\n    value = env.get(name, \"0\")\n    return value.lower() in _TRUE_VALUES\n>>>>>>> REPLACE\n```",
+          "stage": "edit",
+          "tokens_out": 80,
+          "wall_ms": 6483
+        }
+      ],
+      "patch_applied": true,
+      "patch_warnings": [],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 459,
+        "exit_code": 0,
+        "output": ".                                                                        [100%]\n1 passed in 0.01s",
+        "passed": true
+      },
+      "repair_attempts": [],
+      "score": 100,
+      "selected_file": "feature_gate.py"
+    },
+    {
+      "baseline_hidden_tests": {
+        "duration_ms": 537,
+        "exit_code": 1,
+        "output": "F\n================================== FAILURES ===================================\n__________________ test_source_rows_are_copied_to_empty_sink __________________\n\n    def test_source_rows_are_copied_to_empty_sink():\n        source = {\"XYZ\": [{\"bid\": 10.0}, {\"bid\": 10.1}]}\n        sink = {}\n>       assert mirror_window(source, sink, \"XYZ\") == 2\nE       AssertionError: assert 0 == 2\nE        +  where 0 = mirror_window({'XYZ': [{'bid': 10.0}, {'bid': 10.1}]}, {'XYZ': []}, 'XYZ')\n\ntests\\test_hidden_data.py:7: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_hidden_data.py::test_source_rows_are_copied_to_empty_sink\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.08s",
+        "passed": false
+      },
+      "case_id": "data-203",
+      "checks": {
+        "baseline_hidden_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "hidden_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "diagnosis_dimension": "data",
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "source-1",
+            "source-3",
+            "source-4",
+            "source-5",
+            "source-8"
+          ],
+          "hypothesis_id": "h-data",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing data changes or restores the outcome.",
+            "experiment_id": "isolate-data",
+            "held_constant_dimensions": [
+              "code",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-data"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "unknown"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing unknown changes or restores the outcome.",
+            "experiment_id": "isolate-unknown",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-unknown"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "test_harness"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing test_harness changes or restores the outcome.",
+            "experiment_id": "isolate-test_harness",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime"
+            ],
+            "hypothesis_ids": [
+              "h-test_harness"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "source-1",
+              "source-3",
+              "source-4",
+              "source-5",
+              "source-8"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "unknown",
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h-unknown",
+            "support_evidence_ids": [
+              "source-6",
+              "source-7"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "test_harness",
+            "falsification": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
+            "hypothesis_id": "h-test_harness",
+            "support_evidence_ids": [
+              "source-2"
+            ]
+          }
+        ],
+        "problem_statement": "A replay mirror reports zero copied quotes although the source relation contains rows and the sink starts empty. Diagnose the source/sink failure and repair the copy operation without fabricating rows.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "baseline_drift": [],
+        "case_id": "data-203",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by data drift.",
+          "confidence": 0.697,
+          "dimension": "data",
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "source-1",
+            "source-3",
+            "source-4",
+            "source-5",
+            "source-8"
+          ],
+          "hypothesis_id": "h-data",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.697,
+            "confirmatory_weight": 1.65,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "source-1",
+              "source-3",
+              "source-4",
+              "source-5",
+              "source-8"
+            ],
+            "support_weight": 2.3
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "confidence": 0.4737,
+            "confirmatory_weight": 0.9,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "unknown",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h-unknown",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "source-6",
+              "source-7"
+            ],
+            "support_weight": 0.9
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "confidence": 0.4286,
+            "confirmatory_weight": 0.75,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "test_harness",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
+            "hypothesis_id": "h-test_harness",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "source-2"
+            ],
+            "support_weight": 0.75
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "dimension": "unknown",
+            "experiment_id": "falsify-h-unknown",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
+            "dimension": "test_harness",
+            "experiment_id": "falsify-h-test_harness",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_status": "confirmed",
+      "duration_ms": 83449,
+      "hidden_tests": {
+        "duration_ms": 479,
+        "exit_code": 0,
+        "output": "...                                                                      [100%]\n3 passed in 0.01s",
+        "passed": true
+      },
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 31392,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"A replay mirror reports zero copied quotes although the source relation contains rows and the sink starts empty. Diagnose the source/sink failure and repair the copy operation without fabricating rows.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h-data\",\n      \"claim\":\"The observed failure is primarily caused by data drift.\",\n      \"dimension\":\"data\",\n      \"support_evidence_ids\":[\"operator-1\",\"operator-2\",\"source-1\",\"source-3\",\"source-4\",\"source-5\",\"source-8\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing data does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\":\"h-unknown\",\n      \"claim\":\"The observed failure is primarily caused by unknown drift.\",\n      \"dimension\":\"unknown\",\n      \"support_evidence_ids\":[\"source-6\",\"source-7\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing unknown does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\":\"h-test_harness\",\n      \"claim\":\"The observed failure is primarily caused by test_harness drift.\",\n      \"dimension\":\"test_harness\",\n      \"support_evidence_ids\":[\"source-2\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing test_harness does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-data\",\n      \"hypothesis_ids\":[\"h-data\"],\n      \"changed_dimensions\":[\"data\"],\n      \"held_constant_dimensions\":[\"code\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing data changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{\"probe_id\":\"p1\",\"kind\":\"repo_state|search|file_excerpt|git_history|git_diff|compile|targeted_test\",\"paths\":[\"replay_copy.py\"],\"query\":\"fixed text\",\"selector\":\"tests/test_public.py::test_empty_source_copies_zero_rows\",\"dimension\":\"code|data|clock|state|config|dependency|runtime|test_harness|unknown\"}\n    },\n    {\n      \"experiment_id\":\"isolate-unknown\",\n      \"hypothesis_ids\":[\"h-unknown\"],\n      \"changed_dimensions\":[\"unknown\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing unknown changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isol",
+          "stage": "diagnosis_judge",
+          "tokens_out": 650,
+          "wall_ms": 31392
+        },
+        {
+          "error": null,
+          "latency_ms": 8985,
+          "ok": true,
+          "response": "{\n    \"analysis\": \"The observed failure is primarily caused by data drift. The `mirror_window` function in `replay_copy.py` does not actually copy any rows from the source to the sink, which leads to zero copied quotes even though the source contains rows.\",\n    \"files\": [\n        {\n            \"path\": \"replay_copy.py\",\n            \"action\": \"modify\",\n            \"description\": \"Modify the `mirror_window` function to correctly copy rows from the source to the sink.\"\n        }\n    ],\n    \"notes\": \"The next experiment should hold every other dimension constant and show that changing unknown does not change the outcome. Additionally, it's important to ensure that the data drift is properly addressed in the baseline.\"\n}",
+          "stage": "plan",
+          "tokens_out": 151,
+          "wall_ms": 8986
+        },
+        {
+          "error": null,
+          "latency_ms": 7186,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    rows = list(sink_rows.get(symbol, []))\n    sink_rows[symbol] = rows\n    return len(rows)\n=======\n    source_rows_for_symbol = source_rows.get(symbol, [])\n    rows_to_copy = [row for row in source_rows_for_symbol if row not in sink_rows.get(symbol, [])]\n    sink_rows[symbol].extend(rows_to_copy)\n    return len(rows_to_copy)\n>>>>>>> REPLACE\n```",
+          "stage": "edit",
+          "tokens_out": 92,
+          "wall_ms": 7186
+        },
+        {
+          "error": null,
+          "latency_ms": 10308,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The failure in the test is due to a KeyError when trying to extend `sink_rows[symbol]` because `symbol` ('XYZ') does not exist in `sink_rows`. This indicates that the function `mirror_window` is not properly handling cases where the symbol is not already present in the sink.\",\n  \"files\": [\n    {\n      \"path\": \"replay_copy.py\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the symbol exists in `sink_rows` before attempting to extend it. Initialize an empty list if the symbol is not present.\"\n    }\n  ],\n  \"notes\": \"The selected file is replay_copy.py because it contains the implementation of the function causing the failure. The other candidate, metrics.py, does not contain the relevant code for this issue.\"\n}",
+          "stage": "repair_plan_1",
+          "tokens_out": 170,
+          "wall_ms": 10308
+        },
+        {
+          "error": null,
+          "latency_ms": 5440,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    sink_rows[symbol].extend(rows_to_copy)\n=======\n    if symbol not in sink_rows:\n        sink_rows[symbol] = []\n    sink_rows[symbol].extend(rows_to_copy)\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1",
+          "tokens_out": 49,
+          "wall_ms": 5440
+        },
+        {
+          "error": null,
+          "latency_ms": 11517,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The failure in the test `test_existing_sink_is_replaced_by_source_window` indicates that the function `mirror_window` is not correctly updating the sink when it already contains rows for the given symbol. The test expects the sink to be updated with the new rows from the source, but instead, it appends the new rows to the existing ones.\",\n  \"files\": [\n    {\n      \"path\": \"replay_copy.py\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that when copying rows into the sink, any existing rows for the symbol are replaced rather than appended.\"\n    }\n  ],\n  \"notes\": \"The previous selected file was `replay_copy.py`, but it seems that the issue is not with this file. The failure is likely due to a misunderstanding in how the function should handle updating the sink. The correct approach is to replace any existing rows for the symbol with the new rows from the source.\"\n}",
+          "stage": "repair_plan_2",
+          "tokens_out": 198,
+          "wall_ms": 11517
+        },
+        {
+          "error": null,
+          "latency_ms": 4446,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    sink_rows[symbol].extend(rows_to_copy)\n=======\n    sink_rows[symbol] = rows_to_copy\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_2",
+          "tokens_out": 33,
+          "wall_ms": 4446
+        }
+      ],
+      "patch_applied": true,
+      "patch_warnings": [],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 497,
+        "exit_code": 0,
+        "output": ".                                                                        [100%]\n1 passed in 0.01s",
+        "passed": true
+      },
+      "repair_attempts": [
+        {
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The failure in the test is due to a KeyError when trying to extend `sink_rows[symbol]` because `symbol` ('XYZ') does not exist in `sink_rows`. This indicates that the function `mirror_window` is not properly handling cases where the symbol is not already present in the sink.",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Ensure that the symbol exists in `sink_rows` before attempting to extend it. Initialize an empty list if the symbol is not present.",
+                "path": "replay_copy.py"
+              }
+            ],
+            "notes": "The selected file is replay_copy.py because it contains the implementation of the function causing the failure. The other candidate, metrics.py, does not contain the relevant code for this issue."
+          },
+          "round": 1,
+          "selected_file": "replay_copy.py",
+          "warnings": []
+        },
+        {
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The failure in the test `test_existing_sink_is_replaced_by_source_window` indicates that the function `mirror_window` is not correctly updating the sink when it already contains rows for the given symbol. The test expects the sink to be updated with the new rows from the source, but instead, it appends the new rows to the existing ones.",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Ensure that when copying rows into the sink, any existing rows for the symbol are replaced rather than appended.",
+                "path": "replay_copy.py"
+              }
+            ],
+            "notes": "The previous selected file was `replay_copy.py`, but it seems that the issue is not with this file. The failure is likely due to a misunderstanding in how the function should handle updating the sink. The correct approach is to replace any existing rows for the symbol with the new rows from the source."
+          },
+          "round": 2,
+          "selected_file": "replay_copy.py",
+          "warnings": []
+        }
+      ],
+      "score": 100,
+      "selected_file": "replay_copy.py"
+    }
+  ],
+  "created_at": "2026-07-11T10:04:58.070146+00:00",
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "model": "qwen2.5-coder:7b",
+  "overall_score": 100.0,
+  "premium_calls": 0,
+  "reference_family": "claude-fable-5",
+  "schema": "chili.diagnosis-to-fix-results.v1",
+  "verdict": "shadow_ready"
+}

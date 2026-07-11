@@ -386,6 +386,47 @@ def test_unsafe_automatic_experiment_is_rejected():
     assert any("unsafe automatic execution" in error for error in report["errors"])
 
 
+def test_inert_schema_placeholder_probe_is_dropped_but_executable_one_is_rejected():
+    placeholder_kind = (
+        "repo_state|search|file_excerpt|git_history|git_diff|compile|targeted_test"
+    )
+    base_experiment = {
+        "experiment_id": "x-clock",
+        "hypothesis_ids": ["h-clock"],
+        "changed_dimensions": ["clock"],
+        "expected_if_true": "The replay becomes stable.",
+        "expected_if_false": "The mismatch remains.",
+        "safety": "read_only",
+        "status": "planned",
+        "probe": {"probe_id": "placeholder", "kind": placeholder_kind},
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-clock",
+                "claim": "The replay reads wall clock time.",
+                "dimension": "clock",
+                "support_evidence_ids": ["clock-result", "caller-source"],
+                "falsification": "Inject replay time while holding code constant.",
+            }
+        ],
+        "experiments": [{**base_experiment, "auto_execute": False}],
+        "conclusion": {"hypothesis_id": "h-clock", "status": "confirmed"},
+    }
+
+    normalized = reasoning.normalize_packet(packet)
+    accepted = reasoning.evaluate_packet(_sim_clock_case(), normalized)
+    rejected = reasoning.evaluate_packet(
+        _sim_clock_case(),
+        {**packet, "experiments": [{**base_experiment, "auto_execute": True}]},
+    )
+
+    assert normalized["experiments"][0]["probe"] == {}
+    assert accepted["valid"] is True
+    assert rejected["valid"] is False
+    assert any("Unknown diagnostic probe kind" in error for error in rejected["errors"])
+
+
 def test_local_debate_runs_investigator_skeptic_and_judge_without_premium_calls():
     calls = []
     data_packet = {

@@ -89,15 +89,22 @@ class LoopResult:
 
 
 def _llm_chat(messages: list[dict], system_prompt: str, trace_id: str, max_tokens: int = 2000) -> dict:
-    from ...openai_client import chat as _chat, is_configured
-    if not is_configured():
-        return {"reply": "", "model": "none"}
+    from ...openai_client import chat as _chat, is_local_code_configured
+    if not is_local_code_configured():
+        return {
+            "reply": "",
+            "model": "local_unavailable",
+            "local_only": True,
+            "premium_calls": 0,
+        }
     return _chat(
         messages=messages,
         system_prompt=system_prompt,
         trace_id=trace_id,
         user_message=messages[0].get("content", "") if messages else "",
         max_tokens=max_tokens,
+        strict_escalation=False,
+        local_only=True,
     )
 
 

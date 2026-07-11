@@ -221,6 +221,7 @@ def _build_edit_prompt(file_path: str, file_content: str, change_description: st
         ">>>>>>> REPLACE",
         "",
         "STRICT RULES:",
+        "- Every edit MUST be based ONLY on the provided file content and required change.",
         "- SEARCH text must be copied character-for-character from the file below (indentation matters).",
         "- SEARCH text must appear EXACTLY ONCE in the file — include enough surrounding lines to make it unique.",
         "- Several small blocks are better than one large block.",
@@ -385,6 +386,73 @@ _SEARCH_REPLACE_RE = re.compile(
 def _parse_search_replace_blocks(reply: str) -> List[tuple]:
     """Extract (search, replace) pairs from the model reply."""
     return [(m.group(1), m.group(2)) for m in _SEARCH_REPLACE_RE.finditer(reply or "")]
+
+
+def _extract_full_file_replacement(
+    reply: str,
+    file_path: str,
+    original: str,
+) -> Dict[str, Any]:
+    """Accept one guarded full-file fence from small local models.
+
+    The fallback is intentionally stricter than SEARCH/REPLACE: exactly one
+    fenced block, bounded size change, meaningful similarity to the supplied
+    source, and syntax validation for Python. The caller still generates the
+    unified diff mechanically and runs normal validation/tests.
+    """
+    fences = re.findall(
+        r"```([A-Za-z0-9_+.-]*)[ \t]*\r?\n(.*?)```",
+        reply or "",
+        re.DOTALL,
+    )
+    if len(fences) != 1:
+        return {
+            "new_content": None,
+            "warnings": [f"full-file fallback requires exactly one fenced block, found {len(fences)}"],
+        }
+    language, candidate = fences[0]
+    if language.lower() in {"diff", "patch", "udiff"} or (
+        candidate.startswith("--- ") and "\n+++ " in candidate and "\n@@" in candidate
+    ):
+        return {
+            "new_content": None,
+            "warnings": ["full-file fallback rejected a unified diff fence"],
+        }
+    if original.endswith("\n") and not candidate.endswith("\n"):
+        candidate += "\n"
+    if not candidate.strip() or candidate.rstrip() == original.rstrip():
+        return {"new_content": None, "warnings": ["full-file fallback made no change"]}
+    original_size = max(1, len(original))
+    size_ratio = len(candidate) / original_size
+    if size_ratio < 0.25 or size_ratio > 4.0:
+        return {
+            "new_content": None,
+            "warnings": [f"full-file fallback size ratio {size_ratio:.2f} is outside 0.25..4.0"],
+        }
+    import difflib
+
+    similarity = difflib.SequenceMatcher(None, original, candidate).ratio()
+    if similarity < 0.35:
+        return {
+            "new_content": None,
+            "warnings": [f"full-file fallback similarity {similarity:.2f} is below 0.35"],
+        }
+    if Path(file_path).suffix.lower() == ".py":
+        import ast
+
+        try:
+            ast.parse(candidate, filename=file_path)
+        except SyntaxError as exc:
+            return {
+                "new_content": None,
+                "warnings": [f"full-file fallback Python syntax error: {exc}"],
+            }
+    return {
+        "new_content": candidate,
+        "warnings": [
+            f"accepted guarded full-file fallback similarity={similarity:.2f} size_ratio={size_ratio:.2f}"
+        ],
+    }
 
 
 _UNICODE_FOLD = (
@@ -601,10 +669,15 @@ async def run_code_agent(
     = augmented). Gateway failures fail closed so paid calls keep their
     budget, policy, and observability controls.
     """
-    from ...openai_client import is_configured
+    from ...openai_client import is_local_code_configured
 
-    if not is_configured():
-        return {"error": "LLM not configured. Set LLM_API_KEY or PREMIUM_API_KEY in .env"}
+    if not is_local_code_configured():
+        return {
+            "error": (
+                "Local coding model not configured. Set OLLAMA_HOST and "
+                "CHILI_CODE_LOCAL_MODEL; premium keys are not required."
+            )
+        }
 
     # Local helper so the three call sites below stay tidy. Each call
     # gets a different purpose so the policy table can route them
@@ -625,6 +698,7 @@ async def run_code_agent(
                 strict_escalation=strict_escalation,
                 user_id=user_id,
                 db=db,
+                local_only=True,
             )
         except Exception as _e:
             logger.warning(
@@ -856,10 +930,27 @@ async def run_code_agent(
                     f"### {fpath}\n**Edits rejected** -- {'; '.join(outcome['warnings'])}"
                 )
         else:
-            # Legacy fallback: some (cloud) models still answer with a raw
-            # unified diff; keep accepting it, validated against FULL content.
-            diffs_in_reply = re.findall(r"```diff\n(.*?)```", edit_reply, re.DOTALL)
-            if diffs_in_reply:
+            full_file = _extract_full_file_replacement(edit_reply, fpath, file_content)
+            if full_file["new_content"] is not None:
+                d = _unified_diff_text(fpath, file_content, full_file["new_content"])
+                all_diffs.append(d)
+                if fpath not in files_changed:
+                    files_changed.append(fpath)
+                edit_sections.append(f"### {fpath}\n```diff\n{d}\n```")
+                validations.append(
+                    {
+                        "file": fpath,
+                        "valid": True,
+                        "warnings": full_file["warnings"],
+                        "full_file_fallback": True,
+                    }
+                )
+                _edit_succeeded_at_least_one = True
+            else:
+                # Legacy fallback: some cloud models still answer with a raw
+                # unified diff; keep accepting it, validated against FULL content.
+                diffs_in_reply = re.findall(r"```diff\n(.*?)```", edit_reply, re.DOTALL)
+            if full_file["new_content"] is None and diffs_in_reply:
                 for d in diffs_in_reply:
                     # Models often emit bare hunks (first line '@@ …') —
                     # git apply rejects "patch fragment without header"
@@ -879,7 +970,7 @@ async def run_code_agent(
                         edit_sections.append(
                             f"### {fpath}\n**Diff rejected** -- {'; '.join(validation['warnings'])}"
                         )
-            else:
+            elif full_file["new_content"] is None:
                 edit_sections.append(f"### {fpath}\n{edit_reply}")
         if _edit_log_id:
             _dispatch_log_ids.append(

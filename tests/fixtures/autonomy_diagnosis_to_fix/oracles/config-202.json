@@ -1,0 +1,8 @@
+{
+  "case_id": "config-202",
+  "expected_dimension": "config",
+  "expected_file": "feature_gate.py",
+  "hidden_files": {
+    "tests/test_hidden_config.py": "from feature_gate import gate_enabled\n\n\ndef test_explicit_false_values_are_disabled():\n    name = \"CHILI_EXPERIMENTAL_GATE\"\n    for value in (\"0\", \"false\", \"no\", \"off\", \"\"):\n        assert gate_enabled({name: value}, name) is False\n\n\ndef test_true_values_are_enabled_case_insensitively():\n    name = \"CHILI_EXPERIMENTAL_GATE\"\n    for value in (\"1\", \"true\", \"YES\", \"On\"):\n        assert gate_enabled({name: value}, name) is True\n"
+  }
+}

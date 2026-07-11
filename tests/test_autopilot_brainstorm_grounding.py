@@ -65,6 +65,8 @@ def test_chat_reply_grounds_the_system_prompt(db, monkeypatch):
     assert "THIS specific repository" in sys_prompt
     assert "chili-home-copilot" in sys_prompt
     assert "orchestrator.py" in sys_prompt
+    assert captured["local_only"] is True
+    assert captured["strict_escalation"] is False
 
 
 def test_glossary_bridges_operator_vocabulary(db, tmp_path):

@@ -1,0 +1,21 @@
+{
+  "schema": "chili.diagnosis-to-fix-manifest.v1",
+  "reference_family": "claude-fable-5",
+  "cases": [
+    {
+      "case": "cases/clock-201.json",
+      "oracle": "oracles/clock-201.json",
+      "split": "holdout"
+    },
+    {
+      "case": "cases/config-202.json",
+      "oracle": "oracles/config-202.json",
+      "split": "holdout"
+    },
+    {
+      "case": "cases/data-203.json",
+      "oracle": "oracles/data-203.json",
+      "split": "holdout"
+    }
+  ]
+}

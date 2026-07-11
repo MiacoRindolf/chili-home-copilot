@@ -1,0 +1,8 @@
+{
+  "case_id": "clock-201",
+  "expected_dimension": "clock",
+  "expected_file": "session_gate.py",
+  "hidden_files": {
+    "tests/test_hidden_clock.py": "from datetime import datetime\n\nfrom session_gate import in_regular_session\n\n\ndef test_replay_frame_inside_session_is_accepted():\n    assert in_regular_session(datetime(2026, 7, 10, 10, 15)) is True\n\n\ndef test_replay_frame_after_session_is_rejected():\n    assert in_regular_session(datetime(2026, 7, 10, 20, 0)) is False\n"
+  }
+}

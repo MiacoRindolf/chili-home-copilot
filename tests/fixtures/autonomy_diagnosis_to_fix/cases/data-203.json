@@ -1,0 +1,11 @@
+{
+  "schema": "chili.diagnosis-to-fix-case.v1",
+  "case_id": "data-203",
+  "prompt": "A replay mirror reports zero copied quotes although the source relation contains rows and the sink starts empty. Diagnose the source/sink failure and repair the copy operation without fabricating rows.",
+  "candidate_paths": ["replay_copy.py", "metrics.py"],
+  "repo_files": {
+    "replay_copy.py": "def mirror_window(\n    source_rows: dict[str, list[dict]],\n    sink_rows: dict[str, list[dict]],\n    symbol: str,\n) -> int:\n    \"\"\"Copy one symbol window into the replay sink and return its row count.\"\"\"\n    rows = list(sink_rows.get(symbol, []))\n    sink_rows[symbol] = rows\n    return len(rows)\n",
+    "metrics.py": "def copied_fraction(copied: int, available: int) -> float:\n    return copied / available if available else 0.0\n",
+    "tests/test_public.py": "from replay_copy import mirror_window\n\n\ndef test_empty_source_copies_zero_rows():\n    sink = {}\n    assert mirror_window({}, sink, \"XYZ\") == 0\n    assert sink[\"XYZ\"] == []\n"
+  }
+}

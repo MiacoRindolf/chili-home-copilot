@@ -61,7 +61,7 @@ from ..coding_task.validator_runner import (
 )
 from ..context_brain import ollama_client
 from ..project_domain_runs import finish_run, start_run
-from . import diagnostic_reasoning
+from . import diagnostic_probes, diagnostic_reasoning
 
 AUTONOMOUS_KIND = "autonomous"
 EXECUTION_MODE_PLAN_APPROVAL = "plan_approval"
@@ -2481,7 +2481,7 @@ _DIAGNOSTIC_TIMEOUT_SEC = float(
     os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_TIMEOUT_SEC") or "150"
 )
 _DIAGNOSTIC_NUM_PREDICT = int(
-    os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_NUM_PREDICT") or "600"
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_NUM_PREDICT") or "900"
 )
 _DIAGNOSTIC_NUM_CTX = int(
     os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_NUM_CTX") or "8192"
@@ -5811,6 +5811,8 @@ def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) 
                 trace_id=f"autopilot-brainstorm-{run.run_id}",
                 user_message=latest_user_message,
                 max_tokens=1200,
+                strict_escalation=False,
+                local_only=True,
                 # Never share this session: gateway rollback-on-error would
                 # discard the caller's uncommitted user message.
                 db=None,
@@ -6417,6 +6419,7 @@ def _run_local_diagnostic_reasoning(
     )
     model_name = str(model_info.get("model") or "").strip()
     model_calls: list[dict[str, Any]] = []
+    reasoning_round = "initial"
 
     def call_local_role(stage: str, prompt: str) -> str:
         result = ollama_client.chat(
@@ -6443,6 +6446,7 @@ def _run_local_diagnostic_reasoning(
         _note_model_call_result(model_name, result)
         model_calls.append(
             {
+                "round": reasoning_round,
                 "stage": stage,
                 "model": model_name,
                 "ok": result.ok,
@@ -6454,7 +6458,7 @@ def _run_local_diagnostic_reasoning(
         )
         return result.text if result.ok else ""
 
-    debate = diagnostic_reasoning.run_local_diagnostic_debate(
+    initial_debate = diagnostic_reasoning.run_local_diagnostic_debate(
         case,
         call_local_role if model_name else None,
         stages_to_run=(
@@ -6463,18 +6467,93 @@ def _run_local_diagnostic_reasoning(
             else ("judge",)
         ),
     )
+    report = initial_debate.get("report") if isinstance(initial_debate.get("report"), Mapping) else {}
+    packet = initial_debate.get("packet") if isinstance(initial_debate.get("packet"), Mapping) else {}
+    probes = diagnostic_probes.probes_from_packet(packet, max_probes=4)
+    if not probes:
+        probes = diagnostic_probes.default_followup_probes(
+            report,
+            candidate_paths,
+            run.prompt,
+        )
+    probe_run: dict[str, Any] | None = None
+    debate = initial_debate
+    final_case = case
+    if probes and repo_path is not None:
+        probe_run = diagnostic_probes.execute_safe_probes(
+            repo_path,
+            probes,
+            max_probes=4,
+            time_budget_sec=120.0,
+        )
+        _add_artifact(
+            db,
+            run.run_id,
+            "diagnostic",
+            "typed_diagnostic_probe_run",
+            content_json={
+                **probe_run,
+                "requested_probes": probes,
+                "premium_calls": 0,
+            },
+        )
+        probe_evidence = [
+            item
+            for item in probe_run.get("evidence") or []
+            if isinstance(item, Mapping)
+        ]
+        if probe_evidence:
+            final_case = diagnostic_reasoning.normalize_case(
+                {
+                    **case,
+                    "observations": [
+                        *(case.get("observations") or []),
+                        *probe_evidence,
+                    ],
+                }
+            )
+            reasoning_round = "post_probe"
+            final_debate = diagnostic_reasoning.run_local_diagnostic_debate(
+                final_case,
+                call_local_role if model_name else None,
+                stages_to_run=("judge",),
+                previous_report=report,
+            )
+            debate = {
+                **final_debate,
+                "initial_report": report,
+                "probe_run": probe_run,
+                "stages": [
+                    *(
+                        {**stage, "round": "initial"}
+                        for stage in initial_debate.get("stages") or []
+                        if isinstance(stage, Mapping)
+                    ),
+                    *(
+                        {**stage, "round": "post_probe"}
+                        for stage in final_debate.get("stages") or []
+                        if isinstance(stage, Mapping)
+                    ),
+                ],
+                "premium_calls": 0,
+            }
     _add_artifact(
         db,
         run.run_id,
         "diagnostic",
         "local_diagnostic_debate",
         content_json={
-            "case": case,
+            "case": final_case,
             "report": debate.get("report") or {},
             "stages": debate.get("stages") or [],
             "model_calls": model_calls,
             "local_model": model_name or None,
-            "council_mode": "deep" if _DIAGNOSTIC_DEEP_COUNCIL else "adaptive_judge",
+            "council_mode": (
+                "deep"
+                if _DIAGNOSTIC_DEEP_COUNCIL
+                else ("adaptive_probe_judge" if probe_run else "adaptive_judge")
+            ),
+            "probe_run": probe_run,
             "premium_calls": 0,
         },
     )
@@ -6916,6 +6995,25 @@ def generate_diffs_from_plan(
                 if try_fallback(rel, content):
                     continue
                 continue
+        if not diff and full_content is not None:
+            full_file = code_agent_mod._extract_full_file_replacement(
+                reply_text,
+                rel,
+                full_content,
+            )
+            if full_file["new_content"] is not None:
+                diff = code_agent_mod._unified_diff_text(
+                    rel,
+                    full_content,
+                    full_file["new_content"],
+                )
+                _add_artifact(
+                    db,
+                    run.run_id,
+                    "model_adapter",
+                    f"full_file_{rel}",
+                    content_json={"warnings": full_file["warnings"]},
+                )
         if not diff:
             # Legacy fallback: a raw unified diff reply (cloud models).
             diff = _extract_diff(reply_text)
