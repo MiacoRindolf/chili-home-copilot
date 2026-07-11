@@ -304,6 +304,25 @@
   border-color: var(--rp-blue);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--rp-blue) 18%, transparent);
 }
+.rp-live-sort {
+  flex: 0 0 112px;
+  width: 112px;
+  min-width: 112px;
+  height: 32px;
+  box-sizing: border-box;
+  border: 1px solid var(--rp-line);
+  border-radius: 6px;
+  background: var(--rp-panel-2);
+  color: var(--rp-text);
+  cursor: pointer;
+  font-size: 10px;
+  outline: none;
+  padding: 0 7px;
+}
+.rp-live-sort:focus {
+  border-color: var(--rp-blue);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--rp-blue) 18%, transparent);
+}
 .rp-live-focus-summary {
   margin-left: auto;
   color: var(--rp-soft);
@@ -802,6 +821,27 @@
 .rp-chip.live { color: var(--rp-green); border-color: color-mix(in srgb, var(--rp-green) 42%, transparent); }
 .rp-chip.paper-twin { color: var(--rp-blue); border-color: color-mix(in srgb, var(--rp-blue) 42%, transparent); }
 .rp-chip.paper { color: var(--rp-purple); border-color: color-mix(in srgb, var(--rp-purple) 42%, transparent); }
+.rp-chip.attention-reason { font-weight: 800; }
+.rp-chip.attention-position {
+  color: var(--rp-green);
+  border-color: color-mix(in srgb, var(--rp-green) 48%, transparent);
+  background: color-mix(in srgb, var(--rp-green) 8%, var(--rp-panel-2));
+}
+.rp-chip.attention-entry {
+  color: #bfdbfe;
+  border-color: color-mix(in srgb, var(--rp-blue) 52%, transparent);
+  background: color-mix(in srgb, var(--rp-blue) 9%, var(--rp-panel-2));
+}
+.rp-chip.attention-stale {
+  color: var(--rp-amber);
+  border-color: color-mix(in srgb, var(--rp-amber) 52%, transparent);
+  background: color-mix(in srgb, var(--rp-amber) 8%, var(--rp-panel-2));
+}
+.rp-chip.attention-broker {
+  color: var(--rp-red);
+  border-color: color-mix(in srgb, var(--rp-red) 52%, transparent);
+  background: color-mix(in srgb, var(--rp-red) 8%, var(--rp-panel-2));
+}
 .rp-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1004,6 +1044,9 @@
     flex: 1 1 130px;
     width: auto;
   }
+  .rp-live-sort {
+    flex: 0 0 112px;
+  }
   .rp-live-focus-summary {
     align-self: center;
   }
@@ -1107,6 +1150,7 @@
   var rpLiveFollow = true;
   var rpLiveFilter = 'all';
   var rpLiveQuery = '';
+  var rpLiveSort = 'priority';
   var rpLivePaused = false;
   var rpLiveActivityHtml = '';
   var rpReplayCache = null;
@@ -1233,6 +1277,12 @@
       live_meta: {},
       live_payload: payload || {}
     };
+    var liveAnchor = timestampMinute(payload && payload.as_of_utc);
+    Object.keys(result.series).forEach(function(sym) {
+      (result.series[sym] || []).forEach(function(bar) {
+        bar._rpMinute = minuteNearAnchor(bar[0], liveAnchor);
+      });
+    });
     (payload && payload.symbols || []).forEach(function(meta) {
       var sym = normalizeSym(meta.symbol);
       if (!sym) return;
@@ -1241,18 +1291,27 @@
         return String(a.ts || '').localeCompare(String(b.ts || ''));
       });
       events.forEach(function(event) {
-        result.decision_trace.push({
+        event._rpMinute = timestampMinute(event.ts);
+        if (event._rpMinute == null) event._rpMinute = minuteNearAnchor(event.t, liveAnchor);
+        var trace = {
           sym: sym,
           t: event.t,
           stage: String(event.stage || 'event') + (event.detail ? ': ' + event.detail : ''),
           kind: event.kind || 'decision'
-        });
+        };
+        trace._rpMinute = event._rpMinute;
+        result.decision_trace.push(trace);
       });
       if (meta.active) {
         var bars = result.series[sym] || [];
         var start = events.length ? events[0].t : (bars.length ? bars[0][0] : null);
         var end = compactTime(payload.as_of_utc);
-        if (start && end) result.armed_timeline.push({ sym: sym, spans: [[start, end]] });
+        if (start && end) {
+          var span = [start, end];
+          span._rpStart = events.length ? events[0]._rpMinute : (bars.length ? bars[0]._rpMinute : null);
+          span._rpEnd = liveAnchor;
+          result.armed_timeline.push({ sym: sym, spans: [span] });
+        }
       }
 
       var pendingEntry = null;
@@ -1263,7 +1322,7 @@
         }
         if (event.kind !== 'exit' || !pendingEntry) return;
         var position = (meta.positions || [])[0] || {};
-        result.trades.push({
+        var closedTrade = {
           sym: sym,
           session_id: event.session_id || pendingEntry.session_id,
           t: pendingEntry.t,
@@ -1274,12 +1333,15 @@
           target: position.target,
           usd: event.pnl_usd == null ? 0 : Number(event.pnl_usd),
           why: event.detail || event.stage || 'live exit'
-        });
+        };
+        closedTrade._rpEntryMin = pendingEntry._rpMinute;
+        closedTrade._rpExitMin = event._rpMinute;
+        result.trades.push(closedTrade);
         pendingEntry = null;
       });
       if (pendingEntry && (meta.positions || []).length) {
         var openPosition = meta.positions[0];
-        result.trades.push({
+        var openTrade = {
           sym: sym,
           session_id: pendingEntry.session_id,
           t: pendingEntry.t,
@@ -1290,7 +1352,9 @@
           target: openPosition.target,
           usd: Number((meta.pnl || {}).unrealized_usd || 0),
           why: 'open position'
-        });
+        };
+        openTrade._rpEntryMin = pendingEntry._rpMinute;
+        result.trades.push(openTrade);
       }
     });
     return result;
@@ -1357,9 +1421,25 @@
     return Number(m[1]) * 60 + Number(m[2]);
   }
 
+  function timestampMinute(value) {
+    var stamp = Date.parse(value || '');
+    return Number.isFinite(stamp) ? Math.floor(stamp / 60000) : null;
+  }
+
+  function minuteNearAnchor(value, anchor) {
+    var raw = timeMin(value);
+    if (raw == null || anchor == null || !Number.isFinite(anchor)) return raw;
+    var anchorClock = ((anchor % 1440) + 1440) % 1440;
+    var dayStart = anchor - anchorClock;
+    var choices = [dayStart + raw - 1440, dayStart + raw, dayStart + raw + 1440];
+    choices.sort(function(a, b) { return Math.abs(a - anchor) - Math.abs(b - anchor); });
+    return choices[0];
+  }
+
   function timeLabel(minute) {
-    var h = Math.floor(minute / 60);
-    var m = minute % 60;
+    var normalized = ((Math.round(minute) % 1440) + 1440) % 1440;
+    var h = Math.floor(normalized / 60);
+    var m = normalized % 60;
     return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
   }
 
@@ -1666,8 +1746,9 @@
 
   function replayDomain(result) {
     var cache = replayCache(result);
-    var floor = result && result.live_observer ? 0 : 4 * 60;
-    var ceiling = result && result.live_observer ? 24 * 60 - 1 : 20 * 60;
+    var isLive = !!(result && result.live_observer);
+    var floor = isLive ? -Infinity : 4 * 60;
+    var ceiling = isLive ? Infinity : 20 * 60;
     if (cache && cache.allMinutes.length) {
       return {
         min: Math.max(floor, Math.min.apply(null, cache.allMinutes) - 8),
@@ -1699,7 +1780,13 @@
       var m = rowMinute(row);
       if (m != null) mins.push(m);
     });
-    if (!mins.length) return result && result.live_observer ? { min: 0, max: 24 * 60 - 1 } : { min: 8 * 60, max: 20 * 60 };
+    if (!mins.length) {
+      if (isLive) {
+        var anchor = timestampMinute(result && result.live_payload && result.live_payload.as_of_utc);
+        return anchor == null ? { min: 0, max: 24 * 60 - 1 } : { min: anchor - 60, max: anchor };
+      }
+      return { min: 8 * 60, max: 20 * 60 };
+    }
     return {
       min: Math.max(floor, Math.min.apply(null, mins) - 8),
       max: Math.min(ceiling, Math.max.apply(null, mins) + 8)
@@ -3351,8 +3438,84 @@
     return /(entry candidate|pending entry|entry pending|queued live|trigger ready|triggered|placement pending|order pending|awaiting fill|submitted)/.test(text);
   }
 
+  function liveAttentionReasons(meta) {
+    var reasons = [];
+    if (meta && meta.pnl && meta.pnl.broker_unconfirmed) {
+      reasons.push({ key: 'broker', label: 'broker check', detail: 'broker position unconfirmed' });
+    }
+    if (liveMetaHasPosition(meta)) {
+      var positionCount = (meta.positions || []).length;
+      reasons.push({ key: 'position', label: 'open position', detail: positionCount + ' persisted open position' + (positionCount === 1 ? '' : 's') });
+    }
+    if (liveMetaIsEntry(meta)) {
+      var entryText = String(meta.state_label || meta.last_action || '').toLowerCase();
+      var entryLabel = /(pending|awaiting|submitted)/.test(entryText) ? 'entry pending' : (/queued/.test(entryText) ? 'entry queued' : 'entry candidate');
+      reasons.push({ key: 'entry', label: entryLabel, detail: meta.state_label || meta.last_action || 'entry candidate' });
+    }
+    if (meta && meta.stale) {
+      reasons.push({ key: 'stale', label: 'stale runtime', detail: liveAgeLabel(meta) });
+    }
+    return reasons;
+  }
+
   function liveMetaNeedsAttention(meta) {
-    return liveMetaHasPosition(meta) || liveMetaIsEntry(meta) || !!(meta && meta.stale) || !!(meta && meta.pnl && meta.pnl.broker_unconfirmed);
+    return liveAttentionReasons(meta).length > 0;
+  }
+
+  function liveAttentionBreakdown(payload) {
+    var breakdown = { position: 0, entry: 0, stale: 0, broker: 0 };
+    (payload && payload.symbols || []).forEach(function(meta) {
+      liveAttentionReasons(meta).forEach(function(reason) {
+        if (breakdown[reason.key] != null) breakdown[reason.key] += 1;
+      });
+    });
+    return breakdown;
+  }
+
+  function liveAttentionSummary(payload) {
+    var rows = liveAttentionBreakdown(payload);
+    return rows.position + ' open positions, ' + rows.entry + ' entry states, ' + rows.stale + ' stale runtimes, ' + rows.broker + ' broker checks';
+  }
+
+  function liveUpdatedStamp(meta) {
+    var latest = Date.parse(meta && meta.updated_at || '');
+    (meta && meta.events || []).forEach(function(event) {
+      var stamp = Date.parse(event.ts || '');
+      if (Number.isFinite(stamp) && (!Number.isFinite(latest) || stamp > latest)) latest = stamp;
+    });
+    return Number.isFinite(latest) ? latest : 0;
+  }
+
+  function livePriorityScore(meta) {
+    var score = meta && meta.active ? 100 : 0;
+    liveAttentionReasons(meta).forEach(function(reason) {
+      if (reason.key === 'broker') score += 800;
+      else if (reason.key === 'position') score += 600;
+      else if (reason.key === 'entry') score += 400;
+      else if (reason.key === 'stale') score += 200;
+    });
+    return score;
+  }
+
+  function liveSortedRows(rows) {
+    var records = rows.map(function(row, index) {
+      var sym = normalizeSym(row.dataset.symbol);
+      return { row: row, sym: sym, meta: liveMetaFor(rpLastResult, sym), index: index };
+    });
+    records.sort(function(a, b) {
+      if (rpLiveSort === 'symbol') return a.sym.localeCompare(b.sym) || a.index - b.index;
+      if (rpLiveSort === 'pnl') {
+        var aPnl = Math.abs(Number((a.meta.pnl || {}).total_usd || 0));
+        var bPnl = Math.abs(Number((b.meta.pnl || {}).total_usd || 0));
+        return bPnl - aPnl || liveUpdatedStamp(b.meta) - liveUpdatedStamp(a.meta) || a.sym.localeCompare(b.sym);
+      }
+      if (rpLiveSort === 'latest') {
+        return liveUpdatedStamp(b.meta) - liveUpdatedStamp(a.meta) || a.sym.localeCompare(b.sym);
+      }
+      return livePriorityScore(b.meta) - livePriorityScore(a.meta) ||
+        liveUpdatedStamp(b.meta) - liveUpdatedStamp(a.meta) || a.index - b.index;
+    });
+    return records;
   }
 
   function liveFilterCounts(payload) {
@@ -3385,10 +3548,12 @@
   function liveActivityRows(payload) {
     var rows = [];
     var seen = {};
+    var liveAnchor = timestampMinute(payload && payload.as_of_utc);
     (payload && payload.symbols || []).forEach(function(meta) {
       var sym = normalizeSym(meta.symbol);
       (meta.events || []).forEach(function(event) {
-        var minute = timeMin(event.t);
+        var minute = timestampMinute(event.ts);
+        if (minute == null) minute = minuteNearAnchor(event.t, liveAnchor);
         if (!sym || minute == null) return;
         var key = sym + '|' + event.t + '|' + (event.kind || '') + '|' + (event.stage || '') + '|' + (event.detail || '');
         if (seen[key]) return;
@@ -3423,9 +3588,10 @@
     }).join('');
   }
 
-  function renderLiveFilterButton(key, label, count) {
+  function renderLiveFilterButton(key, label, count, tooltip) {
+    var tooltipAttrs = tooltip ? ' title="' + esc(tooltip) + '" aria-label="' + esc(label + ' ' + count + '. ' + tooltip) + '"' : '';
     return '<button class="rp-live-filter" type="button" data-live-filter="' + esc(key) + '" aria-pressed="' +
-      (rpLiveFilter === key ? 'true' : 'false') + '" onclick="rpSetLiveFilter(\'' + esc(key) + '\')">' +
+      (rpLiveFilter === key ? 'true' : 'false') + tooltipAttrs + ' onclick="rpSetLiveFilter(\'' + esc(key) + '\')">' +
       '<span>' + esc(label) + '</span><b data-live-count="' + esc(key) + '">' + esc(count) + '</b></button>';
   }
 
@@ -3435,7 +3601,7 @@
       '<div class="rp-live-toolbar">' +
         '<div class="rp-live-segments" role="group" aria-label="Focus live symbols">' +
           renderLiveFilterButton('all', 'All', counts.all) +
-          renderLiveFilterButton('attention', 'Attention', counts.attention) +
+          renderLiveFilterButton('attention', 'Attention', counts.attention, liveAttentionSummary(payload)) +
           renderLiveFilterButton('positions', 'Positions', counts.positions) +
           renderLiveFilterButton('entries', 'Entries', counts.entries) +
           renderLiveFilterButton('pnl', 'P/L', counts.pnl) +
@@ -3443,6 +3609,12 @@
         '</div>' +
         '<input class="rp-live-search" id="rp-live-search" type="search" value="' + esc(rpLiveQuery) +
           '" placeholder="Symbol" aria-label="Search live symbols" autocomplete="off" spellcheck="false" oninput="rpSetLiveQuery(this.value)" />' +
+        '<select class="rp-live-sort" id="rp-live-sort" aria-label="Sort live symbols" onchange="rpSetLiveSort(this.value)">' +
+          '<option value="priority"' + (rpLiveSort === 'priority' ? ' selected' : '') + '>Priority</option>' +
+          '<option value="latest"' + (rpLiveSort === 'latest' ? ' selected' : '') + '>Latest</option>' +
+          '<option value="pnl"' + (rpLiveSort === 'pnl' ? ' selected' : '') + '>P/L impact</option>' +
+          '<option value="symbol"' + (rpLiveSort === 'symbol' ? ' selected' : '') + '>Symbol</option>' +
+        '</select>' +
         '<span class="rp-live-focus-summary" id="rp-live-focus-summary"></span>' +
         '<button class="rp-tool rp-live-pause" id="rp-live-pause" type="button" aria-pressed="' +
           (rpLivePaused ? 'true' : 'false') + '" aria-label="' + (rpLivePaused ? 'Resume live updates' : 'Pause live updates') +
@@ -3461,12 +3633,13 @@
     if (rpSurfaceMode !== 'live' || !rpLastResult) return;
     var total = 0;
     var visible = 0;
-    document.querySelectorAll('.rp-row-live').forEach(function(row) {
-      var sym = normalizeSym(row.dataset.symbol);
-      var show = liveFilterMatches(liveMetaFor(rpLastResult, sym), sym);
+    var rows = liveSortedRows(Array.prototype.slice.call(document.querySelectorAll('.rp-row-live')));
+    rows.forEach(function(record, index) {
+      var show = liveFilterMatches(record.meta, record.sym);
       total += 1;
       if (show) visible += 1;
-      row.hidden = !show;
+      record.row.hidden = !show;
+      record.row.style.order = String(10 + index);
     });
     if (rpPinnedChart && rpPinnedChart.closest('.rp-row-live') && rpPinnedChart.closest('.rp-row-live').hidden) clearPinnedChart();
     var summary = document.getElementById('rp-live-focus-summary');
@@ -3483,9 +3656,16 @@
       button.setAttribute('aria-pressed', rpLiveFilter === key ? 'true' : 'false');
       var count = button.querySelector('[data-live-count]');
       if (count) count.textContent = counts[key] == null ? 0 : counts[key];
+      if (key === 'attention') {
+        var tooltip = liveAttentionSummary(payload);
+        button.title = tooltip;
+        button.setAttribute('aria-label', 'Attention ' + counts.attention + '. ' + tooltip);
+      }
     });
     var search = document.getElementById('rp-live-search');
     if (search && document.activeElement !== search && search.value !== rpLiveQuery) search.value = rpLiveQuery;
+    var sort = document.getElementById('rp-live-sort');
+    if (sort && sort.value !== rpLiveSort) sort.value = rpLiveSort;
     var pause = document.getElementById('rp-live-pause');
     if (pause) {
       pause.setAttribute('aria-pressed', rpLivePaused ? 'true' : 'false');
@@ -3537,10 +3717,14 @@
   function renderLiveSetup(result, sym, eager) {
     var meta = liveMetaFor(result, sym);
     var pnl = meta.pnl || {};
-    var chips = (meta.lanes || []).map(function(row) {
+    var chips = liveAttentionReasons(meta).map(function(reason) {
+      return '<span class="rp-chip attention-reason attention-' + esc(reason.key) + '" title="' + esc(reason.detail) + '">' +
+        esc(reason.label) + '</span>';
+    });
+    chips = chips.concat((meta.lanes || []).map(function(row) {
       return '<span class="rp-chip ' + esc(liveLaneClass(row.lane)) + '">' +
         esc(liveLaneLabel(row.lane) + ' - ' + (row.state_label || row.state || 'active')) + '</span>';
-    });
+    }));
     Object.keys(pnl.by_lane || {}).forEach(function(lane) {
       var lanePnl = pnl.by_lane[lane] || {};
       var laneTotal = Number(lanePnl.realized_usd || 0) + Number(lanePnl.unrealized_usd || 0);
@@ -3549,7 +3733,6 @@
         esc(liveLaneLabel(lane) + ' P/L ' + fmtSignedMoney(laneTotal)) + '</span>');
     });
     if (meta.armed) chips.push('<span class="rp-chip warn">armed</span>');
-    if (meta.pnl && meta.pnl.broker_unconfirmed) chips.push('<span class="rp-chip warn">broker position unconfirmed</span>');
     var positions = (meta.positions || []).map(function(row) {
       return '<div class="rp-live-position"><b>' + esc(liveLaneLabel(row.lane)) + ' position</b> - ' +
         esc(fmtNum(row.quantity || 0) + ' shares @ ' + fmtPrice(row.entry)) +
@@ -4148,6 +4331,12 @@
   window.rpSetLiveQuery = function(value) {
     rpLiveQuery = String(value || '').trim().toUpperCase();
     applyLiveFocus();
+  };
+
+  window.rpSetLiveSort = function(value) {
+    var allowed = ['priority', 'latest', 'pnl', 'symbol'];
+    rpLiveSort = allowed.indexOf(value) === -1 ? 'priority' : value;
+    updateLiveResearch(rpLastLivePayload || {});
   };
 
   window.rpToggleLivePause = function() {

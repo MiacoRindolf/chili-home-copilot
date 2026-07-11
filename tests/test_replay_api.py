@@ -36,6 +36,11 @@ def test_replay_page_exposes_research_fsm_console(client):
     assert b"rpToggleLivePause" in r.content
     assert b"rpSetLiveFilter" in r.content
     assert b"rp-live-activity-events" in r.content
+    assert b"liveAttentionReasons" in r.content
+    assert b"rp-live-sort" in r.content
+    assert b"rpSetLiveSort" in r.content
+    assert b"broker check" in r.content
+    assert b"minuteNearAnchor" in r.content
 
 
 def test_replay_run_starts_thread_and_single_flights(client):
