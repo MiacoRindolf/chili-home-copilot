@@ -277,6 +277,11 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("ordered by broker sequence", 8),
             ("host offset", 7),
             ("time source", 5),
+            ("local wall-time", 8),
+            ("offset correction", 7),
+            ("parsing zone", 7),
+            ("utc offset", 6),
+            ("monotonic duration", 5),
         ),
     ),
     (
@@ -299,6 +304,13 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("identifier normalization", 8),
             ("retained artifact", 3),
             ("input artifact", 4),
+            ("canonical identifier", 8),
+            ("leading zero", 8),
+            ("numeric column", 7),
+            ("exact join", 7),
+            ("shortened key", 7),
+            ("signed source archive", 5),
+            ("delivered roster", 6),
         ),
     ),
     (
@@ -327,6 +339,12 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("busy_owner", 7),
             ("release_requested", 6),
             ("owner process", 5),
+            ("durable workflow row", 7),
+            ("lease table", 6),
+            ("publishing-without-lease", 8),
+            ("transition rules", 7),
+            ("claimable state", 7),
+            ("orphaned rows", 6),
         ),
     ),
     (
@@ -353,6 +371,12 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("exact-principal denial", 8),
             ("edge authorization", 7),
             ("authorized identity", 7),
+            ("effective settings snapshot", 8),
+            ("topic filter", 8),
+            ("path-normalization transform", 8),
+            ("rendered setting", 6),
+            ("leading-slash filter", 8),
+            ("topic-matcher", 8),
         ),
     ),
     (
@@ -375,6 +399,9 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("signed dependency bundle", 8),
             ("version mismatch", 6),
             ("prior bundle", 5),
+            ("calendar parsing package", 8),
+            ("locked package versions", 8),
+            ("transitive lock refresh", 8),
         ),
     ),
     (
@@ -405,6 +432,11 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("mixed endpoint membership", 7),
             ("isolated namespace", 5),
             ("legacy resource", 5),
+            ("memory-control termination", 8),
+            ("container memory", 7),
+            ("effective container boundary", 8),
+            ("resident-set", 7),
+            ("worker pool replacement", 6),
         ),
     ),
     (
@@ -420,6 +452,13 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("visual diff", 5),
             ("floating runner", 6),
             ("baseline runner", 6),
+            ("end-to-end suite", 8),
+            ("browser profile", 8),
+            ("service-worker", 7),
+            ("parallel shard", 6),
+            ("scenario cleanup", 6),
+            ("proxy rule", 6),
+            ("test scenario", 5),
         ),
     ),
     (
@@ -442,6 +481,10 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("ordering point", 7),
             ("affected revision", 5),
             ("earlier revision", 5),
+            ("paging function", 8),
+            ("cursor selection after filtering", 9),
+            ("prior paging function", 8),
+            ("deployed paging", 8),
         ),
     ),
 )
@@ -636,6 +679,28 @@ _ATTRIBUTION_GAP_MARKERS = (
     "no longer available",
     "lacks worker identity",
     "missing attribution",
+    "cannot distinguish",
+    "cannot establish",
+    "cannot determine",
+    "insufficient to determine",
+    "not enough to distinguish",
+)
+_AMBIGUOUS_EXPERIMENT_MARKERS = (
+    "depending on the assumed",
+    "neither assumption",
+    "does not explain the entire",
+    "does not explain all",
+    "cannot distinguish",
+    "cannot determine",
+)
+_DECISIVE_ATTRIBUTION_GAP_MARKERS = (
+    "cannot distinguish",
+    "cannot separate",
+    "cannot establish",
+    "preventing a correlation-level link",
+    "not individually attributable",
+    "lacks worker identity",
+    "no retained artifact",
 )
 
 
@@ -734,6 +799,8 @@ def infer_causal_role(
     """
     lower = str(statement or "").lower()
     if has_attribution_gap(lower):
+        return "context"
+    if any(marker in lower for marker in _AMBIGUOUS_EXPERIMENT_MARKERS):
         return "context"
     if any(marker in lower for marker in _NEGATED_INTERVENTION_MARKERS) or re.search(
         r"\b(?:changing|reverting|applying|lowering|pinning|resetting)\s+only\b"
@@ -2252,6 +2319,35 @@ def detect_baseline_drift(observations: Sequence[Mapping[str, Any]]) -> list[dic
                 "evidence_ids": [str(item.get("evidence_id")) for item in items],
             }
         )
+    recorded_ids = {
+        str(evidence_id)
+        for finding in drift
+        for evidence_id in finding.get("evidence_ids") or []
+        if str(evidence_id)
+    }
+    for item in observations:
+        evidence_id = str(item.get("evidence_id") or "")
+        statement = str(item.get("statement") or "").lower()
+        if (
+            not evidence_id
+            or evidence_id in recorded_ids
+            or "baseline" not in statement
+            or not bool(item.get("attribution_gap"))
+        ):
+            continue
+        drift.append(
+            {
+                "comparison_key": str(item.get("comparison_key") or "unreproducible-baseline"),
+                "code_revision": str(item.get("code_revision") or "unknown"),
+                "input_fingerprint": str(item.get("input_fingerprint") or "unknown"),
+                "outcome_fingerprints": [],
+                "environment_fingerprints": [
+                    str(item.get("environment_fingerprint") or "unknown")
+                ],
+                "evidence_ids": [evidence_id],
+                "finding_type": "baseline_comparability_gap",
+            }
+        )
     return drift
 
 
@@ -2651,6 +2747,13 @@ def evaluate_packet(
     unresolved_attribution = bool(
         has_attribution_gap(str(case.get("problem_statement") or ""))
         or len(attribution_gap_records) >= 2
+        or any(
+            any(
+                marker in str(item.get("statement") or "").lower()
+                for marker in _DECISIVE_ATTRIBUTION_GAP_MARKERS
+            )
+            for item in attribution_gap_records
+        )
     )
     causal_timeline = _structured_causal_timeline(case)
     downstream_evidence_ids = {
@@ -2897,10 +3000,18 @@ def evaluate_packet(
                     blockers.append(
                         "Baseline drift identifies a comparison-harness confound, but its exact component remains unresolved."
                     )
-            elif _causal_sufficiency_rank(causal_sufficiency) < 2:
+            elif (
+                dimension == "code"
+                or _causal_sufficiency_rank(causal_sufficiency) == 0
+            ) and _causal_sufficiency_rank(causal_sufficiency) < 2:
                 status = "blocked"
                 blockers.append(
                     "Baseline drift remains unexplained and this causal family was not isolated."
+                )
+            elif _causal_sufficiency_rank(causal_sufficiency) < 2:
+                status = "provisional"
+                blockers.append(
+                    "Baseline drift prevents confirmation until the comparison population and environment are reproducible."
                 )
         if (
             runtime_source_mismatch
@@ -2917,6 +3028,11 @@ def evaluate_packet(
             and status in {"supported", "provisional"}
             and _causal_sufficiency_rank(causal_sufficiency) < 2
             and not (dimension == "test_harness" and bool(drift))
+            and not (
+                bool(drift)
+                and dimension not in {"code", "unknown"}
+                and _causal_sufficiency_rank(causal_sufficiency) >= 1
+            )
         ):
             status = "blocked"
             attribution_gap_blocked = True
@@ -3019,8 +3135,10 @@ def evaluate_packet(
             )
         ]
         if causal_candidates:
-            chosen = max(causal_candidates, key=selection_rank)
-            conclusion_id = str(chosen.get("hypothesis_id") or "")
+            causal_candidate = max(causal_candidates, key=selection_rank)
+            if chosen is None or selection_rank(causal_candidate) > selection_rank(chosen):
+                chosen = causal_candidate
+                conclusion_id = str(chosen.get("hypothesis_id") or "")
 
     if provenance_break_evidence_id and provenance_break_dimension != "unknown":
         provenance_candidates = [
@@ -3035,8 +3153,10 @@ def evaluate_packet(
             )
         ]
         if provenance_candidates:
-            chosen = max(provenance_candidates, key=selection_rank)
-            conclusion_id = str(chosen.get("hypothesis_id") or "")
+            provenance_candidate = max(provenance_candidates, key=selection_rank)
+            if chosen is None or selection_rank(provenance_candidate) > selection_rank(chosen):
+                chosen = provenance_candidate
+                conclusion_id = str(chosen.get("hypothesis_id") or "")
 
     if drift and problem_dimension == "test_harness":
         strong_closed_cause = bool(
@@ -3258,6 +3378,22 @@ def heuristic_packet(raw_case: Mapping[str, Any]) -> dict[str, Any]:
                 or dimension == "unknown"
                 or dimension in represented_dimensions
             ):
+                continue
+            unknown_index = next(
+                (
+                    index
+                    for index, (ranked_dimension, _records) in enumerate(ranked)
+                    if ranked_dimension == "unknown"
+                ),
+                len(ranked),
+            )
+            ranked.insert(unknown_index, (dimension, []))
+            represented_dimensions.add(dimension)
+            if len(represented_dimensions) >= minimum_dimensions:
+                break
+    if len(represented_dimensions) < minimum_dimensions:
+        for dimension in DIMENSIONS:
+            if dimension == "unknown" or dimension in represented_dimensions:
                 continue
             unknown_index = next(
                 (

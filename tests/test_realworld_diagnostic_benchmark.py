@@ -18,6 +18,11 @@ BLINDED_THIRD_ROOT = (
     / "fixtures"
     / "project_autonomy_diagnostics_blinded3_20260711"
 )
+BLINDED_FOURTH_ROOT = (
+    Path(__file__).parent
+    / "fixtures"
+    / "project_autonomy_diagnostics_blinded4_20260711"
+)
 
 
 def test_manifest_uses_fable5_and_keeps_oracles_separate():
@@ -114,6 +119,34 @@ def test_blinded_report_uses_manifest_protocol_instead_of_legacy_boilerplate(tmp
     assert result["evaluation_roles"] == ["blinded_holdout_third_run"]
     assert "manifest declares this as a blinded benchmark slice" in report
     assert "three exact Fable 5 incident contracts" not in report
+
+
+def test_fourth_blinded_fixture_preserves_manifest_and_public_blinding_contract():
+    manifest = json.loads(
+        (BLINDED_FOURTH_ROOT / "manifest.json").read_text(encoding="ascii")
+    )
+
+    assert manifest["schema"] == "chili.realworld-diagnostic-manifest.v1"
+    assert manifest["reference_model"] == "claude-fable-5"
+    assert manifest["benchmark_id"] == "fable5-class-diagnostic-blinded-fourth-run-20260711"
+    assert manifest["blinded"] is True
+    assert manifest["immutable_input_count"] == 17
+    assert len(manifest["cases"]) == 8
+    assert {item["evaluation_role"] for item in manifest["cases"]} == {
+        "blinded_holdout_fourth_run"
+    }
+    for item in manifest["cases"]:
+        case = json.loads(
+            (BLINDED_FOURTH_ROOT / item["case"]).read_text(encoding="ascii")
+        )
+        oracle = json.loads(
+            (BLINDED_FOURTH_ROOT / item["oracle"]).read_text(encoding="ascii")
+        )
+        assert case["case_id"] == oracle["case_id"]
+        assert not any(key.startswith(("expected_", "forbid_")) for key in case)
+        assert {observation["dimension"] for observation in case["observations"]} == {
+            "unknown"
+        }
 
 
 def test_model_output_gate_rejects_transport_success_without_usable_packets():

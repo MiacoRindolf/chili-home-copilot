@@ -2003,7 +2003,50 @@ def test_generic_mechanism_vocabulary_maps_to_causal_families_and_ties_stay_unkn
     assert reasoning.infer_dimension(
         "A process snapshot found a loaded module hash outside the signed image inventory."
     ) == "runtime"
+    assert reasoning.infer_dimension(
+        "Memory-control termination occurs above the effective container boundary."
+    ) == "runtime"
+    assert reasoning.infer_dimension(
+        "The durable workflow row is orphaned because transition rules never restore a claimable state."
+    ) == "state"
+    assert reasoning.infer_dimension(
+        "A browser profile and service-worker persist across a parallel test shard."
+    ) == "test_harness"
+    assert reasoning.infer_dimension(
+        "The effective settings snapshot adds a leading slash to the topic filter."
+    ) == "config"
+    assert reasoning.infer_dimension(
+        "The deployed paging function chooses its cursor after filtering."
+    ) == "code"
+    assert reasoning.infer_dimension(
+        "Two locked package versions parse the same calendar feed differently."
+    ) == "dependency"
+    assert reasoning.infer_dimension(
+        "Replacing only each shortened key restores the exact join to the canonical identifier."
+    ) == "data"
+    assert reasoning.infer_dimension(
+        "An offline topic-matcher compares the rendered topic filter."
+    ) == "config"
+    assert reasoning.infer_dimension(
+        "A local wall-time value is recomputed under a different parsing zone."
+    ) == "clock"
     assert reasoning.infer_dimension("clock state") == "unknown"
+
+
+def test_ambiguous_counterfactual_experiment_remains_context():
+    evidence = reasoning.normalize_evidence(
+        {
+            "evidence_id": "ambiguous-offset",
+            "statement": (
+                "The result changes depending on the assumed parsing zone, and neither assumption explains all observations."
+            ),
+            "kind": "experiment",
+            "reliability": 0.99,
+            "discriminating": True,
+        }
+    )
+
+    assert evidence["causal_role"] == "context"
 
 
 def test_isolated_intervention_outranks_multiple_downstream_symptoms():
@@ -2161,6 +2204,64 @@ def test_edge_break_is_earliest_and_same_correlation_sink_is_downstream():
     assert "sink-absent" in timeline["downstream_evidence_ids"]
 
 
+def test_isolated_proof_is_not_overwritten_by_weaker_earliest_or_provenance_break():
+    case = {
+        "case_id": "proof-precedence",
+        "problem_statement": "A package parser drops records before persistence.",
+        "observations": [
+            {
+                "evidence_id": "sink-break",
+                "statement": "The persistence edge receives fewer records.",
+                "dimension": "data",
+                "kind": "artifact",
+                "observed_at": "2026-07-11T10:00:00Z",
+                "edge_from": "parser",
+                "edge_to": "database",
+                "expected_edge_state": "complete",
+                "actual_edge_state": "reduced",
+                "reliability": 0.95,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "package-ab",
+                "statement": "Changing only the locked package version restores every parsed record.",
+                "dimension": "dependency",
+                "kind": "experiment",
+                "observed_at": "2026-07-11T10:01:00Z",
+                "independence_key": "package-ab",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+        ],
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-data",
+                "claim": "Persistence loses parser records.",
+                "dimension": "data",
+                "support_evidence_ids": ["sink-break"],
+                "falsification": "Hold persistence constant.",
+            },
+            {
+                "hypothesis_id": "h-dependency",
+                "claim": "The locked parser package drops records.",
+                "dimension": "dependency",
+                "support_evidence_ids": ["package-ab"],
+                "falsification": "Pin only the prior package.",
+            },
+        ],
+        "conclusion": {"hypothesis_id": "h-data", "status": "confirmed"},
+    }
+
+    report = reasoning.evaluate_packet(case, packet)
+
+    assert report["causal_timeline"]["earliest_break"]["evidence_id"] == "sink-break"
+    assert report["provenance_graph"]["first_broken_edge"]["evidence_id"] == "sink-break"
+    assert report["conclusion"]["dimension"] == "dependency"
+    assert report["conclusion"]["status"] == "confirmed"
+
+
 def test_unresolved_execution_attribution_blocks_runtime_confirmation():
     case = {
         "case_id": "unresolved-runtime-attribution",
@@ -2239,6 +2340,54 @@ def test_unresolved_execution_attribution_blocks_runtime_confirmation():
     assert report["decision"] == "instrument_first"
 
 
+def test_single_decisive_attribution_gap_blocks_harness_confirmation():
+    case = {
+        "case_id": "decisive-harness-gap",
+        "problem_statement": "A browser upload test redirects unexpectedly.",
+        "observations": [
+            {
+                "evidence_id": "profile-state",
+                "statement": "The browser profile persists after scenario cleanup.",
+                "dimension": "test_harness",
+                "kind": "artifact",
+                "expected_state": "clean_profile",
+                "actual_state": "persisted_profile",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "missing-lifecycle",
+                "statement": (
+                    "The retained archive cannot distinguish persisted browser state from a leaked proxy rule."
+                ),
+                "dimension": "test_harness",
+                "kind": "artifact",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+        ],
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-harness",
+                "claim": "Leaked harness state redirects the browser.",
+                "dimension": "test_harness",
+                "support_evidence_ids": ["profile-state", "missing-lifecycle"],
+                "falsification": "Capture profile and proxy lifecycle per scenario.",
+            }
+        ],
+        "conclusion": {"hypothesis_id": "h-harness", "status": "confirmed"},
+    }
+
+    report = reasoning.evaluate_packet(case, packet)
+
+    assert report["attribution_assessment"]["unresolved"] is True
+    assert report["conclusion"]["dimension"] == "test_harness"
+    assert report["conclusion"]["status"] == "inconclusive"
+    assert report["decision"] == "instrument_first"
+
+
 def test_visual_baseline_drift_selects_test_harness_without_claiming_exact_component():
     case = {
         "case_id": "visual-baseline-drift",
@@ -2296,6 +2445,56 @@ def test_visual_baseline_drift_selects_test_harness_without_claiming_exact_compo
 
     assert report["baseline_drift"]
     assert report["conclusion"]["dimension"] == "test_harness"
+    assert report["conclusion"]["status"] == "provisional"
+    assert report["decision"] == "instrument_first"
+
+
+def test_unreproducible_baseline_keeps_noncode_direct_signal_provisional():
+    case = {
+        "case_id": "unreproducible-clock-baseline",
+        "problem_statement": "A latency dashboard changed after a device rollout.",
+        "observations": [
+            {
+                "evidence_id": "clock-artifact",
+                "statement": "The client stores local wall-time without a UTC offset.",
+                "dimension": "clock",
+                "kind": "artifact",
+                "expected_state": "offset_present",
+                "actual_state": "offset_absent",
+                "independence_key": "event-schema",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "baseline-gap",
+                "statement": (
+                    "The pre-rollout baseline retained only daily percentiles and cannot establish the new cohort's prior delay distribution."
+                ),
+                "dimension": "clock",
+                "kind": "artifact",
+                "independence_key": "baseline-retention",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+        ],
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-clock",
+                "claim": "Local wall-time interpretation distorts latency.",
+                "dimension": "clock",
+                "support_evidence_ids": ["clock-artifact", "baseline-gap"],
+                "falsification": "Capture monotonic and offset-aware durations.",
+            }
+        ],
+        "conclusion": {"hypothesis_id": "h-clock", "status": "confirmed"},
+    }
+
+    report = reasoning.evaluate_packet(case, packet)
+
+    assert report["baseline_drift"][0]["finding_type"] == "baseline_comparability_gap"
+    assert report["conclusion"]["dimension"] == "clock"
     assert report["conclusion"]["status"] == "provisional"
     assert report["decision"] == "instrument_first"
 
