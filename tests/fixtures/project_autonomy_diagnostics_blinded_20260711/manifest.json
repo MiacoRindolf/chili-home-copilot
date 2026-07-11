@@ -1,0 +1,63 @@
+{
+  "schema": "chili.realworld-diagnostic-manifest.v1",
+  "reference_model": "claude-fable-5",
+  "baseline_commit": "7dec2e6d608edb0deab64368b5bd9e746ea42140",
+  "cases": [
+    {
+      "case": "cases/bhfr-20260711-01.json",
+      "oracle": "oracles/bhfr-20260711-01.json",
+      "split": "holdout",
+      "evaluation_role": "blinded_holdout_first_run",
+      "source": "independent_post_freeze_case_author"
+    },
+    {
+      "case": "cases/bhfr-20260711-02.json",
+      "oracle": "oracles/bhfr-20260711-02.json",
+      "split": "holdout",
+      "evaluation_role": "blinded_holdout_first_run",
+      "source": "independent_post_freeze_case_author"
+    },
+    {
+      "case": "cases/bhfr-20260711-03.json",
+      "oracle": "oracles/bhfr-20260711-03.json",
+      "split": "holdout",
+      "evaluation_role": "blinded_holdout_first_run",
+      "source": "independent_post_freeze_case_author"
+    },
+    {
+      "case": "cases/bhfr-20260711-04.json",
+      "oracle": "oracles/bhfr-20260711-04.json",
+      "split": "holdout",
+      "evaluation_role": "blinded_holdout_first_run",
+      "source": "independent_post_freeze_case_author"
+    },
+    {
+      "case": "cases/bhfr-20260711-05.json",
+      "oracle": "oracles/bhfr-20260711-05.json",
+      "split": "holdout",
+      "evaluation_role": "blinded_holdout_first_run",
+      "source": "independent_post_freeze_case_author"
+    },
+    {
+      "case": "cases/bhfr-20260711-06.json",
+      "oracle": "oracles/bhfr-20260711-06.json",
+      "split": "holdout",
+      "evaluation_role": "blinded_holdout_first_run",
+      "source": "independent_post_freeze_case_author"
+    },
+    {
+      "case": "cases/bhfr-20260711-07.json",
+      "oracle": "oracles/bhfr-20260711-07.json",
+      "split": "holdout",
+      "evaluation_role": "blinded_holdout_first_run",
+      "source": "independent_post_freeze_case_author"
+    },
+    {
+      "case": "cases/bhfr-20260711-08.json",
+      "oracle": "oracles/bhfr-20260711-08.json",
+      "split": "holdout",
+      "evaluation_role": "blinded_holdout_first_run",
+      "source": "independent_post_freeze_case_author"
+    }
+  ]
+}

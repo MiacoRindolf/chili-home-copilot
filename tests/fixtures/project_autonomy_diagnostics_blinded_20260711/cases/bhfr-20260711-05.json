@@ -1,0 +1,85 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bhfr-20260711-05",
+  "problem_statement": "Expected: the museum lobby display publishes approved exhibit images at 1920 pixels wide. Observed: the lobby display publishes 320-pixel preview images even though the approved source assets are high resolution. Diagnose the causal family and evidence sufficiency without publishing content or changing any kiosk settings.",
+  "provenance": {
+    "authoring_role": "independent_post_freeze_case_author",
+    "source_class": "novel_non_trading_operational_incident",
+    "prior_fixture_reuse": false
+  },
+  "independence": {
+    "independent_of_existing_fixture_incidents": true,
+    "independent_of_archived_trading_tasks": true,
+    "operational_domain": "museum_digital_signage"
+  },
+  "observations": [
+    {
+      "evidence_id": "e1-asset-metadata",
+      "statement": "Read-only metadata for all 24 approved exhibit assets reports widths between 2400 and 4800 pixels, while the generated lobby package contains 320-pixel outputs.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "artifact_catalog:exhibit-set-2026-07",
+      "independence_key": "approved-asset-catalog",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e2-resolution-trace",
+      "statement": "The lobby process's read-only resolved-settings trace records base display_max_width=1920 followed by a kiosk-local preview profile setting display_max_width=320; an unaffected gallery kiosk resolves only the base profile.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "read_only:settings-resolution-trace:lobby-gallery",
+      "independence_key": "resolved-settings-trace",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e3-settings-isolation",
+      "statement": "An isolated renderer holds binary, source assets, dependency versions, runtime image, and clock fixed; exchanging only the two captured resolved-settings snapshots swaps output width between 320 and 1920 pixels.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated:signage-settings-ab",
+      "independence_key": "isolated-settings-ab",
+      "reliability": 0.98,
+      "discriminating": true,
+      "experiment_id": "x-settings-isolation"
+    },
+    {
+      "evidence_id": "e4-imaging-library",
+      "statement": "The lobby and gallery attest to the same imaging-library hash, and an isolated metadata decode using that library preserves each source asset's full dimensions.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "dependency_attestation:image-library-and-decode",
+      "independence_key": "imaging-library-attestation",
+      "reliability": 0.93,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e5-rollout-timing",
+      "statement": "A renderer rollout occurred the previous evening, but both kiosks report the same signed binary and the width disagreement persists in isolated runs of that binary under their respective settings snapshots.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "deployment_attestation:lobby-gallery",
+      "independence_key": "deployment-attestation",
+      "reliability": 0.92,
+      "discriminating": false
+    }
+  ],
+  "constraints": {
+    "allowed_action_classes": ["read_only", "isolated"],
+    "read_only_evidence_only": true,
+    "isolated_experiments_only": true,
+    "no_live_mutation": true,
+    "no_runtime_restart": true,
+    "no_database_write": true,
+    "no_network_access": true,
+    "no_premium_api": true,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

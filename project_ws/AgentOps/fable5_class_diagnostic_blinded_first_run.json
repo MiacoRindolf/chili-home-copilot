@@ -1,0 +1,2514 @@
+{
+  "average_local_latency_ms": 51598.42,
+  "cases": [
+    {
+      "case_id": "bhfr-20260711-01",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 62010,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 890
+        },
+        {
+          "error": null,
+          "latency_ms": 61840,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 900
+        },
+        {
+          "error": null,
+          "latency_ms": 31795,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 370
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e1-request-audit",
+            "e3-revision-isolation"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "dependency"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing dependency changes or restores the outcome.",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "e1-request-audit",
+              "e3-revision-isolation"
+            ]
+          }
+        ],
+        "problem_statement": "Expected: a parcel addressed to the satellite campus in Ontario is sent to the international dispatch lane. Observed: the routing service sends it to the domestic lane even though the accepted request records country CA. Diagnose the causal family and evidence sufficiency using only read-only artifacts and isolated executions.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "bhfr-20260711-01",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by dependency drift.",
+          "confidence": 0.661,
+          "dimension": "dependency",
+          "evidence_ids": [
+            "e1-request-audit",
+            "e3-revision-isolation"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.661,
+            "confirmatory_weight": 1.95,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e1-request-audit",
+              "e3-revision-isolation"
+            ],
+            "support_weight": 1.95
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-dependency",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "dependency",
+          "hypothesis_dimensions": [
+            "dependency"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": false,
+          "grounded": true,
+          "hypothesis_breadth": false,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 70
+      },
+      "source": "independent_post_freeze_case_author",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": false,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.661,
+            "dimension": "dependency",
+            "evidence_ids": [
+              "e1-request-audit",
+              "e3-revision-isolation"
+            ],
+            "hypothesis_id": "h-dependency",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "errors": [
+            "A conclusion hypothesis is required.",
+            "h2 links support from a different evidence family: e4-sdk-warning",
+            "h3 links support from a different evidence family: e1-request-audit"
+          ],
+          "response_chars": 3764,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": false,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.661,
+            "dimension": "dependency",
+            "evidence_ids": [
+              "e1-request-audit",
+              "e3-revision-isolation"
+            ],
+            "hypothesis_id": "h-dependency",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "errors": [
+            "Model response was not a usable diagnostic JSON object."
+          ],
+          "response_chars": 4091,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.661,
+            "dimension": "dependency",
+            "evidence_ids": [
+              "e1-request-audit",
+              "e3-revision-isolation"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "response_chars": 1632,
+          "retractions": [
+            {
+              "hypothesis_id": "h-dependency",
+              "new_status": "superseded",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bhfr-20260711-02",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 55844,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 900
+        },
+        {
+          "error": null,
+          "latency_ms": 62980,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 900
+        },
+        {
+          "error": null,
+          "latency_ms": 63493,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 900
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e1-approved-export",
+            "e2-ingestion-profile"
+          ],
+          "hypothesis_id": "h-data",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing data changes or restores the outcome.",
+            "experiment_id": "isolate-data",
+            "held_constant_dimensions": [
+              "code",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-data"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "clock"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing clock changes or restores the outcome.",
+            "experiment_id": "isolate-clock",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-clock"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "code"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing code changes or restores the outcome.",
+            "experiment_id": "isolate-code",
+            "held_constant_dimensions": [
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-code"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "runtime"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing runtime changes or restores the outcome.",
+            "experiment_id": "isolate-runtime",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-runtime"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "support_evidence_ids": [
+              "e1-approved-export",
+              "e2-ingestion-profile"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "support_evidence_ids": [
+              "e3-input-isolation"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by code drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "support_evidence_ids": [
+              "e4-filter-release"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "support_evidence_ids": [
+              "e5-worker-retry"
+            ]
+          }
+        ],
+        "problem_statement": "Expected: the library bookmobile planner schedules all 312 eligible stops from the approved address export. Observed: only 19 stops are scheduled, with most omitted addresses located in postal zones whose five-digit codes begin with zero. Diagnose the causal family and evidence sufficiency without changing the planner or any operational records.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "bhfr-20260711-02",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by data drift.",
+          "confidence": 0.6633,
+          "dimension": "data",
+          "evidence_ids": [
+            "e1-approved-export",
+            "e2-ingestion-profile"
+          ],
+          "hypothesis_id": "h-data",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.6633,
+            "confirmatory_weight": 1.97,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e1-approved-export",
+              "e2-ingestion-profile"
+            ],
+            "support_weight": 1.97
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.4924,
+            "confirmatory_weight": 0.97,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e3-input-isolation"
+            ],
+            "support_weight": 0.97
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.4819,
+            "confirmatory_weight": 0.93,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e4-filter-release"
+            ],
+            "support_weight": 0.93
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.4792,
+            "confirmatory_weight": 0.92,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e5-worker-retry"
+            ],
+            "support_weight": 0.92
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "dimension": "clock",
+            "experiment_id": "falsify-h-clock",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "dimension": "runtime",
+            "experiment_id": "falsify-h-runtime",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "data",
+          "hypothesis_dimensions": [
+            "clock",
+            "code",
+            "data",
+            "runtime"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 100
+      },
+      "source": "independent_post_freeze_case_author",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": false,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.6633,
+            "dimension": "data",
+            "evidence_ids": [
+              "e1-approved-export",
+              "e2-ingestion-profile"
+            ],
+            "hypothesis_id": "h-data",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "errors": [
+            "Model response was not a usable diagnostic JSON object."
+          ],
+          "response_chars": 3922,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": false,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.6633,
+            "dimension": "data",
+            "evidence_ids": [
+              "e1-approved-export",
+              "e2-ingestion-profile"
+            ],
+            "hypothesis_id": "h-data",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "errors": [
+            "Model response was not a usable diagnostic JSON object."
+          ],
+          "response_chars": 4120,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": false,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.6633,
+            "dimension": "data",
+            "evidence_ids": [
+              "e1-approved-export",
+              "e2-ingestion-profile"
+            ],
+            "hypothesis_id": "h-data",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "errors": [
+            "Model response was not a usable diagnostic JSON object."
+          ],
+          "response_chars": 4120,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bhfr-20260711-03",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 57212,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 897
+        },
+        {
+          "error": null,
+          "latency_ms": 54914,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 778
+        },
+        {
+          "error": null,
+          "latency_ms": 58900,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 844
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e1-ingest-rejection",
+            "e2-clock-comparison",
+            "e3-time-isolation"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "The hypothesis that the observed failure is primarily caused by clock drift is supported by evidence e1-ingest-rejection, e2-clock-comparison, and e3-time-isolation. Changing the clock changes or restores the outcome.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "clock"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing clock changes or restores the outcome.",
+            "experiment_id": "x1-isolate-clock",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "config"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing config changes or restores the outcome.",
+            "experiment_id": "x2-isolate-config",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h2"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "dependency"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing dependency changes or restores the outcome.",
+            "experiment_id": "x3-isolate-dependency",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h3"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "e1-ingest-rejection",
+              "e2-clock-comparison",
+              "e3-time-isolation"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by config drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "config",
+            "falsification": "Hold every other dimension constant and show that changing config does not change the outcome.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "e4-rollout-comparison"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "e5-service-health"
+            ]
+          }
+        ],
+        "problem_statement": "Expected: a fleet inspection recorded at 14:03 UTC is accepted by the regional synchronization service within its two-minute future-skew allowance. Observed: one kiosk's inspection is rejected as eleven minutes in the future while a second kiosk accepts an equivalent inspection. Diagnose the causal family using read-only measurements and isolated validation only.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "bhfr-20260711-03",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by clock drift.",
+          "confidence": 0.7462,
+          "dimension": "clock",
+          "evidence_ids": [
+            "e1-ingest-rejection",
+            "e2-clock-comparison",
+            "e3-time-isolation"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "The hypothesis that the observed failure is primarily caused by clock drift is supported by evidence e1-ingest-rejection, e2-clock-comparison, and e3-time-isolation. Changing the clock changes or restores the outcome.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.7462,
+            "confirmatory_weight": 2.94,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e1-ingest-rejection",
+              "e2-clock-comparison",
+              "e3-time-isolation"
+            ],
+            "support_weight": 2.94
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by config drift.",
+            "confidence": 0.4872,
+            "confirmatory_weight": 0.95,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "config",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing config does not change the outcome.",
+            "hypothesis_id": "h2",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e4-rollout-comparison"
+            ],
+            "support_weight": 0.95
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.4737,
+            "confirmatory_weight": 0.9,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h3",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e5-service-health"
+            ],
+            "support_weight": 0.9
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "dimension": "dependency",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-clock",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "clock",
+          "hypothesis_dimensions": [
+            "clock",
+            "config",
+            "dependency"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 100
+      },
+      "source": "independent_post_freeze_case_author",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": false,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.7462,
+            "dimension": "clock",
+            "evidence_ids": [
+              "e1-ingest-rejection",
+              "e2-clock-comparison",
+              "e3-time-isolation"
+            ],
+            "hypothesis_id": "h-clock",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "errors": [
+            "A conclusion hypothesis is required."
+          ],
+          "response_chars": 3880,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.7462,
+            "dimension": "clock",
+            "evidence_ids": [
+              "e1-ingest-rejection",
+              "e2-clock-comparison",
+              "e3-time-isolation"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "response_chars": 3461,
+          "retractions": [
+            {
+              "hypothesis_id": "h-clock",
+              "new_status": "superseded",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.7462,
+            "dimension": "clock",
+            "evidence_ids": [
+              "e1-ingest-rejection",
+              "e2-clock-comparison",
+              "e3-time-isolation"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "The hypothesis that the observed failure is primarily caused by clock drift is supported by evidence e1-ingest-rejection, e2-clock-comparison, and e3-time-isolation. Changing the clock changes or restores the outcome.",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "response_chars": 3738,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bhfr-20260711-04",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 52656,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 830
+        },
+        {
+          "error": null,
+          "latency_ms": 62408,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 900
+        },
+        {
+          "error": null,
+          "latency_ms": 31390,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 356
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e2-lease-snapshot"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "runtime"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing runtime changes or restores the outcome.",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "e2-lease-snapshot"
+            ]
+          }
+        ],
+        "problem_statement": "Expected: a records scanner becomes available after its completed digitization job releases ownership. Observed: the intake service reports the physically idle scanner as busy for subsequent jobs more than three hours later. Diagnose the causal family without altering the live scanner, lease store, or intake queue.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "bhfr-20260711-04",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by runtime drift.",
+          "confidence": 0.4975,
+          "dimension": "runtime",
+          "evidence_ids": [
+            "e2-lease-snapshot"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.4975,
+            "confirmatory_weight": 0.99,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e2-lease-snapshot"
+            ],
+            "support_weight": 0.99
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-runtime",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "runtime",
+          "hypothesis_dimensions": [
+            "runtime"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": false,
+          "grounded": true,
+          "hypothesis_breadth": false,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 70
+      },
+      "source": "independent_post_freeze_case_author",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": false,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.4975,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "e2-lease-snapshot"
+            ],
+            "hypothesis_id": "h-runtime",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "errors": [
+            "A conclusion hypothesis is required.",
+            "h1 links support from a different evidence family: e2-lease-snapshot",
+            "h2 links support from a different evidence family: e1-job-timeline"
+          ],
+          "response_chars": 3524,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": false,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.4975,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "e2-lease-snapshot"
+            ],
+            "hypothesis_id": "h-runtime",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "errors": [
+            "Model response was not a usable diagnostic JSON object."
+          ],
+          "response_chars": 4054,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.4975,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "e2-lease-snapshot"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "response_chars": 1562,
+          "retractions": [
+            {
+              "hypothesis_id": "h-runtime",
+              "new_status": "superseded",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bhfr-20260711-05",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 53778,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 900
+        },
+        {
+          "error": null,
+          "latency_ms": 62669,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 900
+        },
+        {
+          "error": null,
+          "latency_ms": 32525,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 375
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e2-resolution-trace",
+            "e5-rollout-timing"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "config"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing config changes or restores the outcome.",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by config drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "config",
+            "falsification": "Hold every other dimension constant and show that changing config does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "e2-resolution-trace",
+              "e5-rollout-timing"
+            ]
+          }
+        ],
+        "problem_statement": "Expected: the museum lobby display publishes approved exhibit images at 1920 pixels wide. Observed: the lobby display publishes 320-pixel preview images even though the approved source assets are high resolution. Diagnose the causal family and evidence sufficiency without publishing content or changing any kiosk settings.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "bhfr-20260711-05",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by config drift.",
+          "confidence": 0.6564,
+          "dimension": "config",
+          "evidence_ids": [
+            "e2-resolution-trace",
+            "e5-rollout-timing"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by config drift.",
+            "confidence": 0.6564,
+            "confirmatory_weight": 1.91,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "config",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing config does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e2-resolution-trace",
+              "e5-rollout-timing"
+            ],
+            "support_weight": 1.91
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-config",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "config",
+          "hypothesis_dimensions": [
+            "config"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": false,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 95
+      },
+      "source": "independent_post_freeze_case_author",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": false,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by config drift.",
+            "confidence": 0.6564,
+            "dimension": "config",
+            "evidence_ids": [
+              "e2-resolution-trace",
+              "e5-rollout-timing"
+            ],
+            "hypothesis_id": "h-config",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "errors": [
+            "Model response was not a usable diagnostic JSON object."
+          ],
+          "response_chars": 3738,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": false,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by config drift.",
+            "confidence": 0.6564,
+            "dimension": "config",
+            "evidence_ids": [
+              "e2-resolution-trace",
+              "e5-rollout-timing"
+            ],
+            "hypothesis_id": "h-config",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "errors": [
+            "Model response was not a usable diagnostic JSON object."
+          ],
+          "response_chars": 4041,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by config drift.",
+            "confidence": 0.6564,
+            "dimension": "config",
+            "evidence_ids": [
+              "e2-resolution-trace",
+              "e5-rollout-timing"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "response_chars": 1609,
+          "retractions": [
+            {
+              "hypothesis_id": "h-config",
+              "new_status": "superseded",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bhfr-20260711-06",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 55943,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 900
+        },
+        {
+          "error": null,
+          "latency_ms": 55158,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 794
+        },
+        {
+          "error": null,
+          "latency_ms": 55859,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 797
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e2-peer-chain-capture",
+            "e5-provider-notice"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "The evidence strongly supports the hypothesis that clock drift is the primary cause of the observed failure.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "clock"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing clock changes or restores the outcome.",
+            "experiment_id": "x-isolate-clock",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "runtime"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing runtime changes or restores the outcome.",
+            "experiment_id": "x-isolate-runtime",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h2"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "unknown"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing unknown changes or restores the outcome.",
+            "experiment_id": "x-isolate-unknown",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h3"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "e2-peer-chain-capture",
+              "e5-provider-notice"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "e3-chain-isolation",
+              "e4-local-trust-attestation"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "unknown",
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "e1-handshake-log"
+            ]
+          }
+        ],
+        "problem_statement": "Expected: the nightly historical-archive package completes a mutually authenticated upload to the contracted preservation endpoint. Observed: every attempt stops during certificate validation before any package bytes are sent, although the archive application and payload are unchanged. Diagnose the causal family from captured local evidence only.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "bhfr-20260711-06",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by clock drift.",
+          "confidence": 0.6599,
+          "dimension": "clock",
+          "evidence_ids": [
+            "e2-peer-chain-capture",
+            "e5-provider-notice"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "The evidence strongly supports the hypothesis that clock drift is the primary cause of the observed failure.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.6599,
+            "confirmatory_weight": 1.94,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e2-peer-chain-capture",
+              "e5-provider-notice"
+            ],
+            "support_weight": 1.94
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.6575,
+            "confirmatory_weight": 1.92,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h2",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e3-chain-isolation",
+              "e4-local-trust-attestation"
+            ],
+            "support_weight": 1.92
+          },
+          {
+            "blockers": [
+              "Unknown is not a confirmable causal family; isolate a known dimension first."
+            ],
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "confidence": 0.4924,
+            "confirmatory_weight": 0.97,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "unknown",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h3",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e1-handshake-log"
+            ],
+            "support_weight": 0.97
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "dimension": "unknown",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-clock",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "clock",
+          "hypothesis_dimensions": [
+            "clock",
+            "runtime",
+            "unknown"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": false,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 75
+      },
+      "source": "independent_post_freeze_case_author",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": false,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.6599,
+            "dimension": "clock",
+            "evidence_ids": [
+              "e2-peer-chain-capture",
+              "e5-provider-notice"
+            ],
+            "hypothesis_id": "h-clock",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "errors": [
+            "Model response was not a usable diagnostic JSON object."
+          ],
+          "response_chars": 3912,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.6599,
+            "dimension": "clock",
+            "evidence_ids": [
+              "e2-peer-chain-capture",
+              "e5-provider-notice"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "response_chars": 3566,
+          "retractions": [
+            {
+              "hypothesis_id": "h-clock",
+              "new_status": "superseded",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.6599,
+            "dimension": "clock",
+            "evidence_ids": [
+              "e2-peer-chain-capture",
+              "e5-provider-notice"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "The evidence strongly supports the hypothesis that clock drift is the primary cause of the observed failure.",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "response_chars": 3596,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bhfr-20260711-07",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 47676,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 748
+        },
+        {
+          "error": null,
+          "latency_ms": 42014,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 591
+        },
+        {
+          "error": null,
+          "latency_ms": 31492,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 407
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e1-export-error",
+            "e2-filesystem-stats",
+            "e3-fresh-container-isolation",
+            "e4-font-warning"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "The hypothesis that the failure is primarily caused by runtime drift is supported by evidence, and further experiments are not necessary to confirm this claim.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "runtime"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing runtime changes or restores the outcome.",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "e1-export-error",
+              "e2-filesystem-stats",
+              "e3-fresh-container-isolation",
+              "e4-font-warning"
+            ]
+          }
+        ],
+        "problem_statement": "Expected: the municipal permit portal exports a two-page records package to a temporary file and returns the completed PDF. Observed: the export process returns ENOSPC while its runtime reports substantial free byte capacity, including for a tiny diagnostic package. Diagnose the causal family without restarting or cleaning the live process.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "bhfr-20260711-07",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by runtime drift.",
+          "confidence": 0.7947,
+          "dimension": "runtime",
+          "evidence_ids": [
+            "e1-export-error",
+            "e2-filesystem-stats",
+            "e3-fresh-container-isolation",
+            "e4-font-warning"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "The hypothesis that the failure is primarily caused by runtime drift is supported by evidence, and further experiments are not necessary to confirm this claim.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.7947,
+            "confirmatory_weight": 3.87,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e1-export-error",
+              "e2-filesystem-stats",
+              "e3-fresh-container-isolation",
+              "e4-font-warning"
+            ],
+            "support_weight": 3.87
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-runtime",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "runtime",
+          "hypothesis_dimensions": [
+            "runtime"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": false,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 95
+      },
+      "source": "independent_post_freeze_case_author",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": false,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.7947,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "e1-export-error",
+              "e2-filesystem-stats",
+              "e3-fresh-container-isolation",
+              "e4-font-warning"
+            ],
+            "hypothesis_id": "h-runtime",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "errors": [
+            "A conclusion hypothesis is required.",
+            "h1 links support from a different evidence family: e2-filesystem-stats",
+            "h2 links support from a different evidence family: e4-font-warning"
+          ],
+          "response_chars": 3028,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.7947,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "e1-export-error",
+              "e2-filesystem-stats",
+              "e3-fresh-container-isolation",
+              "e4-font-warning"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "The hypothesis that the failure is primarily caused by runtime drift is supported by evidence, but further experiments are needed to confirm or refute this claim.",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "response_chars": 2644,
+          "retractions": [
+            {
+              "hypothesis_id": "h-runtime",
+              "new_status": "superseded",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.7947,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "e1-export-error",
+              "e2-filesystem-stats",
+              "e3-fresh-container-isolation",
+              "e4-font-warning"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "The hypothesis that the failure is primarily caused by runtime drift is supported by evidence, and further experiments are not necessary to confirm this claim.",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "response_chars": 1807,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bhfr-20260711-08",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 38641,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 627
+        },
+        {
+          "error": null,
+          "latency_ms": 52887,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 807
+        },
+        {
+          "error": null,
+          "latency_ms": 54278,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 820
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e2-trace-disagreement",
+            "e3-fixture-inventory",
+            "e4-process-isolation"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "The hypothesis that the observed failure is primarily caused by test_harness drift is supported by multiple pieces of evidence and has no contradicting evidence.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "test_harness"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing test_harness changes or restores the outcome.",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "dependency"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing dependency changes or restores the outcome.",
+            "experiment_id": "x2",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h2"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "state"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing state changes or restores the outcome.",
+            "experiment_id": "x3",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h3"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "test_harness",
+            "falsification": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "e2-trace-disagreement",
+              "e3-fixture-inventory",
+              "e4-process-isolation"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "e1-order-sensitive-result"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by state drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "e5-retry-implementation"
+            ]
+          }
+        ],
+        "problem_statement": "Expected: release qualification records one outbound notification for one permit-ready event. Observed: the full integration suite records two mock deliveries, while the same scenario run alone records one and the service's own outbound trace records one. Diagnose the causal family without contacting a notification provider or changing the release candidate.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "bhfr-20260711-08",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by test_harness drift.",
+          "confidence": 0.7462,
+          "dimension": "test_harness",
+          "evidence_ids": [
+            "e2-trace-disagreement",
+            "e3-fixture-inventory",
+            "e4-process-isolation"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "The hypothesis that the observed failure is primarily caused by test_harness drift is supported by multiple pieces of evidence and has no contradicting evidence.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "confidence": 0.7462,
+            "confirmatory_weight": 2.94,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "test_harness",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e2-trace-disagreement",
+              "e3-fixture-inventory",
+              "e4-process-isolation"
+            ],
+            "support_weight": 2.94
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.4949,
+            "confirmatory_weight": 0.98,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h2",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e1-order-sensitive-result"
+            ],
+            "support_weight": 0.98
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.4819,
+            "confirmatory_weight": 0.93,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h3",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e5-retry-implementation"
+            ],
+            "support_weight": 0.93
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-test_harness",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "test_harness",
+          "hypothesis_dimensions": [
+            "dependency",
+            "state",
+            "test_harness"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 100
+      },
+      "source": "independent_post_freeze_case_author",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": false,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "confidence": 0.7462,
+            "dimension": "test_harness",
+            "evidence_ids": [
+              "e2-trace-disagreement",
+              "e3-fixture-inventory",
+              "e4-process-isolation"
+            ],
+            "hypothesis_id": "h-test_harness",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "errors": [
+            "A conclusion hypothesis is required.",
+            "h1 links support from a different evidence family: e5-retry-implementation"
+          ],
+          "response_chars": 2681,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "confidence": 0.7462,
+            "dimension": "test_harness",
+            "evidence_ids": [
+              "e2-trace-disagreement",
+              "e3-fixture-inventory",
+              "e4-process-isolation"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "response_chars": 3592,
+          "retractions": [
+            {
+              "hypothesis_id": "h-test_harness",
+              "new_status": "superseded",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "confidence": 0.7462,
+            "dimension": "test_harness",
+            "evidence_ids": [
+              "e2-trace-disagreement",
+              "e3-fixture-inventory",
+              "e4-process-isolation"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "The hypothesis that the observed failure is primarily caused by test_harness drift is supported by multiple pieces of evidence and has no contradicting evidence.",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "response_chars": 3675,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    }
+  ],
+  "created_at": "2026-07-11T16:36:21.735358+00:00",
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "holdout_score": 88.12,
+  "max_local_latency_ms": 63493,
+  "model": "qwen2.5-coder:7b",
+  "overall_score": 88.12,
+  "premium_calls": 0,
+  "reference_model": "claude-fable-5",
+  "schema": "chili.realworld-diagnostic-results.v1",
+  "verdict": "needs_improvement"
+}

@@ -1,0 +1,85 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bhfr-20260711-08",
+  "problem_statement": "Expected: release qualification records one outbound notification for one permit-ready event. Observed: the full integration suite records two mock deliveries, while the same scenario run alone records one and the service's own outbound trace records one. Diagnose the causal family without contacting a notification provider or changing the release candidate.",
+  "provenance": {
+    "authoring_role": "independent_post_freeze_case_author",
+    "source_class": "novel_non_trading_operational_incident",
+    "prior_fixture_reuse": false
+  },
+  "independence": {
+    "independent_of_existing_fixture_incidents": true,
+    "independent_of_archived_trading_tasks": true,
+    "operational_domain": "permit_notification_release_qualification"
+  },
+  "observations": [
+    {
+      "evidence_id": "e1-order-sensitive-result",
+      "statement": "The immutable test report shows the scenario records one mock delivery when run alone, but two when a retry-scenario test precedes it; service revision, test data fingerprint, settings, clock seed, and dependency stubs are identical.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "ci_artifact:qualification-order-matrix:run-552",
+      "independence_key": "qualification-test-report",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e2-trace-disagreement",
+      "statement": "For the failing suite run, the release candidate's append-only outbound trace contains one send intent and one transport invocation, while the mock transport ledger contains two delivery callbacks for the event.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "ci_artifact:service-trace-vs-mock-ledger:event-Q77",
+      "independence_key": "service-outbound-trace",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e3-fixture-inventory",
+      "statement": "A read-only harness fixture inventory after the preceding retry scenario reports two registered fake-transport callbacks under a session-scoped fixture, although its visible delivery counter was reset to zero.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "read_only:harness-fixture-inventory:run-552",
+      "independence_key": "harness-fixture-inventory",
+      "reliability": 0.97,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e4-process-isolation",
+      "statement": "Running the retry scenario and permit-ready scenario in separate isolated harness processes records one mock delivery in each, with the same release artifact and scenario inputs.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated:qualification-separate-processes",
+      "independence_key": "isolated-harness-process-ab",
+      "reliability": 0.98,
+      "discriminating": true,
+      "experiment_id": "x-process-isolation"
+    },
+    {
+      "evidence_id": "e5-retry-implementation",
+      "statement": "A retry subsystem change landed that week, but a read-only execution trace shows no retry branch entered for event Q77 and the duplicate appears only in the mock delivery ledger.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "read_only:retry-branch-trace:event-Q77",
+      "independence_key": "retry-execution-trace",
+      "reliability": 0.93,
+      "discriminating": true
+    }
+  ],
+  "constraints": {
+    "allowed_action_classes": ["read_only", "isolated"],
+    "read_only_evidence_only": true,
+    "isolated_experiments_only": true,
+    "no_live_mutation": true,
+    "no_runtime_restart": true,
+    "no_database_write": true,
+    "no_network_access": true,
+    "no_premium_api": true,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

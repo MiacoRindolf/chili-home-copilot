@@ -1,0 +1,86 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bhfr-20260711-02",
+  "problem_statement": "Expected: the library bookmobile planner schedules all 312 eligible stops from the approved address export. Observed: only 19 stops are scheduled, with most omitted addresses located in postal zones whose five-digit codes begin with zero. Diagnose the causal family and evidence sufficiency without changing the planner or any operational records.",
+  "provenance": {
+    "authoring_role": "independent_post_freeze_case_author",
+    "source_class": "novel_non_trading_operational_incident",
+    "prior_fixture_reuse": false
+  },
+  "independence": {
+    "independent_of_existing_fixture_incidents": true,
+    "independent_of_archived_trading_tasks": true,
+    "operational_domain": "public_library_bookmobile_planning"
+  },
+  "observations": [
+    {
+      "evidence_id": "e1-approved-export",
+      "statement": "The immutable approved export contains 312 rows and defines postal_code as five-character text; sampled omitted records contain values such as 02108 and 02109.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "archive:address-export:sha256-4b7c",
+      "independence_key": "approved-export-archive",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e2-ingestion-profile",
+      "statement": "A read-only profile of the planner's captured batch shows 293 postal codes with four digits, including 2108 and 2109, and no value retaining an initial zero; row count and address text otherwise match the approved export.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "read_only:planner-batch-profile:batch-771",
+      "independence_key": "planner-batch-profile",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e3-input-isolation",
+      "statement": "An isolated run holds planner revision, settings, clock, route map, and dependency stubs fixed: the archived text-preserving export schedules 312 stops, while the captured batch fingerprint schedules 19.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated:bookmobile-input-ab:batch-771",
+      "independence_key": "isolated-input-ab",
+      "reliability": 0.97,
+      "discriminating": true,
+      "experiment_id": "x-input-isolation"
+    },
+    {
+      "evidence_id": "e4-filter-release",
+      "statement": "A geofence filter release occurred two days earlier, but a read-only diff shows no postal parsing change and the same revision schedules all stops when given the archived export.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "git_diff:planner:r611-r612",
+      "independence_key": "planner-source-history",
+      "reliability": 0.93,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e5-worker-retry",
+      "statement": "Retrying the captured batch in a fresh isolated process produces the same 19-stop plan, despite the original worker log containing a transient memory-pressure warning.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated:fresh-process-batch-retry",
+      "independence_key": "isolated-process-retry",
+      "reliability": 0.92,
+      "discriminating": false,
+      "experiment_id": "x-process-retry"
+    }
+  ],
+  "constraints": {
+    "allowed_action_classes": ["read_only", "isolated"],
+    "read_only_evidence_only": true,
+    "isolated_experiments_only": true,
+    "no_live_mutation": true,
+    "no_runtime_restart": true,
+    "no_database_write": true,
+    "no_network_access": true,
+    "no_premium_api": true,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

@@ -1,0 +1,85 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bhfr-20260711-01",
+  "problem_statement": "Expected: a parcel addressed to the satellite campus in Ontario is sent to the international dispatch lane. Observed: the routing service sends it to the domestic lane even though the accepted request records country CA. Diagnose the causal family and evidence sufficiency using only read-only artifacts and isolated executions.",
+  "provenance": {
+    "authoring_role": "independent_post_freeze_case_author",
+    "source_class": "novel_non_trading_operational_incident",
+    "prior_fixture_reuse": false
+  },
+  "independence": {
+    "independent_of_existing_fixture_incidents": true,
+    "independent_of_archived_trading_tasks": true,
+    "operational_domain": "university_mailroom_routing"
+  },
+  "observations": [
+    {
+      "evidence_id": "e1-request-audit",
+      "statement": "A read-only request audit for parcel P-8841 records country=CA, region=ON, accepted schema version 6, and the resulting lane=domestic at service revision mailroute-r184.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "immutable_audit:parcel-routing:P-8841",
+      "independence_key": "request-audit-store",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e2-control-flow",
+      "statement": "A read-only control-flow trace from revision mailroute-r184 records the domestic branch returning after the region field is evaluated and before the country branch is reached; the same trace format on mailroute-r183 reaches the country branch.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "source_trace:destination_classifier:r183-r184",
+      "independence_key": "source-control-flow-trace",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e3-revision-isolation",
+      "statement": "In an isolated no-network runner, the identical captured request, lookup snapshot, settings, interpreter, and dependency stubs route internationally on mailroute-r183 and domestically on mailroute-r184.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated:mailroute-revision-ab:P-8841",
+      "independence_key": "isolated-revision-ab",
+      "reliability": 0.97,
+      "discriminating": true,
+      "experiment_id": "x-revision-isolation"
+    },
+    {
+      "evidence_id": "e4-sdk-warning",
+      "statement": "Carrier SDK logs contain timeout warnings during the incident window, but the routing audit timestamps the lane decision before any carrier call, and a no-network stub produces the same lane result.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "bounded_log_export:carrier-sdk-and-routing-order",
+      "independence_key": "carrier-sdk-log-export",
+      "reliability": 0.91,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e5-settings-snapshot",
+      "statement": "Resolved settings snapshots from the affected and unaffected mailrooms match, including international routing enabled and the same country lookup fingerprint.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "read_only:resolved-settings-comparison",
+      "independence_key": "settings-snapshot-store",
+      "reliability": 0.94,
+      "discriminating": false
+    }
+  ],
+  "constraints": {
+    "allowed_action_classes": ["read_only", "isolated"],
+    "read_only_evidence_only": true,
+    "isolated_experiments_only": true,
+    "no_live_mutation": true,
+    "no_runtime_restart": true,
+    "no_database_write": true,
+    "no_network_access": true,
+    "no_premium_api": true,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

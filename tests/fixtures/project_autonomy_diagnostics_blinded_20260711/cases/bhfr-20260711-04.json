@@ -1,0 +1,85 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bhfr-20260711-04",
+  "problem_statement": "Expected: a records scanner becomes available after its completed digitization job releases ownership. Observed: the intake service reports the physically idle scanner as busy for subsequent jobs more than three hours later. Diagnose the causal family without altering the live scanner, lease store, or intake queue.",
+  "provenance": {
+    "authoring_role": "independent_post_freeze_case_author",
+    "source_class": "novel_non_trading_operational_incident",
+    "prior_fixture_reuse": false
+  },
+  "independence": {
+    "independent_of_existing_fixture_incidents": true,
+    "independent_of_archived_trading_tasks": true,
+    "operational_domain": "municipal_records_digitization"
+  },
+  "observations": [
+    {
+      "evidence_id": "e1-job-timeline",
+      "statement": "Immutable job events show scan job J-440 completed at 09:12 and emitted release_requested for scanner S-3; every later intake attempt is rejected with busy_owner=J-440.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "append_only_events:scanner-jobs:J-440",
+      "independence_key": "job-event-ledger",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e2-lease-snapshot",
+      "statement": "A read-only lease snapshot at 12:31 still records scanner S-3 owned by J-440 with an expiry 19 hours away; the recorded owner process is absent from the process inventory and no active job references it.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "read_only:scanner-lease-and-process-snapshot",
+      "independence_key": "lease-store-snapshot",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e3-cloned-state-isolation",
+      "statement": "In a fully isolated clone, holding intake revision, scanner stub, settings, job payload, dependency versions, and clock fixed while comparing the captured lease snapshot with an otherwise identical snapshot lacking J-440 changes admission from busy to available.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated:scanner-lease-snapshot-ab",
+      "independence_key": "isolated-lease-ab",
+      "reliability": 0.97,
+      "discriminating": true,
+      "experiment_id": "x-cloned-state-isolation"
+    },
+    {
+      "evidence_id": "e4-device-warning",
+      "statement": "The scanner driver logged a USB reconnect warning before J-440, but a read-only device self-test after completion reports ready and an isolated workstation scan succeeds with the same driver package.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "device_diagnostics:S-3:captured-self-test",
+      "independence_key": "scanner-device-diagnostics",
+      "reliability": 0.91,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e5-policy-fingerprint",
+      "statement": "The affected and unaffected scanners share the same lease-duration setting, intake revision, and policy fingerprint.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "read_only:scanner-policy-attestations",
+      "independence_key": "policy-attestation-store",
+      "reliability": 0.93,
+      "discriminating": false
+    }
+  ],
+  "constraints": {
+    "allowed_action_classes": ["read_only", "isolated"],
+    "read_only_evidence_only": true,
+    "isolated_experiments_only": true,
+    "no_live_mutation": true,
+    "no_runtime_restart": true,
+    "no_database_write": true,
+    "no_network_access": true,
+    "no_premium_api": true,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}
