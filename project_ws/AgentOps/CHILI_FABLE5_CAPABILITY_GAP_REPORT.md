@@ -27,6 +27,7 @@ This distinction is intentional. The current evidence proves that CHILI can diag
 | Recognized contract repair | Prompt-derived invariants and repository-shape checks for single-flight eviction, cancellation propagation, injected-clock TTL, subscription lifecycle, partial uniqueness, and sibling pre-aggregation | Proven by variant unit tests and six real regression fixtures; deliberately narrow |
 | Production validation repair | Project Autonomy preserves operator/assertion contracts and retries validation locally | Default three rounds, hard maximum five; proven by tests, not yet by a large live inventory |
 | Fable 5 reference accuracy | Active target is `claude-fable-5`; exact candidate responses must bind to provider-native or provider-UI identity evidence | Proven for archive identity and collection controls; no same-task score yet |
+| Independent post-freeze diagnostic holdout | Cases authored only after the tested source SHA was frozen; case/oracle hashes unchanged through the run | First eight-case slice completed at 88.12/100; below the 90 shadow threshold |
 | Direct blinded Fable 5 head-to-head | Same unseen task set independently run by Fable 5 and CHILI, with human adjudication | Missing |
 | Broad language/repository coverage | Initial Python, TypeScript, Dart, and SQL repair coverage | Partial; large repositories, Go, Rust, and mixed stacks remain incomplete |
 | Universal superiority claim | Statistically defensible quality, safety, latency, and cost advantage across broad tasks | Not proven |
@@ -103,6 +104,20 @@ The older reports use `holdout` in their structural split labels. Because those 
 - The fresh same-task Fable 5 comparison count therefore remains **0**
 - Full audit: `project_ws/AgentOps/CLAUDE_HISTORY_MODEL_AUDIT.md`
 
+### First Independent Post-Freeze Diagnostic Slice
+
+- Frozen implementation: `7dec2e6d608edb0deab64368b5bd9e746ea42140`
+- Eight independently authored, non-trading operational incidents; one intended primary causal family for each supported diagnostic dimension
+- All 17 case/oracle/manifest hashes matched before and after scoring; no case or oracle was changed after the model run began
+- Local model: `qwen2.5-coder:7b`; three roles per case; **24/24 local calls completed**
+- Untouched score: **88.12/100**; verdict: **needs_improvement**
+- Safety violations: **0**; premium calls: **0**
+- Untouched misses: three root-cause dimension checks and four hypothesis-breadth checks; every decision, status, grounding, baseline-drift, safety, and premium-independence check passed
+- Untouched average local-call latency: **51.6 seconds**; maximum: **63.5 seconds**
+- Reports: `project_ws/AgentOps/FABLE5_CLASS_DIAGNOSTIC_BLINDED_FIRST_RUN.md`, `project_ws/AgentOps/FABLE5_CLASS_DIAGNOSTIC_BLINDED_FIRST_RUN_RECEIPT.md`, and `project_ws/AgentOps/fable5_class_diagnostic_blinded_first_run.json`
+
+After preserving the untouched result, the disclosed cases became development regressions. Generic evidence-family vocabulary, secondary-confounder ranking, and competing-hypothesis preservation raised the same suite to **100/100** in both heuristic-only and full 24-call local-council reruns. The full repaired rerun averaged **48.4 seconds/call**, accepted 13 of 24 model packets, and used deterministic packet preservation for the remainder. This proves the known gaps were closed; it is not unseen generalization evidence. A new independently authored slice is required.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
@@ -124,11 +139,12 @@ The older reports use `holdout` in their structural split labels. Because those 
 
 1. The repair suite has only 13 small development repositories: seven Python and six TypeScript/Dart/SQL. It does not represent large-repository, mixed-stack, Go, or Rust superiority.
 2. Provider-attested Fable 5 history exists, but no provider-attested Fable output exists for the same frozen repair cases. Historical answers are excluded from a blinded score because current CHILI development may be contaminated by their fixes and task mechanics.
-3. Runtime evidence currently covers bounded text logs and aggregate/schema PostgreSQL reads. It does not yet provide typed traces, metrics backends, container state, process inspection, or a live production proof using a separately provisioned SELECT-only role.
-4. Local 7B output remains stochastic. Five of six final cross-language successes required recognized deterministic rescue. That demonstrates system resilience, not frontier-model-level free-form reasoning.
-5. Recognized repair synthesis is intentionally narrow. Unknown mechanisms, dependency migrations, frontend visual validation, true concurrency races, and large cross-service refactors remain under-tested.
-6. Final reviewed-code cross-language latency averaged 73.9 seconds/case. This is much better than the earlier 205.1 seconds but remains a material practical gap.
-7. The 14B local model was not production-usable on current hardware because it offloaded heavily to CPU. The resident 7B model is the measured production lane.
+3. The first independent eight-case diagnostic slice scored 88.12/100, below the 90 shadow threshold. Its repaired 100/100 rerun is development evidence only; 22 more independently authored cases and a fresh post-repair slice remain required.
+4. Runtime evidence currently covers bounded text logs and aggregate/schema PostgreSQL reads. It does not yet provide typed traces, metrics backends, container state, process inspection, or a live production proof using a separately provisioned SELECT-only role.
+5. Local 7B output remains stochastic. Five of six final cross-language successes required recognized deterministic rescue. That demonstrates system resilience, not frontier-model-level free-form reasoning.
+6. Recognized repair synthesis is intentionally narrow. Unknown mechanisms, dependency migrations, frontend visual validation, true concurrency races, and large cross-service refactors remain under-tested.
+7. Final reviewed-code cross-language latency averaged 73.9 seconds/case, while the first independent diagnostic run averaged 51.6 seconds per model call across three roles. Latency remains a material practical gap.
+8. The 14B local model was not production-usable on current hardware because it offloaded heavily to CPU. The resident 7B model is the measured production lane.
 
 ## Promotion Gate
 

@@ -67,6 +67,17 @@ _DIAGNOSTIC_MARKERS = (
     "nasira",
     "nasisira",
 )
+_STATUS_ONLY_MESSAGES = frozenset(
+    {
+        "ano na",
+        "anong balita",
+        "anyare na",
+        "ayos na",
+        "ayos na lahat",
+        "hello",
+        "tapos na",
+    }
+)
 _BASE_DIAGNOSTIC_LENSES = (
     "expected_vs_observed",
     "causal_timeline",
@@ -122,12 +133,67 @@ _DIAGNOSTIC_LENS_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
 _DIMENSION_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("clock", ("clock", "time", "timestamp", "timezone", "wall hour", "sim hour", "utc", "et hour")),
     ("data", ("dataset", "row count", "table", "data source", "ingestion source", "sink", "feed", "cache", "snapshot data", "nbbo")),
-    ("state", ("state", "queue", "pending", "session", "board", "checkpoint", "stale row", "lifecycle")),
+    (
+        "state",
+        (
+            "state",
+            "queue",
+            "pending",
+            "session",
+            "board",
+            "checkpoint",
+            "stale row",
+            "lifecycle",
+            "lease",
+            "owner",
+            "ownership",
+            "reservation",
+            " busy ",
+            "admission",
+        ),
+    ),
     ("config", ("config", "setting", "flag", "environment variable", " env ", "feature gate")),
-    ("dependency", ("dependency", "provider", "service", "socket", "network", "database server", "broker api")),
+    (
+        "dependency",
+        (
+            "dependency",
+            "provider",
+            "service",
+            "socket",
+            "network",
+            "database server",
+            "broker api",
+            "certificate",
+            "tls",
+            "handshake",
+            "endpoint",
+            "trust store",
+            "peer chain",
+            "upstream",
+            "dns",
+        ),
+    ),
     ("runtime", ("runtime", "container", "worker", "process", "restart", "image", "deployment")),
     ("test_harness", ("replay", "harness", "fixture", "mock", "test database", "simulator")),
-    ("code", ("code", "commit", "revision", "diff", "function", "caller", "branch", "patch", "source edit", "source inspection")),
+    (
+        "code",
+        (
+            "code",
+            "commit",
+            "revision",
+            "diff",
+            "function",
+            "caller",
+            "branch",
+            "patch",
+            "source edit",
+            "source inspection",
+            "control flow",
+            "control-flow",
+            "call path",
+            "source trace",
+        ),
+    ),
 )
 _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] = (
     (
@@ -179,6 +245,10 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("lifecycle", 5),
             ("after stop", 6),
             ("cancel", 4),
+            ("lease snapshot", 7),
+            ("busy_owner", 7),
+            ("release_requested", 6),
+            ("owner process", 5),
         ),
     ),
     (
@@ -202,6 +272,12 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("aborterror", 7),
             ("provider adapter", 5),
             ("dependency error", 5),
+            ("certificate verify", 7),
+            ("expired intermediate", 7),
+            ("peer chain", 6),
+            ("trust store", 5),
+            ("carrier sdk", 5),
+            ("carrier call", 5),
         ),
     ),
     (
@@ -228,6 +304,11 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("source diff", 5),
             ("source inspection", 4),
             ("additional source edit", 2),
+            ("control-flow trace", 7),
+            ("source trace", 6),
+            ("branch returning", 6),
+            ("fixed while comparing", 7),
+            ("identical captured request", 5),
         ),
     ),
 )
@@ -326,7 +407,7 @@ def _clamp_reliability(value: object) -> float:
     return max(0.0, min(1.0, number))
 
 
-def infer_dimension(statement: str) -> str:
+def _dimension_scores(statement: str) -> dict[str, int]:
     lower = f" {statement.lower()} "
     scores: dict[str, int] = {}
     for dimension, terms in _DIMENSION_TERMS:
@@ -335,6 +416,11 @@ def infer_dimension(statement: str) -> str:
         scores[dimension] = scores.get(dimension, 0) + sum(
             weight for phrase, weight in weighted_phrases if phrase in lower
         )
+    return scores
+
+
+def infer_dimension(statement: str) -> str:
+    scores = _dimension_scores(statement)
     best = max(scores, key=scores.get, default="unknown")
     return best if scores.get(best, 0) else "unknown"
 
@@ -896,6 +982,9 @@ def contract_repair_proposals(
 
 def looks_like_diagnostic_request(prompt: str) -> bool:
     lower = str(prompt or "").lower()
+    normalized = re.sub(r"[^a-z0-9]+", " ", lower).strip()
+    if normalized in _STATUS_ONLY_MESSAGES:
+        return False
     return any(marker in lower for marker in _DIAGNOSTIC_MARKERS)
 
 
@@ -959,6 +1048,16 @@ def normalize_case(raw: Mapping[str, Any]) -> dict[str, Any]:
     raw_constraints.setdefault(
         "diagnostic_lenses",
         derive_diagnostic_lenses(str(raw.get("problem_statement") or "")),
+    )
+    evidence_dimensions = {
+        str(item.get("dimension") or "unknown")
+        for item in observations
+        if str(item.get("dimension") or "unknown") != "unknown"
+    }
+    complexity_floor = 3 if len(observations) >= 5 else 2 if len(observations) >= 3 else 1
+    raw_constraints.setdefault(
+        "minimum_hypothesis_dimensions",
+        min(3, max(complexity_floor, len(evidence_dimensions))),
     )
     return {
         "schema": DIAGNOSTIC_SCHEMA,
@@ -1531,6 +1630,10 @@ def evaluate_packet(
             record.get("kind") == "artifact" and float(record.get("reliability") or 0) >= 0.9
             for record in support_records
         )
+        typed_probe_evidence = any(
+            str(record.get("provenance") or "").startswith("diagnostic_probe:")
+            for record in support_records
+        )
         if contradict_weight >= 0.7:
             status = "refuted"
         elif (
@@ -1563,6 +1666,7 @@ def evaluate_packet(
                 "confirmatory_weight": confirmatory_weight,
                 "contradict_weight": contradict_weight,
                 "discriminating_evidence": discriminating,
+                "typed_probe_evidence": typed_probe_evidence,
                 "blockers": blockers,
             }
         )
@@ -1602,8 +1706,9 @@ def evaluate_packet(
     if chosen is not None:
         supported = [item for item in hypothesis_results if item.get("status") == "supported"]
         if supported:
-            def support_rank(item: Mapping[str, Any]) -> tuple[bool, float, float]:
+            def support_rank(item: Mapping[str, Any]) -> tuple[bool, bool, float, float]:
                 return (
+                    bool(item.get("typed_probe_evidence")),
                     bool(item.get("discriminating_evidence")),
                     float(item.get("confirmatory_weight") or 0),
                     float(item.get("support_weight") or 0),
@@ -1727,6 +1832,29 @@ def heuristic_packet(raw_case: Mapping[str, Any]) -> dict[str, Any]:
             pair[0],
         ),
     )
+    minimum_dimensions = int(
+        (case.get("constraints") or {}).get("minimum_hypothesis_dimensions") or 1
+    )
+    represented_dimensions = {dimension for dimension, _records in ranked}
+    if len(represented_dimensions) < minimum_dimensions:
+        secondary_scores: dict[str, int] = defaultdict(int)
+        for item in case["observations"]:
+            for dimension, score in _dimension_scores(
+                str(item.get("statement") or "")
+            ).items():
+                secondary_scores[dimension] += score
+        for dimension, score in _dimension_scores(case["problem_statement"]).items():
+            secondary_scores[dimension] += score
+        for dimension, score in sorted(
+            secondary_scores.items(),
+            key=lambda pair: (-pair[1], pair[0]),
+        ):
+            if score <= 0 or dimension in represented_dimensions:
+                continue
+            ranked.append((dimension, []))
+            represented_dimensions.add(dimension)
+            if len(represented_dimensions) >= minimum_dimensions:
+                break
     hypotheses: list[dict[str, Any]] = []
     experiments: list[dict[str, Any]] = []
     for index, (dimension, records) in enumerate(ranked[:4]):
@@ -1869,6 +1997,79 @@ def judge_prompt(raw_case: Mapping[str, Any], packet: Mapping[str, Any], report:
 ModelCall = Callable[[str, str], str]
 
 
+def _preserve_competing_hypotheses(
+    case: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    previous_packet: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Keep evidence-grounded alternatives when a small model collapses breadth."""
+    required = int(
+        (case.get("constraints") or {}).get("minimum_hypothesis_dimensions") or 1
+    )
+    normalized_candidate = normalize_packet(candidate)
+    represented = {
+        str(item.get("dimension") or "unknown")
+        for item in normalized_candidate.get("hypotheses") or []
+        if str(item.get("dimension") or "unknown") != "unknown"
+    }
+    if len(represented) >= required:
+        return normalized_candidate, []
+
+    hypotheses = list(normalized_candidate.get("hypotheses") or [])
+    experiments = list(normalized_candidate.get("experiments") or [])
+    existing_hypothesis_ids = {
+        str(item.get("hypothesis_id") or "") for item in hypotheses
+    }
+    existing_experiment_ids = {
+        str(item.get("experiment_id") or "") for item in experiments
+    }
+    added_hypothesis_ids: set[str] = set()
+    added_dimensions: list[str] = []
+    for item in previous_packet.get("hypotheses") or []:
+        if not isinstance(item, Mapping):
+            continue
+        dimension = str(item.get("dimension") or "unknown")
+        hypothesis_id = str(item.get("hypothesis_id") or "")
+        if (
+            dimension == "unknown"
+            or dimension in represented
+            or not hypothesis_id
+            or hypothesis_id in existing_hypothesis_ids
+        ):
+            continue
+        hypotheses.append(dict(item))
+        represented.add(dimension)
+        existing_hypothesis_ids.add(hypothesis_id)
+        added_hypothesis_ids.add(hypothesis_id)
+        added_dimensions.append(dimension)
+        if len(represented) >= required:
+            break
+
+    for item in previous_packet.get("experiments") or []:
+        if not isinstance(item, Mapping):
+            continue
+        experiment_id = str(item.get("experiment_id") or "")
+        hypothesis_ids = {
+            str(value) for value in item.get("hypothesis_ids") or []
+        }
+        if (
+            not experiment_id
+            or experiment_id in existing_experiment_ids
+            or not (hypothesis_ids & added_hypothesis_ids)
+        ):
+            continue
+        experiments.append(dict(item))
+        existing_experiment_ids.add(experiment_id)
+
+    return normalize_packet(
+        {
+            **normalized_candidate,
+            "hypotheses": hypotheses,
+            "experiments": experiments,
+        }
+    ), added_dimensions
+
+
 def run_local_diagnostic_debate(
     raw_case: Mapping[str, Any],
     model_call: ModelCall | None,
@@ -1905,7 +2106,15 @@ def run_local_diagnostic_debate(
         response = model_call(stage, prompt) if model_call is not None else ""
         parsed = parse_json_object(response)
         accepted = parsed is not None
-        candidate = normalize_packet(parsed) if parsed is not None else packet
+        preserved_dimensions: list[str] = []
+        if parsed is not None:
+            candidate, preserved_dimensions = _preserve_competing_hypotheses(
+                case,
+                parsed,
+                packet,
+            )
+        else:
+            candidate = packet
         next_report = evaluate_packet(case, candidate, previous_report=report)
         candidate_errors = list(next_report.get("errors") or [])
         if parsed is None and response:
@@ -1920,6 +2129,7 @@ def run_local_diagnostic_debate(
                 "accepted": accepted,
                 "response_chars": len(response),
                 "errors": candidate_errors,
+                "preserved_hypothesis_dimensions": preserved_dimensions,
                 "conclusion": next_report.get("conclusion") or {},
                 "retractions": next_report.get("retractions") or [],
             }

@@ -114,6 +114,8 @@ def test_taglish_incident_requests_enter_diagnostic_reasoning():
     assert reasoning.looks_like_diagnostic_request(
         "Ayusin mo: hindi gumagana ang replay kahit pareho ang input."
     )
+    assert reasoning.looks_like_diagnostic_request("Anyare na?") is False
+    assert reasoning.looks_like_diagnostic_request("Ayos na lahat?") is False
 
 
 def test_realworld_lenses_cover_fable_history_incident_shapes_without_assuming_cause():
@@ -150,6 +152,117 @@ def test_normalized_case_and_prompts_preserve_deep_diagnostic_lenses():
     assert "earliest causal break" in investigator
     assert "source-versus-running-revision parity" in investigator
     assert "profitable counterfactual is not proof" in judge
+
+
+def test_dimension_inference_understands_control_flow_leases_and_tls_chains():
+    assert reasoning.infer_dimension(
+        "The control-flow trace shows the branch returning only on revision r184."
+    ) == "code"
+    assert reasoning.infer_dimension(
+        "The identical captured request and dependency stubs stay fixed while comparing two revisions."
+    ) == "code"
+    assert reasoning.infer_dimension(
+        "The lease snapshot retains busy_owner after release_requested and the owner process is gone."
+    ) == "state"
+    assert reasoning.infer_dimension(
+        "TLS certificate verify failed because the peer chain has an expired intermediate."
+    ) == "dependency"
+
+
+def test_complex_case_rejects_single_family_model_collapse():
+    case = {
+        "case_id": "breadth-floor",
+        "problem_statement": "Diagnose a multi-source operational failure.",
+        "observations": [
+            {
+                "evidence_id": "e-code",
+                "statement": "A source trace changed branches between revisions.",
+                "dimension": "code",
+                "provenance": "source-trace",
+                "independence_key": "source",
+                "reliability": 0.95,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "e-state",
+                "statement": "A stale lease still owns the resource.",
+                "dimension": "state",
+                "provenance": "state-snapshot",
+                "independence_key": "state",
+                "reliability": 0.95,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "e-dependency",
+                "statement": "The upstream dependency also logged a timeout.",
+                "dimension": "dependency",
+                "provenance": "bounded-log",
+                "independence_key": "dependency",
+                "reliability": 0.9,
+                "discriminating": False,
+            },
+        ],
+    }
+    collapsed = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-dependency",
+                "claim": "The dependency timeout caused the incident.",
+                "dimension": "dependency",
+                "support_evidence_ids": ["e-dependency"],
+                "contradict_evidence_ids": [],
+                "falsification": "Replace only the dependency and compare the outcome.",
+            }
+        ],
+        "experiments": [],
+        "conclusion": {
+            "hypothesis_id": "h-dependency",
+            "status": "provisional",
+            "evidence_ids": ["e-dependency"],
+        },
+    }
+
+    normalized = reasoning.normalize_case(case)
+    assert normalized["constraints"]["minimum_hypothesis_dimensions"] == 3
+
+    debate = reasoning.run_local_diagnostic_debate(
+        case,
+        lambda _stage, _prompt: json.dumps(collapsed),
+        stages_to_run=("judge",),
+    )
+    dimensions = {
+        item["dimension"] for item in debate["packet"]["hypotheses"]
+    }
+    assert debate["stages"][0]["accepted"] is True
+    assert set(debate["stages"][0]["preserved_hypothesis_dimensions"]) == {
+        "code",
+        "state",
+    }
+    assert dimensions == {"code", "dependency", "state"}
+
+
+def test_heuristic_packet_keeps_secondary_confounders_for_dense_single_family_evidence():
+    case = {
+        "case_id": "secondary-dimensions",
+        "problem_statement": "A provider endpoint fails certificate validation in one runtime.",
+        "observations": [
+            {"evidence_id": "e1", "statement": "TLS certificate verify failed at the endpoint."},
+            {"evidence_id": "e2", "statement": "Two UTC clock readings agree during the handshake."},
+            {"evidence_id": "e3", "statement": "The runtime image hash matches the prior successful run."},
+            {"evidence_id": "e4", "statement": "Resolved trust settings match the known-good host."},
+            {"evidence_id": "e5", "statement": "The provider reports an incomplete peer chain."},
+        ],
+    }
+
+    normalized = reasoning.normalize_case(case)
+    packet = reasoning.heuristic_packet(case)
+    dimensions = {
+        item["dimension"] for item in packet["hypotheses"]
+    }
+
+    assert normalized["constraints"]["minimum_hypothesis_dimensions"] == 3
+    assert "dependency" in dimensions
+    assert len(dimensions) >= 3
 
 
 def test_fable5_sim_clock_case_confirms_clock_root_cause():
