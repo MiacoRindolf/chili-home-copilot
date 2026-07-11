@@ -1,0 +1,98 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh2-207",
+  "problem_statement": "A civic-alert webhook processor occasionally sends two notifications for one accepted event during burst traffic. Each worker reports normal completion, serial replay does not duplicate, and the queue visibility timeout comfortably exceeds processing time. Determine whether retries, message data, deployment skew, or overlapping ownership is the earliest causal break.",
+  "observations": [
+    {
+      "evidence_id": "e1",
+      "statement": "Across six bursts, 37 duplicated notifications share one event id but have different worker ids and provider request ids; 19,804 non-overlapping events are delivered once.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "audit:notification-delivery-cohort",
+      "independence_key": "delivery-cohort",
+      "reliability": 0.95,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e2",
+      "statement": "Queue telemetry records one delivery attempt per duplicated event, no visibility expiration, and no broker redelivery; processing duration peaks at 12 seconds against a 45-second visibility timeout.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "queue:delivery-and-visibility-audit",
+      "independence_key": "queue-delivery-audit",
+      "reliability": 0.97,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e3",
+      "statement": "For every duplicate, transaction traces show workers A and B both read no idempotency row under READ COMMITTED within a 180 ms overlap. Each sends externally before either transaction commits its reservation row.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "trace:overlapping-reservation-transactions",
+      "independence_key": "reservation-transaction-trace",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e4",
+      "statement": "A deterministic isolated barrier test releases two workers after both absence checks and reproduces two sends in 20 of 20 runs; the same payload processed serially produces zero duplicates in 100 runs.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "test:two-worker-barrier-reproduction",
+      "independence_key": "barrier-reproduction",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e5",
+      "statement": "The call-path artifact places the provider send before insertion of the idempotency row, and the uniqueness constraint is deferred until commit. An isolated variant that atomically reserves before sending yields one owner in all 100 barrier runs.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "source-test:reservation-order-counterfactual",
+      "independence_key": "reservation-order-artifact",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e6",
+      "statement": "Provider logs contain two distinct accepted requests and no retry for either request id; the service cannot create the second request without receiving it from a worker.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "provider:request-id-audit",
+      "independence_key": "provider-request-audit",
+      "reliability": 0.96,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e7",
+      "statement": "Worker image digest, schema version, and rendered settings match across all pods; duplicates occur with pairs on the same node and on different nodes.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "runtime:worker-parity-inventory",
+      "independence_key": "worker-parity",
+      "reliability": 0.93,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e8",
+      "statement": "Payload hashes for each duplicate pair are identical, and neither malformed fields nor event-type concentration distinguishes duplicated events from nearby single deliveries.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "audit:payload-shape-comparison",
+      "independence_key": "payload-shape-audit",
+      "reliability": 0.92,
+      "discriminating": false
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "state_reconciliation",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

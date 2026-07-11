@@ -1,0 +1,99 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh2-203",
+  "problem_statement": "A regional environmental dashboard ingested substantially fewer hourly sensor records than the publisher's completion notice advertised. The loader completed without a fatal error, one duplicate warning appeared, and the job ran during a storage maintenance window. Establish whether the loss originates in the consumer, published inputs, checkpoint state, storage dependency, or scheduling.",
+  "observations": [
+    {
+      "evidence_id": "e1",
+      "statement": "The 06:00 consumer run reports 821,406 accepted records, while the publisher's signed completion notice reports 1,004,882 records across eleven shards.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "audit:publisher-consumer-counts",
+      "independence_key": "count-reconciliation",
+      "reliability": 0.97,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e2",
+      "statement": "The immutable manifest fetched by the consumer lists nine shard URIs and a declared total of 821,406. Publisher inventory shows two additional completed shards written before the completion notice but absent from that manifest version.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "object-store:manifest-and-version-inventory",
+      "independence_key": "manifest-object-inventory",
+      "reliability": 0.99,
+      "discriminating": true,
+      "input_fingerprint": "manifest-06-v17"
+    },
+    {
+      "evidence_id": "e3",
+      "statement": "An isolated replay that changes only the manifest to include the two omitted immutable shard URIs accepts 1,004,882 records. Loader revision, settings, checkpoint, dependency versions, and shard bytes are held constant.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "lab:manifest-membership-replay",
+      "independence_key": "manifest-replay",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e4",
+      "statement": "A focused parser test verifies every record in all eleven shards under loader revision ld-63; no parse rejection or schema fallback occurs.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "test:all-shard-parser-verification",
+      "independence_key": "parser-test",
+      "reliability": 0.95,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e5",
+      "statement": "The lone duplicate warning refers to a sensor represented in two included shards; the consumer's aggregate shows one row correctly discarded and cannot account for 183,476 missing rows.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "consumer:dedupe-ledger",
+      "independence_key": "dedupe-ledger",
+      "reliability": 0.94,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e6",
+      "statement": "Storage request logs show successful 200 responses for every URI present in manifest-06-v17, no retry exhaustion, and no attempt to fetch the two URIs absent from the manifest.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "storage:bounded-request-log",
+      "independence_key": "storage-request-log",
+      "reliability": 0.96,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e7",
+      "statement": "Rendered loader settings, service account permissions, and shard prefix are unchanged from the previous successful hour; the manifest URI itself is version-pinned rather than selected by a mutable prefix.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "deploy:loader-settings-diff",
+      "independence_key": "loader-settings",
+      "reliability": 0.93,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e8",
+      "statement": "The run began seven minutes after all eleven shard writes completed, and replaying the original nine-entry manifest later produces the same 821,406 count.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "audit:publication-timeline-replay",
+      "independence_key": "publication-timeline",
+      "reliability": 0.94,
+      "discriminating": false
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "producer_consumer_evidence_chain",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

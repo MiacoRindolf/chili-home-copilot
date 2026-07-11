@@ -1,0 +1,108 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh2-205",
+  "problem_statement": "A legal-document OCR service began returning pages in the wrong order on one processor architecture after a routine worker rebuild. Source revision, service settings, and document bytes appear unchanged, but the rebuild refreshed platform-specific packages and moved jobs onto new hosts. Determine whether the primary cause lies in application logic, dependency resolution, document data, persisted job state, or infrastructure.",
+  "observations": [
+    {
+      "evidence_id": "e1",
+      "statement": "Document doc-88 produces page order 1,2,4,3 on arm64 workers and 1,2,3,4 on x86_64 workers under source revision ocr-52 and the same normalized PDF hash.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "synthetic:cross-architecture-ocr",
+      "independence_key": "cross-architecture-run",
+      "reliability": 0.97,
+      "discriminating": false,
+      "comparison_key": "doc-88-architecture",
+      "code_revision": "ocr-52",
+      "input_fingerprint": "doc-88-normalized",
+      "environment_fingerprint": "x86-lock-9d1",
+      "outcome_fingerprint": "ordered"
+    },
+    {
+      "evidence_id": "e2",
+      "statement": "The same revision and document on arm64 produce page order 1,2,4,3; the resolved package fingerprint differs from x86_64 even though the top-level requirements file is identical.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "synthetic:arm64-ocr",
+      "independence_key": "arm64-run",
+      "reliability": 0.97,
+      "discriminating": false,
+      "comparison_key": "doc-88-architecture",
+      "code_revision": "ocr-52",
+      "input_fingerprint": "doc-88-normalized",
+      "environment_fingerprint": "arm-lock-a17",
+      "outcome_fingerprint": "misordered"
+    },
+    {
+      "evidence_id": "e3",
+      "statement": "The arm64 resolution report selects pagegeom 3.8.0, while x86_64 retains 3.7.4 because only 3.8.0 has a wheel for the rebuilt arm image. pagegeom is transitive and absent from the service's direct lock constraints.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "build:cross-platform-resolution-report",
+      "independence_key": "package-resolution-report",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e4",
+      "statement": "Pinning only pagegeom to 3.7.4 on arm64 restores correct order for the 40-document regression corpus; installing 3.8.0 on x86_64 reproduces the same swaps with source, settings, and PDFs fixed.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "lab:pagegeom-version-cross-over",
+      "independence_key": "pagegeom-cross-over",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e5",
+      "statement": "A bounded call trace shows the service emits page indices in the order returned by pagegeom and performs no architecture-specific sorting branch of its own.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "trace:page-order-call-path",
+      "independence_key": "call-path-trace",
+      "reliability": 0.95,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e6",
+      "statement": "CPU throttling, memory pressure, disk errors, and worker restarts are absent on affected hosts; moving the unmodified 3.8.0 environment to a quiet arm64 host preserves the misordering.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "ops:host-pressure-crosscheck",
+      "independence_key": "host-pressure-test",
+      "reliability": 0.94,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e7",
+      "statement": "The normalized input PDF has a stable hash across all runs, and an independent PDF inspector reports a conventional four-page object tree with monotonically ordered page references.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "audit:pdf-structure-inspection",
+      "independence_key": "pdf-inspector",
+      "reliability": 0.93,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e8",
+      "statement": "Retrying with a new job id and an empty OCR cache returns the same order for a given resolved package set; no prior page-order state is read by the worker.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "lab:fresh-job-cache-test",
+      "independence_key": "fresh-job-state-test",
+      "reliability": 0.92,
+      "discriminating": false
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "runtime_source_parity",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

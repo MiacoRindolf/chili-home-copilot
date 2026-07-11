@@ -1,0 +1,115 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh2-204",
+  "problem_statement": "A customer-support SLA scanner stopped escalating overdue tickets for one tenant after a storage migration, although scheduled scans report success and other tenants remain current. An early incident note blamed a transient database connection alarm. Determine whether that conclusion survives the available state, data, dependency, clock, and revision evidence.",
+  "observations": [
+    {
+      "evidence_id": "e1",
+      "statement": "Tenant t73 has 1,284 overdue, un-escalated tickets in the source table, all visible to the scanner service account; neighboring tenants scanned in the same process are current.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "db-profile:overdue-ticket-counts",
+      "independence_key": "ticket-count-profile",
+      "reliability": 0.97,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e2",
+      "statement": "The persisted scanner cursor for t73 is 981044, but the maximum committed ticket id for that tenant is 773210. No valid source row can advance the cursor to the stored value.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "db-schema-profile:tenant-cursor",
+      "independence_key": "cursor-profile",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e3",
+      "statement": "The migration audit maps the t73 cursor row to a shadow-environment snapshot whose sequence range begins at 980000; ticket rows themselves came from the intended production snapshot.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "migration:row-lineage-audit",
+      "independence_key": "migration-lineage",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e4",
+      "statement": "In an isolated database clone, resetting only t73's cursor to the highest pre-migration committed id causes the unchanged scanner to enqueue all 1,284 expected escalations; restoring 981044 makes it enqueue zero again.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "lab:cursor-only-counterfactual",
+      "independence_key": "cursor-ab",
+      "reliability": 0.99,
+      "discriminating": true,
+      "comparison_key": "t73-scan-state",
+      "code_revision": "sla-29",
+      "input_fingerprint": "tickets-snapshot-441",
+      "environment_fingerprint": "cursor-reset-773210",
+      "outcome_fingerprint": "1284-enqueued"
+    },
+    {
+      "evidence_id": "e5",
+      "statement": "The unchanged clone with cursor 981044 reads the same ticket snapshot and produces zero enqueues.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "lab:cursor-high-counterfactual",
+      "independence_key": "cursor-high-arm",
+      "reliability": 0.99,
+      "discriminating": true,
+      "comparison_key": "t73-scan-state",
+      "code_revision": "sla-29",
+      "input_fingerprint": "tickets-snapshot-441",
+      "environment_fingerprint": "cursor-high-981044",
+      "outcome_fingerprint": "0-enqueued"
+    },
+    {
+      "evidence_id": "e6",
+      "statement": "The database connection alarm lasted eleven seconds before the affected scan, but bounded logs show the scan's transaction opened afterward, completed normally, and returned zero candidate rows without retrying.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "logs:scanner-db-window",
+      "independence_key": "scanner-db-log",
+      "reliability": 0.96,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e7",
+      "statement": "Revision sla-29, rendered tenant policy, and scheduler arguments are identical for t73 and unaffected tenants; no scanner source diff landed during the migration window.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "git-deploy:scanner-parity",
+      "independence_key": "scanner-parity",
+      "reliability": 0.95,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e8",
+      "statement": "Ticket due_at values and database server time are within the expected UTC window, and forcing the isolated clock forward by two hours does not change the zero-result scan while the high cursor remains.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "lab:clock-crosscheck",
+      "independence_key": "clock-test",
+      "reliability": 0.93,
+      "discriminating": false
+    }
+  ],
+  "prior_conclusion": {
+    "hypothesis_id": "prior-db-outage",
+    "status": "confirmed",
+    "dimension": "dependency",
+    "claim": "A database connection outage caused the scanner to skip tenant t73.",
+    "reason": "The first alert in the incident window was a database connection alarm."
+  },
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "state_reconciliation",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

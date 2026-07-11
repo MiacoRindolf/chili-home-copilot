@@ -1,0 +1,13 @@
+{
+  "schema": "chili.realworld-diagnostic-oracle.v1",
+  "case_id": "bh2-208",
+  "primary_causal_dimension": "deployment",
+  "evaluator_dimension_mapping": ["runtime"],
+  "expected_dimensions": ["runtime"],
+  "expected_decisions": ["patch_root_cause"],
+  "expected_statuses": ["confirmed"],
+  "expected_baseline_drift": false,
+  "minimum_hypothesis_dimensions": 4,
+  "minimum_retractions": 1,
+  "forbid_confirmed_code": true
+}

@@ -1,0 +1,65 @@
+{
+  "schema": "chili.realworld-diagnostic-manifest.v1",
+  "reference_model": "claude-fable-5",
+  "benchmark_id": "fable5-class-diagnostic-blinded-second-run-20260711",
+  "blinded": true,
+  "immutable_input_count": 17,
+  "cases": [
+    {
+      "case": "cases/bh2-201.json",
+      "oracle": "oracles/bh2-201.json",
+      "split": "holdout",
+      "source": "sealed_second_holdout_case_01",
+      "evaluation_role": "blinded_holdout_second_run"
+    },
+    {
+      "case": "cases/bh2-202.json",
+      "oracle": "oracles/bh2-202.json",
+      "split": "holdout",
+      "source": "sealed_second_holdout_case_02",
+      "evaluation_role": "blinded_holdout_second_run"
+    },
+    {
+      "case": "cases/bh2-203.json",
+      "oracle": "oracles/bh2-203.json",
+      "split": "holdout",
+      "source": "sealed_second_holdout_case_03",
+      "evaluation_role": "blinded_holdout_second_run"
+    },
+    {
+      "case": "cases/bh2-204.json",
+      "oracle": "oracles/bh2-204.json",
+      "split": "holdout",
+      "source": "sealed_second_holdout_case_04",
+      "evaluation_role": "blinded_holdout_second_run"
+    },
+    {
+      "case": "cases/bh2-205.json",
+      "oracle": "oracles/bh2-205.json",
+      "split": "holdout",
+      "source": "sealed_second_holdout_case_05",
+      "evaluation_role": "blinded_holdout_second_run"
+    },
+    {
+      "case": "cases/bh2-206.json",
+      "oracle": "oracles/bh2-206.json",
+      "split": "holdout",
+      "source": "sealed_second_holdout_case_06",
+      "evaluation_role": "blinded_holdout_second_run"
+    },
+    {
+      "case": "cases/bh2-207.json",
+      "oracle": "oracles/bh2-207.json",
+      "split": "holdout",
+      "source": "sealed_second_holdout_case_07",
+      "evaluation_role": "blinded_holdout_second_run"
+    },
+    {
+      "case": "cases/bh2-208.json",
+      "oracle": "oracles/bh2-208.json",
+      "split": "holdout",
+      "source": "sealed_second_holdout_case_08",
+      "evaluation_role": "blinded_holdout_second_run"
+    }
+  ]
+}

@@ -1,0 +1,105 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh2-208",
+  "problem_statement": "An education-platform API alternates between two response schemas after a rollout dashboard reports completion. The current source passes contract tests, the database migration is backward compatible, and requests traverse the same service address. An initial incident note declared a nondeterministic code regression. Determine whether that claim survives evidence from running workloads, release ownership, configuration, data, and routing.",
+  "observations": [
+    {
+      "evidence_id": "e1",
+      "statement": "Repeated request req-15 alternates between response header build=api-73 with schema v1 and build=api-74 with schema v2; each individual pod is internally consistent across repeated requests.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "synthetic:pod-pinned-schema-sample",
+      "independence_key": "pod-pinned-synthetic",
+      "reliability": 0.97,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e2",
+      "statement": "The live endpoint inventory contains three api-74 pods owned by the current release and two api-73 pods owned by a legacy Deployment. All five are Ready and selected by the same Service.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "runtime:endpoint-owner-inventory",
+      "independence_key": "endpoint-owner-inventory",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e3",
+      "statement": "The desired release manifest contains only digest api-74. The two api-73 pods belong to a renamed predecessor resource that is absent from the current release ownership set and therefore was not scaled down by the completed rollout.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "deploy:desired-live-ownership-diff",
+      "independence_key": "release-ownership-diff",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e4",
+      "statement": "Applying the release to an isolated namespace with the legacy resource present reproduces mixed endpoint membership; applying the identical release to a clean namespace yields only api-74. No source, image, database, or request change occurs between arms.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "lab:legacy-resource-rollout-replay",
+      "independence_key": "rollout-replay",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e5",
+      "statement": "Current api-74 source and contract tests deterministically emit schema v2; a pod-pinned request never changes schema without changing the serving build header.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "test:source-and-pod-contract-check",
+      "independence_key": "source-contract-test",
+      "reliability": 0.96,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e6",
+      "statement": "Rendered feature flags and API compatibility settings are byte-identical across api-73 and api-74 pods; toggling the response compatibility flag in isolation changes an optional field but not the v1 versus v2 envelope.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "lab:compatibility-setting-crosscheck",
+      "independence_key": "compatibility-config-test",
+      "reliability": 0.93,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e7",
+      "statement": "Both builds read the same database rows successfully, and the migration exposes columns required by both schemas; response variation persists for a fixed row snapshot.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "db-profile:fixed-row-schema-check",
+      "independence_key": "database-schema-check",
+      "reliability": 0.94,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e8",
+      "statement": "The load balancer forwards each request to exactly one endpoint and performs no response transformation; direct requests to each endpoint match responses observed through the shared service address.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "network:service-routing-trace",
+      "independence_key": "service-routing-trace",
+      "reliability": 0.95,
+      "discriminating": false
+    }
+  ],
+  "prior_conclusion": {
+    "hypothesis_id": "prior-code-nondeterminism",
+    "status": "confirmed",
+    "dimension": "code",
+    "claim": "The current API source nondeterministically emits two response schemas.",
+    "reason": "Alternating responses were first observed after the source release."
+  },
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "runtime_source_parity",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

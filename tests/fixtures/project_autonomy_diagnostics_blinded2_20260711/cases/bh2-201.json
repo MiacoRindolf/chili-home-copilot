@@ -1,0 +1,102 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh2-201",
+  "problem_statement": "A municipal permit portal began returning HTTP 422 for a narrow class of address-bearing PDF exports after a routine release. Most exports still succeed, and the release also refreshed a certificate bundle and enabled a validation flag that had already been enabled in staging. Determine the earliest causal break and whether a root-cause change is justified from the supplied evidence.",
+  "observations": [
+    {
+      "evidence_id": "e1",
+      "statement": "Production telemetry for release r71 shows 422 responses on 91 of 94 sanitized requests whose address contains an explicitly empty unit field; 4,812 requests without that shape completed normally.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "metrics:permit-export-shape-cohort",
+      "independence_key": "export-cohort-metrics",
+      "reliability": 0.94,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e2",
+      "statement": "An isolated replay of captured request apt-17 returns 200 on release r70 and 422 on r71 with the request bytes, rendered settings, dependency lock, and container base digest held constant.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "lab:cross-revision-address-replay",
+      "independence_key": "cross-revision-replay",
+      "reliability": 0.99,
+      "discriminating": true,
+      "comparison_key": "apt-17-cross-release",
+      "code_revision": "r71",
+      "input_fingerprint": "apt-17",
+      "environment_fingerprint": "lab-fixed-v4",
+      "outcome_fingerprint": "422"
+    },
+    {
+      "evidence_id": "e3",
+      "statement": "The release diff moves removal of empty optional address fields ahead of schema validation. The validator still requires the unit key whenever address_type is apartment, so the changed control flow presents an incomplete object to the unchanged validator.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "git:address-normalization-diff",
+      "independence_key": "source-diff-address-normalization",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e4",
+      "statement": "In a focused isolated test, applying only the normalization hunk to r70 reproduces the 422; reverting only that hunk on r71 restores 200. Input, settings, dependency wheels, and certificate bundle remain byte-identical in both arms.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "test:normalization-hunk-ab",
+      "independence_key": "hunk-ab-test",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e5",
+      "statement": "The certificate bundle changed in the same release, but TLS handshakes complete before every sampled 422 and both old and new bundles produce the same application response in isolation.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "lab:certificate-bundle-crosscheck",
+      "independence_key": "certificate-crosscheck",
+      "reliability": 0.93,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e6",
+      "statement": "STRICT_ADDRESS_VALIDATION is true in production and staging. Toggling only that setting changes error wording but does not make apt-17 succeed on r71.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "lab:validation-flag-toggle",
+      "independence_key": "validation-flag-test",
+      "reliability": 0.95,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e7",
+      "statement": "Clearing the export deduplication cache and issuing a new request identifier leaves the 422 unchanged, while cache hit rate and queue depth remain within their normal bands.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "ops:cache-and-request-id-check",
+      "independence_key": "cache-state-check",
+      "reliability": 0.91,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e8",
+      "statement": "A second availability zone running the same r71 image exhibits the same request-shape failure despite separate nodes, process lifetimes, and load balancers.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "ops:cross-zone-sample",
+      "independence_key": "cross-zone-observation",
+      "reliability": 0.9,
+      "discriminating": false
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

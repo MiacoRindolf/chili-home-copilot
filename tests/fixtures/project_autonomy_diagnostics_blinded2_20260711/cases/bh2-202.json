@@ -1,0 +1,108 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh2-202",
+  "problem_statement": "A hosted research-notebook gateway accepts ordinary HTTPS requests in both regions but rejects WebSocket upgrades with an origin error in the newly migrated region. The application revision and client request are the same, while the regional migration also changed ingress topology, DNS, and pod placement. Determine whether the failure is in application behavior, settings, an external dependency, or the runtime path.",
+  "observations": [
+    {
+      "evidence_id": "e1",
+      "statement": "Request ws-91 against gateway revision gw-44 succeeds in region west and fails with origin_mismatch in region east; the serialized upgrade request is byte-identical.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "synthetic:cross-region-websocket",
+      "independence_key": "cross-region-synthetic",
+      "reliability": 0.97,
+      "discriminating": false,
+      "comparison_key": "ws-91-regional",
+      "code_revision": "gw-44",
+      "input_fingerprint": "ws-91",
+      "environment_fingerprint": "west-ingress-v3",
+      "outcome_fingerprint": "upgrade-101"
+    },
+    {
+      "evidence_id": "e2",
+      "statement": "The same request ws-91 against gw-44 in east produces origin_mismatch after the gateway derives an http scheme from the forwarded chain.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "synthetic:east-websocket",
+      "independence_key": "east-synthetic",
+      "reliability": 0.97,
+      "discriminating": false,
+      "comparison_key": "ws-91-regional",
+      "code_revision": "gw-44",
+      "input_fingerprint": "ws-91",
+      "environment_fingerprint": "east-ingress-v5",
+      "outcome_fingerprint": "origin-mismatch"
+    },
+    {
+      "evidence_id": "e3",
+      "statement": "The east ingress path now has two trusted reverse proxies, but the rendered gateway setting TRUSTED_PROXY_HOPS remains 1. The west path has one proxy and also renders 1.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "deploy:rendered-settings-and-hop-inventory",
+      "independence_key": "rendered-proxy-settings",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e4",
+      "statement": "An isolated two-proxy replay fails when TRUSTED_PROXY_HOPS is 1 and succeeds when only that value is changed to 2. A one-proxy replay succeeds with value 1; request bytes and image digest are fixed.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "lab:proxy-hop-counterfactual",
+      "independence_key": "proxy-hop-ab",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e5",
+      "statement": "Image digest, loaded module hashes, process arguments, and gateway revision match across regions; fresh east pods and long-lived east pods fail identically.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "runtime:cross-region-process-inventory",
+      "independence_key": "process-inventory",
+      "reliability": 0.96,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e6",
+      "statement": "DNS resolves to the intended regional load balancer, the TLS certificate chain validates, and the failing transaction completes TLS before the application emits origin_mismatch.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "network:dns-tls-trace",
+      "independence_key": "dns-tls-trace",
+      "reliability": 0.95,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e7",
+      "statement": "Session-store reads and writes succeed for the failing request, and replaying with a new account and empty session produces the same mismatch.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "ops:session-state-crosscheck",
+      "independence_key": "session-state-test",
+      "reliability": 0.91,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e8",
+      "statement": "The first failure aligns with the regional ingress chart rollout, which added an authentication sidecar hop but did not alter the gateway ConfigMap template.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "timeline:regional-rollout",
+      "independence_key": "rollout-timeline",
+      "reliability": 0.9,
+      "discriminating": false
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "runtime_source_parity",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

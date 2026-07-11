@@ -1,0 +1,13 @@
+{
+  "schema": "chili.realworld-diagnostic-oracle.v1",
+  "case_id": "bh2-207",
+  "primary_causal_dimension": "concurrency",
+  "evaluator_dimension_mapping": ["state", "code"],
+  "expected_dimensions": ["state", "code"],
+  "expected_decisions": ["patch_root_cause"],
+  "expected_statuses": ["confirmed"],
+  "expected_baseline_drift": false,
+  "minimum_hypothesis_dimensions": 4,
+  "minimum_retractions": 0,
+  "forbid_confirmed_code": false
+}

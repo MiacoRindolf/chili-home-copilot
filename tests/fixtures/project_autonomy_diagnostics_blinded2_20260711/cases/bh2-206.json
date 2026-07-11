@@ -1,0 +1,108 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh2-206",
+  "problem_statement": "An internal media archive intermittently times out while uploading thumbnails to an object service. Failures cluster on one Kubernetes node pool after a networking rollout, but the object-service client, pod image, request data, and application settings are nominally identical. Diagnose the earliest supported failure without treating downstream retries as the cause.",
+  "observations": [
+    {
+      "evidence_id": "e1",
+      "statement": "Upload probe up-31 under revision media-18 succeeds from node pool maple and times out from node pool cedar with identical request bytes and pod image digest.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "synthetic:cross-pool-upload",
+      "independence_key": "cross-pool-probe",
+      "reliability": 0.97,
+      "discriminating": false,
+      "comparison_key": "up-31-node-pool",
+      "code_revision": "media-18",
+      "input_fingerprint": "up-31",
+      "environment_fingerprint": "maple-cni-212",
+      "outcome_fingerprint": "success"
+    },
+    {
+      "evidence_id": "e2",
+      "statement": "The same up-31 probe and media-18 image on cedar reaches the object-service endpoint but times out during body transfer.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "synthetic:cedar-upload",
+      "independence_key": "cedar-probe",
+      "reliability": 0.97,
+      "discriminating": false,
+      "comparison_key": "up-31-node-pool",
+      "code_revision": "media-18",
+      "input_fingerprint": "up-31",
+      "environment_fingerprint": "cedar-cni-213",
+      "outcome_fingerprint": "body-timeout"
+    },
+    {
+      "evidence_id": "e3",
+      "statement": "A bounded network capture summary on cedar shows repeated retransmission beginning at encapsulated frames above 1380 bytes and no returned fragmentation-needed signal. Maple carries the same frames without retransmission.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "network:cross-pool-capture-summary",
+      "independence_key": "network-capture-summary",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e4",
+      "statement": "Cedar nodes report overlay MTU 1450 while their new underlay path supports 1400; maple reports overlay MTU 1350. The mismatch first appears in the cedar CNI rollout inventory.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "infrastructure:mtu-and-cni-inventory",
+      "independence_key": "mtu-inventory",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e5",
+      "statement": "In an isolated network namespace mirroring cedar, lowering only the pod-side MTU to 1350 makes 100 of 100 up-31 transfers succeed; restoring 1450 reproduces 100 of 100 timeouts.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "lab:mtu-only-counterfactual",
+      "independence_key": "mtu-ab",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e6",
+      "statement": "The object service returns healthy latency for small requests from both pools and for large requests from maple; service-side logs show no rejection and no saturation during cedar failures.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "object-service:bounded-health-window",
+      "independence_key": "object-service-health",
+      "reliability": 0.94,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e7",
+      "statement": "Rendered client timeout, retry count, endpoint, credentials, and proxy settings match across pools. Increasing only the timeout delays the same failure and raises retry volume.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "ops:client-settings-crosscheck",
+      "independence_key": "client-settings-test",
+      "reliability": 0.93,
+      "discriminating": false
+    },
+    {
+      "evidence_id": "e8",
+      "statement": "Application traces on both pools invoke the same upload path and emit identical content lengths and checksums before the socket write; no media-18 source diff overlaps transfer framing.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "trace:upload-path-parity",
+      "independence_key": "upload-call-path",
+      "reliability": 0.94,
+      "discriminating": false
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "runtime_source_parity",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}
