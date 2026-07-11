@@ -1,0 +1,179 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh4-403",
+  "problem_statement": "A county records portal shows a small group of uploaded meeting packets as permanently publishing. Search indexing, preview generation, and virus scanning finished, but the public link remains unavailable even after workers recovered from a brief outage.",
+  "observations": [
+    {
+      "evidence_id": "bh4-403-e01",
+      "statement": "All 63 stuck packets entered publishing between 2026-06-25T16:41:08Z and 2026-06-25T16:44:52Z, the same interval in which three publication workers lost their message-broker connections.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "retained workflow ledger and broker connection log",
+      "independence_key": "outage-entry-window",
+      "reliability": 0.98,
+      "discriminating": true,
+      "timestamps": {
+        "window_start": "2026-06-25T16:41:08Z",
+        "window_end": "2026-06-25T16:44:52Z"
+      },
+      "correlation": {
+        "stuck_packets_in_window": 63,
+        "stuck_packets_outside_window": 0
+      }
+    },
+    {
+      "evidence_id": "bh4-403-e02",
+      "statement": "For affected packets, the durable workflow row says publishing with a lease owner, while the lease table contains no corresponding lease and no worker with that identity remained registered after recovery.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "transaction-consistent read-only database snapshot",
+      "independence_key": "workflow-lease-snapshot",
+      "reliability": 0.99,
+      "discriminating": true,
+      "entity": "publication-workflow",
+      "expected_state": "publishing-with-live-lease",
+      "actual_state": "publishing-with-missing-lease",
+      "fingerprints": {
+        "workflow_rows": 63,
+        "matching_lease_rows": 0
+      }
+    },
+    {
+      "evidence_id": "bh4-403-e03",
+      "statement": "The event sequence ends after publication_started and before either publication_committed or publication_failed; downstream status polling merely repeats the durable publishing value.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "append-only workflow event archive",
+      "independence_key": "workflow-event-sequence",
+      "reliability": 0.97,
+      "discriminating": true,
+      "sequence": [
+        "scan_completed",
+        "preview_completed",
+        "index_completed",
+        "publication_started",
+        "broker_connection_lost"
+      ],
+      "causal_parents": [
+        "publication-start-transition",
+        "worker-disconnection"
+      ]
+    },
+    {
+      "evidence_id": "bh4-403-e04",
+      "statement": "Recovered workers successfully publish packets that were still queued and all packets uploaded after the outage, which is a negative control for storage credentials, public-link generation, and worker availability.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "retained completion report grouped by workflow state at recovery",
+      "independence_key": "queued-packet-negative-control",
+      "reliability": 0.96,
+      "discriminating": true,
+      "comparison": {
+        "queued_at_recovery_completion": 1.0,
+        "publishing_at_disconnect_completion": 0.0,
+        "post_outage_completion": 0.999
+      }
+    },
+    {
+      "evidence_id": "bh4-403-e05",
+      "statement": "The recovery scanner's retained query plan selects queued and retryable rows but has no edge from publishing-without-lease back to a claimable state.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "deployed recovery rule export and query-plan capture",
+      "independence_key": "recovery-transition-rule",
+      "reliability": 0.98,
+      "discriminating": true,
+      "expected_edge_state": "orphaned-publication-is-reclaimable",
+      "actual_edge_state": "orphaned-publication-is-unselected",
+      "transitions": [
+        {
+          "from": "queued",
+          "event": "scanner_claim",
+          "to": "publishing"
+        },
+        {
+          "from": "publishing_without_lease",
+          "event": "scanner_pass",
+          "to": "publishing_without_lease"
+        }
+      ]
+    },
+    {
+      "evidence_id": "bh4-403-e06",
+      "statement": "An offline evaluator applied the deployed transition rules to the snapshot: none of the 63 orphaned rows becomes eligible, while every queued control row does.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "read-only state-machine evaluation report",
+      "independence_key": "state-rule-offline-evaluation",
+      "reliability": 0.98,
+      "discriminating": true,
+      "experiment_id": "orphan-rule-eval-20260626",
+      "comparison": {
+        "orphaned_rows_eligible": 0,
+        "queued_control_rows_eligible": 19
+      }
+    },
+    {
+      "evidence_id": "bh4-403-e07",
+      "statement": "Object storage contains complete private packet objects for all affected entities and no publish request after the disconnect, placing the absent public link after the stranded transition rather than at upload or scanning.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "independent object-store inventory and audit log",
+      "independence_key": "object-store-publication-audit",
+      "reliability": 0.96,
+      "discriminating": true,
+      "component_flow": [
+        "private-object-store",
+        "workflow",
+        "publication-worker",
+        "public-object-store"
+      ],
+      "edge_states": {
+        "private-object": "present",
+        "public-copy-request": "absent"
+      }
+    },
+    {
+      "evidence_id": "bh4-403-e08",
+      "statement": "Affected and unaffected packets span the same file sizes, MIME types, departments, and scan results, providing no association with packet content.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "offline cohort comparison from packet metadata",
+      "independence_key": "content-cohort-comparison",
+      "reliability": 0.91,
+      "discriminating": false,
+      "comparison": {
+        "file_size_distribution": "overlapping",
+        "mime_type_distribution": "matching",
+        "department_distribution": "matching"
+      }
+    },
+    {
+      "evidence_id": "bh4-403-e09",
+      "statement": "Clock offsets across workers remained below 180 milliseconds, and lease durations were fifteen minutes, making ordinary timestamp skew too small to explain the missing lease references.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "retained time-synchronization summary and lease policy snapshot",
+      "independence_key": "clock-skew-control",
+      "reliability": 0.93,
+      "discriminating": true,
+      "comparison": {
+        "maximum_clock_offset_ms": 180,
+        "lease_duration_ms": 900000
+      }
+    }
+  ],
+  "constraints": {
+    "evidence_policy": "offline_and_read_only",
+    "production_mutation_allowed": false,
+    "retained_artifacts_only": true,
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

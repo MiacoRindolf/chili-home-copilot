@@ -1,0 +1,172 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh4-402",
+  "problem_statement": "A university room-scheduling service accepts calendar feeds from several departments, yet some recurring reservations stopped appearing in room displays after a routine build refresh. The feed fetches are successful and unrelated reservations continue to update.",
+  "observations": [
+    {
+      "evidence_id": "bh4-402-e01",
+      "statement": "The first missing reservation was processed by build 6.14.2 at 2026-06-22T09:12:41Z; build 6.14.1 had processed the same department's prior feed without omissions.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "retained ingest ledger and build deployment record",
+      "independence_key": "ingest-build-timeline",
+      "reliability": 0.96,
+      "discriminating": true,
+      "timestamps": {
+        "last_complete_ingest": "2026-06-21T09:10:03Z",
+        "build_refresh": "2026-06-22T07:45:00Z",
+        "first_omission": "2026-06-22T09:12:41Z"
+      },
+      "source_revision": "scheduler-service-6.14.2"
+    },
+    {
+      "evidence_id": "bh4-402-e02",
+      "statement": "Affected calendar components contain a folded TZID property whose continuation line begins with one tab; unaffected components either have no TZID or keep the property on one line.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "content-addressed raw feed archive",
+      "independence_key": "raw-calendar-shape",
+      "reliability": 0.99,
+      "discriminating": true,
+      "artifact_hash": "sha256:a2e95c6bcc8e87d189901bf78257be7c389ffc60fa2e25a73283c82ad1c7e258",
+      "fingerprints": {
+        "affected": "folded-tzid-tab-continuation",
+        "unaffected": "single-line-or-no-tzid"
+      }
+    },
+    {
+      "evidence_id": "bh4-402-e03",
+      "statement": "HTTP records show complete 200 responses with matching byte counts and hashes at the fetcher and archive boundary, ruling against truncation in transit.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "gateway access logs and feed archive index",
+      "independence_key": "feed-transport",
+      "reliability": 0.98,
+      "discriminating": true,
+      "component_flow": [
+        "department-server",
+        "gateway",
+        "feed-archive",
+        "calendar-parser"
+      ],
+      "edge_states": {
+        "gateway-response": "complete",
+        "archive-write": "hash-match"
+      }
+    },
+    {
+      "evidence_id": "bh4-402-e04",
+      "statement": "The application source revision and parser invocation settings are byte-identical between builds 6.14.1 and 6.14.2, while the resolved calendar parsing package changed from 4.8.3 to 4.9.0 through a transitive lock refresh.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "signed build manifests and dependency lock diff",
+      "independence_key": "build-input-diff",
+      "reliability": 0.99,
+      "discriminating": true,
+      "comparison": {
+        "application_source": "identical",
+        "parser_settings": "identical",
+        "calendar_parser": "4.8.3-to-4.9.0"
+      },
+      "fingerprints": {
+        "build_6_14_1": "lock:3a719f",
+        "build_6_14_2": "lock:91d2c4"
+      }
+    },
+    {
+      "evidence_id": "bh4-402-e05",
+      "statement": "Parser diagnostics in the newer build mark the continuation as an orphan property and drop the enclosing event before recurrence expansion.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "retained structured parser diagnostics",
+      "independence_key": "parser-diagnostics",
+      "reliability": 0.97,
+      "discriminating": true,
+      "sequence": [
+        "component-opened",
+        "tzid-line-read",
+        "continuation-rejected",
+        "component-dropped",
+        "recurrence-not-expanded"
+      ]
+    },
+    {
+      "evidence_id": "bh4-402-e06",
+      "statement": "An offline parse of the retained feed with the two locked package versions produces 48 events with 4.8.3 and 41 events with 4.9.0; the seven-event difference exactly matches the room-display omissions.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated read-only replay report using archived packages",
+      "independence_key": "version-paired-replay",
+      "reliability": 0.99,
+      "discriminating": true,
+      "experiment_id": "ical-version-pair-0622",
+      "comparison": {
+        "version_4_8_3_events": 48,
+        "version_4_9_0_events": 41,
+        "visible_omissions": 7
+      }
+    },
+    {
+      "evidence_id": "bh4-402-e07",
+      "statement": "A retained negative-control feed with equivalent recurrence rules but no folded properties produces identical event sets under both package versions.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated replay report for control fixture",
+      "independence_key": "unfolded-feed-negative-control",
+      "reliability": 0.97,
+      "discriminating": true,
+      "experiment_id": "ical-unfolded-control-0622",
+      "comparison": {
+        "version_4_8_3_events": 32,
+        "version_4_9_0_events": 32
+      }
+    },
+    {
+      "evidence_id": "bh4-402-e08",
+      "statement": "Database and display-service records agree on the reduced set of 41 events, placing the first divergence before persistence rather than in display filtering or cache refresh.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "database audit export and display cache inventory",
+      "independence_key": "downstream-set-comparison",
+      "reliability": 0.95,
+      "discriminating": true,
+      "expected_edge_state": "48-events-forwarded",
+      "actual_edge_state": "41-events-forwarded",
+      "component_flow": [
+        "parser",
+        "recurrence-expander",
+        "database",
+        "display-cache"
+      ]
+    },
+    {
+      "evidence_id": "bh4-402-e09",
+      "statement": "No timezone database, host locale, department configuration, or feed-authentication change appears in the signed build and environment manifests for the incident interval.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "signed environment inventory comparison",
+      "independence_key": "environment-negative-evidence",
+      "reliability": 0.92,
+      "discriminating": false,
+      "comparison": {
+        "timezone_database": "unchanged",
+        "host_locale": "unchanged",
+        "department_configuration": "unchanged",
+        "feed_authentication": "unchanged"
+      }
+    }
+  ],
+  "constraints": {
+    "evidence_policy": "offline_and_read_only",
+    "production_mutation_allowed": false,
+    "retained_artifacts_only": true,
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

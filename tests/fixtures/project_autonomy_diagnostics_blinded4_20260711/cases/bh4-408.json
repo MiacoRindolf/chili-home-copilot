@@ -1,0 +1,168 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh4-408",
+  "problem_statement": "A school district's offline reading application began reporting erratic synchronization latency after a tablet fleet rollout. Some dashboard values are negative or exceed an hour even though reading progress eventually reaches the server and support reports do not show a comparable rise in lost work.",
+  "observations": [
+    {
+      "evidence_id": "bh4-408-e01",
+      "statement": "The dashboard shift starts on 2026-03-09, one day after a local daylight-saving transition and during a four-day rollout that increased the new tablet cohort from 8 percent to 61 percent of sampled sessions.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "retained dashboard series and fleet enrollment history",
+      "independence_key": "latency-rollout-timeline",
+      "reliability": 0.95,
+      "discriminating": false,
+      "timestamps": {
+        "civil_time_transition": "2026-03-08T10:00:00Z",
+        "dashboard_shift": "2026-03-09T00:00:00Z",
+        "rollout_end": "2026-03-12T23:00:00Z"
+      },
+      "comparison": {
+        "new_tablet_share_before": 0.08,
+        "new_tablet_share_after": 0.61
+      }
+    },
+    {
+      "evidence_id": "bh4-408-e02",
+      "statement": "Among anomalous sessions, reported latency clusters near negative 3,600 seconds and positive 3,600 seconds, with smaller groups near zero and above two hours.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "offline histogram from retained synchronization events",
+      "independence_key": "latency-offset-shape",
+      "reliability": 0.97,
+      "discriminating": true,
+      "fingerprints": {
+        "negative_cluster_seconds": -3600,
+        "positive_cluster_seconds": 3600,
+        "long_tail_present": true
+      }
+    },
+    {
+      "evidence_id": "bh4-408-e03",
+      "statement": "The client event stores queue_started as a local wall-time string without an offset, while the server stores receipt time in UTC; the latency job subtracts the parsed client value from server receipt time.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "event schema, retained sample payloads, and metric-job plan",
+      "independence_key": "timestamp-calculation-contract",
+      "reliability": 0.99,
+      "discriminating": true,
+      "expected_state": "comparable-time-bases",
+      "actual_state": "offsetless-client-wall-time-minus-server-utc",
+      "component_flow": [
+        "tablet-event",
+        "sync-gateway",
+        "event-store",
+        "latency-job",
+        "dashboard"
+      ]
+    },
+    {
+      "evidence_id": "bh4-408-e04",
+      "statement": "Server receipt sequence, per-device event sequence, and content versions remain monotonic for 99.8 percent of anomalous sessions, so the negative values do not represent reversed delivery or lost reading progress.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "read-only event-order and content reconciliation",
+      "independence_key": "delivery-order-control",
+      "reliability": 0.96,
+      "discriminating": true,
+      "correlation": {
+        "anomalous_sessions_with_monotonic_delivery": 0.998,
+        "content_loss_rate_change": 0.0
+      }
+    },
+    {
+      "evidence_id": "bh4-408-e05",
+      "statement": "Fleet summaries show 73 devices accepted a wall-clock correction between queueing and receipt, but privacy aggregation removed the event-to-device linkage needed to identify which dashboard samples were corrected.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "retained device-management aggregate and privacy retention policy",
+      "independence_key": "clock-correction-aggregate",
+      "reliability": 0.94,
+      "discriminating": true,
+      "events": [
+        "content-queued",
+        "possible-wall-clock-correction",
+        "content-received"
+      ],
+      "missing_signals": [
+        "event-device-join",
+        "correction-magnitude-per-event"
+      ]
+    },
+    {
+      "evidence_id": "bh4-408-e06",
+      "statement": "Desktop clients use server-issued queue tokens and retain a stable latency distribution over the same network and backend interval, providing a negative control for the shared synchronization service.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "cross-client latency and backend health export",
+      "independence_key": "desktop-client-negative-control",
+      "reliability": 0.93,
+      "discriminating": true,
+      "comparison": {
+        "desktop_p95_change_seconds": 1.2,
+        "tablet_reported_p95_change_seconds": 3628.0,
+        "backend_revision": "shared"
+      }
+    },
+    {
+      "evidence_id": "bh4-408-e07",
+      "statement": "Offline recomputation under a one-hour offset correction collapses either the positive or negative cluster depending on the assumed parsing zone, but neither assumption explains the entire long tail.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "read-only alternate-interpretation analysis",
+      "independence_key": "offset-recomputation",
+      "reliability": 0.95,
+      "discriminating": true,
+      "experiment_id": "tablet-time-interpretations-v2",
+      "comparison": {
+        "assumption_local_standard": "positive-cluster-collapses",
+        "assumption_local_daylight": "negative-cluster-collapses",
+        "long_tail": "persists"
+      }
+    },
+    {
+      "evidence_id": "bh4-408-e08",
+      "statement": "The pre-rollout latency baseline contains mostly desktop sessions and retained only daily percentiles, not raw queue spans; it cannot establish the tablet cohort's prior actual network-delay distribution.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "metric-retention inventory and cohort composition report",
+      "independence_key": "baseline-identifiability-gap",
+      "reliability": 0.98,
+      "discriminating": true,
+      "comparison": {
+        "pre_rollout_tablet_share": 0.08,
+        "raw_pre_rollout_spans": "not-retained",
+        "retained_granularity": "daily-percentiles"
+      }
+    },
+    {
+      "evidence_id": "bh4-408-e09",
+      "statement": "The retained events contain neither a monotonic duration, a UTC offset, nor synchronization state at queue time, so the current archive cannot separate wall-time interpretation error from a simultaneous change in actual offline duration across the new cohort.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "offline observability and identifiability review",
+      "independence_key": "duration-identifiability-review",
+      "reliability": 0.99,
+      "discriminating": true,
+      "missing_signals": [
+        "monotonic-queue-duration",
+        "utc-offset-at-queue-time",
+        "time-sync-state",
+        "cohort-matched-prior-spans"
+      ]
+    }
+  ],
+  "constraints": {
+    "evidence_policy": "offline_and_read_only",
+    "production_mutation_allowed": false,
+    "retained_artifacts_only": true,
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

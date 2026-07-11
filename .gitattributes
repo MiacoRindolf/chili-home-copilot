@@ -33,3 +33,8 @@
 tests/fixtures/project_autonomy_diagnostics_blinded3_20260711/manifest.json -text
 tests/fixtures/project_autonomy_diagnostics_blinded3_20260711/cases/*.json -text
 tests/fixtures/project_autonomy_diagnostics_blinded3_20260711/oracles/*.json -text
+
+# Preserve the exact post-freeze bytes used by the fourth blinded holdout.
+tests/fixtures/project_autonomy_diagnostics_blinded4_20260711/manifest.json -text
+tests/fixtures/project_autonomy_diagnostics_blinded4_20260711/cases/*.json -text
+tests/fixtures/project_autonomy_diagnostics_blinded4_20260711/oracles/*.json -text

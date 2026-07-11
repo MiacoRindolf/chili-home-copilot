@@ -1,0 +1,175 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh4-405",
+  "problem_statement": "A volunteer-coordination web application's end-to-end suite intermittently reports that a signed-in coordinator is redirected to the login page while uploading a shift photo. The release was paused even though production uploads and direct API checks show no matching failure.",
+  "observations": [
+    {
+      "evidence_id": "bh4-405-e01",
+      "statement": "All 17 failures in the retained month occurred on parallel shard 3 after the offline-mode scenario had run earlier in the same shard; the same upload scenario passed 286 times on other shards.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "retained continuous-integration result index",
+      "independence_key": "shard-order-correlation",
+      "reliability": 0.95,
+      "discriminating": true,
+      "correlation": {
+        "shard_3_after_offline_failure_rate": 0.21,
+        "other_shards_failure_rate": 0.0
+      },
+      "sequence": [
+        "offline-mode-scenario",
+        "photo-upload-scenario",
+        "login-redirect"
+      ]
+    },
+    {
+      "evidence_id": "bh4-405-e02",
+      "statement": "The browser screenshot shows an offline banner for one frame before the redirect, while the server access log records no upload request or session-validation request for that attempt.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "retained screenshot sequence and server access log",
+      "independence_key": "browser-server-boundary",
+      "reliability": 0.94,
+      "discriminating": true,
+      "component_flow": [
+        "browser-page",
+        "service-worker",
+        "test-proxy",
+        "application-server"
+      ],
+      "edge_states": {
+        "browser-ui": "offline-banner-then-redirect",
+        "server-request": "absent"
+      }
+    },
+    {
+      "evidence_id": "bh4-405-e03",
+      "statement": "The runner definition allows a browser profile directory to persist for the lifetime of a shard, and cleanup records only page closure rather than service-worker unregistration or cache deletion.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "archived runner definition and teardown log",
+      "independence_key": "runner-lifecycle-definition",
+      "reliability": 0.97,
+      "discriminating": true,
+      "expected_state": "scenario-isolated-browser-state",
+      "actual_state": "shard-lifetime-profile-state",
+      "events": [
+        "page-close-recorded",
+        "profile-retained",
+        "worker-cleanup-unrecorded"
+      ]
+    },
+    {
+      "evidence_id": "bh4-405-e04",
+      "statement": "A runner image refresh introduced both a new browser build and a proxy helper revision two days before the first failure; application source, API image, and test scenario source were unchanged.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "signed runner and application build manifests",
+      "independence_key": "runner-refresh-timeline",
+      "reliability": 0.96,
+      "discriminating": false,
+      "timestamps": {
+        "runner_refresh": "2026-06-29T03:20:00Z",
+        "first_failure": "2026-07-01T11:08:14Z"
+      },
+      "comparison": {
+        "browser_build": "changed",
+        "proxy_helper": "changed",
+        "application_source": "unchanged",
+        "scenario_source": "unchanged"
+      }
+    },
+    {
+      "evidence_id": "bh4-405-e05",
+      "statement": "Historical serial runs using a fresh profile for each scenario include 412 passes of the same upload path and no login redirect, providing a negative control for the stable application build and fixture account.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "archived serial-run reports",
+      "independence_key": "fresh-profile-negative-control",
+      "reliability": 0.9,
+      "discriminating": true,
+      "comparison": {
+        "fresh_profile_passes": 412,
+        "fresh_profile_redirects": 0
+      }
+    },
+    {
+      "evidence_id": "bh4-405-e06",
+      "statement": "Production telemetry over the same interval contains 18,204 successful photo uploads and a stable authentication-refresh error rate, including traffic on the paused release candidate's backend revision.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "independent production telemetry export",
+      "independence_key": "production-negative-control",
+      "reliability": 0.93,
+      "discriminating": true,
+      "comparison": {
+        "successful_uploads": 18204,
+        "authentication_error_rate_change": 0.0001
+      }
+    },
+    {
+      "evidence_id": "bh4-405-e07",
+      "statement": "Direct read-only contract checks retained from each failed run show that the fixture account session was valid and the upload endpoint returned healthy status from outside the browser path.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "archived preflight and postflight check results",
+      "independence_key": "api-contract-control",
+      "reliability": 0.92,
+      "discriminating": true,
+      "experiment_id": "ci-contract-sentinel-v3",
+      "edge_states": {
+        "fixture-session": "valid",
+        "upload-endpoint": "healthy"
+      }
+    },
+    {
+      "evidence_id": "bh4-405-e08",
+      "statement": "The retained network archive starts after navigation and omits service-worker lifecycle events; proxy logs are overwritten per scenario and do not preserve whether an offline rule survived teardown.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "artifact inventory and logging-policy snapshot",
+      "independence_key": "missing-lifecycle-evidence",
+      "reliability": 0.99,
+      "discriminating": true,
+      "artifact_hash": "sha256:6a4e50a035af9aa023f0766c01cde2b6c8aeab796c7547979db7938736d005dd",
+      "fingerprints": {
+        "network_archive_start": "post-navigation",
+        "service_worker_events": "not-captured",
+        "proxy_rule_history": "not-retained"
+      }
+    },
+    {
+      "evidence_id": "bh4-405-e09",
+      "statement": "The archived evidence cannot distinguish whether persisted browser state, a leaked proxy rule, or their interaction produced the redirect; resolving that distinction requires future per-scenario lifecycle and rule-state capture, not a production mutation.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "offline evidence-gap review",
+      "independence_key": "mechanism-identifiability-review",
+      "reliability": 0.95,
+      "discriminating": true,
+      "candidate_fingerprints": [
+        "persisted-service-worker",
+        "leaked-proxy-rule",
+        "ordering-interaction"
+      ],
+      "missing_signals": [
+        "service-worker-registration-sequence",
+        "proxy-rule-snapshot",
+        "profile-reset-acknowledgement"
+      ]
+    }
+  ],
+  "constraints": {
+    "evidence_policy": "offline_and_read_only",
+    "production_mutation_allowed": false,
+    "retained_artifacts_only": true,
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

@@ -1,0 +1,167 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh4-407",
+  "problem_statement": "An arts center's environmental dashboard stopped updating temperature and humidity for one building after a weekend maintenance window. Sensors still publish locally, and dashboards for the other buildings remain current.",
+  "observations": [
+    {
+      "evidence_id": "bh4-407-e01",
+      "statement": "The final dashboard sample for building alpha is timestamped 2026-07-04T06:59:58Z; a site overlay rollout completed at 07:00:11Z, and no application or broker deployment occurred that weekend.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "retained dashboard sample index and deployment ledger",
+      "independence_key": "overlay-outage-timeline",
+      "reliability": 0.98,
+      "discriminating": true,
+      "timestamps": {
+        "last_sample": "2026-07-04T06:59:58Z",
+        "overlay_rollout": "2026-07-04T07:00:11Z"
+      }
+    },
+    {
+      "evidence_id": "bh4-407-e02",
+      "statement": "Broker-retained messages continue on topics building/alpha/floor1 and building/alpha/floor2 every thirty seconds after the dashboard becomes stale.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "read-only message-broker retained-topic export",
+      "independence_key": "sensor-publication-continuity",
+      "reliability": 0.99,
+      "discriminating": true,
+      "component_flow": [
+        "sensors",
+        "site-gateway",
+        "message-broker",
+        "ingest-subscriber",
+        "dashboard-store"
+      ],
+      "edge_states": {
+        "sensor-to-broker": "active",
+        "broker-topic-prefix": "building/alpha"
+      }
+    },
+    {
+      "evidence_id": "bh4-407-e03",
+      "statement": "The subscriber's effective settings snapshot for alpha contains /building/alpha/#, including a leading slash, while the prior snapshot and the broker topics contain building/alpha/# without one.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "signed effective-settings snapshots and broker inventory",
+      "independence_key": "effective-topic-filter",
+      "reliability": 0.99,
+      "discriminating": true,
+      "expected_state": "building/alpha/#",
+      "actual_state": "/building/alpha/#",
+      "artifact_hash": "sha256:3d725a0fdce087546dab50c148491429830ee0d9ed5b301b9dc441e29f626261"
+    },
+    {
+      "evidence_id": "bh4-407-e04",
+      "statement": "The shared template did not change; the alpha overlay added a path-normalization transform intended for HTTP routes and applied it to the topic filter field during rendering.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "overlay diff and deterministic render trace",
+      "independence_key": "overlay-render-transform",
+      "reliability": 0.98,
+      "discriminating": true,
+      "sequence": [
+        "shared-template-loaded",
+        "alpha-overlay-applied",
+        "path-normalization-run",
+        "effective-settings-emitted"
+      ],
+      "causal_parents": [
+        "alpha-overlay-transform",
+        "topic-filter-rendering"
+      ]
+    },
+    {
+      "evidence_id": "bh4-407-e05",
+      "statement": "Broker subscription logs show the alpha client reconnecting successfully with the leading-slash filter, receiving zero matched messages, and maintaining a healthy connection.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "independent broker subscription audit log",
+      "independence_key": "broker-subscription-match",
+      "reliability": 0.99,
+      "discriminating": true,
+      "expected_edge_state": "subscription-matches-alpha-topics",
+      "actual_edge_state": "healthy-subscription-zero-matches",
+      "events": [
+        "client-connected",
+        "filter-registered",
+        "zero-matches"
+      ]
+    },
+    {
+      "evidence_id": "bh4-407-e06",
+      "statement": "An offline topic-matcher evaluation over the retained broker inventory returns 1,842 matches for building/alpha/# and zero for /building/alpha/#.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "read-only matcher report using broker specification rules",
+      "independence_key": "topic-filter-offline-evaluation",
+      "reliability": 0.99,
+      "discriminating": true,
+      "experiment_id": "mqtt-filter-pair-0704",
+      "comparison": {
+        "without_leading_slash": 1842,
+        "with_leading_slash": 0
+      }
+    },
+    {
+      "evidence_id": "bh4-407-e07",
+      "statement": "Building beta uses the same application image, broker, sensor models, and shared template but an overlay without the transform; its dashboard remains current, providing a negative control.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "cross-building component and freshness comparison",
+      "independence_key": "building-beta-negative-control",
+      "reliability": 0.96,
+      "discriminating": true,
+      "comparison": {
+        "alpha_freshness_seconds": 176400,
+        "beta_freshness_seconds": 18,
+        "application_image": "matching",
+        "broker": "shared"
+      }
+    },
+    {
+      "evidence_id": "bh4-407-e08",
+      "statement": "The dashboard store has no alpha samples after the rollout and no rejected-write entries, placing the stale display downstream of absent subscriber delivery rather than database rejection or rendering cache behavior.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "database ingestion ledger and write-error archive",
+      "independence_key": "store-ingest-boundary",
+      "reliability": 0.96,
+      "discriminating": true,
+      "edge_states": {
+        "subscriber-delivery": "absent",
+        "database-rejection": "absent",
+        "dashboard-read": "last-known-sample"
+      }
+    },
+    {
+      "evidence_id": "bh4-407-e09",
+      "statement": "Sensor firmware versions and payload schemas are mixed equally across alpha and beta, and retained alpha payloads decode under the current schema, weakening a coincident firmware or payload-format explanation.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "offline payload decode and firmware cohort report",
+      "independence_key": "payload-firmware-control",
+      "reliability": 0.92,
+      "discriminating": false,
+      "experiment_id": "payload-decode-control-0705",
+      "comparison": {
+        "alpha_decode_rate": 1.0,
+        "beta_decode_rate": 1.0,
+        "firmware_distribution": "matching"
+      }
+    }
+  ],
+  "constraints": {
+    "evidence_policy": "offline_and_read_only",
+    "production_mutation_allowed": false,
+    "retained_artifacts_only": true,
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}
