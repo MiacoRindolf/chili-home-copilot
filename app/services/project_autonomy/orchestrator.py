@@ -61,6 +61,7 @@ from ..coding_task.validator_runner import (
 )
 from ..context_brain import ollama_client
 from ..project_domain_runs import finish_run, start_run
+from . import diagnostic_reasoning
 
 AUTONOMOUS_KIND = "autonomous"
 EXECUTION_MODE_PLAN_APPROVAL = "plan_approval"
@@ -1387,7 +1388,11 @@ def _frontier_preflight_blocker_source(blocker_id: str) -> str:
     normalized = blocker_id.strip().lower()
     if normalized in {"codex_cli_available", "codex_cli_live_probe"}:
         return "codex"
-    if normalized in {"claude_cli_available", "claude_opus48_live_probe"}:
+    if normalized in {
+        "claude_cli_available",
+        "claude_fable5_live_probe",
+        "claude_opus48_live_probe",
+    }:
         return "claude"
     return ""
 
@@ -2460,6 +2465,7 @@ def _agent_coding_benchmark_signal(runtime_path: Path | None) -> dict[str, Any]:
 _MODEL_PREFERENCE = (
     "chili-coder:current",
     "qwen2.5-coder:7b",
+    "qwen2.5-coder:14b",
     "qwen2.5-coder",
     "qwen3-coder",
     "qwen3:4b",
@@ -2471,6 +2477,18 @@ _MODEL_PREFERENCE = (
 _PLAN_TIMEOUT_SEC = float(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_TIMEOUT_SEC") or "90")
 _PLAN_NUM_PREDICT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_NUM_PREDICT") or "120")
 _PLAN_NUM_CTX = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_NUM_CTX") or "2048")
+_DIAGNOSTIC_TIMEOUT_SEC = float(
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_TIMEOUT_SEC") or "150"
+)
+_DIAGNOSTIC_NUM_PREDICT = int(
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_NUM_PREDICT") or "600"
+)
+_DIAGNOSTIC_NUM_CTX = int(
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_NUM_CTX") or "8192"
+)
+_DIAGNOSTIC_DEEP_COUNCIL = str(
+    os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_DEEP_COUNCIL") or "false"
+).strip().lower() in {"1", "true", "yes", "on"}
 _PLAN_PROMPT_CHAR_LIMIT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_PROMPT_CHARS") or "9000")
 _EDIT_TIMEOUT_SEC = float(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_TIMEOUT_SEC") or "150")
 _EDIT_NUM_PREDICT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_NUM_PREDICT") or "350")
@@ -6158,10 +6176,12 @@ def _plan_candidate_files(context: dict[str, Any], repo_path: Path | None, promp
 def _build_autonomy_plan_prompt(context: dict[str, Any], repo_path: Path | None) -> str:
     request = str(context.get("operator_request") or "")
     candidates = _plan_candidate_files(context, repo_path, request)
+    diagnostic_context = str(context.get("diagnostic_context") or "").strip()
+    max_files = 3 if diagnostic_context else 2
     parts = [
         "Return one compact JSON object for a safe local autonomous code run.",
         "No markdown. No prose outside JSON. Keep strings short.",
-        "Choose one or two concrete files and avoid speculative rewrites.",
+        f"Choose no more than {max_files} concrete files and avoid speculative rewrites.",
         "",
         "Operator request:",
         request,
@@ -6191,12 +6211,26 @@ def _build_autonomy_plan_prompt(context: dict[str, Any], repo_path: Path | None)
         parts.extend(["", "Repo patterns:"])
         parts.extend(f"- {_clip(item, 220)}" for item in insights)
 
+    if diagnostic_context:
+        parts.extend(
+            [
+                "",
+                diagnostic_context,
+                "",
+                "Diagnostic planning rules:",
+                "- For instrument_first, add the smallest discriminating instrumentation or isolated regression test; do not claim a root cause.",
+                "- For patch_root_cause, change only the confirmed owning code and add a focused regression test.",
+                "- Preserve contradictions and retractions in the plan notes.",
+                "- Never plan automatic live-state, broker, production-data, or destructive experiments.",
+            ]
+        )
+
     parts.extend(
         [
             "",
             "JSON shape:",
             '{"analysis":"<=18 words","files":[{"path":"candidate/path","action":"modify","description":"<=12 words"}],"notes":"<=12 words"}',
-            "Rules: max 2 files, prefer existing candidate files exactly, include only repo-relative paths.",
+            f"Rules: max {max_files} files, prefer existing candidate files exactly, include only repo-relative paths.",
         ]
     )
     return _clip("\n".join(parts), _PLAN_PROMPT_CHAR_LIMIT)
@@ -6367,6 +6401,86 @@ def _fallback_plan_from_context(
     }
 
 
+def _run_local_diagnostic_reasoning(
+    db: Session,
+    run: ProjectAutonomyRun,
+    context: dict[str, Any],
+    repo_path: Path | None,
+    model_info: Mapping[str, Any],
+) -> dict[str, Any]:
+    candidate_paths = _plan_candidate_files(context, repo_path, run.prompt)
+    case = diagnostic_reasoning.build_case_from_prompt(
+        run.prompt,
+        case_id=f"autonomy-{run.run_id}",
+        repo_path=repo_path,
+        candidate_paths=candidate_paths,
+    )
+    model_name = str(model_info.get("model") or "").strip()
+    model_calls: list[dict[str, Any]] = []
+
+    def call_local_role(stage: str, prompt: str) -> str:
+        result = ollama_client.chat(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are one role in CHILI's premium-independent diagnostic council. "
+                        "Use only supplied evidence, expose uncertainty, and return JSON only."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            model_name,
+            temperature=0.1,
+            timeout_sec=_DIAGNOSTIC_TIMEOUT_SEC,
+            options={
+                "num_predict": _DIAGNOSTIC_NUM_PREDICT,
+                "num_ctx": _DIAGNOSTIC_NUM_CTX,
+                "keep_alive": _OLLAMA_KEEP_ALIVE,
+                "format": "json",
+            },
+        )
+        _note_model_call_result(model_name, result)
+        model_calls.append(
+            {
+                "stage": stage,
+                "model": model_name,
+                "ok": result.ok,
+                "latency_ms": result.latency_ms,
+                "tokens_out": result.tokens_out,
+                "error": result.error,
+                "response_chars": len(result.text or ""),
+            }
+        )
+        return result.text if result.ok else ""
+
+    debate = diagnostic_reasoning.run_local_diagnostic_debate(
+        case,
+        call_local_role if model_name else None,
+        stages_to_run=(
+            ("investigator", "skeptic", "judge")
+            if _DIAGNOSTIC_DEEP_COUNCIL
+            else ("judge",)
+        ),
+    )
+    _add_artifact(
+        db,
+        run.run_id,
+        "diagnostic",
+        "local_diagnostic_debate",
+        content_json={
+            "case": case,
+            "report": debate.get("report") or {},
+            "stages": debate.get("stages") or [],
+            "model_calls": model_calls,
+            "local_model": model_name or None,
+            "council_mode": "deep" if _DIAGNOSTIC_DEEP_COUNCIL else "adaptive_judge",
+            "premium_calls": 0,
+        },
+    )
+    return debate
+
+
 def build_local_plan(
     db: Session,
     run: ProjectAutonomyRun,
@@ -6391,6 +6505,17 @@ def build_local_plan(
             _add_artifact(db, run.run_id, "plan", "heuristic_plan_fast_path", content_json=fallback)
             return fallback
     model_info = select_local_model()
+    if diagnostic_reasoning.looks_like_diagnostic_request(run.prompt):
+        debate = _run_local_diagnostic_reasoning(
+            db,
+            run,
+            context,
+            repo_path,
+            model_info,
+        )
+        report = debate.get("report") if isinstance(debate.get("report"), dict) else {}
+        context["diagnostic_report"] = report
+        context["diagnostic_context"] = diagnostic_reasoning.report_context(report)
     if not model_info.get("model"):
         fallback = _fallback_plan_from_context(
             context,
@@ -6720,8 +6845,8 @@ def generate_diffs_from_plan(
         if not validation_context and try_fallback(rel, content):
             continue
         # Proven dispatch-lane edit machinery (SR blocks + fuzzy/indent
-        # healing + machine-generated diffs), via the gateway's local-first
-        # code tier with cascade escalation — replaces the old direct-Ollama
+        # healing + machine-generated diffs), via the gateway's local-only
+        # code tier — replaces the old direct-Ollama
         # unified-diff guessing against the 260-line truncation, which was
         # the autopilot lane's dominant failure mode.
         import time as _time
@@ -6745,6 +6870,8 @@ def generate_diffs_from_plan(
             trace_id=f"autopilot-edit-{rel}",
             user_message=desc,
             max_tokens=_settings.chili_code_gen_max_tokens,
+            strict_escalation=False,
+            local_only=True,
             # Own session inside the gateway — never share the run session
             # (rollback-on-error would discard pending run state).
             db=None,
@@ -6762,6 +6889,8 @@ def generate_diffs_from_plan(
                 "latency_ms": int((_time.monotonic() - _t0) * 1000),
                 "engine": "sr_blocks_via_gateway",
                 "prompt_chars": len(prompt),
+                "local_only": bool(gw.get("local_only")) if isinstance(gw, dict) else True,
+                "premium_calls": int(gw.get("premium_calls") or 0) if isinstance(gw, dict) else 0,
             },
         )
         _check_cancel(db, run)

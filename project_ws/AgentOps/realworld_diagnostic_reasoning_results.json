@@ -1,0 +1,1684 @@
+{
+  "average_local_latency_ms": 26811.29,
+  "cases": [
+    {
+      "case_id": "cal-001",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 26266,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 334
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e1",
+            "e2",
+            "e3"
+          ],
+          "hypothesis_id": "h-clock",
+          "reason": "The hypothesis is supported by the evidence and falsification criteria are met.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "clock"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing clock changes or restores the outcome.",
+            "experiment_id": "isolate-clock",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-clock"
+            ],
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "support_evidence_ids": [
+              "e1",
+              "e2",
+              "e3"
+            ]
+          }
+        ],
+        "problem_statement": "A deterministic market replay rejects a setup as outside the session even though the replay frame is inside the allowed window. Diagnose the causal family and choose whether to patch or instrument.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "cal-001",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by clock drift.",
+          "confidence": 0.7442,
+          "dimension": "clock",
+          "evidence_ids": [
+            "e1",
+            "e2",
+            "e3"
+          ],
+          "hypothesis_id": "h-clock",
+          "reason": "The hypothesis is supported by the evidence and falsification criteria are met.",
+          "status": "confirmed"
+        },
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.7442,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e1",
+              "e2",
+              "e3"
+            ],
+            "support_weight": 2.91
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "clock",
+          "hypothesis_dimensions": [
+            "clock"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": false,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 95
+      },
+      "source": "exact_fable5_sim_clock_incident",
+      "split": "calibration",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.7442,
+            "dimension": "clock",
+            "evidence_ids": [
+              "e1",
+              "e2",
+              "e3"
+            ],
+            "hypothesis_id": "h-clock",
+            "reason": "The hypothesis is supported by the evidence and falsification criteria are met.",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "response_chars": 1434,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "cal-002",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 20008,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 328
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e1",
+            "e2",
+            "e3"
+          ],
+          "hypothesis_id": "h-data",
+          "reason": "The hypothesis is supported by the evidence and falsification criteria are met.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing data changes or restores the outcome.",
+            "experiment_id": "isolate-data",
+            "held_constant_dimensions": [
+              "code",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-data"
+            ],
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "support_evidence_ids": [
+              "e1",
+              "e2",
+              "e3"
+            ]
+          }
+        ],
+        "problem_statement": "A historical replay produces zero NBBO-qualified candidates on a date known to contain quotes. Diagnose the causal family without loosening trading gates.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "cal-002",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by data drift.",
+          "confidence": 0.7442,
+          "dimension": "data",
+          "evidence_ids": [
+            "e1",
+            "e2",
+            "e3"
+          ],
+          "hypothesis_id": "h-data",
+          "reason": "The hypothesis is supported by the evidence and falsification criteria are met.",
+          "status": "confirmed"
+        },
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.7442,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e1",
+              "e2",
+              "e3"
+            ],
+            "support_weight": 2.91
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "data",
+          "hypothesis_dimensions": [
+            "data"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": false,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 95
+      },
+      "source": "exact_fable5_nbbo_source_sink_incident",
+      "split": "calibration",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.7442,
+            "dimension": "data",
+            "evidence_ids": [
+              "e1",
+              "e2",
+              "e3"
+            ],
+            "hypothesis_id": "h-data",
+            "reason": "The hypothesis is supported by the evidence and falsification criteria are met.",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "response_chars": 1383,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "cal-003",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 37352,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 600
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e3",
+            "e4",
+            "e5"
+          ],
+          "hypothesis_id": "h-data",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing data changes or restores the outcome.",
+            "experiment_id": "isolate-data",
+            "held_constant_dimensions": [
+              "code",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-data"
+            ],
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "code"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing code changes or restores the outcome.",
+            "experiment_id": "isolate-code",
+            "held_constant_dimensions": [
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-code"
+            ],
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "test_harness"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing test_harness changes or restores the outcome.",
+            "experiment_id": "isolate-test_harness",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime"
+            ],
+            "hypothesis_ids": [
+              "h-test_harness"
+            ],
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "support_evidence_ids": [
+              "e3",
+              "e4",
+              "e5"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by code drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "support_evidence_ids": [
+              "e2"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "test_harness",
+            "falsification": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
+            "hypothesis_id": "h-test_harness",
+            "support_evidence_ids": [
+              "e1"
+            ]
+          }
+        ],
+        "problem_statement": "A feature A/B was blamed for a replay PnL collapse, but the same revision and input later reproduced different outcomes. Re-evaluate the old conclusion using the newly collected harness evidence.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [
+          {
+            "code_revision": "r30",
+            "comparison_key": "winner-window",
+            "environment_fingerprints": [
+              "sink-empty",
+              "sink-populated"
+            ],
+            "evidence_ids": [
+              "e1",
+              "e2"
+            ],
+            "input_fingerprint": "w1",
+            "outcome_fingerprints": [
+              "pnl:+15034",
+              "pnl:-5419"
+            ]
+          }
+        ],
+        "case_id": "cal-003",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by data drift.",
+          "confidence": 0.7468,
+          "dimension": "data",
+          "evidence_ids": [
+            "e3",
+            "e4",
+            "e5"
+          ],
+          "hypothesis_id": "h-data",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.7468,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e3",
+              "e4",
+              "e5"
+            ],
+            "support_weight": 2.95
+          },
+          {
+            "blockers": [
+              "Same code and input produced different outcomes; code causality is not isolated."
+            ],
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.49,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "status": "blocked",
+            "support_evidence_ids": [
+              "e2"
+            ],
+            "support_weight": 0.98
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "confidence": 0.4949,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "test_harness",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
+            "hypothesis_id": "h-test_harness",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e1"
+            ],
+            "support_weight": 0.98
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold code and inputs constant; measure whether changing only clock restores the baseline outcome.",
+            "dimension": "clock",
+            "experiment_id": "isolate-clock",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only state restores the baseline outcome.",
+            "dimension": "state",
+            "experiment_id": "isolate-state",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only config restores the baseline outcome.",
+            "dimension": "config",
+            "experiment_id": "isolate-config",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only dependency restores the baseline outcome.",
+            "dimension": "dependency",
+            "experiment_id": "isolate-dependency",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only runtime restores the baseline outcome.",
+            "dimension": "runtime",
+            "experiment_id": "isolate-runtime",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "dimension": "code",
+            "experiment_id": "falsify-h-code",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-prior-code",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": true,
+          "decision": "patch_root_cause",
+          "dimension": "data",
+          "hypothesis_dimensions": [
+            "clock",
+            "code",
+            "config",
+            "data",
+            "dependency",
+            "runtime",
+            "state",
+            "test_harness"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 100
+      },
+      "source": "exact_fable5_invalidated_ab_retraction_incident",
+      "split": "calibration",
+      "stages": [
+        {
+          "accepted": false,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.7468,
+            "dimension": "data",
+            "evidence_ids": [
+              "e3",
+              "e4",
+              "e5"
+            ],
+            "hypothesis_id": "h-data",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "response_chars": 2662,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "hold-101",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 30774,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 533
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e2",
+            "e3"
+          ],
+          "hypothesis_id": "h-runtime",
+          "reason": "The evidence strongly supports that runtime drift is the primary cause of the observed failure.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "runtime"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing runtime changes or restores the outcome.",
+            "experiment_id": "isolate-runtime",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-runtime"
+            ],
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "test_harness"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing test_harness changes or restores the outcome.",
+            "experiment_id": "isolate-test_harness",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime"
+            ],
+            "hypothesis_ids": [
+              "h-test_harness"
+            ],
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "support_evidence_ids": [
+              "e2",
+              "e3"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "test_harness",
+            "falsification": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
+            "hypothesis_id": "h-test_harness",
+            "support_evidence_ids": [
+              "e1"
+            ]
+          }
+        ],
+        "problem_statement": "A focused test passes from the checkout but the corresponding worker still exhibits the pre-fix behavior. Diagnose before editing the implementation again.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "hold-101",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by runtime drift.",
+          "confidence": 0.6622,
+          "dimension": "runtime",
+          "evidence_ids": [
+            "e2",
+            "e3"
+          ],
+          "hypothesis_id": "h-runtime",
+          "reason": "The evidence strongly supports that runtime drift is the primary cause of the observed failure.",
+          "status": "confirmed"
+        },
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.6622,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e2",
+              "e3"
+            ],
+            "support_weight": 1.96
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "confidence": 0.4872,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "test_harness",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
+            "hypothesis_id": "h-test_harness",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e1"
+            ],
+            "support_weight": 0.95
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
+            "dimension": "test_harness",
+            "experiment_id": "falsify-h-test_harness",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "runtime",
+          "hypothesis_dimensions": [
+            "runtime",
+            "test_harness"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 100
+      },
+      "source": "sealed_runtime_drift_variant",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.6622,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "e2",
+              "e3"
+            ],
+            "hypothesis_id": "h-runtime",
+            "reason": "The evidence strongly supports that runtime drift is the primary cause of the observed failure.",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "response_chars": 2367,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "hold-102",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 32172,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 546
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e2",
+            "e3"
+          ],
+          "hypothesis_id": "h-config",
+          "reason": "The hypothesis that the observed failure is primarily caused by config drift is supported by evidence e2 and e3, which show a clear difference in outcomes between worker A and B when only the config dimension differs.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "config"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing config changes or restores the outcome.",
+            "experiment_id": "isolate-config",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-config"
+            ],
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "runtime"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing runtime changes or restores the outcome.",
+            "experiment_id": "isolate-runtime",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-runtime"
+            ],
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by config drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "config",
+            "falsification": "Hold every other dimension constant and show that changing config does not change the outcome.",
+            "hypothesis_id": "h-config",
+            "support_evidence_ids": [
+              "e2",
+              "e3"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "support_evidence_ids": [
+              "e1"
+            ]
+          }
+        ],
+        "problem_statement": "Two workers running the same revision and replay fixture disagree on whether a feature gate is active. Find the causal family and avoid blaming code without isolation.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [
+          {
+            "code_revision": "r12",
+            "comparison_key": "paired-replay",
+            "environment_fingerprints": [
+              "worker-a",
+              "worker-b"
+            ],
+            "evidence_ids": [
+              "e1",
+              "e2"
+            ],
+            "input_fingerprint": "fixture-77",
+            "outcome_fingerprints": [
+              "accepted",
+              "rejected"
+            ]
+          }
+        ],
+        "case_id": "hold-102",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by config drift.",
+          "confidence": 0.6633,
+          "dimension": "config",
+          "evidence_ids": [
+            "e2",
+            "e3"
+          ],
+          "hypothesis_id": "h-config",
+          "reason": "The hypothesis that the observed failure is primarily caused by config drift is supported by evidence e2 and e3, which show a clear difference in outcomes between worker A and B when only the config dimension differs.",
+          "status": "confirmed"
+        },
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by config drift.",
+            "confidence": 0.6633,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "config",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing config does not change the outcome.",
+            "hypothesis_id": "h-config",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e2",
+              "e3"
+            ],
+            "support_weight": 1.97
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.4845,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e1"
+            ],
+            "support_weight": 0.94
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold code and inputs constant; measure whether changing only data restores the baseline outcome.",
+            "dimension": "data",
+            "experiment_id": "isolate-data",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only clock restores the baseline outcome.",
+            "dimension": "clock",
+            "experiment_id": "isolate-clock",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only state restores the baseline outcome.",
+            "dimension": "state",
+            "experiment_id": "isolate-state",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only dependency restores the baseline outcome.",
+            "dimension": "dependency",
+            "experiment_id": "isolate-dependency",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only test_harness restores the baseline outcome.",
+            "dimension": "test_harness",
+            "experiment_id": "isolate-test_harness",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "dimension": "runtime",
+            "experiment_id": "falsify-h-runtime",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": true,
+          "decision": "patch_root_cause",
+          "dimension": "config",
+          "hypothesis_dimensions": [
+            "clock",
+            "config",
+            "data",
+            "dependency",
+            "runtime",
+            "state",
+            "test_harness"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 100
+      },
+      "source": "sealed_config_drift_variant",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by config drift.",
+            "confidence": 0.6633,
+            "dimension": "config",
+            "evidence_ids": [
+              "e2",
+              "e3"
+            ],
+            "hypothesis_id": "h-config",
+            "reason": "The hypothesis that the observed failure is primarily caused by config drift is supported by evidence e2 and e3, which show a clear difference in outcomes between worker A and B when only the config dimension differs.",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "response_chars": 2458,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "hold-103",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 19261,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 325
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e1",
+            "e2",
+            "e3"
+          ],
+          "hypothesis_id": "h-state",
+          "reason": "The hypothesis is supported by the evidence and falsification experiment.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "state"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing state changes or restores the outcome.",
+            "experiment_id": "isolate-state",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-state"
+            ],
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by state drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h-state",
+            "support_evidence_ids": [
+              "e1",
+              "e2",
+              "e3"
+            ]
+          }
+        ],
+        "problem_statement": "A protected context refresh repeatedly fails to enter a bounded work queue even though its producer is healthy. Diagnose the bottleneck without raising the cap.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "hold-103",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by state drift.",
+          "confidence": 0.7436,
+          "dimension": "state",
+          "evidence_ids": [
+            "e1",
+            "e2",
+            "e3"
+          ],
+          "hypothesis_id": "h-state",
+          "reason": "The hypothesis is supported by the evidence and falsification experiment.",
+          "status": "confirmed"
+        },
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.7436,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h-state",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e1",
+              "e2",
+              "e3"
+            ],
+            "support_weight": 2.9
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "state",
+          "hypothesis_dimensions": [
+            "state"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": false,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 95
+      },
+      "source": "sealed_state_pressure_variant",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.7436,
+            "dimension": "state",
+            "evidence_ids": [
+              "e1",
+              "e2",
+              "e3"
+            ],
+            "hypothesis_id": "h-state",
+            "reason": "The hypothesis is supported by the evidence and falsification experiment.",
+            "status": "confirmed"
+          },
+          "errors": [],
+          "response_chars": 1391,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "hold-104",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 21846,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 338
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e1",
+            "e2"
+          ],
+          "hypothesis_id": "h-code",
+          "reason": "The baseline drift is not isolated to code. Further experiments are needed to determine the root cause.",
+          "status": "inconclusive"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "code"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing code changes or restores the outcome.",
+            "experiment_id": "isolate-code",
+            "held_constant_dimensions": [
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-code"
+            ],
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by code drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "support_evidence_ids": [
+              "e1",
+              "e2"
+            ]
+          }
+        ],
+        "problem_statement": "The same revision and serialized replay input passed yesterday and fails today. Available evidence does not fingerprint dependencies, runtime state, clock, or data snapshots. Decide whether a root-cause patch is justified.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [
+          {
+            "code_revision": "r20",
+            "comparison_key": "daily-replay",
+            "environment_fingerprints": [
+              "unknown"
+            ],
+            "evidence_ids": [
+              "e1",
+              "e2"
+            ],
+            "input_fingerprint": "f88",
+            "outcome_fingerprints": [
+              "fail",
+              "pass"
+            ]
+          }
+        ],
+        "case_id": "hold-104",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by code drift.",
+          "confidence": 0.49,
+          "dimension": "code",
+          "evidence_ids": [
+            "e1",
+            "e2"
+          ],
+          "hypothesis_id": "h-code",
+          "reason": "The baseline drift is not isolated to code. Further experiments are needed to determine the root cause.",
+          "status": "inconclusive"
+        },
+        "decision": "instrument_first",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [
+              "Same code and input produced different outcomes; code causality is not isolated."
+            ],
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.49,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "status": "blocked",
+            "support_evidence_ids": [
+              "e1",
+              "e2"
+            ],
+            "support_weight": 1.8
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold code and inputs constant; measure whether changing only data restores the baseline outcome.",
+            "dimension": "data",
+            "experiment_id": "isolate-data",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only clock restores the baseline outcome.",
+            "dimension": "clock",
+            "experiment_id": "isolate-clock",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only state restores the baseline outcome.",
+            "dimension": "state",
+            "experiment_id": "isolate-state",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only config restores the baseline outcome.",
+            "dimension": "config",
+            "experiment_id": "isolate-config",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only dependency restores the baseline outcome.",
+            "dimension": "dependency",
+            "experiment_id": "isolate-dependency",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "dimension": "code",
+            "experiment_id": "falsify-h-code",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": true,
+          "decision": "instrument_first",
+          "dimension": "code",
+          "hypothesis_dimensions": [
+            "clock",
+            "code",
+            "config",
+            "data",
+            "dependency",
+            "state"
+          ],
+          "premium_calls": 0,
+          "status": "inconclusive",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 100
+      },
+      "source": "sealed_unresolved_baseline_variant",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.49,
+            "dimension": "code",
+            "evidence_ids": [
+              "e1",
+              "e2"
+            ],
+            "hypothesis_id": "h-code",
+            "reason": "The baseline drift is not isolated to code. Further experiments are needed to determine the root cause.",
+            "status": "inconclusive"
+          },
+          "errors": [],
+          "response_chars": 1468,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    }
+  ],
+  "created_at": "2026-07-11T09:24:21.519895+00:00",
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "holdout_score": 98.75,
+  "max_local_latency_ms": 37352,
+  "model": "qwen2.5-coder:7b",
+  "overall_score": 97.86,
+  "premium_calls": 0,
+  "reference_model": "claude-fable-5",
+  "schema": "chili.realworld-diagnostic-results.v1",
+  "verdict": "shadow_ready"
+}

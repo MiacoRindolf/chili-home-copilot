@@ -1,0 +1,47 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "hold-104",
+  "problem_statement": "The same revision and serialized replay input passed yesterday and fails today. Available evidence does not fingerprint dependencies, runtime state, clock, or data snapshots. Decide whether a root-cause patch is justified.",
+  "observations": [
+    {
+      "evidence_id": "e1",
+      "statement": "Yesterday's run used revision r20 and input hash f88 and produced pass; no environment fingerprint was recorded.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "run:yesterday",
+      "independence_key": "run-yesterday",
+      "reliability": 0.9,
+      "discriminating": false,
+      "comparison_key": "daily-replay",
+      "code_revision": "r20",
+      "input_fingerprint": "f88",
+      "environment_fingerprint": "unknown",
+      "outcome_fingerprint": "pass"
+    },
+    {
+      "evidence_id": "e2",
+      "statement": "Today's run used revision r20 and input hash f88 and produced fail; no environment fingerprint was recorded.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "run:today",
+      "independence_key": "run-today",
+      "reliability": 0.9,
+      "discriminating": false,
+      "comparison_key": "daily-replay",
+      "code_revision": "r20",
+      "input_fingerprint": "f88",
+      "environment_fingerprint": "unknown",
+      "outcome_fingerprint": "fail"
+    },
+    {
+      "evidence_id": "e3",
+      "statement": "A source diff confirms no tracked implementation change between the runs, but there is no isolated experiment for any non-code dimension.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "git:revision-diff",
+      "independence_key": "git-diff",
+      "reliability": 0.96,
+      "discriminating": false
+    }
+  ]
+}

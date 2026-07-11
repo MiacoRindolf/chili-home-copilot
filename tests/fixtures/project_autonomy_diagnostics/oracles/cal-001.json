@@ -1,0 +1,9 @@
+{
+  "case_id": "cal-001",
+  "expected_dimensions": ["clock"],
+  "expected_decisions": ["patch_root_cause"],
+  "expected_statuses": ["confirmed"],
+  "expected_baseline_drift": false,
+  "minimum_hypothesis_dimensions": 2,
+  "forbid_confirmed_code": true
+}

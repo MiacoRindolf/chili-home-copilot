@@ -1,0 +1,9 @@
+{
+  "case_id": "hold-104",
+  "expected_dimensions": ["unknown", "code", "data", "clock", "state", "config", "dependency", "runtime", "test_harness"],
+  "expected_decisions": ["instrument_first"],
+  "expected_statuses": ["provisional", "inconclusive"],
+  "expected_baseline_drift": true,
+  "minimum_hypothesis_dimensions": 2,
+  "forbid_confirmed_code": true
+}

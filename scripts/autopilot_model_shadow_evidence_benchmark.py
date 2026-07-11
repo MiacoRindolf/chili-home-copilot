@@ -358,7 +358,7 @@ def _valid_manifests(root: Path) -> list[dict[str, object]]:
             root,
             source_kind="claude",
             run_id="frontier-eval-20260602-claude",
-            model_name="claude-opus-4.8-shadow",
+            model_name="claude-fable-5-shadow",
             source_command="claude code recorded transcript",
         ),
         _collect_manifest(

@@ -1,0 +1,48 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "hold-102",
+  "problem_statement": "Two workers running the same revision and replay fixture disagree on whether a feature gate is active. Find the causal family and avoid blaming code without isolation.",
+  "observations": [
+    {
+      "evidence_id": "e1",
+      "statement": "Worker A and worker B report the same revision and input fingerprint, but A accepts and B rejects the fixture.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "telemetry:paired-workers",
+      "independence_key": "paired-worker-outcomes",
+      "reliability": 0.94,
+      "discriminating": false,
+      "comparison_key": "paired-replay",
+      "code_revision": "r12",
+      "input_fingerprint": "fixture-77",
+      "environment_fingerprint": "worker-a",
+      "outcome_fingerprint": "accepted"
+    },
+    {
+      "evidence_id": "e2",
+      "statement": "The only material environment difference is CHILI_EXPERIMENTAL_GATE=1 on A and 0 on B; resolved settings snapshots confirm the values.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "settings:resolved-snapshots",
+      "independence_key": "resolved-settings",
+      "reliability": 0.98,
+      "discriminating": true,
+      "comparison_key": "paired-replay",
+      "code_revision": "r12",
+      "input_fingerprint": "fixture-77",
+      "environment_fingerprint": "worker-b",
+      "outcome_fingerprint": "rejected"
+    },
+    {
+      "evidence_id": "e3",
+      "statement": "Toggling only that setting in isolated processes swaps the outcomes while revision, fixture, dependency versions, and clock remain fixed.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated:setting-toggle",
+      "independence_key": "setting-toggle",
+      "reliability": 0.99,
+      "discriminating": true,
+      "experiment_id": "x-setting-toggle"
+    }
+  ]
+}

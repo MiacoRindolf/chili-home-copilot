@@ -1,0 +1,42 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "cal-001",
+  "problem_statement": "A deterministic market replay rejects a setup as outside the session even though the replay frame is inside the allowed window. Diagnose the causal family and choose whether to patch or instrument.",
+  "observations": [
+    {
+      "evidence_id": "e1",
+      "statement": "Source inspection shows the session gate reads datetime.now().hour while the replay frame carries simulated_at for the event being evaluated.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "source:session_gate.py:118",
+      "independence_key": "source-session-gate",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e2",
+      "statement": "In an isolated replay, holding fixture, revision, and wall time fixed while moving only simulated_at across the opening boundary leaves the gate tied to wall time.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated:simulated-time-ab",
+      "independence_key": "simulated-time-ab",
+      "reliability": 0.96,
+      "discriminating": true,
+      "experiment_id": "x-clock"
+    },
+    {
+      "evidence_id": "e3",
+      "statement": "Replacing only the wall-clock read with the replay frame timestamp restores the expected session classification on the frozen fixture.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated:clock-substitution",
+      "independence_key": "clock-substitution",
+      "reliability": 0.97,
+      "discriminating": true,
+      "experiment_id": "x-clock-substitution"
+    }
+  ],
+  "constraints": {
+    "no_live_mutation": true
+  }
+}

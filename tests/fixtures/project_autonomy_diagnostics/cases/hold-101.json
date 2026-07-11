@@ -1,0 +1,38 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "hold-101",
+  "problem_statement": "A focused test passes from the checkout but the corresponding worker still exhibits the pre-fix behavior. Diagnose before editing the implementation again.",
+  "observations": [
+    {
+      "evidence_id": "e1",
+      "statement": "The checked-out source and focused test both contain the fix at revision r9, and the test passes when imported from that checkout.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "git-and-test:checkout-r9",
+      "independence_key": "checkout-proof",
+      "reliability": 0.95,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e2",
+      "statement": "The running worker image label reports revision r7 and its loaded module hash matches the pre-fix file rather than the checkout.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "runtime:worker-image-and-hash",
+      "independence_key": "runtime-image-proof",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e3",
+      "statement": "Recreating only an isolated worker from revision r9 makes the behavior match the focused test without any additional source edit.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated:worker-recreate",
+      "independence_key": "worker-recreate",
+      "reliability": 0.97,
+      "discriminating": true,
+      "experiment_id": "x-worker-recreate"
+    }
+  ]
+}

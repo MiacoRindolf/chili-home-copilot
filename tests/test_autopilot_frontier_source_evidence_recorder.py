@@ -124,16 +124,16 @@ def test_frontier_source_recorder_no_write_leaves_source_bundle_untouched(tmp_pa
     source_dir = _prepare_source_dir(
         tmp_path,
         source_kind="claude",
-        model_name="claude-opus-4-8",
+        model_name="claude-fable-5",
     )
     drop_dir = _prepare_drop_dir(
         tmp_path,
         source_kind="claude",
-        model_name="claude-opus-4-8",
+        model_name="claude-fable-5",
     )
     response = tmp_path / "claude-response.txt"
     response.write_text(
-        "claude-opus-4-8 claude run claude-run-dry produced candidate drop JSON and patch files.",
+        "claude-fable-5 claude run claude-run-dry produced candidate drop JSON and patch files.",
         encoding="utf-8",
     )
 
@@ -159,12 +159,12 @@ def test_frontier_source_recorder_imports_response_without_drop_dir(tmp_path):
     source_dir = _prepare_source_dir(
         tmp_path,
         source_kind="claude",
-        model_name="claude-opus-4-8",
+        model_name="claude-fable-5",
     )
     response, case_id = _prepare_response_file(
         tmp_path,
         source_kind="claude",
-        model_name="claude-opus-4-8",
+        model_name="claude-fable-5",
         candidate_id="claude-response-only-candidate",
         text_prefix="Hosted session final answer:\n",
     )
@@ -187,7 +187,7 @@ def test_frontier_source_recorder_imports_response_without_drop_dir(tmp_path):
     assert (source_dir / "raw" / f"{case_id}.patch").is_file()
     raw_drop = json.loads((source_dir / "raw" / f"{case_id}.json").read_text(encoding="utf-8"))
     assert raw_drop["source_kind"] == "claude"
-    assert raw_drop["model_name"] == "claude-opus-4-8"
+    assert raw_drop["model_name"] == "claude-fable-5"
     assert raw_drop["candidate_id"] == "claude-response-only-candidate"
     transcript = (source_dir / "transcript.jsonl").read_text(encoding="utf-8")
     assert case_id in transcript
@@ -238,12 +238,12 @@ def test_frontier_source_recorder_emits_post_import_validation_commands(tmp_path
     source_dir = _prepare_source_dir(
         tmp_path,
         source_kind="claude",
-        model_name="claude-opus-4-8",
+        model_name="claude-fable-5",
     )
     response, case_id = _prepare_response_file(
         tmp_path,
         source_kind="claude",
-        model_name="claude-opus-4-8",
+        model_name="claude-fable-5",
     )
 
     summary = recorder.record_frontier_source_evidence(
@@ -383,7 +383,7 @@ def test_frontier_source_recorder_rejects_response_without_patch(tmp_path):
     source_dir = _prepare_source_dir(
         tmp_path,
         source_kind="claude",
-        model_name="claude-opus-4-8",
+        model_name="claude-fable-5",
     )
     response = tmp_path / "claude-no-patch.txt"
     response.write_text(
@@ -411,16 +411,16 @@ def test_frontier_source_recorder_cli_json_no_write(tmp_path, capsys):
     source_dir = _prepare_source_dir(
         tmp_path,
         source_kind="claude",
-        model_name="claude-opus-4-8",
+        model_name="claude-fable-5",
     )
     drop_dir = _prepare_drop_dir(
         tmp_path,
         source_kind="claude",
-        model_name="claude-opus-4-8",
+        model_name="claude-fable-5",
     )
     response = tmp_path / "claude-response.txt"
     response.write_text(
-        "claude-opus-4-8 claude run claude-run-cli produced candidate drop JSON and patch files.",
+        "claude-fable-5 claude run claude-run-cli produced candidate drop JSON and patch files.",
         encoding="utf-8",
     )
     output = tmp_path / "summary.md"
@@ -459,12 +459,12 @@ def test_frontier_source_recorder_cli_json_response_only_no_write(tmp_path, caps
     source_dir = _prepare_source_dir(
         tmp_path,
         source_kind="claude",
-        model_name="claude-opus-4-8",
+        model_name="claude-fable-5",
     )
     response, case_id = _prepare_response_file(
         tmp_path,
         source_kind="claude",
-        model_name="claude-opus-4-8",
+        model_name="claude-fable-5",
     )
     output = tmp_path / "summary.md"
 

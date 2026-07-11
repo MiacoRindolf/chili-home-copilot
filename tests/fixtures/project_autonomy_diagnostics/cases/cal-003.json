@@ -1,0 +1,72 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "cal-003",
+  "problem_statement": "A feature A/B was blamed for a replay PnL collapse, but the same revision and input later reproduced different outcomes. Re-evaluate the old conclusion using the newly collected harness evidence.",
+  "prior_conclusion": {
+    "hypothesis_id": "h-prior-code",
+    "status": "confirmed",
+    "dimension": "code",
+    "claim": "The experimental exit feature caused the replay loss.",
+    "reason": "The loss appeared immediately after the feature A/B."
+  },
+  "observations": [
+    {
+      "evidence_id": "e1",
+      "statement": "The original replay produced PnL +15034 at revision r30 with input window w1.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "scorecard:original",
+      "independence_key": "scorecard-original",
+      "reliability": 0.98,
+      "comparison_key": "winner-window",
+      "code_revision": "r30",
+      "input_fingerprint": "w1",
+      "environment_fingerprint": "sink-populated",
+      "outcome_fingerprint": "pnl:+15034"
+    },
+    {
+      "evidence_id": "e2",
+      "statement": "A repeat produced PnL -5419 at revision r30 with the same input window w1 and no feature change.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "scorecard:repeat",
+      "independence_key": "scorecard-repeat",
+      "reliability": 0.98,
+      "comparison_key": "winner-window",
+      "code_revision": "r30",
+      "input_fingerprint": "w1",
+      "environment_fingerprint": "sink-empty",
+      "outcome_fingerprint": "pnl:-5419"
+    },
+    {
+      "evidence_id": "e3",
+      "statement": "A read-only production count found 473990 NBBO rows for the replay window.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "db:production-count",
+      "independence_key": "production-db",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e4",
+      "statement": "The replay sink contained zero NBBO rows for the same symbols and window.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "db:replay-sink-count",
+      "independence_key": "replay-sink-db",
+      "reliability": 0.99,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e5",
+      "statement": "Source tracing confirms the consumer fails closed when the replay NBBO sink is empty.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "source:consumer-fail-closed",
+      "independence_key": "consumer-source",
+      "reliability": 0.97,
+      "discriminating": true
+    }
+  ]
+}

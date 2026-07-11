@@ -161,6 +161,7 @@ def _gateway_cache_key(
     max_tokens: int,
     strict_escalation: bool,
     model_override: Optional[str],
+    local_only: bool,
     user_id: Optional[int],
     project_id: Optional[int],
 ) -> str:
@@ -174,6 +175,7 @@ def _gateway_cache_key(
         "max_tokens": int(max_tokens or 0),
         "strict_escalation": bool(strict_escalation),
         "model_override": model_override or "",
+        "local_only": bool(local_only),
         "user_id": user_id,
         "project_id": project_id,
     }
@@ -342,6 +344,23 @@ _CODE_FRONTIER_EXACT_PURPOSES = frozenset({"code_review"})
 def _is_code_frontier_purpose(purpose: str) -> bool:
     p = (purpose or "").strip()
     return p.startswith("code_dispatch") or p in _CODE_FRONTIER_EXACT_PURPOSES
+
+
+def _local_only_code_routing(purpose: str, requested: bool | None) -> bool:
+    """Resolve the premium-independent production policy for code work.
+
+    Callers may force either behavior explicitly. Otherwise, code-generation
+    purposes remain local-only unless an operator opts into premium fallback
+    or explicitly enables the frontier benchmark route.
+    """
+    if requested is not None:
+        return bool(requested)
+    if not _is_code_frontier_purpose(purpose):
+        return False
+    return not bool(
+        getattr(settings, "chili_code_premium_fallback_enabled", False)
+        or getattr(settings, "chili_code_frontier_enabled", False)
+    )
 
 
 def _frontier_code_override(policy: PurposePolicy | None) -> str | None:
@@ -539,6 +558,7 @@ def _passthrough(
     max_tokens: int,
     strict_escalation: bool,
     model_override: Optional[str] = None,
+    local_only: bool = False,
 ) -> dict:
     """Direct call to the legacy openai_client.chat() cascade."""
     return openai_client.chat(
@@ -549,6 +569,7 @@ def _passthrough(
         max_tokens=max_tokens,
         strict_escalation=strict_escalation,
         model_override=model_override,
+        local_only=local_only,
     )
 
 
@@ -603,6 +624,7 @@ def _augmented(
     user_id: Optional[int],
     project_id: Optional[int],
     model_override: Optional[str] = None,
+    local_only: bool = False,
 ) -> dict:
     """Phase F.1-F.3 pipeline: assemble structured context, single LLM
     call. Same as ``chat_service.gather_context_only`` but invokable
@@ -629,6 +651,7 @@ def _augmented(
                     max_tokens=max_tokens,
                     strict_escalation=strict_escalation,
                     model_override=model_override,
+                    local_only=local_only,
                 )
     except Exception as e:
         logger.debug("[context_brain.gateway] augmented failed, passthrough: %s", e)
@@ -640,6 +663,7 @@ def _augmented(
         user_message=user_message, max_tokens=max_tokens,
         strict_escalation=strict_escalation,
         model_override=model_override,
+        local_only=local_only,
     )
 
 
@@ -657,6 +681,7 @@ def gateway_chat(
     chat_message_id: Optional[int] = None,
     user_name: str = "you",
     db: Optional[Session] = None,
+    local_only: bool | None = None,
 ) -> dict:
     """Single entry point for every LLM call in CHILI.
 
@@ -668,6 +693,7 @@ def gateway_chat(
     downstream code.
     """
     started_at = time.monotonic()
+    effective_local_only = _local_only_code_routing(purpose, local_only)
     own_db = False
     if db is None:
         try:
@@ -678,6 +704,17 @@ def gateway_chat(
                 "[context_brain.gateway] no db session; direct paid fallback disabled: %s",
                 e,
             )
+            if effective_local_only:
+                return _passthrough(
+                    messages,
+                    system_prompt=system_prompt,
+                    trace_id=trace_id,
+                    user_message=user_message,
+                    max_tokens=max_tokens,
+                    strict_escalation=False,
+                    model_override=(settings.chili_code_local_model or "").strip(),
+                    local_only=True,
+                )
             return _gateway_error_result()
 
     try:
@@ -687,10 +724,26 @@ def gateway_chat(
             policy = PurposePolicy(
                 **{**policy.__dict__, "routing_strategy": "passthrough"},
             )
+        effective_local_only = _local_only_code_routing(policy.purpose, local_only)
+        if effective_local_only:
+            policy = PurposePolicy(
+                **{
+                    **policy.__dict__,
+                    "routing_strategy": "passthrough",
+                    "decompose": False,
+                    "cross_examine": False,
+                    "use_premium_synthesis": False,
+                },
+            )
+            strict_escalation = False
         model_override = (
-            _purpose_model_override(policy.purpose, policy)
-            or _local_code_override(policy)
-            or _frontier_code_override(policy)
+            (settings.chili_code_local_model or "").strip()
+            if effective_local_only
+            else (
+                _purpose_model_override(policy.purpose, policy)
+                or _local_code_override(policy)
+                or _frontier_code_override(policy)
+            )
         )
 
         log_id = _write_gateway_log_start(
@@ -726,6 +779,7 @@ def gateway_chat(
                     max_tokens=max_tokens,
                     strict_escalation=strict_escalation,
                     model_override=model_override,
+                    local_only=effective_local_only,
                     user_id=user_id,
                     project_id=project_id,
                 )
@@ -821,6 +875,7 @@ def gateway_chat(
                     strict_escalation=strict_escalation,
                     db=db, user_id=user_id, project_id=project_id,
                     model_override=model_override,
+                    local_only=effective_local_only,
                 )
                 cost_fields = _cost_fields_from_result(result)
                 _finalize_gateway_log(
@@ -842,6 +897,7 @@ def gateway_chat(
                     max_tokens=max_tokens,
                     strict_escalation=strict_escalation,
                     model_override=model_override,
+                    local_only=effective_local_only,
                 )
                 cost_fields = _cost_fields_from_result(result)
                 if gateway_cache_key:
@@ -886,6 +942,7 @@ def gateway_chat_stream(
     project_id: Optional[int] = None,
     chat_message_id: Optional[int] = None,
     db: Optional[Session] = None,
+    local_only: bool | None = None,
 ):
     """Streaming sibling of ``gateway_chat`` for SSE call sites.
 
@@ -894,6 +951,7 @@ def gateway_chat_stream(
     telemetry after the stream completes.
     """
     started_at = time.monotonic()
+    effective_local_only = _local_only_code_routing(purpose, local_only)
     own_db = False
     log_id: Optional[int] = None
     policy: Optional[PurposePolicy] = None
@@ -909,6 +967,17 @@ def gateway_chat_stream(
                 "[context_brain.gateway] no db session for stream; direct paid fallback disabled: %s",
                 e,
             )
+            if effective_local_only:
+                yield from openai_client.chat_stream(
+                    messages=messages,
+                    system_prompt=system_prompt,
+                    trace_id=trace_id,
+                    user_message=user_message,
+                    max_tokens=max_tokens,
+                    strict_escalation=False,
+                    model_override=(settings.chili_code_local_model or "").strip(),
+                    local_only=True,
+                )
             return
 
     prompt = system_prompt or openai_client.SYSTEM_PROMPT
@@ -939,10 +1008,26 @@ def gateway_chat_stream(
             policy = PurposePolicy(
                 **{**policy.__dict__, "routing_strategy": "passthrough"},
             )
+        effective_local_only = _local_only_code_routing(policy.purpose, local_only)
+        if effective_local_only:
+            policy = PurposePolicy(
+                **{
+                    **policy.__dict__,
+                    "routing_strategy": "passthrough",
+                    "decompose": False,
+                    "cross_examine": False,
+                    "use_premium_synthesis": False,
+                },
+            )
+            strict_escalation = False
         model_override = (
-            _purpose_model_override(policy.purpose, policy)
-            or _local_code_override(policy)
-            or _frontier_code_override(policy)
+            (settings.chili_code_local_model or "").strip()
+            if effective_local_only
+            else (
+                _purpose_model_override(policy.purpose, policy)
+                or _local_code_override(policy)
+                or _frontier_code_override(policy)
+            )
         )
 
         log_id = _write_gateway_log_start(
@@ -981,6 +1066,7 @@ def gateway_chat_stream(
                 max_tokens=max_tokens,
                 strict_escalation=strict_escalation,
                 model_override=model_override,
+                local_only=effective_local_only,
                 user_id=user_id,
                 project_id=project_id,
             )
@@ -1010,6 +1096,7 @@ def gateway_chat_stream(
             max_tokens=max_tokens,
             strict_escalation=strict_escalation,
             model_override=model_override,
+            local_only=effective_local_only,
         ):
             if model:
                 model_seen = model

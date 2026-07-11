@@ -1,0 +1,41 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "cal-002",
+  "problem_statement": "A historical replay produces zero NBBO-qualified candidates on a date known to contain quotes. Diagnose the causal family without loosening trading gates.",
+  "observations": [
+    {
+      "evidence_id": "e1",
+      "statement": "A read-only count shows the replay date has 3,912 quote rows in the ingestion source but zero rows in the relation queried by the evaluator.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "db:read-only-row-counts",
+      "independence_key": "db-row-counts",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e2",
+      "statement": "Source tracing shows ingestion persists replay quotes through one repository while the evaluator reads a different sink repository with no transfer step between them.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "source:repository-call-graph",
+      "independence_key": "repository-call-graph",
+      "reliability": 0.96,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e3",
+      "statement": "An isolated adapter that reads the populated source restores NBBO-qualified candidates with the same code revision, fixture, thresholds, and simulated clock.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated:source-sink-adapter",
+      "independence_key": "source-sink-adapter",
+      "reliability": 0.97,
+      "discriminating": true,
+      "experiment_id": "x-source-sink"
+    }
+  ],
+  "constraints": {
+    "preserve_risk_and_evidence_gates": true
+  }
+}

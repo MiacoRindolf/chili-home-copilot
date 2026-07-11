@@ -1,0 +1,10 @@
+{
+  "case_id": "cal-003",
+  "expected_dimensions": ["data"],
+  "expected_decisions": ["patch_root_cause"],
+  "expected_statuses": ["confirmed"],
+  "expected_baseline_drift": true,
+  "minimum_hypothesis_dimensions": 2,
+  "minimum_retractions": 1,
+  "forbid_confirmed_code": true
+}

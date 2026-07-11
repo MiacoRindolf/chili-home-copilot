@@ -48,7 +48,7 @@ def test_collection_packet_writes_codex_and_claude_packets_by_default(tmp_path):
     assert summary["source_kinds"] == ["codex", "claude"]
     packets = {item["source_kind"]: item for item in summary["packets"]}
     assert packets["codex"]["model_name"] == "gpt-5.5"
-    assert packets["claude"]["model_name"] == "claude-opus-4-8"
+    assert packets["claude"]["model_name"] == "claude-fable-5"
     for source_kind in ("codex", "claude"):
         packet_path = Path(packets[source_kind]["packet"])
         assert packet_path.is_file()

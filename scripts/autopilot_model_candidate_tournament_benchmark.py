@@ -48,11 +48,11 @@ REAL_ARTIFACT_EVIDENCE_MODE = "real_artifacts"
 REQUIRED_SOURCE_KINDS = ("codex", "claude", "local_model")
 REQUIRED_FRONTIER_MODEL_TARGETS = {
     "codex": ("gpt-5.5",),
-    "claude": ("opus-4.8", "opus-4-8"),
+    "claude": ("fable-5", "claude-fable-5"),
 }
 REQUIRED_FRONTIER_MODEL_LABELS = {
     "codex": "gpt-5.5",
-    "claude": "opus-4.8",
+    "claude": "fable-5",
 }
 MIN_CASES = 6
 SYNTHETIC_MARKERS = ("self-test", "self_test", "synthetic", "fixture", "deterministic", "mock")
@@ -280,7 +280,7 @@ def default_artifact() -> dict[str, object]:
         claude = _synthetic_candidate_record(
             base,
             source_kind="claude",
-            model_name="claude-opus-4.8-candidate",
+            model_name="claude-fable-5-candidate",
             patch_candidate=base.incumbent,
             duration_seconds=8.0,
             cost_units=8.5,

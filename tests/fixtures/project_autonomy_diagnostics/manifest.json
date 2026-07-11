@@ -1,0 +1,51 @@
+{
+  "schema": "chili.realworld-diagnostic-manifest.v1",
+  "reference_model": "claude-fable-5",
+  "cases": [
+    {
+      "case": "cases/cal-001.json",
+      "oracle": "oracles/cal-001.json",
+      "split": "calibration",
+      "source": "exact_fable5_sim_clock_incident",
+      "reference_evidence": "authenticated claude-fable-5 task ledger task 2 and merged PR 908"
+    },
+    {
+      "case": "cases/cal-002.json",
+      "oracle": "oracles/cal-002.json",
+      "split": "calibration",
+      "source": "exact_fable5_nbbo_source_sink_incident",
+      "reference_evidence": "authenticated claude-fable-5 task ledger task 12 and merged PR 913"
+    },
+    {
+      "case": "cases/cal-003.json",
+      "oracle": "oracles/cal-003.json",
+      "split": "calibration",
+      "source": "exact_fable5_invalidated_ab_retraction_incident",
+      "reference_evidence": "authenticated claude-fable-5 task ledger tasks 1, 4, and 12"
+    },
+    {
+      "case": "cases/hold-101.json",
+      "oracle": "oracles/hold-101.json",
+      "split": "holdout",
+      "source": "sealed_runtime_drift_variant"
+    },
+    {
+      "case": "cases/hold-102.json",
+      "oracle": "oracles/hold-102.json",
+      "split": "holdout",
+      "source": "sealed_config_drift_variant"
+    },
+    {
+      "case": "cases/hold-103.json",
+      "oracle": "oracles/hold-103.json",
+      "split": "holdout",
+      "source": "sealed_state_pressure_variant"
+    },
+    {
+      "case": "cases/hold-104.json",
+      "oracle": "oracles/hold-104.json",
+      "split": "holdout",
+      "source": "sealed_unresolved_baseline_variant"
+    }
+  ]
+}

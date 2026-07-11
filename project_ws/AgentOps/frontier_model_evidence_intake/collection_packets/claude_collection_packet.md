@@ -3,7 +3,7 @@
 - Schema: chili.frontier-source-collection-packet.v1
 - Generated UTC: 2026-06-03T15:02:15.491818Z
 - Source kind: claude
-- Model name: claude-opus-4-8
+- Model name: claude-fable-5
 - Current source status: partial
 - Prompt pack: D:\dev\chili-home-copilot\project_ws\AgentOps\frontier_model_prompt_packs\claude\prompt_pack.md
 - Prompt pack SHA-256: 1160abd9a2d081007b1eb1404a963562b616003bddc701578a91a0d02ebb0cb3
@@ -30,7 +30,7 @@
 ## All-Cases Response Contract
 
 - Return exactly one JSON object per case, either as JSONL or objects inside a JSON array.
-- Every object must include `source_kind: claude`, `model_name: claude-opus-4-8`, `case_id`, `candidate_id`, and `patch`.
+- Every object must include `source_kind: claude`, `model_name: claude-fable-5`, `case_id`, `candidate_id`, and `patch`.
 - Include `planned_file`, `expected_changed_files`, and `declared_commands` exactly as listed in the case matrix when possible; CHILI verifies them when present.
 - The `patch` must be a unified diff scoped to the planned file for that case.
 - Empty or incomplete cases are allowed to be rejected by CHILI; do not invent validation results.
@@ -61,7 +61,7 @@
 ## Required Transcript Evidence
 
 - At least 3 non-empty JSONL events.
-- Include source kind `claude` and model name `claude-opus-4-8`.
+- Include source kind `claude` and model name `claude-fable-5`.
 - Include the prompt-pack SHA-256, run id, case id, and final patch/drop decision.
 - Claims about PR state, readiness, or current-head status are not promotion evidence.
 

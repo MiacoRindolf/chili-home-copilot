@@ -1,0 +1,9 @@
+{
+  "case_id": "hold-102",
+  "expected_dimensions": ["config"],
+  "expected_decisions": ["patch_root_cause"],
+  "expected_statuses": ["confirmed"],
+  "expected_baseline_drift": true,
+  "minimum_hypothesis_dimensions": 2,
+  "forbid_confirmed_code": true
+}

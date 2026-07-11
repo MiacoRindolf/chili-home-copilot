@@ -72,6 +72,18 @@ def test_select_local_model_prefers_coder_prefix_before_later_exact(monkeypatch)
     assert selected["model"] == "qwen2.5-coder:3b-instruct-q8_0"
 
 
+def test_select_local_model_prefers_resident_7b_over_cpu_offloaded_14b(monkeypatch):
+    monkeypatch.setattr(
+        orchestrator.ollama_client,
+        "list_models",
+        lambda: ["qwen2.5-coder:7b", "qwen2.5-coder:14b"],
+    )
+
+    selected = orchestrator.select_local_model()
+
+    assert selected["model"] == "qwen2.5-coder:7b"
+
+
 def test_select_local_model_recommends_coder_model_when_empty(monkeypatch):
     monkeypatch.setattr(orchestrator.ollama_client, "list_models", lambda: [])
 
@@ -150,6 +162,89 @@ def test_build_local_plan_uses_bounded_warm_ollama_options(monkeypatch, tmp_path
         assert captured["options"]["num_predict"] == orchestrator._PLAN_NUM_PREDICT
         assert captured["options"]["num_ctx"] == orchestrator._PLAN_NUM_CTX
         assert captured["options"]["keep_alive"] == orchestrator._OLLAMA_KEEP_ALIVE
+    finally:
+        db.close()
+
+
+def test_build_local_plan_runs_local_diagnostic_council_before_planning(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        target = tmp_path / "app/service.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("def replay():\n    return 'old'\n", encoding="utf-8")
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = ProjectAutonomyRun(
+            run_id="pa_diagnostic_council",
+            repo_id=repo.id,
+            prompt=(
+                "Diagnose why replay returns different outcomes with the same code and input, "
+                "then add an isolated regression test for app/service.py."
+            ),
+            status="running",
+            current_stage="plan",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {"model": "qwen", "available": True, "installed_models": ["qwen"]},
+        )
+        monkeypatch.setattr(
+            orchestrator,
+            "_gather_context",
+            lambda *args, **kwargs: {
+                "repos": [],
+                "insights": [],
+                "hotspots": [],
+                "relevant_files": [{"file": "app/service.py"}],
+            },
+        )
+        calls: list[dict] = []
+
+        def fake_chat(messages, model, **kwargs):
+            calls.append({"messages": messages, "model": model, **kwargs})
+            is_diagnostic = "diagnostic council" in messages[0]["content"]
+            text_value = (
+                "{}"
+                if is_diagnostic
+                else (
+                    '{"analysis":"instrument drift","files":[{"path":"app/service.py",'
+                    '"action":"modify","description":"add drift evidence"}],'
+                    '"notes":"root cause remains provisional"}'
+                )
+            )
+            return SimpleNamespace(
+                ok=True,
+                text=text_value,
+                latency_ms=1,
+                tokens_out=10,
+                error=None,
+            )
+
+        monkeypatch.setattr(orchestrator.ollama_client, "chat", fake_chat)
+
+        plan = orchestrator.build_local_plan(db, run, repo)
+
+        assert plan["files"][0]["path"] == "app/service.py"
+        assert len(calls) == 2
+        assert calls[0]["options"]["format"] == "json"
+        assert "local-only diagnostic team" in calls[0]["messages"][1]["content"]
+        assert "Diagnostic evidence gate:" in calls[1]["messages"][1]["content"]
+        artifact = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(
+                ProjectAutonomyArtifact.run_id == run.run_id,
+                ProjectAutonomyArtifact.name == "local_diagnostic_debate",
+            )
+            .one()
+        )
+        payload = json.loads(artifact.content_json or "{}")
+        assert len(payload["model_calls"]) == 1
+        assert payload["council_mode"] == "adaptive_judge"
+        assert payload["premium_calls"] == 0
     finally:
         db.close()
 
@@ -1910,9 +2005,20 @@ def test_generate_diffs_reports_rejected_model_output(monkeypatch, tmp_path):
         # The edit engine now goes through the gateway (local-first code
         # tier) instead of direct ollama_client — mock at the gateway so the
         # test never touches a real LLM.
+        gateway_args = {}
+
+        def fake_gateway(*args, **kwargs):
+            gateway_args.update(kwargs)
+            return {
+                "reply": "I cannot produce a patch.",
+                "model": "m",
+                "local_only": True,
+                "premium_calls": 0,
+            }
+
         monkeypatch.setattr(
             "app.services.context_brain.llm_gateway.gateway_chat",
-            lambda *args, **kwargs: {"reply": "I cannot produce a patch.", "model": "m"},
+            fake_gateway,
         )
 
         with pytest.raises(orchestrator.AutonomyBlocked) as exc:
@@ -1924,6 +2030,8 @@ def test_generate_diffs_reports_rejected_model_output(monkeypatch, tmp_path):
             )
 
         assert "neither edit blocks nor a unified diff" in str(exc.value)
+        assert gateway_args["local_only"] is True
+        assert gateway_args["strict_escalation"] is False
     finally:
         db.close()
 
@@ -2326,14 +2434,14 @@ def test_frontier_model_evidence_intake_status_attaches_preflight_recovery_route
                 "",
                 "| Check | Status | Required | Actual | Evidence | Next action |",
                 "| --- | --- | --- | --- | --- | --- |",
-                "| claude_opus48_live_probe | warning | usable Claude completion | auth failure | claude -p | refresh auth |",
+                "| claude_fable5_live_probe | warning | usable Claude completion | auth failure | claude -p | refresh auth |",
                 "",
                 "## Recovery Routes",
                 "",
                 "| Source | Blocker | Action | All-cases command | Single-case fallback | Boundary |",
                 "| --- | --- | --- | --- | --- | --- |",
                 (
-                    "| claude | claude_opus48_live_probe | Import saved claude response | "
+                    "| claude | claude_fable5_live_probe | Import saved claude response | "
                     "python scripts/autopilot_frontier_source_evidence_recorder.py "
                     "--source-kind claude --all-cases --response <claude-all-cases-response.txt> "
                     "--run-id <real-claude-run-id> "
@@ -2974,7 +3082,7 @@ def test_coding_benchmark_signal_surfaces_frontier_preflight_recovery_routes(tmp
                 "| Check | Status | Required | Actual | Evidence | Next action |",
                 "| --- | --- | --- | --- | --- | --- |",
                 (
-                    "| claude_opus48_live_probe | warning | Claude Opus 4.8 print mode "
+                    "| claude_fable5_live_probe | warning | Claude Fable 5 print mode "
                     "can return a usable completion | exit_code=1; auth_failure_detected=true "
                     "| claude -p ... | refresh auth |"
                 ),
@@ -2984,7 +3092,7 @@ def test_coding_benchmark_signal_surfaces_frontier_preflight_recovery_routes(tmp
                 "| Source | Blocker | Action | All-cases command | Single-case fallback | Boundary |",
                 "| --- | --- | --- | --- | --- | --- |",
                 (
-                    "| claude | claude_opus48_live_probe | Import saved claude response | "
+                    "| claude | claude_fable5_live_probe | Import saved claude response | "
                     "python scripts/autopilot_frontier_source_evidence_recorder.py "
                     "--source-kind claude --all-cases --response <claude-all-cases-response.txt> "
                     "--run-id <real-claude-run-id> "
@@ -3004,13 +3112,13 @@ def test_coding_benchmark_signal_surfaces_frontier_preflight_recovery_routes(tmp
     preflight = signal["frontier_evidence_preflight"]
     assert preflight["status"] == "warning"
     assert preflight["path"] == orchestrator.AGENT_FRONTIER_EVIDENCE_PREFLIGHT_LIVE_REL_PATH
-    assert preflight["blocker_ids"] == ["claude_opus48_live_probe"]
+    assert preflight["blocker_ids"] == ["claude_fable5_live_probe"]
     assert "Source" not in preflight["blocker_ids"]
     assert "claude" not in preflight["blocker_ids"]
     assert preflight["recovery_route_count"] == 1
     route = preflight["recovery_routes"][0]
     assert route["source_kind"] == "claude"
-    assert route["blocker_id"] == "claude_opus48_live_probe"
+    assert route["blocker_id"] == "claude_fable5_live_probe"
     assert route["action_label"] == "Import saved claude response"
     assert "autopilot_frontier_source_collection_packet.py" in route[
         "collection_packet_command"

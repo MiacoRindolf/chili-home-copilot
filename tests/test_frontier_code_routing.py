@@ -10,7 +10,7 @@ These verify the *routing* contract without any network or DB:
 
 The frontier tier reuses the generic OpenAI-compatible ``_call_provider``;
 Anthropic exposes an OpenAI-compatible endpoint, so the same plumbing reaches
-Claude Opus 4.8 with no new SDK.
+Claude Fable 5 with no new SDK.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from app.config import settings
 from app.services.context_brain import llm_gateway
 
 
-FRONTIER_MODEL = "claude-opus-4-8"
+FRONTIER_MODEL = "claude-fable-5"
 
 
 @pytest.fixture
@@ -262,7 +262,7 @@ def test_temperature_param_omitted_for_reasoning_families():
     """claude*/gpt-5*/o1*/o3* reject or constrain custom temperature; the
     param must be omitted so the provider default applies. Anything else
     keeps the historical 0.7."""
-    assert openai_client._temperature_param("claude-opus-4-8") == {}
+    assert openai_client._temperature_param("claude-fable-5") == {}
     assert openai_client._temperature_param("claude-fable-5") == {}
     assert openai_client._temperature_param("gpt-5.5") == {}
     assert openai_client._temperature_param("o3-mini") == {}

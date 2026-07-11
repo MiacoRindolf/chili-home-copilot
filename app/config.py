@@ -363,7 +363,7 @@ class Settings(BaseSettings):
     # (auth, rate-limit, error) falls back to the local cascade, so enabling it
     # never makes the code path worse than today. Inert by default: with no key
     # or the flag off, behavior is byte-identical to the existing cascade.
-    # Defaults target Anthropic's OpenAI-compatible endpoint + Claude Opus 4.8;
+    # Defaults target Anthropic's OpenAI-compatible endpoint + Claude Fable 5;
     # point frontier_base_url / frontier_model at any OpenAI-compatible frontier
     # (e.g. OpenAI's strongest coding model) to use a different provider.
     frontier_api_key: str = Field(
@@ -377,7 +377,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("FRONTIER_BASE_URL", "CHILI_FRONTIER_BASE_URL"),
     )
     frontier_model: str = Field(
-        default="claude-opus-4-8",
+        default="claude-fable-5",
         validation_alias=AliasChoices("FRONTIER_MODEL", "CHILI_FRONTIER_MODEL"),
     )
     chili_code_frontier_enabled: bool = Field(
@@ -394,12 +394,11 @@ class Settings(BaseSettings):
     )
 
     # ── Local-first code generation (free tier zero: own GPU) ────────────
-    # When on, code purposes route to the local Ollama coder FIRST; any
-    # failure or weak reply falls through the standard cascade (free Groq
-    # 70B → paid tiers), so quality is preserved while the default code
-    # brain costs nothing. Premium/frontier becomes opt-in escalation, not
-    # the default. Resolution order in the gateway: explicit per-purpose
-    # JSON override > local (this flag) > frontier flag.
+    # When on, code purposes route to the local Ollama coder first. Production
+    # code paths are local-only unless premium fallback or frontier routing is
+    # explicitly enabled. A local failure is surfaced instead of silently
+    # spending credits. Resolution order in the gateway remains explicit
+    # per-purpose override, local model, then frontier model.
     chili_code_local_first: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_CODE_LOCAL_FIRST"),
@@ -407,6 +406,16 @@ class Settings(BaseSettings):
     chili_code_local_model: str = Field(
         default="qwen2.5-coder:7b",
         validation_alias=AliasChoices("CHILI_CODE_LOCAL_MODEL"),
+    )
+    # Default production policy: local model or a clean failure. Cloud fallback
+    # requires an explicit operator opt-in and is never needed by Autopilot.
+    chili_code_premium_fallback_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_CODE_PREMIUM_FALLBACK_ENABLED"),
+        description=(
+            "Explicit operator opt-in for cloud fallback on code-generation purposes. "
+            "False keeps production coding premium-independent."
+        ),
     )
 
     # Cascade order toggle (Phase B, b1). When True AND both OPENAI_API_KEY and

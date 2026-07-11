@@ -33,7 +33,7 @@ DEFAULT_SUMMARY_OUTPUT = REPO_ROOT / "project_ws" / "AgentOps" / "FRONTIER_MODEL
 FRONTIER_PROMPT_PACK_BUNDLE_SCHEMA_VERSION = "chili.frontier-prompt-pack-bundle.v1"
 DEFAULT_MODEL_NAMES = {
     "codex": "gpt-5.5",
-    "claude": "claude-opus-4-8",
+    "claude": "claude-fable-5",
     "local_model": "qwen3:4b",
 }
 PROMPT_PACK_FILE = "prompt_pack.md"

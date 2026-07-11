@@ -886,6 +886,7 @@ def chat(
     max_tokens: int = 1024,
     strict_escalation: bool = True,
     model_override: str | None = None,
+    local_only: bool = False,
 ) -> dict:
     """Chat cascade. Order depends on ``settings.llm_free_tier_first``:
 
@@ -900,7 +901,23 @@ def chat(
     prompt = system_prompt or SYSTEM_PROMPT
     _log_cascade_order_once(trace_id)
 
-    if _free_tier_first_enabled():
+    if local_only:
+        strict_escalation = False
+        model_override = (
+            (model_override or "").strip()
+            or (settings.chili_code_local_model or "").strip()
+        )
+        if not _local_code_configured() or not _is_local_code_model(model_override):
+            return {
+                "reply": "",
+                "tokens_used": 0,
+                "model": "local_unavailable",
+                "local_only": True,
+                "premium_calls": 0,
+                "premium_cost_usd": 0.0,
+            }
+        order = ((_chat_local, "ollama", 0),)
+    elif _free_tier_first_enabled():
         order = (
             (_chat_groq, _provider_host(settings.llm_base_url), 2),
             (_chat_openai, _provider_host(PAID_OPENAI_BASE_URL), 1),
@@ -918,14 +935,18 @@ def chat(
     # AND a frontier provider is configured. Tried first; any failure falls
     # through to the standard cascade above. Every other call keeps the exact
     # cascade order above, so default behavior is unchanged.
-    if _frontier_configured() and _is_frontier_model(model_override):
+    if not local_only and _frontier_configured() and _is_frontier_model(model_override):
         order = ((_chat_frontier, "frontier", 0),) + order
 
     # Local code-gen tier (free): same explicit-override trigger shape as the
     # frontier tier, opposite direction — the gateway requests the local coder
     # for code purposes when chili_code_local_first is on. Tried first; weak or
     # failed local replies fall through to the standard (free-Groq-led) cascade.
-    if _local_code_configured() and _is_local_code_model(model_override):
+    if (
+        not local_only
+        and _local_code_configured()
+        and _is_local_code_model(model_override)
+    ):
         order = ((_chat_local, "ollama", 0),) + order
 
     # Concatenated user content for log fidelity (system prompt logged separately).
@@ -966,6 +987,15 @@ def chat(
                 latency_ms=_latency_ms, success=True,
                 weak_response=False, failure_kind=None,
             )
+            if local_only:
+                result = dict(result)
+                result.update(
+                    {
+                        "local_only": True,
+                        "premium_calls": 0,
+                        "premium_cost_usd": 0.0,
+                    }
+                )
             return result
         # Tier did not return a usable reply — log as a failure row so we have
         # debugging evidence and so distillation can learn what NOT to keep.
@@ -977,6 +1007,15 @@ def chat(
             weak_response=False, failure_kind="empty_or_weak_or_skipped",
         )
 
+    if local_only:
+        return {
+            "reply": "",
+            "tokens_used": 0,
+            "model": "local_error",
+            "local_only": True,
+            "premium_calls": 0,
+            "premium_cost_usd": 0.0,
+        }
     return {"reply": "", "tokens_used": 0, "model": "error"}
 
 
@@ -1146,6 +1185,7 @@ def chat_stream(
     max_tokens: int = 1024,
     strict_escalation: bool = True,
     model_override: str | None = None,
+    local_only: bool = False,
 ):
     """Stream cascade (order depends on ``settings.llm_free_tier_first``).
 
@@ -1157,7 +1197,16 @@ def chat_stream(
     prompt = system_prompt or SYSTEM_PROMPT
     _log_cascade_order_once(trace_id)
 
-    if _free_tier_first_enabled():
+    if local_only:
+        strict_escalation = False
+        model_override = (
+            (model_override or "").strip()
+            or (settings.chili_code_local_model or "").strip()
+        )
+        if not _local_code_configured() or not _is_local_code_model(model_override):
+            return
+        tiers = (_stream_tier_local,)
+    elif _free_tier_first_enabled():
         tiers = (_stream_tier_groq, _stream_tier_openai, _stream_tier_gemini)
     else:
         tiers = (_stream_tier_openai, _stream_tier_groq, _stream_tier_gemini)
@@ -1165,12 +1214,16 @@ def chat_stream(
     # Frontier streaming tier (opt-in): same trigger as the non-streaming
     # cascade in ``chat`` — explicit frontier model_override + configured
     # provider. Every other call keeps the exact tier order above.
-    if _frontier_configured() and _is_frontier_model(model_override):
+    if not local_only and _frontier_configured() and _is_frontier_model(model_override):
         tiers = (_stream_tier_frontier,) + tiers
 
     # Local coder streaming tier (free): same explicit-override trigger as
     # the non-streaming cascade.
-    if _local_code_configured() and _is_local_code_model(model_override):
+    if (
+        not local_only
+        and _local_code_configured()
+        and _is_local_code_model(model_override)
+    ):
         tiers = (_stream_tier_local,) + tiers
 
     flags = {"done": False, "saw_permanent": False, "saw_transient_429": False}
@@ -1199,6 +1252,7 @@ def chat_stream(
             max_tokens=max_tokens,
             strict_escalation=strict_escalation,
             model_override=model_override,
+            local_only=local_only,
         )
         reply = (result.get("reply") or "").strip()
         if reply:

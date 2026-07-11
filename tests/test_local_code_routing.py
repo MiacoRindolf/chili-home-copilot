@@ -22,7 +22,7 @@ from app.services.context_brain import llm_gateway
 
 
 LOCAL_MODEL = "qwen2.5-coder:7b"
-FRONTIER_MODEL = "claude-opus-4-8"
+FRONTIER_MODEL = "claude-fable-5"
 
 
 @pytest.fixture
@@ -88,6 +88,46 @@ def test_chat_local_failure_falls_back_to_cascade(local_configured):
         model_override=LOCAL_MODEL,
     )
     assert result["reply"] == "GROQ-70B"
+
+
+def test_chat_local_only_failure_never_calls_cloud(local_configured):
+    monkeypatch = local_configured
+    monkeypatch.setattr(openai_client, "_chat_local", lambda *a, **k: None)
+    monkeypatch.setattr(openai_client, "_chat_groq", lambda *a, **k: pytest.fail("groq reached"))
+    monkeypatch.setattr(openai_client, "_chat_openai", lambda *a, **k: pytest.fail("openai reached"))
+    monkeypatch.setattr(openai_client, "_chat_gemini", lambda *a, **k: pytest.fail("gemini reached"))
+    monkeypatch.setattr(openai_client, "_chat_frontier", lambda *a, **k: pytest.fail("frontier reached"))
+
+    result = openai_client.chat(
+        [{"role": "user", "content": "diagnose and implement"}],
+        model_override=LOCAL_MODEL,
+        local_only=True,
+    )
+
+    assert result["reply"] == ""
+    assert result["model"] == "local_error"
+    assert result["local_only"] is True
+    assert result["premium_calls"] == 0
+    assert result["premium_cost_usd"] == 0.0
+
+
+def test_chat_local_only_success_reports_zero_premium(local_configured):
+    monkeypatch = local_configured
+    monkeypatch.setattr(
+        openai_client,
+        "_chat_local",
+        lambda *a, **k: _reply("local diagnostic result", model=LOCAL_MODEL),
+    )
+
+    result = openai_client.chat(
+        [{"role": "user", "content": "diagnose"}],
+        local_only=True,
+    )
+
+    assert result["reply"] == "local diagnostic result"
+    assert result["local_only"] is True
+    assert result["premium_calls"] == 0
+    assert result["premium_cost_usd"] == 0.0
 
 
 def test_weak_local_reply_escalates(local_configured):
@@ -169,6 +209,29 @@ def test_chat_stream_local_error_falls_back(local_configured):
     assert [t for t, _m in out] == ["gtok"]
 
 
+def test_chat_stream_local_only_error_stops_without_cloud(local_configured):
+    monkeypatch = local_configured
+
+    def boom(api_key, base_url, model, messages, prompt, trace_id, max_tokens=1024):
+        raise RuntimeError("ollama down")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(openai_client, "_stream_provider", boom)
+    monkeypatch.setattr(openai_client, "_chat_local", lambda *a, **k: None)
+    monkeypatch.setattr(openai_client, "_stream_tier_groq", lambda *a, **k: pytest.fail("groq reached"))
+    monkeypatch.setattr(openai_client, "_stream_tier_openai", lambda *a, **k: pytest.fail("openai reached"))
+    monkeypatch.setattr(openai_client, "_stream_tier_gemini", lambda *a, **k: pytest.fail("gemini reached"))
+
+    out = list(
+        openai_client.chat_stream(
+            [{"role": "user", "content": "x"}],
+            model_override=LOCAL_MODEL,
+            local_only=True,
+        )
+    )
+    assert out == []
+
+
 # ── gateway resolution order ─────────────────────────────────────────────
 
 
@@ -188,6 +251,20 @@ def test_gateway_local_override_off_when_disabled(local_configured):
     monkeypatch = local_configured
     monkeypatch.setattr(settings, "chili_code_local_first", False)
     assert llm_gateway._local_code_override(_policy("code_dispatch_edit")) is None
+
+
+def test_gateway_code_defaults_to_local_only_without_premium_opt_in(local_configured):
+    monkeypatch = local_configured
+    monkeypatch.setattr(settings, "chili_code_premium_fallback_enabled", False)
+    monkeypatch.setattr(settings, "chili_code_frontier_enabled", False)
+
+    assert llm_gateway._local_only_code_routing("code_dispatch_edit", None) is True
+    assert llm_gateway._local_only_code_routing("code_review", None) is True
+    assert llm_gateway._local_only_code_routing("chat_user", None) is False
+    assert llm_gateway._local_only_code_routing("code_dispatch_edit", False) is False
+
+    monkeypatch.setattr(settings, "chili_code_premium_fallback_enabled", True)
+    assert llm_gateway._local_only_code_routing("code_dispatch_edit", None) is False
 
 
 def test_resolution_order_json_beats_local_beats_frontier(local_configured):

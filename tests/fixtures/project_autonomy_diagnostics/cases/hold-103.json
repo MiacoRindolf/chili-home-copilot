@@ -1,0 +1,38 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "hold-103",
+  "problem_statement": "A protected context refresh repeatedly fails to enter a bounded work queue even though its producer is healthy. Diagnose the bottleneck without raising the cap.",
+  "observations": [
+    {
+      "evidence_id": "e1",
+      "statement": "A read-only snapshot shows pending depth exactly 500 of 500, with 476 stale low-value evaluations and 24 protected refresh records.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "db:queue-composition",
+      "independence_key": "queue-composition",
+      "reliability": 0.98,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e2",
+      "statement": "Producer logs show the protected refresh is generated on schedule and rejected only at the full-depth admission check.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "logs:producer-admission",
+      "independence_key": "producer-logs",
+      "reliability": 0.95,
+      "discriminating": true
+    },
+    {
+      "evidence_id": "e3",
+      "statement": "In an isolated queue copy, retiring one stale low-value item admits and drains the refresh with the cap, producer code, and payload unchanged.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated:queue-admission",
+      "independence_key": "queue-admission",
+      "reliability": 0.97,
+      "discriminating": true,
+      "experiment_id": "x-queue-admission"
+    }
+  ]
+}
