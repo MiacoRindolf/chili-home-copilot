@@ -381,6 +381,105 @@ def test_prompt_grounded_runtime_probes_are_not_starved_by_model_probe():
     assert len(merged) == 4
 
 
+def test_probe_selector_prioritizes_information_gain_and_skips_attempted_probe():
+    probes = [
+        {
+            **diagnostic_probes.normalize_probe_spec(
+                {
+                    "probe_id": "inspect-repo",
+                    "kind": "repo_state",
+                    "dimension": "code",
+                }
+            ),
+            "safety": "read_only",
+        },
+        {
+            **diagnostic_probes.normalize_probe_spec(
+                {
+                    "probe_id": "search-provider-log",
+                    "kind": "log_search",
+                    "query": "connection refused",
+                    "dimension": "dependency",
+                }
+            ),
+            "safety": "read_only",
+        },
+        {
+            **diagnostic_probes.normalize_probe_spec(
+                {
+                    "probe_id": "profile-events",
+                    "kind": "db_profile",
+                    "table": "trading_events",
+                    "timestamp_column": "created_at",
+                    "lookback_minutes": 60,
+                    "dimension": "data",
+                }
+            ),
+            "safety": "read_only",
+        },
+    ]
+    report = {
+        "conclusion": {"dimension": "dependency", "status": "provisional"},
+        "hypothesis_results": [
+            {"dimension": "dependency", "status": "provisional"},
+            {"dimension": "code", "status": "untested"},
+        ],
+        "next_experiments": [{"dimension": "dependency"}],
+    }
+
+    first = diagnostic_probes.select_next_probe(probes, report)
+    second = diagnostic_probes.select_next_probe(
+        probes,
+        report,
+        attempted_probe_ids={"search-provider-log"},
+    )
+
+    assert first is not None
+    assert first["probe_id"] == "search-provider-log"
+    assert "tests_current_conclusion" in first["selection_reasons"]
+    assert "kind_dimension_affinity" in first["selection_reasons"]
+    assert second is not None
+    assert second["probe_id"] == "inspect-repo"
+
+
+def test_probe_selector_uses_structured_earliest_break_dimension():
+    probes = [
+        {
+            **diagnostic_probes.normalize_probe_spec(
+                {
+                    "probe_id": "profile-state",
+                    "kind": "db_profile",
+                    "table": "trading_events",
+                    "timestamp_column": "created_at",
+                    "lookback_minutes": 60,
+                    "dimension": "state",
+                }
+            ),
+            "safety": "read_only",
+        },
+        {
+            **diagnostic_probes.normalize_probe_spec(
+                {
+                    "probe_id": "inspect-code",
+                    "kind": "repo_state",
+                    "dimension": "code",
+                }
+            ),
+            "safety": "read_only",
+        },
+    ]
+    report = {
+        "conclusion": {"dimension": "unknown", "status": "inconclusive"},
+        "causal_timeline": {"earliest_break": {"dimension": "state"}},
+    }
+
+    selected = diagnostic_probes.select_next_probe(probes, report)
+
+    assert selected is not None
+    assert selected["probe_id"] == "profile-state"
+    assert "tests_earliest_break" in selected["selection_reasons"]
+
+
 def test_runtime_probe_evidence_can_retract_a_supported_runtime_conclusion(monkeypatch, tmp_path):
     monkeypatch.setattr(
         runtime_evidence,

@@ -16,7 +16,7 @@ import sys
 import tarfile
 import tempfile
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -262,6 +262,127 @@ def merge_probe_sets(
         if len(merged) >= maximum:
             break
     return merged
+
+
+_PROBE_KIND_BASE_VALUE = {
+    "file_excerpt": 12,
+    "git_diff": 12,
+    "git_history": 10,
+    "repo_state": 11,
+    "search": 9,
+    "log_search": 12,
+    "log_inventory": 8,
+    "db_profile": 12,
+    "db_schema": 8,
+    "compile": 7,
+    "targeted_test": 8,
+}
+_DIMENSION_KIND_AFFINITY = {
+    "code": {"file_excerpt", "git_diff", "git_history", "repo_state", "search", "compile", "targeted_test"},
+    "data": {"db_profile", "db_schema", "file_excerpt", "search"},
+    "clock": {"search", "file_excerpt", "targeted_test", "log_search"},
+    "state": {"db_profile", "log_search", "log_inventory", "targeted_test"},
+    "config": {"repo_state", "search", "file_excerpt", "git_diff"},
+    "dependency": {"log_search", "log_inventory", "targeted_test"},
+    "runtime": {"log_search", "log_inventory", "repo_state"},
+    "test_harness": {"targeted_test", "file_excerpt", "search", "git_diff"},
+}
+
+
+def rank_probes_for_report(
+    probes: Sequence[Mapping[str, Any]],
+    report: Mapping[str, Any],
+    *,
+    attempted_probe_ids: Iterable[str] = (),
+) -> list[dict[str, Any]]:
+    """Rank safe probes by expected discrimination, relevance, and cost."""
+    attempted = {str(value) for value in attempted_probe_ids if str(value)}
+    unresolved_dimensions = {
+        str(item.get("dimension") or "unknown")
+        for item in report.get("hypothesis_results") or []
+        if isinstance(item, Mapping)
+        and str(item.get("status") or "") in {"provisional", "blocked", "untested"}
+    }
+    conclusion = report.get("conclusion") if isinstance(report.get("conclusion"), Mapping) else {}
+    conclusion_dimension = str(conclusion.get("dimension") or "unknown")
+    earliest_break = (
+        (report.get("causal_timeline") or {}).get("earliest_break")
+        if isinstance(report.get("causal_timeline"), Mapping)
+        else {}
+    )
+    earliest_dimension = str((earliest_break or {}).get("dimension") or "unknown")
+    recommended_dimensions = {
+        str(item.get("dimension") or "unknown")
+        for item in report.get("next_experiments") or []
+        if isinstance(item, Mapping)
+    }
+    ranked: list[tuple[int, int, dict[str, Any]]] = []
+    for index, raw in enumerate(probes):
+        probe = normalize_probe_spec(raw, index)
+        safety = str(raw.get("safety") or "")
+        probe_id = str(probe.get("probe_id") or "")
+        if probe_id in attempted or validate_probe_spec(probe, safety):
+            continue
+        dimension = str(probe.get("dimension") or "unknown")
+        kind = str(probe.get("kind") or "")
+        score = int(_PROBE_KIND_BASE_VALUE.get(kind, 1))
+        reasons = [f"base:{kind}"]
+        if dimension == conclusion_dimension and conclusion_dimension != "unknown":
+            score += 28
+            reasons.append("tests_current_conclusion")
+        if dimension in unresolved_dimensions and dimension != "unknown":
+            score += 22
+            reasons.append("tests_unresolved_family")
+        if dimension in recommended_dimensions and dimension != "unknown":
+            score += 16
+            reasons.append("matches_counterfactual")
+        if dimension == earliest_dimension and earliest_dimension != "unknown":
+            score += 20
+            reasons.append("tests_earliest_break")
+        if kind in _DIMENSION_KIND_AFFINITY.get(dimension, set()):
+            score += 12
+            reasons.append("kind_dimension_affinity")
+        if safety == "read_only":
+            score += 5
+            reasons.append("read_only")
+        if report.get("baseline_drift") and dimension in {
+            "data",
+            "clock",
+            "state",
+            "config",
+            "runtime",
+            "test_harness",
+        }:
+            score += 10
+            reasons.append("isolates_baseline_drift")
+        ranked.append(
+            (
+                -score,
+                index,
+                {
+                    **probe,
+                    "safety": safety,
+                    "selection_score": score,
+                    "selection_reasons": reasons,
+                },
+            )
+        )
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in ranked]
+
+
+def select_next_probe(
+    probes: Sequence[Mapping[str, Any]],
+    report: Mapping[str, Any],
+    *,
+    attempted_probe_ids: Iterable[str] = (),
+) -> dict[str, Any] | None:
+    ranked = rank_probes_for_report(
+        probes,
+        report,
+        attempted_probe_ids=attempted_probe_ids,
+    )
+    return ranked[0] if ranked else None
 
 
 def default_followup_probes(

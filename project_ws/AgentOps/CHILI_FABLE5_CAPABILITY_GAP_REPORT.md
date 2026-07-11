@@ -18,7 +18,7 @@ This distinction is intentional. The current evidence proves that CHILI can diag
 | Causal timeline and state transitions | Event-time ordering, entity transitions, expected/actual state violations, causal parent edges, downstream symptom closure, and source/runtime revision parity | Proven for structured evidence and typed-probe timestamps; automatic trace/log edge extraction remains partial |
 | Correct uncertainty behavior | Same code/input with unexplained outcome drift blocks code attribution and chooses `instrument_first` | Proven |
 | Conclusion correction | New evidence can supersede and explicitly retract an earlier confirmed conclusion | Proven |
-| Autonomous evidence acquisition | Typed fixed-string search, file excerpts, repo state, git history/diff, isolated compile, and snapshot-based targeted pytest | Proven for catalog operations |
+| Autonomous evidence acquisition | Typed fixed-string search, file excerpts, repo state, git history/diff, isolated compile, snapshot-based targeted pytest, and bounded sequential information-gain selection | Proven for catalog operations and adaptive probe rounds |
 | Runtime log evidence | Bounded log inventory and fixed-string tail search with approved suffixes, path containment, file/byte/result caps, and no shell execution | Proven by safety and development-regression tests |
 | Runtime database evidence | Schema metadata and aggregate-only PostgreSQL profiles through an explicit read-only DSN, read-only transactions, short timeouts, bounded lookback, safe identifiers, and no raw SQL or raw rows | Proven in `_test` integration and development-regression tests; live production credential proof not performed |
 | No arbitrary diagnostic shell | Probe schema has no command kind; paths, selectors, time, count, and output are bounded | Proven by source and tests |
@@ -78,7 +78,7 @@ The older reports use `holdout` in their structural split labels. Because those 
 - Final reviewed-code average wall time: **73.9 seconds/case**, down from **205.1 seconds/case** on the earlier strict full run; a prior green run measured **65.9 seconds/case**
 - Premium calls: **0**
 - Development-regression score: **100/100**; blinded holdout count: **0**; Fable 5 parity claim: **No**
-- Broad relevant regression suite after causal-timeline integration: **299 passed**
+- Broad relevant regression suite after sequential-probe integration: **301 passed**
 - Reports: `project_ws/AgentOps/CROSS_LANGUAGE_DIAGNOSIS_TO_FIX_FIRST_RUN.md`, `project_ws/AgentOps/CROSS_LANGUAGE_DIAGNOSIS_TO_FIX_PRE_DART_CONTRACT_FULL.md`, `project_ws/AgentOps/CROSS_LANGUAGE_DIAGNOSIS_TO_FIX_PRE_ALL_CONTRACT_FULL.md`, and `project_ws/AgentOps/CROSS_LANGUAGE_DIAGNOSIS_TO_FIX_BENCHMARK.md`
 - Interpretation: this proves repeatable coverage for six recognized mechanism families. It measures the autonomous system, not free-form 7B model parity, and it is not unseen generalization evidence.
 

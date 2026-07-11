@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 import difflib
 from datetime import datetime, timedelta, timezone
@@ -2490,6 +2491,23 @@ _DIAGNOSTIC_NUM_CTX = int(
 _DIAGNOSTIC_DEEP_COUNCIL = str(
     os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_DEEP_COUNCIL") or "false"
 ).strip().lower() in {"1", "true", "yes", "on"}
+_DIAGNOSTIC_MAX_PROBES = max(
+    1,
+    min(
+        diagnostic_probes.MAX_PROBES,
+        int(os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_MAX_PROBES") or "4"),
+    ),
+)
+_DIAGNOSTIC_PROBE_TIME_BUDGET_SEC = max(
+    10.0,
+    min(
+        300.0,
+        float(
+            os.environ.get("CHILI_PROJECT_AUTOPILOT_DIAGNOSTIC_PROBE_TIME_BUDGET_SEC")
+            or "120"
+        ),
+    ),
+)
 _PLAN_PROMPT_CHAR_LIMIT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_PROMPT_CHARS") or "9000")
 _EDIT_TIMEOUT_SEC = float(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_TIMEOUT_SEC") or "150")
 _EDIT_NUM_PREDICT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_NUM_PREDICT") or "350")
@@ -6492,12 +6510,157 @@ def _run_local_diagnostic_reasoning(
     debate = initial_debate
     final_case = case
     if probes and repo_path is not None:
-        probe_run = diagnostic_probes.execute_safe_probes(
-            repo_path,
-            probes,
-            max_probes=4,
-            time_budget_sec=120.0,
+        probe_started = time.monotonic()
+        attempted_probe_ids: set[str] = set()
+        probe_rounds: list[dict[str, Any]] = []
+        probe_results: list[dict[str, Any]] = []
+        probe_evidence_all: list[dict[str, Any]] = []
+        stage_history = [
+            {**stage, "round": "initial"}
+            for stage in initial_debate.get("stages") or []
+            if isinstance(stage, Mapping)
+        ]
+        current_report = report
+        current_packet = packet
+        latest_debate: dict[str, Any] | None = None
+        report_signatures: list[tuple[str, str, str]] = []
+        initial_conclusion = (
+            current_report.get("conclusion")
+            if isinstance(current_report.get("conclusion"), Mapping)
+            else {}
         )
+        report_signatures.append(
+            (
+                str(initial_conclusion.get("hypothesis_id") or ""),
+                str(initial_conclusion.get("dimension") or "unknown"),
+                str(initial_conclusion.get("status") or "inconclusive"),
+            )
+        )
+        stop_reason = "probe_budget_exhausted"
+        for probe_index in range(_DIAGNOSTIC_MAX_PROBES):
+            elapsed = time.monotonic() - probe_started
+            remaining = _DIAGNOSTIC_PROBE_TIME_BUDGET_SEC - elapsed
+            if remaining <= 1.0:
+                stop_reason = "probe_time_budget_exhausted"
+                break
+            selected_probe = diagnostic_probes.select_next_probe(
+                probes,
+                current_report,
+                attempted_probe_ids=attempted_probe_ids,
+            )
+            if selected_probe is None:
+                stop_reason = "no_admissible_probe"
+                break
+            probe_id = str(selected_probe.get("probe_id") or f"probe-{probe_index + 1}")
+            attempted_probe_ids.add(probe_id)
+            one_run = diagnostic_probes.execute_safe_probes(
+                repo_path,
+                [selected_probe],
+                max_probes=1,
+                time_budget_sec=remaining,
+            )
+            round_record = {
+                "round": probe_index + 1,
+                "selected_probe": selected_probe,
+                "result": one_run,
+            }
+            probe_rounds.append(round_record)
+            probe_results.extend(
+                item
+                for item in one_run.get("results") or []
+                if isinstance(item, Mapping)
+            )
+            probe_evidence = [
+                dict(item)
+                for item in one_run.get("evidence") or []
+                if isinstance(item, Mapping)
+            ]
+            probe_evidence_all.extend(probe_evidence)
+            if not probe_evidence:
+                continue
+            final_case = diagnostic_reasoning.normalize_case(
+                {
+                    **final_case,
+                    "observations": [
+                        *(final_case.get("observations") or []),
+                        *probe_evidence,
+                    ],
+                }
+            )
+            reasoning_round = f"post_probe_{probe_index + 1}"
+            latest_debate = diagnostic_reasoning.run_local_diagnostic_debate(
+                final_case,
+                call_local_role if model_name else None,
+                stages_to_run=("judge",),
+                previous_report=current_report,
+            )
+            stage_history.extend(
+                {**stage, "round": reasoning_round}
+                for stage in latest_debate.get("stages") or []
+                if isinstance(stage, Mapping)
+            )
+            current_report = (
+                latest_debate.get("report")
+                if isinstance(latest_debate.get("report"), Mapping)
+                else current_report
+            )
+            current_packet = (
+                latest_debate.get("packet")
+                if isinstance(latest_debate.get("packet"), Mapping)
+                else current_packet
+            )
+            conclusion = (
+                current_report.get("conclusion")
+                if isinstance(current_report.get("conclusion"), Mapping)
+                else {}
+            )
+            report_signatures.append(
+                (
+                    str(conclusion.get("hypothesis_id") or ""),
+                    str(conclusion.get("dimension") or "unknown"),
+                    str(conclusion.get("status") or "inconclusive"),
+                )
+            )
+            new_model_probes = diagnostic_probes.probes_from_packet(
+                current_packet,
+                max_probes=diagnostic_probes.MAX_PROBES,
+            )
+            probes = diagnostic_probes.merge_probe_sets(
+                probes,
+                new_model_probes,
+                max_probes=diagnostic_probes.MAX_PROBES,
+            )
+            latest_evidence_ids = {
+                str(item.get("evidence_id") or "") for item in probe_evidence
+            }
+            conclusion_evidence_ids = {
+                str(value) for value in conclusion.get("evidence_ids") or []
+            }
+            if (
+                str(conclusion.get("status") or "") == "confirmed"
+                and bool(latest_evidence_ids & conclusion_evidence_ids)
+            ):
+                stop_reason = "grounded_conclusion_confirmed"
+                break
+            if (
+                len(report_signatures) >= 3
+                and report_signatures[-1] == report_signatures[-2]
+                and report_signatures[-1][2] == "confirmed"
+            ):
+                stop_reason = "confirmed_conclusion_stable"
+                break
+
+        probe_run = {
+            "schema": "chili.sequential-diagnostic-probe-run.v1",
+            "rounds": probe_rounds,
+            "results": probe_results,
+            "evidence": probe_evidence_all,
+            "attempted_probe_ids": sorted(attempted_probe_ids),
+            "candidate_probes": probes,
+            "stop_reason": stop_reason,
+            "duration_ms": int((time.monotonic() - probe_started) * 1000),
+            "premium_calls": 0,
+        }
         _add_artifact(
             db,
             run.run_id,
@@ -6509,44 +6672,19 @@ def _run_local_diagnostic_reasoning(
                 "premium_calls": 0,
             },
         )
-        probe_evidence = [
-            item
-            for item in probe_run.get("evidence") or []
-            if isinstance(item, Mapping)
-        ]
-        if probe_evidence:
-            final_case = diagnostic_reasoning.normalize_case(
-                {
-                    **case,
-                    "observations": [
-                        *(case.get("observations") or []),
-                        *probe_evidence,
-                    ],
-                }
-            )
-            reasoning_round = "post_probe"
-            final_debate = diagnostic_reasoning.run_local_diagnostic_debate(
-                final_case,
-                call_local_role if model_name else None,
-                stages_to_run=("judge",),
-                previous_report=report,
-            )
+        if latest_debate is not None:
             debate = {
-                **final_debate,
+                **latest_debate,
                 "initial_report": report,
                 "probe_run": probe_run,
-                "stages": [
-                    *(
-                        {**stage, "round": "initial"}
-                        for stage in initial_debate.get("stages") or []
-                        if isinstance(stage, Mapping)
-                    ),
-                    *(
-                        {**stage, "round": "post_probe"}
-                        for stage in final_debate.get("stages") or []
-                        if isinstance(stage, Mapping)
-                    ),
-                ],
+                "stages": stage_history,
+                "premium_calls": 0,
+            }
+        else:
+            debate = {
+                **initial_debate,
+                "probe_run": probe_run,
+                "stages": stage_history,
                 "premium_calls": 0,
             }
     _add_artifact(
@@ -6563,7 +6701,11 @@ def _run_local_diagnostic_reasoning(
             "council_mode": (
                 "deep"
                 if _DIAGNOSTIC_DEEP_COUNCIL
-                else ("adaptive_probe_judge" if probe_run else "adaptive_judge")
+                else (
+                    "adaptive_sequential_probe_judge"
+                    if probe_run
+                    else "adaptive_judge"
+                )
             ),
             "probe_run": probe_run,
             "premium_calls": 0,

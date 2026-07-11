@@ -229,12 +229,23 @@ def test_build_local_plan_runs_local_diagnostic_council_before_planning(monkeypa
         plan = orchestrator.build_local_plan(db, run, repo)
 
         assert plan["files"][0]["path"] == "app/service.py"
-        assert len(calls) == 3
+        diagnostic_calls = [
+            call
+            for call in calls
+            if "diagnostic council" in call["messages"][0]["content"]
+        ]
+        assert 2 <= len(diagnostic_calls) <= 1 + orchestrator._DIAGNOSTIC_MAX_PROBES
         assert calls[0]["options"]["format"] == "json"
         assert "local-only diagnostic team" in calls[0]["messages"][1]["content"]
-        assert calls[1]["options"]["format"] == "json"
-        assert "diagnostic_probe" in calls[1]["messages"][1]["content"]
-        assert "Diagnostic evidence gate:" in calls[2]["messages"][1]["content"]
+        assert all(
+            call["options"]["format"] == "json"
+            for call in diagnostic_calls
+        )
+        assert all(
+            "diagnostic_probe" in call["messages"][1]["content"]
+            for call in diagnostic_calls[1:]
+        )
+        assert "Diagnostic evidence gate:" in calls[-1]["messages"][1]["content"]
         artifact = (
             db.query(ProjectAutonomyArtifact)
             .filter(
@@ -244,9 +255,16 @@ def test_build_local_plan_runs_local_diagnostic_council_before_planning(monkeypa
             .one()
         )
         payload = json.loads(artifact.content_json or "{}")
-        assert len(payload["model_calls"]) == 2
-        assert payload["council_mode"] == "adaptive_probe_judge"
+        assert len(payload["model_calls"]) == len(diagnostic_calls)
+        assert payload["council_mode"] == "adaptive_sequential_probe_judge"
         assert payload["probe_run"]["evidence"]
+        assert len(payload["probe_run"]["rounds"]) == len(diagnostic_calls) - 1
+        attempted = payload["probe_run"]["attempted_probe_ids"]
+        assert len(attempted) == len(set(attempted))
+        assert all(
+            round_item["selected_probe"]["selection_reasons"]
+            for round_item in payload["probe_run"]["rounds"]
+        )
         probe_artifact = (
             db.query(ProjectAutonomyArtifact)
             .filter(
