@@ -7550,6 +7550,25 @@ def tick_live_session(
                             _g4e_wild = _g4e_wild_fn(db)
                             if _g4e_wild is not None and _g4e_sym == _g4e_wild:
                                 _g4e_leader = True
+                        # LAST-KNOWN-DEFINITIVE leader latch (2026-07-10): viability
+                        # freshness decays WHILE IN A TRADE (nothing refreshes the row in
+                        # live/managing states) so post-exit reads return empty_board and
+                        # the ripping leader loses every bypass right at its ignition (JEM
+                        # 06-30 / live CLRO-0707 wedge class). An EMPTY board has no rival —
+                        # the last DEFINITIVE read stands; only a real demotion (a DIFFERENT
+                        # top on a readable board) clears the latch.
+                        if (
+                            _g4e_leader is not True
+                            and _g4e_top is None
+                            and str((_g4e_meta or {}).get("reason") or "") == "empty_board"
+                            and le.get("g4_leader_definitive") is True
+                            and bool(getattr(settings, "chili_momentum_leader_definitive_latch_enabled", True))
+                        ):
+                            _g4e_leader = True
+                        if _g4e_leader is True:
+                            le["g4_leader_definitive"] = True
+                        elif _g4e_top is not None and _g4e_leader is False:
+                            le["g4_leader_definitive"] = False
                         le["g4_leader_min"] = _g4e_min_key
                         le["g4_leader_is"] = _g4e_leader
                         _commit_le(sess, le)
@@ -7627,18 +7646,103 @@ def tick_live_session(
                 if _cc_anchor and _cc_risk and _cc_risk > 0 and _cc_px:
                     _cc_ceiling = float(_cc_anchor) + _cc_cap * float(_cc_risk)
                     if _cc_px > _cc_ceiling:
-                        _prev_reason = _trigger_reason
-                        _trigger_ok = False
-                        _trigger_reason = "reentry_chase_cap_wait"
-                        _emit(db, sess, "momentum_reentry_chase_blocked", {
-                            "blocked_trigger": _prev_reason,
-                            "prior_anchor_hwm": round(float(_cc_anchor), 6),
-                            "risk_unit_atr": round(float(_cc_risk), 6),
-                            "chase_ceiling": round(_cc_ceiling, 6),
-                            "live_price": round(float(_cc_px), 6),
-                            "chase_cap_r": _cc_cap,
-                            "prior_exit_reason": _cc_prior.get("exit_reason"),
-                        })
+                        # LEADER-IGNITION BYPASS (2026-07-10, the #892 recipe extended): the
+                        # chase cap anchors to the PRIOR losing tranche's hwm forever, so after
+                        # an early bailout (JEM 06-30: in 2.86, bail 2.83) EVERY ignition
+                        # re-entry on a genuine new leg (3.3→4.89) reads as a "chase" and the
+                        # day's winner is vetoed for the rest of the window (363 blocks) —
+                        # while the ESCALATION gate, which has the ignition bypass, already
+                        # said GO. Same strict class as reentry_escalation_decision's bypass:
+                        # day-leader (same ~1min-cached board read) AND a STRUCTURAL trigger
+                        # (defined stop) AND tape_confirms_hold TRUE (fail-CLOSED tape). The
+                        # SVRE fade-chase this guard exists for stays blocked: a fading top is
+                        # not the leader-with-confirming-tape ignition class. Any error ⇒ no
+                        # bypass (the veto stands).
+                        _cc_bypass = False
+                        _cc_bp_dbg = {}
+                        if bool(getattr(settings, "chili_momentum_chase_cap_leader_bypass_enabled", True)):
+                            try:
+                                _cc_leader = None
+                                _cc_min_key = _utcnow().strftime("%Y%m%d%H%M")
+                                if le.get("g4_leader_min") == _cc_min_key:
+                                    _cc_leader = le.get("g4_leader_is")
+                                else:
+                                    from .risk_policy import (
+                                        _top_ranked_live_eligible_symbol as _cc_top_fn,
+                                        _wildcard_dominant_symbol as _cc_wild_fn,
+                                    )
+
+                                    _cc_sym = str(sess.symbol or "").strip().upper()
+                                    _cc_top, _cc_ts2, _cc_p90, _cc_meta = _cc_top_fn(
+                                        db, crypto=_cc_sym.endswith("-USD")
+                                    )
+                                    if _cc_top is not None:
+                                        _cc_leader = bool(
+                                            _cc_sym == _cc_top
+                                            or (
+                                                _cc_p90 is not None
+                                                and float(via.viability_score or 0.0) >= float(_cc_p90)
+                                            )
+                                        )
+                                    if _cc_leader is not True:
+                                        _cc_wild = _cc_wild_fn(db)
+                                        if _cc_wild is not None and _cc_sym == _cc_wild:
+                                            _cc_leader = True
+                                    # LAST-KNOWN-DEFINITIVE latch: empty_board ≠ demotion
+                                    # (see the escalation-block comment; in-trade freshness
+                                    # decay). Only a readable board with a DIFFERENT top
+                                    # clears the latch.
+                                    if (
+                                        _cc_leader is not True
+                                        and _cc_top is None
+                                        and str((_cc_meta or {}).get("reason") or "") == "empty_board"
+                                        and le.get("g4_leader_definitive") is True
+                                        and bool(getattr(settings, "chili_momentum_leader_definitive_latch_enabled", True))
+                                    ):
+                                        _cc_leader = True
+                                    if _cc_leader is True:
+                                        le["g4_leader_definitive"] = True
+                                    elif _cc_top is not None and _cc_leader is False:
+                                        le["g4_leader_definitive"] = False
+                                    le["g4_leader_min"] = _cc_min_key
+                                    le["g4_leader_is"] = _cc_leader
+                                    _commit_le(sess, le)
+                                if _cc_leader is True and (_trigger_reason in STRUCTURAL_TRIGGER_REASONS):
+                                    from .entry_gates import tape_confirms_hold as _cc_tape_fn
+
+                                    _cc_tape_ok, _cc_tape_dbg = _cc_tape_fn(
+                                        sess.symbol, db=db, settings=settings
+                                    )
+                                    if _cc_tape_ok:
+                                        _cc_bypass = True
+                                        _cc_bp_dbg = {
+                                            "is_day_leader": True,
+                                            "structural_trigger": _trigger_reason,
+                                            "tape": _cc_tape_dbg,
+                                        }
+                            except Exception:
+                                _cc_bypass = False  # fail-closed: the veto stands
+                        if _cc_bypass:
+                            _emit(db, sess, "momentum_reentry_chase_leader_bypass", {
+                                "trigger": _trigger_reason,
+                                "prior_anchor_hwm": round(float(_cc_anchor), 6),
+                                "chase_ceiling": round(_cc_ceiling, 6),
+                                "live_price": round(float(_cc_px), 6),
+                                **_cc_bp_dbg,
+                            })
+                        else:
+                            _prev_reason = _trigger_reason
+                            _trigger_ok = False
+                            _trigger_reason = "reentry_chase_cap_wait"
+                            _emit(db, sess, "momentum_reentry_chase_blocked", {
+                                "blocked_trigger": _prev_reason,
+                                "prior_anchor_hwm": round(float(_cc_anchor), 6),
+                                "risk_unit_atr": round(float(_cc_risk), 6),
+                                "chase_ceiling": round(_cc_ceiling, 6),
+                                "live_price": round(float(_cc_px), 6),
+                                "chase_cap_r": _cc_cap,
+                                "prior_exit_reason": _cc_prior.get("exit_reason"),
+                            })
         # HVM101 (B): BID-PROP / SPREAD-TIGHTENING CONFIRMER — confirm a fired break
         # only when, over the last few L1 samples, the best-bid is non-decreasing AND
         # the spread is at/below its short trailing median (genuine backing). Equity/RH
@@ -15925,30 +16029,91 @@ def tick_live_session(
             # re-entry then needs the escalated confirmation (structural trigger +
             # HWM reclaim + tape) — a QUALITY raise, never a free pass. FAIL-CLOSED:
             # an unreadable board grants NO exemption (terminalize exactly as today).
+            _g4c_dbg: dict = {}
             if (
                 not _re_ok
                 and bool(getattr(settings, "chili_momentum_g4_reentry_escalation_enabled", True))
             ):
                 try:
+                    # READ PARITY (2026-07-10): this exemption used a BARE top==sym read while
+                    # the escalation/chase-cap bypasses use the ~1min-cached read WITH the p90
+                    # branch — so in the same minute the bypasses said LEADER while this said
+                    # not-leader, and the day's winner terminalized at the 3-stopout cap with
+                    # its ignition still ahead (JEM 06-30 full-evidence: bullets spent 2.86/
+                    # 3.53/3.60, capped, 4.89 leg never re-entered). Same read everywhere:
+                    # le-cache first, else top==sym OR viability>=p90 OR wildcard.
                     from .risk_policy import (
                         _top_ranked_live_eligible_symbol as _g4c_top_fn,
                         _wildcard_dominant_symbol as _g4c_wild_fn,
                     )
 
                     _g4c_sym = str(sess.symbol or "").strip().upper()
-                    _g4c_top, _, _, _ = _g4c_top_fn(db, crypto=_g4c_sym.endswith("-USD"))
-                    _g4c_leader = bool(_g4c_top is not None and _g4c_sym == _g4c_top)
-                    if not _g4c_leader:
-                        _g4c_wild = _g4c_wild_fn(db)
-                        _g4c_leader = bool(_g4c_wild is not None and _g4c_sym == _g4c_wild)
-                    if _g4c_leader:
+                    _g4c_leader = None
+                    _g4c_min_key = _utcnow().strftime("%Y%m%d%H%M")
+                    if le.get("g4_leader_min") == _g4c_min_key:
+                        _g4c_leader = le.get("g4_leader_is")
+                        _g4c_dbg["cache_hit"] = True
+                        _g4c_dbg["cached_leader"] = _g4c_leader
+                    if not isinstance(_g4c_leader, bool):
+                        _g4c_top, _g4c_ts, _g4c_p90, _g4c_meta = _g4c_top_fn(
+                            db, crypto=_g4c_sym.endswith("-USD")
+                        )
+                        _g4c_dbg.update({
+                            "top": _g4c_top,
+                            "p90": _g4c_p90,
+                            "meta": _g4c_meta,
+                        })
+                        _g4c_leader = bool(_g4c_top is not None and _g4c_sym == _g4c_top)
+                        if not _g4c_leader and _g4c_top is not None and _g4c_p90 is not None:
+                            try:
+                                _g4c_via_score = (
+                                    db.query(MomentumSymbolViability.viability_score)
+                                    .filter(MomentumSymbolViability.symbol == _g4c_sym)
+                                    .order_by(MomentumSymbolViability.viability_score.desc())
+                                    .limit(1)
+                                    .scalar()
+                                )
+                                if _g4c_via_score is not None:
+                                    _g4c_leader = bool(
+                                        float(_g4c_via_score) >= float(_g4c_p90)
+                                    )
+                            except (TypeError, ValueError):
+                                pass
+                        if not _g4c_leader:
+                            _g4c_wild = _g4c_wild_fn(db)
+                            _g4c_leader = bool(_g4c_wild is not None and _g4c_sym == _g4c_wild)
+                        # EMPTY-BOARD ≠ DEMOTED (2026-07-10): viability freshness decays
+                        # WHILE THE FSM IS IN A TRADE (nothing refreshes the row in live/
+                        # managing states), so the read at this exact post-exit moment
+                        # routinely returns empty_board — and the ripping day-leader
+                        # terminalizes at the cap with its next leg ahead (JEM 06-30; the
+                        # live CLRO-0707 wedge class). An EMPTY board has no rival: nobody
+                        # took the crown, so the last successful leader read stands. A board
+                        # with a DIFFERENT top is a REAL demotion — no fallback there.
+                        if (
+                            not _g4c_leader
+                            and _g4c_top is None
+                            and str((_g4c_meta or {}).get("reason") or "") == "empty_board"
+                            and le.get("g4_leader_definitive") is True
+                            and bool(getattr(settings, "chili_momentum_leader_definitive_latch_enabled", True))
+                        ):
+                            _g4c_leader = True
+                            _g4c_dbg["empty_board_last_known_leader"] = True
+                        if _g4c_leader is True:
+                            le["g4_leader_definitive"] = True
+                        elif _g4c_top is not None and not _g4c_leader:
+                            le["g4_leader_definitive"] = False
+                        le["g4_leader_min"] = _g4c_min_key
+                        le["g4_leader_is"] = bool(_g4c_leader)
+                    if _g4c_leader is True:
                         _re_ok = True
                         _emit(db, sess, "live_reentry_cap_leader_exempt", {
                             "reason": _re_reason,
                             "stopout_cycles": int(le.get("stopout_cycles") or 0),
                             "escalation_level": int(le.get("g4_reentry_escalation") or 0),
                         })
-                except Exception:
+                except Exception as _g4c_exc:
+                    _g4c_dbg["error"] = repr(_g4c_exc)
                     _log.debug(
                         "[momentum_live] g4 leader-exempt read failed (fail-closed)",
                         exc_info=True,
@@ -15960,6 +16125,7 @@ def tick_live_session(
                     "reason": _re_reason,
                     "stopout_cycles": int(le.get("stopout_cycles") or 0),
                     "trade_cycles": le["trade_cycles"],
+                    "leader_read": _g4c_dbg,
                 })
                 db.flush()
                 return {"ok": True, "session_id": sess.id, "state": sess.state}
