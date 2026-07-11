@@ -19,13 +19,13 @@ Provider-native assistant-event lines:
 
 | Native model label | Transcript files | Assistant-event lines |
 | --- | ---: | ---: |
-| `claude-fable-5` | 367 | 30,567 |
+| `claude-fable-5` | 366 | 30,546 |
 | `claude-sonnet-5` | 38 | 4,106 |
 | `claude-opus-4-8` | 3,523 | 170,631 |
 | `claude-opus-4-7` | 54 | 12,349 |
 | `claude-haiku-4-5-20251001` | 794 | 43,697 |
 
-The Fable set contains **19 top-level** transcript files and **348 subagent** transcript files. Some top-level sessions contain more than one native model label, so session membership alone is not candidate identity proof.
+The Fable set contains **19 top-level** transcript files and **347 subagent** transcript files. Some top-level sessions contain more than one native model label, so session membership alone is not candidate identity proof.
 
 ## Trading Task Mining
 

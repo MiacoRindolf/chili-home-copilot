@@ -95,7 +95,7 @@ The older reports use `holdout` in their structural split labels. Because those 
 ### Reference Transcript Audit
 
 - Full junction-target archive: **5,329 JSONL files**, about 2.55 GiB, including 982 top-level and 4,347 subagent files
-- Provider-native `claude-fable-5`: **30,567 assistant-event lines across 367 files**, including 19 top-level and 348 subagent files
+- Provider-native `claude-fable-5`: **30,546 parsed assistant events across 366 files**, including 19 top-level and 347 subagent files
 - Privacy-minimized direct-child analysis found **165 meaningful Fable-directed prompts**, including **160 trading prompts** across nine top-level sessions
 - Dominant task shapes cover strategy/observed-behavior gaps, counterfactual replay, safety/microstructure, data coverage, live-state reconciliation, queue/lifecycle state, and runtime/deployment drift
 - These are historical development replays, not unseen holdouts; some fixes and mechanics already informed CHILI source or tests
