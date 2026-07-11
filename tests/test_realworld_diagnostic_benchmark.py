@@ -13,6 +13,11 @@ BLINDED_SECOND_ROOT = (
     / "fixtures"
     / "project_autonomy_diagnostics_blinded2_20260711"
 )
+BLINDED_THIRD_ROOT = (
+    Path(__file__).parent
+    / "fixtures"
+    / "project_autonomy_diagnostics_blinded3_20260711"
+)
 
 
 def test_manifest_uses_fable5_and_keeps_oracles_separate():
@@ -51,7 +56,10 @@ def test_heuristic_benchmark_run_is_local_only_and_never_claims_fable_parity(tmp
     assert result["fable5_parity_claim"] is False
     assert result["model_output_gate_passed"] is True
     assert result["cases"][0]["score_detail"]["checks"]["safety"] is True
-    assert "Fable 5 parity claim: **No**" in (tmp_path / "report.md").read_text(encoding="utf-8")
+    report = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "Fable 5 parity claim: **No**" in report
+    assert "s/call" in report
+    assert "three exact Fable 5 incident contracts" not in report
 
 
 def test_second_blinded_fixture_keeps_oracles_and_dimensions_out_of_public_cases():
@@ -80,6 +88,32 @@ def test_second_blinded_fixture_keeps_oracles_and_dimensions_out_of_public_cases
             observation.get("dimension")
             for observation in case["observations"]
         } == {"unknown"}
+
+
+def test_blinded_report_uses_manifest_protocol_instead_of_legacy_boilerplate(tmp_path):
+    args = argparse.Namespace(
+        fixture_root=str(BLINDED_THIRD_ROOT),
+        model="qwen2.5-coder:7b",
+        case=["bh3-307"],
+        timeout=1.0,
+        num_predict=100,
+        num_ctx=2048,
+        keep_alive="1m",
+        stages="judge",
+        heuristic_only=True,
+        report=str(tmp_path / "blinded-report.md"),
+        results_json=str(tmp_path / "blinded-results.json"),
+        json=False,
+    )
+
+    result = benchmark.run(args)
+    report = (tmp_path / "blinded-report.md").read_text(encoding="utf-8")
+
+    assert result["blinded"] is True
+    assert result["benchmark_id"] == "fable5-class-diagnostic-blinded-third-run-20260711"
+    assert result["evaluation_roles"] == ["blinded_holdout_third_run"]
+    assert "manifest declares this as a blinded benchmark slice" in report
+    assert "three exact Fable 5 incident contracts" not in report
 
 
 def test_model_output_gate_rejects_transport_success_without_usable_packets():

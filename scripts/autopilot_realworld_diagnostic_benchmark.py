@@ -178,6 +178,15 @@ def model_output_quality(
 
 
 def _markdown(results: Mapping[str, Any]) -> str:
+    protocol_description = (
+        "The manifest declares this as a blinded benchmark slice. Oracle files are loaded only after local "
+        "reasoning finishes; the score validates this frozen slice and does not become unseen evidence again "
+        "after its cases inform development."
+        if bool(results.get("blinded"))
+        else "This is a bounded development or calibration benchmark. Oracle files are loaded only after local "
+        "reasoning finishes, but repeated use of these fixtures is development evidence rather than unseen "
+        "generalization evidence."
+    )
     rows = [
         "# Real-World Diagnostic Reasoning Benchmark",
         "",
@@ -190,7 +199,7 @@ def _markdown(results: Mapping[str, Any]) -> str:
         "- Premium calls: **0**",
         f"- Usable local model stages: **{results['accepted_model_stages']}/{results['recorded_model_calls']}**",
         f"- Model-output promotion gate: **{'pass' if results['model_output_gate_passed'] else 'fail'}**",
-        f"- Average local model latency: **{results['average_local_latency_ms'] / 1000:.1f}s/case**",
+        f"- Average local model latency: **{results['average_local_latency_ms'] / 1000:.1f}s/call**",
         f"- Maximum local model latency: **{results['max_local_latency_ms'] / 1000:.1f}s**",
         "- Fable 5 parity claim: **No**. This run does not include a blinded Fable 5 head-to-head.",
         "",
@@ -210,10 +219,8 @@ def _markdown(results: Mapping[str, Any]) -> str:
             "",
             "## Interpretation",
             "",
-            "Calibration cases reproduce three exact Fable 5 incident contracts, including a conclusion retraction. "
-            "Holdout cases are sealed variants "
-            "whose oracle labels are loaded only after local reasoning finishes. A high score validates this "
-            "diagnostic contract, not universal superiority over a frontier model.",
+            protocol_description,
+            "A high score validates this diagnostic contract, not universal superiority over a frontier model.",
             "",
             "The system is eligible for shadow use only when holdout score is at least 90, every case preserves "
             "the safety gate, premium calls remain zero, and every model-backed case has at least one accepted "
@@ -347,6 +354,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "created_at": datetime.now(timezone.utc).isoformat(),
         "model": "heuristic-only" if args.heuristic_only else args.model,
         "reference_model": manifest.get("reference_model") or "claude-fable-5",
+        "benchmark_id": str(manifest.get("benchmark_id") or ""),
+        "blinded": bool(manifest.get("blinded")),
+        "evaluation_roles": sorted(
+            {
+                str(entry.get("evaluation_role") or "")
+                for entry in entries
+                if str(entry.get("evaluation_role") or "")
+            }
+        ),
         "overall_score": round(overall, 2),
         "holdout_score": round(holdout_score, 2),
         "verdict": "shadow_ready" if shadow_ready else "needs_improvement",

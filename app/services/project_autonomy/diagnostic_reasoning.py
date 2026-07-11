@@ -157,6 +157,10 @@ _DIMENSION_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "manifest",
             "shard",
             "nbbo",
+            "identifier",
+            "encoding",
+            "unicode",
+            "normalization",
         ),
     ),
     (
@@ -179,13 +183,27 @@ _DIMENSION_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "admission",
         ),
     ),
-    ("config", ("config", "setting", "flag", "environment variable", " env ", "feature gate")),
+    (
+        "config",
+        (
+            "config",
+            "setting",
+            "flag",
+            "environment variable",
+            " env ",
+            "feature gate",
+            "policy",
+            "principal",
+            "authorization",
+            "membership",
+            "service identity",
+        ),
+    ),
     (
         "dependency",
         (
             "dependency",
             "provider",
-            "service",
             "socket",
             "network",
             "database server",
@@ -198,10 +216,29 @@ _DIMENSION_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "peer chain",
             "upstream",
             "dns",
+            "package",
+            "library",
+            "sdk",
         ),
     ),
     ("runtime", ("runtime", "container", "worker", "process", "restart", "image", "deployment")),
-    ("test_harness", ("replay", "harness", "fixture", "mock", "test database", "simulator")),
+    (
+        "test_harness",
+        (
+            "replay",
+            "harness",
+            "fixture",
+            "mock",
+            "test database",
+            "simulator",
+            "qualification",
+            "comparison record",
+            "reference run",
+            "candidate run",
+            "screenshot",
+            "test runner",
+        ),
+    ),
     (
         "code",
         (
@@ -219,6 +256,9 @@ _DIMENSION_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "control-flow",
             "call path",
             "source trace",
+            "source revision",
+            "stage plan",
+            "ordering point",
         ),
     ),
 )
@@ -231,6 +271,12 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("simulated time", 5),
             ("replay timestamp", 4),
             ("datetime.now", 4),
+            ("event time", 6),
+            ("broker sequence", 7),
+            ("ordered by recorded producer time", 8),
+            ("ordered by broker sequence", 8),
+            ("host offset", 7),
+            ("time source", 5),
         ),
     ),
     (
@@ -248,6 +294,11 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("cross multiplied", 6),
             ("aggregate", 4),
             ("group by", 4),
+            ("route join", 7),
+            ("unicode punctuation", 7),
+            ("identifier normalization", 8),
+            ("retained artifact", 3),
+            ("input artifact", 4),
         ),
     ),
     (
@@ -292,6 +343,16 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("only that value is changed", 7),
             ("only that value changed", 7),
             ("changing only that value", 7),
+            ("rendered policy", 7),
+            ("policy bundle", 6),
+            ("policy evaluator", 6),
+            ("principal membership", 7),
+            ("authorization policy", 7),
+            ("route declaration", 5),
+            ("terminal space", 7),
+            ("exact-principal denial", 8),
+            ("edge authorization", 7),
+            ("authorized identity", 7),
         ),
     ),
     (
@@ -308,6 +369,12 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("trust store", 5),
             ("carrier sdk", 5),
             ("carrier call", 5),
+            ("package version", 7),
+            ("transitive package", 8),
+            ("dependency bundle", 7),
+            ("signed dependency bundle", 8),
+            ("version mismatch", 6),
+            ("prior bundle", 5),
         ),
     ),
     (
@@ -316,7 +383,15 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("recreating only", 6),
             ("running worker image", 6),
             ("image label", 5),
-            ("loaded module hash", 5),
+            ("loaded module hash", 8),
+            ("loaded confirmation handler", 8),
+            ("process snapshot", 7),
+            ("signed image inventory", 6),
+            ("writable layer", 8),
+            ("overlay entries", 6),
+            ("worker rollout", 7),
+            ("process evidence", 6),
+            ("executing process", 8),
             ("pre-fix behavior", 3),
             ("node pool", 5),
             ("network namespace", 6),
@@ -338,6 +413,13 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("serialized replay input", 4),
             ("replay fixture", 3),
             ("focused test", 2),
+            ("qualification gate", 7),
+            ("comparison environment", 7),
+            ("reference record", 5),
+            ("candidate record", 5),
+            ("visual diff", 5),
+            ("floating runner", 6),
+            ("baseline runner", 6),
         ),
     ),
     (
@@ -355,6 +437,11 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("code hunk", 7),
             ("normalization hunk", 7),
             ("reverting only that hunk", 7),
+            ("source revision", 6),
+            ("stage plan differs", 7),
+            ("ordering point", 7),
+            ("affected revision", 5),
+            ("earlier revision", 5),
         ),
     ),
 )
@@ -452,6 +539,46 @@ _CAUSAL_SUPPORT_MARKERS = (
     "missing",
     "stale ",
     "orphan",
+    "differs at",
+    "differing only",
+    "instead of",
+    "rather than",
+    "after removing only",
+    "produces respectively",
+    " versus ",
+    "with identical",
+)
+_CAUSAL_INTERVENTION_MARKERS = (
+    "applying only",
+    "changing only",
+    "lowering only",
+    "pinning only",
+    "resetting only",
+    "reverting only",
+    "reproduces",
+    "restores",
+    "first broken",
+    "earliest break",
+    "differs at",
+    "differing only",
+    "after removing only",
+    "produces respectively",
+    "with identical",
+)
+_NEGATED_INTERVENTION_MARKERS = (
+    "changing only this does not",
+    "changing only that does not",
+    "changing only the value does not",
+    "reverting only this does not",
+    "reverting only that does not",
+    "applying only this does not",
+    "applying only that does not",
+    "reproduces no failure",
+    "reproduces no fault",
+    "does not reproduce",
+    "did not reproduce",
+    "fails to reproduce",
+    "no longer reproduces",
 )
 _CAUSAL_CONTRADICTION_MARKERS = (
     "byte-identical",
@@ -473,6 +600,42 @@ _CAUSAL_CONTRADICTION_MARKERS = (
     "same application response",
     "unchanged from",
     "within the expected",
+    "are identical",
+    "is identical",
+    "checksums are identical",
+    "remain correct",
+    "remains correct",
+    "remain healthy",
+    "remains healthy",
+    "remain normal",
+    "remains normal",
+    "match the last healthy",
+    "no unexpected",
+    "no step change",
+    "arguing against",
+    "all pass independent validation",
+    "without elevated latency or errors",
+    "each emit one",
+    "each emits one",
+    "produce identical",
+    "produces identical",
+    "unchanged fingerprints",
+)
+_ATTRIBUTION_GAP_MARKERS = (
+    "cannot identify",
+    "cannot separate",
+    "cannot be proven",
+    "cannot isolate",
+    "preventing a correlation-level link",
+    "no record explaining",
+    "not captured",
+    "was not recorded",
+    "were not recorded",
+    "no retained artifact",
+    "not individually attributable",
+    "no longer available",
+    "lacks worker identity",
+    "missing attribution",
 )
 
 
@@ -541,11 +704,28 @@ def _dimension_scores(statement: str) -> dict[str, int]:
 
 def infer_dimension(statement: str) -> str:
     scores = _dimension_scores(statement)
-    best = max(scores, key=scores.get, default="unknown")
-    return best if scores.get(best, 0) else "unknown"
+    ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+    if not ranked or ranked[0][1] <= 0:
+        return "unknown"
+    if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
+        return "unknown"
+    return ranked[0][0]
 
 
-def infer_causal_role(statement: str, *, discriminating: bool = False) -> str:
+def has_attribution_gap(statement: str) -> bool:
+    lower = str(statement or "").lower()
+    return any(marker in lower for marker in _ATTRIBUTION_GAP_MARKERS)
+
+
+def infer_causal_role(
+    statement: str,
+    *,
+    discriminating: bool = False,
+    kind: str = "observation",
+    provenance: str = "",
+    structured_break: bool = False,
+    downstream_surface: bool = False,
+) -> str:
     """Classify evidence as causal support, contradiction, or context.
 
     Dense incident packets deliberately include healthy controls and held-
@@ -553,10 +733,34 @@ def infer_causal_role(statement: str, *, discriminating: bool = False) -> str:
     positive support makes the largest family win rather than the cause.
     """
     lower = str(statement or "").lower()
-    if discriminating or any(marker in lower for marker in _CAUSAL_SUPPORT_MARKERS):
+    if has_attribution_gap(lower):
+        return "context"
+    if any(marker in lower for marker in _NEGATED_INTERVENTION_MARKERS) or re.search(
+        r"\b(?:changing|reverting|applying|lowering|pinning|resetting)\s+only\b"
+        r".{0,120}\b(?:does not|did not|fails to|leaves? the outcome unchanged)",
+        lower,
+    ):
+        return "contradiction"
+    if any(marker in lower for marker in _CAUSAL_INTERVENTION_MARKERS):
         return "support"
     if any(marker in lower for marker in _CAUSAL_CONTRADICTION_MARKERS):
         return "contradiction"
+    if (
+        str(kind or "") == "metric"
+        and not structured_break
+        and not str(provenance or "").startswith("diagnostic_probe:")
+    ):
+        return "context"
+    if any(marker in lower for marker in _CAUSAL_SUPPORT_MARKERS):
+        return "support"
+    if downstream_surface:
+        return "context"
+    if discriminating and (
+        str(kind or "") == "experiment"
+        or str(provenance or "").startswith("diagnostic_probe:")
+        or structured_break
+    ):
+        return "support"
     return "context"
 
 
@@ -1136,20 +1340,61 @@ def derive_diagnostic_lenses(statement: str) -> list[str]:
 def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]:
     statement = _clip(raw.get("statement"), 900)
     explicit_dimension = str(raw.get("dimension") or "").strip().lower()
-    dimension = (
-        explicit_dimension
-        if explicit_dimension in DIMENSIONS and explicit_dimension != "unknown"
-        else infer_dimension(statement)
-    )
+    supplied_origin = str(raw.get("dimension_origin") or "").strip().lower()
+    if supplied_origin in {"explicit", "inferred", "unknown"}:
+        dimension = (
+            explicit_dimension if explicit_dimension in DIMENSIONS else "unknown"
+        )
+        dimension_origin = (
+            supplied_origin if dimension != "unknown" else "unknown"
+        )
+    else:
+        has_explicit_dimension = (
+            explicit_dimension in DIMENSIONS and explicit_dimension != "unknown"
+        )
+        dimension = (
+            explicit_dimension if has_explicit_dimension else infer_dimension(statement)
+        )
+        dimension_origin = (
+            "explicit"
+            if has_explicit_dimension
+            else "inferred"
+            if dimension != "unknown"
+            else "unknown"
+        )
     kind = str(raw.get("kind") or "observation").strip().lower()
     if kind not in {"observation", "experiment", "artifact", "metric"}:
         kind = "observation"
     discriminating = bool(raw.get("discriminating"))
+    provenance = _clip(raw.get("provenance") or f"unattributed:{index + 1}", 300)
+    expected_state = str(raw.get("expected_state") or "")
+    actual_state = str(raw.get("actual_state") or raw.get("transition_to") or "")
+    expected_edge_state = str(raw.get("expected_edge_state") or "")
+    actual_edge_state = str(raw.get("actual_edge_state") or "")
+    structured_break = bool(
+        (expected_state and actual_state and expected_state != actual_state)
+        or (
+            expected_edge_state
+            and actual_edge_state
+            and expected_edge_state != actual_edge_state
+        )
+    )
+    downstream_surface = bool(
+        raw.get("sink_id")
+        and kind in {"metric", "observation"}
+        and not raw.get("edge_from")
+        and not raw.get("edge_to")
+    )
+    attribution_gap = has_attribution_gap(statement)
     causal_role = str(raw.get("causal_role") or "").strip().lower()
     if causal_role not in {"support", "contradiction", "context"}:
         causal_role = infer_causal_role(
             statement,
             discriminating=discriminating,
+            kind=kind,
+            provenance=provenance,
+            structured_break=structured_break,
+            downstream_surface=downstream_surface,
         )
     correlation_values = [
         *(
@@ -1187,12 +1432,14 @@ def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]
         "evidence_id": _clean_id(raw.get("evidence_id"), f"evidence-{index + 1}"),
         "statement": statement,
         "dimension": dimension,
+        "dimension_origin": dimension_origin,
         "kind": kind,
-        "provenance": _clip(raw.get("provenance") or f"unattributed:{index + 1}", 300),
+        "provenance": provenance,
         "independence_key": _clip(raw.get("independence_key") or raw.get("provenance") or f"source:{index + 1}", 200),
         "reliability": _clamp_reliability(raw.get("reliability")),
         "discriminating": discriminating,
         "causal_role": causal_role,
+        "attribution_gap": attribution_gap,
         "comparison_key": _clip(raw.get("comparison_key"), 160),
         "code_revision": _clip(raw.get("code_revision"), 100),
         "input_fingerprint": _clip(raw.get("input_fingerprint"), 160),
@@ -1309,6 +1556,26 @@ def _timeline_sort_key(item: Mapping[str, Any], index: int) -> tuple[float, int,
     return timestamp, sequence if sequence is not None else index, index
 
 
+def _revision_namespace(value: object) -> str:
+    """Return a conservative identifier namespace for revision comparison."""
+    match = re.match(r"^([a-zA-Z]+)", str(value or "").strip())
+    return match.group(1).lower() if match else ""
+
+
+def _revision_pair_status(source_revision: object, runtime_revision: object) -> str:
+    source = str(source_revision or "").strip()
+    runtime = str(runtime_revision or "").strip()
+    if not source or not runtime:
+        return "unknown"
+    if source == runtime:
+        return "match"
+    source_namespace = _revision_namespace(source)
+    runtime_namespace = _revision_namespace(runtime)
+    if source_namespace and source_namespace == runtime_namespace:
+        return "mismatch"
+    return "unknown"
+
+
 def reconstruct_causal_timeline(case: Mapping[str, Any]) -> dict[str, Any]:
     """Build a deterministic event/state graph from explicit evidence metadata."""
     observations = [
@@ -1322,18 +1589,25 @@ def reconstruct_causal_timeline(case: Mapping[str, Any]) -> dict[str, Any]:
     )
     last_state_by_entity: dict[str, str] = {}
     events: list[dict[str, Any]] = []
-    source_revisions: list[str] = []
-    runtime_revisions: list[str] = []
+    revision_pairs: list[dict[str, str]] = []
     for order, (_original_index, item) in enumerate(ordered):
         evidence_id = str(item.get("evidence_id") or "")
         entity_id = str(item.get("entity_id") or "")
         expected_state = str(item.get("expected_state") or "")
         actual_state = str(item.get("actual_state") or item.get("transition_to") or "")
+        expected_edge_state = str(item.get("expected_edge_state") or "")
+        actual_edge_state = str(item.get("actual_edge_state") or "")
         transition_from = str(item.get("transition_from") or "")
         transition_to = str(item.get("transition_to") or "")
         violations: list[str] = []
         if expected_state and actual_state and expected_state != actual_state:
             violations.append("expected_actual_mismatch")
+        if (
+            expected_edge_state
+            and actual_edge_state
+            and expected_edge_state != actual_edge_state
+        ):
+            violations.append("edge_state_mismatch")
         prior_state = last_state_by_entity.get(entity_id, "") if entity_id else ""
         if transition_from and prior_state and transition_from != prior_state:
             violations.append("transition_from_mismatch")
@@ -1341,11 +1615,20 @@ def reconstruct_causal_timeline(case: Mapping[str, Any]) -> dict[str, Any]:
             last_state_by_entity[entity_id] = transition_to or actual_state
         source_revision = str(item.get("source_revision") or "")
         runtime_revision = str(item.get("runtime_revision") or "")
-        if source_revision:
-            source_revisions.append(source_revision)
-        if runtime_revision:
-            runtime_revisions.append(runtime_revision)
-        if source_revision and runtime_revision and source_revision != runtime_revision:
+        revision_pair_status = _revision_pair_status(
+            source_revision,
+            runtime_revision,
+        )
+        if source_revision and runtime_revision:
+            revision_pairs.append(
+                {
+                    "source_revision": source_revision,
+                    "runtime_revision": runtime_revision,
+                    "status": revision_pair_status,
+                    "evidence_id": evidence_id,
+                }
+            )
+        if revision_pair_status == "mismatch":
             violations.append("source_runtime_revision_mismatch")
         events.append(
             {
@@ -1361,36 +1644,37 @@ def reconstruct_causal_timeline(case: Mapping[str, Any]) -> dict[str, Any]:
                 "actual_state": actual_state,
                 "transition_from": transition_from,
                 "transition_to": transition_to,
+                "expected_edge_state": expected_edge_state,
+                "actual_edge_state": actual_edge_state,
                 "causal_parent_ids": list(item.get("causal_parent_ids") or []),
+                "correlation_fingerprints": list(
+                    item.get("correlation_fingerprints") or []
+                ),
                 "violations": violations,
             }
         )
 
-    source_revision = source_revisions[-1] if source_revisions else ""
-    runtime_revision = runtime_revisions[-1] if runtime_revisions else ""
-    parity_status = (
-        "mismatch"
-        if source_revision and runtime_revision and source_revision != runtime_revision
-        else "match"
-        if source_revision and runtime_revision
-        else "unknown"
-    )
-    earliest_break = next((event for event in events if event["violations"]), None)
-    if earliest_break is None and parity_status == "mismatch":
-        earliest_break = next(
-            (
-                event
-                for event in events
-                if str(event.get("evidence_id") or "")
-                and any(
-                    str(item.get("evidence_id") or "") == event["evidence_id"]
-                    and str(item.get("runtime_revision") or "") == runtime_revision
-                    for item in observations
-                )
-            ),
+    comparable_pairs = [
+        pair for pair in revision_pairs if pair.get("status") != "unknown"
+    ]
+    selected_pair = (
+        next(
+            (pair for pair in comparable_pairs if pair.get("status") == "mismatch"),
             None,
         )
-
+        or (comparable_pairs[-1] if comparable_pairs else None)
+        or (revision_pairs[-1] if revision_pairs else {})
+    )
+    parity_status = (
+        "mismatch"
+        if any(pair.get("status") == "mismatch" for pair in comparable_pairs)
+        else "match"
+        if comparable_pairs
+        else "unknown"
+    )
+    source_revision = str(selected_pair.get("source_revision") or "")
+    runtime_revision = str(selected_pair.get("runtime_revision") or "")
+    earliest_break = next((event for event in events if event["violations"]), None)
     children: dict[str, list[str]] = defaultdict(list)
     for event in events:
         child_id = str(event.get("evidence_id") or "")
@@ -1409,6 +1693,31 @@ def reconstruct_causal_timeline(case: Mapping[str, Any]) -> dict[str, Any]:
         downstream.append(evidence_id)
         frontier.extend(children.get(evidence_id, []))
 
+    if earliest_break:
+        root_order = int(earliest_break.get("order") or 0)
+        root_fingerprints = {
+            str(value)
+            for value in earliest_break.get("correlation_fingerprints") or []
+            if str(value)
+        }
+        if root_fingerprints:
+            for event in events:
+                evidence_id = str(event.get("evidence_id") or "")
+                event_fingerprints = {
+                    str(value)
+                    for value in event.get("correlation_fingerprints") or []
+                    if str(value)
+                }
+                if (
+                    evidence_id
+                    and evidence_id != root_id
+                    and int(event.get("order") or 0) > root_order
+                    and root_fingerprints & event_fingerprints
+                    and evidence_id not in seen
+                ):
+                    seen.add(evidence_id)
+                    downstream.append(evidence_id)
+
     return {
         "schema": "chili.causal-timeline.v1",
         "ordered_evidence_ids": [
@@ -1421,6 +1730,7 @@ def reconstruct_causal_timeline(case: Mapping[str, Any]) -> dict[str, Any]:
             "status": parity_status,
             "source_revision": source_revision,
             "runtime_revision": runtime_revision,
+            "comparable_pair_count": len(comparable_pairs),
         },
     }
 
@@ -1961,6 +2271,75 @@ def _confirmatory_weight(records: Iterable[Mapping[str, Any]]) -> float:
     )
 
 
+def _record_has_structured_break(record: Mapping[str, Any]) -> bool:
+    expected_state = str(record.get("expected_state") or "")
+    actual_state = str(record.get("actual_state") or record.get("transition_to") or "")
+    expected_edge_state = str(record.get("expected_edge_state") or "")
+    actual_edge_state = str(record.get("actual_edge_state") or "")
+    return bool(
+        (expected_state and actual_state and expected_state != actual_state)
+        or (
+            expected_edge_state
+            and actual_edge_state
+            and expected_edge_state != actual_edge_state
+        )
+    )
+
+
+def _is_contrastive_experiment(record: Mapping[str, Any]) -> bool:
+    return bool(
+        str(record.get("kind") or "") == "experiment"
+        and bool(record.get("discriminating"))
+        and str(record.get("causal_role") or "context") == "support"
+        and not bool(record.get("attribution_gap"))
+    )
+
+
+def _has_direct_causal_artifact(record: Mapping[str, Any]) -> bool:
+    if (
+        str(record.get("kind") or "") != "artifact"
+        or str(record.get("causal_role") or "context") != "support"
+        or bool(record.get("attribution_gap"))
+        or _clamp_reliability(record.get("reliability")) < 0.9
+    ):
+        return False
+    lower = str(record.get("statement") or "").lower()
+    return _record_has_structured_break(record) or any(
+        marker in lower for marker in _CAUSAL_SUPPORT_MARKERS
+    )
+
+
+def _causal_sufficiency(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    typed_probe: bool,
+    earliest_break_support: bool,
+    provenance_break_support: bool,
+    completed_result_ids: set[str] | None = None,
+) -> str:
+    completed = completed_result_ids or set()
+    if (
+        typed_probe
+        or any(_is_contrastive_experiment(record) for record in records)
+        or any(str(record.get("evidence_id") or "") in completed for record in records)
+    ):
+        return "isolated"
+    if earliest_break_support or provenance_break_support:
+        return "graph_linked"
+    if any(_has_direct_causal_artifact(record) for record in records):
+        return "direct_artifact"
+    return "observational"
+
+
+def _causal_sufficiency_rank(value: object) -> int:
+    return {
+        "observational": 0,
+        "direct_artifact": 1,
+        "graph_linked": 2,
+        "isolated": 3,
+    }.get(str(value or "observational"), 0)
+
+
 def _experiment_result_ids(packet: Mapping[str, Any]) -> set[str]:
     return {
         str(evidence_id)
@@ -1974,45 +2353,104 @@ def _typed_probe_fallback_hypotheses(
     case: Mapping[str, Any],
     hypotheses: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Recover strong causal families omitted by a small local model.
+    """Recover strongly grounded causal families omitted by a small local model.
 
-    The fallback is deliberately narrow: only high-reliability, discriminating
-    evidence emitted by CHILI's typed probes can create a hypothesis. Ordinary
-    prompt or repository evidence still requires the model to propose one.
+    Typed probes, contrastive experiments, and explicit structured breaks may
+    create a bounded fallback. Ordinary observations and symptom volume cannot.
     """
-    existing_dimensions = {
-        str(item.get("dimension") or "unknown")
-        for item in hypotheses
-        if isinstance(item, Mapping)
-    }
+    existing_support_by_dimension: dict[str, set[str]] = defaultdict(set)
+    for item in hypotheses:
+        if not isinstance(item, Mapping):
+            continue
+        existing_support_by_dimension[
+            str(item.get("dimension") or "unknown")
+        ].update(str(value) for value in item.get("support_evidence_ids") or [])
     existing_ids = {
         str(item.get("hypothesis_id") or "")
         for item in hypotheses
         if isinstance(item, Mapping)
     }
     evidence_by_dimension: dict[str, list[str]] = defaultdict(list)
+    strong_records_by_id: dict[str, Mapping[str, Any]] = {}
     for record in case.get("observations") or []:
         if not isinstance(record, Mapping):
             continue
         dimension = str(record.get("dimension") or "unknown")
         provenance = str(record.get("provenance") or "")
+        expected_edge_state = str(record.get("expected_edge_state") or "")
+        actual_edge_state = str(record.get("actual_edge_state") or "")
+        strong_causal_record = bool(
+            provenance.startswith("diagnostic_probe:")
+            or _is_contrastive_experiment(record)
+            or (
+                expected_edge_state
+                and actual_edge_state
+                and expected_edge_state != actual_edge_state
+            )
+            or _has_direct_causal_artifact(record)
+        )
         if (
             dimension not in DIMENSIONS
             or dimension == "unknown"
-            or dimension in existing_dimensions
-            or not provenance.startswith("diagnostic_probe:")
+            or not strong_causal_record
             or not bool(record.get("discriminating"))
             or _clamp_reliability(record.get("reliability")) < 0.9
+            or str(record.get("causal_role") or "context") != "support"
+            or bool(record.get("attribution_gap"))
         ):
             continue
         evidence_id = str(record.get("evidence_id") or "")
         if evidence_id and evidence_id not in evidence_by_dimension[dimension]:
             evidence_by_dimension[dimension].append(evidence_id)
+            strong_records_by_id[evidence_id] = record
 
     fallbacks: list[dict[str, Any]] = []
     for dimension in DIMENSIONS:
         evidence_ids = evidence_by_dimension.get(dimension) or []
         if not evidence_ids:
+            continue
+        existing_overlap = (
+            existing_support_by_dimension.get(dimension, set()) & set(evidence_ids)
+        )
+        isolation_grade_ids = {
+            evidence_id
+            for evidence_id in evidence_ids
+            if str(
+                (strong_records_by_id.get(evidence_id) or {}).get("provenance") or ""
+            ).startswith("diagnostic_probe:")
+            or _is_contrastive_experiment(
+                strong_records_by_id.get(evidence_id) or {}
+            )
+            or (
+                str(
+                    (strong_records_by_id.get(evidence_id) or {}).get(
+                        "expected_edge_state"
+                    )
+                    or ""
+                )
+                and str(
+                    (strong_records_by_id.get(evidence_id) or {}).get(
+                        "actual_edge_state"
+                    )
+                    or ""
+                )
+                and str(
+                    (strong_records_by_id.get(evidence_id) or {}).get(
+                        "expected_edge_state"
+                    )
+                    or ""
+                )
+                != str(
+                    (strong_records_by_id.get(evidence_id) or {}).get(
+                        "actual_edge_state"
+                    )
+                    or ""
+                )
+            )
+        }
+        if existing_overlap and (
+            not isolation_grade_ids or existing_overlap & isolation_grade_ids
+        ):
             continue
         base_id = f"evidence-{dimension}"
         hypothesis_id = base_id
@@ -2025,7 +2463,7 @@ def _typed_probe_fallback_hypotheses(
         fallbacks.append(
             {
                 "hypothesis_id": hypothesis_id,
-                "claim": f"Typed diagnostic evidence identifies {label} as the primary causal dimension.",
+                "claim": f"Controlled diagnostic evidence identifies {label} as the primary causal dimension.",
                 "dimension": dimension,
                 "support_evidence_ids": evidence_ids,
                 "contradict_evidence_ids": [],
@@ -2067,6 +2505,13 @@ def _validate_packet(case: Mapping[str, Any], packet: Mapping[str, Any]) -> list
             str(value)
             for value in item.get("support_evidence_ids") or []
             if str(value) in evidence_by_id
+            and (
+                str(evidence_by_id[str(value)].get("dimension_origin") or "unknown")
+                == "explicit"
+                or str(evidence_by_id[str(value)].get("provenance") or "").startswith(
+                    "diagnostic_probe:"
+                )
+            )
             and str(evidence_by_id[str(value)].get("dimension") or "unknown")
             not in {hypothesis_dimension, "unknown"}
         )
@@ -2074,6 +2519,18 @@ def _validate_packet(case: Mapping[str, Any], packet: Mapping[str, Any]) -> list
             errors.append(
                 f"{hypothesis_id} links support from a different evidence family: "
                 + ", ".join(mismatched_support)
+            )
+        contradiction_as_support = sorted(
+            str(value)
+            for value in item.get("support_evidence_ids") or []
+            if str(value) in evidence_by_id
+            and str(evidence_by_id[str(value)].get("causal_role") or "context")
+            == "contradiction"
+        )
+        if contradiction_as_support:
+            errors.append(
+                f"{hypothesis_id} links contradiction evidence as support: "
+                + ", ".join(contradiction_as_support)
             )
     experiment_ids: set[str] = set()
     for item in packet.get("experiments") or []:
@@ -2184,6 +2641,17 @@ def evaluate_packet(
     evidence = {str(item.get("evidence_id")): item for item in case["observations"]}
     completed_result_ids = _experiment_result_ids(packet)
     drift = detect_baseline_drift(case["observations"])
+    problem_dimension = infer_dimension(str(case.get("problem_statement") or ""))
+    attribution_gap_records = [
+        item
+        for item in case["observations"]
+        if bool(item.get("attribution_gap"))
+        and _clamp_reliability(item.get("reliability")) >= 0.9
+    ]
+    unresolved_attribution = bool(
+        has_attribution_gap(str(case.get("problem_statement") or ""))
+        or len(attribution_gap_records) >= 2
+    )
     causal_timeline = _structured_causal_timeline(case)
     downstream_evidence_ids = {
         str(value)
@@ -2213,31 +2681,169 @@ def evaluate_packet(
         *packet["hypotheses"],
         *_typed_probe_fallback_hypotheses(case, packet["hypotheses"]),
     ]
+    drift_evidence_ids = list(
+        dict.fromkeys(
+            str(evidence_id)
+            for finding in drift
+            for evidence_id in finding.get("evidence_ids") or []
+            if str(evidence_id)
+        )
+    )
+    if drift and problem_dimension == "test_harness" and not any(
+        str(item.get("dimension") or "unknown") == "test_harness"
+        and set(str(value) for value in item.get("support_evidence_ids") or [])
+        & set(drift_evidence_ids)
+        for item in hypotheses
+    ):
+        existing_ids = {
+            str(item.get("hypothesis_id") or "") for item in hypotheses
+        }
+        hypothesis_id = "baseline-test-harness"
+        suffix = 2
+        while hypothesis_id in existing_ids:
+            hypothesis_id = f"baseline-test-harness-{suffix}"
+            suffix += 1
+        hypotheses.append(
+            {
+                "hypothesis_id": hypothesis_id,
+                "claim": "The comparison harness or its environment changed the observed baseline.",
+                "dimension": "test_harness",
+                "support_evidence_ids": drift_evidence_ids,
+                "contradict_evidence_ids": [],
+                "falsification": "Reproduce both outcomes in one fully fingerprinted comparison environment.",
+                "origin": "baseline_drift_gate",
+            }
+        )
+
     hypothesis_results: list[dict[str, Any]] = []
     for item in hypotheses:
-        support_ids = list(dict.fromkeys(item.get("support_evidence_ids") or []))
-        contradict_ids = list(dict.fromkeys(item.get("contradict_evidence_ids") or []))
-        support_records = [evidence[value] for value in support_ids if value in evidence]
-        contradict_records = [evidence[value] for value in contradict_ids if value in evidence]
-        support_weight = _independent_weight(support_records)
+        support_ids = list(
+            dict.fromkeys(str(value) for value in item.get("support_evidence_ids") or [])
+        )
+        contradict_ids = list(
+            dict.fromkeys(str(value) for value in item.get("contradict_evidence_ids") or [])
+        )
+        linked_support_records = [
+            evidence[value] for value in support_ids if value in evidence
+        ]
         causal_support_records = [
             record
-            for record in support_records
+            for record in linked_support_records
             if str(record.get("evidence_id") or "") not in downstream_evidence_ids
+            and not bool(record.get("attribution_gap"))
+            and str(record.get("causal_role") or "context") != "contradiction"
+            and (
+                str(record.get("causal_role") or "context") == "support"
+                or str(record.get("evidence_id") or "") in completed_result_ids
+            )
         ]
+        context_records = [
+            record
+            for record in linked_support_records
+            if str(record.get("evidence_id") or "") not in downstream_evidence_ids
+            and not bool(record.get("attribution_gap"))
+            and str(record.get("causal_role") or "context") == "context"
+            and str(record.get("evidence_id") or "") not in completed_result_ids
+        ]
+        explicit_contradict_records = [
+            evidence[value] for value in contradict_ids if value in evidence
+        ]
+        implicit_contradict_records = [
+            record
+            for record in linked_support_records
+            if str(record.get("causal_role") or "context") == "contradiction"
+        ]
+        contradict_records_by_id = {
+            str(record.get("evidence_id") or f"contradiction-{index}"): record
+            for index, record in enumerate(
+                [*explicit_contradict_records, *implicit_contradict_records]
+            )
+        }
+        contradict_records = list(contradict_records_by_id.values())
+        causal_support_weight = _independent_weight(causal_support_records)
+        context_weight = round(0.2 * _independent_weight(context_records), 4)
+        support_weight = round(causal_support_weight + context_weight, 4)
         confirmatory_weight = _confirmatory_weight(causal_support_records)
         contradict_weight = _independent_weight(contradict_records)
         discriminating = any(
-            bool(record.get("discriminating")) or str(record.get("evidence_id")) in completed_result_ids
+            bool(record.get("discriminating"))
+            or str(record.get("evidence_id")) in completed_result_ids
             for record in causal_support_records
         )
-        direct_artifact = any(
-            record.get("kind") == "artifact" and float(record.get("reliability") or 0) >= 0.9
+        direct_artifact_records = [
+            record
             for record in causal_support_records
-        )
+            if _has_direct_causal_artifact(record)
+        ]
+        direct_artifact = bool(direct_artifact_records)
         typed_probe_evidence = any(
             str(record.get("provenance") or "").startswith("diagnostic_probe:")
-            for record in support_records
+            for record in causal_support_records
+        )
+        causal_support_ids = {
+            str(record.get("evidence_id") or "") for record in causal_support_records
+        }
+        earliest_break_support = bool(
+            earliest_break_id and earliest_break_id in causal_support_ids
+        )
+        earliest_break_graph_qualified = bool(
+            earliest_break_support
+            and (
+                earliest_break.get("causal_parent_ids")
+                or "edge_state_mismatch" in (earliest_break.get("violations") or [])
+                or "source_runtime_revision_mismatch"
+                in (earliest_break.get("violations") or [])
+                or "transition_from_mismatch"
+                in (earliest_break.get("violations") or [])
+            )
+        )
+        provenance_break_support = bool(
+            provenance_break_evidence_id
+            and provenance_break_evidence_id in causal_support_ids
+        )
+        causal_sufficiency = _causal_sufficiency(
+            causal_support_records,
+            typed_probe=typed_probe_evidence,
+            earliest_break_support=earliest_break_graph_qualified,
+            provenance_break_support=provenance_break_support,
+            completed_result_ids=completed_result_ids,
+        )
+        hypothesis_dimension = str(item.get("dimension") or "unknown")
+        aligned_dimension_records = [
+            record
+            for record in causal_support_records
+            if str(record.get("dimension") or "unknown") == hypothesis_dimension
+            and hypothesis_dimension != "unknown"
+        ]
+        inferred_mismatch_records = [
+            record
+            for record in causal_support_records
+            if str(record.get("dimension_origin") or "unknown") == "inferred"
+            and str(record.get("dimension") or "unknown")
+            not in {hypothesis_dimension, "unknown"}
+        ]
+        dimension_alignment_weight = _independent_weight(
+            aligned_dimension_records
+        )
+        dimension_mismatch_weight = _independent_weight(
+            inferred_mismatch_records
+        )
+        ownership_bonus = {
+            "isolated": 1.0,
+            "graph_linked": 0.7,
+            "direct_artifact": 0.3,
+            "observational": 0.0,
+        }[causal_sufficiency]
+        ownership_weight = round(
+            max(
+                0.0,
+                confirmatory_weight
+                + ownership_bonus
+                + (0.25 * dimension_alignment_weight)
+                - (0.25 * dimension_mismatch_weight)
+                - (0.5 * contradict_weight),
+            ),
+            4,
         )
         if (
             contradict_weight >= 0.7
@@ -2245,9 +2851,12 @@ def evaluate_packet(
         ):
             status = "refuted"
         elif (
-            confirmatory_weight >= 1.25 and (discriminating or direct_artifact)
+            causal_sufficiency in {"isolated", "graph_linked"}
+            and confirmatory_weight >= 0.8
         ) or (
-            confirmatory_weight >= 0.85 and discriminating and direct_artifact
+            causal_sufficiency == "direct_artifact"
+            and len(direct_artifact_records) >= 2
+            and confirmatory_weight >= 1.6
         ):
             status = "supported"
         elif support_weight > 0:
@@ -2255,7 +2864,9 @@ def evaluate_packet(
         else:
             status = "untested"
         blockers: list[str] = []
-        downstream_only = bool(support_records) and not causal_support_records
+        downstream_only = bool(linked_support_records) and not (
+            causal_support_records or context_records or implicit_contradict_records
+        )
         if downstream_only:
             blockers.append(
                 "Support is downstream of the earliest structured causal break."
@@ -2263,14 +2874,54 @@ def evaluate_packet(
         if item.get("dimension") == "unknown" and status == "supported":
             status = "provisional"
             blockers.append("Unknown is not a confirmable causal family; isolate a known dimension first.")
+        attribution_gap_blocked = False
+        dimension = str(item.get("dimension") or "unknown")
         if (
-            (drift or runtime_source_mismatch)
-            and item.get("dimension") == "code"
+            unresolved_attribution
+            and status == "refuted"
+            and causal_support_weight > 0
+            and contradict_weight <= confirmatory_weight + 0.25
+        ):
+            status = "blocked"
+            attribution_gap_blocked = True
+            blockers.append(
+                "Mixed causal support and counterevidence cannot be resolved without missing execution attribution."
+            )
+        if drift and status in {"supported", "provisional"}:
+            if dimension == "test_harness":
+                if (
+                    unresolved_attribution
+                    or _causal_sufficiency_rank(causal_sufficiency) < 2
+                ):
+                    status = "provisional"
+                    blockers.append(
+                        "Baseline drift identifies a comparison-harness confound, but its exact component remains unresolved."
+                    )
+            elif _causal_sufficiency_rank(causal_sufficiency) < 2:
+                status = "blocked"
+                blockers.append(
+                    "Baseline drift remains unexplained and this causal family was not isolated."
+                )
+        if (
+            runtime_source_mismatch
+            and dimension == "code"
             and status in {"supported", "provisional"}
+            and _causal_sufficiency_rank(causal_sufficiency) < 2
         ):
             status = "blocked"
             blockers.append(
-                "Code causality is not isolated while baseline or source/runtime revision parity differs."
+                "Code causality is not isolated while source/runtime revision parity differs."
+            )
+        if (
+            unresolved_attribution
+            and status in {"supported", "provisional"}
+            and _causal_sufficiency_rank(causal_sufficiency) < 2
+            and not (dimension == "test_harness" and bool(drift))
+        ):
+            status = "blocked"
+            attribution_gap_blocked = True
+            blockers.append(
+                "Retained evidence cannot attribute the suspected mechanism to the failing correlation or execution path."
             )
         denominator = support_weight + contradict_weight + 1.0
         confidence = max(0.0, min(0.99, support_weight / denominator))
@@ -2282,13 +2933,26 @@ def evaluate_packet(
                 "status": status,
                 "confidence": round(confidence, 4),
                 "support_weight": support_weight,
+                "causal_support_weight": causal_support_weight,
+                "context_weight": context_weight,
                 "confirmatory_weight": confirmatory_weight,
                 "contradict_weight": contradict_weight,
+                "ownership_weight": ownership_weight,
+                "dimension_alignment_weight": dimension_alignment_weight,
+                "dimension_mismatch_weight": dimension_mismatch_weight,
+                "causal_sufficiency": causal_sufficiency,
+                "causal_support_evidence_ids": [
+                    str(record.get("evidence_id") or "")
+                    for record in causal_support_records
+                    if str(record.get("evidence_id") or "")
+                ],
                 "discriminating_evidence": discriminating,
                 "typed_probe_evidence": typed_probe_evidence,
-                "earliest_break_support": earliest_break_id in support_ids,
-                "provenance_break_support": provenance_break_evidence_id in support_ids,
+                "earliest_break_support": earliest_break_support,
+                "earliest_break_graph_qualified": earliest_break_graph_qualified,
+                "provenance_break_support": provenance_break_support,
                 "downstream_only_support": downstream_only,
+                "attribution_gap_blocked": attribution_gap_blocked,
                 "blockers": blockers,
             }
         )
@@ -2298,14 +2962,29 @@ def evaluate_packet(
     conclusion_id = str(requested.get("hypothesis_id") or "")
     chosen = results_by_id.get(conclusion_id)
     requested_choice_id = conclusion_id
-    if chosen is None and hypothesis_results:
-        chosen = max(
-            hypothesis_results,
-            key=lambda item: (
-                item.get("status") == "supported",
-                float(item.get("support_weight") or 0) - float(item.get("contradict_weight") or 0),
-            ),
+
+    def selection_rank(
+        item: Mapping[str, Any],
+    ) -> tuple[int, bool, int, float, float, float]:
+        status_rank = {
+            "supported": 4,
+            "provisional": 3,
+            "blocked": 2,
+            "untested": 1,
+            "refuted": 0,
+        }.get(str(item.get("status") or "untested"), 0)
+        return (
+            status_rank,
+            bool(item.get("typed_probe_evidence")),
+            _causal_sufficiency_rank(item.get("causal_sufficiency")),
+            float(item.get("ownership_weight") or 0),
+            float(item.get("confirmatory_weight") or 0),
+            float(item.get("support_weight") or 0)
+            - float(item.get("contradict_weight") or 0),
         )
+
+    if chosen is None and hypothesis_results:
+        chosen = max(hypothesis_results, key=selection_rank)
         conclusion_id = str(chosen.get("hypothesis_id") or "")
     if chosen is not None and chosen.get("dimension") == "unknown":
         known_candidates = [
@@ -2315,29 +2994,16 @@ def evaluate_packet(
             and item.get("status") not in {"refuted", "untested"}
         ]
         if known_candidates:
-            chosen = max(
-                known_candidates,
-                key=lambda item: (
-                    item.get("status") == "supported",
-                    bool(item.get("discriminating_evidence")),
-                    float(item.get("confirmatory_weight") or 0),
-                    float(item.get("support_weight") or 0),
-                ),
-            )
+            chosen = max(known_candidates, key=selection_rank)
             conclusion_id = str(chosen.get("hypothesis_id") or "")
     if chosen is not None:
         supported = [item for item in hypothesis_results if item.get("status") == "supported"]
         if supported:
-            def support_rank(item: Mapping[str, Any]) -> tuple[bool, bool, float, float]:
-                return (
-                    bool(item.get("typed_probe_evidence")),
-                    bool(item.get("discriminating_evidence")),
-                    float(item.get("confirmatory_weight") or 0),
-                    float(item.get("support_weight") or 0),
-                )
-
-            strongest_supported = max(supported, key=support_rank)
-            if chosen.get("status") != "supported" or support_rank(strongest_supported) > support_rank(chosen):
+            strongest_supported = max(supported, key=selection_rank)
+            if (
+                chosen.get("status") != "supported"
+                or selection_rank(strongest_supported) > selection_rank(chosen)
+            ):
                 chosen = strongest_supported
                 conclusion_id = str(chosen.get("hypothesis_id") or "")
 
@@ -2346,21 +3012,14 @@ def evaluate_packet(
             item
             for item in hypothesis_results
             if item.get("dimension") == earliest_break_dimension
-            and item.get("status") not in {"refuted", "untested", "blocked"}
+            and item.get("status") not in {"refuted", "untested"}
             and (
                 bool(item.get("earliest_break_support"))
                 or earliest_break_id in (item.get("support_evidence_ids") or [])
             )
         ]
         if causal_candidates:
-            chosen = max(
-                causal_candidates,
-                key=lambda item: (
-                    item.get("status") == "supported",
-                    float(item.get("confirmatory_weight") or 0),
-                    float(item.get("support_weight") or 0),
-                ),
-            )
+            chosen = max(causal_candidates, key=selection_rank)
             conclusion_id = str(chosen.get("hypothesis_id") or "")
 
     if provenance_break_evidence_id and provenance_break_dimension != "unknown":
@@ -2368,7 +3027,7 @@ def evaluate_packet(
             item
             for item in hypothesis_results
             if item.get("dimension") == provenance_break_dimension
-            and item.get("status") not in {"refuted", "untested", "blocked"}
+            and item.get("status") not in {"refuted", "untested"}
             and (
                 bool(item.get("provenance_break_support"))
                 or provenance_break_evidence_id
@@ -2376,58 +3035,84 @@ def evaluate_packet(
             )
         ]
         if provenance_candidates:
-            chosen = max(
-                provenance_candidates,
-                key=lambda item: (
-                    item.get("status") == "supported",
-                    float(item.get("confirmatory_weight") or 0),
-                    float(item.get("support_weight") or 0),
-                ),
-            )
+            chosen = max(provenance_candidates, key=selection_rank)
             conclusion_id = str(chosen.get("hypothesis_id") or "")
 
-    problem_dimension = infer_dimension(str(case.get("problem_statement") or ""))
+    if drift and problem_dimension == "test_harness":
+        strong_closed_cause = bool(
+            chosen
+            and chosen.get("dimension") != "test_harness"
+            and chosen.get("status") == "supported"
+            and _causal_sufficiency_rank(chosen.get("causal_sufficiency")) >= 2
+        )
+        harness_candidates = [
+            item
+            for item in hypothesis_results
+            if item.get("dimension") == "test_harness"
+            and item.get("status") not in {"refuted", "untested"}
+        ]
+        if harness_candidates and not strong_closed_cause:
+            chosen = max(harness_candidates, key=selection_rank)
+            conclusion_id = str(chosen.get("hypothesis_id") or "")
+
     if (
         chosen is not None
         and problem_dimension not in {"unknown", str(chosen.get("dimension") or "unknown")}
-        and not bool(chosen.get("discriminating_evidence"))
+        and _causal_sufficiency_rank(chosen.get("causal_sufficiency")) < 2
     ):
         problem_candidates = [
             item
             for item in hypothesis_results
             if item.get("dimension") == problem_dimension
-            and item.get("status") not in {"refuted", "untested", "blocked"}
+            and item.get("status") not in {"refuted", "untested"}
         ]
         if problem_candidates:
-            problem_candidate = max(
-                problem_candidates,
-                key=lambda item: (
-                    float(item.get("support_weight") or 0),
-                    float(item.get("confirmatory_weight") or 0),
-                ),
-            )
+            problem_candidate = max(problem_candidates, key=selection_rank)
             if (
-                float(problem_candidate.get("support_weight") or 0) + 0.9
-                > float(chosen.get("support_weight") or 0)
+                float(problem_candidate.get("ownership_weight") or 0) + 0.6
+                > float(chosen.get("ownership_weight") or 0)
+                or bool(problem_candidate.get("attribution_gap_blocked"))
             ):
                 chosen = problem_candidate
                 conclusion_id = str(chosen.get("hypothesis_id") or "")
 
     requested_status = str(requested.get("status") or "provisional")
+    promotion_reason = ""
     if chosen is None:
         effective_status = "inconclusive"
-    elif requested_status == "rejected" or chosen.get("status") == "refuted":
+    elif chosen.get("status") == "refuted":
         effective_status = "rejected"
     elif (
-        requested_status not in {"inconclusive", "rejected"}
-        and chosen.get("status") == "supported"
-        and not errors
-        and (
-            conclusion_id == requested_choice_id
-            or bool(chosen.get("typed_probe_evidence"))
+        requested_status == "rejected"
+        and not (
+            chosen.get("status") == "supported"
+            and _causal_sufficiency_rank(chosen.get("causal_sufficiency")) >= 2
+            and not chosen.get("blockers")
+            and not errors
         )
     ):
+        effective_status = "rejected"
+    elif (
+        requested_status == "confirmed"
+        and chosen.get("status") == "supported"
+        and not errors
+        and _causal_sufficiency_rank(chosen.get("causal_sufficiency")) >= 1
+        and not chosen.get("blockers")
+    ):
         effective_status = "confirmed"
+    elif (
+        requested_status in {"provisional", "inconclusive", "rejected"}
+        and chosen.get("status") == "supported"
+        and not errors
+        and _causal_sufficiency_rank(chosen.get("causal_sufficiency")) >= 2
+        and not chosen.get("blockers")
+    ):
+        effective_status = "confirmed"
+        promotion_reason = (
+            "Deterministic evidence gate promoted a cautious conclusion only after isolated or graph-linked proof."
+        )
+    elif requested_status == "inconclusive":
+        effective_status = "inconclusive"
     elif chosen.get("status") in {"blocked", "untested"}:
         effective_status = "inconclusive"
     else:
@@ -2448,7 +3133,7 @@ def evaluate_packet(
                 }
             )
 
-    if effective_status == "confirmed":
+    if effective_status == "confirmed" and not (chosen or {}).get("blockers"):
         decision = "patch_root_cause"
     elif (
         effective_status == "provisional"
@@ -2463,10 +3148,16 @@ def evaluate_packet(
         decision = "investigate"
 
     recommendations = recommend_counterfactuals(case, packet, hypothesis_results, drift)
-    selected_evidence_ids = list(requested.get("evidence_ids") or [])
+    chosen_causal_evidence_ids = list(
+        (chosen or {}).get("causal_support_evidence_ids") or []
+    )
+    selected_evidence_ids = (
+        chosen_causal_evidence_ids
+        or list((chosen or {}).get("support_evidence_ids") or [])
+        or list(requested.get("evidence_ids") or [])
+    )
     selected_reason = str(requested.get("reason") or "")
     if conclusion_id and conclusion_id != requested_choice_id and chosen is not None:
-        selected_evidence_ids = list(chosen.get("support_evidence_ids") or [])
         selected_reason = (
             "Deterministic evidence gate selected a stronger supported competing hypothesis."
         )
@@ -2476,6 +3167,13 @@ def evaluate_packet(
         "valid": not errors,
         "errors": errors,
         "baseline_drift": drift,
+        "attribution_assessment": {
+            "unresolved": unresolved_attribution,
+            "evidence_ids": [
+                str(item.get("evidence_id") or "")
+                for item in attribution_gap_records
+            ],
+        },
         "causal_timeline": causal_timeline,
         "provenance_graph": provenance_graph,
         "hypothesis_results": hypothesis_results,
@@ -2487,6 +3185,12 @@ def evaluate_packet(
             "confidence": float(chosen.get("confidence") or 0) if chosen else 0.0,
             "evidence_ids": selected_evidence_ids,
             "reason": selected_reason,
+            "requested_status": requested_status,
+            "causal_sufficiency": str(
+                chosen.get("causal_sufficiency") or "observational"
+            ) if chosen else "observational",
+            "promotion_reason": promotion_reason,
+            "blockers": list(chosen.get("blockers") or []) if chosen else [],
         },
         "decision": decision,
         "retractions": retractions,
@@ -2581,11 +3285,6 @@ def heuristic_packet(raw_case: Mapping[str, Any]) -> dict[str, Any]:
             for item in records
             if str(item.get("causal_role") or "context") == "context"
         ]
-        contradiction_records = [
-            item
-            for item in records
-            if str(item.get("causal_role") or "") == "contradiction"
-        ]
         hypotheses.append(
             {
                 "hypothesis_id": hypothesis_id,
@@ -2595,10 +3294,7 @@ def heuristic_packet(raw_case: Mapping[str, Any]) -> dict[str, Any]:
                     str(item.get("evidence_id"))
                     for item in [*support_records, *context_records]
                 ],
-                "contradict_evidence_ids": [
-                    str(item.get("evidence_id"))
-                    for item in contradiction_records
-                ],
+                "contradict_evidence_ids": [],
                 "falsification": f"Hold every other dimension constant and show that changing {dimension} does not change the outcome.",
             }
         )
@@ -2645,12 +3341,14 @@ def _case_prompt(case: Mapping[str, Any]) -> str:
         "evidence_id",
         "statement",
         "dimension",
+        "dimension_origin",
         "kind",
         "provenance",
         "independence_key",
         "reliability",
         "discriminating",
         "causal_role",
+        "attribution_gap",
         "comparison_key",
         "code_revision",
         "input_fingerprint",
@@ -2752,6 +3450,9 @@ def _report_prompt(report: Mapping[str, Any]) -> str:
                     "support_evidence_ids",
                     "contradict_evidence_ids",
                     "discriminating_evidence",
+                    "causal_sufficiency",
+                    "ownership_weight",
+                    "attribution_gap_blocked",
                     "blockers",
                 )
                 if _has_prompt_value(item.get(key))
@@ -2762,6 +3463,7 @@ def _report_prompt(report: Mapping[str, Any]) -> str:
             "valid": bool(report.get("valid")),
             "errors": list(report.get("errors") or [])[:6],
             "baseline_drift": list(report.get("baseline_drift") or [])[:2],
+            "attribution_assessment": report.get("attribution_assessment") or {},
             "decision": report.get("decision"),
             "conclusion": report.get("conclusion") or {},
             "hypothesis_results": hypothesis_results[:4],
@@ -2862,11 +3564,27 @@ def _repair_candidate_contract(
     """
     normalized = normalize_packet(candidate)
     previous = normalize_packet(previous_packet)
-    evidence_dimensions = {
-        str(item.get("evidence_id") or ""): str(item.get("dimension") or "unknown")
+    evidence_contracts = {
+        str(item.get("evidence_id") or ""): {
+            "dimension": str(item.get("dimension") or "unknown"),
+            "dimension_origin": str(item.get("dimension_origin") or "unknown"),
+            "causal_role": str(item.get("causal_role") or "context"),
+            "provenance": str(item.get("provenance") or ""),
+        }
         for item in case.get("observations") or []
         if isinstance(item, Mapping) and str(item.get("evidence_id") or "")
     }
+
+    def support_is_compatible(evidence_id: str, dimension: str) -> bool:
+        contract = evidence_contracts.get(evidence_id)
+        if not contract or contract.get("causal_role") == "contradiction":
+            return False
+        hard_owned = (
+            contract.get("dimension_origin") == "explicit"
+            or str(contract.get("provenance") or "").startswith("diagnostic_probe:")
+        )
+        return not hard_owned or contract.get("dimension") in {dimension, "unknown"}
+
     previous_by_id = {
         str(item.get("hypothesis_id") or ""): item
         for item in previous.get("hypotheses") or []
@@ -2895,21 +3613,39 @@ def _repair_candidate_contract(
         aligned_support = [
             evidence_id
             for evidence_id in raw_support
-            if evidence_id in evidence_dimensions
-            and evidence_dimensions[evidence_id] in {dimension, "unknown"}
+            if support_is_compatible(str(evidence_id), dimension)
         ]
         prior_support = []
         if prior:
             prior_support = [
                 evidence_id
                 for evidence_id in prior.get("support_evidence_ids") or []
-                if evidence_id in evidence_dimensions
-                and evidence_dimensions[evidence_id] in {dimension, "unknown"}
+                if support_is_compatible(str(evidence_id), dimension)
             ]
-        if aligned_support != raw_support and (aligned_support or prior_support):
-            repairs.append(f"{hypothesis_id}:dropped_mismatched_support")
-        elif aligned_support != raw_support:
-            aligned_support = raw_support
+        if aligned_support != raw_support:
+            dropped_roles = {
+                str((evidence_contracts.get(str(evidence_id)) or {}).get("causal_role") or "")
+                for evidence_id in raw_support
+                if evidence_id not in aligned_support
+            }
+            if "contradiction" in dropped_roles:
+                repairs.append(f"{hypothesis_id}:dropped_contradiction_support")
+            if any(
+                str(evidence_id) not in evidence_contracts
+                for evidence_id in raw_support
+                if evidence_id not in aligned_support
+            ):
+                repairs.append(f"{hypothesis_id}:dropped_unknown_support")
+            if any(
+                str(evidence_id) in evidence_contracts
+                and str(
+                    evidence_contracts[str(evidence_id)].get("causal_role") or ""
+                )
+                != "contradiction"
+                for evidence_id in raw_support
+                if evidence_id not in aligned_support
+            ):
+                repairs.append(f"{hypothesis_id}:dropped_mismatched_support")
         if not aligned_support and prior_support:
             aligned_support = prior_support
             if aligned_support:
@@ -3061,6 +3797,11 @@ def run_local_diagnostic_debate(
         response = model_call(stage, prompt) if model_call is not None else ""
         parsed = parse_json_object(response)
         accepted = parsed is not None
+        requested_conclusion = dict(
+            (normalize_packet(parsed).get("conclusion") or {})
+            if parsed is not None
+            else (packet.get("conclusion") or {})
+        )
         preserved_dimensions: list[str] = []
         contract_repairs: list[str] = []
         if parsed is not None:
@@ -3092,6 +3833,8 @@ def run_local_diagnostic_debate(
                 "errors": candidate_errors,
                 "contract_repairs": contract_repairs,
                 "preserved_hypothesis_dimensions": preserved_dimensions,
+                "requested_conclusion": requested_conclusion,
+                "effective_conclusion": next_report.get("conclusion") or {},
                 "conclusion": next_report.get("conclusion") or {},
                 "retractions": next_report.get("retractions") or [],
             }
@@ -3101,10 +3844,46 @@ def run_local_diagnostic_debate(
         report = next_report
 
     report = {**report, "retractions": all_retractions}
+    effective_conclusion = dict(report.get("conclusion") or {})
+    final_hypotheses = list(packet.get("hypotheses") or [])
+    effective_hypothesis_id = str(
+        effective_conclusion.get("hypothesis_id") or ""
+    )
+    if effective_hypothesis_id and effective_hypothesis_id not in {
+        str(item.get("hypothesis_id") or "")
+        for item in final_hypotheses
+        if isinstance(item, Mapping)
+    }:
+        effective_result = next(
+            (
+                item
+                for item in report.get("hypothesis_results") or []
+                if isinstance(item, Mapping)
+                and str(item.get("hypothesis_id") or "")
+                == effective_hypothesis_id
+            ),
+            None,
+        )
+        if effective_result is not None:
+            final_hypotheses.append(dict(effective_result))
+    final_packet = normalize_packet(
+        {
+            **packet,
+            "hypotheses": final_hypotheses,
+            "conclusion": {
+                "hypothesis_id": effective_hypothesis_id,
+                "status": str(effective_conclusion.get("status") or "inconclusive"),
+                "evidence_ids": list(
+                    effective_conclusion.get("evidence_ids") or []
+                ),
+                "reason": str(effective_conclusion.get("reason") or ""),
+            },
+        }
+    )
     return {
         "schema": DEBATE_SCHEMA,
         "case_id": case["case_id"],
-        "packet": packet,
+        "packet": final_packet,
         "report": report,
         "stages": stages,
         "premium_calls": 0,

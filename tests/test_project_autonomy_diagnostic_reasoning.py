@@ -285,8 +285,8 @@ def test_reconstructs_earliest_break_from_shuffled_cross_service_events():
     assert results["h-state"]["downstream_only_support"] is True
     assert results["h-dependency"]["downstream_only_support"] is True
     assert report["conclusion"]["dimension"] == "runtime"
-    assert report["conclusion"]["status"] == "provisional"
-    assert report["decision"] == "instrument_first"
+    assert report["conclusion"]["status"] == "confirmed"
+    assert report["decision"] == "patch_root_cause"
     assert "causal_timeline" in reasoning.judge_prompt(case, packet, report)
 
 
@@ -429,8 +429,8 @@ def test_provenance_graph_finds_consumer_starvation_before_missing_sink():
     ]
     assert "req-42-sensitive" not in json.dumps(graph)
     assert report["conclusion"]["dimension"] == "state"
-    assert report["conclusion"]["status"] == "provisional"
-    assert report["decision"] == "instrument_first"
+    assert report["conclusion"]["status"] == "confirmed"
+    assert report["decision"] == "patch_root_cause"
     assert "provenance_graph" in reasoning.judge_prompt(case, packet, report)
 
 
@@ -515,7 +515,7 @@ def test_heuristic_evidence_polarity_does_not_count_healthy_controls_as_support(
     )
 
     assert dependency["support_evidence_ids"] == []
-    assert dependency["contradict_evidence_ids"] == ["dependency-control"]
+    assert dependency["contradict_evidence_ids"] == []
     assert report["conclusion"]["dimension"] == "runtime"
     assert report["conclusion"]["status"] == "confirmed"
 
@@ -725,7 +725,7 @@ def test_local_packet_contract_repair_is_grounded_audited_and_fail_closed():
     experiment = result["packet"]["experiments"][0]
 
     assert stage["accepted"] is True
-    assert "h-code:dropped_mismatched_support" in stage["contract_repairs"]
+    assert "h-code:dropped_contradiction_support" in stage["contract_repairs"]
     assert "h-code:restored_grounded_support" in stage["contract_repairs"]
     assert "h-code:restored_falsification" in stage["contract_repairs"]
     assert "x-restart:demoted_unsafe_auto_execute" in stage["contract_repairs"]
@@ -1826,8 +1826,9 @@ def test_local_judge_cannot_relabel_clock_evidence_as_data_support():
         stages_to_run=("judge",),
     )
 
-    assert result["stages"][0]["accepted"] is False
-    assert any("different evidence family" in error for error in result["stages"][0]["errors"])
+    assert result["stages"][0]["accepted"] is True
+    assert "h-data:dropped_mismatched_support" in result["stages"][0]["contract_repairs"]
+    assert result["packet"]["hypotheses"][0]["support_evidence_ids"] == []
     assert result["report"]["conclusion"]["dimension"] == "clock"
 
 
@@ -1856,3 +1857,650 @@ def test_empty_or_unknown_conclusion_packet_is_invalid():
     assert empty["valid"] is False
     assert "At least one falsifiable hypothesis is required." in empty["errors"]
     assert any("unknown evidence" in error for error in unknown["errors"])
+
+
+def test_discriminating_controls_keep_negative_polarity_but_mixed_interventions_support():
+    healthy = reasoning.normalize_evidence(
+        {
+            "evidence_id": "healthy-control",
+            "statement": "The clean worker remains healthy and checksums are identical.",
+            "kind": "experiment",
+            "discriminating": True,
+        }
+    )
+    intervention = reasoning.normalize_evidence(
+        {
+            "evidence_id": "mixed-intervention",
+            "statement": (
+                "The affected revision reproduces the fault while the earlier revision remains correct."
+            ),
+            "kind": "experiment",
+            "discriminating": True,
+        }
+    )
+    negated_intervention = reasoning.normalize_evidence(
+        {
+            "evidence_id": "negated-intervention",
+            "statement": "Changing only the cache does not change the failure.",
+            "kind": "experiment",
+            "discriminating": True,
+        }
+    )
+
+    assert healthy["causal_role"] == "contradiction"
+    assert intervention["causal_role"] == "support"
+    assert negated_intervention["causal_role"] == "contradiction"
+
+
+def test_inferred_dimension_is_advisory_but_explicit_dimension_is_hard_owned():
+    case = reasoning.normalize_case(
+        {
+            "case_id": "dimension-ownership",
+            "problem_statement": "An output changed after a source edit.",
+            "observations": [
+                {
+                    "evidence_id": "inferred-code",
+                    "statement": "Reverting only the source hunk restores the output.",
+                    "kind": "experiment",
+                    "discriminating": True,
+                },
+                {
+                    "evidence_id": "explicit-code",
+                    "statement": "Reverting only the source hunk restores the output.",
+                    "dimension": "code",
+                    "kind": "experiment",
+                    "discriminating": True,
+                },
+            ],
+        }
+    )
+    inferred_packet = reasoning.normalize_packet(
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": "h-data",
+                    "claim": "A transformed input caused the output.",
+                    "dimension": "data",
+                    "support_evidence_ids": ["inferred-code"],
+                    "falsification": "Hold the transformed input constant.",
+                }
+            ],
+            "conclusion": {"hypothesis_id": "h-data", "status": "provisional"},
+        }
+    )
+    explicit_packet = reasoning.normalize_packet(
+        {
+            **inferred_packet,
+            "hypotheses": [
+                {
+                    **inferred_packet["hypotheses"][0],
+                    "support_evidence_ids": ["explicit-code"],
+                }
+            ],
+        }
+    )
+
+    assert case["observations"][0]["dimension_origin"] == "inferred"
+    assert case["observations"][1]["dimension_origin"] == "explicit"
+    assert not any(
+        "different evidence family" in error
+        for error in reasoning._validate_packet(case, inferred_packet)
+    )
+    assert any(
+        "different evidence family" in error
+        for error in reasoning._validate_packet(case, explicit_packet)
+    )
+
+
+def test_case_normalization_preserves_dimension_origin_idempotently():
+    once = reasoning.normalize_case(
+        {
+            "case_id": "dimension-origin-idempotence",
+            "problem_statement": "A source stage plan changed.",
+            "observations": [
+                {
+                    "evidence_id": "inferred",
+                    "statement": "The stage plan differs at one ordering point.",
+                },
+                {
+                    "evidence_id": "explicit",
+                    "statement": "The stage plan differs at one ordering point.",
+                    "dimension": "code",
+                },
+            ],
+        }
+    )
+    twice = reasoning.normalize_case(once)
+
+    assert [item["dimension"] for item in twice["observations"]] == [
+        item["dimension"] for item in once["observations"]
+    ]
+    assert [item["dimension_origin"] for item in twice["observations"]] == [
+        "inferred",
+        "explicit",
+    ]
+
+
+def test_generic_mechanism_vocabulary_maps_to_causal_families_and_ties_stay_unknown():
+    assert reasoning.infer_dimension(
+        "The source stage plan differs at one ordering point."
+    ) == "code"
+    assert reasoning.infer_dimension(
+        "The rendered policy denies the exact service principal."
+    ) == "config"
+    assert reasoning.infer_dimension(
+        "A transitive package version changed in the signed dependency bundle."
+    ) == "dependency"
+    assert reasoning.infer_dimension(
+        "The visual qualification comparison record used a floating runner."
+    ) == "test_harness"
+    assert reasoning.infer_dimension(
+        "The rebuild ordered events by producer event time instead of broker sequence."
+    ) == "clock"
+    assert reasoning.infer_dimension(
+        "Unicode identifier normalization restores every route join."
+    ) == "data"
+    assert reasoning.infer_dimension(
+        "A process snapshot found a loaded module hash outside the signed image inventory."
+    ) == "runtime"
+    assert reasoning.infer_dimension("clock state") == "unknown"
+
+
+def test_isolated_intervention_outranks_multiple_downstream_symptoms():
+    case = {
+        "case_id": "intervention-over-symptoms",
+        "problem_statement": "Two monitors report failures after a policy migration.",
+        "observations": [
+            {
+                "evidence_id": "symptom-a",
+                "statement": "The sink failure counter increased.",
+                "dimension": "runtime",
+                "kind": "metric",
+                "causal_role": "context",
+                "independence_key": "monitor-a",
+                "reliability": 0.99,
+            },
+            {
+                "evidence_id": "symptom-b",
+                "statement": "The delivery latency monitor alerted.",
+                "dimension": "runtime",
+                "kind": "metric",
+                "causal_role": "context",
+                "independence_key": "monitor-b",
+                "reliability": 0.99,
+            },
+            {
+                "evidence_id": "policy-intervention",
+                "statement": "Changing only the rendered principal restores delivery.",
+                "dimension": "config",
+                "kind": "experiment",
+                "independence_key": "policy-replay",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+        ],
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-runtime",
+                "claim": "Runtime load caused delivery failure.",
+                "dimension": "runtime",
+                "support_evidence_ids": ["symptom-a", "symptom-b"],
+                "falsification": "Hold runtime load constant.",
+            },
+            {
+                "hypothesis_id": "h-config",
+                "claim": "The rendered principal blocks delivery.",
+                "dimension": "config",
+                "support_evidence_ids": ["policy-intervention"],
+                "falsification": "Restore only the prior principal.",
+            },
+        ],
+        "conclusion": {"hypothesis_id": "h-runtime", "status": "confirmed"},
+    }
+
+    report = reasoning.evaluate_packet(case, packet)
+    results = {item["hypothesis_id"]: item for item in report["hypothesis_results"]}
+
+    assert results["h-runtime"]["context_weight"] > 0
+    assert results["h-runtime"]["ownership_weight"] == 0
+    assert results["h-config"]["causal_sufficiency"] == "isolated"
+    assert report["conclusion"]["dimension"] == "config"
+    assert report["conclusion"]["status"] == "confirmed"
+
+
+def test_inferred_dimension_alignment_breaks_cross_family_causal_ties_softly():
+    case = {
+        "case_id": "soft-dimension-alignment",
+        "problem_statement": "An event-order replay changes the final state.",
+        "observations": [
+            {
+                "evidence_id": "ordering-replay",
+                "statement": (
+                    "Changing only event time ordering restores the final state."
+                ),
+                "kind": "experiment",
+                "independence_key": "ordering-replay",
+                "reliability": 0.99,
+                "discriminating": True,
+            }
+        ],
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-dependency",
+                "claim": "A dependency changed event ordering.",
+                "dimension": "dependency",
+                "support_evidence_ids": ["ordering-replay"],
+                "falsification": "Hold the dependency constant.",
+            },
+            {
+                "hypothesis_id": "h-clock",
+                "claim": "Event-time ordering changed the final state.",
+                "dimension": "clock",
+                "support_evidence_ids": ["ordering-replay"],
+                "falsification": "Hold event-time ordering constant.",
+            },
+        ],
+        "conclusion": {"hypothesis_id": "h-dependency", "status": "confirmed"},
+    }
+
+    report = reasoning.evaluate_packet(case, packet)
+    results = {item["hypothesis_id"]: item for item in report["hypothesis_results"]}
+
+    assert report["valid"] is True
+    assert results["h-dependency"]["dimension_mismatch_weight"] == 0.99
+    assert results["h-clock"]["dimension_alignment_weight"] == 0.99
+    assert report["conclusion"]["dimension"] == "clock"
+    assert report["conclusion"]["status"] == "confirmed"
+
+
+def test_edge_break_is_earliest_and_same_correlation_sink_is_downstream():
+    case = reasoning.normalize_case(
+        {
+            "case_id": "edge-break-correlation",
+            "problem_statement": "A policy edge denied a produced package.",
+            "observations": [
+                {
+                    "evidence_id": "produced",
+                    "statement": "The producer emitted the package.",
+                    "dimension": "data",
+                    "observed_at": "2026-07-11T10:00:00Z",
+                    "correlation_id": "request-42",
+                },
+                {
+                    "evidence_id": "denied",
+                    "statement": "The exact principal was denied at the policy edge.",
+                    "dimension": "config",
+                    "observed_at": "2026-07-11T10:00:01Z",
+                    "edge_from": "producer",
+                    "edge_to": "consumer",
+                    "expected_edge_state": "allowed",
+                    "actual_edge_state": "denied",
+                    "correlation_id": "request-42",
+                },
+                {
+                    "evidence_id": "sink-absent",
+                    "statement": "The sink has no package for the request.",
+                    "dimension": "data",
+                    "observed_at": "2026-07-11T10:00:02Z",
+                    "expected_state": "present",
+                    "actual_state": "absent",
+                    "correlation_id": "request-42",
+                },
+            ],
+        }
+    )
+
+    timeline = reasoning.reconstruct_causal_timeline(case)
+
+    assert timeline["earliest_break"]["evidence_id"] == "denied"
+    assert "edge_state_mismatch" in timeline["earliest_break"]["violations"]
+    assert "sink-absent" in timeline["downstream_evidence_ids"]
+
+
+def test_unresolved_execution_attribution_blocks_runtime_confirmation():
+    case = {
+        "case_id": "unresolved-runtime-attribution",
+        "problem_statement": (
+            "The process evidence cannot identify which executing process emitted duplicates."
+        ),
+        "observations": [
+            {
+                "evidence_id": "runtime-anomaly",
+                "statement": "The loaded module hash mismatches the signed image inventory.",
+                "dimension": "runtime",
+                "kind": "artifact",
+                "independence_key": "process-snapshot",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "duplicate-symptom",
+                "statement": "One reservation produced two confirmations.",
+                "dimension": "runtime",
+                "kind": "observation",
+                "causal_role": "context",
+                "expected_state": "one_confirmation",
+                "actual_state": "two_confirmations",
+                "independence_key": "sink-ledger",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "missing-link",
+                "statement": (
+                    "No retained span can identify whether that module handled the failing correlation."
+                ),
+                "dimension": "runtime",
+                "kind": "artifact",
+                "independence_key": "retention-audit",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "healthy-control",
+                "statement": "The clean worker remains healthy and checksums are identical.",
+                "dimension": "runtime",
+                "kind": "artifact",
+                "independence_key": "clean-worker",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+        ],
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-runtime",
+                "claim": "The anomalous runtime emitted duplicate confirmations.",
+                "dimension": "runtime",
+                "support_evidence_ids": [
+                    "runtime-anomaly",
+                    "duplicate-symptom",
+                    "missing-link",
+                ],
+                "contradict_evidence_ids": ["healthy-control"],
+                "falsification": "Capture worker identity on dequeue and send spans.",
+            }
+        ],
+        "conclusion": {"hypothesis_id": "h-runtime", "status": "confirmed"},
+    }
+
+    report = reasoning.evaluate_packet(case, packet)
+    result = report["hypothesis_results"][0]
+
+    assert report["attribution_assessment"]["unresolved"] is True
+    assert result["attribution_gap_blocked"] is True
+    assert report["conclusion"]["dimension"] == "runtime"
+    assert report["conclusion"]["status"] == "inconclusive"
+    assert report["decision"] == "instrument_first"
+
+
+def test_visual_baseline_drift_selects_test_harness_without_claiming_exact_component():
+    case = {
+        "case_id": "visual-baseline-drift",
+        "problem_statement": (
+            "A visual qualification comparison changed with constant product source and inputs."
+        ),
+        "observations": [
+            {
+                "evidence_id": "reference",
+                "statement": "The reference comparison record used runner A.",
+                "dimension": "test_harness",
+                "kind": "artifact",
+                "comparison_key": "page-1",
+                "code_revision": "same-revision",
+                "input_fingerprint": "same-input",
+                "environment_fingerprint": "runner-a",
+                "outcome_fingerprint": "reference-hash",
+                "reliability": 1.0,
+            },
+            {
+                "evidence_id": "candidate",
+                "statement": "The candidate comparison record used runner B.",
+                "dimension": "test_harness",
+                "kind": "artifact",
+                "comparison_key": "page-1",
+                "code_revision": "same-revision",
+                "input_fingerprint": "same-input",
+                "environment_fingerprint": "runner-b",
+                "outcome_fingerprint": "candidate-hash",
+                "reliability": 1.0,
+            },
+            {
+                "evidence_id": "missing-environment",
+                "statement": "The original runner image is no longer available.",
+                "dimension": "runtime",
+                "kind": "artifact",
+                "reliability": 0.99,
+            },
+        ],
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-runtime",
+                "claim": "A runtime component changed rendering.",
+                "dimension": "runtime",
+                "support_evidence_ids": ["missing-environment"],
+                "falsification": "Reconstruct the original runner exactly.",
+            }
+        ],
+        "conclusion": {"hypothesis_id": "h-runtime", "status": "confirmed"},
+    }
+
+    report = reasoning.evaluate_packet(case, packet)
+
+    assert report["baseline_drift"]
+    assert report["conclusion"]["dimension"] == "test_harness"
+    assert report["conclusion"]["status"] == "provisional"
+    assert report["decision"] == "instrument_first"
+
+
+def test_provisional_promotion_requires_isolated_or_graph_linked_proof():
+    artifact_case = {
+        "case_id": "artifact-only-promotion",
+        "problem_statement": "A source ordering change altered output.",
+        "observations": [
+            {
+                "evidence_id": "source-a",
+                "statement": "The stage plan differs at one ordering point.",
+                "dimension": "code",
+                "kind": "artifact",
+                "independence_key": "stage-plan",
+                "reliability": 0.95,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "source-b",
+                "statement": "The source trace differs at the same branch.",
+                "dimension": "code",
+                "kind": "artifact",
+                "independence_key": "source-trace",
+                "reliability": 0.95,
+                "discriminating": True,
+            },
+        ],
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-code",
+                "claim": "The ordering change altered output.",
+                "dimension": "code",
+                "support_evidence_ids": ["source-a", "source-b"],
+                "falsification": "Revert only the ordering change.",
+            }
+        ],
+        "conclusion": {"hypothesis_id": "h-code", "status": "provisional"},
+    }
+
+    artifact_report = reasoning.evaluate_packet(artifact_case, packet)
+    experiment_case = {
+        **artifact_case,
+        "case_id": "isolated-promotion",
+        "observations": [
+            *artifact_case["observations"],
+            {
+                "evidence_id": "isolated-revert",
+                "statement": "Reverting only the ordering change restores output.",
+                "dimension": "code",
+                "kind": "experiment",
+                "independence_key": "isolated-revert",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+        ],
+    }
+    experiment_packet = {
+        **packet,
+        "hypotheses": [
+            {
+                **packet["hypotheses"][0],
+                "support_evidence_ids": ["source-a", "source-b", "isolated-revert"],
+            }
+        ],
+    }
+    experiment_report = reasoning.evaluate_packet(experiment_case, experiment_packet)
+    rejected_packet = {
+        **experiment_packet,
+        "conclusion": {"hypothesis_id": "h-code", "status": "rejected"},
+    }
+    rejected_report = reasoning.evaluate_packet(experiment_case, rejected_packet)
+
+    assert artifact_report["hypothesis_results"][0]["status"] == "supported"
+    assert artifact_report["conclusion"]["status"] == "provisional"
+    assert experiment_report["conclusion"]["status"] == "confirmed"
+    assert experiment_report["conclusion"]["promotion_reason"]
+    assert rejected_report["conclusion"]["status"] == "confirmed"
+
+
+def test_stage_history_separates_requested_and_effective_conclusions():
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-clock",
+                "claim": "Replay sizing reads wall time.",
+                "dimension": "clock",
+                "support_evidence_ids": ["clock-result", "caller-source"],
+                "falsification": "Pass only the replay clock.",
+            }
+        ],
+        "conclusion": {"hypothesis_id": "h-clock", "status": "provisional"},
+    }
+
+    debate = reasoning.run_local_diagnostic_debate(
+        _sim_clock_case(),
+        lambda _stage, _prompt: json.dumps(packet),
+        stages_to_run=("judge",),
+    )
+    stage = debate["stages"][0]
+
+    assert stage["requested_conclusion"]["status"] == "provisional"
+    assert stage["effective_conclusion"]["status"] == "confirmed"
+    assert stage["conclusion"] == stage["effective_conclusion"]
+
+
+def test_causal_fallback_restores_omitted_isolation_evidence_and_syncs_final_packet():
+    case = {
+        "case_id": "omitted-isolation-evidence",
+        "problem_statement": "A source ordering change altered output.",
+        "observations": [
+            {
+                "evidence_id": "stage-plan",
+                "statement": "The stage plan differs at one ordering point.",
+                "dimension": "code",
+                "kind": "artifact",
+                "independence_key": "stage-plan",
+                "reliability": 0.95,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "isolated-revert",
+                "statement": "Reverting only the ordering change restores output.",
+                "dimension": "code",
+                "kind": "experiment",
+                "independence_key": "isolated-revert",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+        ],
+        "constraints": {"minimum_hypothesis_dimensions": 1},
+    }
+    model_packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-code",
+                "claim": "The ordering change altered output.",
+                "dimension": "code",
+                "support_evidence_ids": ["stage-plan"],
+                "falsification": "Revert only the ordering change.",
+            }
+        ],
+        "conclusion": {"hypothesis_id": "h-code", "status": "inconclusive"},
+    }
+
+    debate = reasoning.run_local_diagnostic_debate(
+        case,
+        lambda _stage, _prompt: json.dumps(model_packet),
+        stages_to_run=("judge",),
+    )
+
+    assert debate["stages"][0]["requested_conclusion"]["status"] == "inconclusive"
+    assert debate["report"]["conclusion"]["status"] == "confirmed"
+    assert debate["report"]["conclusion"]["hypothesis_id"] == "evidence-code"
+    assert debate["packet"]["conclusion"]["status"] == "confirmed"
+    assert debate["packet"]["conclusion"]["evidence_ids"] == [
+        "stage-plan",
+        "isolated-revert",
+    ]
+    assert any(
+        item["hypothesis_id"] == "evidence-code"
+        for item in debate["packet"]["hypotheses"]
+    )
+
+
+def test_revision_parity_compares_only_compatible_identifier_namespaces():
+    unrelated = reasoning.normalize_case(
+        {
+            "case_id": "unrelated-revisions",
+            "problem_statement": "A process snapshot records source and image identifiers.",
+            "observations": [
+                {
+                    "evidence_id": "snapshot",
+                    "statement": "The process reports one source id and one image id.",
+                    "source_revision": "src-8f41",
+                    "runtime_revision": "img-a91",
+                }
+            ],
+        }
+    )
+    comparable = reasoning.normalize_case(
+        {
+            "case_id": "comparable-revisions",
+            "problem_statement": "The worker runs an older revision.",
+            "observations": [
+                {
+                    "evidence_id": "snapshot",
+                    "statement": "The worker reports revision r1 instead of r2.",
+                    "source_revision": "r2",
+                    "runtime_revision": "r1",
+                }
+            ],
+        }
+    )
+
+    unrelated_parity = reasoning.reconstruct_causal_timeline(unrelated)[
+        "runtime_source_parity"
+    ]
+    comparable_parity = reasoning.reconstruct_causal_timeline(comparable)[
+        "runtime_source_parity"
+    ]
+
+    assert unrelated_parity["status"] == "unknown"
+    assert unrelated_parity["comparable_pair_count"] == 0
+    assert comparable_parity["status"] == "mismatch"
+    assert comparable_parity["comparable_pair_count"] == 1
