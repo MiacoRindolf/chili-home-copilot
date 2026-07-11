@@ -129,6 +129,54 @@ def score_debate(
     }
 
 
+def model_output_quality(
+    case_results: list[dict[str, Any]],
+    requested_stages: tuple[str, ...],
+    *,
+    heuristic_only: bool,
+) -> dict[str, Any]:
+    calls = [
+        call
+        for item in case_results
+        for call in item.get("model_calls") or []
+        if isinstance(call, Mapping)
+    ]
+    stages = [
+        stage
+        for item in case_results
+        for stage in item.get("stages") or []
+        if isinstance(stage, Mapping)
+    ]
+    expected_calls = 0 if heuristic_only else len(case_results) * len(requested_stages)
+    accepted = sum(1 for stage in stages if bool(stage.get("accepted")))
+    cases_with_accepted_stage = sum(
+        1
+        for item in case_results
+        if any(
+            bool(stage.get("accepted"))
+            for stage in item.get("stages") or []
+            if isinstance(stage, Mapping)
+        )
+    )
+    transport_ok = sum(1 for call in calls if bool(call.get("ok")))
+    gate_passed = heuristic_only or (
+        len(calls) == expected_calls
+        and transport_ok == expected_calls
+        and cases_with_accepted_stage == len(case_results)
+    )
+    return {
+        "expected_model_calls": expected_calls,
+        "recorded_model_calls": len(calls),
+        "successful_model_calls": transport_ok,
+        "accepted_model_stages": accepted,
+        "cases_with_accepted_model_stage": cases_with_accepted_stage,
+        "model_output_usable_rate": (
+            round(accepted / len(stages), 4) if stages else 1.0 if heuristic_only else 0.0
+        ),
+        "model_output_gate_passed": gate_passed,
+    }
+
+
 def _markdown(results: Mapping[str, Any]) -> str:
     rows = [
         "# Real-World Diagnostic Reasoning Benchmark",
@@ -140,6 +188,8 @@ def _markdown(results: Mapping[str, Any]) -> str:
         f"- Holdout score: **{results['holdout_score']:.1f}/100**",
         f"- Verdict: **{results['verdict']}**",
         "- Premium calls: **0**",
+        f"- Usable local model stages: **{results['accepted_model_stages']}/{results['recorded_model_calls']}**",
+        f"- Model-output promotion gate: **{'pass' if results['model_output_gate_passed'] else 'fail'}**",
         f"- Average local model latency: **{results['average_local_latency_ms'] / 1000:.1f}s/case**",
         f"- Maximum local model latency: **{results['max_local_latency_ms'] / 1000:.1f}s**",
         "- Fable 5 parity claim: **No**. This run does not include a blinded Fable 5 head-to-head.",
@@ -166,7 +216,8 @@ def _markdown(results: Mapping[str, Any]) -> str:
             "diagnostic contract, not universal superiority over a frontier model.",
             "",
             "The system is eligible for shadow use only when holdout score is at least 90, every case preserves "
-            "the safety gate, and premium calls remain zero. Frontier parity requires a separate blinded, "
+            "the safety gate, premium calls remain zero, and every model-backed case has at least one accepted "
+            "local packet. Transport success without usable JSON is not model reasoning. Frontier parity requires a separate blinded, "
             "multi-repository head-to-head with human adjudication. A rejected local stage is allowed only when "
             "the deterministic evidence fallback remains valid, safe, and fully scored.",
             "",
@@ -275,7 +326,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     all_local = all(
         item["score_detail"]["checks"]["premium_independence"] for item in case_results
     )
-    shadow_ready = bool(holdouts) and holdout_score >= 90 and all_safe and all_local and all(
+    output_quality = model_output_quality(
+        case_results,
+        requested_stages,
+        heuristic_only=bool(args.heuristic_only),
+    )
+    shadow_ready = bool(holdouts) and holdout_score >= 90 and all_safe and all_local and bool(
+        output_quality["model_output_gate_passed"]
+    ) and all(
         item["score_detail"]["score"] >= 80 for item in holdouts
     )
     local_latencies = [
@@ -300,6 +358,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "max_local_latency_ms": max(local_latencies, default=0),
         "fable5_head_to_head_run": False,
         "fable5_parity_claim": False,
+        **output_quality,
         "cases": case_results,
     }
     report_path = Path(args.report).resolve()

@@ -1,0 +1,377 @@
+{
+  "accepted_model_stages": 2,
+  "average_local_latency_ms": 13108.0,
+  "evidence_classification": "targeted_development_repair_after_disclosure",
+  "cases": [
+    {
+      "case_id": "bh2-203",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 10781,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 456
+        },
+        {
+          "error": null,
+          "latency_ms": 13902,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 563
+        },
+        {
+          "error": null,
+          "latency_ms": 14641,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 556
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e2",
+            "e3",
+            "e8"
+          ],
+          "hypothesis_id": "h-data",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-2",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "contradict_evidence_ids": [
+              "e6",
+              "e7"
+            ],
+            "dimension": "data",
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "support_evidence_ids": [
+              "e2",
+              "e3",
+              "e8"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by state drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h-state",
+            "support_evidence_ids": [
+              "e5"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by code drift.",
+            "contradict_evidence_ids": [
+              "e4"
+            ],
+            "dimension": "code",
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "support_evidence_ids": []
+          },
+          {
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h-dependency",
+            "support_evidence_ids": []
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "bh2-203",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by data drift.",
+          "confidence": 0.5026,
+          "dimension": "data",
+          "evidence_ids": [
+            "e2",
+            "e3",
+            "e8"
+          ],
+          "hypothesis_id": "h-data",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "producer_consumer_evidence_chain",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.5026,
+            "confirmatory_weight": 2.92,
+            "contradict_evidence_ids": [
+              "e6",
+              "e7"
+            ],
+            "contradict_weight": 1.89,
+            "dimension": "data",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e2",
+              "e3",
+              "e8"
+            ],
+            "support_weight": 2.92,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.4845,
+            "confirmatory_weight": 0.94,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h-state",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e5"
+            ],
+            "support_weight": 0.94,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [
+              "e4"
+            ],
+            "contradict_weight": 0.95,
+            "dimension": "code",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "status": "refuted",
+            "support_evidence_ids": [],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h-dependency",
+            "status": "untested",
+            "support_evidence_ids": [],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "dimension": "state",
+            "experiment_id": "falsify-h-state",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "dimension": "dependency",
+            "experiment_id": "falsify-h-dependency",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "data",
+          "hypothesis_dimensions": [
+            "code",
+            "data",
+            "dependency",
+            "state"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 100
+      },
+      "source": "sealed_second_holdout_case_03",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": false,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.5026,
+            "dimension": "data",
+            "evidence_ids": [
+              "e2",
+              "e3",
+              "e8"
+            ],
+            "hypothesis_id": "h-data",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [
+            "h1 links support from a different evidence family: e5",
+            "h4 links support from a different evidence family: e7"
+          ],
+          "preserved_hypothesis_dimensions": [
+            "state"
+          ],
+          "response_chars": 1716,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.5026,
+            "dimension": "data",
+            "evidence_ids": [
+              "e2",
+              "e3",
+              "e8"
+            ],
+            "hypothesis_id": "h-data",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 2162,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.5026,
+            "dimension": "data",
+            "evidence_ids": [
+              "e2",
+              "e3",
+              "e8"
+            ],
+            "hypothesis_id": "h-data",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 2143,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    }
+  ],
+  "cases_with_accepted_model_stage": 1,
+  "created_at": "2026-07-11T18:43:15.243296+00:00",
+  "expected_model_calls": 3,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "holdout_score": 100.0,
+  "max_local_latency_ms": 14641,
+  "model": "qwen2.5-coder:7b",
+  "model_output_gate_passed": true,
+  "model_output_usable_rate": 0.6667,
+  "overall_score": 100.0,
+  "premium_calls": 0,
+  "recorded_model_calls": 3,
+  "reference_model": "claude-fable-5",
+  "schema": "chili.realworld-diagnostic-results.v1",
+  "successful_model_calls": 3,
+  "verdict": "shadow_ready"
+}

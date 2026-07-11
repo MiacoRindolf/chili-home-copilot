@@ -8,6 +8,11 @@ from scripts import autopilot_realworld_diagnostic_benchmark as benchmark
 
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "project_autonomy_diagnostics"
+BLINDED_SECOND_ROOT = (
+    Path(__file__).parent
+    / "fixtures"
+    / "project_autonomy_diagnostics_blinded2_20260711"
+)
 
 
 def test_manifest_uses_fable5_and_keeps_oracles_separate():
@@ -44,5 +49,93 @@ def test_heuristic_benchmark_run_is_local_only_and_never_claims_fable_parity(tmp
     assert result["premium_calls"] == 0
     assert result["fable5_head_to_head_run"] is False
     assert result["fable5_parity_claim"] is False
+    assert result["model_output_gate_passed"] is True
     assert result["cases"][0]["score_detail"]["checks"]["safety"] is True
     assert "Fable 5 parity claim: **No**" in (tmp_path / "report.md").read_text(encoding="utf-8")
+
+
+def test_second_blinded_fixture_keeps_oracles_and_dimensions_out_of_public_cases():
+    manifest = json.loads(
+        (BLINDED_SECOND_ROOT / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert manifest["reference_model"] == "claude-fable-5"
+    assert len(manifest["cases"]) == 8
+    assert {item["split"] for item in manifest["cases"]} == {"holdout"}
+    assert {item["evaluation_role"] for item in manifest["cases"]} == {
+        "blinded_holdout_second_run"
+    }
+    for item in manifest["cases"]:
+        case = json.loads(
+            (BLINDED_SECOND_ROOT / item["case"]).read_text(encoding="utf-8")
+        )
+        oracle = json.loads(
+            (BLINDED_SECOND_ROOT / item["oracle"]).read_text(encoding="utf-8")
+        )
+        assert oracle["case_id"] == case["case_id"]
+        assert not any(
+            key.startswith(("expected_", "forbid_")) for key in case
+        )
+        assert {
+            observation.get("dimension")
+            for observation in case["observations"]
+        } == {"unknown"}
+
+
+def test_model_output_gate_rejects_transport_success_without_usable_packets():
+    cases = [
+        {
+            "model_calls": [{"stage": "judge", "ok": True}],
+            "stages": [{"stage": "judge", "accepted": False}],
+        },
+        {
+            "model_calls": [{"stage": "judge", "ok": True}],
+            "stages": [{"stage": "judge", "accepted": False}],
+        },
+    ]
+
+    quality = benchmark.model_output_quality(
+        cases,
+        ("judge",),
+        heuristic_only=False,
+    )
+
+    assert quality["recorded_model_calls"] == 2
+    assert quality["successful_model_calls"] == 2
+    assert quality["accepted_model_stages"] == 0
+    assert quality["model_output_gate_passed"] is False
+
+
+def test_model_output_gate_requires_one_usable_packet_per_case():
+    cases = [
+        {
+            "model_calls": [
+                {"stage": "investigator", "ok": True},
+                {"stage": "judge", "ok": True},
+            ],
+            "stages": [
+                {"stage": "investigator", "accepted": True},
+                {"stage": "judge", "accepted": False},
+            ],
+        },
+        {
+            "model_calls": [
+                {"stage": "investigator", "ok": True},
+                {"stage": "judge", "ok": True},
+            ],
+            "stages": [
+                {"stage": "investigator", "accepted": False},
+                {"stage": "judge", "accepted": True},
+            ],
+        },
+    ]
+
+    quality = benchmark.model_output_quality(
+        cases,
+        ("investigator", "judge"),
+        heuristic_only=False,
+    )
+
+    assert quality["cases_with_accepted_model_stage"] == 2
+    assert quality["model_output_usable_rate"] == 0.5
+    assert quality["model_output_gate_passed"] is True

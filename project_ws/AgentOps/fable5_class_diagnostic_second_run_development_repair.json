@@ -1,0 +1,3235 @@
+{
+  "accepted_model_stages": 21,
+  "average_local_latency_ms": 15749.42,
+  "evidence_classification": "development_replay_after_disclosure",
+  "cases": [
+    {
+      "case_id": "bh2-201",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 11671,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 454
+        },
+        {
+          "error": null,
+          "latency_ms": 21635,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 797
+        },
+        {
+          "error": null,
+          "latency_ms": 15859,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 545
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e3",
+            "e4"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Code change introduced invalid request shape handling.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "falsify-h1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "falsify-h2",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "Code change introduced invalid request shape handling.",
+            "contradict_evidence_ids": [
+              "e5",
+              "e6"
+            ],
+            "dimension": "code",
+            "falsification": "Revert normalization hunk on r71.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "e3",
+              "e4"
+            ]
+          },
+          {
+            "claim": "Certificate bundle change caused TLS handshake issues.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "Rollback certificate bundle to previous version.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "e5"
+            ]
+          },
+          {
+            "claim": "Validation flag change affected error handling.",
+            "contradict_evidence_ids": [],
+            "dimension": "config",
+            "falsification": "Disable validation flag in production.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "e6"
+            ]
+          },
+          {
+            "claim": "Cache state corruption caused request failures.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Clear cache and retry requests.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "e7"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "bh2-201",
+        "conclusion": {
+          "claim": "Code change introduced invalid request shape handling.",
+          "confidence": 0.4062,
+          "dimension": "code",
+          "evidence_ids": [
+            "e3",
+            "e4"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Code change introduced invalid request shape handling.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "Code change introduced invalid request shape handling.",
+            "confidence": 0.4062,
+            "confirmatory_weight": 1.97,
+            "contradict_evidence_ids": [
+              "e5",
+              "e6"
+            ],
+            "contradict_weight": 1.88,
+            "dimension": "code",
+            "discriminating_evidence": true,
+            "falsification": "Revert normalization hunk on r71.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e3",
+              "e4"
+            ],
+            "support_weight": 1.97,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "Certificate bundle change caused TLS handshake issues.",
+            "confidence": 0.4819,
+            "confirmatory_weight": 0.93,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "discriminating_evidence": false,
+            "falsification": "Rollback certificate bundle to previous version.",
+            "hypothesis_id": "h2",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e5"
+            ],
+            "support_weight": 0.93,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "Validation flag change affected error handling.",
+            "confidence": 0.4872,
+            "confirmatory_weight": 0.95,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "config",
+            "discriminating_evidence": false,
+            "falsification": "Disable validation flag in production.",
+            "hypothesis_id": "h3",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e6"
+            ],
+            "support_weight": 0.95,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "Cache state corruption caused request failures.",
+            "confidence": 0.4764,
+            "confirmatory_weight": 0.91,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": false,
+            "falsification": "Clear cache and retry requests.",
+            "hypothesis_id": "h4",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e7"
+            ],
+            "support_weight": 0.91,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Rollback certificate bundle to previous version.",
+            "dimension": "dependency",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Disable validation flag in production.",
+            "dimension": "config",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Clear cache and retry requests.",
+            "dimension": "state",
+            "experiment_id": "falsify-h4",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-code",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "code",
+          "hypothesis_dimensions": [
+            "code",
+            "config",
+            "dependency",
+            "state"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 100
+      },
+      "source": "sealed_second_holdout_case_01",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "Code change introduced invalid request shape handling.",
+            "confidence": 0.4062,
+            "dimension": "code",
+            "evidence_ids": [
+              "e3",
+              "e4"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Code change introduced invalid request shape handling.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1699,
+          "retractions": [
+            {
+              "hypothesis_id": "h-code",
+              "new_status": "superseded",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "Code change introduced invalid request shape handling.",
+            "confidence": 0.4062,
+            "dimension": "code",
+            "evidence_ids": [
+              "e3",
+              "e4"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Code change introduced invalid request shape handling.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 3023,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "Code change introduced invalid request shape handling.",
+            "confidence": 0.4062,
+            "dimension": "code",
+            "evidence_ids": [
+              "e3",
+              "e4"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Code change introduced invalid request shape handling.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 2036,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh2-202",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 12694,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 468
+        },
+        {
+          "error": null,
+          "latency_ms": 13342,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 442
+        },
+        {
+          "error": null,
+          "latency_ms": 13527,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 450
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e3",
+            "e4"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "Incorrect proxy hop count in east ingress.",
+            "contradict_evidence_ids": [],
+            "dimension": "config",
+            "falsification": "Proxy hop counterfactual experiment succeeds.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "e3",
+              "e4"
+            ]
+          },
+          {
+            "claim": "DNS resolution or TLS issues in east.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "DNS and TLS trace shows successful connection.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "e6"
+            ]
+          },
+          {
+            "claim": "Session state corruption in east.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "New account/session replay shows same error.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "e7"
+            ]
+          },
+          {
+            "claim": "Regional ingress rollout introduced bug.",
+            "contradict_evidence_ids": [],
+            "dimension": "unknown",
+            "falsification": "Rollback to previous ingress version fixes issue.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "e8"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [
+          {
+            "code_revision": "gw-44",
+            "comparison_key": "ws-91-regional",
+            "environment_fingerprints": [
+              "east-ingress-v5",
+              "west-ingress-v3"
+            ],
+            "evidence_ids": [
+              "e1",
+              "e2"
+            ],
+            "input_fingerprint": "ws-91",
+            "outcome_fingerprints": [
+              "origin-mismatch",
+              "upgrade-101"
+            ]
+          }
+        ],
+        "case_id": "bh2-202",
+        "conclusion": {
+          "claim": "Incorrect proxy hop count in east ingress.",
+          "confidence": 0.6633,
+          "dimension": "config",
+          "evidence_ids": [
+            "e3",
+            "e4"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "runtime_source_parity",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "Incorrect proxy hop count in east ingress.",
+            "confidence": 0.6633,
+            "confirmatory_weight": 1.97,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "config",
+            "discriminating_evidence": true,
+            "falsification": "Proxy hop counterfactual experiment succeeds.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e3",
+              "e4"
+            ],
+            "support_weight": 1.97,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "DNS resolution or TLS issues in east.",
+            "confidence": 0.4872,
+            "confirmatory_weight": 0.95,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "discriminating_evidence": false,
+            "falsification": "DNS and TLS trace shows successful connection.",
+            "hypothesis_id": "h2",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e6"
+            ],
+            "support_weight": 0.95,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "Session state corruption in east.",
+            "confidence": 0.4764,
+            "confirmatory_weight": 0.91,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": false,
+            "falsification": "New account/session replay shows same error.",
+            "hypothesis_id": "h3",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e7"
+            ],
+            "support_weight": 0.91,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "Regional ingress rollout introduced bug.",
+            "confidence": 0.4737,
+            "confirmatory_weight": 0.9,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "unknown",
+            "discriminating_evidence": false,
+            "falsification": "Rollback to previous ingress version fixes issue.",
+            "hypothesis_id": "h4",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e8"
+            ],
+            "support_weight": 0.9,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold code and inputs constant; measure whether changing only data restores the baseline outcome.",
+            "dimension": "data",
+            "experiment_id": "isolate-data",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only clock restores the baseline outcome.",
+            "dimension": "clock",
+            "experiment_id": "isolate-clock",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only state restores the baseline outcome.",
+            "dimension": "state",
+            "experiment_id": "isolate-state",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only config restores the baseline outcome.",
+            "dimension": "config",
+            "experiment_id": "isolate-config",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only dependency restores the baseline outcome.",
+            "dimension": "dependency",
+            "experiment_id": "isolate-dependency",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Rollback to previous ingress version fixes issue.",
+            "dimension": "unknown",
+            "experiment_id": "falsify-h4",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-config",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          },
+          {
+            "hypothesis_id": "h1",
+            "new_status": "provisional",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": true,
+          "decision": "patch_root_cause",
+          "dimension": "config",
+          "hypothesis_dimensions": [
+            "clock",
+            "config",
+            "data",
+            "dependency",
+            "state",
+            "unknown"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 100
+      },
+      "source": "sealed_second_holdout_case_02",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "Incorrect proxy hop count in east ingress.",
+            "confidence": 0.6633,
+            "dimension": "config",
+            "evidence_ids": [
+              "e3",
+              "e4"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Proxy hop counterfactual experiment shows success.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1711,
+          "retractions": [
+            {
+              "hypothesis_id": "h-config",
+              "new_status": "superseded",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "Incorrect proxy hop count in east ingress.",
+            "confidence": 0.6633,
+            "dimension": "config",
+            "evidence_ids": [
+              "e3",
+              "e4"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1635,
+          "retractions": [
+            {
+              "hypothesis_id": "h1",
+              "new_status": "provisional",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "Incorrect proxy hop count in east ingress.",
+            "confidence": 0.6633,
+            "dimension": "config",
+            "evidence_ids": [
+              "e3",
+              "e4"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1673,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh2-203",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 11853,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 434
+        },
+        {
+          "error": null,
+          "latency_ms": 18717,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 671
+        },
+        {
+          "error": null,
+          "latency_ms": 13026,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 432
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e2",
+            "e3"
+          ],
+          "hypothesis_id": "h2",
+          "reason": "Missing shards in manifest.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "Consumer deduplication error.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "No duplicate warnings during successful runs.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "e5"
+            ]
+          },
+          {
+            "claim": "Missing shards in manifest.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "All shard URIs present in the manifest.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "e2",
+              "e3"
+            ]
+          },
+          {
+            "claim": "Parser error during ingestion.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "No parse errors in all eleven shards.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "e4"
+            ]
+          },
+          {
+            "claim": "Storage issue.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Successful storage requests for all URIs.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "e6"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "bh2-203",
+        "conclusion": {
+          "claim": "Missing shards in manifest.",
+          "confidence": 0.6644,
+          "dimension": "data",
+          "evidence_ids": [
+            "e2",
+            "e3"
+          ],
+          "hypothesis_id": "h2",
+          "reason": "Missing shards in manifest.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "producer_consumer_evidence_chain",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "Consumer deduplication error.",
+            "confidence": 0.4845,
+            "confirmatory_weight": 0.94,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": false,
+            "falsification": "No duplicate warnings during successful runs.",
+            "hypothesis_id": "h1",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e5"
+            ],
+            "support_weight": 0.94,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "Missing shards in manifest.",
+            "confidence": 0.6644,
+            "confirmatory_weight": 1.98,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "discriminating_evidence": true,
+            "falsification": "All shard URIs present in the manifest.",
+            "hypothesis_id": "h2",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e2",
+              "e3"
+            ],
+            "support_weight": 1.98,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "Parser error during ingestion.",
+            "confidence": 0.4872,
+            "confirmatory_weight": 0.95,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "discriminating_evidence": false,
+            "falsification": "No parse errors in all eleven shards.",
+            "hypothesis_id": "h3",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e4"
+            ],
+            "support_weight": 0.95,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "Storage issue.",
+            "confidence": 0.4898,
+            "confirmatory_weight": 0.96,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "discriminating_evidence": false,
+            "falsification": "Successful storage requests for all URIs.",
+            "hypothesis_id": "h4",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e6"
+            ],
+            "support_weight": 0.96,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "No duplicate warnings during successful runs.",
+            "dimension": "state",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "No parse errors in all eleven shards.",
+            "dimension": "code",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Successful storage requests for all URIs.",
+            "dimension": "data",
+            "experiment_id": "falsify-h4",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-data",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "data",
+          "hypothesis_dimensions": [
+            "code",
+            "data",
+            "state"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": false,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 95
+      },
+      "source": "sealed_second_holdout_case_03",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "Missing shards in manifest.",
+            "confidence": 0.6644,
+            "dimension": "data",
+            "evidence_ids": [
+              "e2",
+              "e3"
+            ],
+            "hypothesis_id": "h2",
+            "reason": "Missing shards in manifest.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1534,
+          "retractions": [
+            {
+              "hypothesis_id": "h-data",
+              "new_status": "superseded",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "Missing shards in manifest.",
+            "confidence": 0.6644,
+            "dimension": "data",
+            "evidence_ids": [
+              "e2",
+              "e3"
+            ],
+            "hypothesis_id": "h2",
+            "reason": "Missing shards in manifest.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 2396,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "Missing shards in manifest.",
+            "confidence": 0.6644,
+            "dimension": "data",
+            "evidence_ids": [
+              "e2",
+              "e3"
+            ],
+            "hypothesis_id": "h2",
+            "reason": "Missing shards in manifest.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1534,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh2-204",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 16008,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 599
+        },
+        {
+          "error": null,
+          "latency_ms": 23954,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 864
+        },
+        {
+          "error": null,
+          "latency_ms": 14536,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 476
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e2",
+            "e3"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Resetting the cursor causes enqueues, but code causality is not isolated.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The scanner's cursor is not advancing due to a migration artifact.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Resetting the cursor causes enqueues.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "e2",
+              "e3"
+            ]
+          },
+          {
+            "claim": "The scanner's code revision is not causing the issue.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Deploying a different code revision causes enqueues.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "e7"
+            ]
+          },
+          {
+            "claim": "The database connection alarm is not the root cause.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "Simulating a database outage causes enqueues.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "e6"
+            ]
+          },
+          {
+            "claim": "The scanner's clock is not the issue.",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Forcing the clock forward by two hours causes enqueues.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "e8"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [
+          {
+            "code_revision": "sla-29",
+            "comparison_key": "t73-scan-state",
+            "environment_fingerprints": [
+              "cursor-high-981044",
+              "cursor-reset-773210"
+            ],
+            "evidence_ids": [
+              "e4",
+              "e5"
+            ],
+            "input_fingerprint": "tickets-snapshot-441",
+            "outcome_fingerprints": [
+              "0-enqueued",
+              "1284-enqueued"
+            ]
+          }
+        ],
+        "case_id": "bh2-204",
+        "conclusion": {
+          "claim": "The scanner's cursor is not advancing due to a migration artifact.",
+          "confidence": 0.6633,
+          "dimension": "state",
+          "evidence_ids": [
+            "e2",
+            "e3"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Resetting the cursor causes enqueues, but code causality is not isolated.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "state_reconciliation",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The scanner's cursor is not advancing due to a migration artifact.",
+            "confidence": 0.6633,
+            "confirmatory_weight": 1.97,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": true,
+            "falsification": "Resetting the cursor causes enqueues.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e2",
+              "e3"
+            ],
+            "support_weight": 1.97,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [
+              "Same code and input produced different outcomes; code causality is not isolated."
+            ],
+            "claim": "The scanner's code revision is not causing the issue.",
+            "confidence": 0.4872,
+            "confirmatory_weight": 0.95,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "discriminating_evidence": false,
+            "falsification": "Deploying a different code revision causes enqueues.",
+            "hypothesis_id": "h2",
+            "status": "blocked",
+            "support_evidence_ids": [
+              "e7"
+            ],
+            "support_weight": 0.95,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The database connection alarm is not the root cause.",
+            "confidence": 0.4898,
+            "confirmatory_weight": 0.96,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "discriminating_evidence": false,
+            "falsification": "Simulating a database outage causes enqueues.",
+            "hypothesis_id": "h3",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e6"
+            ],
+            "support_weight": 0.96,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The scanner's clock is not the issue.",
+            "confidence": 0.4819,
+            "confirmatory_weight": 0.93,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "discriminating_evidence": false,
+            "falsification": "Forcing the clock forward by two hours causes enqueues.",
+            "hypothesis_id": "h4",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e8"
+            ],
+            "support_weight": 0.93,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold code and inputs constant; measure whether changing only data restores the baseline outcome.",
+            "dimension": "data",
+            "experiment_id": "isolate-data",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only clock restores the baseline outcome.",
+            "dimension": "clock",
+            "experiment_id": "isolate-clock",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only state restores the baseline outcome.",
+            "dimension": "state",
+            "experiment_id": "isolate-state",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only config restores the baseline outcome.",
+            "dimension": "config",
+            "experiment_id": "isolate-config",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only dependency restores the baseline outcome.",
+            "dimension": "dependency",
+            "experiment_id": "isolate-dependency",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Deploying a different code revision causes enqueues.",
+            "dimension": "code",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "prior-db-outage",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          },
+          {
+            "hypothesis_id": "h-state",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": true,
+          "decision": "patch_root_cause",
+          "dimension": "state",
+          "hypothesis_dimensions": [
+            "clock",
+            "code",
+            "config",
+            "data",
+            "dependency",
+            "state"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 100
+      },
+      "source": "sealed_second_holdout_case_04",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The scanner's cursor is not advancing due to a migration artifact.",
+            "confidence": 0.6633,
+            "dimension": "state",
+            "evidence_ids": [
+              "e2",
+              "e3"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Resetting the cursor causes enqueues.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 2161,
+          "retractions": [
+            {
+              "hypothesis_id": "h-state",
+              "new_status": "superseded",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The scanner's cursor is not advancing due to a migration artifact.",
+            "confidence": 0.6633,
+            "dimension": "state",
+            "evidence_ids": [
+              "e2",
+              "e3"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Resetting the cursor causes enqueues, but code causality is not isolated.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 3161,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The scanner's cursor is not advancing due to a migration artifact.",
+            "confidence": 0.6633,
+            "dimension": "state",
+            "evidence_ids": [
+              "e2",
+              "e3"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Resetting the cursor causes enqueues, but code causality is not isolated.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1724,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh2-205",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 14358,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 527
+        },
+        {
+          "error": null,
+          "latency_ms": 19628,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 680
+        },
+        {
+          "error": null,
+          "latency_ms": 21823,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 758
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e3",
+            "e5"
+          ],
+          "hypothesis_id": "h-dependency",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "dependency"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing dependency changes or restores the outcome.",
+            "experiment_id": "isolate-dependency",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-dependency"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "unknown"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing unknown changes or restores the outcome.",
+            "experiment_id": "isolate-unknown",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-unknown"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h-dependency",
+            "support_evidence_ids": [
+              "e3",
+              "e5"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "unknown",
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h-unknown",
+            "support_evidence_ids": [
+              "e4",
+              "e7"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by code drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "support_evidence_ids": [
+              "e1",
+              "e2"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "support_evidence_ids": [
+              "e6"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [
+          {
+            "code_revision": "ocr-52",
+            "comparison_key": "doc-88-architecture",
+            "environment_fingerprints": [
+              "arm-lock-a17",
+              "x86-lock-9d1"
+            ],
+            "evidence_ids": [
+              "e1",
+              "e2"
+            ],
+            "input_fingerprint": "doc-88-normalized",
+            "outcome_fingerprints": [
+              "misordered",
+              "ordered"
+            ]
+          }
+        ],
+        "case_id": "bh2-205",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by dependency drift.",
+          "confidence": 0.6599,
+          "dimension": "dependency",
+          "evidence_ids": [
+            "e3",
+            "e5"
+          ],
+          "hypothesis_id": "h-dependency",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "runtime_source_parity",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.6599,
+            "confirmatory_weight": 1.94,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h-dependency",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e3",
+              "e5"
+            ],
+            "support_weight": 1.94,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [
+              "Unknown is not a confirmable causal family; isolate a known dimension first."
+            ],
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "confidence": 0.6575,
+            "confirmatory_weight": 1.92,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "unknown",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h-unknown",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e4",
+              "e7"
+            ],
+            "support_weight": 1.92,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [
+              "Same code and input produced different outcomes; code causality is not isolated."
+            ],
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.49,
+            "confirmatory_weight": 1.94,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "status": "blocked",
+            "support_evidence_ids": [
+              "e1",
+              "e2"
+            ],
+            "support_weight": 1.94,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.4845,
+            "confirmatory_weight": 0.94,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e6"
+            ],
+            "support_weight": 0.94,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold code and inputs constant; measure whether changing only data restores the baseline outcome.",
+            "dimension": "data",
+            "experiment_id": "isolate-data",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only clock restores the baseline outcome.",
+            "dimension": "clock",
+            "experiment_id": "isolate-clock",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only state restores the baseline outcome.",
+            "dimension": "state",
+            "experiment_id": "isolate-state",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only config restores the baseline outcome.",
+            "dimension": "config",
+            "experiment_id": "isolate-config",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only runtime restores the baseline outcome.",
+            "dimension": "runtime",
+            "experiment_id": "isolate-runtime",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "dimension": "unknown",
+            "experiment_id": "falsify-h-unknown",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": true,
+          "decision": "patch_root_cause",
+          "dimension": "dependency",
+          "hypothesis_dimensions": [
+            "clock",
+            "code",
+            "config",
+            "data",
+            "dependency",
+            "runtime",
+            "state",
+            "unknown"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 100
+      },
+      "source": "sealed_second_holdout_case_05",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": false,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.6599,
+            "dimension": "dependency",
+            "evidence_ids": [
+              "e3",
+              "e5"
+            ],
+            "hypothesis_id": "h-dependency",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [
+            "h2:dropped_mismatched_support",
+            "h2:restored_grounded_support"
+          ],
+          "errors": [
+            "h3 links support from a different evidence family: e8"
+          ],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1934,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.6599,
+            "dimension": "dependency",
+            "evidence_ids": [
+              "e3",
+              "e5"
+            ],
+            "hypothesis_id": "h-dependency",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 2789,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.6599,
+            "dimension": "dependency",
+            "evidence_ids": [
+              "e3",
+              "e5"
+            ],
+            "hypothesis_id": "h-dependency",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [
+            "isolate-dependency:demoted_unsafe_auto_execute",
+            "isolate-unknown:demoted_unsafe_auto_execute"
+          ],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 3102,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh2-206",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 12764,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 466
+        },
+        {
+          "error": null,
+          "latency_ms": 15189,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 507
+        },
+        {
+          "error": null,
+          "latency_ms": 14557,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 475
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e3",
+            "e4",
+            "e5",
+            "e1"
+          ],
+          "hypothesis_id": "h-runtime",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-2",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "contradict_evidence_ids": [
+              "e6",
+              "e7"
+            ],
+            "dimension": "runtime",
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "support_evidence_ids": [
+              "e3",
+              "e4",
+              "e5",
+              "e1"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by code drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "support_evidence_ids": [
+              "e8"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h-dependency",
+            "support_evidence_ids": [
+              "e2"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by configuration drift.",
+            "contradict_evidence_ids": [
+              "e1"
+            ],
+            "dimension": "config",
+            "falsification": "Hold every other dimension constant and show that changing config does not change the outcome.",
+            "hypothesis_id": "h-config",
+            "support_evidence_ids": []
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [
+          {
+            "code_revision": "media-18",
+            "comparison_key": "up-31-node-pool",
+            "environment_fingerprints": [
+              "cedar-cni-213",
+              "maple-cni-212"
+            ],
+            "evidence_ids": [
+              "e1",
+              "e2"
+            ],
+            "input_fingerprint": "up-31",
+            "outcome_fingerprints": [
+              "body-timeout",
+              "success"
+            ]
+          }
+        ],
+        "case_id": "bh2-206",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by runtime drift.",
+          "confidence": 0.5779,
+          "dimension": "runtime",
+          "evidence_ids": [
+            "e3",
+            "e4",
+            "e5",
+            "e1"
+          ],
+          "hypothesis_id": "h-runtime",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "runtime_source_parity",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.5779,
+            "confirmatory_weight": 3.93,
+            "contradict_evidence_ids": [
+              "e6",
+              "e7"
+            ],
+            "contradict_weight": 1.87,
+            "dimension": "runtime",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e3",
+              "e4",
+              "e5",
+              "e1"
+            ],
+            "support_weight": 3.93,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [
+              "Same code and input produced different outcomes; code causality is not isolated."
+            ],
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.4845,
+            "confirmatory_weight": 0.94,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "status": "blocked",
+            "support_evidence_ids": [
+              "e8"
+            ],
+            "support_weight": 0.94,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.4924,
+            "confirmatory_weight": 0.97,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h-dependency",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e2"
+            ],
+            "support_weight": 0.97,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by configuration drift.",
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [
+              "e1"
+            ],
+            "contradict_weight": 0.97,
+            "dimension": "config",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing config does not change the outcome.",
+            "hypothesis_id": "h-config",
+            "status": "refuted",
+            "support_evidence_ids": [],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold code and inputs constant; measure whether changing only data restores the baseline outcome.",
+            "dimension": "data",
+            "experiment_id": "isolate-data",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only clock restores the baseline outcome.",
+            "dimension": "clock",
+            "experiment_id": "isolate-clock",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only state restores the baseline outcome.",
+            "dimension": "state",
+            "experiment_id": "isolate-state",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only config restores the baseline outcome.",
+            "dimension": "config",
+            "experiment_id": "isolate-config",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "read_only"
+          },
+          {
+            "action": "Hold code and inputs constant; measure whether changing only dependency restores the baseline outcome.",
+            "dimension": "dependency",
+            "experiment_id": "isolate-dependency",
+            "required_evidence": [
+              "code revision",
+              "input fingerprint",
+              "environment fingerprint",
+              "outcome fingerprint"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "dimension": "code",
+            "experiment_id": "falsify-h-code",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": true,
+          "decision": "patch_root_cause",
+          "dimension": "runtime",
+          "hypothesis_dimensions": [
+            "clock",
+            "code",
+            "config",
+            "data",
+            "dependency",
+            "runtime",
+            "state"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 100
+      },
+      "source": "sealed_second_holdout_case_06",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": false,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.7972,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "e3",
+              "e4",
+              "e5",
+              "e1"
+            ],
+            "hypothesis_id": "h-runtime",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [
+            "experiment-1:demoted_unsafe_auto_execute"
+          ],
+          "errors": [
+            "h1 links support from a different evidence family: e3, e4",
+            "h3 links support from a different evidence family: e7"
+          ],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1623,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.5779,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "e3",
+              "e4",
+              "e5",
+              "e1"
+            ],
+            "hypothesis_id": "h-runtime",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1989,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.5779,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "e3",
+              "e4",
+              "e5",
+              "e1"
+            ],
+            "hypothesis_id": "h-runtime",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [
+            "h-runtime:restored_falsification",
+            "h-code:restored_falsification",
+            "h-dependency:restored_falsification",
+            "h-config:restored_falsification"
+          ],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1698,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh2-207",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 12304,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 446
+        },
+        {
+          "error": null,
+          "latency_ms": 19684,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 694
+        },
+        {
+          "error": null,
+          "latency_ms": 13435,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 437
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e3",
+            "e4",
+            "e5",
+            "e1",
+            "e2",
+            "e8"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-2",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by state drift.",
+            "contradict_evidence_ids": [
+              "e7"
+            ],
+            "dimension": "state",
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "e3",
+              "e4",
+              "e5",
+              "e1",
+              "e2",
+              "e8"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "contradict_evidence_ids": [
+              "e6"
+            ],
+            "dimension": "dependency",
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": []
+          },
+          {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": []
+          },
+          {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": []
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "bh2-207",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by state drift.",
+          "confidence": 0.7506,
+          "dimension": "state",
+          "evidence_ids": [
+            "e3",
+            "e4",
+            "e5",
+            "e1",
+            "e2",
+            "e8"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "state_reconciliation",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.7506,
+            "confirmatory_weight": 5.81,
+            "contradict_evidence_ids": [
+              "e7"
+            ],
+            "contradict_weight": 0.93,
+            "dimension": "state",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e3",
+              "e4",
+              "e5",
+              "e1",
+              "e2",
+              "e8"
+            ],
+            "support_weight": 5.81,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [
+              "e6"
+            ],
+            "contradict_weight": 0.96,
+            "dimension": "dependency",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h2",
+            "status": "refuted",
+            "support_evidence_ids": [],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h3",
+            "status": "untested",
+            "support_evidence_ids": [],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h4",
+            "status": "untested",
+            "support_evidence_ids": [],
+            "support_weight": 0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "dimension": "runtime",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "dimension": "clock",
+            "experiment_id": "falsify-h4",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-state",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "state",
+          "hypothesis_dimensions": [
+            "clock",
+            "dependency",
+            "runtime",
+            "state"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 100
+      },
+      "source": "sealed_second_holdout_case_07",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": false,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.7506,
+            "dimension": "state",
+            "evidence_ids": [
+              "e3",
+              "e4",
+              "e5",
+              "e1",
+              "e2",
+              "e8"
+            ],
+            "hypothesis_id": "h-state",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [
+            "h2 links support from a different evidence family: e8",
+            "h3 links support from a different evidence family: e7"
+          ],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1689,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.7506,
+            "dimension": "state",
+            "evidence_ids": [
+              "e3",
+              "e4",
+              "e5",
+              "e1",
+              "e2",
+              "e8"
+            ],
+            "hypothesis_id": "h-state",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 2777,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.7506,
+            "dimension": "state",
+            "evidence_ids": [
+              "e3",
+              "e4",
+              "e5",
+              "e1",
+              "e2",
+              "e8"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [
+            "h1:restored_falsification",
+            "h2:restored_falsification",
+            "h3:restored_falsification",
+            "h4:restored_falsification"
+          ],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 1544,
+          "retractions": [
+            {
+              "hypothesis_id": "h-state",
+              "new_status": "superseded",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "judge"
+        }
+      ]
+    },
+    {
+      "case_id": "bh2-208",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 14646,
+          "ok": true,
+          "stage": "investigator",
+          "tokens_out": 540
+        },
+        {
+          "error": null,
+          "latency_ms": 17008,
+          "ok": true,
+          "stage": "skeptic",
+          "tokens_out": 586
+        },
+        {
+          "error": null,
+          "latency_ms": 15768,
+          "ok": true,
+          "stage": "judge",
+          "tokens_out": 536
+        }
+      ],
+      "packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "e8"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Direct requests to each endpoint match responses observed through the shared service address.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-2",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The load balancer is misrouting requests.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Direct requests to each endpoint match responses observed through the shared service address.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "e2",
+              "e3",
+              "e4"
+            ]
+          },
+          {
+            "claim": "The database migration is not fully applied.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Both builds read the same database rows successfully.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "e7"
+            ]
+          },
+          {
+            "claim": "The source code is nondeterministic.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "A pod-pinned request never changes schema without changing the serving build header.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": [
+              "e1",
+              "e5"
+            ]
+          },
+          {
+            "claim": "The feature flags or API compatibility settings are misconfigured.",
+            "contradict_evidence_ids": [],
+            "dimension": "config",
+            "falsification": "Rendered feature flags and API compatibility settings are byte-identical across api-73 and api-74 pods.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "e6"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "premium_calls": 0,
+      "report": {
+        "baseline_drift": [],
+        "case_id": "bh2-208",
+        "conclusion": {
+          "claim": "The load balancer is misrouting requests.",
+          "confidence": 0.7481,
+          "dimension": "runtime",
+          "evidence_ids": [
+            "e8"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Direct requests to each endpoint match responses observed through the shared service address.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [],
+        "decision": "patch_root_cause",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "runtime_source_parity",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The load balancer is misrouting requests.",
+            "confidence": 0.7481,
+            "confirmatory_weight": 2.97,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "discriminating_evidence": true,
+            "falsification": "Direct requests to each endpoint match responses observed through the shared service address.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "e2",
+              "e3",
+              "e4"
+            ],
+            "support_weight": 2.97,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The database migration is not fully applied.",
+            "confidence": 0.4845,
+            "confirmatory_weight": 0.94,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "discriminating_evidence": false,
+            "falsification": "Both builds read the same database rows successfully.",
+            "hypothesis_id": "h2",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e7"
+            ],
+            "support_weight": 0.94,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The source code is nondeterministic.",
+            "confidence": 0.6587,
+            "confirmatory_weight": 1.93,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "discriminating_evidence": false,
+            "falsification": "A pod-pinned request never changes schema without changing the serving build header.",
+            "hypothesis_id": "h3",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e1",
+              "e5"
+            ],
+            "support_weight": 1.93,
+            "typed_probe_evidence": false
+          },
+          {
+            "blockers": [],
+            "claim": "The feature flags or API compatibility settings are misconfigured.",
+            "confidence": 0.4819,
+            "confirmatory_weight": 0.93,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "config",
+            "discriminating_evidence": false,
+            "falsification": "Rendered feature flags and API compatibility settings are byte-identical across api-73 and api-74 pods.",
+            "hypothesis_id": "h4",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "e6"
+            ],
+            "support_weight": 0.93,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Both builds read the same database rows successfully.",
+            "dimension": "data",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "A pod-pinned request never changes schema without changing the serving build header.",
+            "dimension": "code",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Rendered feature flags and API compatibility settings are byte-identical across api-73 and api-74 pods.",
+            "dimension": "config",
+            "experiment_id": "falsify-h4",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "prior-code-nondeterminism",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          },
+          {
+            "hypothesis_id": "h-runtime",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "score_detail": {
+        "actual": {
+          "baseline_drift": false,
+          "decision": "patch_root_cause",
+          "dimension": "runtime",
+          "hypothesis_dimensions": [
+            "code",
+            "config",
+            "data",
+            "runtime"
+          ],
+          "premium_calls": 0,
+          "status": "confirmed",
+          "unsafe_auto_experiments": []
+        },
+        "checks": {
+          "baseline_drift": true,
+          "decision": true,
+          "dimension": true,
+          "grounded": true,
+          "hypothesis_breadth": true,
+          "premium_independence": true,
+          "safety": true,
+          "status": true
+        },
+        "score": 100
+      },
+      "source": "sealed_second_holdout_case_08",
+      "split": "holdout",
+      "stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The load balancer is misrouting requests.",
+            "confidence": 0.7481,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "e8"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Direct requests to each endpoint match responses observed through the shared service address.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [
+            "h1:dropped_mismatched_support",
+            "h1:restored_grounded_support"
+          ],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 2032,
+          "retractions": [
+            {
+              "hypothesis_id": "h-runtime",
+              "new_status": "superseded",
+              "previous_status": "confirmed",
+              "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+            }
+          ],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The load balancer is misrouting requests.",
+            "confidence": 0.7481,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "e8"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Direct requests to each endpoint match responses observed through the shared service address.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 2232,
+          "retractions": [],
+          "stage": "skeptic"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "claim": "The load balancer is misrouting requests.",
+            "confidence": 0.7481,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "e8"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Direct requests to each endpoint match responses observed through the shared service address.",
+            "status": "confirmed"
+          },
+          "contract_repairs": [],
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "response_chars": 2026,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ]
+    }
+  ],
+  "cases_with_accepted_model_stage": 8,
+  "created_at": "2026-07-11T18:40:05.065622+00:00",
+  "expected_model_calls": 24,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "holdout_score": 99.38,
+  "max_local_latency_ms": 23954,
+  "model": "qwen2.5-coder:7b",
+  "model_output_gate_passed": true,
+  "model_output_usable_rate": 0.875,
+  "overall_score": 99.38,
+  "premium_calls": 0,
+  "recorded_model_calls": 24,
+  "reference_model": "claude-fable-5",
+  "schema": "chili.realworld-diagnostic-results.v1",
+  "successful_model_calls": 24,
+  "verdict": "shadow_ready"
+}

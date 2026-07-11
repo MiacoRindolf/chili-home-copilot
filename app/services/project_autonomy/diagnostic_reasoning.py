@@ -33,6 +33,13 @@ DIMENSIONS = (
     "test_harness",
     "unknown",
 )
+DIMENSION_ALIASES = {
+    "concurrency": "state",
+    "deployment": "runtime",
+    "environment": "runtime",
+    "infrastructure": "runtime",
+    "lifecycle": "state",
+}
 AUTO_SAFE_LEVELS = frozenset({"read_only", "isolated"})
 SAFETY_LEVELS = AUTO_SAFE_LEVELS | {"runtime", "live"}
 
@@ -132,7 +139,24 @@ _DIAGNOSTIC_LENS_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 _DIMENSION_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("clock", ("clock", "time", "timestamp", "timezone", "wall hour", "sim hour", "utc", "et hour")),
-    ("data", ("dataset", "row count", "table", "data source", "ingestion source", "sink", "feed", "cache", "snapshot data", "nbbo")),
+    (
+        "data",
+        (
+            "dataset",
+            "row count",
+            "record count",
+            "table",
+            "data source",
+            "ingestion source",
+            "sink",
+            "feed",
+            "cache",
+            "snapshot data",
+            "manifest",
+            "shard",
+            "nbbo",
+        ),
+    ),
     (
         "state",
         (
@@ -142,6 +166,7 @@ _DIMENSION_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "session",
             "board",
             "checkpoint",
+            "cursor",
             "stale row",
             "lifecycle",
             "lease",
@@ -262,6 +287,9 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("gate_enabled", 5),
             ("_true_values", 5),
             ("env.get", 4),
+            ("only that value is changed", 7),
+            ("only that value changed", 7),
+            ("changing only that value", 7),
         ),
     ),
     (
@@ -288,6 +316,18 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("image label", 5),
             ("loaded module hash", 5),
             ("pre-fix behavior", 3),
+            ("node pool", 5),
+            ("network namespace", 6),
+            ("overlay mtu", 7),
+            ("underlay path", 6),
+            ("pod-side mtu", 7),
+            ("encapsulated frames", 6),
+            ("release manifest", 5),
+            ("legacy deployment", 6),
+            ("deployment controller", 6),
+            ("mixed endpoint membership", 7),
+            ("isolated namespace", 5),
+            ("legacy resource", 5),
         ),
     ),
     (
@@ -309,6 +349,10 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("branch returning", 6),
             ("fixed while comparing", 7),
             ("identical captured request", 5),
+            ("source hunk", 7),
+            ("code hunk", 7),
+            ("normalization hunk", 7),
+            ("reverting only that hunk", 7),
         ),
     ),
 )
@@ -387,6 +431,47 @@ _DIRECT_SOURCE_SIGNALS = (
     "queue depth",
     "pending depth",
 )
+_CAUSAL_SUPPORT_MARKERS = (
+    "applying only",
+    "changing only",
+    "lowering only",
+    "pinning only",
+    "resetting only",
+    "reverting only",
+    "reproduces",
+    "restores",
+    "first broken",
+    "earliest break",
+    "race window",
+    "wrong ",
+    "mismatch",
+    "misconfigured",
+    "omitted",
+    "missing",
+    "stale ",
+    "orphan",
+)
+_CAUSAL_CONTRADICTION_MARKERS = (
+    "byte-identical",
+    "does not change",
+    "does not make",
+    "did not change",
+    "healthy",
+    "identical across",
+    "is absent",
+    "leaves the outcome unchanged",
+    "match across",
+    "matches across",
+    "no additional",
+    "no parse rejection",
+    "no retry",
+    "no source",
+    "remain unchanged",
+    "remains unchanged",
+    "same application response",
+    "unchanged from",
+    "within the expected",
+)
 
 
 def _clip(value: object, limit: int) -> str:
@@ -407,11 +492,28 @@ def _clamp_reliability(value: object) -> float:
     return max(0.0, min(1.0, number))
 
 
+def _dimension_term_present(statement: str, term: str) -> bool:
+    """Match taxonomy terms as tokens, not accidental substrings.
+
+    The old substring matcher classified ``release`` as state because it
+    contains ``lease`` and ``timeout`` as clock because it contains ``time``.
+    Weighted phrases remain prefix-friendly for intentional stems.
+    """
+    candidate = str(term or "").strip().lower()
+    if not candidate:
+        return False
+    prefix = r"(?<![a-z0-9_])" if candidate[0].isalnum() or candidate[0] == "_" else ""
+    suffix = r"(?![a-z0-9_])" if candidate[-1].isalnum() or candidate[-1] == "_" else ""
+    return re.search(prefix + re.escape(candidate) + suffix, statement) is not None
+
+
 def _dimension_scores(statement: str) -> dict[str, int]:
-    lower = f" {statement.lower()} "
+    lower = str(statement or "").lower()
     scores: dict[str, int] = {}
     for dimension, terms in _DIMENSION_TERMS:
-        scores[dimension] = sum(1 for term in terms if term in lower)
+        scores[dimension] = sum(
+            1 for term in terms if _dimension_term_present(lower, term)
+        )
     for dimension, weighted_phrases in _DIMENSION_PHRASE_WEIGHTS:
         scores[dimension] = scores.get(dimension, 0) + sum(
             weight for phrase, weight in weighted_phrases if phrase in lower
@@ -423,6 +525,21 @@ def infer_dimension(statement: str) -> str:
     scores = _dimension_scores(statement)
     best = max(scores, key=scores.get, default="unknown")
     return best if scores.get(best, 0) else "unknown"
+
+
+def infer_causal_role(statement: str, *, discriminating: bool = False) -> str:
+    """Classify evidence as causal support, contradiction, or context.
+
+    Dense incident packets deliberately include healthy controls and held-
+    constant confounders. Treating every record in a semantic family as
+    positive support makes the largest family win rather than the cause.
+    """
+    lower = str(statement or "").lower()
+    if discriminating or any(marker in lower for marker in _CAUSAL_SUPPORT_MARKERS):
+        return "support"
+    if any(marker in lower for marker in _CAUSAL_CONTRADICTION_MARKERS):
+        return "contradiction"
+    return "context"
 
 
 def derive_contract_invariants(statement: str) -> list[str]:
@@ -1009,6 +1126,13 @@ def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]
     kind = str(raw.get("kind") or "observation").strip().lower()
     if kind not in {"observation", "experiment", "artifact", "metric"}:
         kind = "observation"
+    discriminating = bool(raw.get("discriminating"))
+    causal_role = str(raw.get("causal_role") or "").strip().lower()
+    if causal_role not in {"support", "contradiction", "context"}:
+        causal_role = infer_causal_role(
+            statement,
+            discriminating=discriminating,
+        )
     return {
         "evidence_id": _clean_id(raw.get("evidence_id"), f"evidence-{index + 1}"),
         "statement": statement,
@@ -1017,7 +1141,8 @@ def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]
         "provenance": _clip(raw.get("provenance") or f"unattributed:{index + 1}", 300),
         "independence_key": _clip(raw.get("independence_key") or raw.get("provenance") or f"source:{index + 1}", 200),
         "reliability": _clamp_reliability(raw.get("reliability")),
-        "discriminating": bool(raw.get("discriminating")),
+        "discriminating": discriminating,
+        "causal_role": causal_role,
         "comparison_key": _clip(raw.get("comparison_key"), 160),
         "code_revision": _clip(raw.get("code_revision"), 100),
         "input_fingerprint": _clip(raw.get("input_fingerprint"), 160),
@@ -1032,7 +1157,22 @@ def normalize_case(raw: Mapping[str, Any]) -> dict[str, Any]:
         normalize_evidence(item, index)
         for index, item in enumerate(raw.get("observations") or [])
         if isinstance(item, Mapping)
-    ][:40]
+    ]
+    if len(observations) > 40:
+        probe_evidence = [
+            item
+            for item in observations
+            if str(item.get("provenance") or "").startswith("diagnostic_probe:")
+        ][-40:]
+        ordinary_evidence = [
+            item
+            for item in observations
+            if not str(item.get("provenance") or "").startswith("diagnostic_probe:")
+        ]
+        observations = [
+            *ordinary_evidence[: max(0, 40 - len(probe_evidence))],
+            *probe_evidence,
+        ][-40:]
     prior_raw = raw.get("prior_conclusion") if isinstance(raw.get("prior_conclusion"), Mapping) else {}
     prior_status = str(prior_raw.get("status") or "").strip().lower()
     if prior_status not in {"confirmed", "provisional", "inconclusive", "rejected"}:
@@ -1255,6 +1395,7 @@ def parse_json_object(text: str) -> dict[str, Any] | None:
 
 def _normalize_hypothesis(raw: Mapping[str, Any], index: int) -> dict[str, Any]:
     dimension = str(raw.get("dimension") or "unknown").strip().lower()
+    dimension = DIMENSION_ALIASES.get(dimension, dimension)
     if dimension not in DIMENSIONS:
         dimension = infer_dimension(str(raw.get("claim") or ""))
     return {
@@ -1611,12 +1752,6 @@ def evaluate_packet(
     for item in hypotheses:
         support_ids = list(dict.fromkeys(item.get("support_evidence_ids") or []))
         contradict_ids = list(dict.fromkeys(item.get("contradict_evidence_ids") or []))
-        if not support_ids:
-            support_ids = [
-                evidence_id
-                for evidence_id, record in evidence.items()
-                if record.get("dimension") == item.get("dimension")
-            ]
         support_records = [evidence[value] for value in support_ids if value in evidence]
         contradict_records = [evidence[value] for value in contradict_ids if value in evidence]
         support_weight = _independent_weight(support_records)
@@ -1634,7 +1769,10 @@ def evaluate_packet(
             str(record.get("provenance") or "").startswith("diagnostic_probe:")
             for record in support_records
         )
-        if contradict_weight >= 0.7:
+        if (
+            contradict_weight >= 0.7
+            and contradict_weight >= confirmatory_weight
+        ):
             status = "refuted"
         elif (
             confirmatory_weight >= 1.25 and (discriminating or direct_artifact)
@@ -1755,6 +1893,10 @@ def evaluate_packet(
         requested_status not in {"inconclusive", "rejected"}
         and chosen.get("status") == "supported"
         and not errors
+        and (
+            conclusion_id == requested_choice_id
+            or bool(chosen.get("typed_probe_evidence"))
+        )
     ):
         effective_status = "confirmed"
     elif chosen.get("status") in {"blocked", "untested"}:
@@ -1827,15 +1969,35 @@ def heuristic_packet(raw_case: Mapping[str, Any]) -> dict[str, Any]:
     ranked = sorted(
         by_dimension.items(),
         key=lambda pair: (
-            -sum(float(item.get("reliability") or 0) for item in pair[1]),
             pair[0] == "unknown",
+            -sum(
+                float(item.get("reliability") or 0)
+                * (
+                    2.0
+                    if str(item.get("causal_role") or "") == "support"
+                    else 0.2
+                    if str(item.get("causal_role") or "") == "context"
+                    else -1.0
+                )
+                * (1.4 if bool(item.get("discriminating")) else 1.0)
+                * (
+                    1.15
+                    if str(item.get("kind") or "") in {"artifact", "experiment"}
+                    else 1.0
+                )
+                for item in pair[1]
+            ),
             pair[0],
         ),
     )
     minimum_dimensions = int(
         (case.get("constraints") or {}).get("minimum_hypothesis_dimensions") or 1
     )
-    represented_dimensions = {dimension for dimension, _records in ranked}
+    represented_dimensions = {
+        dimension
+        for dimension, _records in ranked
+        if dimension != "unknown"
+    }
     if len(represented_dimensions) < minimum_dimensions:
         secondary_scores: dict[str, int] = defaultdict(int)
         for item in case["observations"]:
@@ -1849,9 +2011,21 @@ def heuristic_packet(raw_case: Mapping[str, Any]) -> dict[str, Any]:
             secondary_scores.items(),
             key=lambda pair: (-pair[1], pair[0]),
         ):
-            if score <= 0 or dimension in represented_dimensions:
+            if (
+                score <= 0
+                or dimension == "unknown"
+                or dimension in represented_dimensions
+            ):
                 continue
-            ranked.append((dimension, []))
+            unknown_index = next(
+                (
+                    index
+                    for index, (ranked_dimension, _records) in enumerate(ranked)
+                    if ranked_dimension == "unknown"
+                ),
+                len(ranked),
+            )
+            ranked.insert(unknown_index, (dimension, []))
             represented_dimensions.add(dimension)
             if len(represented_dimensions) >= minimum_dimensions:
                 break
@@ -1859,13 +2033,34 @@ def heuristic_packet(raw_case: Mapping[str, Any]) -> dict[str, Any]:
     experiments: list[dict[str, Any]] = []
     for index, (dimension, records) in enumerate(ranked[:4]):
         hypothesis_id = f"h-{dimension}"
+        support_records = [
+            item
+            for item in records
+            if str(item.get("causal_role") or "context") == "support"
+        ]
+        context_records = [
+            item
+            for item in records
+            if str(item.get("causal_role") or "context") == "context"
+        ]
+        contradiction_records = [
+            item
+            for item in records
+            if str(item.get("causal_role") or "") == "contradiction"
+        ]
         hypotheses.append(
             {
                 "hypothesis_id": hypothesis_id,
                 "claim": f"The observed failure is primarily caused by {dimension} drift.",
                 "dimension": dimension,
-                "support_evidence_ids": [str(item.get("evidence_id")) for item in records],
-                "contradict_evidence_ids": [],
+                "support_evidence_ids": [
+                    str(item.get("evidence_id"))
+                    for item in [*support_records, *context_records]
+                ],
+                "contradict_evidence_ids": [
+                    str(item.get("evidence_id"))
+                    for item in contradiction_records
+                ],
                 "falsification": f"Hold every other dimension constant and show that changing {dimension} does not change the outcome.",
             }
         )
@@ -1899,28 +2094,114 @@ def heuristic_packet(raw_case: Mapping[str, Any]) -> dict[str, Any]:
     )
 
 
+def _prompt_json(value: object) -> str:
+    return json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+
+def _has_prompt_value(value: object) -> bool:
+    return value is not None and value != "" and value != [] and value != {}
+
+
 def _case_prompt(case: Mapping[str, Any]) -> str:
+    observation_keys = (
+        "evidence_id",
+        "statement",
+        "dimension",
+        "kind",
+        "provenance",
+        "independence_key",
+        "reliability",
+        "discriminating",
+        "causal_role",
+        "comparison_key",
+        "code_revision",
+        "input_fingerprint",
+        "environment_fingerprint",
+        "outcome_fingerprint",
+        "experiment_id",
+    )
     safe_case = {
         "case_id": case.get("case_id"),
         "problem_statement": case.get("problem_statement"),
-        "observations": case.get("observations"),
+        "observations": [
+            {
+                key: item.get(key)
+                for key in observation_keys
+                if key in item and _has_prompt_value(item.get(key))
+            }
+            for item in case.get("observations") or []
+            if isinstance(item, Mapping)
+        ],
         "prior_conclusion": case.get("prior_conclusion"),
         "constraints": case.get("constraints"),
     }
-    return json.dumps(safe_case, indent=2, sort_keys=True)
+    return _prompt_json(safe_case)
 
 
 def _packet_shape() -> str:
     return (
-        '{"schema":"chili.diagnostic-packet.v1","problem_statement":"...",'
-        '"hypotheses":[{"hypothesis_id":"h1","claim":"...","dimension":"code|data|clock|state|config|dependency|runtime|test_harness|unknown",'
-        '"support_evidence_ids":["e1"],"contradict_evidence_ids":[],"falsification":"..."}],'
-        '"experiments":[{"experiment_id":"x1","hypothesis_ids":["h1"],"changed_dimensions":["code"],'
-        '"held_constant_dimensions":["data"],"expected_if_true":"...","expected_if_false":"...",'
-        '"evidence_required":["..."],"result_evidence_ids":[],"safety":"read_only|isolated|runtime|live",'
-        '"status":"planned|completed|blocked","auto_execute":false,"probe":{}}],'
+        '{"hypotheses":[{"hypothesis_id":"h1","claim":"<=12 words","dimension":"code|data|clock|state|config|dependency|runtime|test_harness|unknown",'
+        '"support_evidence_ids":["e1"],"contradict_evidence_ids":[],"falsification":"<=12 words"}],'
+        '"experiments":[],'
         '"conclusion":{"hypothesis_id":"h1","status":"confirmed|provisional|inconclusive|rejected",'
-        '"evidence_ids":["e1"],"reason":"..."}}'
+        '"evidence_ids":["e1"],"reason":"<=12 words"}}'
+    )
+
+
+def _compact_output_rules(case: Mapping[str, Any]) -> str:
+    required = int(
+        (case.get("constraints") or {}).get("minimum_hypothesis_dimensions") or 1
+    )
+    return (
+        "Hard output budget: at most 700 tokens. Do not restate the case or evidence text. "
+        f"Return {required} to 4 concise hypotheses across distinct dimensions. "
+        "Every claim, falsification, and reason is at most 12 words. Use evidence ids only. "
+        "Use experiments=[] unless one or two bounded typed probes are essential. "
+        "Omit schema and problem_statement. Close every JSON array and object."
+    )
+
+
+def _packet_prompt(packet: Mapping[str, Any]) -> str:
+    normalized = normalize_packet(packet)
+    return _prompt_json(
+        {
+            "hypotheses": list(normalized.get("hypotheses") or [])[:4],
+            "experiments": list(normalized.get("experiments") or [])[:2],
+            "conclusion": normalized.get("conclusion") or {},
+        }
+    )
+
+
+def _report_prompt(report: Mapping[str, Any]) -> str:
+    hypothesis_results = []
+    for item in report.get("hypothesis_results") or []:
+        if not isinstance(item, Mapping):
+            continue
+        hypothesis_results.append(
+            {
+                key: item.get(key)
+                for key in (
+                    "hypothesis_id",
+                    "dimension",
+                    "status",
+                    "support_evidence_ids",
+                    "contradict_evidence_ids",
+                    "discriminating_evidence",
+                    "blockers",
+                )
+                if _has_prompt_value(item.get(key))
+            }
+        )
+    return _prompt_json(
+        {
+            "valid": bool(report.get("valid")),
+            "errors": list(report.get("errors") or [])[:6],
+            "baseline_drift": list(report.get("baseline_drift") or [])[:2],
+            "decision": report.get("decision"),
+            "conclusion": report.get("conclusion") or {},
+            "hypothesis_results": hypothesis_results[:4],
+            "next_experiments": list(report.get("next_experiments") or [])[:2],
+        }
     )
 
 
@@ -1946,14 +2227,16 @@ def investigator_prompt(raw_case: Mapping[str, Any]) -> str:
         "as a question to test, not as an assumed answer. For trading or operational incidents, distinguish the "
         "strategy/requirements contract, external conditions, broker or persisted state, evidence-pipeline "
         "coverage, and source-versus-running-revision parity. "
-        "A hypothesis without a falsification experiment is invalid. Same code and input with different outcomes "
+        "Every hypothesis needs a short falsification string; do not create an experiment object unless a typed "
+        "probe is essential. Same code and input with different outcomes "
         "means baseline drift, not proof of a code regression. Never request automatic runtime or live mutation. "
         "When evidence is insufficient, you may set auto_execute=true only for a typed probe from the supplied "
         "catalog. Raw shell commands do not exist. search is fixed-string; targeted_test must name one selector "
         "under tests/. log_search is fixed-string over bounded log tails. db_schema and db_profile never accept "
         "SQL; db_profile exposes only count/group/min/max/avg/sum aggregates and production use requires a "
         "timestamp column plus bounded lookback. Use read_only for repo_state/search/file_excerpt/git_history/"
-        "git_diff/log_inventory/log_search/db_schema/db_profile and isolated for compile/targeted_test.\n\n"
+        "git_diff/log_inventory/log_search/db_schema/db_profile and isolated for compile/targeted_test. "
+        f"{_compact_output_rules(case)}\n\n"
         f"Required shape:\n{_packet_shape()}\n{_typed_probe_examples()}\n\nCase:\n{_case_prompt(case)}"
     )
 
@@ -1966,10 +2249,11 @@ def skeptic_prompt(raw_case: Mapping[str, Any], packet: Mapping[str, Any], repor
         "correlated evidence, and claims that survived no discriminating experiment. Add contradiction evidence links when justified. "
         "Challenge post-hoc metric optimization, replay leakage, source/runtime drift, producer-consumer starvation, "
         "broker/local-state divergence, external-condition confounding, and fixes aimed only at a downstream symptom. "
-        "Retract a conclusion rather than defending it when the evidence changed. Never request automatic runtime or live mutation.\n\n"
+        "Retract a conclusion rather than defending it when the evidence changed. Never request automatic runtime or live mutation. "
+        f"{_compact_output_rules(case)}\n\n"
         f"Required shape:\n{_packet_shape()}\n{_typed_probe_examples()}\n\nCase:\n{_case_prompt(case)}\n\n"
-        f"Investigator packet:\n{json.dumps(packet, indent=2, sort_keys=True)}\n\n"
-        f"Deterministic evaluation:\n{json.dumps(report, indent=2, sort_keys=True)}"
+        f"Investigator packet:\n{_packet_prompt(packet)}\n\n"
+        f"Deterministic evaluation:\n{_report_prompt(report)}"
     )
 
 
@@ -1987,14 +2271,118 @@ def judge_prompt(raw_case: Mapping[str, Any], packet: Mapping[str, Any], report:
         "If the evidence gate says instrument_first, choose at most two auto_execute typed probes from this "
         "catalog: repo_state, fixed-string search, bounded file_excerpt, git_history, git_diff, isolated compile, "
         "one targeted_test selector under tests/, bounded log_inventory/log_search, or aggregate-only "
-        "db_schema/db_profile. Database probes never accept SQL or raw-row selection. Raw commands are forbidden.\n\n"
+        "db_schema/db_profile. Database probes never accept SQL or raw-row selection. Raw commands are forbidden. "
+        f"{_compact_output_rules(case)}\n\n"
         f"Required shape:\n{_packet_shape()}\n{_typed_probe_examples()}\n\nCase:\n{_case_prompt(case)}\n\n"
-        f"Challenged packet:\n{json.dumps(packet, indent=2, sort_keys=True)}\n\n"
-        f"Deterministic evaluation:\n{json.dumps(report, indent=2, sort_keys=True)}"
+        f"Challenged packet:\n{_packet_prompt(packet)}\n\n"
+        f"Deterministic evaluation:\n{_report_prompt(report)}"
     )
 
 
 ModelCall = Callable[[str, str], str]
+
+
+def _repair_candidate_contract(
+    case: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    previous_packet: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Fail closed on common small-model schema slips while preserving its claim.
+
+    Repairs never invent evidence or make an experiment executable. They only
+    drop mismatched support links, restore already-grounded contract fields,
+    and demote malformed automatic experiments to non-executable plans.
+    """
+    normalized = normalize_packet(candidate)
+    previous = normalize_packet(previous_packet)
+    evidence_dimensions = {
+        str(item.get("evidence_id") or ""): str(item.get("dimension") or "unknown")
+        for item in case.get("observations") or []
+        if isinstance(item, Mapping) and str(item.get("evidence_id") or "")
+    }
+    previous_by_id = {
+        str(item.get("hypothesis_id") or ""): item
+        for item in previous.get("hypotheses") or []
+        if isinstance(item, Mapping)
+    }
+    previous_by_dimension = {
+        str(item.get("dimension") or "unknown"): item
+        for item in previous.get("hypotheses") or []
+        if isinstance(item, Mapping)
+    }
+    repairs: list[str] = []
+    hypotheses: list[dict[str, Any]] = []
+    for item in normalized.get("hypotheses") or []:
+        repaired = dict(item)
+        hypothesis_id = str(repaired.get("hypothesis_id") or "")
+        dimension = str(repaired.get("dimension") or "unknown")
+        prior = previous_by_id.get(hypothesis_id) or previous_by_dimension.get(dimension)
+        if not str(repaired.get("claim") or "").strip() and prior:
+            repaired["claim"] = str(prior.get("claim") or "")
+            repairs.append(f"{hypothesis_id}:restored_claim")
+        if not str(repaired.get("falsification") or "").strip() and prior:
+            repaired["falsification"] = str(prior.get("falsification") or "")
+            repairs.append(f"{hypothesis_id}:restored_falsification")
+
+        raw_support = list(repaired.get("support_evidence_ids") or [])
+        aligned_support = [
+            evidence_id
+            for evidence_id in raw_support
+            if evidence_id in evidence_dimensions
+            and evidence_dimensions[evidence_id] in {dimension, "unknown"}
+        ]
+        prior_support = []
+        if prior:
+            prior_support = [
+                evidence_id
+                for evidence_id in prior.get("support_evidence_ids") or []
+                if evidence_id in evidence_dimensions
+                and evidence_dimensions[evidence_id] in {dimension, "unknown"}
+            ]
+        if aligned_support != raw_support and (aligned_support or prior_support):
+            repairs.append(f"{hypothesis_id}:dropped_mismatched_support")
+        elif aligned_support != raw_support:
+            aligned_support = raw_support
+        if not aligned_support and prior_support:
+            aligned_support = prior_support
+            if aligned_support:
+                repairs.append(f"{hypothesis_id}:restored_grounded_support")
+        repaired["support_evidence_ids"] = aligned_support
+        hypotheses.append(repaired)
+
+    experiments: list[dict[str, Any]] = []
+    for item in normalized.get("experiments") or []:
+        repaired = dict(item)
+        probe = repaired.get("probe") if isinstance(repaired.get("probe"), Mapping) else {}
+        if bool(repaired.get("auto_execute")) and (
+            not probe or str(repaired.get("safety") or "") not in AUTO_SAFE_LEVELS
+        ):
+            repaired["auto_execute"] = False
+            repaired["probe"] = {}
+            repairs.append(
+                f"{str(repaired.get('experiment_id') or 'experiment')}:demoted_unsafe_auto_execute"
+            )
+        experiments.append(repaired)
+
+    conclusion = dict(normalized.get("conclusion") or {})
+    hypothesis_ids = {
+        str(item.get("hypothesis_id") or "") for item in hypotheses
+    }
+    if str(conclusion.get("hypothesis_id") or "") not in hypothesis_ids and hypotheses:
+        prior_id = str((previous.get("conclusion") or {}).get("hypothesis_id") or "")
+        conclusion["hypothesis_id"] = (
+            prior_id if prior_id in hypothesis_ids else str(hypotheses[0].get("hypothesis_id") or "")
+        )
+        repairs.append("conclusion:restored_known_hypothesis")
+
+    return normalize_packet(
+        {
+            **normalized,
+            "hypotheses": hypotheses,
+            "experiments": experiments,
+            "conclusion": conclusion,
+        }
+    ), repairs
 
 
 def _preserve_competing_hypotheses(
@@ -2107,10 +2495,16 @@ def run_local_diagnostic_debate(
         parsed = parse_json_object(response)
         accepted = parsed is not None
         preserved_dimensions: list[str] = []
+        contract_repairs: list[str] = []
         if parsed is not None:
-            candidate, preserved_dimensions = _preserve_competing_hypotheses(
+            repaired, contract_repairs = _repair_candidate_contract(
                 case,
                 parsed,
+                packet,
+            )
+            candidate, preserved_dimensions = _preserve_competing_hypotheses(
+                case,
+                repaired,
                 packet,
             )
         else:
@@ -2129,6 +2523,7 @@ def run_local_diagnostic_debate(
                 "accepted": accepted,
                 "response_chars": len(response),
                 "errors": candidate_errors,
+                "contract_repairs": contract_repairs,
                 "preserved_hypothesis_dimensions": preserved_dimensions,
                 "conclusion": next_report.get("conclusion") or {},
                 "retractions": next_report.get("retractions") or [],

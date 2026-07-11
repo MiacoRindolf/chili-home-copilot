@@ -169,6 +169,321 @@ def test_dimension_inference_understands_control_flow_leases_and_tls_chains():
     ) == "dependency"
 
 
+def test_dimension_terms_do_not_match_inside_release_or_timeout():
+    release_scores = reasoning._dimension_scores(
+        "A routine release completed after the request cohort was captured."
+    )
+    timeout_scores = reasoning._dimension_scores(
+        "The upload timed out while transferring a large request body."
+    )
+
+    assert release_scores["state"] == 0
+    assert timeout_scores["clock"] == 0
+
+
+def test_dimension_inference_handles_dense_operational_mechanisms():
+    assert reasoning.infer_dimension(
+        "Reverting only that source hunk restores the previous result."
+    ) == "code"
+    assert reasoning.infer_dimension(
+        "The isolated replay succeeds when only that value is changed."
+    ) == "config"
+    assert reasoning.infer_dimension(
+        "The network namespace has an overlay MTU above the underlay path."
+    ) == "runtime"
+    assert reasoning.infer_dimension(
+        "The immutable manifest omitted two shard URIs."
+    ) == "data"
+    assert reasoning.infer_dimension(
+        "Resetting only the persisted cursor restores scanning."
+    ) == "state"
+
+
+def test_heuristic_evidence_polarity_does_not_count_healthy_controls_as_support():
+    case = {
+        "case_id": "evidence-polarity",
+        "problem_statement": "Uploads fail only on one node pool.",
+        "observations": [
+            {
+                "evidence_id": "runtime-a",
+                "statement": "The overlay MTU exceeds the underlay path.",
+                "kind": "artifact",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "runtime-b",
+                "statement": "Lowering only the pod-side MTU restores every transfer.",
+                "kind": "experiment",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "dependency-control",
+                "statement": "The upstream endpoint remains healthy and no retry occurs.",
+                "kind": "artifact",
+                "reliability": 0.95,
+                "discriminating": False,
+            },
+        ],
+    }
+
+    packet = reasoning.heuristic_packet(case)
+    report = reasoning.evaluate_packet(case, packet)
+    dependency = next(
+        item for item in packet["hypotheses"] if item["dimension"] == "dependency"
+    )
+
+    assert dependency["support_evidence_ids"] == []
+    assert dependency["contradict_evidence_ids"] == ["dependency-control"]
+    assert report["conclusion"]["dimension"] == "runtime"
+    assert report["conclusion"]["status"] == "confirmed"
+
+
+def test_strong_independent_support_outweighs_weaker_same_family_counterevidence():
+    case = {
+        "case_id": "support-versus-control",
+        "problem_statement": "A state transition duplicates work.",
+        "observations": [
+            {
+                "evidence_id": "state-a",
+                "statement": "A deterministic barrier reproduces the stale cursor race.",
+                "dimension": "state",
+                "kind": "experiment",
+                "provenance": "barrier-a",
+                "independence_key": "barrier-a",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "state-b",
+                "statement": "Resetting only the cursor restores one transition.",
+                "dimension": "state",
+                "kind": "experiment",
+                "provenance": "barrier-b",
+                "independence_key": "barrier-b",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "state-control",
+                "statement": "The unrelated session cache remains unchanged from baseline.",
+                "dimension": "state",
+                "kind": "artifact",
+                "provenance": "cache-control",
+                "independence_key": "cache-control",
+                "reliability": 0.9,
+                "discriminating": False,
+            },
+        ],
+    }
+
+    report = reasoning.evaluate_packet(case, reasoning.heuristic_packet(case))
+
+    assert report["conclusion"]["dimension"] == "state"
+    assert report["conclusion"]["status"] == "confirmed"
+
+
+def test_hypothesis_without_evidence_links_is_not_auto_supported_by_family():
+    case = {
+        "case_id": "no-implicit-support",
+        "problem_statement": "A code path may be wrong.",
+        "observations": [
+            {
+                "evidence_id": "source-a",
+                "statement": "The source hunk changed the branch.",
+                "dimension": "code",
+                "kind": "artifact",
+                "reliability": 0.99,
+                "discriminating": True,
+            }
+        ],
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-code",
+                "claim": "The code branch is wrong.",
+                "dimension": "code",
+                "support_evidence_ids": [],
+                "falsification": "Revert only the source hunk.",
+            }
+        ],
+        "conclusion": {"hypothesis_id": "h-code", "status": "confirmed"},
+    }
+
+    report = reasoning.evaluate_packet(case, packet)
+
+    assert report["hypothesis_results"][0]["status"] == "untested"
+    assert report["conclusion"]["status"] == "inconclusive"
+
+
+def test_normalize_case_retains_fresh_probe_evidence_at_observation_cap():
+    observations = [
+        {
+            "evidence_id": f"operator-{index}",
+            "statement": f"Operator observation {index}",
+            "provenance": "operator_prompt",
+        }
+        for index in range(40)
+    ]
+    observations.append(
+        {
+            "evidence_id": "probe-fresh",
+            "statement": "The typed probe found a runtime revision mismatch.",
+            "provenance": "diagnostic_probe:repo_state",
+            "reliability": 0.99,
+            "discriminating": True,
+        }
+    )
+
+    normalized = reasoning.normalize_case(
+        {
+            "case_id": "probe-at-cap",
+            "problem_statement": "Diagnose the mismatch.",
+            "observations": observations,
+        }
+    )
+
+    assert len(normalized["observations"]) == 40
+    assert normalized["observations"][-1]["evidence_id"] == "probe-fresh"
+    assert "operator-39" not in {
+        item["evidence_id"] for item in normalized["observations"]
+    }
+
+
+def test_dense_council_prompts_enforce_compact_closed_json_contract():
+    case = {
+        "case_id": "compact-council",
+        "problem_statement": "Diagnose a dense cross-service operational failure.",
+        "observations": [
+            {
+                "evidence_id": f"e{index}",
+                "statement": (
+                    "A bounded source, runtime, configuration, dependency, and state "
+                    f"observation was recorded for service {index}."
+                ),
+                "provenance": f"source-{index}",
+                "independence_key": f"source-{index}",
+                "reliability": 0.9,
+                "discriminating": index < 2,
+            }
+            for index in range(8)
+        ],
+        "constraints": {"minimum_hypothesis_dimensions": 4},
+    }
+    packet = reasoning.heuristic_packet(case)
+    report = reasoning.evaluate_packet(case, packet)
+    investigator = reasoning.investigator_prompt(case)
+    judge = reasoning.judge_prompt(case, packet, report)
+
+    assert "Hard output budget: at most 700 tokens" in investigator
+    assert "Close every JSON array and object" in judge
+    assert len(investigator) < 8_000
+    assert len(judge) < 13_000
+    assert '\"environment_fingerprint\":\"\"' not in judge
+
+
+def test_local_packet_contract_repair_is_grounded_audited_and_fail_closed():
+    case = {
+        "case_id": "contract-repair",
+        "problem_statement": "A source hunk changed the branch outcome.",
+        "observations": [
+            {
+                "evidence_id": "code-proof",
+                "statement": "Reverting only that source hunk restores the outcome.",
+                "dimension": "code",
+                "kind": "experiment",
+                "provenance": "isolated-revert",
+                "independence_key": "isolated-revert",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "state-control",
+                "statement": "The unrelated session cache remains unchanged from baseline.",
+                "dimension": "state",
+                "kind": "artifact",
+                "provenance": "state-control",
+                "independence_key": "state-control",
+                "reliability": 0.9,
+            },
+        ],
+        "constraints": {"minimum_hypothesis_dimensions": 1},
+    }
+    malformed = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-code",
+                "claim": "The source hunk changed control flow.",
+                "dimension": "code",
+                "support_evidence_ids": ["state-control"],
+                "falsification": "",
+            }
+        ],
+        "experiments": [
+            {
+                "experiment_id": "x-restart",
+                "hypothesis_ids": ["h-code"],
+                "safety": "runtime",
+                "auto_execute": True,
+            }
+        ],
+        "conclusion": {
+            "hypothesis_id": "h-code",
+            "status": "confirmed",
+            "evidence_ids": ["code-proof"],
+        },
+    }
+
+    result = reasoning.run_local_diagnostic_debate(
+        case,
+        lambda _stage, _prompt: json.dumps(malformed),
+        stages_to_run=("judge",),
+    )
+    stage = result["stages"][0]
+    experiment = result["packet"]["experiments"][0]
+
+    assert stage["accepted"] is True
+    assert "h-code:dropped_mismatched_support" in stage["contract_repairs"]
+    assert "h-code:restored_grounded_support" in stage["contract_repairs"]
+    assert "h-code:restored_falsification" in stage["contract_repairs"]
+    assert "x-restart:demoted_unsafe_auto_execute" in stage["contract_repairs"]
+    assert result["packet"]["hypotheses"][0]["support_evidence_ids"] == [
+        "code-proof"
+    ]
+    assert experiment["auto_execute"] is False
+    assert experiment["probe"] == {}
+    assert result["report"]["valid"] is True
+
+
+def test_local_dimension_aliases_preserve_system_layer_meaning():
+    packet = reasoning.normalize_packet(
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": "h-deploy",
+                    "claim": "A stale deployment serves the old build.",
+                    "dimension": "deployment",
+                    "falsification": "Remove only the stale deployment.",
+                },
+                {
+                    "hypothesis_id": "h-race",
+                    "claim": "Concurrent workers race before reservation.",
+                    "dimension": "concurrency",
+                    "falsification": "Serialize only the reservation step.",
+                },
+            ],
+            "conclusion": {"hypothesis_id": "h-deploy"},
+        }
+    )
+
+    assert [item["dimension"] for item in packet["hypotheses"]] == [
+        "runtime",
+        "state",
+    ]
+
+
 def test_complex_case_rejects_single_family_model_collapse():
     case = {
         "case_id": "breadth-floor",
@@ -263,6 +578,41 @@ def test_heuristic_packet_keeps_secondary_confounders_for_dense_single_family_ev
     assert normalized["constraints"]["minimum_hypothesis_dimensions"] == 3
     assert "dependency" in dimensions
     assert len(dimensions) >= 3
+
+
+def test_breadth_floor_prefers_testable_known_dimensions_over_unknown_bucket():
+    case = {
+        "case_id": "known-breadth",
+        "problem_statement": (
+            "Diagnose data loss while runtime, dependency, configuration, and state "
+            "controls remain plausible."
+        ),
+        "observations": [
+            {
+                "evidence_id": "data-a",
+                "statement": "The manifest omitted two shard records.",
+                "dimension": "unknown",
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "unknown-a",
+                "statement": "The outcome also changed for an unknown reason.",
+                "dimension": "unknown",
+            },
+            {
+                "evidence_id": "state-a",
+                "statement": "The queue cursor stayed at its prior checkpoint.",
+                "dimension": "unknown",
+            },
+        ],
+        "constraints": {"minimum_hypothesis_dimensions": 4},
+    }
+
+    packet = reasoning.heuristic_packet(case)
+    dimensions = [item["dimension"] for item in packet["hypotheses"]]
+
+    assert len(set(dimensions)) == 4
+    assert "unknown" not in dimensions
 
 
 def test_fable5_sim_clock_case_confirms_clock_root_cause():
