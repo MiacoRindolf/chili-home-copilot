@@ -1,0 +1,147 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh5-508",
+  "problem_statement": "An astronomical observatory image indexer on newly provisioned hosts stops accepting detector channels several hours into a night. Existing channels and the health endpoint remain active, so dashboards show a growing stale subset while raw images stay on disk. Determine the initiating constraint and corrective target using host snapshots, service attestations, and isolated proof evidence.",
+  "observations": [
+    {
+      "evidence_id": "bh5-508-e01",
+      "statement": "The stale subset begins when the 1013th long-lived detector channel becomes active; channels already open continue indexing, while each later channel logs a resource-unavailable accept failure.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "channel registry and indexer event log",
+      "independence_key": "activation-threshold-pattern",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "sequence": ["channel_1012_active", "channel_1013_activation", "accept_failure", "stale_dashboard_subset"],
+        "comparison": {"existing_channels_failed": 0, "later_channels_failed": 167}
+      }
+    },
+    {
+      "evidence_id": "bh5-508-e02",
+      "statement": "A read-only process snapshot at first failure shows 1024 open descriptors against a hard ceiling of 1024; 1009 descriptors correspond to active detector streams and the remainder to logs, sockets, and the health endpoint.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "captured process descriptor table and limits file",
+      "independence_key": "process-resource-ceiling",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "actual_state": {"open_descriptors": 1024, "hard_ceiling": 1024, "detector_stream_descriptors": 1009},
+        "artifact_hash": "sha256:dc51adbf73d029b271ab63e4fbc6d5f9150885511ba0ebc41ee5397777fd2405"
+      }
+    },
+    {
+      "evidence_id": "bh5-508-e03",
+      "statement": "The service unit on new hosts inherits a 1024 descriptor ceiling, while the archived unit from prior hosts explicitly sets 8192; application settings request up to 1400 concurrent channels in both environments.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "service-manager property dump and signed deployment bundles",
+      "independence_key": "host-unit-comparison",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "runtime_revisions": {"prior_host": "obs-node-2026.01", "new_host": "obs-node-2026.02"},
+        "comparison": {"prior_ceiling": 8192, "new_ceiling": 1024, "configured_channels": 1400}
+      }
+    },
+    {
+      "evidence_id": "bh5-508-e04",
+      "statement": "Application binary, component inventory, detector map, stream protocol, and incoming image files match a prior host that indexed all 1180 channels during the same observing plan.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "cross-host attestations and observing-plan hashes",
+      "independence_key": "application-workload-negative-control",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "code_fingerprint": "indexer-5f36c1",
+        "input_fingerprint": "observing-plan-a817",
+        "comparison": {"component_differences": 0, "detector_map_differences": 0, "prior_channels_indexed": 1180}
+      }
+    },
+    {
+      "evidence_id": "bh5-508-e05",
+      "statement": "Descriptor count rises one-for-one with active detector channels and falls one-for-one when a channel naturally closes; no monotonic growth remains after channel count is held constant.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "process snapshots correlated with channel lifecycle ledger",
+      "independence_key": "descriptor-lifecycle-correlation",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "correlation": {"variables": ["active_channels", "open_descriptors"], "pearson_r": 0.999},
+        "transitions": ["channel_open_descriptor_plus_one", "channel_close_descriptor_minus_one"]
+      }
+    },
+    {
+      "evidence_id": "bh5-508-e06",
+      "statement": "Disk capacity, inode usage, network loss, process memory, and CPU remain normal at the threshold; raw images for rejected channels continue accumulating with valid checksums.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "host metrics and raw-image inventory",
+      "independence_key": "capacity-and-input-controls",
+      "reliability": 0.95,
+      "discriminating": true,
+      "metadata": {
+        "comparison": {"disk_used_percent": 41, "inode_used_percent": 18, "network_loss_percent": 0.03, "memory_used_percent": 52, "cpu_used_percent": 37, "invalid_raw_hashes": 0}
+      }
+    },
+    {
+      "evidence_id": "bh5-508-e07",
+      "statement": "The green health check reuses an already-open socket and queries only existing channels, explaining why it remains successful after new stream acceptance has stopped.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "health-check route trace and descriptor ownership snapshot",
+      "independence_key": "health-check-symptom-explanation",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "edges": [
+          {"producer": "health_probe", "consumer": "existing_control_socket", "sink": "health_status", "edge_state": "healthy"},
+          {"producer": "new_detector", "consumer": "stream_accept", "sink": "image_index", "edge_state": "blocked_at_ceiling"}
+        ]
+      }
+    },
+    {
+      "evidence_id": "bh5-508-e08",
+      "statement": "An isolated host with the same binary and 1400 synthetic long-lived streams accepts only 1009 under the new unit and all 1400 when the prior ceiling is restored; stream contents and settings are unchanged.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "sealed nonproduction host comparison transcript",
+      "independence_key": "single-factor-resource-proof",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "experiment_id": "exp-observatory-streams-31",
+        "environment_fingerprint": "isolated-host-obs-node-2026.02",
+        "outcomes": {"ceiling_1024": {"accepted": 1009}, "ceiling_8192": {"accepted": 1400}}
+      }
+    },
+    {
+      "evidence_id": "bh5-508-e09",
+      "statement": "A post-change endurance proof at 1400 channels stays below the revised ceiling, indexes all retained sample images, and adds an alert on remaining descriptor headroom rather than total process liveness.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated endurance proof and monitoring assertion report",
+      "independence_key": "resource-headroom-proof",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "experiment_id": "exp-observatory-endurance-32",
+        "comparison": {"duration_hours": 12, "channels": 1400, "missed_images": 0, "minimum_descriptor_headroom": 6760},
+        "outcome_fingerprint": "all-channels-indexed-with-headroom"
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

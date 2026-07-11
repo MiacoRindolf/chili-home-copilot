@@ -1,0 +1,18 @@
+{
+  "schema": "chili.realworld-diagnostic-oracle.v1",
+  "case_id": "bh5-505",
+  "primary_causal_dimension": "test_harness",
+  "expected_dimensions": [
+    "test_harness"
+  ],
+  "expected_decisions": [
+    "instrument_first"
+  ],
+  "expected_statuses": [
+    "inconclusive"
+  ],
+  "expected_baseline_drift": false,
+  "minimum_hypothesis_dimensions": 4,
+  "minimum_retractions": 0,
+  "forbid_confirmed_code": true
+}

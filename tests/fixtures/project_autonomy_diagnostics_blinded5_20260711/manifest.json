@@ -1,0 +1,65 @@
+{
+  "schema": "chili.realworld-diagnostic-manifest.v1",
+  "reference_model": "claude-fable-5",
+  "benchmark_id": "fable5-class-diagnostic-blinded-fifth-run-20260711",
+  "blinded": true,
+  "immutable_input_count": 17,
+  "cases": [
+    {
+      "case": "cases/bh5-501.json",
+      "oracle": "oracles/bh5-501.json",
+      "split": "holdout",
+      "source": "sealed_fifth_holdout_case_01",
+      "evaluation_role": "blinded_holdout_fifth_run"
+    },
+    {
+      "case": "cases/bh5-502.json",
+      "oracle": "oracles/bh5-502.json",
+      "split": "holdout",
+      "source": "sealed_fifth_holdout_case_02",
+      "evaluation_role": "blinded_holdout_fifth_run"
+    },
+    {
+      "case": "cases/bh5-503.json",
+      "oracle": "oracles/bh5-503.json",
+      "split": "holdout",
+      "source": "sealed_fifth_holdout_case_03",
+      "evaluation_role": "blinded_holdout_fifth_run"
+    },
+    {
+      "case": "cases/bh5-504.json",
+      "oracle": "oracles/bh5-504.json",
+      "split": "holdout",
+      "source": "sealed_fifth_holdout_case_04",
+      "evaluation_role": "blinded_holdout_fifth_run"
+    },
+    {
+      "case": "cases/bh5-505.json",
+      "oracle": "oracles/bh5-505.json",
+      "split": "holdout",
+      "source": "sealed_fifth_holdout_case_05",
+      "evaluation_role": "blinded_holdout_fifth_run"
+    },
+    {
+      "case": "cases/bh5-506.json",
+      "oracle": "oracles/bh5-506.json",
+      "split": "holdout",
+      "source": "sealed_fifth_holdout_case_06",
+      "evaluation_role": "blinded_holdout_fifth_run"
+    },
+    {
+      "case": "cases/bh5-507.json",
+      "oracle": "oracles/bh5-507.json",
+      "split": "holdout",
+      "source": "sealed_fifth_holdout_case_07",
+      "evaluation_role": "blinded_holdout_fifth_run"
+    },
+    {
+      "case": "cases/bh5-508.json",
+      "oracle": "oracles/bh5-508.json",
+      "split": "holdout",
+      "source": "sealed_fifth_holdout_case_08",
+      "evaluation_role": "blinded_holdout_fifth_run"
+    }
+  ]
+}

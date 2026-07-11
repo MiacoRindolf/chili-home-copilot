@@ -1,0 +1,151 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh5-503",
+  "problem_statement": "After a brief queue-worker outage, some municipal permits show a passed final inspection but never receive a certificate. Replaying delivery at the broker appears successful and no records are corrupt. Determine the earliest corrective target from immutable event history, audit rows, and traces without changing permit records.",
+  "observations": [
+    {
+      "evidence_id": "bh5-503-e01",
+      "statement": "All 37 affected permits have a final-inspection event, a processed-event marker, no certificate row, and no certificate-render request.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "read-only relational consistency query",
+      "independence_key": "permit-state-join",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "entities": ["inspection_event", "processed_event", "certificate", "render_request"],
+        "expected_state": {"processed_marker": true, "certificate": true, "render_request": true},
+        "actual_state": {"processed_marker": true, "certificate": false, "render_request": false}
+      }
+    },
+    {
+      "evidence_id": "bh5-503-e02",
+      "statement": "The affected event deliveries were attempted twice: the first worker vanished 9 to 31 milliseconds after inserting the marker, and the second delivery returned duplicate without requesting a render.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "broker delivery ledger joined to worker spans",
+      "independence_key": "delivery-attempt-timeline",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "sequence": ["delivery-1", "marker-insert", "worker-loss", "delivery-2", "duplicate-return"],
+        "transitions": [
+          {"from": "unseen", "to": "marked", "result": "worker_lost"},
+          {"from": "marked", "to": "marked", "result": "duplicate_short_circuit"}
+        ]
+      }
+    },
+    {
+      "evidence_id": "bh5-503-e03",
+      "statement": "For unaffected permits on the same build, the marker insert and render-request insert share one transaction identifier; for affected permits the marker transaction committed alone before the connection ended.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "database write-ahead audit decoder",
+      "independence_key": "transaction-boundary-comparison",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "comparison": {"unaffected": ["marker_insert", "render_request_insert", "commit"], "affected": ["marker_insert", "commit", "connection_end"]},
+        "causal_parents": ["event_delivery", "marker_commit", "render_request"]
+      }
+    },
+    {
+      "evidence_id": "bh5-503-e04",
+      "statement": "The renderer, template store, and document sink processed unrelated requests throughout the outage window, and no failed request exists for any affected permit.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "downstream service counters and sink ledger",
+      "independence_key": "downstream-negative-control",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "edges": [
+          {"producer": "permit_worker", "consumer": "renderer", "sink": "document_store", "edge_state": "missing_for_affected"},
+          {"producer": "permit_worker", "consumer": "renderer", "sink": "document_store", "edge_state": "healthy_for_unrelated"}
+        ]
+      }
+    },
+    {
+      "evidence_id": "bh5-503-e05",
+      "statement": "Source revision, event schema, worker settings, database engine revision, and certificate template hash match the prior healthy day.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "deployment attestations and schema registry",
+      "independence_key": "change-surface-negative-control",
+      "reliability": 0.95,
+      "discriminating": false,
+      "metadata": {
+        "comparison": {"source_revision": "0f83a91", "event_schema": "inspection-final-v6", "runtime_revision": "db-15.6", "template_hash": "tmpl-994a"}
+      }
+    },
+    {
+      "evidence_id": "bh5-503-e06",
+      "statement": "The worker-loss interval aligns with an orchestrator network partition, but permits whose first attempt ended before marker commit were redelivered and completed normally.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "orchestrator journal and permit outcome join",
+      "independence_key": "failure-position-control",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "comparison": {"loss_before_marker_commit": {"count": 22, "completed": 22}, "loss_after_marker_commit": {"count": 37, "completed": 0}},
+        "timestamps": {"partition_start": "2026-04-12T16:08:11Z", "partition_end": "2026-04-12T16:11:44Z"}
+      }
+    },
+    {
+      "evidence_id": "bh5-503-e07",
+      "statement": "A read-only state-machine reconstruction finds no permitted transition from marked-without-request to certificate-issued because every later delivery exits at the marker check.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "offline transition replay from immutable audit events",
+      "independence_key": "state-machine-reachability",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "experiment_id": "exp-permit-reachability-09",
+        "input_fingerprint": "permit-audit-window-1608-1612",
+        "transitions": ["unseen_to_marked", "marked_to_duplicate_exit"],
+        "outcome": "certificate_state_unreachable"
+      }
+    },
+    {
+      "evidence_id": "bh5-503-e08",
+      "statement": "A sealed fault-injection proof that places the marker and render request in one atomic unit leaves neither row after loss and completes both on redelivery; ordinary duplicate deliveries still emit one request.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "isolated database and broker proof transcript",
+      "independence_key": "atomicity-fault-proof",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "experiment_id": "exp-permit-atomicity-11",
+        "comparison": {"fault_points": 14, "partial_states": 0, "duplicate_requests": 0},
+        "outcome_fingerprint": "atomic-marker-and-request"
+      }
+    },
+    {
+      "evidence_id": "bh5-503-e09",
+      "statement": "The certificate absence is thus upstream of rendering and storage alarms: those systems never receive a causally linked request for an affected permit.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "cross-service causal trace audit",
+      "independence_key": "causal-parent-absence",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "causal_parents": {"certificate_render": "render_request", "render_request": "inspection_event_processing"},
+        "actual_state": {"render_request_parent_present": false}
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

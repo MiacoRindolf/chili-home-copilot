@@ -1,0 +1,146 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh5-504",
+  "problem_statement": "Following a scheduler release, a laboratory robot fleet rejects many sterilization runs as overlapping even though the prior run ends exactly when the next is due to begin. Queues rise and watchdogs later report idle robots. Identify the root cause and separate the initiating fault from downstream capacity symptoms using retained revisions and deterministic evidence.",
+  "observations": [
+    {
+      "evidence_id": "bh5-504-e01",
+      "statement": "Every newly rejected run shares an endpoint exactly with an existing reservation; requests with a positive gap continue to schedule and requests with a true one-second overlap remain rejected.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "scheduler decision export grouped by interval relation",
+      "independence_key": "interval-shape-correlation",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "comparison": {"shared_endpoint_rejected": 418, "positive_gap_rejected": 0, "true_overlap_accepted": 0},
+        "correlation": {"feature": "endpoint_equality", "phi": 1.0}
+      }
+    },
+    {
+      "evidence_id": "bh5-504-e02",
+      "statement": "Robot controllers report the chambers free at the shared endpoint, and their signed execution logs contain no overrun, cleaning delay, or safety interlock for the rejected requests.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "independent controller execution logs",
+      "independence_key": "physical-resource-negative-control",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "expected_state": {"at_previous_end": "available"},
+        "actual_state": {"controller": "available", "scheduler": "conflict"}
+      }
+    },
+    {
+      "evidence_id": "bh5-504-e03",
+      "statement": "Reservation input bytes, chamber topology, cleaning policy, database revision, and worker image are identical when the final good and first bad scheduler builds evaluate the same retained request.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "signed evaluation bundles",
+      "independence_key": "input-environment-control",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "input_fingerprint": "reservation-corpus-4f0d9",
+        "environment_fingerprint": "scheduler-worker-linux-amd64-22c1",
+        "comparison": {"topology_hash": "topo-e11a", "policy_hash": "clean-3b09", "db_revision": "16.2"}
+      }
+    },
+    {
+      "evidence_id": "bh5-504-e04",
+      "statement": "The release diff replaces a half-open interval helper with an inline predicate that uses less-than-or-equal comparisons on both endpoints.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "reviewed source diff between deployed revisions",
+      "independence_key": "scheduler-revision-delta",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "source_revisions": {"good": "93aa02c", "bad": "b6d712e"},
+        "code": {"good_semantics": "start < other_end and other_start < end", "bad_semantics": "start <= other_end and other_start <= end"}
+      }
+    },
+    {
+      "evidence_id": "bh5-504-e05",
+      "statement": "A deterministic comparison on 12,000 generated interval pairs finds disagreement only for endpoint equality; the deployed build labels all 1,204 such pairs as conflicts.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "sealed differential evaluation transcript",
+      "independence_key": "predicate-differential-proof",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "experiment_id": "exp-interval-diff-22",
+        "comparison": {"pairs": 12000, "disagreements": 1204, "endpoint_equal_disagreements": 1204},
+        "outcome_fingerprint": "closed-vs-half-open-boundary"
+      }
+    },
+    {
+      "evidence_id": "bh5-504-e06",
+      "statement": "The queue increase begins 18 minutes after the first boundary rejection, and idle-robot watchdog alarms begin only after queued runs miss their dispatch windows.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "causally linked scheduler and watchdog timeline",
+      "independence_key": "downstream-symptom-ordering",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "sequence": ["boundary_rejection", "queue_growth", "dispatch_miss", "idle_watchdog"],
+        "timestamps": {"first_rejection": "2026-05-23T14:02:17Z", "queue_inflection": "2026-05-23T14:20:00Z", "first_watchdog": "2026-05-23T14:29:31Z"}
+      }
+    },
+    {
+      "evidence_id": "bh5-504-e07",
+      "statement": "Reverting only the predicate semantics in an isolated build accepts shared endpoints, still rejects real overlaps, and leaves policy and controller outputs unchanged.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "single-change isolated build report",
+      "independence_key": "single-change-restoration",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "experiment_id": "exp-interval-restore-24",
+        "outcomes": {"shared_endpoint": "accepted", "one_second_overlap": "rejected", "policy_diffs": 0, "controller_diffs": 0}
+      }
+    },
+    {
+      "evidence_id": "bh5-504-e08",
+      "statement": "Package locks and runtime library inventories are byte-identical between the two scheduler builds, excluding a resolved-component change coincident with the source release.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "software bill of materials comparison",
+      "independence_key": "component-inventory-negative-control",
+      "reliability": 0.96,
+      "discriminating": false,
+      "metadata": {
+        "artifact_hash": "sha256:fc9c8163db0eb8f4d61aa0aee278ae81bfdcfbc1cc55882458bf95572a789854",
+        "comparison": {"component_differences": 0}
+      }
+    },
+    {
+      "evidence_id": "bh5-504-e09",
+      "statement": "A boundary-focused proof corpus covers zero-duration guards, shared endpoints, nested runs, and real overlaps, with all outcomes matching the documented half-open reservation contract.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "post-change contract proof artifact",
+      "independence_key": "contract-proof-corpus",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "experiment_id": "exp-interval-contract-25",
+        "comparison": {"contract_cases": 86, "mismatches": 0},
+        "code_fingerprint": "scheduler-boundary-fix-04f8"
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

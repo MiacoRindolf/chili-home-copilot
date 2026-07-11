@@ -1,0 +1,146 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh5-507",
+  "problem_statement": "After maintenance on a shore gateway, command messages to a subset of marine research buoys time out during connection setup while telemetry from those buoys continues to arrive. The maintenance changed more than one delivery input and did not retain a comparable effective pre-change snapshot. Determine the defensible diagnostic posture and a read-only way to isolate the failing edge.",
+  "observations": [
+    {
+      "evidence_id": "bh5-507-e01",
+      "statement": "Failures are confined to command downlinks routed through gateway west and listener relay-v2; telemetry uplinks and command downlinks through gateway east remain healthy.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "message route ledger and gateway counters",
+      "independence_key": "route-specific-failure",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "edges": [
+          {"producer": "command_service", "consumer": "gateway_west_relay_v2", "sink": "buoy_downlink", "edge_state": "handshake_timeout"},
+          {"producer": "buoy_telemetry", "consumer": "gateway_west_telemetry", "sink": "telemetry_store", "edge_state": "healthy"},
+          {"producer": "command_service", "consumer": "gateway_east_relay_v2", "sink": "buoy_downlink", "edge_state": "healthy"}
+        ]
+      }
+    },
+    {
+      "evidence_id": "bh5-507-e02",
+      "statement": "A retained passive trace shows the affected connection sending a server-name value for relay-west.internal and receiving an unrecognized-name alert before any command bytes are transmitted.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "redacted packet capture from the incident window",
+      "independence_key": "handshake-failure-localization",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "sequence": ["client_hello", "server_name_relay_west_internal", "server_alert_unrecognized_name", "connection_close"],
+        "actual_state": {"application_bytes_sent": 0}
+      }
+    },
+    {
+      "evidence_id": "bh5-507-e03",
+      "statement": "The current desired template names commands.ocean.example, and the presented certificate covers that name but not relay-west.internal.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "configuration repository and read-only certificate inspection",
+      "independence_key": "desired-name-certificate-comparison",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "expected_state": {"server_name": "commands.ocean.example"},
+        "actual_state": {"trace_server_name": "relay-west.internal", "certificate_names": ["commands.ocean.example"]}
+      }
+    },
+    {
+      "evidence_id": "bh5-507-e04",
+      "statement": "The gateway renders its listener configuration from the template plus a region-alias environment value, but maintenance records preserve neither the old value nor the rendered pre-change output.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "deployment template and maintenance evidence inventory",
+      "independence_key": "effective-baseline-gap",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "producer_consumer": {"producer": "template_and_region_alias", "consumer": "gateway_renderer", "sink": "effective_listener"},
+        "missing_artifacts": ["prechange_region_alias", "prechange_rendered_listener"]
+      }
+    },
+    {
+      "evidence_id": "bh5-507-e05",
+      "statement": "The maintenance window also updated the connection library used by the command sidecar; its archived notes describe a fallback to the dial target when no explicit server name is supplied.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "signed software inventory and vendor notes archive",
+      "independence_key": "coupled-client-change",
+      "reliability": 0.94,
+      "discriminating": true,
+      "metadata": {
+        "comparison": {"connection_library": ["4.7.2", "4.8.0"], "maintenance_window": "2026-02-14T05:00:00Z/2026-02-14T05:42:00Z"},
+        "causal_parents": ["explicit_server_name_presence", "dial_target_fallback"]
+      }
+    },
+    {
+      "evidence_id": "bh5-507-e06",
+      "statement": "Only redacted checksums of effective gateway output were retained, and serializer changes make the old and current checksums incomparable even when semantically equivalent inputs are reconstructed.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "configuration attestation records and serializer migration note",
+      "independence_key": "checksum-noncomparability",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "artifact_hash": "sha256:9e2c8f54c680e7f6af7e179c63d394bc2d7f2e0a2908bd7e55ffb9a9cf126c6e",
+        "comparison": {"old_serializer": "ordered-v1", "current_serializer": "canonical-v2", "semantic_diff_available": false}
+      }
+    },
+    {
+      "evidence_id": "bh5-507-e07",
+      "statement": "Two isolated reconstructions from archived material both fit the observed trace: an omitted rendered server-name field with client fallback, and an explicit field rendered from the unavailable alias value.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "offline gateway and sidecar reconstruction report",
+      "independence_key": "equifinal-reconstruction",
+      "reliability": 0.95,
+      "discriminating": true,
+      "metadata": {
+        "experiment_id": "exp-buoy-handshake-19",
+        "outcomes": {"omitted_field_with_fallback": "relay-west.internal", "explicit_alias_field": "relay-west.internal"},
+        "outcome_fingerprint": "same-trace-two-mechanisms"
+      }
+    },
+    {
+      "evidence_id": "bh5-507-e08",
+      "statement": "DNS answers, certificate validity, satellite-link quality, queue age, and buoy firmware are normal; none can explain why failure precedes application data only on one listener.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "read-only infrastructure and device health bundle",
+      "independence_key": "downstream-and-network-controls",
+      "reliability": 0.93,
+      "discriminating": true,
+      "metadata": {
+        "comparison": {"dns_failures": 0, "certificate_expired": false, "link_loss_percent": 0.8, "normal_link_loss_percent": 0.9, "queue_age_seconds": 3}
+      }
+    },
+    {
+      "evidence_id": "bh5-507-e09",
+      "statement": "The gateway can expose a redacted effective-listener dump, and the sidecar can log whether server name was explicit or derived, both correlated to a passive handshake identifier without sending a buoy command.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "administrative endpoint schema and sidecar trace capability review",
+      "independence_key": "safe-discriminating-capture",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "events": ["rendered_server_name", "server_name_origin", "handshake_id", "peer_alert"],
+        "safety": {"passive_only": true, "buoy_command_sent": false, "production_mutation": false}
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

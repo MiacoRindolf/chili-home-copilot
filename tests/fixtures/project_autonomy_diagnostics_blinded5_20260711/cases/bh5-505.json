@@ -1,0 +1,146 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh5-505",
+  "problem_statement": "An automated accessibility gate for a museum touchscreen intermittently reports that the first exhibit tile receives focus but its spoken label is absent. The same application artifact is deployed on visitor kiosks, where coarse telemetry shows no corresponding complaint signal. Retained evidence is incomplete, so determine the safest next diagnostic action without changing visitor-facing systems.",
+  "observations": [
+    {
+      "evidence_id": "bh5-505-e01",
+      "statement": "Seven of 30 automated runs fail only on the first injected tap after launch; later taps in those same runs produce the expected focus and speech assertions.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "continuous integration result archive",
+      "independence_key": "automated-first-tap-pattern",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "sequence": ["launch", "first_tap", "focus_assertion", "speech_assertion", "later_taps"],
+        "comparison": {"runs": 30, "first_tap_failures": 7, "later_tap_failures": 0}
+      }
+    },
+    {
+      "evidence_id": "bh5-505-e02",
+      "statement": "Failure screenshots show the correct focus ring and selected exhibit, but the retained trace records only the assertion timeout, not the injected-input timestamp or virtual speech-device readiness.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "test screenshots and reduced trace bundle",
+      "independence_key": "trace-observability-gap",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "expected_state": {"visual_focus": true, "spoken_label": true},
+        "actual_state": {"visual_focus": true, "spoken_label": "not_observed_before_timeout"},
+        "missing_events": ["input_injection_time", "virtual_device_ready_time", "speech_callback_time"]
+      }
+    },
+    {
+      "evidence_id": "bh5-505-e03",
+      "statement": "Twenty supervised starts on physical kiosks with the same application hash produce an audible first label, but the physical runs use real touch and audio hardware and do not preserve callback timing.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "field technician checklist and artifact attestation",
+      "independence_key": "physical-kiosk-comparison",
+      "reliability": 0.82,
+      "discriminating": true,
+      "metadata": {
+        "experiment_id": "exp-kiosk-field-06",
+        "comparison": {"starts": 20, "audible_labels": 20},
+        "environment_fingerprint": "physical-touch-and-audio",
+        "code_fingerprint": "kiosk-app-18d4a7"
+      }
+    },
+    {
+      "evidence_id": "bh5-505-e04",
+      "statement": "The application source, content bundle, accessibility tree snapshot, and test script are unchanged across the last fully passing run and the intermittent window.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "build attestations and archived test inputs",
+      "independence_key": "application-input-negative-control",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "comparison": {"source_revision": "e9146c0", "content_hash": "content-c59f", "tree_hash": "a11y-21b4", "script_hash": "taptest-7730"}
+      }
+    },
+    {
+      "evidence_id": "bh5-505-e05",
+      "statement": "The execution image changed both the browser patch level and the virtual audio bridge revision in the same maintenance update; no retained run changes one without the other.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "runner image software inventories",
+      "independence_key": "coupled-runner-change",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "runtime_revisions": {"good": "runner-2026.06.1", "intermittent": "runner-2026.06.2"},
+        "comparison": {"browser": ["134.0.7012.18", "134.0.7012.29"], "audio_bridge": ["5.4.1", "5.5.0"]}
+      }
+    },
+    {
+      "evidence_id": "bh5-505-e06",
+      "statement": "Virtual audio startup warnings occur in six failed runs and five passing runs; warning duration has a 0.58 correlation with assertion duration but does not separate outcomes.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "runner service journal joined to test outcomes",
+      "independence_key": "audio-startup-correlation",
+      "reliability": 0.9,
+      "discriminating": false,
+      "metadata": {
+        "comparison": {"warning_in_failures": 6, "warning_in_passes": 5},
+        "correlation": {"variables": ["warning_duration", "assertion_duration"], "pearson_r": 0.58}
+      }
+    },
+    {
+      "evidence_id": "bh5-505-e07",
+      "statement": "Keyboard-driven focus checks pass in every run, but they execute after the launch animation and after the virtual speech device has already handled one probe utterance.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "test step log and script ordering",
+      "independence_key": "late-keyboard-negative-control",
+      "reliability": 0.95,
+      "discriminating": true,
+      "metadata": {
+        "sequence": ["launch_animation", "tap_check", "probe_utterance", "keyboard_check"],
+        "actual_state": {"keyboard_checks_passed": 30, "keyboard_checks_total": 30}
+      }
+    },
+    {
+      "evidence_id": "bh5-505-e08",
+      "statement": "Adding a 500-millisecond pre-tap wait makes ten isolated reruns pass, but it also allows both the launch animation and virtual device initialization to finish, so the result cannot distinguish the competing mechanisms.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "quarantined timing probe transcript",
+      "independence_key": "non-isolating-wait-probe",
+      "reliability": 0.92,
+      "discriminating": false,
+      "metadata": {
+        "experiment_id": "exp-kiosk-wait-08",
+        "comparison": {"wait_ms": 500, "runs": 10, "passes": 10},
+        "causal_parents": ["animation_completion", "virtual_device_readiness"]
+      }
+    },
+    {
+      "evidence_id": "bh5-505-e09",
+      "statement": "A read-only rerun can capture compositor frames, injected-input acknowledgments, speech-device readiness, and application callbacks on one monotonic timeline; none of those signals are available in the retained failures.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "runner capability inventory and trace schema review",
+      "independence_key": "discriminating-instrumentation-availability",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "events": ["frame_presented", "tap_acknowledged", "speech_device_ready", "label_callback", "assertion_deadline"],
+        "safety": {"target": "isolated_runner", "visitor_system_mutation": false}
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

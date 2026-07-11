@@ -1,0 +1,152 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh5-501",
+  "problem_statement": "An educational media packager began publishing playable lessons whose captions stop immediately after an authoring note. The source tracks still validate, packaging reports success, and the onset follows a routine builder refresh. Determine the root cause using retained artifacts and read-only comparisons; production mutation is not required.",
+  "observations": [
+    {
+      "evidence_id": "bh5-501-e01",
+      "statement": "Across eight affected lessons, the player loads every cue before the first NOTE block and zero cues after it, while video and audio segment counts remain normal.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "player telemetry export joined to packaged cue indexes",
+      "independence_key": "player-cue-boundary",
+      "reliability": 0.94,
+      "discriminating": true,
+      "metadata": {
+        "entities": ["lesson", "caption_track", "media_segments"],
+        "comparison": {"before_note_cues": 1462, "after_note_cues": 0, "media_segment_errors": 0}
+      }
+    },
+    {
+      "evidence_id": "bh5-501-e02",
+      "statement": "The retained WebVTT inputs have the same SHA-256 values as the authoring exports and pass two independent syntax validators, including the blank line following each NOTE block.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "immutable authoring export and validation reports",
+      "independence_key": "source-track-integrity",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "artifact_hash": "sha256:2e1f25a0f3d916f0a29be42a549de0d8dcd3b865bfe72385d4f8c9ca4c2ae611",
+        "validators": ["validator-a", "validator-b"],
+        "outcome_fingerprint": "valid-vtt-note-boundaries"
+      }
+    },
+    {
+      "evidence_id": "bh5-501-e03",
+      "statement": "Package manifests claim the expected total cue count, but the serialized seek index contains only the prefix ending at the first note; the loss therefore occurs after counting and before index serialization.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "signed package manifest and extracted seek index",
+      "independence_key": "package-stage-localization",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "edges": [
+          {"producer": "cue_counter", "consumer": "index_builder", "sink": "package_manifest", "edge_state": "complete"},
+          {"producer": "index_builder", "consumer": "serializer", "sink": "seek_index", "edge_state": "truncated_after_note"}
+        ],
+        "expected_state": {"cue_count": 231},
+        "actual_state": {"manifest_count": 231, "serialized_count": 74}
+      }
+    },
+    {
+      "evidence_id": "bh5-501-e04",
+      "statement": "Application source, packager settings, locale, and container base digest are identical between the final good build and the first bad build.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "build attestations from adjacent nightly runs",
+      "independence_key": "application-environment-negative-control",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "comparison": {"source_revision": "7c9140e", "settings_hash": "cfg-35b14", "locale": "C.UTF-8", "base_digest": "img-8ab97"},
+        "timestamps": {"good": "2026-06-17T02:14:00Z", "bad": "2026-06-18T02:13:00Z"}
+      }
+    },
+    {
+      "evidence_id": "bh5-501-e05",
+      "statement": "The resolved component lock differs at one transitive caption parser: the good build resolves 2.8.4 and the bad build resolves 3.0.0 after the lock was regenerated.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "signed dependency resolution reports",
+      "independence_key": "resolved-component-delta",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "source_revision": "7c9140e",
+        "comparison": {"good_component": "vtt-parse-core@2.8.4", "bad_component": "vtt-parse-core@3.0.0"},
+        "causal_parents": ["lock-regeneration", "component-resolution"]
+      }
+    },
+    {
+      "evidence_id": "bh5-501-e06",
+      "statement": "A quarantined offline comparison feeds identical retained bytes to both resolved component sets: 2.8.4 emits 231 cues, while 3.0.0 emits 74 and leaves its scanner in note mode at end of input.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "reproducible isolated parser transcript",
+      "independence_key": "component-a-b-reproduction",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "experiment_id": "exp-caption-parser-17",
+        "input_fingerprint": "vtt-retained-2e1f25a0",
+        "environment_fingerprint": "isolated-linux-amd64-cutf8",
+        "outcomes": {"2.8.4": {"cues": 231, "terminal_mode": "cue"}, "3.0.0": {"cues": 74, "terminal_mode": "note"}}
+      }
+    },
+    {
+      "evidence_id": "bh5-501-e07",
+      "statement": "Tracks with no NOTE blocks produce byte-identical indexes under both component sets, ruling against a general serializer, storage, or player regression.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "negative-control corpus comparison",
+      "independence_key": "note-free-negative-control",
+      "reliability": 0.95,
+      "discriminating": true,
+      "metadata": {
+        "experiment_id": "exp-caption-parser-18",
+        "comparison": {"control_tracks": 43, "index_hash_mismatches": 0}
+      }
+    },
+    {
+      "evidence_id": "bh5-501-e08",
+      "statement": "The archived 3.0.0 parser source changes NOTE termination from one blank-line token to a two-token delimiter that the tokenizer can never emit as a pair.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "vendor source archive matched to the resolved digest",
+      "independence_key": "component-mechanism-inspection",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "code_fingerprint": "vtt-parse-core-3.0.0-sha256-8f28c1",
+        "transitions": ["cue_to_note", "note_to_note_at_single_blank", "end_of_input_while_note"]
+      }
+    },
+    {
+      "evidence_id": "bh5-501-e09",
+      "statement": "Rebuilding an affected package in isolation with the prior resolved component restores the full seek index without changing application code, input bytes, settings, or runtime image.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "sealed restoration build and artifact diff",
+      "independence_key": "single-factor-restoration",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "experiment_id": "exp-caption-restore-04",
+        "comparison_fingerprint": "same-code-input-settings-runtime",
+        "actual_state": {"serialized_cues": 231, "player_visible_cues": 231}
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}
