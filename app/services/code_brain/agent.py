@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 _MAX_FILE_LINES = 600
 _MAX_FILES_PER_EDIT = 8
+_NON_MUTATING_PLAN_ACTIONS = frozenset(
+    {"review", "inspect", "read", "analyze", "none", "skip", "unchanged", "no_change"}
+)
 
 
 def _snapshots_by_repo(db: Session, repo_ids: list[int]) -> dict[int, list[CodeSnapshot]]:
@@ -455,6 +458,56 @@ def _extract_full_file_replacement(
     }
 
 
+def _semantic_replacement_warnings(file_path: str, content: str) -> List[str]:
+    """Reject a small set of mechanically contradictory Python constants."""
+    if Path(file_path).suffix.lower() != ".py":
+        return []
+    import ast
+
+    try:
+        tree = ast.parse(content, filename=file_path)
+    except SyntaxError:
+        return []
+
+    known_false = {"", "0", "false", "no", "off", "disabled", "none", "null"}
+    known_true = {"1", "true", "yes", "on", "enabled"}
+    warnings: list[str] = []
+
+    def target_name(node: ast.AST) -> str:
+        if isinstance(node, ast.Name):
+            return node.id.upper()
+        return ""
+
+    for node in ast.walk(tree):
+        target = None
+        value = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign):
+            target, value = node.target, node.value
+        name = target_name(target) if target is not None else ""
+        if not name or value is None or not isinstance(value, (ast.Set, ast.List, ast.Tuple)):
+            continue
+        literals = {
+            str(item.value).strip().lower()
+            for item in value.elts
+            if isinstance(item, ast.Constant) and isinstance(item.value, str)
+        }
+        if "TRUE" in name and "VALUE" in name:
+            contradictions = sorted(literals & known_false)
+            if contradictions:
+                warnings.append(
+                    f"{name} contains known false literal(s): {', '.join(repr(v) for v in contradictions)}"
+                )
+        if "FALSE" in name and "VALUE" in name:
+            contradictions = sorted(literals & known_true)
+            if contradictions:
+                warnings.append(
+                    f"{name} contains known true literal(s): {', '.join(repr(v) for v in contradictions)}"
+                )
+    return warnings
+
+
 _UNICODE_FOLD = (
     ("—", "-"), ("–", "-"),  # em/en dash -> hyphen
     ("‘", "'"), ("’", "'"),  # curly single quotes
@@ -619,6 +672,11 @@ def _parse_plan_json(reply: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _is_mutating_plan_action(value: object) -> bool:
+    action = str(value or "modify").strip().lower().replace("-", "_").replace(" ", "_")
+    return action not in _NON_MUTATING_PLAN_ACTIONS
+
+
 def _validate_diff(diff_text: str, file_path: str, file_content: Optional[str]) -> Dict[str, Any]:
     """Validate a generated diff against the real file content."""
     result = {"valid": True, "warnings": []}
@@ -777,7 +835,11 @@ async def run_code_agent(
         }
 
     analysis = plan_json.get("analysis", "")
-    plan_files = plan_json.get("files", [])[:_MAX_FILES_PER_EDIT]
+    plan_files = [
+        item
+        for item in plan_json.get("files", [])
+        if isinstance(item, dict) and _is_mutating_plan_action(item.get("action"))
+    ][:_MAX_FILES_PER_EDIT]
     notes = plan_json.get("notes", "")
 
     # Plan grounding: when the TASK ITSELF names existing file path(s), the
@@ -847,6 +909,24 @@ async def run_code_agent(
             m = re.search(r"```\w*\n(.*?)```", create_reply, re.DOTALL)
             if m:
                 new_content = m.group(1).strip()
+                semantic_warnings = _semantic_replacement_warnings(fpath, new_content)
+                if semantic_warnings:
+                    validations.append(
+                        {
+                            "file": fpath,
+                            "valid": False,
+                            "warnings": semantic_warnings,
+                        }
+                    )
+                    edit_sections.append(
+                        f"Could not generate safe content for {fpath}: "
+                        + "; ".join(semantic_warnings)
+                    )
+                    if _create_log_id:
+                        _dispatch_log_ids.append(
+                            (int(_create_log_id), "code_dispatch_create", False)
+                        )
+                    continue
                 diff = f"--- /dev/null\n+++ b/{fpath}\n@@ -0,0 +1,{len(new_content.splitlines())} @@\n"
                 diff += "\n".join("+" + l for l in new_content.splitlines())
                 all_diffs.append(diff)
@@ -906,20 +986,38 @@ async def run_code_agent(
         if sr_blocks:
             outcome = _apply_search_replace(file_content, sr_blocks)
             if outcome["new_content"] is not None:
-                d = _unified_diff_text(fpath, file_content, outcome["new_content"])
-                if d.strip():
-                    all_diffs.append(d)
-                    if fpath not in files_changed:
-                        files_changed.append(fpath)
-                    edit_sections.append(f"### {fpath}\n```diff\n{d}\n```")
-                    _edit_succeeded_at_least_one = True
-                validations.append({
-                    "file": fpath,
-                    "valid": True,
-                    "warnings": outcome["warnings"],
-                    "applied_blocks": outcome["applied"],
-                    "total_blocks": len(sr_blocks),
-                })
+                semantic_warnings = _semantic_replacement_warnings(
+                    fpath,
+                    outcome["new_content"],
+                )
+                if semantic_warnings:
+                    validations.append(
+                        {
+                            "file": fpath,
+                            "valid": False,
+                            "warnings": semantic_warnings,
+                            "semantic_polarity_guard": True,
+                        }
+                    )
+                    edit_sections.append(
+                        f"### {fpath}\n**Edits rejected** -- "
+                        + "; ".join(semantic_warnings)
+                    )
+                else:
+                    d = _unified_diff_text(fpath, file_content, outcome["new_content"])
+                    if d.strip():
+                        all_diffs.append(d)
+                        if fpath not in files_changed:
+                            files_changed.append(fpath)
+                        edit_sections.append(f"### {fpath}\n```diff\n{d}\n```")
+                        _edit_succeeded_at_least_one = True
+                    validations.append({
+                        "file": fpath,
+                        "valid": True,
+                        "warnings": outcome["warnings"],
+                        "applied_blocks": outcome["applied"],
+                        "total_blocks": len(sr_blocks),
+                    })
             else:
                 validations.append({
                     "file": fpath,
@@ -932,20 +1030,38 @@ async def run_code_agent(
         else:
             full_file = _extract_full_file_replacement(edit_reply, fpath, file_content)
             if full_file["new_content"] is not None:
-                d = _unified_diff_text(fpath, file_content, full_file["new_content"])
-                all_diffs.append(d)
-                if fpath not in files_changed:
-                    files_changed.append(fpath)
-                edit_sections.append(f"### {fpath}\n```diff\n{d}\n```")
-                validations.append(
-                    {
-                        "file": fpath,
-                        "valid": True,
-                        "warnings": full_file["warnings"],
-                        "full_file_fallback": True,
-                    }
+                semantic_warnings = _semantic_replacement_warnings(
+                    fpath,
+                    full_file["new_content"],
                 )
-                _edit_succeeded_at_least_one = True
+                if semantic_warnings:
+                    validations.append(
+                        {
+                            "file": fpath,
+                            "valid": False,
+                            "warnings": semantic_warnings,
+                            "semantic_polarity_guard": True,
+                        }
+                    )
+                    edit_sections.append(
+                        f"### {fpath}\n**Full-file edit rejected** -- "
+                        + "; ".join(semantic_warnings)
+                    )
+                else:
+                    d = _unified_diff_text(fpath, file_content, full_file["new_content"])
+                    all_diffs.append(d)
+                    if fpath not in files_changed:
+                        files_changed.append(fpath)
+                    edit_sections.append(f"### {fpath}\n```diff\n{d}\n```")
+                    validations.append(
+                        {
+                            "file": fpath,
+                            "valid": True,
+                            "warnings": full_file["warnings"],
+                            "full_file_fallback": True,
+                        }
+                    )
+                    _edit_succeeded_at_least_one = True
             else:
                 # Legacy fallback: some cloud models still answer with a raw
                 # unified diff; keep accepting it, validated against FULL content.

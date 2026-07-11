@@ -1,0 +1,13 @@
+{
+  "schema": "chili.diagnosis-to-fix-case.v1",
+  "case_id": "config-chain-302",
+  "prompt": "Workers on the same revision disagree when CHILI_EXPERIMENTAL_GATE=0. Both the shared flag parser and the worker mode resolver interpret non-empty strings as enabled. Normalize the flag once and make the consumer use that contract without renaming the setting.",
+  "candidate_paths": ["flags.py", "worker_mode.py", "env_report.py"],
+  "max_files": 3,
+  "repo_files": {
+    "flags.py": "_TRUE_VALUES = {\"1\", \"true\", \"yes\", \"on\"}\n\n\ndef enabled(env: dict[str, str], name: str) -> bool:\n    return bool(env.get(name, \"0\"))\n",
+    "worker_mode.py": "from flags import enabled\n\n\ndef resolved_mode(env: dict[str, str]) -> str:\n    if env.get(\"CHILI_EXPERIMENTAL_GATE\"):\n        return \"experimental\"\n    return \"stable\"\n",
+    "env_report.py": "def present_setting(name: str, value: str) -> str:\n    return f\"{name}={value}\"\n",
+    "tests/test_public.py": "from flags import enabled\nfrom worker_mode import resolved_mode\n\n\ndef test_explicit_one_uses_experimental_mode():\n    env = {\"CHILI_EXPERIMENTAL_GATE\": \"1\"}\n    assert enabled(env, \"CHILI_EXPERIMENTAL_GATE\") is True\n    assert resolved_mode(env) == \"experimental\"\n"
+  }
+}

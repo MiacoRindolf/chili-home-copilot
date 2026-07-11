@@ -2687,7 +2687,11 @@ def test_validation_repair_context_text_preserves_targeted_failure():
                 "step_key": "pytest_targeted",
                 "exit_code": 1,
                 "command": "pytest tests/test_example.py -q",
-                "stdout": "FAILED tests/test_example.py::test_behavior",
+                "stdout": (
+                    "FAILED tests/test_example.py::test_behavior\n"
+                    ">       assert result == expected\n"
+                    "E       AssertionError: assert 3 == 2"
+                ),
                 "test_files": ["tests/test_example.py"],
             }
         ],
@@ -2700,6 +2704,43 @@ def test_validation_repair_context_text_preserves_targeted_failure():
     assert "schema: chili.validation-repair-context.v1" in text
     assert "pytest tests/test_example.py -q" in text
     assert "FAILED tests/test_example.py::test_behavior" in text
+    assert "non_negotiable_validation_contracts:" in text
+    assert "assert result == expected" in text
+    assert "observed: AssertionError: assert 3 == 2" in text
+    assert isinstance(context["failed_steps"][0]["stdout_tail"], str)
+
+
+def test_validation_failure_text_uses_structured_contract_summary():
+    text = orchestrator._validation_failure_text(
+        [
+            {
+                "step_key": "pytest_targeted",
+                "exit_code": 1,
+                "stdout": '>       assert sink["XYZ"] == []\nE       KeyError: \'XYZ\'',
+                "stderr": "",
+            }
+        ]
+    )
+
+    assert text.startswith("schema: chili.validation-repair-context.v1")
+    assert 'assert sink["XYZ"] == []' in text
+    assert "observed: KeyError: 'XYZ'" in text
+
+
+def test_plan_files_excludes_advisory_non_mutating_entries():
+    files = orchestrator._plan_files(
+        {
+            "files": [
+                {"path": "app/owner.py", "action": "modify"},
+                {"path": "app/related.py", "action": "review"},
+                {"path": "app/notes.py", "action": "no change"},
+            ]
+        }
+    )
+
+    assert files == [
+        {"path": "app/owner.py", "action": "modify", "description": ""}
+    ]
 
 
 def test_run_needs_visual_qa_for_visible_ui_plan():

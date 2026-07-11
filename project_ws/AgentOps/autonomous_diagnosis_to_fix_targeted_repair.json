@@ -1,0 +1,230 @@
+{
+  "average_case_duration_ms": 42609.0,
+  "cases": [
+    {
+      "baseline_hidden_tests": {
+        "duration_ms": 515,
+        "exit_code": 1,
+        "output": "F\n================================== FAILURES ===================================\n___________________ test_explicit_false_values_are_disabled ___________________\n\n    def test_explicit_false_values_are_disabled():\n        name = \"CHILI_EXPERIMENTAL_GATE\"\n        for value in (\"0\", \"false\", \"no\", \"off\", \"\"):\n>           assert gate_enabled({name: value}, name) is False\nE           AssertionError: assert True is False\nE            +  where True = gate_enabled({'CHILI_EXPERIMENTAL_GATE': '0'}, 'CHILI_EXPERIMENTAL_GATE')\n\ntests\\test_hidden_config.py:7: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_hidden_config.py::test_explicit_false_values_are_disabled\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.07s",
+        "passed": false
+      },
+      "case_id": "config-202",
+      "changed_files": [
+        "feature_gate.py"
+      ],
+      "checks": {
+        "baseline_hidden_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "hidden_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "diagnosis_dimension": "config",
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-2",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-5",
+            "source-6",
+            "source-7",
+            "source-8"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "config"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing config changes or restores the outcome.",
+            "experiment_id": "isolate-config",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by config drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "config",
+            "falsification": "Hold every other dimension constant and show that changing config does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-2",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-4",
+              "source-5",
+              "source-6",
+              "source-7",
+              "source-8"
+            ]
+          }
+        ],
+        "problem_statement": "Two workers on the same revision disagree because one receives CHILI_EXPERIMENTAL_GATE=0, yet the gate is reported enabled. Diagnose and fix the environment-value interpretation without renaming the flag.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "baseline_drift": [],
+        "case_id": "config-202",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by config drift.",
+          "confidence": 0.7619,
+          "dimension": "config",
+          "evidence_ids": [
+            "operator-2",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-5",
+            "source-6",
+            "source-7",
+            "source-8"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by config drift.",
+            "confidence": 0.7619,
+            "confirmatory_weight": 2.55,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "config",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing config does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-2",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-4",
+              "source-5",
+              "source-6",
+              "source-7",
+              "source-8"
+            ],
+            "support_weight": 3.2
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-config",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_status": "confirmed",
+      "duration_ms": 42609,
+      "hidden_tests": {
+        "duration_ms": 462,
+        "exit_code": 0,
+        "output": "...                                                                      [100%]\n3 passed in 0.02s",
+        "passed": true
+      },
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 22489,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"Two workers on the same revision disagree because one receives CHILI_EXPERIMENTAL_GATE=0, yet the gate is reported enabled. Diagnose and fix the environment-value interpretation without renaming the flag.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by config drift.\",\n      \"dimension\":\"config\",\n      \"support_evidence_ids\":[\"operator-2\",\"source-1\",\"source-2\",\"source-3\",\"source-4\",\"source-5\",\"source-6\",\"source-7\",\"source-8\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing config does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-config\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"config\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"state\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing config changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"confirmed\",\n    \"evidence_ids\":[\"operator-2\",\"source-1\",\"source-2\",\"source-3\",\"source-4\",\"source-5\",\"source-6\",\"source-7\",\"source-8\"],\n    \"reason\":\"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 397,
+          "wall_ms": 22489
+        },
+        {
+          "error": null,
+          "latency_ms": 10675,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The issue arises because the `gate_enabled` function in `feature_gate.py` converts any non-empty string to True, including '1', which is incorrect. The environment variable should be interpreted strictly according to its intended boolean value.\",\n  \"files\": [\n    {\n      \"path\": \"feature_gate.py\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `gate_enabled` function to correctly interpret the environment variable as a boolean based on predefined true values.\"\n    }\n  ],\n  \"notes\": \"Ensure that the `_TRUE_VALUES` set includes all intended string representations of 'true' for the gate to be considered enabled. The test in `tests/test_public.py` should pass after this change.\"\n}",
+          "stage": "plan",
+          "tokens_out": 153,
+          "wall_ms": 10675
+        },
+        {
+          "error": null,
+          "latency_ms": 7292,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\ndef gate_enabled(env: dict[str, str], name: str) -> bool:\n    value = env.get(name, \"0\")\n    return bool(value)\n=======\ndef gate_enabled(env: dict[str, str], name: str) -> bool:\n    value = env.get(name, \"0\").lower()\n    return value in _TRUE_VALUES\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 80,
+          "wall_ms": 7292
+        }
+      ],
+      "patch_applied": true,
+      "patch_warnings": [],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 530,
+        "exit_code": 0,
+        "output": ".                                                                        [100%]\n1 passed in 0.02s",
+        "passed": true
+      },
+      "repair_attempts": [],
+      "score": 100,
+      "selected_file": "feature_gate.py",
+      "selected_files": [
+        "feature_gate.py"
+      ],
+      "split": "holdout"
+    }
+  ],
+  "created_at": "2026-07-11T11:29:23.333716+00:00",
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "holdout_case_count": 1,
+  "holdout_score": 100.0,
+  "max_repair_rounds": 5,
+  "model": "qwen2.5-coder:7b",
+  "multifile_holdout_case_count": 0,
+  "multifile_holdout_score": 0.0,
+  "overall_score": 100.0,
+  "premium_calls": 0,
+  "reference_family": "claude-fable-5",
+  "schema": "chili.diagnosis-to-fix-results.v2",
+  "verdict": "shadow_ready"
+}

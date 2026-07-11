@@ -20,7 +20,8 @@ This distinction is intentional. The current evidence proves that CHILI can diag
 | Autonomous evidence acquisition | Typed fixed-string search, file excerpts, repo state, git history/diff, isolated compile, and snapshot-based targeted pytest | Proven for catalog operations |
 | No arbitrary diagnostic shell | Probe schema has no command kind; paths, selectors, time, count, and output are bounded | Proven by source and tests |
 | Workspace isolation for dynamic probes | Compile uses temporary copies; pytest uses a validated `git archive` snapshot and credential-stripped environment | Proven for repository isolation; hardened OS sandboxing remains open |
-| Diagnosis-to-fix autonomy | Local diagnosis, planning, file selection, edit adaptation, public tests, hidden tests, and at most two repair rounds | Proven on three sealed Python repositories |
+| Diagnosis-to-fix autonomy | Local diagnosis, exact tracked-file selection, atomic multi-file edit groups, public+hidden conjunctive validation, assertion-contract extraction, and bounded repair | Proven on seven Python repositories, including four multi-file cases |
+| Production validation repair | Project Autonomy preserves operator/assertion contracts and retries validation locally | Default three rounds, hard maximum five; proven by tests, not yet by a large live inventory |
 | Fable 5 reference accuracy | Active reference is `claude-fable-5`; calibration incidents come from an authenticated Fable 5 task ledger and merged fixes | Proven for three incident contracts |
 | Direct blinded Fable 5 head-to-head | Same unseen task set independently run by Fable 5 and CHILI, with human adjudication | Missing |
 | Broad language/repository coverage | Large Python, TypeScript, Dart, SQL, Go, Rust, and mixed-repository repairs | Incomplete |
@@ -42,18 +43,20 @@ This distinction is intentional. The current evidence proves that CHILI can diag
 
 ### Autonomous Diagnosis-to-Fix
 
-- Three sealed temporary repositories: clock, config, and data source/sink failures
-- Baseline public tests: **3/3 passed**
-- Baseline hidden tests: **3/3 failed**, proving each fixture contained a real defect
-- Final diagnosis dimension: **3/3 correct**
-- Final owning file: **3/3 correct**
-- Final public tests: **3/3 passed**
-- Final hidden tests: **3/3 passed**
-- Overall: **100/100**
-- Average wall time: **56.2 seconds/repository**
+- Seven temporary repositories: three original single-file cases and four multi-file interface/state cases
+- Baseline public tests: **7/7 passed**
+- Baseline hidden tests: **7/7 failed**, proving each fixture contained a real defect
+- Primary uninterrupted run: **97.1/100 overall**, **96.7/100 holdout**
+- Multi-file holdout-derived cases: **3/3 hidden pass, 100/100**
+- Primary exact changed-file ownership: **7/7**
+- Primary public tests: **7/7 passed**
+- Primary hidden tests: **6/7 passed**
+- Newer targeted repair for the one failed config row: **100/100**, public and hidden pass
+- Effective covered rows after targeted repair: **7/7**; this is not reported as a clean full-run 100
+- Untouched multi-file first-run baseline before generic improvements: **83.3/100**
+- Primary average wall time: **116.6 seconds/repository**
 - Premium calls: **0**
-- The data case required two repair rounds, demonstrating validation-driven correction rather than first-answer acceptance
-- Report: `project_ws/AgentOps/AUTONOMOUS_DIAGNOSIS_TO_FIX_BENCHMARK.md`
+- Reports: `project_ws/AgentOps/AUTONOMOUS_DIAGNOSIS_TO_FIX_BENCHMARK.md`, `project_ws/AgentOps/AUTONOMOUS_DIAGNOSIS_TO_FIX_TARGETED_REPAIR.md`, and `project_ws/AgentOps/MULTIFILE_HOLDOUT_FIRST_RUN.md`
 
 ## Safety Boundaries
 
@@ -63,15 +66,17 @@ This distinction is intentional. The current evidence proves that CHILI can diag
 - Snapshot execution protects the source workspace but is not a hardened operating-system sandbox; only already-committed, selector-bounded tests are eligible.
 - Subprocess environments omit API keys, broker credentials, database credentials other than an explicitly `_test`-suffixed test URL, and user-provided environment maps.
 - Model edits are accepted only as exact SEARCH/REPLACE blocks, validated diffs, or one guarded full-file fence with syntax, similarity, and size checks.
+- Python true/false constant sets receive a semantic-polarity check before a local patch is accepted.
 - Hidden-test failure is evidence for a bounded repair loop; tests cannot be edited because only manifest-approved source candidates are eligible.
+- Production Project Autonomy defaults to three local validation-repair rounds and enforces a hard maximum of five.
 
 ## Remaining Gaps
 
-1. The repair holdout has only three small Python repositories. It proves the control loop, not broad coding superiority.
+1. The repair suite has only seven small Python repositories. Four require multi-file changes, but this still does not represent large-repository or multi-language superiority.
 2. No same-task Fable 5 output exists for the sealed repair cases. Current Fable evidence is incident-derived calibration, not a direct tournament.
 3. The generic probe catalog cannot yet query application logs, schemas, or databases through typed read-only adapters. Those were important in the real NBBO investigation.
 4. Local 7B output remains stochastic. Deterministic evidence gates and repair loops contain errors, but difficult tasks can require more calls and higher latency.
-5. Multi-file architectural changes, dependency migrations, frontend visual validation, concurrency bugs, and large cross-service refactors remain under-tested.
+5. Multi-file interface and state repairs now have initial evidence; dependency migrations, frontend visual validation, true concurrency races, and large cross-service refactors remain under-tested.
 6. The 14B local model was not production-usable on current hardware because it offloaded heavily to CPU. The resident 7B model is the measured production lane.
 
 ## Promotion Gate

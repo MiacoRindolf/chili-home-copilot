@@ -92,6 +92,13 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("pending depth", 5),
             ("stale low-value", 4),
             ("admission check", 3),
+            ("reservation registry", 7),
+            ("state contract", 6),
+            ("dedupe", 6),
+            ("duplicate", 5),
+            ("successful reservation", 5),
+            ("_seen", 5),
+            ("reserve(", 5),
         ),
     ),
     (
@@ -204,6 +211,8 @@ _DIRECT_SOURCE_SIGNALS = (
     "sink_rows",
     "return bool(",
     "os.environ",
+    "_seen",
+    "reserve(",
     "queue depth",
     "pending depth",
 )

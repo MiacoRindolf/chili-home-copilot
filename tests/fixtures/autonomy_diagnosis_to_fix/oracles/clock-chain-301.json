@@ -1,0 +1,8 @@
+{
+  "case_id": "clock-chain-301",
+  "expected_dimension": "clock",
+  "expected_files": ["session_policy.py", "replay_runner.py"],
+  "hidden_files": {
+    "tests/test_hidden_clock_chain.py": "from datetime import datetime\n\nfrom replay_runner import replay_accepts\nfrom session_policy import in_regular_session\n\n\ndef test_policy_uses_explicit_clock_value():\n    assert in_regular_session(datetime(2026, 7, 10, 10, 15)) is True\n    assert in_regular_session(datetime(2026, 7, 10, 20, 0)) is False\n\n\ndef test_replay_threads_frame_clock_into_policy():\n    assert replay_accepts(datetime(2026, 7, 10, 10, 15)) is True\n    assert replay_accepts(datetime(2026, 7, 10, 20, 0)) is False\n"
+  }
+}

@@ -1,14 +1,17 @@
 {
-  "average_case_duration_ms": 56221.67,
+  "average_case_duration_ms": 116610.57,
   "cases": [
     {
       "baseline_hidden_tests": {
-        "duration_ms": 601,
+        "duration_ms": 545,
         "exit_code": 1,
         "output": "F\n================================== FAILURES ===================================\n________________ test_replay_frame_inside_session_is_accepted _________________\n\n    def test_replay_frame_inside_session_is_accepted():\n>       assert in_regular_session(datetime(2026, 7, 10, 10, 15)) is True\nE       assert False is True\nE        +  where False = in_regular_session(datetime.datetime(2026, 7, 10, 10, 15))\nE        +    where datetime.datetime(2026, 7, 10, 10, 15) = datetime(2026, 7, 10, 10, 15)\n\ntests\\test_hidden_clock.py:7: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_hidden_clock.py::test_replay_frame_inside_session_is_accepted\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.08s",
         "passed": false
       },
       "case_id": "clock-201",
+      "changed_files": [
+        "session_gate.py"
+      ],
       "checks": {
         "baseline_hidden_failure": true,
         "diagnosis": true,
@@ -22,14 +25,12 @@
       "diagnosis_packet": {
         "conclusion": {
           "evidence_ids": [
-            "operator-1",
-            "operator-2",
-            "source-3",
-            "source-4"
+            "source-1",
+            "source-2"
           ],
-          "hypothesis_id": "h-state",
-          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
-          "status": "provisional"
+          "hypothesis_id": "h-clock",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "status": "confirmed"
         },
         "experiments": [
           {
@@ -199,68 +200,75 @@
         "valid": true
       },
       "diagnosis_status": "confirmed",
-      "duration_ms": 48025,
+      "duration_ms": 54170,
       "hidden_tests": {
-        "duration_ms": 543,
+        "duration_ms": 473,
         "exit_code": 0,
-        "output": "...                                                                      [100%]\n3 passed in 0.02s",
+        "output": "...                                                                      [100%]\n3 passed in 0.01s",
         "passed": true
       },
       "model_calls": [
         {
           "error": null,
-          "latency_ms": 30641,
+          "latency_ms": 35834,
           "ok": true,
-          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"A deterministic replay frame at 10:15 is rejected as outside regular session on machines running before the open. Diagnose the causal family and implement the minimal fix without changing session boundaries.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h-state\",\n      \"claim\":\"The observed failure is primarily caused by state drift.\",\n      \"dimension\":\"state\",\n      \"support_evidence_ids\":[\"operator-1\",\"operator-2\",\"source-3\",\"source-4\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing state does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\":\"h-clock\",\n      \"claim\":\"The observed failure is primarily caused by clock drift.\",\n      \"dimension\":\"clock\",\n      \"support_evidence_ids\":[\"source-1\",\"source-2\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing clock does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-state\",\n      \"hypothesis_ids\":[\"h-state\"],\n      \"changed_dimensions\":[\"state\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing state changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{\"probe_id\":\"p1\",\"kind\":\"repo_state|search|file_excerpt|git_history|git_diff|compile|targeted_test\",\"paths\":[\"session_gate.py\"],\"query\":\"fixed text\",\"selector\":\"tests/test_public.py::test_function_is_callable\",\"dimension\":\"code\"}\n    },\n    {\n      \"experiment_id\":\"isolate-clock\",\n      \"hypothesis_ids\":[\"h-clock\"],\n      \"changed_dimensions\":[\"clock\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing clock changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{\"probe_id\":\"p2\",\"kind\":\"repo_state|search|file_excerpt|git_history|git_diff|compile|targeted_test\",\"paths\":[\"session_gate.py\"],\"query\":\"fixed text\",\"selector\":\"tests/test_public.py::test_function_is_callable\",\"dimension\":\"code\"}\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h-clock\",\n    \"status\":\"confirmed\",\n    \"evidence_ids\":[\"source-1\",\"source-2\"],\n    \"reason\":\"Deterministic evidence",
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"A deterministic replay frame at 10:15 is rejected as outside regular session on machines running before the open. Diagnose the causal family and implement the minimal fix without changing session boundaries.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h-state\",\n      \"claim\":\"The observed failure is primarily caused by state drift.\",\n      \"dimension\":\"state\",\n      \"support_evidence_ids\":[\"operator-1\",\"operator-2\",\"source-3\",\"source-4\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing state does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\":\"h-clock\",\n      \"claim\":\"The observed failure is primarily caused by clock drift.\",\n      \"dimension\":\"clock\",\n      \"support_evidence_ids\":[\"source-1\",\"source-2\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing clock does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-state\",\n      \"hypothesis_ids\":[\"h-state\"],\n      \"changed_dimensions\":[\"state\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing state changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    },\n    {\n      \"experiment_id\":\"isolate-clock\",\n      \"hypothesis_ids\":[\"h-clock\"],\n      \"changed_dimensions\":[\"clock\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing clock changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h-clock\",\n    \"status\":\"confirmed\",\n    \"evidence_ids\":[\"source-1\",\"source-2\"],\n    \"reason\":\"Deterministic evidence gate selected a stronger supported competing hypothesis.\"\n  }\n}",
           "stage": "diagnosis_judge",
-          "tokens_out": 650,
-          "wall_ms": 30641
+          "tokens_out": 554,
+          "wall_ms": 35834
         },
         {
           "error": null,
-          "latency_ms": 10851,
+          "latency_ms": 11255,
           "ok": true,
-          "response": "{\n  \"analysis\": \"The observed failure is primarily caused by clock drift. The function `in_regular_session` in `session_gate.py` checks if the current hour is within the regular session (9 AM to 4 PM). However, this check uses the current system time, which can be affected by clock drift, leading to incorrect session determination.\",\n  \"files\": [\n    {\n      \"path\": \"session_gate.py\",\n      \"action\": \"modify\",\n      \"description\": \"Replace `datetime.now().hour` with `frame_time.hour` to use the provided frame time instead of the current system time.\"\n    }\n  ],\n  \"notes\": \"This fix ensures that the session determination is based on the provided frame time rather than the potentially drifted system time. This change does not alter the session boundaries but corrects the logic for determining if a frame belongs to the regular session.\"\n}",
+          "response": "{\n  \"analysis\": \"The observed failure is primarily caused by clock drift. The `in_regular_session` function in `session_gate.py` checks if the current hour is between 9 and 15, which does not account for potential clock discrepancies.\",\n  \"files\": [\n    {\n      \"path\": \"session_gate.py\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `in_regular_session` function to accept a `frame_time` parameter instead of using the current time. This will allow for more accurate session checks regardless of clock drift.\"\n    }\n  ],\n  \"notes\": \"This fix ensures that the session check is based on the provided frame time rather than the system's current time, thus mitigating the impact of clock drift.\"\n}",
           "stage": "plan",
-          "tokens_out": 182,
-          "wall_ms": 10851
+          "tokens_out": 158,
+          "wall_ms": 11255
         },
         {
           "error": null,
-          "latency_ms": 4236,
+          "latency_ms": 4922,
           "ok": true,
           "response": "```\n<<<<<<< SEARCH\n    hour = datetime.now().hour\n=======\n    hour = frame_time.hour\n>>>>>>> REPLACE\n```",
-          "stage": "edit",
+          "stage": "edit_1",
           "tokens_out": 26,
-          "wall_ms": 4236
+          "wall_ms": 4922
         }
       ],
       "patch_applied": true,
       "patch_warnings": [],
       "premium_calls": 0,
       "public_tests": {
-        "duration_ms": 530,
+        "duration_ms": 479,
         "exit_code": 0,
         "output": ".                                                                        [100%]\n1 passed in 0.01s",
         "passed": true
       },
       "repair_attempts": [],
       "score": 100,
-      "selected_file": "session_gate.py"
+      "selected_file": "session_gate.py",
+      "selected_files": [
+        "session_gate.py"
+      ],
+      "split": "holdout"
     },
     {
       "baseline_hidden_tests": {
-        "duration_ms": 533,
+        "duration_ms": 548,
         "exit_code": 1,
         "output": "F\n================================== FAILURES ===================================\n___________________ test_explicit_false_values_are_disabled ___________________\n\n    def test_explicit_false_values_are_disabled():\n        name = \"CHILI_EXPERIMENTAL_GATE\"\n        for value in (\"0\", \"false\", \"no\", \"off\", \"\"):\n>           assert gate_enabled({name: value}, name) is False\nE           AssertionError: assert True is False\nE            +  where True = gate_enabled({'CHILI_EXPERIMENTAL_GATE': '0'}, 'CHILI_EXPERIMENTAL_GATE')\n\ntests\\test_hidden_config.py:7: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_hidden_config.py::test_explicit_false_values_are_disabled\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.08s",
         "passed": false
       },
       "case_id": "config-202",
+      "changed_files": [
+        "feature_gate.py"
+      ],
       "checks": {
         "baseline_hidden_failure": true,
         "diagnosis": true,
         "file_selection": true,
-        "hidden_tests": true,
+        "hidden_tests": false,
         "patch_applied": true,
         "premium_independence": true,
         "public_tests": true
@@ -403,63 +411,334 @@
         "valid": true
       },
       "diagnosis_status": "confirmed",
-      "duration_ms": 37191,
+      "duration_ms": 203383,
       "hidden_tests": {
-        "duration_ms": 465,
-        "exit_code": 0,
-        "output": "...                                                                      [100%]\n3 passed in 0.02s",
-        "passed": true
+        "duration_ms": 542,
+        "exit_code": 1,
+        "output": "F\n================================== FAILURES ===================================\n___________________ test_explicit_false_values_are_disabled ___________________\n\n    def test_explicit_false_values_are_disabled():\n        name = \"CHILI_EXPERIMENTAL_GATE\"\n        for value in (\"0\", \"false\", \"no\", \"off\", \"\"):\n>           assert gate_enabled({name: value}, name) is False\nE           AssertionError: assert True is False\nE            +  where True = gate_enabled({'CHILI_EXPERIMENTAL_GATE': '0'}, 'CHILI_EXPERIMENTAL_GATE')\n\ntests\\test_hidden_config.py:7: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_hidden_config.py::test_explicit_false_values_are_disabled\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.08s\n\nCHILI adapter rejected the attempted edit:\nblock 1: SEARCH text not found in file (hallucinated or stale content): '_TRUE_VALUES = {\"1\", \"true\", \"yes\", \"on\"}'\nRolled back multi-file edit group after feature_gate.py was rejected.\n\nCHILI adapter rejected the attempted edit:\nblock 1: SEARCH text not found in file (hallucinated or stale content): 'def gate_enabled(env: dict[str, str], name: str) -> bool: |     value = env.get(name, \"0\") |     return bool(value)'\nRolled back multi-file edit group after feature_gate.py was rejected.\n\nCHILI adapter rejected the attempted edit:\nblock 1: SEARCH text not found in file (hallucinated or stale content): 'def gate_enabled(env: dict[str, str], name: str) -> bool: |     value = env.get(name, \"0\") |     return bool(value)'\nRolled back multi-file edit group after feature_gate.py was rejected.",
+        "passed": false
       },
       "model_calls": [
         {
           "error": null,
-          "latency_ms": 19324,
+          "latency_ms": 30126,
           "ok": true,
-          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"Two workers on the same revision disagree because one receives CHILI_EXPERIMENTAL_GATE=0, yet the gate is reported enabled. Diagnose and fix the environment-value interpretation without renaming the flag.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by config drift.\",\n      \"dimension\":\"config\",\n      \"support_evidence_ids\":[\"operator-2\",\"source-1\",\"source-2\",\"source-3\",\"source-4\",\"source-5\",\"source-6\",\"source-7\",\"source-8\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing config does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-config\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"config\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"state\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing config changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\"\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"confirmed\",\n    \"evidence_ids\":[\"operator-2\",\"source-1\",\"source-2\",\"source-3\",\"source-4\",\"source-5\",\"source-6\",\"source-7\",\"source-8\"],\n    \"reason\":\"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"Two workers on the same revision disagree because one receives CHILI_EXPERIMENTAL_GATE=0, yet the gate is reported enabled. Diagnose and fix the environment-value interpretation without renaming the flag.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by config drift.\",\n      \"dimension\":\"config\",\n      \"support_evidence_ids\":[\"operator-2\",\"source-1\",\"source-2\",\"source-3\",\"source-4\",\"source-5\",\"source-6\",\"source-7\",\"source-8\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing config does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-config\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"config\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"state\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing config changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"confirmed\",\n    \"evidence_ids\":[\"operator-2\",\"source-1\",\"source-2\",\"source-3\",\"source-4\",\"source-5\",\"source-6\",\"source-7\",\"source-8\"],\n    \"reason\":\"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
           "stage": "diagnosis_judge",
-          "tokens_out": 385,
-          "wall_ms": 19324
+          "tokens_out": 397,
+          "wall_ms": 30126
         },
         {
           "error": null,
-          "latency_ms": 9376,
+          "latency_ms": 9999,
           "ok": true,
-          "response": "{\n  \"analysis\": \"The issue arises because the `gate_enabled` function in `feature_gate.py` converts any non-empty string to `True`, including '0'. This causes the gate to be reported as enabled when it should not be.\",\n  \"files\": [\n    {\n      \"path\": \"feature_gate.py\",\n      \"action\": \"modify\",\n      \"description\": \"Update the `gate_enabled` function to correctly interpret '0' as `False`.\"\n    }\n  ],\n  \"notes\": \"The flag name 'CHILI_EXPERIMENTAL_GATE' should not be renamed as per the request. The fix involves modifying the logic in `feature_gate.py` to handle the specific value '0' appropriately.\"\n}",
+          "response": "{\n  \"analysis\": \"The issue arises because the `gate_enabled` function in `feature_gate.py` converts any non-empty string to `True`, including '0'. This causes the gate to be incorrectly reported as enabled when it should not be.\",\n  \"files\": [\n    {\n      \"path\": \"feature_gate.py\",\n      \"action\": \"modify\",\n      \"description\": \"Update the `gate_enabled` function to correctly interpret '0' as a disabled state.\"\n    }\n  ],\n  \"notes\": \"The change ensures that only values explicitly listed in `_TRUE_VALUES` are considered enabled, preventing incorrect interpretation of '0'.\"\n}",
           "stage": "plan",
-          "tokens_out": 150,
-          "wall_ms": 9376
+          "tokens_out": 133,
+          "wall_ms": 9999
         },
         {
           "error": null,
-          "latency_ms": 6483,
+          "latency_ms": 9004,
           "ok": true,
-          "response": "```\n<<<<<<< SEARCH\ndef gate_enabled(env: dict[str, str], name: str) -> bool:\n    value = env.get(name, \"0\")\n    return bool(value)\n=======\ndef gate_enabled(env: dict[str, str], name: str) -> bool:\n    value = env.get(name, \"0\")\n    return value.lower() in _TRUE_VALUES\n>>>>>>> REPLACE\n```",
-          "stage": "edit",
+          "response": "```\n<<<<<<< SEARCH\n_TRUE_VALUES = {\"1\", \"true\", \"yes\", \"on\"}\n\n\ndef gate_enabled(env: dict[str, str], name: str) -> bool:\n    value = env.get(name, \"0\")\n    return bool(value)\n=======\n_TRUE_VALUES = {\"1\", \"true\", \"yes\", \"on\", \"0\"}\n\n\ndef gate_enabled(env: dict[str, str], name: str) -> bool:\n    value = env.get(name, \"0\")\n    return value.lower() in _TRUE_VALUES\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 115,
+          "wall_ms": 9004
+        },
+        {
+          "error": null,
+          "latency_ms": 12631,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The previous patch failed validation because the `gate_enabled` function did not correctly interpret environment values as false when they were '0', 'false', 'no', 'off', or an empty string. The issue was in the `feature_gate.py` file.\",\n  \"files\": [\n    {\n      \"path\": \"feature_gate.py\",\n      \"action\": \"modify\",\n      \"description\": \"Updated the `_TRUE_VALUES` set to include '0' and adjusted the `gate_enabled` function to convert values to lowercase before checking against `_TRUE_VALUES`. This ensures that environment values are correctly interpreted as false when they are '0', 'false', 'no', 'off', or an empty string.\"\n    }\n  ],\n  \"notes\": \"The change in `feature_gate.py` should resolve the validation failure and ensure that the environment-value interpretation is correct without renaming the flag.\"\n}",
+          "stage": "repair_plan_1",
+          "tokens_out": 186,
+          "wall_ms": 12631
+        },
+        {
+          "error": null,
+          "latency_ms": 12740,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The previous patch failed validation because the `gate_enabled` function did not correctly interpret environment values as false when they were '0', 'false', 'no', 'off', or an empty string. The issue was in the `feature_gate.py` file.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Updated the `_TRUE_VALUES` set to include '0' and adjusted the `gate_enabled` function to convert values to lowercase before checking against `_TRUE_VALUES`. This ensures that environment values are correctly interpreted as false when they are '0', 'false', 'no', 'off', or an empty string.\",\n      \"path\": \"feature_gate.py\"\n    }\n  ],\n  \"notes\": \"The change in `feature_gate.py` should resolve the validation failure and ensure that the environment-value interpretation is correct without renaming the flag.\"\n}",
+          "stage": "repair_review_1",
+          "tokens_out": 186,
+          "wall_ms": 12740
+        },
+        {
+          "error": null,
+          "latency_ms": 7811,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n_TRUE_VALUES = {\"1\", \"true\", \"yes\", \"on\"}\n=======\n_TRUE_VALUES = {\"0\", \"false\", \"no\", \"off\", \"\"}\n>>>>>>> REPLACE\n\ndef gate_enabled(env: dict[str, str], name: str) -> bool:\n    value = env.get(name, \"0\").lower()\n    return value in _TRUE_VALUES\n```",
+          "stage": "repair_edit_1_1",
+          "tokens_out": 79,
+          "wall_ms": 7811
+        },
+        {
+          "error": null,
+          "latency_ms": 10238,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The previous patch failed validation because it did not correctly handle the interpretation of environment values. The `_TRUE_VALUES` set included '0', which caused the gate to be incorrectly reported as enabled when the value was '0'. The `gate_enabled` function should convert the value to lowercase before checking against `_TRUE_VALUES`.\",\n  \"files\": [\n    {\n      \"path\": \"feature_gate.py\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `gate_enabled` function to convert the environment value to lowercase before checking against `_TRUE_VALUES`.\"\n    }\n  ],\n  \"notes\": \"This change ensures that the gate is correctly interpreted based on the provided environment values, without renaming the flag or introducing new files.\"\n}",
+          "stage": "repair_plan_2",
+          "tokens_out": 156,
+          "wall_ms": 10238
+        },
+        {
+          "error": null,
+          "latency_ms": 10431,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The previous patch failed validation because it did not correctly handle the interpretation of environment values. The `_TRUE_VALUES` set included '0', which caused the gate to be incorrectly reported as enabled when the value was '0'. The `gate_enabled` function should convert the value to lowercase before checking against `_TRUE_VALUES`.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Modify the `gate_enabled` function to convert the environment value to lowercase before checking against `_TRUE_VALUES`.\",\n      \"path\": \"feature_gate.py\"\n    }\n  ],\n  \"notes\": \"This change ensures that the gate is correctly interpreted based on the provided environment values, without renaming the flag or introducing new files.\"\n}",
+          "stage": "repair_review_2",
+          "tokens_out": 156,
+          "wall_ms": 10431
+        },
+        {
+          "error": null,
+          "latency_ms": 8389,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\ndef gate_enabled(env: dict[str, str], name: str) -> bool:\n    value = env.get(name, \"0\")\n    return value.lower() in _TRUE_VALUES\n=======\ndef gate_enabled(env: dict[str, str], name: str) -> bool:\n    value = env.get(name, \"0\").lower()\n    return value in _TRUE_VALUES\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_2_1",
+          "tokens_out": 85,
+          "wall_ms": 8389
+        },
+        {
+          "error": null,
+          "latency_ms": 10565,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The previous patch failed validation because the `gate_enabled` function did not correctly interpret environment values as false when they were '0', 'false', 'no', 'off', or an empty string. The issue was in the `feature_gate.py` file, specifically in the `gate_enabled` function.\",\n  \"files\": [\n    {\n      \"path\": \"feature_gate.py\",\n      \"action\": \"modify\",\n      \"description\": \"Updated the `gate_enabled` function to correctly interpret environment values as false when they are '0', 'false', 'no', 'off', or an empty string.\"\n    }\n  ],\n  \"notes\": \"The `env_report.py` file was not modified because it does not contain any code related to interpreting environment values for feature gates.\"\n}",
+          "stage": "repair_plan_3",
+          "tokens_out": 166,
+          "wall_ms": 10565
+        },
+        {
+          "error": null,
+          "latency_ms": 11077,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The previous patch failed validation because the `gate_enabled` function did not correctly interpret environment values as false when they were '0', 'false', 'no', 'off', or an empty string. The issue was in the `feature_gate.py` file, specifically in the `gate_enabled` function.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Updated the `gate_enabled` function to correctly interpret environment values as false when they are '0', 'false', 'no', 'off', or an empty string.\",\n      \"path\": \"feature_gate.py\"\n    }\n  ],\n  \"notes\": \"The `env_report.py` file was not modified because it does not contain any code related to interpreting environment values for feature gates.\"\n}",
+          "stage": "repair_review_3",
+          "tokens_out": 166,
+          "wall_ms": 11077
+        },
+        {
+          "error": null,
+          "latency_ms": 8263,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n_TRUE_VALUES = {\"1\", \"true\", \"yes\", \"on\"}\n=======\n_FALSE_VALUES = {\"0\", \"false\", \"no\", \"off\", \"\"}\n>>>>>>> REPLACE\n\ndef gate_enabled(env: dict[str, str], name: str) -> bool:\n    value = env.get(name, \"0\").lower()\n    return value not in _FALSE_VALUES\n```",
+          "stage": "repair_edit_3_1",
           "tokens_out": 80,
-          "wall_ms": 6483
+          "wall_ms": 8263
+        },
+        {
+          "error": null,
+          "latency_ms": 10463,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The previous patch failed validation because it did not correctly handle the interpretation of environment values. The `gate_enabled` function was not converting the input value to lowercase before checking against `_TRUE_VALUES`, leading to incorrect interpretations of '0' as enabled.\",\n  \"files\": [\n    {\n      \"path\": \"feature_gate.py\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `gate_enabled` function to convert the environment value to lowercase before checking against `_TRUE_VALUES`. This ensures that '0', 'false', 'no', 'off', and '' are correctly interpreted as disabled.\"\n    }\n  ],\n  \"notes\": \"The change in `feature_gate.py` should resolve the validation failure by ensuring consistent interpretation of environment values.\"\n}",
+          "stage": "repair_plan_4",
+          "tokens_out": 159,
+          "wall_ms": 10463
+        },
+        {
+          "error": null,
+          "latency_ms": 10788,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The previous patch failed validation because it did not correctly handle the interpretation of environment values. The `gate_enabled` function was not converting the input value to lowercase before checking against `_TRUE_VALUES`, leading to incorrect interpretations of '0' as enabled.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Modify the `gate_enabled` function to convert the environment value to lowercase before checking against `_TRUE_VALUES`. This ensures that '0', 'false', 'no', 'off', and '' are correctly interpreted as disabled.\",\n      \"path\": \"feature_gate.py\"\n    }\n  ],\n  \"notes\": \"The change in `feature_gate.py` should resolve the validation failure by ensuring consistent interpretation of environment values.\"\n}",
+          "stage": "repair_review_4",
+          "tokens_out": 159,
+          "wall_ms": 10788
+        },
+        {
+          "error": null,
+          "latency_ms": 8216,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\ndef gate_enabled(env: dict[str, str], name: str) -> bool:\n    value = env.get(name, \"0\")\n    return bool(value)\n=======\ndef gate_enabled(env: dict[str, str], name: str) -> bool:\n    value = env.get(name, \"0\").lower()\n    return value in _TRUE_VALUES\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_4_1",
+          "tokens_out": 80,
+          "wall_ms": 8216
+        },
+        {
+          "error": null,
+          "latency_ms": 10652,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The previous patch failed validation because it did not correctly handle the interpretation of environment values. The `gate_enabled` function was not converting the input value to lowercase before checking against `_TRUE_VALUES`, leading to incorrect interpretations of '0' as a true value.\",\n  \"files\": [\n    {\n      \"path\": \"feature_gate.py\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `gate_enabled` function to convert the environment value to lowercase before checking against `_TRUE_VALUES`. This ensures that '0', 'false', 'no', 'off', and '' are correctly interpreted as false values.\"\n    }\n  ],\n  \"notes\": \"This change should resolve the validation failure by ensuring that all false values are correctly identified as such.\"\n}",
+          "stage": "repair_plan_5",
+          "tokens_out": 160,
+          "wall_ms": 10652
+        },
+        {
+          "error": null,
+          "latency_ms": 10726,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The previous patch failed validation because it did not correctly handle the interpretation of environment values. The `gate_enabled` function was not converting the input value to lowercase before checking against `_TRUE_VALUES`, leading to incorrect interpretations of '0' as a true value.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Modify the `gate_enabled` function to convert the environment value to lowercase before checking against `_TRUE_VALUES`. This ensures that '0', 'false', 'no', 'off', and '' are correctly interpreted as false values.\",\n      \"path\": \"feature_gate.py\"\n    }\n  ],\n  \"notes\": \"This change should resolve the validation failure by ensuring that all false values are correctly identified as such.\"\n}",
+          "stage": "repair_review_5",
+          "tokens_out": 160,
+          "wall_ms": 10726
+        },
+        {
+          "error": null,
+          "latency_ms": 7788,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\ndef gate_enabled(env: dict[str, str], name: str) -> bool:\n    value = env.get(name, \"0\")\n    return bool(value)\n=======\ndef gate_enabled(env: dict[str, str], name: str) -> bool:\n    value = env.get(name, \"0\").lower()\n    return value in _TRUE_VALUES\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_5_1",
+          "tokens_out": 80,
+          "wall_ms": 7788
         }
       ],
       "patch_applied": true,
-      "patch_warnings": [],
+      "patch_warnings": [
+        "block 1: SEARCH text not found in file (hallucinated or stale content): '_TRUE_VALUES = {\"1\", \"true\", \"yes\", \"on\"}'",
+        "Rolled back multi-file edit group after feature_gate.py was rejected.",
+        "block 1: SEARCH text not found in file (hallucinated or stale content): '_TRUE_VALUES = {\"1\", \"true\", \"yes\", \"on\"}'",
+        "Rolled back multi-file edit group after feature_gate.py was rejected.",
+        "block 1: SEARCH text not found in file (hallucinated or stale content): 'def gate_enabled(env: dict[str, str], name: str) -> bool: |     value = env.get(name, \"0\") |     return bool(value)'",
+        "Rolled back multi-file edit group after feature_gate.py was rejected.",
+        "block 1: SEARCH text not found in file (hallucinated or stale content): 'def gate_enabled(env: dict[str, str], name: str) -> bool: |     value = env.get(name, \"0\") |     return bool(value)'",
+        "Rolled back multi-file edit group after feature_gate.py was rejected."
+      ],
       "premium_calls": 0,
       "public_tests": {
-        "duration_ms": 459,
+        "duration_ms": 571,
         "exit_code": 0,
         "output": ".                                                                        [100%]\n1 passed in 0.01s",
         "passed": true
       },
-      "repair_attempts": [],
-      "score": 100,
-      "selected_file": "feature_gate.py"
+      "repair_attempts": [
+        {
+          "applied_files": [],
+          "patch_applied": false,
+          "plan": {
+            "analysis": "The previous patch failed validation because the `gate_enabled` function did not correctly interpret environment values as false when they were '0', 'false', 'no', 'off', or an empty string. The issue was in the `feature_gate.py` file.",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Updated the `_TRUE_VALUES` set to include '0' and adjusted the `gate_enabled` function to convert values to lowercase before checking against `_TRUE_VALUES`. This ensures that environment values are correctly interpreted as false when they are '0', 'false', 'no', 'off', or an empty string.",
+                "path": "feature_gate.py"
+              }
+            ],
+            "notes": "The change in `feature_gate.py` should resolve the validation failure and ensure that the environment-value interpretation is correct without renaming the flag."
+          },
+          "round": 1,
+          "selected_file": "feature_gate.py",
+          "selected_files": [
+            "feature_gate.py"
+          ],
+          "warnings": [
+            "block 1: SEARCH text not found in file (hallucinated or stale content): '_TRUE_VALUES = {\"1\", \"true\", \"yes\", \"on\"}'",
+            "Rolled back multi-file edit group after feature_gate.py was rejected."
+          ]
+        },
+        {
+          "applied_files": [
+            "feature_gate.py"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The previous patch failed validation because it did not correctly handle the interpretation of environment values. The `_TRUE_VALUES` set included '0', which caused the gate to be incorrectly reported as enabled when the value was '0'. The `gate_enabled` function should convert the value to lowercase before checking against `_TRUE_VALUES`.",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Modify the `gate_enabled` function to convert the environment value to lowercase before checking against `_TRUE_VALUES`.",
+                "path": "feature_gate.py"
+              }
+            ],
+            "notes": "This change ensures that the gate is correctly interpreted based on the provided environment values, without renaming the flag or introducing new files."
+          },
+          "round": 2,
+          "selected_file": "feature_gate.py",
+          "selected_files": [
+            "feature_gate.py"
+          ],
+          "warnings": []
+        },
+        {
+          "applied_files": [],
+          "patch_applied": false,
+          "plan": {
+            "analysis": "The previous patch failed validation because the `gate_enabled` function did not correctly interpret environment values as false when they were '0', 'false', 'no', 'off', or an empty string. The issue was in the `feature_gate.py` file, specifically in the `gate_enabled` function.",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Updated the `gate_enabled` function to correctly interpret environment values as false when they are '0', 'false', 'no', 'off', or an empty string.",
+                "path": "feature_gate.py"
+              }
+            ],
+            "notes": "The `env_report.py` file was not modified because it does not contain any code related to interpreting environment values for feature gates."
+          },
+          "round": 3,
+          "selected_file": "feature_gate.py",
+          "selected_files": [
+            "feature_gate.py"
+          ],
+          "warnings": [
+            "block 1: SEARCH text not found in file (hallucinated or stale content): '_TRUE_VALUES = {\"1\", \"true\", \"yes\", \"on\"}'",
+            "Rolled back multi-file edit group after feature_gate.py was rejected."
+          ]
+        },
+        {
+          "applied_files": [],
+          "patch_applied": false,
+          "plan": {
+            "analysis": "The previous patch failed validation because it did not correctly handle the interpretation of environment values. The `gate_enabled` function was not converting the input value to lowercase before checking against `_TRUE_VALUES`, leading to incorrect interpretations of '0' as enabled.",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Modify the `gate_enabled` function to convert the environment value to lowercase before checking against `_TRUE_VALUES`. This ensures that '0', 'false', 'no', 'off', and '' are correctly interpreted as disabled.",
+                "path": "feature_gate.py"
+              }
+            ],
+            "notes": "The change in `feature_gate.py` should resolve the validation failure by ensuring consistent interpretation of environment values."
+          },
+          "round": 4,
+          "selected_file": "feature_gate.py",
+          "selected_files": [
+            "feature_gate.py"
+          ],
+          "warnings": [
+            "block 1: SEARCH text not found in file (hallucinated or stale content): 'def gate_enabled(env: dict[str, str], name: str) -> bool: |     value = env.get(name, \"0\") |     return bool(value)'",
+            "Rolled back multi-file edit group after feature_gate.py was rejected."
+          ]
+        },
+        {
+          "applied_files": [],
+          "patch_applied": false,
+          "plan": {
+            "analysis": "The previous patch failed validation because it did not correctly handle the interpretation of environment values. The `gate_enabled` function was not converting the input value to lowercase before checking against `_TRUE_VALUES`, leading to incorrect interpretations of '0' as a true value.",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Modify the `gate_enabled` function to convert the environment value to lowercase before checking against `_TRUE_VALUES`. This ensures that '0', 'false', 'no', 'off', and '' are correctly interpreted as false values.",
+                "path": "feature_gate.py"
+              }
+            ],
+            "notes": "This change should resolve the validation failure by ensuring that all false values are correctly identified as such."
+          },
+          "round": 5,
+          "selected_file": "feature_gate.py",
+          "selected_files": [
+            "feature_gate.py"
+          ],
+          "warnings": [
+            "block 1: SEARCH text not found in file (hallucinated or stale content): 'def gate_enabled(env: dict[str, str], name: str) -> bool: |     value = env.get(name, \"0\") |     return bool(value)'",
+            "Rolled back multi-file edit group after feature_gate.py was rejected."
+          ]
+        }
+      ],
+      "score": 80,
+      "selected_file": "feature_gate.py",
+      "selected_files": [
+        "feature_gate.py"
+      ],
+      "split": "holdout"
     },
     {
       "baseline_hidden_tests": {
-        "duration_ms": 537,
+        "duration_ms": 546,
         "exit_code": 1,
-        "output": "F\n================================== FAILURES ===================================\n__________________ test_source_rows_are_copied_to_empty_sink __________________\n\n    def test_source_rows_are_copied_to_empty_sink():\n        source = {\"XYZ\": [{\"bid\": 10.0}, {\"bid\": 10.1}]}\n        sink = {}\n>       assert mirror_window(source, sink, \"XYZ\") == 2\nE       AssertionError: assert 0 == 2\nE        +  where 0 = mirror_window({'XYZ': [{'bid': 10.0}, {'bid': 10.1}]}, {'XYZ': []}, 'XYZ')\n\ntests\\test_hidden_data.py:7: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_hidden_data.py::test_source_rows_are_copied_to_empty_sink\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.08s",
+        "output": "F\n================================== FAILURES ===================================\n__________________ test_source_rows_are_copied_to_empty_sink __________________\n\n    def test_source_rows_are_copied_to_empty_sink():\n        source = {\"XYZ\": [{\"bid\": 10.0}, {\"bid\": 10.1}]}\n        sink = {}\n>       assert mirror_window(source, sink, \"XYZ\") == 2\nE       AssertionError: assert 0 == 2\nE        +  where 0 = mirror_window({'XYZ': [{'bid': 10.0}, {'bid': 10.1}]}, {'XYZ': []}, 'XYZ')\n\ntests\\test_hidden_data.py:7: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_hidden_data.py::test_source_rows_are_copied_to_empty_sink\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.07s",
         "passed": false
       },
       "case_id": "data-203",
+      "changed_files": [
+        "replay_copy.py"
+      ],
       "checks": {
         "baseline_hidden_failure": true,
         "diagnosis": true,
@@ -734,9 +1013,9 @@
         "valid": true
       },
       "diagnosis_status": "confirmed",
-      "duration_ms": 83449,
+      "duration_ms": 195905,
       "hidden_tests": {
-        "duration_ms": 479,
+        "duration_ms": 458,
         "exit_code": 0,
         "output": "...                                                                      [100%]\n3 passed in 0.01s",
         "passed": true
@@ -744,66 +1023,578 @@
       "model_calls": [
         {
           "error": null,
-          "latency_ms": 31392,
+          "latency_ms": 43787,
           "ok": true,
-          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"A replay mirror reports zero copied quotes although the source relation contains rows and the sink starts empty. Diagnose the source/sink failure and repair the copy operation without fabricating rows.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h-data\",\n      \"claim\":\"The observed failure is primarily caused by data drift.\",\n      \"dimension\":\"data\",\n      \"support_evidence_ids\":[\"operator-1\",\"operator-2\",\"source-1\",\"source-3\",\"source-4\",\"source-5\",\"source-8\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing data does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\":\"h-unknown\",\n      \"claim\":\"The observed failure is primarily caused by unknown drift.\",\n      \"dimension\":\"unknown\",\n      \"support_evidence_ids\":[\"source-6\",\"source-7\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing unknown does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\":\"h-test_harness\",\n      \"claim\":\"The observed failure is primarily caused by test_harness drift.\",\n      \"dimension\":\"test_harness\",\n      \"support_evidence_ids\":[\"source-2\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing test_harness does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-data\",\n      \"hypothesis_ids\":[\"h-data\"],\n      \"changed_dimensions\":[\"data\"],\n      \"held_constant_dimensions\":[\"code\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing data changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{\"probe_id\":\"p1\",\"kind\":\"repo_state|search|file_excerpt|git_history|git_diff|compile|targeted_test\",\"paths\":[\"replay_copy.py\"],\"query\":\"fixed text\",\"selector\":\"tests/test_public.py::test_empty_source_copies_zero_rows\",\"dimension\":\"code|data|clock|state|config|dependency|runtime|test_harness|unknown\"}\n    },\n    {\n      \"experiment_id\":\"isolate-unknown\",\n      \"hypothesis_ids\":[\"h-unknown\"],\n      \"changed_dimensions\":[\"unknown\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing unknown changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isol",
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"A replay mirror reports zero copied quotes although the source relation contains rows and the sink starts empty. Diagnose the source/sink failure and repair the copy operation without fabricating rows.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h-data\",\n      \"claim\":\"The observed failure is primarily caused by data drift.\",\n      \"dimension\":\"data\",\n      \"support_evidence_ids\":[\"operator-1\",\"operator-2\",\"source-1\",\"source-3\",\"source-4\",\"source-5\",\"source-8\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing data does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\":\"h-unknown\",\n      \"claim\":\"The observed failure is primarily caused by unknown drift.\",\n      \"dimension\":\"unknown\",\n      \"support_evidence_ids\":[\"source-6\",\"source-7\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing unknown does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\":\"h-test_harness\",\n      \"claim\":\"The observed failure is primarily caused by test_harness drift.\",\n      \"dimension\":\"test_harness\",\n      \"support_evidence_ids\":[\"source-2\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing test_harness does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-data\",\n      \"hypothesis_ids\":[\"h-data\"],\n      \"changed_dimensions\":[\"data\"],\n      \"held_constant_dimensions\":[\"code\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing data changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\"\n    },\n    {\n      \"experiment_id\":\"isolate-unknown\",\n      \"hypothesis_ids\":[\"h-unknown\"],\n      \"changed_dimensions\":[\"unknown\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing unknown changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\"\n    },\n    {\n      \"experiment_id\":\"isolate-test_harness\",\n      \"hypothesis_ids\":[\"h-test_harness\"],\n      \"changed_dimensions\":[\"test_harness\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\"],\n      \"expected_if_true\":\"Changing test_harness changes or restores the outcome.\",\n      \"expected_if_false\":\"The",
           "stage": "diagnosis_judge",
           "tokens_out": 650,
-          "wall_ms": 31392
+          "wall_ms": 43787
         },
         {
           "error": null,
-          "latency_ms": 8985,
+          "latency_ms": 10607,
           "ok": true,
-          "response": "{\n    \"analysis\": \"The observed failure is primarily caused by data drift. The `mirror_window` function in `replay_copy.py` does not actually copy any rows from the source to the sink, which leads to zero copied quotes even though the source contains rows.\",\n    \"files\": [\n        {\n            \"path\": \"replay_copy.py\",\n            \"action\": \"modify\",\n            \"description\": \"Modify the `mirror_window` function to correctly copy rows from the source to the sink.\"\n        }\n    ],\n    \"notes\": \"The next experiment should hold every other dimension constant and show that changing unknown does not change the outcome. Additionally, it's important to ensure that the data drift is properly addressed in the baseline.\"\n}",
+          "response": "{\n    \"analysis\": \"The issue lies in the `mirror_window` function where it directly assigns the existing rows from `sink_rows` to a local variable `rows`, effectively overwriting any potential new rows that should be copied from `source_rows`. This results in zero copied quotes even though there are rows in the source.\",\n    \"files\": [\n        {\n            \"path\": \"replay_copy.py\",\n            \"action\": \"modify\",\n            \"description\": \"Modify the `mirror_window` function to correctly copy rows from `source_rows` to `sink_rows`.\"\n        }\n    ],\n    \"notes\": \"Ensure that the function correctly handles copying rows and does not overwrite existing data in the sink.\"\n}",
           "stage": "plan",
-          "tokens_out": 151,
-          "wall_ms": 8986
+          "tokens_out": 146,
+          "wall_ms": 10607
         },
         {
           "error": null,
-          "latency_ms": 7186,
+          "latency_ms": 7492,
           "ok": true,
-          "response": "```\n<<<<<<< SEARCH\n    rows = list(sink_rows.get(symbol, []))\n    sink_rows[symbol] = rows\n    return len(rows)\n=======\n    source_rows_for_symbol = source_rows.get(symbol, [])\n    rows_to_copy = [row for row in source_rows_for_symbol if row not in sink_rows.get(symbol, [])]\n    sink_rows[symbol].extend(rows_to_copy)\n    return len(rows_to_copy)\n>>>>>>> REPLACE\n```",
-          "stage": "edit",
-          "tokens_out": 92,
-          "wall_ms": 7186
+          "response": "```\n<<<<<<< SEARCH\n    rows = list(sink_rows.get(symbol, []))\n    sink_rows[symbol] = rows\n    return len(rows)\n=======\n    if symbol in source_rows:\n        rows = source_rows[symbol]\n        sink_rows[symbol] = rows\n        return len(rows)\n    else:\n        return 0\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 74,
+          "wall_ms": 7492
         },
         {
           "error": null,
-          "latency_ms": 10308,
+          "latency_ms": 11262,
           "ok": true,
-          "response": "{\n  \"analysis\": \"The failure in the test is due to a KeyError when trying to extend `sink_rows[symbol]` because `symbol` ('XYZ') does not exist in `sink_rows`. This indicates that the function `mirror_window` is not properly handling cases where the symbol is not already present in the sink.\",\n  \"files\": [\n    {\n      \"path\": \"replay_copy.py\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the symbol exists in `sink_rows` before attempting to extend it. Initialize an empty list if the symbol is not present.\"\n    }\n  ],\n  \"notes\": \"The selected file is replay_copy.py because it contains the implementation of the function causing the failure. The other candidate, metrics.py, does not contain the relevant code for this issue.\"\n}",
+          "response": "{\n  \"analysis\": \"The failure is due to the function `mirror_window` not handling the case where the symbol does not exist in the source rows correctly. It should initialize an empty list for the symbol in the sink rows instead of raising a KeyError.\",\n  \"files\": [\n    {\n      \"path\": \"replay_copy.py\",\n      \"action\": \"modify\",\n      \"description\": \"Initialize an empty list for the symbol in the sink rows if it does not exist.\"\n    }\n  ],\n  \"notes\": \"This change ensures that the function handles missing symbols gracefully and avoids raising a KeyError. It also maintains the behavior of copying rows from the source to the sink without fabricating any data.\"\n}",
           "stage": "repair_plan_1",
-          "tokens_out": 170,
-          "wall_ms": 10308
+          "tokens_out": 145,
+          "wall_ms": 11262
         },
         {
           "error": null,
-          "latency_ms": 5440,
+          "latency_ms": 11369,
           "ok": true,
-          "response": "```\n<<<<<<< SEARCH\n    sink_rows[symbol].extend(rows_to_copy)\n=======\n    if symbol not in sink_rows:\n        sink_rows[symbol] = []\n    sink_rows[symbol].extend(rows_to_copy)\n>>>>>>> REPLACE\n```",
-          "stage": "repair_edit_1",
-          "tokens_out": 49,
-          "wall_ms": 5440
+          "response": "{\n    \"analysis\": \"The failure is due to the function `mirror_window` not handling the case where the symbol does not exist in the source rows correctly. It should initialize an empty list for the symbol in the sink rows instead of raising a KeyError.\",\n    \"files\": [\n        {\n            \"action\": \"modify\",\n            \"description\": \"Initialize an empty list for the symbol in the sink rows if it does not exist.\",\n            \"path\": \"replay_copy.py\"\n        }\n    ],\n    \"notes\": \"This change ensures that the function handles missing symbols gracefully and avoids raising a KeyError. It also maintains the behavior of copying rows from the source to the sink without fabricating any data.\"\n}",
+          "stage": "repair_review_1",
+          "tokens_out": 145,
+          "wall_ms": 11369
         },
         {
           "error": null,
-          "latency_ms": 11517,
+          "latency_ms": 9644,
           "ok": true,
-          "response": "{\n  \"analysis\": \"The failure in the test `test_existing_sink_is_replaced_by_source_window` indicates that the function `mirror_window` is not correctly updating the sink when it already contains rows for the given symbol. The test expects the sink to be updated with the new rows from the source, but instead, it appends the new rows to the existing ones.\",\n  \"files\": [\n    {\n      \"path\": \"replay_copy.py\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that when copying rows into the sink, any existing rows for the symbol are replaced rather than appended.\"\n    }\n  ],\n  \"notes\": \"The previous selected file was `replay_copy.py`, but it seems that the issue is not with this file. The failure is likely due to a misunderstanding in how the function should handle updating the sink. The correct approach is to replace any existing rows for the symbol with the new rows from the source.\"\n}",
+          "response": "```\n<<<<<<< SEARCH\n    if symbol in source_rows:\n        rows = source_rows[symbol]\n        sink_rows[symbol] = rows\n        return len(rows)\n    else:\n        return 0\n=======\n    if symbol not in sink_rows:\n        sink_rows[symbol] = []\n    if symbol in source_rows:\n        rows = source_rows[symbol]\n        sink_rows[symbol].extend(rows)\n        return len(rows)\n    else:\n        return 0\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_1",
+          "tokens_out": 101,
+          "wall_ms": 9644
+        },
+        {
+          "error": null,
+          "latency_ms": 9736,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The failure is due to the sink not being updated correctly when copying rows from the source. The test expects the sink to be replaced by the source window, but instead, it appends the new rows to the existing ones.\",\n  \"files\": [\n    {\n      \"path\": \"replay_copy.py\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `mirror_window` function to replace the existing rows in the sink with the rows from the source when copying.\"\n    }\n  ],\n  \"notes\": \"Ensure that the test cases are updated to reflect the expected behavior of replacing the sink with the source window.\"\n}",
           "stage": "repair_plan_2",
-          "tokens_out": 198,
-          "wall_ms": 11517
+          "tokens_out": 136,
+          "wall_ms": 9736
         },
         {
           "error": null,
-          "latency_ms": 4446,
+          "latency_ms": 10055,
           "ok": true,
-          "response": "```\n<<<<<<< SEARCH\n    sink_rows[symbol].extend(rows_to_copy)\n=======\n    sink_rows[symbol] = rows_to_copy\n>>>>>>> REPLACE\n```",
-          "stage": "repair_edit_2",
-          "tokens_out": 33,
-          "wall_ms": 4446
+          "response": "{\n  \"analysis\": \"The failure is due to the sink not being updated correctly when copying rows from the source. The test expects the sink to be replaced by the source window, but instead, it appends the new rows to the existing ones.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Modify the `mirror_window` function to replace the existing rows in the sink with the rows from the source when copying.\",\n      \"path\": \"replay_copy.py\"\n    }\n  ],\n  \"notes\": \"Ensure that the test cases are updated to reflect the expected behavior of replacing the sink with the source window.\"\n}",
+          "stage": "repair_review_2",
+          "tokens_out": 136,
+          "wall_ms": 10055
+        },
+        {
+          "error": null,
+          "latency_ms": 8880,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    if symbol in source_rows:\n        rows = source_rows[symbol]\n        sink_rows[symbol].extend(rows)\n        return len(rows)\n    else:\n        return 0\n=======\n    if symbol in source_rows:\n        sink_rows[symbol] = source_rows[symbol]\n        return len(source_rows[symbol])\n    else:\n        return 0\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_2_1",
+          "tokens_out": 83,
+          "wall_ms": 8880
+        },
+        {
+          "error": null,
+          "latency_ms": 11253,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The failure is due to the `mirror_window` function not creating a new list for the sink when copying rows from the source. This results in both the source and sink pointing to the same list object, causing the identity check (`is not`) to fail.\",\n  \"files\": [\n    {\n      \"path\": \"replay_copy.py\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure a new list is created for each symbol when copying rows from the source to the sink.\"\n    }\n  ],\n  \"notes\": \"The `metrics.py` file does not need modification as it is not directly related to the failure. The test `test_source_rows_are_copied_to_empty_sink` should pass with the changes made to `replay_copy.py`.\"\n}",
+          "stage": "repair_plan_3",
+          "tokens_out": 165,
+          "wall_ms": 11253
+        },
+        {
+          "error": null,
+          "latency_ms": 11526,
+          "ok": true,
+          "response": "{\n    \"analysis\": \"The failure is due to the `mirror_window` function not creating a new list for the sink when copying rows from the source. This results in both the source and sink pointing to the same list object, causing the identity check (`is not`) to fail.\",\n    \"files\": [\n        {\n            \"action\": \"modify\",\n            \"description\": \"Ensure a new list is created for each symbol when copying rows from the source to the sink.\",\n            \"path\": \"replay_copy.py\"\n        }\n    ],\n    \"notes\": \"The `metrics.py` file does not need modification as it is not directly related to the failure. The test `test_source_rows_are_copied_to_empty_sink` should pass with the changes made to `replay_copy.py`.\"\n}",
+          "stage": "repair_review_3",
+          "tokens_out": 165,
+          "wall_ms": 11526
+        },
+        {
+          "error": null,
+          "latency_ms": 9286,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    if symbol in source_rows:\n        sink_rows[symbol] = source_rows[symbol]\n        return len(source_rows[symbol])\n    else:\n        return 0\n=======\n    if symbol not in sink_rows:\n        sink_rows[symbol] = []\n    if symbol in source_rows:\n        sink_rows[symbol].extend(source_rows[symbol])\n        return len(sink_rows[symbol])\n    else:\n        return 0\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_3_1",
+          "tokens_out": 98,
+          "wall_ms": 9286
+        },
+        {
+          "error": null,
+          "latency_ms": 12763,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The validation failure indicates that the `mirror_window` function is not correctly updating the sink when a new symbol window is encountered. The function should replace any existing entries in the sink for the given symbol with the source entries, but it appears to be appending instead.\",\n  \"files\": [\n    {\n      \"path\": \"replay_copy.py\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `mirror_window` function to ensure that if a new symbol window is encountered, any existing entries in the sink for that symbol are replaced with the source entries.\"\n    }\n  ],\n  \"notes\": \"The failure crosses an interface between the `replay_copy.py` and `test_hidden_data.py` files. The `replay_copy.py` file contains the implementation of the `mirror_window` function, while the `test_hidden_data.py` file contains a test that checks the behavior of this function.\"\n}",
+          "stage": "repair_plan_4",
+          "tokens_out": 193,
+          "wall_ms": 12763
+        },
+        {
+          "error": null,
+          "latency_ms": 13509,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The validation failure indicates that the `mirror_window` function is not correctly updating the sink when a new symbol window is encountered. The function should replace any existing entries in the sink for the given symbol with the source entries, but it appears to be appending instead.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Modify the `mirror_window` function to ensure that if a new symbol window is encountered, any existing entries in the sink for that symbol are replaced with the source entries.\",\n      \"path\": \"replay_copy.py\"\n    }\n  ],\n  \"notes\": \"The failure crosses an interface between the `replay_copy.py` and `test_hidden_data.py` files. The `replay_copy.py` file contains the implementation of the `mirror_window` function, while the `test_hidden_data.py` file contains a test that checks the behavior of this function.\"\n}",
+          "stage": "repair_review_4",
+          "tokens_out": 193,
+          "wall_ms": 13509
+        },
+        {
+          "error": null,
+          "latency_ms": 8266,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    if symbol not in sink_rows:\n        sink_rows[symbol] = []\n    if symbol not in sink_rows:\n        sink_rows[symbol] = []\n=======\n    if symbol not in sink_rows:\n        sink_rows[symbol] = []\n    else:\n        sink_rows[symbol].clear()\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_4_1",
+          "tokens_out": 70,
+          "wall_ms": 8266
+        }
+      ],
+      "patch_applied": true,
+      "patch_warnings": [],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 436,
+        "exit_code": 0,
+        "output": ".                                                                        [100%]\n1 passed in 0.01s",
+        "passed": true
+      },
+      "repair_attempts": [
+        {
+          "applied_files": [
+            "replay_copy.py"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The failure is due to the function `mirror_window` not handling the case where the symbol does not exist in the source rows correctly. It should initialize an empty list for the symbol in the sink rows instead of raising a KeyError.",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Initialize an empty list for the symbol in the sink rows if it does not exist.",
+                "path": "replay_copy.py"
+              }
+            ],
+            "notes": "This change ensures that the function handles missing symbols gracefully and avoids raising a KeyError. It also maintains the behavior of copying rows from the source to the sink without fabricating any data."
+          },
+          "round": 1,
+          "selected_file": "replay_copy.py",
+          "selected_files": [
+            "replay_copy.py"
+          ],
+          "warnings": []
+        },
+        {
+          "applied_files": [
+            "replay_copy.py"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The failure is due to the sink not being updated correctly when copying rows from the source. The test expects the sink to be replaced by the source window, but instead, it appends the new rows to the existing ones.",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Modify the `mirror_window` function to replace the existing rows in the sink with the rows from the source when copying.",
+                "path": "replay_copy.py"
+              }
+            ],
+            "notes": "Ensure that the test cases are updated to reflect the expected behavior of replacing the sink with the source window."
+          },
+          "round": 2,
+          "selected_file": "replay_copy.py",
+          "selected_files": [
+            "replay_copy.py"
+          ],
+          "warnings": []
+        },
+        {
+          "applied_files": [
+            "replay_copy.py"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The failure is due to the `mirror_window` function not creating a new list for the sink when copying rows from the source. This results in both the source and sink pointing to the same list object, causing the identity check (`is not`) to fail.",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Ensure a new list is created for each symbol when copying rows from the source to the sink.",
+                "path": "replay_copy.py"
+              }
+            ],
+            "notes": "The `metrics.py` file does not need modification as it is not directly related to the failure. The test `test_source_rows_are_copied_to_empty_sink` should pass with the changes made to `replay_copy.py`."
+          },
+          "round": 3,
+          "selected_file": "replay_copy.py",
+          "selected_files": [
+            "replay_copy.py"
+          ],
+          "warnings": []
+        },
+        {
+          "applied_files": [
+            "replay_copy.py"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The validation failure indicates that the `mirror_window` function is not correctly updating the sink when a new symbol window is encountered. The function should replace any existing entries in the sink for the given symbol with the source entries, but it appears to be appending instead.",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Modify the `mirror_window` function to ensure that if a new symbol window is encountered, any existing entries in the sink for that symbol are replaced with the source entries.",
+                "path": "replay_copy.py"
+              }
+            ],
+            "notes": "The failure crosses an interface between the `replay_copy.py` and `test_hidden_data.py` files. The `replay_copy.py` file contains the implementation of the `mirror_window` function, while the `test_hidden_data.py` file contains a test that checks the behavior of this function."
+          },
+          "round": 4,
+          "selected_file": "replay_copy.py",
+          "selected_files": [
+            "replay_copy.py"
+          ],
+          "warnings": []
+        }
+      ],
+      "score": 100,
+      "selected_file": "replay_copy.py",
+      "selected_files": [
+        "replay_copy.py"
+      ],
+      "split": "holdout"
+    },
+    {
+      "baseline_hidden_tests": {
+        "duration_ms": 555,
+        "exit_code": 1,
+        "output": "F\n================================== FAILURES ===================================\n____________________ test_policy_uses_explicit_clock_value ____________________\n\n    def test_policy_uses_explicit_clock_value():\n>       assert in_regular_session(datetime(2026, 7, 10, 10, 15)) is True\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       TypeError: in_regular_session() takes 0 positional arguments but 1 was given\n\ntests\\test_hidden_clock_chain.py:8: TypeError\n=========================== short test summary info ===========================\nFAILED tests/test_hidden_clock_chain.py::test_policy_uses_explicit_clock_value\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.08s",
+        "passed": false
+      },
+      "case_id": "clock-chain-301",
+      "changed_files": [
+        "replay_runner.py",
+        "session_policy.py"
+      ],
+      "checks": {
+        "baseline_hidden_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "hidden_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "diagnosis_dimension": "clock",
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "operator-3",
+            "source-1",
+            "source-2",
+            "source-4",
+            "source-5"
+          ],
+          "hypothesis_id": "h-clock",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "clock"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing clock changes or restores the outcome.",
+            "experiment_id": "isolate-clock",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-clock"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "state"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing state changes or restores the outcome.",
+            "experiment_id": "isolate-state",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-state"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing data changes or restores the outcome.",
+            "experiment_id": "isolate-data",
+            "held_constant_dimensions": [
+              "code",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-data"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-3",
+              "source-1",
+              "source-2",
+              "source-4",
+              "source-5"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by state drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h-state",
+            "support_evidence_ids": [
+              "source-3",
+              "source-6"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "support_evidence_ids": [
+              "source-7"
+            ]
+          }
+        ],
+        "problem_statement": "A replay frame timestamped 10:15 is rejected before the real market open. The shared session policy and replay caller must use the injected frame clock without duplicating session boundaries. Diagnose and repair the cross-module clock contract.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "baseline_drift": [],
+        "case_id": "clock-chain-301",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by clock drift.",
+          "confidence": 0.7101,
+          "dimension": "clock",
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "operator-3",
+            "source-1",
+            "source-2",
+            "source-4",
+            "source-5"
+          ],
+          "hypothesis_id": "h-clock",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.7101,
+            "confirmatory_weight": 1.8,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-3",
+              "source-1",
+              "source-2",
+              "source-4",
+              "source-5"
+            ],
+            "support_weight": 2.45
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.4286,
+            "confirmatory_weight": 0.75,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h-state",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "source-3",
+              "source-6"
+            ],
+            "support_weight": 0.75
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.4286,
+            "confirmatory_weight": 0.75,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "source-7"
+            ],
+            "support_weight": 0.75
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "dimension": "state",
+            "experiment_id": "falsify-h-state",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "dimension": "data",
+            "experiment_id": "falsify-h-data",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_status": "confirmed",
+      "duration_ms": 63484,
+      "hidden_tests": {
+        "duration_ms": 493,
+        "exit_code": 0,
+        "output": "...                                                                      [100%]\n3 passed in 0.01s",
+        "passed": true
+      },
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 34953,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"A replay frame timestamped 10:15 is rejected before the real market open. The shared session policy and replay caller must use the injected frame clock without duplicating session boundaries. Diagnose and repair the cross-module clock contract.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h-clock\",\n      \"claim\":\"The observed failure is primarily caused by clock drift.\",\n      \"dimension\":\"clock\",\n      \"support_evidence_ids\":[\"operator-1\",\"operator-2\",\"operator-3\",\"source-1\",\"source-2\",\"source-4\",\"source-5\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing clock does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\":\"h-state\",\n      \"claim\":\"The observed failure is primarily caused by state drift.\",\n      \"dimension\":\"state\",\n      \"support_evidence_ids\":[\"source-3\",\"source-6\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing state does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\":\"h-data\",\n      \"claim\":\"The observed failure is primarily caused by data drift.\",\n      \"dimension\":\"data\",\n      \"support_evidence_ids\":[\"source-7\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing data does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-clock\",\n      \"hypothesis_ids\":[\"h-clock\"],\n      \"changed_dimensions\":[\"clock\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing clock changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    },\n    {\n      \"experiment_id\":\"isolate-state\",\n      \"hypothesis_ids\":[\"h-state\"],\n      \"changed_dimensions\":[\"state\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing state changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    },\n    {\n      \"experiment_id\":\"isolate-data\",\n      \"hypothesis_ids\":[\"h-data\"],\n      \"changed_dimensions\":[\"data\"],\n      \"held_constant_dimensions\":[\"code\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if",
+          "stage": "diagnosis_judge",
+          "tokens_out": 650,
+          "wall_ms": 34953
+        },
+        {
+          "error": null,
+          "latency_ms": 11773,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The issue arises because the `replay_accepts` function in `replay_runner.py` checks if it's within a regular session using the current system time, not the injected frame clock. This causes the replay to be rejected before the real market open.\",\n  \"files\": [\n    {\n      \"path\": \"session_policy.py\",\n      \"action\": \"modify\",\n      \"description\": \"Modify `in_regular_session` to accept an optional `frame_time` parameter and use it if provided.\"\n    },\n    {\n      \"path\": \"replay_runner.py\",\n      \"action\": \"modify\",\n      \"description\": \"Update `replay_accepts` to use the injected frame clock if available, otherwise fall back to the system time.\"\n    }\n  ],\n  \"notes\": \"Ensure that any changes do not introduce new session boundaries or drift issues. Test with various frame times to confirm the fix.\"\n}",
+          "stage": "plan",
+          "tokens_out": 192,
+          "wall_ms": 11773
+        },
+        {
+          "error": null,
+          "latency_ms": 7570,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\ndef in_regular_session() -> bool:\n    hour = datetime.now().hour\n    return 9 <= hour < 16\n=======\ndef in_regular_session(frame_time: datetime = None) -> bool:\n    if frame_time is not None:\n        hour = frame_time.hour\n    else:\n        hour = datetime.now().hour\n    return 9 <= hour < 16\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 89,
+          "wall_ms": 7570
+        },
+        {
+          "error": null,
+          "latency_ms": 6811,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nfrom datetime import datetime\n\nfrom session_policy import in_regular_session\n\n\ndef replay_accepts(frame_time: datetime) -> bool:\n    return in_regular_session()\n=======\nfrom datetime import datetime\n\nfrom session_policy import in_regular_session\n\n\ndef replay_accepts(frame_time: datetime) -> bool:\n    return in_regular_session(frame_time)\n>>>>>>> REPLACE\n```",
+          "stage": "edit_2",
+          "tokens_out": 75,
+          "wall_ms": 6811
         }
       ],
       "patch_applied": true,
@@ -815,53 +1606,1198 @@
         "output": ".                                                                        [100%]\n1 passed in 0.01s",
         "passed": true
       },
-      "repair_attempts": [
-        {
-          "patch_applied": true,
-          "plan": {
-            "analysis": "The failure in the test is due to a KeyError when trying to extend `sink_rows[symbol]` because `symbol` ('XYZ') does not exist in `sink_rows`. This indicates that the function `mirror_window` is not properly handling cases where the symbol is not already present in the sink.",
-            "files": [
-              {
-                "action": "modify",
-                "description": "Ensure that the symbol exists in `sink_rows` before attempting to extend it. Initialize an empty list if the symbol is not present.",
-                "path": "replay_copy.py"
-              }
+      "repair_attempts": [],
+      "score": 100,
+      "selected_file": "",
+      "selected_files": [
+        "session_policy.py",
+        "replay_runner.py"
+      ],
+      "split": "calibration-multifile"
+    },
+    {
+      "baseline_hidden_tests": {
+        "duration_ms": 562,
+        "exit_code": 1,
+        "output": "F\n================================== FAILURES ===================================\n_____________ test_shared_parser_normalizes_false_and_true_values _____________\n\n    def test_shared_parser_normalizes_false_and_true_values():\n        name = \"CHILI_EXPERIMENTAL_GATE\"\n        for value in (\"0\", \"false\", \"NO\", \"off\", \"\"):\n>           assert enabled({name: value}, name) is False\nE           AssertionError: assert True is False\nE            +  where True = enabled({'CHILI_EXPERIMENTAL_GATE': '0'}, 'CHILI_EXPERIMENTAL_GATE')\n\ntests\\test_hidden_config_chain.py:8: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_hidden_config_chain.py::test_shared_parser_normalizes_false_and_true_values\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.08s",
+        "passed": false
+      },
+      "case_id": "config-chain-302",
+      "changed_files": [
+        "flags.py",
+        "worker_mode.py"
+      ],
+      "checks": {
+        "baseline_hidden_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "hidden_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "diagnosis_dimension": "config",
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-2",
+            "operator-3",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-5",
+            "source-6"
+          ],
+          "hypothesis_id": "h-config",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "config"
             ],
-            "notes": "The selected file is replay_copy.py because it contains the implementation of the function causing the failure. The other candidate, metrics.py, does not contain the relevant code for this issue."
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing config changes or restores the outcome.",
+            "experiment_id": "isolate-config",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-config"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
           },
-          "round": 1,
-          "selected_file": "replay_copy.py",
-          "warnings": []
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "unknown"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing unknown changes or restores the outcome.",
+            "experiment_id": "isolate-unknown",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-unknown"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "runtime"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing runtime changes or restores the outcome.",
+            "experiment_id": "isolate-runtime",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-runtime"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by config drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "config",
+            "falsification": "Hold every other dimension constant and show that changing config does not change the outcome.",
+            "hypothesis_id": "h-config",
+            "support_evidence_ids": [
+              "operator-2",
+              "operator-3",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-4",
+              "source-5",
+              "source-6"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "unknown",
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h-unknown",
+            "support_evidence_ids": [
+              "source-7"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "support_evidence_ids": [
+              "operator-1"
+            ]
+          }
+        ],
+        "problem_statement": "Workers on the same revision disagree when CHILI_EXPERIMENTAL_GATE=0. Both the shared flag parser and the worker mode resolver interpret non-empty strings as enabled. Normalize the flag once and make the consumer use that contract without renaming the setting.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "baseline_drift": [],
+        "case_id": "config-chain-302",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by config drift.",
+          "confidence": 0.7619,
+          "dimension": "config",
+          "evidence_ids": [
+            "operator-2",
+            "operator-3",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-5",
+            "source-6"
+          ],
+          "hypothesis_id": "h-config",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by config drift.",
+            "confidence": 0.7619,
+            "confirmatory_weight": 2.55,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "config",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing config does not change the outcome.",
+            "hypothesis_id": "h-config",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-2",
+              "operator-3",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-4",
+              "source-5",
+              "source-6"
+            ],
+            "support_weight": 3.2
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "confidence": 0.4286,
+            "confirmatory_weight": 0.75,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "unknown",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h-unknown",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "source-7"
+            ],
+            "support_weight": 0.75
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.3939,
+            "confirmatory_weight": 0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-1"
+            ],
+            "support_weight": 0.65
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "dimension": "unknown",
+            "experiment_id": "falsify-h-unknown",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "dimension": "runtime",
+            "experiment_id": "falsify-h-runtime",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_status": "confirmed",
+      "duration_ms": 87866,
+      "hidden_tests": {
+        "duration_ms": 516,
+        "exit_code": 0,
+        "output": "...                                                                      [100%]\n3 passed in 0.02s",
+        "passed": true
+      },
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 35176,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"Workers on the same revision disagree when CHILI_EXPERIMENTAL_GATE=0. Both the shared flag parser and the worker mode resolver interpret non-empty strings as enabled. Normalize the flag once and make the consumer use that contract without renaming the setting.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h-config\",\n      \"claim\":\"The observed failure is primarily caused by config drift.\",\n      \"dimension\":\"config\",\n      \"support_evidence_ids\":[\"operator-2\",\"operator-3\",\"source-1\",\"source-2\",\"source-3\",\"source-4\",\"source-5\",\"source-6\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing config does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\":\"h-unknown\",\n      \"claim\":\"The observed failure is primarily caused by unknown drift.\",\n      \"dimension\":\"unknown\",\n      \"support_evidence_ids\":[\"source-7\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing unknown does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\":\"h-runtime\",\n      \"claim\":\"The observed failure is primarily caused by runtime drift.\",\n      \"dimension\":\"runtime\",\n      \"support_evidence_ids\":[\"operator-1\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing runtime does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-config\",\n      \"hypothesis_ids\":[\"h-config\"],\n      \"changed_dimensions\":[\"config\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"state\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing config changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\"\n    },\n    {\n      \"experiment_id\":\"isolate-unknown\",\n      \"hypothesis_ids\":[\"h-unknown\"],\n      \"changed_dimensions\":[\"unknown\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing unknown changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\"\n    },\n    {\n      \"experiment_id\":\"isolate-runtime\",\n      \"hypothesis_ids\":[\"h-runtime\"],\n      \"changed_dimensions\":[\"runtime\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"state\",\"config\",\"dependency\",\"test_harness\"],\n      \"expected_if_true\":\"Changing runtime changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome",
+          "stage": "diagnosis_judge",
+          "tokens_out": 650,
+          "wall_ms": 35176
         },
         {
+          "error": null,
+          "latency_ms": 9876,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The issue arises because both the shared flag parser and the worker mode resolver interpret non-empty strings as enabled. To normalize the flag once and make the consumer use that contract without renaming the setting, we need to modify the `enabled` function in `flags.py` to handle the normalization.\",\n  \"files\": [\n    {\n      \"path\": \"flags.py\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `enabled` function to normalize the flag value before checking if it is enabled.\"\n    }\n  ],\n  \"notes\": \"This change ensures that both the shared flag parser and the worker mode resolver interpret non-empty strings as enabled consistently. The consumer of these flags can then use this contract without renaming the setting.\"\n}",
+          "stage": "plan",
+          "tokens_out": 156,
+          "wall_ms": 9876
+        },
+        {
+          "error": null,
+          "latency_ms": 5697,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\ndef enabled(env: dict[str, str], name: str) -> bool:\n    return bool(env.get(name, \"0\"))\n=======\ndef enabled(env: dict[str, str], name: str) -> bool:\n    value = env.get(name, \"0\").lower()\n    return value in _TRUE_VALUES\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 73,
+          "wall_ms": 5697
+        },
+        {
+          "error": null,
+          "latency_ms": 13792,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The validation failure indicates that the `resolved_mode` function is not correctly interpreting the environment variable `CHILI_EXPERIMENTAL_GATE`. The test expects 'stable' when the value is '0', but it receives 'experimental'. This discrepancy arises because the `enabled` function in `flags.py` interprets non-empty strings as enabled, while the `resolved_mode` function does not handle this correctly.\",\n  \"files\": [\n    {\n      \"path\": \"worker_mode.py\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `resolved_mode` function to use the `enabled` function from `flags.py` for consistent interpretation of the environment variable.\"\n    },\n    {\n      \"path\": \"flags.py\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the `enabled` function correctly handles the interpretation of non-empty strings as enabled.\"\n    }\n  ],\n  \"notes\": \"The changes in `worker_mode.py` and `flags.py` should ensure that the environment variable is interpreted consistently across different parts of the codebase. This will resolve the validation failure.\"\n}",
+          "stage": "repair_plan_1",
+          "tokens_out": 232,
+          "wall_ms": 13792
+        },
+        {
+          "error": null,
+          "latency_ms": 12841,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The validation failure indicates that the `resolved_mode` function is not correctly interpreting the environment variable `CHILI_EXPERIMENTAL_GATE`. The test expects 'stable' when the value is '0', but it receives 'experimental'. This discrepancy arises because the `enabled` function in `flags.py` interprets non-empty strings as enabled, while the `resolved_mode` function does not handle this correctly.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Modify the `resolved_mode` function to use the `enabled` function from `flags.py` for consistent interpretation of the environment variable.\",\n      \"path\": \"worker_mode.py\"\n    }\n  ],\n  \"notes\": \"The changes in `worker_mode.py` should ensure that the environment variable is interpreted consistently across different parts of the codebase. This will resolve the validation failure.\"\n}",
+          "stage": "repair_review_1",
+          "tokens_out": 185,
+          "wall_ms": 12842
+        },
+        {
+          "error": null,
+          "latency_ms": 7147,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    if env.get(\"CHILI_EXPERIMENTAL_GATE\"):\n        return \"experimental\"\n    return \"stable\"\n=======\n    if enabled(env, \"CHILI_EXPERIMENTAL_GATE\"):\n        return \"experimental\"\n    return \"stable\"\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_1",
+          "tokens_out": 58,
+          "wall_ms": 7147
+        }
+      ],
+      "patch_applied": true,
+      "patch_warnings": [],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 508,
+        "exit_code": 0,
+        "output": ".                                                                        [100%]\n1 passed in 0.01s",
+        "passed": true
+      },
+      "repair_attempts": [
+        {
+          "applied_files": [
+            "worker_mode.py"
+          ],
           "patch_applied": true,
           "plan": {
-            "analysis": "The failure in the test `test_existing_sink_is_replaced_by_source_window` indicates that the function `mirror_window` is not correctly updating the sink when it already contains rows for the given symbol. The test expects the sink to be updated with the new rows from the source, but instead, it appends the new rows to the existing ones.",
+            "analysis": "The validation failure indicates that the `resolved_mode` function is not correctly interpreting the environment variable `CHILI_EXPERIMENTAL_GATE`. The test expects 'stable' when the value is '0', but it receives 'experimental'. This discrepancy arises because the `enabled` function in `flags.py` interprets non-empty strings as enabled, while the `resolved_mode` function does not handle this correctly.",
             "files": [
               {
                 "action": "modify",
-                "description": "Ensure that when copying rows into the sink, any existing rows for the symbol are replaced rather than appended.",
-                "path": "replay_copy.py"
+                "description": "Modify the `resolved_mode` function to use the `enabled` function from `flags.py` for consistent interpretation of the environment variable.",
+                "path": "worker_mode.py"
               }
             ],
-            "notes": "The previous selected file was `replay_copy.py`, but it seems that the issue is not with this file. The failure is likely due to a misunderstanding in how the function should handle updating the sink. The correct approach is to replace any existing rows for the symbol with the new rows from the source."
+            "notes": "The changes in `worker_mode.py` should ensure that the environment variable is interpreted consistently across different parts of the codebase. This will resolve the validation failure."
           },
-          "round": 2,
-          "selected_file": "replay_copy.py",
+          "round": 1,
+          "selected_file": "worker_mode.py",
+          "selected_files": [
+            "worker_mode.py"
+          ],
           "warnings": []
         }
       ],
       "score": 100,
-      "selected_file": "replay_copy.py"
+      "selected_file": "",
+      "selected_files": [
+        "flags.py",
+        "worker_mode.py"
+      ],
+      "split": "holdout-multifile"
+    },
+    {
+      "baseline_hidden_tests": {
+        "duration_ms": 524,
+        "exit_code": 1,
+        "output": "F\n================================== FAILURES ===================================\n_________________ test_source_accessor_uses_requested_symbol __________________\n\n    def test_source_accessor_uses_requested_symbol():\n        source = {\"XYZ\": [{\"bid\": 10.0}], \"DEFAULT\": [{\"bid\": 1.0}]}\n>       assert source_window(source, \"XYZ\") == [{\"bid\": 10.0}]\nE       AssertionError: assert [{'bid': 1.0}] == [{'bid': 10.0}]\nE         \nE         At index 0 diff: {'bid': 1.0} != {'bid': 10.0}\nE         Use -v to get more diff\n\ntests\\test_hidden_data_contract.py:7: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_hidden_data_contract.py::test_source_accessor_uses_requested_symbol\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.07s",
+        "passed": false
+      },
+      "case_id": "data-contract-303",
+      "changed_files": [
+        "quote_source.py",
+        "replay_mirror.py"
+      ],
+      "checks": {
+        "baseline_hidden_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "hidden_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "diagnosis_dimension": "data",
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "operator-3",
+            "source-1",
+            "source-5",
+            "source-6"
+          ],
+          "hypothesis_id": "h-data",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing data changes or restores the outcome.",
+            "experiment_id": "isolate-data",
+            "held_constant_dimensions": [
+              "code",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-data"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "unknown"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing unknown changes or restores the outcome.",
+            "experiment_id": "isolate-unknown",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-unknown"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "test_harness"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing test_harness changes or restores the outcome.",
+            "experiment_id": "isolate-test_harness",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime"
+            ],
+            "hypothesis_ids": [
+              "h-test_harness"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-3",
+              "source-1",
+              "source-5",
+              "source-6"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "unknown",
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h-unknown",
+            "support_evidence_ids": [
+              "source-2",
+              "source-7",
+              "source-8"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "test_harness",
+            "falsification": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
+            "hypothesis_id": "h-test_harness",
+            "support_evidence_ids": [
+              "source-3",
+              "source-4",
+              "source-9"
+            ]
+          }
+        ],
+        "problem_statement": "A replay mirror reports zero copied quotes while the requested symbol exists in the source and the sink starts empty. The source accessor and mirror disagree about the source/sink contract. Repair the cross-module path without fabricating rows or retaining stale sink data.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "baseline_drift": [],
+        "case_id": "data-contract-303",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by data drift.",
+          "confidence": 0.697,
+          "dimension": "data",
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "operator-3",
+            "source-1",
+            "source-5",
+            "source-6"
+          ],
+          "hypothesis_id": "h-data",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.697,
+            "confirmatory_weight": 1.65,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-3",
+              "source-1",
+              "source-5",
+              "source-6"
+            ],
+            "support_weight": 2.3
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "confidence": 0.6429,
+            "confirmatory_weight": 1.8,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "unknown",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h-unknown",
+            "status": "supported",
+            "support_evidence_ids": [
+              "source-2",
+              "source-7",
+              "source-8"
+            ],
+            "support_weight": 1.8
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by test_harness drift.",
+            "confidence": 0.6226,
+            "confirmatory_weight": 1.65,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "test_harness",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing test_harness does not change the outcome.",
+            "hypothesis_id": "h-test_harness",
+            "status": "supported",
+            "support_evidence_ids": [
+              "source-3",
+              "source-4",
+              "source-9"
+            ],
+            "support_weight": 1.65
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_status": "confirmed",
+      "duration_ms": 97358,
+      "hidden_tests": {
+        "duration_ms": 487,
+        "exit_code": 0,
+        "output": "...                                                                      [100%]\n3 passed in 0.02s",
+        "passed": true
+      },
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 34952,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"A replay mirror reports zero copied quotes while the requested symbol exists in the source and the sink starts empty. The source accessor and mirror disagree about the source/sink contract. Repair the cross-module path without fabricating rows or retaining stale sink data.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h-data\",\n      \"claim\":\"The observed failure is primarily caused by data drift.\",\n      \"dimension\":\"data\",\n      \"support_evidence_ids\":[\"operator-1\",\"operator-2\",\"operator-3\",\"source-1\",\"source-5\",\"source-6\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing data does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\":\"h-unknown\",\n      \"claim\":\"The observed failure is primarily caused by unknown drift.\",\n      \"dimension\":\"unknown\",\n      \"support_evidence_ids\":[\"source-2\",\"source-7\",\"source-8\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing unknown does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\":\"h-test_harness\",\n      \"claim\":\"The observed failure is primarily caused by test_harness drift.\",\n      \"dimension\":\"test_harness\",\n      \"support_evidence_ids\":[\"source-3\",\"source-4\",\"source-9\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing test_harness does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-data\",\n      \"hypothesis_ids\":[\"h-data\"],\n      \"changed_dimensions\":[\"data\"],\n      \"held_constant_dimensions\":[\"code\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing data changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\"\n    },\n    {\n      \"experiment_id\":\"isolate-unknown\",\n      \"hypothesis_ids\":[\"h-unknown\"],\n      \"changed_dimensions\":[\"unknown\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing unknown changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\"\n    },\n    {\n      \"experiment_id\":\"isolate-test_harness\",\n      \"hypothesis_ids\":[\"h-test_harness\"],\n      \"changed_dimensions\":[\"test_harness\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\"],\n      \"expected",
+          "stage": "diagnosis_judge",
+          "tokens_out": 650,
+          "wall_ms": 34952
+        },
+        {
+          "error": null,
+          "latency_ms": 9310,
+          "ok": true,
+          "response": "{\n    \"analysis\": \"The issue arises because the `mirror_window` function is not correctly handling the case where the source has data but the sink is empty. The function should copy data from the source to the sink if it exists.\",\n    \"files\": [\n        {\n            \"path\": \"replay_mirror.py\",\n            \"action\": \"modify\",\n            \"description\": \"Ensure that `mirror_window` copies data from the source to the sink if it exists.\"\n        }\n    ],\n    \"notes\": \"No additional files are required as the issue is localized within `replay_mirror.py`. The other files (`quote_source.py` and `metrics.py`) do not directly contribute to the problem described.\"\n}",
+          "stage": "plan",
+          "tokens_out": 145,
+          "wall_ms": 9310
+        },
+        {
+          "error": null,
+          "latency_ms": 7468,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    copied = list(sink_rows.get(symbol, []))\n    sink_rows[symbol] = copied\n    return len(copied)\n=======\n    if symbol in source_rows:\n        copied = list(source_rows[symbol])\n        sink_rows[symbol] = copied\n    else:\n        copied = []\n    return len(copied)\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 78,
+          "wall_ms": 7468
+        },
+        {
+          "error": null,
+          "latency_ms": 11695,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The failure is caused by the `source_window` function not handling the requested symbol correctly and the `mirror_window` function not updating the sink properly.\",\n  \"files\": [\n    {\n      \"path\": \"quote_source.py\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the `source_window` function returns the correct data for the requested symbol.\"\n    },\n    {\n      \"path\": \"replay_mirror.py\",\n      \"action\": \"modify\",\n      \"description\": \"Update the `mirror_window` function to handle cases where the requested symbol is not found in the source and ensure it correctly updates the sink.\"\n    }\n  ],\n  \"notes\": \"The repair should focus on ensuring that both functions adhere to their contracts without fabricating rows or retaining stale data. The tests should be updated to reflect the expected behavior after the changes.\"\n}",
+          "stage": "repair_plan_1",
+          "tokens_out": 182,
+          "wall_ms": 11695
+        },
+        {
+          "error": null,
+          "latency_ms": 12287,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The failure is caused by the `source_window` function not handling the requested symbol correctly and the `mirror_window` function not updating the sink properly.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the `source_window` function returns the correct data for the requested symbol.\",\n      \"path\": \"quote_source.py\"\n    },\n    {\n      \"action\": \"modify\",\n      \"description\": \"Update the `mirror_window` function to handle cases where the requested symbol is not found in the source and ensure it correctly updates the sink.\",\n      \"path\": \"replay_mirror.py\"\n    }\n  ],\n  \"notes\": \"The repair should focus on ensuring that both functions adhere to their contracts without fabricating rows or retaining stale data. The tests should be updated to reflect the expected behavior after the changes.\"\n}",
+          "stage": "repair_review_1",
+          "tokens_out": 182,
+          "wall_ms": 12287
+        },
+        {
+          "error": null,
+          "latency_ms": 8790,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\ndef source_window(rows: dict[str, list[dict]], symbol: str) -> list[dict]:\n    return list(rows.get(\"DEFAULT\", []))\n=======\ndef source_window(rows: dict[str, list[dict]], symbol: str) -> list[dict]:\n    if symbol in rows:\n        return list(rows[symbol])\n    else:\n        return []\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_1",
+          "tokens_out": 82,
+          "wall_ms": 8790
+        },
+        {
+          "error": null,
+          "latency_ms": 9600,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    if symbol in source_rows:\n        copied = list(source_rows[symbol])\n        sink_rows[symbol] = copied\n    else:\n        copied = []\n    return len(copied)\n=======\n    if symbol in source_rows:\n        copied = list(source_rows[symbol])\n        sink_rows[symbol] = copied\n    else:\n        copied = []\n        sink_rows[symbol] = []  # Ensure the sink is updated even if the symbol is not found\n    return len(copied)\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_2",
+          "tokens_out": 112,
+          "wall_ms": 9600
+        }
+      ],
+      "patch_applied": true,
+      "patch_warnings": [],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 461,
+        "exit_code": 0,
+        "output": ".                                                                        [100%]\n1 passed in 0.01s",
+        "passed": true
+      },
+      "repair_attempts": [
+        {
+          "applied_files": [
+            "quote_source.py",
+            "replay_mirror.py"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The failure is caused by the `source_window` function not handling the requested symbol correctly and the `mirror_window` function not updating the sink properly.",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Ensure that the `source_window` function returns the correct data for the requested symbol.",
+                "path": "quote_source.py"
+              },
+              {
+                "action": "modify",
+                "description": "Update the `mirror_window` function to handle cases where the requested symbol is not found in the source and ensure it correctly updates the sink.",
+                "path": "replay_mirror.py"
+              }
+            ],
+            "notes": "The repair should focus on ensuring that both functions adhere to their contracts without fabricating rows or retaining stale data. The tests should be updated to reflect the expected behavior after the changes."
+          },
+          "round": 1,
+          "selected_file": "quote_source.py",
+          "selected_files": [
+            "quote_source.py",
+            "replay_mirror.py"
+          ],
+          "warnings": []
+        }
+      ],
+      "score": 100,
+      "selected_file": "",
+      "selected_files": [
+        "replay_mirror.py",
+        "quote_source.py"
+      ],
+      "split": "holdout-multifile"
+    },
+    {
+      "baseline_hidden_tests": {
+        "duration_ms": 686,
+        "exit_code": 1,
+        "output": "F\n================================== FAILURES ===================================\n__________________ test_registry_rejects_second_reservation ___________________\n\n    def test_registry_rejects_second_reservation():\n        assert reserve(\"job-2\") is True\n>       assert reserve(\"job-2\") is False\nE       AssertionError: assert True is False\nE        +  where True = reserve('job-2')\n\ntests\\test_hidden_state_dedupe.py:11: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_hidden_state_dedupe.py::test_registry_rejects_second_reservation\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.09s",
+        "passed": false
+      },
+      "case_id": "state-dedupe-304",
+      "changed_files": [
+        "dedupe_registry.py",
+        "worker.py"
+      ],
+      "checks": {
+        "baseline_hidden_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "hidden_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "diagnosis_dimension": "state",
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "operator-3",
+            "source-1",
+            "source-3",
+            "source-4",
+            "source-5",
+            "source-6",
+            "source-7"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "The hypothesis that the observed failure is primarily caused by state drift is supported by multiple observations and artifacts.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "state"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing state changes or restores the outcome.",
+            "experiment_id": "isolate-state",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "code"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing code changes or restores the outcome.",
+            "experiment_id": "isolate-code",
+            "held_constant_dimensions": [
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h2"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by state drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-3",
+              "source-1",
+              "source-3",
+              "source-4",
+              "source-5",
+              "source-6",
+              "source-7"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by code drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "source-2"
+            ]
+          }
+        ],
+        "problem_statement": "A retry dispatches the same job twice even though a process-local reservation registry is present. The registry never retains a successful reservation and the worker ignores a rejected reservation. Repair the state contract so the first attempt runs and a duplicate is skipped.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "baseline_drift": [],
+        "case_id": "state-dedupe-304",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by state drift.",
+          "confidence": 0.7619,
+          "dimension": "state",
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "operator-3",
+            "source-1",
+            "source-3",
+            "source-4",
+            "source-5",
+            "source-6",
+            "source-7"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "The hypothesis that the observed failure is primarily caused by state drift is supported by multiple observations and artifacts.",
+          "status": "confirmed"
+        },
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.7619,
+            "confirmatory_weight": 2.55,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-3",
+              "source-1",
+              "source-3",
+              "source-4",
+              "source-5",
+              "source-6",
+              "source-7"
+            ],
+            "support_weight": 3.2
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.4286,
+            "confirmatory_weight": 0.75,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h2",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "source-2"
+            ],
+            "support_weight": 0.75
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "dimension": "code",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-state",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_status": "confirmed",
+      "duration_ms": 114108,
+      "hidden_tests": {
+        "duration_ms": 528,
+        "exit_code": 0,
+        "output": "...                                                                      [100%]\n3 passed in 0.02s",
+        "passed": true
+      },
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 31409,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"A retry dispatches the same job twice even though a process-local reservation registry is present. The registry never retains a successful reservation and the worker ignores a rejected reservation. Repair the state contract so the first attempt runs and a duplicate is skipped.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by state drift.\",\n      \"dimension\":\"state\",\n      \"support_evidence_ids\":[\"operator-1\",\"operator-2\",\"operator-3\",\"source-1\",\"source-3\",\"source-4\",\"source-5\",\"source-6\",\"source-7\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing state does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\":\"h2\",\n      \"claim\":\"The observed failure is primarily caused by code drift.\",\n      \"dimension\":\"code\",\n      \"support_evidence_ids\":[\"source-2\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing code does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-state\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"state\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing state changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\"\n    },\n    {\n      \"experiment_id\":\"isolate-code\",\n      \"hypothesis_ids\":[\"h2\"],\n      \"changed_dimensions\":[\"code\"],\n      \"held_constant_dimensions\":[\"data\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing code changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\"\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"confirmed\",\n    \"evidence_ids\":[\"operator-1\",\"operator-2\",\"operator-3\",\"source-1\",\"source-3\",\"source-4\",\"source-5\",\"source-6\",\"source-7\"],\n    \"reason\":\"The hypothesis that the observed failure is primarily caused by state drift is supported by multiple observations and artifacts.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 591,
+          "wall_ms": 31409
+        },
+        {
+          "error": null,
+          "latency_ms": 11320,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The issue arises because the reservation registry does not retain successful reservations, leading to duplicate job dispatches.\",\n  \"files\": [\n    {\n      \"path\": \"dedupe_registry.py\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `reserve` function to mark a key as seen only if it is successfully processed.\"\n    },\n    {\n      \"path\": \"worker.py\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the reservation registry is updated after a job is successfully processed.\"\n    }\n  ],\n  \"notes\": \"The `clear_registry` function in `dedupe_registry.py` should be retained as it allows for resetting the registry when necessary. The `outcome_label` function in `telemetry.py` does not directly contribute to the issue and can remain unchanged.\"\n}",
+          "stage": "plan",
+          "tokens_out": 173,
+          "wall_ms": 11320
+        },
+        {
+          "error": null,
+          "latency_ms": 6952,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\ndef reserve(key: str) -> bool:\n    if key in _SEEN:\n        return False\n    return True\n=======\ndef reserve(key: str) -> bool:\n    if key in _SEEN:\n        return False\n    _SEEN.add(key)\n    return True\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 68,
+          "wall_ms": 6952
+        },
+        {
+          "error": null,
+          "latency_ms": 5855,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    accepted = reserve(key)\n    dispatch(key)\n    return \"processed\"\n=======\n    if reserve(key):\n        dispatch(key)\n        return \"processed\"\n    else:\n        return \"rejected\"\n>>>>>>> REPLACE\n```",
+          "stage": "edit_2",
+          "tokens_out": 48,
+          "wall_ms": 5855
+        },
+        {
+          "error": null,
+          "latency_ms": 9539,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The failure is caused by the worker not handling rejected reservations correctly. The test expects 'duplicate' but receives 'rejected'. This indicates that the reservation registry is not being used to skip duplicate jobs as intended.\",\n  \"files\": [\n    {\n      \"path\": \"worker.py\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `process_job` function to handle rejected reservations by appending a 'duplicate' label instead of returning 'rejected'.\"\n    }\n  ],\n  \"notes\": \"The telemetry module is not directly related to the failure and can be ignored for this repair.\"\n}",
+          "stage": "repair_plan_1",
+          "tokens_out": 128,
+          "wall_ms": 9539
+        },
+        {
+          "error": null,
+          "latency_ms": 10043,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The failure is caused by the worker not handling rejected reservations correctly. The test expects 'duplicate' but receives 'rejected'. This indicates that the reservation registry is not being used to skip duplicate jobs as intended.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Modify the `process_job` function to handle rejected reservations by appending a 'duplicate' label instead of returning 'rejected'.\",\n      \"path\": \"worker.py\"\n    }\n  ],\n  \"notes\": \"The telemetry module is not directly related to the failure and can be ignored for this repair.\"\n}",
+          "stage": "repair_review_1",
+          "tokens_out": 128,
+          "wall_ms": 10043
+        },
+        {
+          "error": null,
+          "latency_ms": 5642,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    else:\n        return \"rejected\"\n=======\n    else:\n        dispatch(key)\n        return \"duplicate\"\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_1",
+          "tokens_out": 31,
+          "wall_ms": 5642
+        },
+        {
+          "error": null,
+          "latency_ms": 10100,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The failure is due to the worker not respecting the reservation state, leading to duplicate job processing. The issue lies in the `process_job` function where the dispatch happens regardless of the reservation result.\",\n  \"files\": [\n    {\n      \"path\": \"worker.py\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the dispatch only occurs if the reservation is successful.\"\n    }\n  ],\n  \"notes\": \"The `dedupe_registry.py` and `telemetry.py` files are not directly involved in the failure, so they are not included in this patch. The `worker.py` file needs to be updated to correctly handle the reservation state before dispatching jobs.\"\n}",
+          "stage": "repair_plan_2",
+          "tokens_out": 147,
+          "wall_ms": 10100
+        },
+        {
+          "error": null,
+          "latency_ms": 10834,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The failure is due to the worker not respecting the reservation state, leading to duplicate job processing. The issue lies in the `process_job` function where the dispatch happens regardless of the reservation result.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the dispatch only occurs if the reservation is successful.\",\n      \"path\": \"worker.py\"\n    }\n  ],\n  \"notes\": \"The `dedupe_registry.py` and `telemetry.py` files are not directly involved in the failure, so they are not included in this patch. The `worker.py` file needs to be updated to correctly handle the reservation state before dispatching jobs.\"\n}",
+          "stage": "repair_review_2",
+          "tokens_out": 147,
+          "wall_ms": 10834
+        },
+        {
+          "error": null,
+          "latency_ms": 7436,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    if reserve(key):\n        dispatch(key)\n        return \"processed\"\n    else:\n        dispatch(key)\n        return \"duplicate\"\n=======\n    if reserve(key):\n        dispatch(key)\n        return \"processed\"\n    else:\n        return \"duplicate\"\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_2_1",
+          "tokens_out": 59,
+          "wall_ms": 7437
+        }
+      ],
+      "patch_applied": true,
+      "patch_warnings": [],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 484,
+        "exit_code": 0,
+        "output": ".                                                                        [100%]\n1 passed in 0.01s",
+        "passed": true
+      },
+      "repair_attempts": [
+        {
+          "applied_files": [
+            "worker.py"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The failure is caused by the worker not handling rejected reservations correctly. The test expects 'duplicate' but receives 'rejected'. This indicates that the reservation registry is not being used to skip duplicate jobs as intended.",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Modify the `process_job` function to handle rejected reservations by appending a 'duplicate' label instead of returning 'rejected'.",
+                "path": "worker.py"
+              }
+            ],
+            "notes": "The telemetry module is not directly related to the failure and can be ignored for this repair."
+          },
+          "round": 1,
+          "selected_file": "worker.py",
+          "selected_files": [
+            "worker.py"
+          ],
+          "warnings": []
+        },
+        {
+          "applied_files": [
+            "worker.py"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The failure is due to the worker not respecting the reservation state, leading to duplicate job processing. The issue lies in the `process_job` function where the dispatch happens regardless of the reservation result.",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Ensure that the dispatch only occurs if the reservation is successful.",
+                "path": "worker.py"
+              }
+            ],
+            "notes": "The `dedupe_registry.py` and `telemetry.py` files are not directly involved in the failure, so they are not included in this patch. The `worker.py` file needs to be updated to correctly handle the reservation state before dispatching jobs."
+          },
+          "round": 2,
+          "selected_file": "worker.py",
+          "selected_files": [
+            "worker.py"
+          ],
+          "warnings": []
+        }
+      ],
+      "score": 100,
+      "selected_file": "",
+      "selected_files": [
+        "dedupe_registry.py",
+        "worker.py"
+      ],
+      "split": "holdout-multifile"
     }
   ],
-  "created_at": "2026-07-11T10:04:58.070146+00:00",
+  "created_at": "2026-07-11T11:24:52.396491+00:00",
   "fable5_head_to_head_run": false,
   "fable5_parity_claim": false,
+  "holdout_case_count": 6,
+  "holdout_score": 96.67,
+  "max_repair_rounds": 5,
   "model": "qwen2.5-coder:7b",
-  "overall_score": 100.0,
+  "multifile_holdout_case_count": 3,
+  "multifile_holdout_score": 100.0,
+  "overall_score": 97.14,
   "premium_calls": 0,
   "reference_family": "claude-fable-5",
-  "schema": "chili.diagnosis-to-fix-results.v1",
-  "verdict": "shadow_ready"
+  "schema": "chili.diagnosis-to-fix-results.v2",
+  "verdict": "needs_improvement"
 }

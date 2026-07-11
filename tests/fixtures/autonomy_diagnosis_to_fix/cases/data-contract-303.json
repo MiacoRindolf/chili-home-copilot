@@ -1,0 +1,13 @@
+{
+  "schema": "chili.diagnosis-to-fix-case.v1",
+  "case_id": "data-contract-303",
+  "prompt": "A replay mirror reports zero copied quotes while the requested symbol exists in the source and the sink starts empty. The source accessor and mirror disagree about the source/sink contract. Repair the cross-module path without fabricating rows or retaining stale sink data.",
+  "candidate_paths": ["quote_source.py", "replay_mirror.py", "metrics.py"],
+  "max_files": 3,
+  "repo_files": {
+    "quote_source.py": "def source_window(rows: dict[str, list[dict]], symbol: str) -> list[dict]:\n    return list(rows.get(\"DEFAULT\", []))\n",
+    "replay_mirror.py": "from quote_source import source_window\n\n\ndef mirror_window(\n    source_rows: dict[str, list[dict]],\n    sink_rows: dict[str, list[dict]],\n    symbol: str,\n) -> int:\n    copied = list(sink_rows.get(symbol, []))\n    sink_rows[symbol] = copied\n    return len(copied)\n",
+    "metrics.py": "def copied_fraction(copied: int, available: int) -> float:\n    return copied / available if available else 0.0\n",
+    "tests/test_public.py": "from quote_source import source_window\nfrom replay_mirror import mirror_window\n\n\ndef test_empty_source_and_sink_stay_empty():\n    sink = {}\n    assert source_window({}, \"XYZ\") == []\n    assert mirror_window({}, sink, \"XYZ\") == 0\n    assert sink[\"XYZ\"] == []\n"
+  }
+}

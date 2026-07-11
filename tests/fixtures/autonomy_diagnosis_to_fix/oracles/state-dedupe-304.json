@@ -1,0 +1,8 @@
+{
+  "case_id": "state-dedupe-304",
+  "expected_dimension": "state",
+  "expected_files": ["dedupe_registry.py", "worker.py"],
+  "hidden_files": {
+    "tests/test_hidden_state_dedupe.py": "from dedupe_registry import clear_registry, reserve\nfrom worker import process_job\n\n\ndef setup_function():\n    clear_registry()\n\n\ndef test_registry_rejects_second_reservation():\n    assert reserve(\"job-2\") is True\n    assert reserve(\"job-2\") is False\n\n\ndef test_worker_dispatches_only_first_attempt():\n    calls = []\n    assert process_job(\"job-3\", calls.append) == \"processed\"\n    assert process_job(\"job-3\", calls.append) == \"duplicate\"\n    assert calls == [\"job-3\"]\n"
+  }
+}

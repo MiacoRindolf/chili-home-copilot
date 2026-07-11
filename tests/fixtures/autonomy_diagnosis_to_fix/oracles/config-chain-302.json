@@ -1,0 +1,8 @@
+{
+  "case_id": "config-chain-302",
+  "expected_dimension": "config",
+  "expected_files": ["flags.py", "worker_mode.py"],
+  "hidden_files": {
+    "tests/test_hidden_config_chain.py": "from flags import enabled\nfrom worker_mode import resolved_mode\n\n\ndef test_shared_parser_normalizes_false_and_true_values():\n    name = \"CHILI_EXPERIMENTAL_GATE\"\n    for value in (\"0\", \"false\", \"NO\", \"off\", \"\"):\n        assert enabled({name: value}, name) is False\n    for value in (\"1\", \"TRUE\", \"yes\", \"On\"):\n        assert enabled({name: value}, name) is True\n\n\ndef test_worker_consumes_shared_normalized_contract():\n    name = \"CHILI_EXPERIMENTAL_GATE\"\n    assert resolved_mode({name: \"0\"}) == \"stable\"\n    assert resolved_mode({name: \"false\"}) == \"stable\"\n    assert resolved_mode({name: \"YES\"}) == \"experimental\"\n"
+  }
+}

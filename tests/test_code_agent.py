@@ -12,6 +12,8 @@ from app.services.code_brain.agent import (
     _build_plan_prompt,
     _build_edit_prompt,
     _extract_full_file_replacement,
+    _is_mutating_plan_action,
+    _semantic_replacement_warnings,
 )
 
 
@@ -40,6 +42,12 @@ class TestParsePlanJson:
     def test_returns_none_for_invalid(self):
         assert _parse_plan_json("No JSON here") is None
         assert _parse_plan_json("```json\nnot valid json\n```") is None
+
+    def test_plan_action_classifier_blocks_advisory_entries(self):
+        assert _is_mutating_plan_action("modify") is True
+        assert _is_mutating_plan_action("create") is True
+        assert _is_mutating_plan_action("review") is False
+        assert _is_mutating_plan_action("no change") is False
 
 
 class TestValidateDiff:
@@ -157,6 +165,29 @@ class TestFullFileFallback:
 
         assert result["new_content"] is None
         assert "unified diff" in result["warnings"][0]
+
+
+class TestSemanticReplacementGuard:
+    def test_rejects_false_literals_in_true_value_set(self):
+        warnings = _semantic_replacement_warnings(
+            "feature_gate.py",
+            '_TRUE_VALUES = {"1", "true", "0", "off"}\n',
+        )
+
+        assert warnings
+        assert "_TRUE_VALUES" in warnings[0]
+        assert "'0'" in warnings[0]
+
+    def test_accepts_consistent_true_and_false_value_sets(self):
+        warnings = _semantic_replacement_warnings(
+            "feature_gate.py",
+            (
+                '_TRUE_VALUES = {"1", "true", "yes", "on"}\n'
+                '_FALSE_VALUES = {"0", "false", "no", "off", ""}\n'
+            ),
+        )
+
+        assert warnings == []
 
 
 class TestGatherContext:

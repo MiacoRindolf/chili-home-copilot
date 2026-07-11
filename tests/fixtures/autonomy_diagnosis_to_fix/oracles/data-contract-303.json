@@ -1,0 +1,8 @@
+{
+  "case_id": "data-contract-303",
+  "expected_dimension": "data",
+  "expected_files": ["quote_source.py", "replay_mirror.py"],
+  "hidden_files": {
+    "tests/test_hidden_data_contract.py": "from quote_source import source_window\nfrom replay_mirror import mirror_window\n\n\ndef test_source_accessor_uses_requested_symbol():\n    source = {\"XYZ\": [{\"bid\": 10.0}], \"DEFAULT\": [{\"bid\": 1.0}]}\n    assert source_window(source, \"XYZ\") == [{\"bid\": 10.0}]\n\n\ndef test_mirror_copies_source_and_replaces_stale_sink():\n    source = {\"XYZ\": [{\"bid\": 10.0}, {\"bid\": 10.1}]}\n    sink = {\"XYZ\": [{\"bid\": 1.0}]}\n    assert mirror_window(source, sink, \"XYZ\") == 2\n    assert sink[\"XYZ\"] == source[\"XYZ\"]\n    assert sink[\"XYZ\"] is not source[\"XYZ\"]\n"
+  }
+}

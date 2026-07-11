@@ -44,6 +44,7 @@ from ..code_brain.agent import (
     _MAX_FILES_PER_EDIT,
     _build_edit_prompt,
     _gather_context,
+    _is_mutating_plan_action,
     _parse_plan_json,
     _read_file_content,
     _validate_diff,
@@ -2494,6 +2495,13 @@ _EDIT_TIMEOUT_SEC = float(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_TIMEOUT_S
 _EDIT_NUM_PREDICT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_NUM_PREDICT") or "350")
 _EDIT_NUM_CTX = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_NUM_CTX") or "4096")
 _EDIT_MAX_FILE_LINES = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_EDIT_MAX_FILE_LINES") or "260")
+_VALIDATION_REPAIR_ROUNDS = max(
+    0,
+    min(
+        5,
+        int(os.environ.get("CHILI_PROJECT_AUTOPILOT_VALIDATION_REPAIR_ROUNDS") or "3"),
+    ),
+)
 _OLLAMA_KEEP_ALIVE = os.environ.get("CHILI_PROJECT_AUTOPILOT_OLLAMA_KEEP_ALIVE") or "15m"
 _MODEL_COOLDOWN_SEC = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_MODEL_COOLDOWN_SEC") or "900")
 
@@ -6683,6 +6691,8 @@ def _plan_files(plan: dict[str, Any]) -> list[dict[str, Any]]:
     for item in plan.get("files") or []:
         if not isinstance(item, dict):
             continue
+        if not _is_mutating_plan_action(item.get("action")):
+            continue
         rel = _safe_rel_path(str(item.get("path") or ""))
         if rel is None or rel in seen:
             continue
@@ -6920,7 +6930,17 @@ def generate_diffs_from_plan(
         desc = str(item.get("description") or "")
         content = _read_file_content(str(repo_path), rel, max_lines=_EDIT_MAX_FILE_LINES)
         if validation_context:
-            desc = desc + "\n\nValidation failure to repair:\n" + validation_context
+            desc = (
+                desc
+                + "\n\nOriginal operator contract:\n"
+                + run.prompt
+                + "\n\nValidation failure to repair:\n"
+                + validation_context
+                + "\n\nRepair rules: satisfy every non-negotiable assertion while preserving prior "
+                "green behavior. When changing control flow, replace or include the complete affected "
+                "function body so no stale branch, duplicate assignment, or type-incompatible follow-up "
+                "statement survives. Never weaken or edit tests."
+            )
         if not validation_context and try_fallback(rel, content):
             continue
         # Proven dispatch-lane edit machinery (SR blocks + fuzzy/indent
@@ -6983,6 +7003,28 @@ def generate_diffs_from_plan(
         if sr_blocks and full_content is not None:
             outcome = code_agent_mod._apply_search_replace(full_content, sr_blocks)
             if outcome["new_content"] is not None:
+                semantic_warnings = code_agent_mod._semantic_replacement_warnings(
+                    rel,
+                    outcome["new_content"],
+                )
+                if semantic_warnings:
+                    _add_artifact(
+                        db,
+                        run.run_id,
+                        "diff_rejected",
+                        rel,
+                        content_json={
+                            "reason": "semantic_polarity_guard",
+                            "warnings": semantic_warnings,
+                        },
+                    )
+                    rejections.append(
+                        f"{rel}: semantic polarity guard rejected edit "
+                        f"({'; '.join(semantic_warnings)[:300]})"
+                    )
+                    if try_fallback(rel, content):
+                        continue
+                    continue
                 diff = code_agent_mod._unified_diff_text(rel, full_content, outcome["new_content"])
             else:
                 _add_artifact(
@@ -7002,6 +7044,28 @@ def generate_diffs_from_plan(
                 full_content,
             )
             if full_file["new_content"] is not None:
+                semantic_warnings = code_agent_mod._semantic_replacement_warnings(
+                    rel,
+                    full_file["new_content"],
+                )
+                if semantic_warnings:
+                    _add_artifact(
+                        db,
+                        run.run_id,
+                        "diff_rejected",
+                        rel,
+                        content_json={
+                            "reason": "semantic_polarity_guard",
+                            "warnings": semantic_warnings,
+                        },
+                    )
+                    rejections.append(
+                        f"{rel}: semantic polarity guard rejected full-file edit "
+                        f"({'; '.join(semantic_warnings)[:300]})"
+                    )
+                    if try_fallback(rel, content):
+                        continue
+                    continue
                 diff = code_agent_mod._unified_diff_text(
                     rel,
                     full_content,
@@ -7756,9 +7820,33 @@ def validation_repair_context(
     plan_files: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     failed_steps: list[dict[str, Any]] = []
+    assertion_contracts: list[str] = []
+    exception_facts: list[str] = []
     for item in validation:
         if not isinstance(item, Mapping) or not _validation_step_failed(item):
             continue
+        for output in (str(item.get("stdout") or ""), str(item.get("stderr") or "")):
+            for raw_line in output.splitlines():
+                line = raw_line.strip()
+                assert_at = line.find("assert ")
+                if assert_at >= 0:
+                    contract = line[assert_at:]
+                    if contract not in assertion_contracts:
+                        assertion_contracts.append(contract)
+                if line.startswith("E ") and any(
+                    token in line
+                    for token in (
+                        "Error",
+                        "Exception",
+                        "assert ",
+                        "KeyError",
+                        "TypeError",
+                        "AttributeError",
+                    )
+                ):
+                    fact = line[2:].strip()
+                    if fact not in exception_facts:
+                        exception_facts.append(fact)
         failed_steps.append(
             {
                 "step_key": str(item.get("step_key") or "validation"),
@@ -7766,14 +7854,16 @@ def validation_repair_context(
                 "command": str(item.get("command") or ""),
                 "test_files": [str(value) for value in (item.get("test_files") or [])],
                 "test_selection": item.get("test_selection") if isinstance(item.get("test_selection"), list) else [],
-                "stdout_tail": truncate_text(str(item.get("stdout") or ""), 1800),
-                "stderr_tail": truncate_text(str(item.get("stderr") or ""), 1800),
+                "stdout_tail": truncate_text(str(item.get("stdout") or ""), 1800)[0],
+                "stderr_tail": truncate_text(str(item.get("stderr") or ""), 1800)[0],
             }
         )
     return {
         "schema": "chili.validation-repair-context.v1",
         "changed_files": [rel for value in changed_files for rel in [_safe_rel_path(str(value))] if rel],
         "plan_files": [dict(item) for item in plan_files if isinstance(item, Mapping)],
+        "assertion_contracts": assertion_contracts[:20],
+        "exception_facts": exception_facts[:12],
         "failed_steps": failed_steps,
     }
 
@@ -7784,6 +7874,12 @@ def validation_repair_context_text(context: Mapping[str, Any]) -> str:
         "schema: chili.validation-repair-context.v1",
         "changed_files: " + changed_text,
     ]
+    contracts = [str(value) for value in context.get("assertion_contracts") or []]
+    facts = [str(value) for value in context.get("exception_facts") or []]
+    if contracts or facts:
+        lines.append("non_negotiable_validation_contracts:")
+        lines.extend(f"- {value}" for value in contracts)
+        lines.extend(f"- observed: {value}" for value in facts)
     for index, item in enumerate(context.get("failed_steps") or [], start=1):
         if not isinstance(item, Mapping):
             continue
@@ -7821,11 +7917,8 @@ def _run_needs_visual_qa(run: Any, plan: Mapping[str, Any] | None) -> bool:
 
 
 def _validation_failure_text(results: list[dict[str, Any]]) -> str:
-    failed = [r for r in results if int(r.get("exit_code") or 0) != 0]
-    return "\n\n".join(
-        f"{r.get('step_key')} exit={r.get('exit_code')}\n{r.get('stdout') or ''}\n{r.get('stderr') or ''}"
-        for r in failed[:4]
-    )[:5000]
+    context = validation_repair_context(results)
+    return validation_repair_context_text(context)[:12_000]
 
 
 def _dirty_files(repo_path: Path) -> list[str]:
@@ -8129,17 +8222,63 @@ def _run_implementation_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRe
     db.commit()
 
     if not validation_passed(validation):
-        _record_step(db, run, "repair", "Validation failed; attempting one local repair pass", status="completed")
-        repair_context = _validation_failure_text(validation)
-        repair_diffs = generate_diffs_from_plan(db, run, worktree, files, validation_context=repair_context)
-        if repair_diffs:
+        for repair_round in range(1, _VALIDATION_REPAIR_ROUNDS + 1):
+            _record_step(
+                db,
+                run,
+                "repair",
+                f"Validation failed; attempting bounded local repair {repair_round}/{_VALIDATION_REPAIR_ROUNDS}",
+                status="completed",
+                detail={"repair_round": repair_round, "max_repair_rounds": _VALIDATION_REPAIR_ROUNDS},
+            )
+            repair_packet = validation_repair_context(
+                validation,
+                changed_files=changed_files,
+                plan_files=files,
+            )
+            repair_context = validation_repair_context_text(repair_packet)
+            _add_artifact(
+                db,
+                run.run_id,
+                "validation",
+                f"repair_context_{repair_round}",
+                content_json=repair_packet,
+                commit=False,
+            )
+            repair_diffs = generate_diffs_from_plan(
+                db,
+                run,
+                worktree,
+                files,
+                validation_context=repair_context,
+            )
+            if not repair_diffs:
+                break
             _apply_diffs(worktree, repair_diffs)
             changed_files = _changed_files(worktree)
             validation = run_validation(worktree, changed_files)
             run.files_json = _json_text(changed_files)
             run.validation_json = _json_text(validation)
-            _add_artifact(db, run.run_id, "validation", "repair_validation_results", content_json=validation, commit=False)
+            run.commands_json = _json_text(
+                [
+                    {
+                        "step_key": item.get("step_key"),
+                        "exit_code": item.get("exit_code"),
+                    }
+                    for item in validation
+                ]
+            )
+            _add_artifact(
+                db,
+                run.run_id,
+                "validation",
+                f"repair_validation_results_{repair_round}",
+                content_json=validation,
+                commit=False,
+            )
             db.commit()
+            if validation_passed(validation):
+                break
 
     commit_sha = _commit_if_needed(worktree, run)
     _add_artifact(db, run.run_id, "commit", "integration_commit", content_json={"commit_sha": commit_sha, "branch": branch})

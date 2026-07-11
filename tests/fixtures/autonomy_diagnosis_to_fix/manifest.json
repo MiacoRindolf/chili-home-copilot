@@ -16,6 +16,26 @@
       "case": "cases/data-203.json",
       "oracle": "oracles/data-203.json",
       "split": "holdout"
+    },
+    {
+      "case": "cases/clock-chain-301.json",
+      "oracle": "oracles/clock-chain-301.json",
+      "split": "calibration-multifile"
+    },
+    {
+      "case": "cases/config-chain-302.json",
+      "oracle": "oracles/config-chain-302.json",
+      "split": "holdout-multifile"
+    },
+    {
+      "case": "cases/data-contract-303.json",
+      "oracle": "oracles/data-contract-303.json",
+      "split": "holdout-multifile"
+    },
+    {
+      "case": "cases/state-dedupe-304.json",
+      "oracle": "oracles/state-dedupe-304.json",
+      "split": "holdout-multifile"
     }
   ]
 }

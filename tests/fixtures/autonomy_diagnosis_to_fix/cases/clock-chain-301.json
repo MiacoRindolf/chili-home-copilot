@@ -1,0 +1,13 @@
+{
+  "schema": "chili.diagnosis-to-fix-case.v1",
+  "case_id": "clock-chain-301",
+  "prompt": "A replay frame timestamped 10:15 is rejected before the real market open. The shared session policy and replay caller must use the injected frame clock without duplicating session boundaries. Diagnose and repair the cross-module clock contract.",
+  "candidate_paths": ["session_policy.py", "replay_runner.py", "formatting.py"],
+  "max_files": 3,
+  "repo_files": {
+    "session_policy.py": "from datetime import datetime\n\n\ndef in_regular_session() -> bool:\n    hour = datetime.now().hour\n    return 9 <= hour < 16\n",
+    "replay_runner.py": "from datetime import datetime\n\nfrom session_policy import in_regular_session\n\n\ndef replay_accepts(frame_time: datetime) -> bool:\n    return in_regular_session()\n",
+    "formatting.py": "def display_hour(value: int) -> str:\n    return f\"{value:02d}:00\"\n",
+    "tests/test_public.py": "from replay_runner import replay_accepts\nfrom session_policy import in_regular_session\n\n\ndef test_replay_contract_is_importable():\n    assert callable(replay_accepts)\n    assert callable(in_regular_session)\n"
+  }
+}

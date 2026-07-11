@@ -1,0 +1,13 @@
+{
+  "schema": "chili.diagnosis-to-fix-case.v1",
+  "case_id": "state-dedupe-304",
+  "prompt": "A retry dispatches the same job twice even though a process-local reservation registry is present. The registry never retains a successful reservation and the worker ignores a rejected reservation. Repair the state contract so the first attempt runs and a duplicate is skipped.",
+  "candidate_paths": ["dedupe_registry.py", "worker.py", "telemetry.py"],
+  "max_files": 3,
+  "repo_files": {
+    "dedupe_registry.py": "_SEEN: set[str] = set()\n\n\ndef reserve(key: str) -> bool:\n    if key in _SEEN:\n        return False\n    return True\n\n\ndef clear_registry() -> None:\n    _SEEN.clear()\n",
+    "worker.py": "from collections.abc import Callable\n\nfrom dedupe_registry import reserve\n\n\ndef process_job(key: str, dispatch: Callable[[str], None]) -> str:\n    accepted = reserve(key)\n    dispatch(key)\n    return \"processed\"\n",
+    "telemetry.py": "def outcome_label(value: str) -> str:\n    return f\"job:{value}\"\n",
+    "tests/test_public.py": "from dedupe_registry import clear_registry\nfrom worker import process_job\n\n\ndef test_first_attempt_dispatches():\n    clear_registry()\n    calls = []\n    assert process_job(\"job-1\", calls.append) == \"processed\"\n    assert calls == [\"job-1\"]\n"
+  }
+}
