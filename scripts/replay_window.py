@@ -105,6 +105,46 @@ def build_printed_volume(grid, ticks):
     return vol
 
 
+def mirror_nbbo_streaming(sim_engine):
+    """Mirror the prod NBBO/L1 window (momentum_nbbo_spread_tape) into the sink, per run.
+
+    NBBO-GAP ROOT-CAUSE (2026-07-10): the harness DEPENDED on a sink NBBO table it never
+    populated — it was only loaded at sink BUILD time (#890), so when the table went empty
+    (rebuild/cleanup), `tape_confirms_hold`/`signed_tape_accel_features` failed CLOSED on the
+    empty tape → escalation re-entries blocked → JEM +$15,034 → −$5,419 with NO code change
+    (misattributed to two feature A/Bs). Bounded DELETE (symbol) + streaming re-mirror from
+    prod per run makes the replay self-contained and immune to sink-table drift."""
+    import psycopg2
+    src = psycopg2.connect(PROD)
+    src.set_session(readonly=True)
+    scur = src.cursor(name="nbbo_mirror_stream")
+    scur.itersize = 10000
+    scur.execute(
+        "SELECT observed_at, bid, ask, mid, spread_bps, day_volume, source "
+        "FROM momentum_nbbo_spread_tape "
+        "WHERE symbol=%s AND observed_at>=%s AND observed_at<%s ORDER BY observed_at ASC",
+        (SYMBOL, OHLCV_START, WIN_END))
+    dst = sim_engine.raw_connection()
+    dcur = dst.cursor()
+    dcur.execute("DELETE FROM momentum_nbbo_spread_tape WHERE symbol=%s", (SYMBOL,))
+    ins = ("INSERT INTO momentum_nbbo_spread_tape "
+           "(symbol, observed_at, bid, ask, mid, spread_bps, day_volume, source) "
+           "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)")
+    total = 0
+    while True:
+        batch = scur.fetchmany(10000)
+        if not batch:
+            break
+        rows = [(SYMBOL, r[0], r[1], r[2], r[3], r[4], r[5], r[6]) for r in batch]
+        dcur.executemany(ins, rows)
+        total += len(rows)
+        del batch, rows
+    dst.commit()
+    dcur.close(); dst.close()
+    scur.close(); src.close()
+    return total
+
+
 def mirror_ticks(db, ticks):
     """Legacy in-memory mirror (downsampled ticks). Kept for the fallback path."""
     if ticks.empty:
@@ -328,6 +368,16 @@ def run_arm(label, grid, ticks, g4_on):
     db = Sess()
     # clean any prior replay_v3 ticks + stale seeded CLRO sessions
     db.execute(text("DELETE FROM iqfeed_trade_ticks WHERE source='replay_v3' AND symbol=:s"), {"s": SYMBOL})
+    # VIABILITY-BOARD RESET (2026-07-10 contamination root-cause): viability rows accumulate
+    # across runs (mixed freshness eras) and corrupt the day-leader read the escalation
+    # ignition bypass keys on — the replayed symbol stops resolving as leader on a dirty
+    # board. Each run starts from a CLEAN board: the seeded symbol is deterministically the
+    # leader, and every replay is reproducible.
+    db.execute(text("DELETE FROM momentum_symbol_viability"))
+    try:
+        db.execute(text("DELETE FROM momentum_viability_history"))
+    except Exception:
+        db.rollback()
     db.commit()
 
     arm = rv3.RecordedArm(symbol=SYMBOL, live_eligible_at_utc=WIN_START.isoformat(),
@@ -353,6 +403,8 @@ def run_arm(label, grid, ticks, g4_on):
     else:
         mirrored = mirror_ticks(db, ticks)
     db.commit()
+    nbbo_mirrored = mirror_nbbo_streaming(eng)
+    print(f"  nbbo_mirrored={nbbo_mirrored}")
     # VACUUM ANALYZE the freshly (re)loaded tape: each run's DELETE+INSERT leaves dead
     # tuples + stale stats, which flips the per-tick as-of reads from the btree to a
     # lossy BRIN bitmap (118ms -> 6s per call = a multi-hour window). Autocommit conn
