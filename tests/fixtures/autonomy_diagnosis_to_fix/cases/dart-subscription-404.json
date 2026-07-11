@@ -1,0 +1,15 @@
+{
+  "schema": "chili.diagnosis-to-fix-case.v1",
+  "case_id": "dart-subscription-404",
+  "language": "dart",
+  "test_runner": "dart",
+  "prompt": "A stream-backed worker receives normal events, but it continues dispatching after stop. The subscription wrapper returns a handle unrelated to the real listener, and the worker drops that handle without cancellation. Repair the lifecycle across both modules so stop cancels the actual subscription.",
+  "candidate_paths": ["lib/subscription.dart", "lib/worker.dart", "lib/counters.dart"],
+  "max_files": 3,
+  "repo_files": {
+    "lib/subscription.dart": "import 'dart:async';\n\nStreamSubscription<T> bindSubscription<T>(\n  Stream<T> source,\n  void Function(T) onData,\n) {\n  source.listen(onData);\n  return Stream<T>.empty().listen((_) {});\n}\n",
+    "lib/worker.dart": "import 'dart:async';\n\nimport 'subscription.dart';\n\nclass EventWorker {\n  EventWorker(this._dispatch);\n\n  final void Function(String) _dispatch;\n  StreamSubscription<String>? _subscription;\n\n  void start(Stream<String> source) {\n    _subscription = bindSubscription(source, _dispatch);\n  }\n\n  Future<void> stop() async {\n    _subscription = null;\n  }\n}\n",
+    "lib/counters.dart": "String eventCountLabel(int value) => 'events:$value';\n",
+    "tests/public_worker_test.dart": "import 'dart:async';\n\nimport '../lib/worker.dart';\n\nFuture<void> main() async {\n  final events = <String>[];\n  final controller = StreamController<String>(sync: true);\n  final worker = EventWorker(events.add);\n  worker.start(controller.stream);\n  controller.add('first');\n  if (events.join(',') != 'first') throw StateError('active worker must dispatch');\n  await controller.close();\n  print('public worker contract passed');\n}\n"
+  }
+}

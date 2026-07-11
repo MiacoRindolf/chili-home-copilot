@@ -1,0 +1,1604 @@
+{
+  "average_case_duration_ms": 73943.67,
+  "blinded_holdout_case_count": 0,
+  "blinded_holdout_score": null,
+  "cases": [
+    {
+      "baseline_hidden_tests": {
+        "duration_ms": 212,
+        "exit_code": 1,
+        "output": "\u00e2\u0153\u2013 failed operation is observable and does not poison retry (1.4727ms)\n\u00e2\u0153\u201d concurrent successful loads share one provider call (17.8665ms)\n\u00e2\u201e\u00b9 tests 2\n\u00e2\u201e\u00b9 suites 0\n\u00e2\u201e\u00b9 pass 1\n\u00e2\u201e\u00b9 fail 1\n\u00e2\u201e\u00b9 cancelled 0\n\u00e2\u201e\u00b9 skipped 0\n\u00e2\u201e\u00b9 todo 0\n\u00e2\u201e\u00b9 duration_ms 152.5089\n\n\u00e2\u0153\u2013 failing tests:\n\ntest at tests\\hidden-singleflight.test.ts:7:1\n\u00e2\u0153\u2013 failed operation is observable and does not poison retry (1.4727ms)\n  AssertionError [ERR_ASSERTION]: Missing expected rejection.\n      at async TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-hidden-px2l7ont/repo/tests/hidden-singleflight.test.ts:15:3)\n      at async Test.run (node:internal/test_runner/test:1208:7)\n      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3) {\n    generatedMessage: false,\n    code: 'ERR_ASSERTION',\n    actual: undefined,\n    expected: /temporary provider failure/,\n    operator: 'rejects',\n    diff: 'simple'\n  }",
+        "passed": false,
+        "runner": "node_test",
+        "test_files": [
+          "tests/hidden-singleflight.test.ts",
+          "tests/public.test.ts"
+        ]
+      },
+      "baseline_public_tests": {
+        "duration_ms": 205,
+        "exit_code": 0,
+        "output": "\u00e2\u0153\u201d concurrent successful loads share one provider call (12.5242ms)\n\u00e2\u201e\u00b9 tests 1\n\u00e2\u201e\u00b9 suites 0\n\u00e2\u201e\u00b9 pass 1\n\u00e2\u201e\u00b9 fail 0\n\u00e2\u201e\u00b9 cancelled 0\n\u00e2\u201e\u00b9 skipped 0\n\u00e2\u201e\u00b9 todo 0\n\u00e2\u201e\u00b9 duration_ms 141.7944",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/public.test.ts"
+        ]
+      },
+      "case_id": "ts-singleflight-401",
+      "changed_files": [
+        "src/inflight.ts",
+        "src/user_service.ts"
+      ],
+      "checks": {
+        "baseline_hidden_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "hidden_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "selected_files": [
+          "src/inflight.ts",
+          "src/user_service.ts"
+        ],
+        "warnings": []
+      },
+      "diagnosis_dimension": "state",
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-2",
+            "operator-3",
+            "source-2",
+            "source-4",
+            "probe-default-repo-state"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "state"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing state changes or restores the outcome.",
+            "experiment_id": "isolate-state",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by state drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-2",
+              "operator-3",
+              "source-2",
+              "source-4",
+              "probe-default-repo-state"
+            ]
+          }
+        ],
+        "problem_statement": "Concurrent successful user loads should share one provider call. In production, a temporary provider failure is converted to a fallback and permanently poisons later loads for the same key. The caller must observe the original failure, and a later retry must be allowed to start fresh while successful in-flight requests remain coalesced.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "baseline_drift": [],
+        "case_id": "ts-singleflight-401",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by state drift.",
+          "confidence": 0.6825,
+          "dimension": "state",
+          "evidence_ids": [
+            "operator-2",
+            "operator-3",
+            "source-2",
+            "source-4",
+            "probe-default-repo-state"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [
+          "Failed per-key in-flight work must be evicted by the state owner; the original error remains observable, successful concurrent work stays coalesced, and retry must not await its own cached promise."
+        ],
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.6825,
+            "confirmatory_weight": 1.5,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-2",
+              "operator-3",
+              "source-2",
+              "source-4",
+              "probe-default-repo-state"
+            ],
+            "support_weight": 2.15
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-state",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_status": "confirmed",
+      "duration_ms": 101872,
+      "evaluation_role": "development_regression",
+      "hidden_tests": {
+        "duration_ms": 314,
+        "exit_code": 0,
+        "output": "\u00e2\u0153\u201d failed operation is observable and does not poison retry (1.5907ms)\n\u00e2\u0153\u201d concurrent successful loads share one provider call (17.1379ms)\n\u00e2\u201e\u00b9 tests 2\n\u00e2\u201e\u00b9 suites 0\n\u00e2\u201e\u00b9 pass 2\n\u00e2\u201e\u00b9 fail 0\n\u00e2\u201e\u00b9 cancelled 0\n\u00e2\u201e\u00b9 skipped 0\n\u00e2\u201e\u00b9 todo 0\n\u00e2\u201e\u00b9 duration_ms 251.7386",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/hidden-singleflight.test.ts",
+          "tests/public.test.ts"
+        ]
+      },
+      "language": "typescript",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 36465,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"Concurrent successful user loads should share one provider call. In production, a temporary provider failure is converted to a fallback and permanently poisons later loads for the same key. The caller must observe the original failure, and a later retry must be allowed to start fresh while successful in-flight requests remain coalesced.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by state drift.\",\n      \"dimension\":\"state\",\n      \"support_evidence_ids\":[\"operator-2\",\"operator-3\",\"source-2\",\"source-4\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing state does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"x1\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"state\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing state changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"provisional\",\n    \"evidence_ids\":[\"operator-2\",\"operator-3\",\"source-2\",\"source-4\"],\n    \"reason\":\"Deterministic evidence gate selected a stronger supported competing hypothesis.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 375,
+          "wall_ms": 36465
+        },
+        {
+          "error": null,
+          "latency_ms": 29108,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"Concurrent successful user loads should share one provider call. In production, a temporary provider failure is converted to a fallback and permanently poisons later loads for the same key. The caller must observe the original failure, and a later retry must be allowed to start fresh while successful in-flight requests remain coalesced.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by state drift.\",\n      \"dimension\":\"state\",\n      \"support_evidence_ids\":[\"operator-2\",\"operator-3\",\"source-2\",\"source-4\",\"probe-default-repo-state\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing state does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-state\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"state\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing state changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"provisional\",\n    \"evidence_ids\":[\"operator-2\",\"operator-3\",\"source-2\",\"source-4\",\"probe-default-repo-state\"],\n    \"reason\":\"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 392,
+          "wall_ms": 29108
+        },
+        {
+          "error": null,
+          "latency_ms": 13344,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The issue arises because the fallback mechanism in `src/user_service.ts` does not properly handle state eviction for failed per-key in-flight work. This leads to permanent poisoning of later loads for the same key.\",\n  \"files\": [\n    {\n      \"path\": \"src/inflight.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that failed per-key in-flight work is evicted by the state owner.\"\n    },\n    {\n      \"path\": \"src/user_service.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the fallback mechanism to properly handle state eviction and allow retries.\"\n    }\n  ],\n  \"notes\": \"The `singleFlight` function in `src/inflight.ts` should be modified to evict failed per-key in-flight work. The `loadUser` function in `src/user_service.ts` should be updated to ensure that the original error remains observable, successful concurrent work stays coalesced, and retry must not await its own cached promise.\"\n}",
+          "stage": "plan",
+          "tokens_out": 211,
+          "wall_ms": 13344
+        },
+        {
+          "error": null,
+          "latency_ms": 14197,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nconst pending = new Map<string, Promise<string>>();\n\nexport function singleFlight(\n  key: string,\n  task: () => Promise<string>,\n): Promise<string> {\n  const existing = pending.get(key);\n  if (existing) return existing;\n  const operation = task();\n  pending.set(key, operation);\n  return operation;\n}\n\nexport function resetFlights(): void {\n  pending.clear();\n}\n=======\nconst pending = new Map<string, { promise: Promise<string>; error?: Error }>();\n\nexport async function singleFlight(\n  key: string,\n  task: () => Promise<string>,\n): Promise<string> {\n  const existing = pending.get(key);\n  if (existing) {\n    if (existing.error) throw existing.error;\n    return await existing.promise;\n  }\n  try {\n    const operation = task();\n    pending.set(key, { promise: operation });\n    return await operation;\n  } catch (error) {\n    pending.set(key, { error });\n    throw error;\n  }\n}\n\nexport function resetFlights(): void {\n  pending.clear();\n}\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 224,
+          "wall_ms": 14197
+        },
+        {
+          "error": null,
+          "latency_ms": 3954,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    return 'fallback';\n  } catch {\n=======\n    throw error;\n  }\n} catch (error) {\n  pending.set(key, { error });\n  throw error;\n}\n>>>>>>> REPLACE\n```",
+          "stage": "edit_2",
+          "tokens_out": 45,
+          "wall_ms": 3954
+        },
+        {
+          "error": null,
+          "latency_ms": 2393,
+          "ok": true,
+          "response": "```\nimport { singleFlight } from './inflight.ts';\n\nexport async function loadUser(\n  key: string,\n  provider: () => Promise<string>,\n): Promise<string> {\n  try {\n    return await singleFlight(key, provider);\n  } catch {\n    return 'fallback';\n  }\n}\n```",
+          "stage": "edit_2_retry",
+          "tokens_out": 63,
+          "wall_ms": 2393
+        }
+      ],
+      "patch_applied": true,
+      "patch_warnings": [
+        "full-file fallback made no change",
+        "Rolled back multi-file edit group after src/user_service.ts was rejected."
+      ],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 215,
+        "exit_code": 0,
+        "output": "\u00e2\u0153\u201d concurrent successful loads share one provider call (16.3657ms)\n\u00e2\u201e\u00b9 tests 1\n\u00e2\u201e\u00b9 suites 0\n\u00e2\u201e\u00b9 pass 1\n\u00e2\u201e\u00b9 fail 0\n\u00e2\u201e\u00b9 cancelled 0\n\u00e2\u201e\u00b9 skipped 0\n\u00e2\u201e\u00b9 todo 0\n\u00e2\u201e\u00b9 duration_ms 139.0777",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/public.test.ts"
+        ]
+      },
+      "repair_attempts": [],
+      "score": 100,
+      "selected_file": "",
+      "selected_files": [
+        "src/inflight.ts",
+        "src/user_service.ts"
+      ],
+      "split": "development-regression-multifile-typescript",
+      "test_runner": "node_test"
+    },
+    {
+      "baseline_hidden_tests": {
+        "duration_ms": 248,
+        "exit_code": 1,
+        "output": "\u00e2\u0153\u2013 caller abort signal reaches adapter and is never retried (1.6444ms)\n\u00e2\u0153\u201d normal provider success is returned without retry (0.7264ms)\n\u00e2\u201e\u00b9 tests 2\n\u00e2\u201e\u00b9 suites 0\n\u00e2\u201e\u00b9 pass 1\n\u00e2\u201e\u00b9 fail 1\n\u00e2\u201e\u00b9 cancelled 0\n\u00e2\u201e\u00b9 skipped 0\n\u00e2\u201e\u00b9 todo 0\n\u00e2\u201e\u00b9 duration_ms 166.3007\n\n\u00e2\u0153\u2013 failing tests:\n\ntest at tests\\hidden-abort.test.ts:6:1\n\u00e2\u0153\u2013 caller abort signal reaches adapter and is never retried (1.6444ms)\n  AssertionError [ERR_ASSERTION]: The validation function is expected to return \"true\". Received false\n  \n  Caught error:\n  \n  Error: signal identity lost\n      at async TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-hidden-rslenmrm/repo/tests/hidden-abort.test.ts:20:3)\n      at async Test.run (node:internal/test_runner/test:1208:7)\n      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: Error: signal identity lost\n        at adapter (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-hidden-rslenmrm/repo/tests/hidden-abort.test.ts:12:45)\n        at callProvider (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-hidden-rslenmrm/repo/src/provider.ts:8:10)\n        at retryRequest (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-hidden-rslenmrm/repo/src/retry.ts:10:20)\n        at async waitForActual (node:assert:646:5)\n        at async strict.rejects (node:assert:769:25)\n        at async TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-hidden-rslenmrm/repo/tests/hidden-abort.test.ts:20:3)\n        at async Test.run (node:internal/test_runner/test:1208:7)\n        at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3),\n    operator: 'rejects',\n    diff: 'simple'\n  }",
+        "passed": false,
+        "runner": "node_test",
+        "test_files": [
+          "tests/hidden-abort.test.ts",
+          "tests/public.test.ts"
+        ]
+      },
+      "baseline_public_tests": {
+        "duration_ms": 208,
+        "exit_code": 0,
+        "output": "\u00e2\u0153\u201d normal provider success is returned without retry (0.7195ms)\n\u00e2\u201e\u00b9 tests 1\n\u00e2\u201e\u00b9 suites 0\n\u00e2\u201e\u00b9 pass 1\n\u00e2\u201e\u00b9 fail 0\n\u00e2\u201e\u00b9 cancelled 0\n\u00e2\u201e\u00b9 skipped 0\n\u00e2\u201e\u00b9 todo 0\n\u00e2\u201e\u00b9 duration_ms 134.9666",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/public.test.ts"
+        ]
+      },
+      "case_id": "ts-abort-chain-402",
+      "changed_files": [
+        "src/provider.ts",
+        "src/retry.ts"
+      ],
+      "checks": {
+        "baseline_hidden_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "hidden_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "selected_files": [
+          "src/provider.ts",
+          "src/retry.ts"
+        ],
+        "warnings": []
+      },
+      "diagnosis_dimension": "dependency",
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-6",
+            "source-7",
+            "source-8",
+            "source-9"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "dependency"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing dependency changes or restores the outcome.",
+            "experiment_id": "isolate-dependency",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "unknown"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing unknown changes or restores the outcome.",
+            "experiment_id": "isolate-unknown",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h2"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-4",
+              "source-6",
+              "source-7",
+              "source-8",
+              "source-9"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "unknown",
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "source-5"
+            ]
+          }
+        ],
+        "problem_statement": "An aborted provider request continues through a wrapper with a detached signal and is retried as though it were a transient dependency error. Preserve normal retry behavior, but propagate the caller's AbortSignal through the adapter and stop retrying immediately when the dependency reports AbortError.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "baseline_drift": [],
+        "case_id": "ts-abort-chain-402",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by dependency drift.",
+          "confidence": 0.7619,
+          "dimension": "dependency",
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-6",
+            "source-7",
+            "source-8",
+            "source-9"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [
+          "Propagate the caller's exact cancellation signal through every wrapper; cancellation is terminal for retries and must use existing platform error identity without invented dependencies."
+        ],
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.7619,
+            "confirmatory_weight": 2.55,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-4",
+              "source-6",
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "support_weight": 3.2
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "confidence": 0.4286,
+            "confirmatory_weight": 0.75,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "unknown",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h2",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "source-5"
+            ],
+            "support_weight": 0.75
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "dimension": "unknown",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-dependency",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_status": "confirmed",
+      "duration_ms": 74604,
+      "evaluation_role": "development_regression",
+      "hidden_tests": {
+        "duration_ms": 236,
+        "exit_code": 0,
+        "output": "\u00e2\u0153\u201d caller abort signal reaches adapter and is never retried (1.1069ms)\n\u00e2\u0153\u201d normal provider success is returned without retry (0.9536ms)\n\u00e2\u201e\u00b9 tests 2\n\u00e2\u201e\u00b9 suites 0\n\u00e2\u201e\u00b9 pass 2\n\u00e2\u201e\u00b9 fail 0\n\u00e2\u201e\u00b9 cancelled 0\n\u00e2\u201e\u00b9 skipped 0\n\u00e2\u201e\u00b9 todo 0\n\u00e2\u201e\u00b9 duration_ms 154.8317",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/hidden-abort.test.ts",
+          "tests/public.test.ts"
+        ]
+      },
+      "language": "typescript",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 47205,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"An aborted provider request continues through a wrapper with a detached signal and is retried as though it were a transient dependency error. Preserve normal retry behavior, but propagate the caller's AbortSignal through the adapter and stop retrying immediately when the dependency reports AbortError.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by dependency drift.\",\n      \"dimension\":\"dependency\",\n      \"support_evidence_ids\":[\"operator-1\",\"operator-2\",\"source-1\",\"source-2\",\"source-3\",\"source-4\",\"source-6\",\"source-7\",\"source-8\",\"source-9\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing dependency does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\":\"h2\",\n      \"claim\":\"The observed failure is primarily caused by unknown drift.\",\n      \"dimension\":\"unknown\",\n      \"support_evidence_ids\":[\"source-5\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing unknown does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-dependency\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"dependency\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"state\",\"config\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing dependency changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    },\n    {\n      \"experiment_id\":\"isolate-unknown\",\n      \"hypothesis_ids\":[\"h2\"],\n      \"changed_dimensions\":[\"unknown\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing unknown changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"confirmed\",\n    \"evidence_ids\":[\"operator-1\",\"operator-2\",\"source-1\",\"source-2\",\"source-3\",\"source-4\",\"source-6\",\"source-7\",\"source-8\",\"source-9\"],\n    \"reason\":\"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 624,
+          "wall_ms": 47205
+        },
+        {
+          "error": null,
+          "latency_ms": 14203,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The issue arises because the `callProvider` function creates a detached `AbortController`, which means it ignores any signals passed to it. This causes the retry mechanism in `retryRequest` to continue even when the caller's signal is aborted.\",\n  \"files\": [\n    {\n      \"path\": \"src/provider.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `callProvider` function to pass through the provided `AbortSignal` instead of creating a detached one.\"\n    },\n    {\n      \"path\": \"src/retry.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the retry mechanism in `retryRequest` stops immediately when an `AbortError` is received, respecting the caller's cancellation signal.\"\n    }\n  ],\n  \"notes\": \"This change ensures that the caller's exact cancellation signal is propagated through every wrapper, and cancellation is terminal for retries. It also preserves normal retry behavior while correctly handling aborted requests.\"\n}",
+          "stage": "plan",
+          "tokens_out": 205,
+          "wall_ms": 14204
+        },
+        {
+          "error": null,
+          "latency_ms": 4691,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n  const detached = new AbortController();\n  return adapter(detached.signal);\n=======\n  return adapter(signal);\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 31,
+          "wall_ms": 4691
+        },
+        {
+          "error": null,
+          "latency_ms": 6312,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n      return await callProvider(adapter, signal);\n    } catch (error) {\n      lastError = error;\n    }\n  }\n  throw lastError;\n}\n=======\n      if (error instanceof AbortError) {\n        throw error;\n      }\n      lastError = error;\n    }\n  }\n  throw lastError;\n}\n>>>>>>> REPLACE\n```",
+          "stage": "edit_2",
+          "tokens_out": 74,
+          "wall_ms": 6312
+        }
+      ],
+      "patch_applied": true,
+      "patch_warnings": [
+        "contract invariant guard: AbortError is referenced as an undefined class; inspect the existing error name",
+        "Rolled back edit group because the resulting source contradicted a mechanism invariant."
+      ],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 251,
+        "exit_code": 0,
+        "output": "\u00e2\u0153\u201d normal provider success is returned without retry (1.1154ms)\n\u00e2\u201e\u00b9 tests 1\n\u00e2\u201e\u00b9 suites 0\n\u00e2\u201e\u00b9 pass 1\n\u00e2\u201e\u00b9 fail 0\n\u00e2\u201e\u00b9 cancelled 0\n\u00e2\u201e\u00b9 skipped 0\n\u00e2\u201e\u00b9 todo 0\n\u00e2\u201e\u00b9 duration_ms 168.1804",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/public.test.ts"
+        ]
+      },
+      "repair_attempts": [],
+      "score": 100,
+      "selected_file": "",
+      "selected_files": [
+        "src/provider.ts",
+        "src/retry.ts"
+      ],
+      "split": "development-regression-multifile-typescript",
+      "test_runner": "node_test"
+    },
+    {
+      "baseline_hidden_tests": {
+        "duration_ms": 371,
+        "exit_code": 255,
+        "output": "[tests/hidden_cache_test.dart]\nUnhandled exception:\nBad state: injected clock must expire stale value: expected=null actual=one\n#0      expectEqual (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-hidden-6uwt_xze/repo/tests/hidden_cache_test.dart:4:27)\n#1      main (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-hidden-6uwt_xze/repo/tests/hidden_cache_test.dart:12:3)\n#2      _delayEntrypointInvocation.<anonymous closure> (dart:isolate-patch/isolate_patch.dart:314:19)\n#3      _RawReceivePort._handleMessage (dart:isolate-patch/isolate_patch.dart:193:12)",
+        "passed": false,
+        "runner": "dart",
+        "test_files": [
+          "tests/hidden_cache_test.dart",
+          "tests/public_cache_test.dart"
+        ]
+      },
+      "baseline_public_tests": {
+        "duration_ms": 325,
+        "exit_code": 0,
+        "output": "[tests/public_cache_test.dart]\npublic cache contract passed",
+        "passed": true,
+        "runner": "dart",
+        "test_files": [
+          "tests/public_cache_test.dart"
+        ]
+      },
+      "case_id": "dart-cache-clock-403",
+      "changed_files": [
+        "lib/cache.dart",
+        "lib/cache_entry.dart"
+      ],
+      "checks": {
+        "baseline_hidden_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "hidden_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "selected_files": [
+          "lib/cache.dart",
+          "lib/cache_entry.dart"
+        ],
+        "warnings": []
+      },
+      "diagnosis_dimension": "clock",
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-1",
+            "operator-3",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-6",
+            "source-7",
+            "source-9",
+            "source-10"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "The hypothesis that the observed failure is primarily caused by clock drift is supported by multiple pieces of evidence and lacks contradictory evidence.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "clock"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing clock changes or restores the outcome.",
+            "experiment_id": "isolate-clock",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-3",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-6",
+              "source-7",
+              "source-9",
+              "source-10"
+            ]
+          }
+        ],
+        "problem_statement": "A TTL cache accepts an injected clock for deterministic replay, yet expiration follows the host wall clock. Refreshing an existing key also retains its old deadline. Repair the clock and refresh contracts so replay time controls expiration and a refreshed value receives the new TTL.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "baseline_drift": [],
+        "case_id": "dart-cache-clock-403",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by clock drift.",
+          "confidence": 0.8039,
+          "dimension": "clock",
+          "evidence_ids": [
+            "operator-1",
+            "operator-3",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-6",
+            "source-7",
+            "source-9",
+            "source-10"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "The hypothesis that the observed failure is primarily caused by clock drift is supported by multiple pieces of evidence and lacks contradictory evidence.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [
+          "All expiry creation and comparison uses the injected clock; refresh updates both value and deadline without changing the public cache API."
+        ],
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.8039,
+            "confirmatory_weight": 3.45,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-3",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-6",
+              "source-7",
+              "source-9",
+              "source-10"
+            ],
+            "support_weight": 4.1
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-clock",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_status": "confirmed",
+      "duration_ms": 55198,
+      "evaluation_role": "development_regression",
+      "hidden_tests": {
+        "duration_ms": 639,
+        "exit_code": 0,
+        "output": "[tests/hidden_cache_test.dart]\nhidden cache contracts passed\n\n[tests/public_cache_test.dart]\npublic cache contract passed",
+        "passed": true,
+        "runner": "dart",
+        "test_files": [
+          "tests/hidden_cache_test.dart",
+          "tests/public_cache_test.dart"
+        ]
+      },
+      "language": "dart",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 30547,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"A TTL cache accepts an injected clock for deterministic replay, yet expiration follows the host wall clock. Refreshing an existing key also retains its old deadline. Repair the clock and refresh contracts so replay time controls expiration and a refreshed value receives the new TTL.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by clock drift.\",\n      \"dimension\":\"clock\",\n      \"support_evidence_ids\":[\"operator-1\",\"operator-3\",\"source-1\",\"source-2\",\"source-3\",\"source-6\",\"source-7\",\"source-9\",\"source-10\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing clock does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-clock\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"clock\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing clock changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"confirmed\",\n    \"evidence_ids\":[\"operator-1\",\"operator-3\",\"source-1\",\"source-2\",\"source-3\",\"source-6\",\"source-7\",\"source-9\",\"source-10\"],\n    \"reason\":\"The hypothesis that the observed failure is primarily caused by clock drift is supported by multiple pieces of evidence and lacks contradictory evidence.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 419,
+          "wall_ms": 30547
+        },
+        {
+          "error": null,
+          "latency_ms": 12220,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The issue arises because the `TtlCache` class uses the host wall clock for expiration checks instead of the injected clock. This leads to inconsistent behavior during deterministic replay. The `refresh` method in `CacheEntry` does not update the deadline, which is crucial for maintaining the TTL.\",\n  \"files\": [\n    {\n      \"path\": \"lib/cache_entry.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Update the `refresh` method to also update the `expiresAt` field with the new deadline.\"\n    },\n    {\n      \"path\": \"lib/cache.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that all expiry checks use the injected clock instead of the host wall clock. Update the `put` and `get` methods accordingly.\"\n    }\n  ],\n  \"notes\": \"This repair ensures that the TTL cache behaves deterministically by using the injected clock for both creation and comparison of expiration times, as well as updating the deadline when a value is refreshed.\"\n}",
+          "stage": "plan",
+          "tokens_out": 213,
+          "wall_ms": 12220
+        },
+        {
+          "error": null,
+          "latency_ms": 5381,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n  void refresh(T nextValue, DateTime nextExpiry) {\n    value = nextValue;\n  }\n=======\n  void refresh(T nextValue, DateTime nextExpiry) {\n    value = nextValue;\n    expiresAt = nextExpiry;\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 61,
+          "wall_ms": 5381
+        },
+        {
+          "error": null,
+          "latency_ms": 3601,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    final expiry = _now().add(ttl);\n=======\n    final expiry = _now.call().add(ttl);\n>>>>>>> REPLACE\n\n```",
+          "stage": "edit_2",
+          "tokens_out": 34,
+          "wall_ms": 3601
+        }
+      ],
+      "patch_applied": true,
+      "patch_warnings": [
+        "contract invariant guard: TTL comparison still reads wall clock instead of the injected clock",
+        "Rolled back edit group because the resulting source contradicted a mechanism invariant."
+      ],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 359,
+        "exit_code": 0,
+        "output": "[tests/public_cache_test.dart]\npublic cache contract passed",
+        "passed": true,
+        "runner": "dart",
+        "test_files": [
+          "tests/public_cache_test.dart"
+        ]
+      },
+      "repair_attempts": [],
+      "score": 100,
+      "selected_file": "",
+      "selected_files": [
+        "lib/cache_entry.dart",
+        "lib/cache.dart"
+      ],
+      "split": "development-regression-multifile-dart",
+      "test_runner": "dart"
+    },
+    {
+      "baseline_hidden_tests": {
+        "duration_ms": 382,
+        "exit_code": 255,
+        "output": "[tests/hidden_worker_test.dart]\nUnhandled exception:\nBad state: stopped worker dispatched: before,after\n#0      main (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-hidden-f21ltgr1/repo/tests/hidden_worker_test.dart:15:5)\n<asynchronous suspension>",
+        "passed": false,
+        "runner": "dart",
+        "test_files": [
+          "tests/hidden_worker_test.dart",
+          "tests/public_worker_test.dart"
+        ]
+      },
+      "baseline_public_tests": {
+        "duration_ms": 359,
+        "exit_code": 0,
+        "output": "[tests/public_worker_test.dart]\npublic worker contract passed",
+        "passed": true,
+        "runner": "dart",
+        "test_files": [
+          "tests/public_worker_test.dart"
+        ]
+      },
+      "case_id": "dart-subscription-404",
+      "changed_files": [
+        "lib/subscription.dart",
+        "lib/worker.dart"
+      ],
+      "checks": {
+        "baseline_hidden_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "hidden_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": false,
+        "patch_applied": false,
+        "selected_files": [],
+        "warnings": []
+      },
+      "diagnosis_dimension": "state",
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "operator-3",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-5"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "The hypothesis that the observed failure is primarily caused by state drift is supported by the evidence. Changing state does not change the outcome, confirming this as the root cause.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "state"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing state changes or restores the outcome.",
+            "experiment_id": "isolate-state",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by state drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-3",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-4",
+              "source-5"
+            ]
+          }
+        ],
+        "problem_statement": "A stream-backed worker receives normal events, but it continues dispatching after stop. The subscription wrapper returns a handle unrelated to the real listener, and the worker drops that handle without cancellation. Repair the lifecycle across both modules so stop cancels the actual subscription.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "baseline_drift": [],
+        "case_id": "dart-subscription-404",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by state drift.",
+          "confidence": 0.7101,
+          "dimension": "state",
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "operator-3",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-5"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "The hypothesis that the observed failure is primarily caused by state drift is supported by the evidence. Changing state does not change the outcome, confirming this as the root cause.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [
+          "The wrapper must return and store the actual active subscription, and stop must await cancellation before dropping the handle."
+        ],
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.7101,
+            "confirmatory_weight": 1.8,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-3",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-4",
+              "source-5"
+            ],
+            "support_weight": 2.45
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-state",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_status": "confirmed",
+      "duration_ms": 60339,
+      "evaluation_role": "development_regression",
+      "hidden_tests": {
+        "duration_ms": 661,
+        "exit_code": 0,
+        "output": "[tests/hidden_worker_test.dart]\nhidden worker contract passed\n\n[tests/public_worker_test.dart]\npublic worker contract passed",
+        "passed": true,
+        "runner": "dart",
+        "test_files": [
+          "tests/hidden_worker_test.dart",
+          "tests/public_worker_test.dart"
+        ]
+      },
+      "language": "dart",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 31855,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"A stream-backed worker receives normal events, but it continues dispatching after stop. The subscription wrapper returns a handle unrelated to the real listener, and the worker drops that handle without cancellation. Repair the lifecycle across both modules so stop cancels the actual subscription.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by state drift.\",\n      \"dimension\":\"state\",\n      \"support_evidence_ids\":[\"operator-1\",\"operator-2\",\"operator-3\",\"source-1\",\"source-2\",\"source-3\",\"source-4\",\"source-5\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing state does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-state\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"state\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing state changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\"\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"confirmed\",\n    \"evidence_ids\":[\"operator-1\",\"operator-2\",\"operator-3\",\"source-1\",\"source-2\",\"source-3\",\"source-4\",\"source-5\"],\n    \"reason\":\"The hypothesis that the observed failure is primarily caused by state drift is supported by the evidence. Changing state does not change the outcome, confirming this as the root cause.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 407,
+          "wall_ms": 31855
+        },
+        {
+          "error": null,
+          "latency_ms": 12185,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The issue arises because the `bindSubscription` function returns an empty stream subscription instead of the actual subscription returned by `source.listen`. This causes the worker to lose track of the active subscription and fail to cancel it when stopping.\",\n  \"files\": [\n    {\n      \"path\": \"lib/subscription.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `bindSubscription` function to return the actual subscription returned by `source.listen`.\"\n    },\n    {\n      \"path\": \"lib/worker.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the `_subscription` field in `EventWorker` is updated with the actual subscription returned by `bindSubscription` and cancel it when stopping.\"\n    }\n  ],\n  \"notes\": \"The changes in `lib/subscription.dart` ensure that the actual subscription is returned, allowing the worker to correctly manage its lifecycle. The changes in `lib/worker.dart` ensure that the worker properly cancels the subscription when stopping.\"\n}",
+          "stage": "plan",
+          "tokens_out": 213,
+          "wall_ms": 12185
+        },
+        {
+          "error": null,
+          "latency_ms": 6374,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nStreamSubscription<T> bindSubscription<T>(\n  Stream<T> source,\n  void Function(T) onData,\n) {\n  source.listen(onData);\n  return Stream<T>.empty().listen((_) {});\n}\n=======\nStreamSubscription<T> bindSubscription<T>(\n  Stream<T> source,\n  void Function(T) onData,\n) {\n  return source.listen(onData);\n}\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 83,
+          "wall_ms": 6374
+        },
+        {
+          "error": null,
+          "latency_ms": 7380,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n  void start(Stream<String> source) {\n    _subscription = bindSubscription(source, _dispatch);\n  }\n\n  Future<void> stop() async {\n    _subscription = null;\n  }\n=======\n  StreamSubscription<String>? _actualSubscription;\n\n  void start(Stream<String> source) {\n    _actualSubscription = bindSubscription(source, _dispatch);\n    _subscription = _actualSubscription;\n  }\n\n  Future<void> stop() async {\n    await _actualSubscription?.cancel();\n    _subscription = null;\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "edit_2",
+          "tokens_out": 113,
+          "wall_ms": 7380
+        }
+      ],
+      "patch_applied": true,
+      "patch_warnings": [],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 350,
+        "exit_code": 0,
+        "output": "[tests/public_worker_test.dart]\npublic worker contract passed",
+        "passed": true,
+        "runner": "dart",
+        "test_files": [
+          "tests/public_worker_test.dart"
+        ]
+      },
+      "repair_attempts": [],
+      "score": 100,
+      "selected_file": "",
+      "selected_files": [
+        "lib/subscription.dart",
+        "lib/worker.dart"
+      ],
+      "split": "development-regression-multifile-dart",
+      "test_runner": "dart"
+    },
+    {
+      "baseline_hidden_tests": {
+        "duration_ms": 613,
+        "exit_code": 1,
+        "output": "F\n================================== FAILURES ===================================\n____________________ test_duplicate_open_order_is_rejected ____________________\n\n    def test_duplicate_open_order_is_rejected():\n        connection = database()\n        connection.execute(\"INSERT INTO orders VALUES (1, 'acct', 'AAA', 'open')\")\n>       with pytest.raises(sqlite3.IntegrityError):\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       Failed: DID NOT RAISE <class 'sqlite3.IntegrityError'>\n\ntests\\test_hidden_partial_unique.py:16: Failed\n=========================== short test summary info ===========================\nFAILED tests/test_hidden_partial_unique.py::test_duplicate_open_order_is_rejected\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.07s",
+        "passed": false,
+        "runner": "pytest"
+      },
+      "baseline_public_tests": {
+        "duration_ms": 554,
+        "exit_code": 0,
+        "output": ".                                                                        [100%]\n1 passed in 0.02s",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "case_id": "sql-partial-unique-405",
+      "changed_files": [
+        "schema.sql"
+      ],
+      "checks": {
+        "baseline_hidden_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "hidden_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "selected_files": [
+          "schema.sql"
+        ],
+        "warnings": []
+      },
+      "diagnosis_dimension": "data",
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-3",
+            "source-3",
+            "source-4",
+            "probe-default-fixed-search"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing data changes or restores the outcome.",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-3",
+              "source-3",
+              "source-4",
+              "probe-default-fixed-search"
+            ]
+          }
+        ],
+        "problem_statement": "The order schema should allow repeated closed history while preventing two open rows for the same account and symbol. Production evidence shows the opposite behavior. Repair the partial uniqueness contract without changing table columns or globally deduplicating history.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "baseline_drift": [],
+        "case_id": "sql-partial-unique-405",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by data drift.",
+          "confidence": 0.7101,
+          "dimension": "data",
+          "evidence_ids": [
+            "operator-3",
+            "source-3",
+            "source-4",
+            "probe-default-fixed-search"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [
+          "Partial uniqueness applies only to the active-row predicate; historical inactive rows remain repeatable."
+        ],
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.7101,
+            "confirmatory_weight": 1.8,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-3",
+              "source-3",
+              "source-4",
+              "probe-default-fixed-search"
+            ],
+            "support_weight": 2.45
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-data",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_status": "confirmed",
+      "duration_ms": 69390,
+      "evaluation_role": "development_regression",
+      "hidden_tests": {
+        "duration_ms": 577,
+        "exit_code": 0,
+        "output": "...                                                                      [100%]\n3 passed in 0.02s",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "language": "sql",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 25792,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"The order schema should allow repeated closed history while preventing two open rows for the same account and symbol. Production evidence shows the opposite behavior. Repair the partial uniqueness contract without changing table columns or globally deduplicating history.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by data drift.\",\n      \"dimension\":\"data\",\n      \"support_evidence_ids\":[\"operator-3\",\"source-3\",\"source-4\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing data does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"x1\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"data\"],\n      \"held_constant_dimensions\":[\"code\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing data changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"provisional\",\n    \"evidence_ids\":[\"operator-3\",\"source-3\",\"source-4\"],\n    \"reason\":\"Deterministic evidence gate selected a stronger supported competing hypothesis.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 350,
+          "wall_ms": 25792
+        },
+        {
+          "error": null,
+          "latency_ms": 26269,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"The order schema should allow repeated closed history while preventing two open rows for the same account and symbol. Production evidence shows the opposite behavior. Repair the partial uniqueness contract without changing table columns or globally deduplicating history.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by data drift.\",\n      \"dimension\":\"data\",\n      \"support_evidence_ids\":[\"operator-3\",\"source-3\",\"source-4\",\"probe-default-fixed-search\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing data does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"x1\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"data\"],\n      \"held_constant_dimensions\":[\"code\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing data changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"provisional\",\n    \"evidence_ids\":[\"operator-3\",\"source-3\",\"source-4\",\"probe-default-fixed-search\"],\n    \"reason\":\"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 362,
+          "wall_ms": 26269
+        },
+        {
+          "error": null,
+          "latency_ms": 8060,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The issue arises from the unique index on (account_id, symbol) that only applies to active rows. This prevents repeated closed history but allows duplicate open rows for the same account and symbol.\",\n  \"files\": [\n    {\n      \"path\": \"schema.sql\",\n      \"action\": \"modify\",\n      \"description\": \"Add a partial uniqueness constraint on (account_id, symbol) that includes both 'closed' and 'open' statuses to ensure no repeated history.\"\n    }\n  ],\n  \"notes\": \"This change ensures that the partial uniqueness contract is enforced across all rows without altering table columns or globally deduplicating history.\"\n}",
+          "stage": "plan",
+          "tokens_out": 135,
+          "wall_ms": 8060
+        },
+        {
+          "error": null,
+          "latency_ms": 4840,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nCREATE UNIQUE INDEX uq_active_order\n  ON orders(account_id, symbol)\n  WHERE status = 'closed';\n=======\nCREATE UNIQUE INDEX uq_active_order_and_open\n  ON orders(account_id, symbol)\n  WHERE status IN ('closed', 'open');\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 62,
+          "wall_ms": 4840
+        }
+      ],
+      "patch_applied": true,
+      "patch_warnings": [
+        "contract invariant guard: partial unique index is not scoped to explicitly active open rows",
+        "Rolled back edit group because the resulting source contradicted a mechanism invariant."
+      ],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 568,
+        "exit_code": 0,
+        "output": ".                                                                        [100%]\n1 passed in 0.01s",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "repair_attempts": [],
+      "score": 100,
+      "selected_file": "schema.sql",
+      "selected_files": [
+        "schema.sql"
+      ],
+      "split": "development-regression-sql",
+      "test_runner": "pytest"
+    },
+    {
+      "baseline_hidden_tests": {
+        "duration_ms": 621,
+        "exit_code": 1,
+        "output": "F\n================================== FAILURES ===================================\n_______________ test_multiple_children_are_not_cross_multiplied _______________\n\n    def test_multiple_children_are_not_cross_multiplied():\n        connection = sqlite3.connect(':memory:')\n        connection.executescript(Path('schema.sql').read_text(encoding='utf-8'))\n        connection.execute(\"INSERT INTO orders VALUES (1, 'acct')\")\n        connection.executemany('INSERT INTO fills VALUES (?, 1, ?)', [(1, 2), (2, 3)])\n        connection.executemany('INSERT INTO fees VALUES (?, 1, ?)', [(1, 0.5), (2, 1.0)])\n        row = connection.execute(Path('report.sql').read_text(encoding='utf-8')).fetchone()\n>       assert row == ('acct', 5, 1.5)\nE       AssertionError: assert ('acct', 10, 3.0) == ('acct', 5, 1.5)\nE         \nE         At index 1 diff: 10 != 5\nE         Use -v to get more diff\n\ntests\\test_hidden_join_aggregate.py:12: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_hidden_join_aggregate.py::test_multiple_children_are_not_cross_multiplied\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.07s",
+        "passed": false,
+        "runner": "pytest"
+      },
+      "baseline_public_tests": {
+        "duration_ms": 554,
+        "exit_code": 0,
+        "output": ".                                                                        [100%]\n1 passed in 0.02s",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "case_id": "sql-join-aggregate-406",
+      "changed_files": [
+        "report.sql"
+      ],
+      "checks": {
+        "baseline_hidden_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "hidden_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "selected_files": [
+          "report.sql"
+        ],
+        "warnings": []
+      },
+      "diagnosis_dimension": "data",
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-2",
+            "source-1",
+            "source-4",
+            "source-5",
+            "probe-default-fixed-search"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing data changes or restores the outcome.",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-2",
+              "source-1",
+              "source-4",
+              "source-5",
+              "probe-default-fixed-search"
+            ]
+          }
+        ],
+        "problem_statement": "An account report is correct when each order has one fill and one fee, but overstates both quantity and fees when either side has multiple child rows. Repair the query so independent one-to-many relationships are aggregated without a Cartesian multiplication.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "baseline_drift": [],
+        "case_id": "sql-join-aggregate-406",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by data drift.",
+          "confidence": 0.7101,
+          "dimension": "data",
+          "evidence_ids": [
+            "operator-2",
+            "source-1",
+            "source-4",
+            "source-5",
+            "probe-default-fixed-search"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [
+          "Aggregate each independent child relation to its parent key before joining sibling one-to-many data."
+        ],
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.7101,
+            "confirmatory_weight": 1.8,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-2",
+              "source-1",
+              "source-4",
+              "source-5",
+              "probe-default-fixed-search"
+            ],
+            "support_weight": 2.45
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-data",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_status": "confirmed",
+      "duration_ms": 82259,
+      "evaluation_role": "development_regression",
+      "hidden_tests": {
+        "duration_ms": 567,
+        "exit_code": 0,
+        "output": "..                                                                       [100%]\n2 passed in 0.03s",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "language": "sql",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 29127,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"An account report is correct when each order has one fill and one fee, but overstates both quantity and fees when either side has multiple child rows. Repair the query so independent one-to-many relationships are aggregated without a Cartesian multiplication.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by data drift.\",\n      \"dimension\":\"data\",\n      \"support_evidence_ids\":[\"operator-2\",\"source-1\",\"source-4\",\"source-5\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing data does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"x1\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"data\"],\n      \"held_constant_dimensions\":[\"code\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing data changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"provisional\",\n    \"evidence_ids\":[\"operator-2\",\"source-1\",\"source-4\",\"source-5\"],\n    \"reason\":\"The hypothesis is supported by the evidence and requires further falsification experiments.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 364,
+          "wall_ms": 29127
+        },
+        {
+          "error": null,
+          "latency_ms": 29629,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"An account report is correct when each order has one fill and one fee, but overstates both quantity and fees when either side has multiple child rows. Repair the query so independent one-to-many relationships are aggregated without a Cartesian multiplication.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by data drift.\",\n      \"dimension\":\"data\",\n      \"support_evidence_ids\":[\"operator-2\",\"source-1\",\"source-4\",\"source-5\",\"probe-default-fixed-search\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing data does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"x1\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"data\"],\n      \"held_constant_dimensions\":[\"code\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing data changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"provisional\",\n    \"evidence_ids\":[\"operator-2\",\"source-1\",\"source-4\",\"source-5\",\"probe-default-fixed-search\"],\n    \"reason\":\"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 373,
+          "wall_ms": 29629
+        },
+        {
+          "error": null,
+          "latency_ms": 8787,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The query is not aggregating the independent one-to-many relationships correctly. It is performing a Cartesian multiplication between fills and fees, leading to overstatement of quantity and fees.\",\n  \"files\": [\n    {\n      \"path\": \"report.sql\",\n      \"action\": \"modify\",\n      \"description\": \"Aggregate each independent child relation (fills and fees) to its parent key before joining sibling one-to-many data.\"\n    }\n  ],\n  \"notes\": \"The issue is resolved by ensuring that fills and fees are aggregated separately for each order before the final join. This prevents a Cartesian multiplication and ensures accurate aggregation of quantities and fees.\"\n}",
+          "stage": "plan",
+          "tokens_out": 135,
+          "wall_ms": 8787
+        },
+        {
+          "error": null,
+          "latency_ms": 9064,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nLEFT JOIN fills ON fills.order_id = orders.id\nLEFT JOIN fees ON fees.order_id = orders.id\nGROUP BY orders.account_id\nORDER BY orders.account_id;\n=======\nLEFT JOIN (\n  SELECT order_id, SUM(quantity) AS total_quantity\n  FROM fills\n  GROUP BY order_id\n) AS fills ON fills.order_id = orders.id\nLEFT JOIN (\n  SELECT order_id, SUM(amount) AS total_fees\n  FROM fees\n  GROUP BY order_id\n) AS fees ON fees.order_id = orders.id\nGROUP BY orders.account_id\nORDER BY orders.account_id;\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 130,
+          "wall_ms": 9064
+        }
+      ],
+      "patch_applied": true,
+      "patch_warnings": [
+        "Rolled back initial patch because validation regressed below the sealed baseline."
+      ],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 523,
+        "exit_code": 0,
+        "output": ".                                                                        [100%]\n1 passed in 0.01s",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "repair_attempts": [],
+      "score": 100,
+      "selected_file": "report.sql",
+      "selected_files": [
+        "report.sql"
+      ],
+      "split": "development-regression-sql",
+      "test_runner": "pytest"
+    }
+  ],
+  "created_at": "2026-07-11T15:21:00.452204+00:00",
+  "development_regression_case_count": 6,
+  "development_regression_score": 100.0,
+  "evaluation_verdict": "development_regression_passed",
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "holdout_case_count": 0,
+  "holdout_score": 0.0,
+  "max_repair_rounds": 3,
+  "model": "qwen2.5-coder:7b",
+  "multifile_holdout_case_count": 0,
+  "multifile_holdout_score": 0.0,
+  "overall_score": 100.0,
+  "premium_calls": 0,
+  "reference_family": "claude-fable-5",
+  "schema": "chili.diagnosis-to-fix-results.v2",
+  "verdict": "shadow_ready"
+}

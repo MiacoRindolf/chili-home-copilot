@@ -1,0 +1,534 @@
+{
+  "average_case_duration_ms": 54335.5,
+  "cases": [
+    {
+      "baseline_hidden_tests": {
+        "duration_ms": 343,
+        "exit_code": 255,
+        "output": "[tests/hidden_cache_test.dart]\nUnhandled exception:\nBad state: injected clock must expire stale value: expected=null actual=one\n#0      expectEqual (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-hidden-w0nnk4nl/repo/tests/hidden_cache_test.dart:4:27)\n#1      main (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-hidden-w0nnk4nl/repo/tests/hidden_cache_test.dart:12:3)\n#2      _delayEntrypointInvocation.<anonymous closure> (dart:isolate-patch/isolate_patch.dart:314:19)\n#3      _RawReceivePort._handleMessage (dart:isolate-patch/isolate_patch.dart:193:12)",
+        "passed": false,
+        "runner": "dart",
+        "test_files": [
+          "tests/hidden_cache_test.dart",
+          "tests/public_cache_test.dart"
+        ]
+      },
+      "baseline_public_tests": {
+        "duration_ms": 317,
+        "exit_code": 0,
+        "output": "[tests/public_cache_test.dart]\npublic cache contract passed",
+        "passed": true,
+        "runner": "dart",
+        "test_files": [
+          "tests/public_cache_test.dart"
+        ]
+      },
+      "case_id": "dart-cache-clock-403",
+      "changed_files": [
+        "lib/cache.dart",
+        "lib/cache_entry.dart"
+      ],
+      "checks": {
+        "baseline_hidden_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "hidden_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "selected_files": [
+          "lib/cache.dart",
+          "lib/cache_entry.dart"
+        ],
+        "warnings": []
+      },
+      "diagnosis_dimension": "clock",
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-1",
+            "operator-3",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-6",
+            "source-7",
+            "source-9",
+            "source-10"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "clock"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing clock changes or restores the outcome.",
+            "experiment_id": "isolate-clock",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-3",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-6",
+              "source-7",
+              "source-9",
+              "source-10"
+            ]
+          }
+        ],
+        "problem_statement": "A TTL cache accepts an injected clock for deterministic replay, yet expiration follows the host wall clock. Refreshing an existing key also retains its old deadline. Repair the clock and refresh contracts so replay time controls expiration and a refreshed value receives the new TTL.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "baseline_drift": [],
+        "case_id": "dart-cache-clock-403",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by clock drift.",
+          "confidence": 0.8039,
+          "dimension": "clock",
+          "evidence_ids": [
+            "operator-1",
+            "operator-3",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-6",
+            "source-7",
+            "source-9",
+            "source-10"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [
+          "All expiry creation and comparison uses the injected clock; refresh updates both value and deadline without changing the public cache API."
+        ],
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.8039,
+            "confirmatory_weight": 3.45,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-3",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-6",
+              "source-7",
+              "source-9",
+              "source-10"
+            ],
+            "support_weight": 4.1
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-clock",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_status": "confirmed",
+      "duration_ms": 52145,
+      "hidden_tests": {
+        "duration_ms": 738,
+        "exit_code": 0,
+        "output": "[tests/hidden_cache_test.dart]\nhidden cache contracts passed\n\n[tests/public_cache_test.dart]\npublic cache contract passed",
+        "passed": true,
+        "runner": "dart",
+        "test_files": [
+          "tests/hidden_cache_test.dart",
+          "tests/public_cache_test.dart"
+        ]
+      },
+      "language": "dart",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 24717,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"A TTL cache accepts an injected clock for deterministic replay, yet expiration follows the host wall clock. Refreshing an existing key also retains its old deadline. Repair the clock and refresh contracts so replay time controls expiration and a refreshed value receives the new TTL.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by clock drift.\",\n      \"dimension\":\"clock\",\n      \"support_evidence_ids\":[\"operator-1\",\"operator-3\",\"source-1\",\"source-2\",\"source-3\",\"source-6\",\"source-7\",\"source-9\",\"source-10\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing clock does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-clock\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"clock\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing clock changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"confirmed\",\n    \"evidence_ids\":[\"operator-1\",\"operator-3\",\"source-1\",\"source-2\",\"source-3\",\"source-6\",\"source-7\",\"source-9\",\"source-10\"],\n    \"reason\":\"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 408,
+          "wall_ms": 24717
+        },
+        {
+          "error": null,
+          "latency_ms": 13188,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The issue arises because the `TtlCache` class uses the host wall clock for expiration checks instead of the injected clock. This causes the cache to expire entries based on real-time, which is not deterministic and does not align with the intended behavior.\",\n  \"files\": [\n    {\n      \"path\": \"lib/cache.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `get` method in `TtlCache` to use the injected clock for expiration checks.\"\n    },\n    {\n      \"path\": \"lib/cache_entry.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the `refresh` method updates both the value and the deadline using the injected clock.\"\n    }\n  ],\n  \"notes\": \"The `cache_metrics.dart` file is not directly involved in the issue, so no changes are needed there. The `lib/cache_entry.dart` file should be updated to ensure that the `refresh` method correctly handles the new TTL when refreshing an existing key.\"\n}",
+          "stage": "plan",
+          "tokens_out": 213,
+          "wall_ms": 13188
+        },
+        {
+          "error": null,
+          "latency_ms": 5663,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    if (DateTime.now().isAfter(entry.expiresAt)) {\n=======\n    if (_now().isAfter(entry.expiresAt)) {\n>>>>>>> REPLACE\n      _entries.remove(key);\n      return null;\n    }\n```",
+          "stage": "edit_1",
+          "tokens_out": 48,
+          "wall_ms": 5663
+        },
+        {
+          "error": null,
+          "latency_ms": 4488,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n  void refresh(T nextValue, DateTime nextExpiry) {\n    value = nextValue;\n  }\n=======\n  void refresh(Clock clock, T nextValue, Duration ttl) {\n    final expiry = clock().add(ttl);\n    value = nextValue;\n    expiresAt = expiry;\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "edit_2",
+          "tokens_out": 71,
+          "wall_ms": 4488
+        }
+      ],
+      "patch_applied": true,
+      "patch_warnings": [
+        "Rolled back initial patch because validation regressed below the sealed baseline."
+      ],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 386,
+        "exit_code": 0,
+        "output": "[tests/public_cache_test.dart]\npublic cache contract passed",
+        "passed": true,
+        "runner": "dart",
+        "test_files": [
+          "tests/public_cache_test.dart"
+        ]
+      },
+      "repair_attempts": [],
+      "score": 100,
+      "selected_file": "",
+      "selected_files": [
+        "lib/cache.dart",
+        "lib/cache_entry.dart"
+      ],
+      "split": "holdout-multifile-dart",
+      "test_runner": "dart"
+    },
+    {
+      "baseline_hidden_tests": {
+        "duration_ms": 400,
+        "exit_code": 255,
+        "output": "[tests/hidden_worker_test.dart]\nUnhandled exception:\nBad state: stopped worker dispatched: before,after\n#0      main (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-hidden-c7f02mli/repo/tests/hidden_worker_test.dart:15:5)\n<asynchronous suspension>",
+        "passed": false,
+        "runner": "dart",
+        "test_files": [
+          "tests/hidden_worker_test.dart",
+          "tests/public_worker_test.dart"
+        ]
+      },
+      "baseline_public_tests": {
+        "duration_ms": 312,
+        "exit_code": 0,
+        "output": "[tests/public_worker_test.dart]\npublic worker contract passed",
+        "passed": true,
+        "runner": "dart",
+        "test_files": [
+          "tests/public_worker_test.dart"
+        ]
+      },
+      "case_id": "dart-subscription-404",
+      "changed_files": [
+        "lib/subscription.dart",
+        "lib/worker.dart"
+      ],
+      "checks": {
+        "baseline_hidden_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "hidden_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": false,
+        "patch_applied": false,
+        "selected_files": [],
+        "warnings": []
+      },
+      "diagnosis_dimension": "state",
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "operator-3",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-5"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "The hypothesis that the observed failure is primarily caused by state drift is supported by multiple pieces of evidence and lacks contradictory evidence.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "state"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing state changes or restores the outcome.",
+            "experiment_id": "isolate-state",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by state drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-3",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-4",
+              "source-5"
+            ]
+          }
+        ],
+        "problem_statement": "A stream-backed worker receives normal events, but it continues dispatching after stop. The subscription wrapper returns a handle unrelated to the real listener, and the worker drops that handle without cancellation. Repair the lifecycle across both modules so stop cancels the actual subscription.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "baseline_drift": [],
+        "case_id": "dart-subscription-404",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by state drift.",
+          "confidence": 0.7101,
+          "dimension": "state",
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "operator-3",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-5"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "The hypothesis that the observed failure is primarily caused by state drift is supported by multiple pieces of evidence and lacks contradictory evidence.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [
+          "The wrapper must return and store the actual active subscription, and stop must await cancellation before dropping the handle."
+        ],
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.7101,
+            "confirmatory_weight": 1.8,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-3",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-4",
+              "source-5"
+            ],
+            "support_weight": 2.45
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-state",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_status": "confirmed",
+      "duration_ms": 56526,
+      "hidden_tests": {
+        "duration_ms": 756,
+        "exit_code": 0,
+        "output": "[tests/hidden_worker_test.dart]\nhidden worker contract passed\n\n[tests/public_worker_test.dart]\npublic worker contract passed",
+        "passed": true,
+        "runner": "dart",
+        "test_files": [
+          "tests/hidden_worker_test.dart",
+          "tests/public_worker_test.dart"
+        ]
+      },
+      "language": "dart",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 25257,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"A stream-backed worker receives normal events, but it continues dispatching after stop. The subscription wrapper returns a handle unrelated to the real listener, and the worker drops that handle without cancellation. Repair the lifecycle across both modules so stop cancels the actual subscription.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by state drift.\",\n      \"dimension\":\"state\",\n      \"support_evidence_ids\":[\"operator-1\",\"operator-2\",\"operator-3\",\"source-1\",\"source-2\",\"source-3\",\"source-4\",\"source-5\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing state does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-state\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"state\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing state changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"confirmed\",\n    \"evidence_ids\":[\"operator-1\",\"operator-2\",\"operator-3\",\"source-1\",\"source-2\",\"source-3\",\"source-4\",\"source-5\"],\n    \"reason\":\"The hypothesis that the observed failure is primarily caused by state drift is supported by multiple pieces of evidence and lacks contradictory evidence.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 410,
+          "wall_ms": 25257
+        },
+        {
+          "error": null,
+          "latency_ms": 11777,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The issue arises because the `bindSubscription` function returns an empty stream subscription instead of the actual subscription returned by `source.listen`. This causes the worker to lose track of the active subscription and fail to cancel it when stopping.\",\n  \"files\": [\n    {\n      \"path\": \"lib/subscription.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `bindSubscription` function to return the actual subscription returned by `source.listen`.\"\n    },\n    {\n      \"path\": \"lib/worker.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the `_subscription` field in `EventWorker` is updated with the actual subscription returned by `bindSubscription` and cancel it when stopping.\"\n    }\n  ],\n  \"notes\": \"This repair ensures that the worker correctly manages the lifecycle of the subscription, allowing proper cancellation when stopping.\"\n}",
+          "stage": "plan",
+          "tokens_out": 186,
+          "wall_ms": 11777
+        },
+        {
+          "error": null,
+          "latency_ms": 7712,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nStreamSubscription<T> bindSubscription<T>(\n  Stream<T> source,\n  void Function(T) onData,\n) {\n  source.listen(onData);\n  return Stream<T>.empty().listen((_) {});\n}\n=======\nStreamSubscription<T> bindSubscription<T>(\n  Stream<T> source,\n  void Function(T) onData,\n) {\n  return source.listen(onData);\n}\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 83,
+          "wall_ms": 7712
+        },
+        {
+          "error": null,
+          "latency_ms": 9111,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n  void start(Stream<String> source) {\n    _subscription = bindSubscription(source, _dispatch);\n  }\n\n  Future<void> stop() async {\n    _subscription = null;\n  }\n=======\n  StreamSubscription<String>? _actualSubscription;\n\n  void start(Stream<String> source) {\n    _actualSubscription = bindSubscription(source, _dispatch);\n    _subscription = _actualSubscription;\n  }\n\n  Future<void> stop() async {\n    await _actualSubscription?.cancel();\n    _subscription = null;\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "edit_2",
+          "tokens_out": 113,
+          "wall_ms": 9111
+        }
+      ],
+      "patch_applied": true,
+      "patch_warnings": [],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 337,
+        "exit_code": 0,
+        "output": "[tests/public_worker_test.dart]\npublic worker contract passed",
+        "passed": true,
+        "runner": "dart",
+        "test_files": [
+          "tests/public_worker_test.dart"
+        ]
+      },
+      "repair_attempts": [],
+      "score": 100,
+      "selected_file": "",
+      "selected_files": [
+        "lib/subscription.dart",
+        "lib/worker.dart"
+      ],
+      "split": "holdout-multifile-dart",
+      "test_runner": "dart"
+    }
+  ],
+  "created_at": "2026-07-11T14:40:29.657058+00:00",
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "holdout_case_count": 2,
+  "holdout_score": 100.0,
+  "max_repair_rounds": 3,
+  "model": "qwen2.5-coder:7b",
+  "multifile_holdout_case_count": 2,
+  "multifile_holdout_score": 100.0,
+  "overall_score": 100.0,
+  "premium_calls": 0,
+  "reference_family": "claude-fable-5",
+  "schema": "chili.diagnosis-to-fix-results.v2",
+  "verdict": "shadow_ready"
+}

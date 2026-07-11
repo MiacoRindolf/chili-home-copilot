@@ -1,0 +1,16 @@
+{
+  "schema": "chili.diagnosis-to-fix-case.v1",
+  "case_id": "ts-singleflight-401",
+  "language": "typescript",
+  "test_runner": "node_test",
+  "prompt": "Concurrent successful user loads should share one provider call. In production, a temporary provider failure is converted to a fallback and permanently poisons later loads for the same key. The caller must observe the original failure, and a later retry must be allowed to start fresh while successful in-flight requests remain coalesced.",
+  "candidate_paths": ["src/inflight.ts", "src/user_service.ts", "src/telemetry.ts"],
+  "max_files": 3,
+  "repo_files": {
+    "package.json": "{\"type\":\"module\"}\n",
+    "src/inflight.ts": "const pending = new Map<string, Promise<string>>();\n\nexport function singleFlight(\n  key: string,\n  task: () => Promise<string>,\n): Promise<string> {\n  const existing = pending.get(key);\n  if (existing) return existing;\n  const operation = task();\n  pending.set(key, operation);\n  return operation;\n}\n\nexport function resetFlights(): void {\n  pending.clear();\n}\n",
+    "src/user_service.ts": "import { singleFlight } from './inflight.ts';\n\nexport async function loadUser(\n  key: string,\n  provider: () => Promise<string>,\n): Promise<string> {\n  try {\n    return await singleFlight(key, provider);\n  } catch {\n    return 'fallback';\n  }\n}\n",
+    "src/telemetry.ts": "export function userOutcome(value: string): string {\n  return `user:${value}`;\n}\n",
+    "tests/public.test.ts": "import test from 'node:test';\nimport assert from 'node:assert/strict';\n\nimport { resetFlights } from '../src/inflight.ts';\nimport { loadUser } from '../src/user_service.ts';\n\ntest('concurrent successful loads share one provider call', async () => {\n  resetFlights();\n  let calls = 0;\n  const provider = async () => {\n    calls += 1;\n    await new Promise((resolve) => setTimeout(resolve, 5));\n    return 'alice';\n  };\n  const [first, second] = await Promise.all([loadUser('u-1', provider), loadUser('u-1', provider)]);\n  assert.deepEqual([first, second], ['alice', 'alice']);\n  assert.equal(calls, 1);\n});\n"
+  }
+}

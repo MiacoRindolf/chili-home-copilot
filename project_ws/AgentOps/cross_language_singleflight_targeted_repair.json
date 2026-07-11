@@ -1,0 +1,428 @@
+{
+  "average_case_duration_ms": 147148.0,
+  "cases": [
+    {
+      "baseline_hidden_tests": {
+        "duration_ms": 256,
+        "exit_code": 1,
+        "output": "\u00e2\u0153\u2013 failed operation is observable and does not poison retry (1.3164ms)\n\u00e2\u0153\u201d concurrent successful loads share one provider call (18.691ms)\n\u00e2\u201e\u00b9 tests 2\n\u00e2\u201e\u00b9 suites 0\n\u00e2\u201e\u00b9 pass 1\n\u00e2\u201e\u00b9 fail 1\n\u00e2\u201e\u00b9 cancelled 0\n\u00e2\u201e\u00b9 skipped 0\n\u00e2\u201e\u00b9 todo 0\n\u00e2\u201e\u00b9 duration_ms 198.6884\n\n\u00e2\u0153\u2013 failing tests:\n\ntest at tests\\hidden-singleflight.test.ts:7:1\n\u00e2\u0153\u2013 failed operation is observable and does not poison retry (1.3164ms)\n  AssertionError [ERR_ASSERTION]: Missing expected rejection.\n      at async TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-hidden-mdeh3cl4/repo/tests/hidden-singleflight.test.ts:15:3)\n      at async Test.run (node:internal/test_runner/test:1208:7)\n      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3) {\n    generatedMessage: false,\n    code: 'ERR_ASSERTION',\n    actual: undefined,\n    expected: /temporary provider failure/,\n    operator: 'rejects',\n    diff: 'simple'\n  }",
+        "passed": false,
+        "runner": "node_test",
+        "test_files": [
+          "tests/hidden-singleflight.test.ts",
+          "tests/public.test.ts"
+        ]
+      },
+      "baseline_public_tests": {
+        "duration_ms": 191,
+        "exit_code": 0,
+        "output": "\u00e2\u0153\u201d concurrent successful loads share one provider call (15.0862ms)\n\u00e2\u201e\u00b9 tests 1\n\u00e2\u201e\u00b9 suites 0\n\u00e2\u201e\u00b9 pass 1\n\u00e2\u201e\u00b9 fail 0\n\u00e2\u201e\u00b9 cancelled 0\n\u00e2\u201e\u00b9 skipped 0\n\u00e2\u201e\u00b9 todo 0\n\u00e2\u201e\u00b9 duration_ms 133.7378",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/public.test.ts"
+        ]
+      },
+      "case_id": "ts-singleflight-401",
+      "changed_files": [
+        "src/user_service.ts"
+      ],
+      "checks": {
+        "baseline_hidden_failure": true,
+        "diagnosis": true,
+        "file_selection": false,
+        "hidden_tests": false,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "diagnosis_dimension": "state",
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-2",
+            "operator-3",
+            "source-2",
+            "source-4",
+            "probe-default-repo-state"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "state"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing state changes or restores the outcome.",
+            "experiment_id": "isolate-state",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by state drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-2",
+              "operator-3",
+              "source-2",
+              "source-4",
+              "probe-default-repo-state"
+            ]
+          }
+        ],
+        "problem_statement": "Concurrent successful user loads should share one provider call. In production, a temporary provider failure is converted to a fallback and permanently poisons later loads for the same key. The caller must observe the original failure, and a later retry must be allowed to start fresh while successful in-flight requests remain coalesced.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "baseline_drift": [],
+        "case_id": "ts-singleflight-401",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by state drift.",
+          "confidence": 0.6825,
+          "dimension": "state",
+          "evidence_ids": [
+            "operator-2",
+            "operator-3",
+            "source-2",
+            "source-4",
+            "probe-default-repo-state"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.6825,
+            "confirmatory_weight": 1.5,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-2",
+              "operator-3",
+              "source-2",
+              "source-4",
+              "probe-default-repo-state"
+            ],
+            "support_weight": 2.15
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-state",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_status": "confirmed",
+      "duration_ms": 147148,
+      "hidden_tests": {
+        "duration_ms": 293,
+        "exit_code": 1,
+        "output": "\u00e2\u0153\u2013 failed operation is observable and does not poison retry (1.1752ms)\n\u00e2\u0153\u201d concurrent successful loads share one provider call (19.9903ms)\n\u00e2\u201e\u00b9 tests 2\n\u00e2\u201e\u00b9 suites 0\n\u00e2\u201e\u00b9 pass 1\n\u00e2\u201e\u00b9 fail 1\n\u00e2\u201e\u00b9 cancelled 0\n\u00e2\u201e\u00b9 skipped 0\n\u00e2\u201e\u00b9 todo 0\n\u00e2\u201e\u00b9 duration_ms 230.2217\n\n\u00e2\u0153\u2013 failing tests:\n\ntest at tests\\hidden-singleflight.test.ts:7:1\n\u00e2\u0153\u2013 failed operation is observable and does not poison retry (1.1752ms)\n  Error: temporary provider failure\n      at provider (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-ts-singleflight-401-st6i4_sh/repo/tests/hidden-singleflight.test.ts:12:28)\n      at singleFlight (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-ts-singleflight-401-st6i4_sh/repo/src/inflight.ts:9:21)\n      at loadUser (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-ts-singleflight-401-st6i4_sh/repo/src/user_service.ts:8:18)\n      at file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-ts-singleflight-401-st6i4_sh/repo/tests/hidden-singleflight.test.ts:15:30\n      at waitForActual (node:assert:632:21)\n      at strict.rejects (node:assert:769:31)\n      at TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-ts-singleflight-401-st6i4_sh/repo/tests/hidden-singleflight.test.ts:15:16)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1201:25)\n      at Test.start (node:internal/test_runner/test:1096:17)",
+        "passed": false,
+        "runner": "node_test",
+        "test_files": [
+          "tests/hidden-singleflight.test.ts",
+          "tests/public.test.ts"
+        ]
+      },
+      "language": "typescript",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 18223,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"Concurrent successful user loads should share one provider call. In production, a temporary provider failure is converted to a fallback and permanently poisons later loads for the same key. The caller must observe the original failure, and a later retry must be allowed to start fresh while successful in-flight requests remain coalesced.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by state drift.\",\n      \"dimension\":\"state\",\n      \"support_evidence_ids\":[\"operator-2\",\"operator-3\",\"source-2\",\"source-4\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing state does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-state\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"state\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"dependency\",\"config\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing state changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"provisional\",\n    \"evidence_ids\":[\"operator-2\",\"operator-3\",\"source-2\",\"source-4\"],\n    \"reason\":\"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 380,
+          "wall_ms": 18223
+        },
+        {
+          "error": null,
+          "latency_ms": 24799,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"Concurrent successful user loads should share one provider call. In production, a temporary provider failure is converted to a fallback and permanently poisons later loads for the same key. The caller must observe the original failure, and a later retry must be allowed to start fresh while successful in-flight requests remain coalesced.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by state drift.\",\n      \"dimension\":\"state\",\n      \"support_evidence_ids\":[\"operator-2\",\"operator-3\",\"source-2\",\"source-4\",\"probe-default-repo-state\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing state does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-state\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"state\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing state changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\"\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"provisional\",\n    \"evidence_ids\":[\"operator-2\",\"operator-3\",\"source-2\",\"source-4\",\"probe-default-repo-state\"],\n    \"reason\":\"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 378,
+          "wall_ms": 24799
+        },
+        {
+          "error": null,
+          "latency_ms": 10703,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The issue arises because the fallback mechanism in `src/user_service.ts` does not properly handle state drift. When a provider fails, it permanently poisons future requests for the same key, preventing retries and coalescing of successful in-flight requests.\",\n  \"files\": [\n    {\n      \"path\": \"src/user_service.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `loadUser` function to handle state drift by resetting the flight map when a fallback is returned.\"\n    },\n    {\n      \"path\": \"src/inflight.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the `resetFlights` function is called when a fallback is returned in `loadUser` to prevent permanent poisoning of future requests.\"\n    }\n  ],\n  \"notes\": \"This change ensures that the system can recover from temporary provider failures and allow retries for successful in-flight requests while coalescing them.\"\n}",
+          "stage": "plan",
+          "tokens_out": 198,
+          "wall_ms": 10703
+        },
+        {
+          "error": null,
+          "latency_ms": 8271,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nimport { singleFlight } from './inflight.ts';\n\nexport async function loadUser(\n  key: string,\n  provider: () => Promise<string>,\n): Promise<string> {\n  try {\n    return await singleFlight(key, provider);\n  } catch {\n    return 'fallback';\n  }\n}\n=======\nimport { singleFlight, resetFlights } from './inflight.ts';\n\nexport async function loadUser(\n  key: string,\n  provider: () => Promise<string>,\n): Promise<string> {\n  try {\n    return await singleFlight(key, provider);\n  } catch {\n    resetFlights();\n    return 'fallback';\n  }\n}\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 138,
+          "wall_ms": 8271
+        },
+        {
+          "error": null,
+          "latency_ms": 9409,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nconst pending = new Map<string, Promise<string>>();\n\nexport function singleFlight(\n  key: string,\n  task: () => Promise<string>,\n): Promise<string> {\n  const existing = pending.get(key);\n  if (existing) return existing;\n  const operation = task();\n  pending.set(key, operation);\n  return operation;\n}\n\nexport function resetFlights(): void {\n  pending.clear();\n}\n=======\nconst pending = new Map<string, Promise<string>>();\n\nexport function singleFlight(\n  key: string,\n  task: () => Promise<string>,\n): Promise<string> {\n  const existing = pending.get(key);\n  if (existing) return existing;\n  const operation = task();\n  pending.set(key, operation);\n  return operation;\n}\n\nexport function resetFlights(): void {\n  pending.clear();\n}\n>>>>>>> REPLACE\n```",
+          "stage": "edit_2",
+          "tokens_out": 171,
+          "wall_ms": 9409
+        },
+        {
+          "error": null,
+          "latency_ms": 8342,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The failure indicates that the fallback mechanism is not properly handling temporary provider failures, leading to a permanent poisoning of later loads. The issue arises because the catch block in loadUser does not rethrow the error, preventing retries.\",\n  \"files\": [\n    {\n      \"path\": \"src/user_service.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the catch block in loadUser to rethrow the error instead of returning a fallback. This allows retries and prevents permanent poisoning.\"\n    }\n  ],\n  \"notes\": \"Ensure that the singleFlight mechanism is correctly handling concurrent requests and that the fallback does not interfere with retry logic.\"\n}",
+          "stage": "repair_plan_1",
+          "tokens_out": 138,
+          "wall_ms": 8342
+        },
+        {
+          "error": null,
+          "latency_ms": 8413,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The failure indicates that the fallback mechanism is not properly handling temporary provider failures, leading to a permanent poisoning of later loads. The issue arises because the catch block in loadUser does not rethrow the error, preventing retries.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Modify the catch block in loadUser to rethrow the error instead of returning a fallback. This allows retries and prevents permanent poisoning.\",\n      \"path\": \"src/user_service.ts\"\n    }\n  ],\n  \"notes\": \"Ensure that the singleFlight mechanism is correctly handling concurrent requests and that the fallback does not interfere with retry logic.\"\n}",
+          "stage": "repair_review_1",
+          "tokens_out": 138,
+          "wall_ms": 8413
+        },
+        {
+          "error": null,
+          "latency_ms": 3721,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    } catch {\n      return 'fallback';\n    }\n=======\n    } catch (error) {\n      throw error;\n    }\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_1",
+          "tokens_out": 35,
+          "wall_ms": 3721
+        },
+        {
+          "error": null,
+          "latency_ms": 10852,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The failure indicates that the retry mechanism is not functioning as expected, leading to a permanent poisoning of later loads for the same key. The issue arises from the catch block in loadUser, which throws the error instead of handling it appropriately.\",\n  \"files\": [\n    {\n      \"path\": \"src/user_service.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the catch block to handle temporary provider failures by returning a fallback value and allowing retries.\"\n    },\n    {\n      \"path\": \"src/inflight.ts\",\n      \"action\": \"review\",\n      \"description\": \"Review the singleFlight implementation to ensure it correctly handles concurrent requests and does not poison later loads for the same key.\"\n    }\n  ],\n  \"notes\": \"Ensure that the retry mechanism is properly implemented in loadUser, allowing retries after a temporary provider failure without poisoning later loads. Consider adding logging or telemetry to monitor the behavior of the system under different conditions.\"\n}",
+          "stage": "repair_plan_2",
+          "tokens_out": 200,
+          "wall_ms": 10852
+        },
+        {
+          "error": null,
+          "latency_ms": 11328,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The failure indicates that the retry mechanism is not functioning as expected, leading to a permanent poisoning of later loads for the same key. The issue arises from the catch block in loadUser, which throws the error instead of handling it appropriately.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Modify the catch block to handle temporary provider failures by returning a fallback value and allowing retries.\",\n      \"path\": \"src/user_service.ts\"\n    },\n    {\n      \"action\": \"review\",\n      \"description\": \"Review the singleFlight implementation to ensure it correctly handles concurrent requests and does not poison later loads for the same key.\",\n      \"path\": \"src/inflight.ts\"\n    }\n  ],\n  \"notes\": \"Ensure that the retry mechanism is properly implemented in loadUser, allowing retries after a temporary provider failure without poisoning later loads. Consider adding logging or telemetry to monitor the behavior of the system under different conditions.\"\n}",
+          "stage": "repair_review_2",
+          "tokens_out": 200,
+          "wall_ms": 11328
+        },
+        {
+          "error": null,
+          "latency_ms": 4890,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    } catch (error) {\n      throw error;\n    }\n=======\n    } catch (error) {\n      return 'fallback';\n    }\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_2_1",
+          "tokens_out": 38,
+          "wall_ms": 4890
+        },
+        {
+          "error": null,
+          "latency_ms": 8934,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The previous patch failed validation because it did not handle the expected rejection from the provider function. The failure was confirmed to be primarily caused by state drift, as indicated by the diagnostic evidence gate.\",\n  \"files\": [\n    {\n      \"path\": \"src/user_service.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the provider function's rejection is properly handled and propagated.\"\n    },\n    {\n      \"path\": \"src/inflight.ts\",\n      \"action\": \"review\",\n      \"description\": \"Verify that the singleFlight implementation correctly handles concurrent requests and retries.\"\n    }\n  ],\n  \"notes\": \"The selected files are src/user_service.ts and src/inflight.ts. The telemetry file is not required for this repair as it does not directly contribute to the issue at hand.\"\n}",
+          "stage": "repair_plan_3",
+          "tokens_out": 171,
+          "wall_ms": 8934
+        },
+        {
+          "error": null,
+          "latency_ms": 9936,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The previous patch failed validation because it did not handle the expected rejection from the provider function. The failure was confirmed to be primarily caused by state drift, as indicated by the diagnostic evidence gate.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the provider function's rejection is properly handled and propagated.\",\n      \"path\": \"src/user_service.ts\"\n    },\n    {\n      \"action\": \"review\",\n      \"description\": \"Verify that the singleFlight implementation correctly handles concurrent requests and retries.\",\n      \"path\": \"src/inflight.ts\"\n    }\n  ],\n  \"notes\": \"The selected files are src/user_service.ts and src/inflight.ts. The telemetry file is not required for this repair as it does not directly contribute to the issue at hand.\"\n}",
+          "stage": "repair_review_3",
+          "tokens_out": 171,
+          "wall_ms": 9936
+        },
+        {
+          "error": null,
+          "latency_ms": 5773,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n  try {\n    return await singleFlight(key, provider);\n  } catch (error) {\n    return 'fallback';\n  }\n=======\n  try {\n    return await singleFlight(key, provider);\n  } catch (error) {\n    throw error; // Propagate the original error to the caller\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_3_1",
+          "tokens_out": 72,
+          "wall_ms": 5773
+        }
+      ],
+      "patch_applied": true,
+      "patch_warnings": [
+        "Patch made no change.",
+        "Rolled back multi-file edit group after src/inflight.ts was rejected.",
+        "block 1: matched via whitespace/unicode normalization",
+        "block 1: matched via whitespace/unicode normalization"
+      ],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 191,
+        "exit_code": 0,
+        "output": "\u00e2\u0153\u201d concurrent successful loads share one provider call (19.4308ms)\n\u00e2\u201e\u00b9 tests 1\n\u00e2\u201e\u00b9 suites 0\n\u00e2\u201e\u00b9 pass 1\n\u00e2\u201e\u00b9 fail 0\n\u00e2\u201e\u00b9 cancelled 0\n\u00e2\u201e\u00b9 skipped 0\n\u00e2\u201e\u00b9 todo 0\n\u00e2\u201e\u00b9 duration_ms 134.5732",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/public.test.ts"
+        ]
+      },
+      "repair_attempts": [
+        {
+          "applied_files": [
+            "src/user_service.ts"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The failure indicates that the fallback mechanism is not properly handling temporary provider failures, leading to a permanent poisoning of later loads. The issue arises because the catch block in loadUser does not rethrow the error, preventing retries.",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Modify the catch block in loadUser to rethrow the error instead of returning a fallback. This allows retries and prevents permanent poisoning.",
+                "path": "src/user_service.ts"
+              }
+            ],
+            "notes": "Ensure that the singleFlight mechanism is correctly handling concurrent requests and that the fallback does not interfere with retry logic."
+          },
+          "round": 1,
+          "selected_file": "src/user_service.ts",
+          "selected_files": [
+            "src/user_service.ts"
+          ],
+          "warnings": [
+            "block 1: matched via whitespace/unicode normalization"
+          ]
+        },
+        {
+          "applied_files": [
+            "src/user_service.ts"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The failure indicates that the retry mechanism is not functioning as expected, leading to a permanent poisoning of later loads for the same key. The issue arises from the catch block in loadUser, which throws the error instead of handling it appropriately.",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Modify the catch block to handle temporary provider failures by returning a fallback value and allowing retries.",
+                "path": "src/user_service.ts"
+              },
+              {
+                "action": "review",
+                "description": "Review the singleFlight implementation to ensure it correctly handles concurrent requests and does not poison later loads for the same key.",
+                "path": "src/inflight.ts"
+              }
+            ],
+            "notes": "Ensure that the retry mechanism is properly implemented in loadUser, allowing retries after a temporary provider failure without poisoning later loads. Consider adding logging or telemetry to monitor the behavior of the system under different conditions."
+          },
+          "round": 2,
+          "selected_file": "src/user_service.ts",
+          "selected_files": [
+            "src/user_service.ts"
+          ],
+          "warnings": [
+            "block 1: matched via whitespace/unicode normalization"
+          ]
+        },
+        {
+          "applied_files": [
+            "src/user_service.ts"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The previous patch failed validation because it did not handle the expected rejection from the provider function. The failure was confirmed to be primarily caused by state drift, as indicated by the diagnostic evidence gate.",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Ensure that the provider function's rejection is properly handled and propagated.",
+                "path": "src/user_service.ts"
+              },
+              {
+                "action": "review",
+                "description": "Verify that the singleFlight implementation correctly handles concurrent requests and retries.",
+                "path": "src/inflight.ts"
+              }
+            ],
+            "notes": "The selected files are src/user_service.ts and src/inflight.ts. The telemetry file is not required for this repair as it does not directly contribute to the issue at hand."
+          },
+          "round": 3,
+          "selected_file": "src/user_service.ts",
+          "selected_files": [
+            "src/user_service.ts"
+          ],
+          "warnings": []
+        }
+      ],
+      "score": 65,
+      "selected_file": "src/user_service.ts",
+      "selected_files": [
+        "src/user_service.ts",
+        "src/inflight.ts"
+      ],
+      "split": "holdout-multifile-typescript",
+      "test_runner": "node_test"
+    }
+  ],
+  "created_at": "2026-07-11T13:27:40.767879+00:00",
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "holdout_case_count": 1,
+  "holdout_score": 65.0,
+  "max_repair_rounds": 3,
+  "model": "qwen2.5-coder:7b",
+  "multifile_holdout_case_count": 1,
+  "multifile_holdout_score": 65.0,
+  "overall_score": 65.0,
+  "premium_calls": 0,
+  "reference_family": "claude-fable-5",
+  "schema": "chili.diagnosis-to-fix-results.v2",
+  "verdict": "needs_improvement"
+}

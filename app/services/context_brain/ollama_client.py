@@ -36,6 +36,23 @@ _FALLBACK_OLLAMA_HOSTS = (
     "http://localhost:11434",
     "http://ollama:11434",
 )
+_LAST_WORKING_OLLAMA_HOST: Optional[str] = None
+
+
+def _candidate_hosts(base_url: Optional[str]) -> list[str]:
+    if base_url:
+        return [base_url]
+    ordered = [
+        _LAST_WORKING_OLLAMA_HOST,
+        _DEFAULT_OLLAMA_HOST,
+        *_FALLBACK_OLLAMA_HOSTS,
+    ]
+    hosts: list[str] = []
+    for value in ordered:
+        host = str(value or "").rstrip("/")
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts
 
 
 @dataclass
@@ -92,9 +109,8 @@ def chat(
         payload["keep_alive"] = str(options["keep_alive"])
     if options and options.get("format"):
         payload["format"] = str(options["format"])
-    bases = [base_url or _DEFAULT_OLLAMA_HOST]
-    if base_url is None:
-        bases.extend(host for host in _FALLBACK_OLLAMA_HOSTS if host not in bases)
+    global _LAST_WORKING_OLLAMA_HOST
+    bases = _candidate_hosts(base_url)
     errors: list[str] = []
     t0 = time.monotonic()
     for raw_base in bases:
@@ -102,6 +118,8 @@ def chat(
         url = f"{base}/api/chat"
         try:
             body = _post_json(url, payload, timeout=timeout_sec)
+            if base_url is None:
+                _LAST_WORKING_OLLAMA_HOST = base
             break
         except urllib.error.HTTPError as e:
             try:
@@ -144,8 +162,8 @@ def chat(
 
 def list_models(base_url: Optional[str] = None, timeout_sec: float = 5.0) -> list[str]:
     """Return list of locally-available model tags. Empty list on failure."""
-    bases = [base_url or _DEFAULT_OLLAMA_HOST]
-    bases.extend(host for host in _FALLBACK_OLLAMA_HOSTS if host not in bases)
+    global _LAST_WORKING_OLLAMA_HOST
+    bases = _candidate_hosts(base_url)
     for raw_base in bases:
         base = raw_base.rstrip("/")
         url = f"{base}/api/tags"
@@ -154,6 +172,8 @@ def list_models(base_url: Optional[str] = None, timeout_sec: float = 5.0) -> lis
                 body = json.loads(resp.read().decode("utf-8", errors="replace"))
             models = [str(m.get("name") or "") for m in (body.get("models") or []) if m.get("name")]
             if models:
+                if base_url is None:
+                    _LAST_WORKING_OLLAMA_HOST = base
                 return models
         except Exception:
             continue

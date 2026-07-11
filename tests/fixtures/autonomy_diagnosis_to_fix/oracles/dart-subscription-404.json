@@ -1,0 +1,8 @@
+{
+  "case_id": "dart-subscription-404",
+  "expected_dimension": "state",
+  "expected_files": ["lib/subscription.dart", "lib/worker.dart"],
+  "hidden_files": {
+    "tests/hidden_worker_test.dart": "import 'dart:async';\n\nimport '../lib/worker.dart';\n\nFuture<void> main() async {\n  final events = <String>[];\n  final controller = StreamController<String>(sync: true);\n  final worker = EventWorker(events.add);\n  worker.start(controller.stream);\n  controller.add('before');\n  await worker.stop();\n  controller.add('after');\n  await controller.close();\n  if (events.join(',') != 'before') {\n    throw StateError('stopped worker dispatched: ${events.join(',')}');\n  }\n  print('hidden worker contract passed');\n}\n"
+  }
+}

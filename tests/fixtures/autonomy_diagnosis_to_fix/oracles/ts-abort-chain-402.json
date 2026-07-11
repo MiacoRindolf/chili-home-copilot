@@ -1,0 +1,8 @@
+{
+  "case_id": "ts-abort-chain-402",
+  "expected_dimension": "dependency",
+  "expected_files": ["src/provider.ts", "src/retry.ts"],
+  "hidden_files": {
+    "tests/hidden-abort.test.ts": "import test from 'node:test';\nimport assert from 'node:assert/strict';\n\nimport { retryRequest } from '../src/retry.ts';\n\ntest('caller abort signal reaches adapter and is never retried', async () => {\n  const controller = new AbortController();\n  controller.abort();\n  let calls = 0;\n  const adapter = async (signal: AbortSignal) => {\n    calls += 1;\n    if (signal !== controller.signal) throw new Error('signal identity lost');\n    if (signal.aborted) {\n      const error = new Error('aborted');\n      error.name = 'AbortError';\n      throw error;\n    }\n    return 'unexpected';\n  };\n  await assert.rejects(\n    () => retryRequest(adapter, controller.signal),\n    (error: Error) => error.name === 'AbortError',\n  );\n  assert.equal(calls, 1);\n});\n"
+  }
+}

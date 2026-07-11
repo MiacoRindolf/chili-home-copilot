@@ -1,0 +1,654 @@
+{
+  "average_case_duration_ms": 247211.0,
+  "cases": [
+    {
+      "baseline_hidden_tests": {
+        "duration_ms": 212,
+        "exit_code": 1,
+        "output": "\u00e2\u0153\u2013 failed operation is observable and does not poison retry (1.3304ms)\n\u00e2\u0153\u201d concurrent successful loads share one provider call (12.0228ms)\n\u00e2\u201e\u00b9 tests 2\n\u00e2\u201e\u00b9 suites 0\n\u00e2\u201e\u00b9 pass 1\n\u00e2\u201e\u00b9 fail 1\n\u00e2\u201e\u00b9 cancelled 0\n\u00e2\u201e\u00b9 skipped 0\n\u00e2\u201e\u00b9 todo 0\n\u00e2\u201e\u00b9 duration_ms 144.4288\n\n\u00e2\u0153\u2013 failing tests:\n\ntest at tests\\hidden-singleflight.test.ts:7:1\n\u00e2\u0153\u2013 failed operation is observable and does not poison retry (1.3304ms)\n  AssertionError [ERR_ASSERTION]: Missing expected rejection.\n      at async TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-hidden-4kwbm_pd/repo/tests/hidden-singleflight.test.ts:15:3)\n      at async Test.run (node:internal/test_runner/test:1208:7)\n      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3) {\n    generatedMessage: false,\n    code: 'ERR_ASSERTION',\n    actual: undefined,\n    expected: /temporary provider failure/,\n    operator: 'rejects',\n    diff: 'simple'\n  }",
+        "passed": false,
+        "runner": "node_test",
+        "test_files": [
+          "tests/hidden-singleflight.test.ts",
+          "tests/public.test.ts"
+        ]
+      },
+      "baseline_public_tests": {
+        "duration_ms": 203,
+        "exit_code": 0,
+        "output": "\u00e2\u0153\u201d concurrent successful loads share one provider call (13.2412ms)\n\u00e2\u201e\u00b9 tests 1\n\u00e2\u201e\u00b9 suites 0\n\u00e2\u201e\u00b9 pass 1\n\u00e2\u201e\u00b9 fail 0\n\u00e2\u201e\u00b9 cancelled 0\n\u00e2\u201e\u00b9 skipped 0\n\u00e2\u201e\u00b9 todo 0\n\u00e2\u201e\u00b9 duration_ms 135.6251",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/public.test.ts"
+        ]
+      },
+      "case_id": "ts-singleflight-401",
+      "changed_files": [
+        "src/inflight.ts",
+        "src/user_service.ts"
+      ],
+      "checks": {
+        "baseline_hidden_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "hidden_tests": false,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "diagnosis_dimension": "state",
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-1",
+            "source-1",
+            "source-3",
+            "source-7",
+            "source-8"
+          ],
+          "hypothesis_id": "h-dependency",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "dependency"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing dependency changes or restores the outcome.",
+            "experiment_id": "isolate-dependency",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-dependency"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "state"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing state changes or restores the outcome.",
+            "experiment_id": "isolate-state",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-state"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "clock"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing clock changes or restores the outcome.",
+            "experiment_id": "isolate-clock",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-clock"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "code"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing code changes or restores the outcome.",
+            "experiment_id": "isolate-code",
+            "held_constant_dimensions": [
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-code"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h-dependency",
+            "support_evidence_ids": [
+              "operator-1",
+              "source-1",
+              "source-3",
+              "source-7",
+              "source-8"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by state drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h-state",
+            "support_evidence_ids": [
+              "operator-2",
+              "operator-3",
+              "source-2",
+              "source-4",
+              "probe-default-repo-state"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "support_evidence_ids": [
+              "source-5",
+              "source-6"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by code drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "support_evidence_ids": [
+              "probe-default-git-history"
+            ]
+          }
+        ],
+        "problem_statement": "Concurrent successful user loads should share one provider call. In production, a temporary provider failure is converted to a fallback and permanently poisons later loads for the same key. The caller must observe the original failure, and a later retry must be allowed to start fresh while successful in-flight requests remain coalesced.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "baseline_drift": [],
+        "case_id": "ts-singleflight-401",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by state drift.",
+          "confidence": 0.6825,
+          "dimension": "state",
+          "evidence_ids": [
+            "operator-2",
+            "operator-3",
+            "source-2",
+            "source-4",
+            "probe-default-repo-state"
+          ],
+          "hypothesis_id": "h-state",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [
+          "Failed per-key in-flight work must be evicted by the state owner; the original error remains observable, successful concurrent work stays coalesced, and retry must not await its own cached promise."
+        ],
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.697,
+            "confirmatory_weight": 1.65,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h-dependency",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-1",
+              "source-1",
+              "source-3",
+              "source-7",
+              "source-8"
+            ],
+            "support_weight": 2.3
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.6825,
+            "confirmatory_weight": 1.5,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h-state",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-2",
+              "operator-3",
+              "source-2",
+              "source-4",
+              "probe-default-repo-state"
+            ],
+            "support_weight": 2.15
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "confidence": 0.4737,
+            "confirmatory_weight": 0.9,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "source-5",
+              "source-6"
+            ],
+            "support_weight": 0.9
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.3939,
+            "confirmatory_weight": 0.65,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "probe-default-git-history"
+            ],
+            "support_weight": 0.65
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "dimension": "clock",
+            "experiment_id": "falsify-h-clock",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "dimension": "code",
+            "experiment_id": "falsify-h-code",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_status": "confirmed",
+      "duration_ms": 247211,
+      "hidden_tests": {
+        "duration_ms": 300,
+        "exit_code": 1,
+        "output": "\u00e2\u0153\u2013 failed operation is observable and does not poison retry (1.4373ms)\n\u00e2\u0153\u201d concurrent successful loads share one provider call (10.9316ms)\n\u00e2\u201e\u00b9 tests 2\n\u00e2\u201e\u00b9 suites 0\n\u00e2\u201e\u00b9 pass 1\n\u00e2\u201e\u00b9 fail 1\n\u00e2\u201e\u00b9 cancelled 0\n\u00e2\u201e\u00b9 skipped 0\n\u00e2\u201e\u00b9 todo 0\n\u00e2\u201e\u00b9 duration_ms 238.2854\n\n\u00e2\u0153\u2013 failing tests:\n\ntest at tests\\hidden-singleflight.test.ts:7:1\n\u00e2\u0153\u2013 failed operation is observable and does not poison retry (1.4373ms)\n  Error: temporary provider failure\n      at provider (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-ts-singleflight-401-5d7uentd/repo/tests/hidden-singleflight.test.ts:12:28)\n      at singleFlight (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-ts-singleflight-401-5d7uentd/repo/src/inflight.ts:15:23)\n      at loadUser (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-ts-singleflight-401-5d7uentd/repo/src/user_service.ts:7:24)\n      at file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-ts-singleflight-401-5d7uentd/repo/tests/hidden-singleflight.test.ts:15:30\n      at waitForActual (node:assert:632:21)\n      at strict.rejects (node:assert:769:31)\n      at TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-ts-singleflight-401-5d7uentd/repo/tests/hidden-singleflight.test.ts:15:16)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1201:25)\n      at Test.start (node:internal/test_runner/test:1096:17)",
+        "passed": false,
+        "runner": "node_test",
+        "test_files": [
+          "tests/hidden-singleflight.test.ts",
+          "tests/public.test.ts"
+        ]
+      },
+      "language": "typescript",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 22247,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"Concurrent successful user loads should share one provider call. In production, a temporary provider failure is converted to a fallback and permanently poisons later loads for the same key. The caller must observe the original failure, and a later retry must be allowed to start fresh while successful in-flight requests remain coalesced.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by state drift.\",\n      \"dimension\":\"state\",\n      \"support_evidence_ids\":[\"operator-2\",\"operator-3\",\"source-2\",\"source-4\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing state does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"x1\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"state\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing state changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"provisional\",\n    \"evidence_ids\":[\"operator-2\",\"operator-3\",\"source-2\",\"source-4\"],\n    \"reason\":\"Deterministic evidence gate selected a stronger supported competing hypothesis.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 375,
+          "wall_ms": 22247
+        },
+        {
+          "error": null,
+          "latency_ms": 47116,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"Concurrent successful user loads should share one provider call. In production, a temporary provider failure is converted to a fallback and permanently poisons later loads for the same key. The caller must observe the original failure, and a later retry must be allowed to start fresh while successful in-flight requests remain coalesced.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by state drift.\",\n      \"dimension\":\"state\",\n      \"support_evidence_ids\":[\"operator-2\",\"operator-3\",\"source-2\",\"source-4\",\"probe-default-repo-state\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing state does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-dependency\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"dependency\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"state\",\"config\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing dependency changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    },\n    {\n      \"experiment_id\":\"isolate-state\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"state\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing state changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    },\n    {\n      \"experiment_id\":\"isolate-clock\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"clock\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing clock changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    },\n    {\n      \"experiment_id\":\"isolate-code\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"code\"],\n      \"held_constant_dimensions\":[\"data\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing code changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"",
+          "stage": "diagnosis_judge",
+          "tokens_out": 650,
+          "wall_ms": 47116
+        },
+        {
+          "error": null,
+          "latency_ms": 14271,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The observed behavior is primarily caused by state drift in the `singleFlight` function. The `pending` map in `src/inflight.ts` does not properly handle temporary failures, leading to permanent poisoning of subsequent requests for the same key.\",\n  \"files\": [\n    {\n      \"path\": \"src/inflight.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that temporary failures are handled correctly and do not permanently poison the state.\"\n    },\n    {\n      \"path\": \"src/user_service.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the caller observes the original failure and is allowed to retry without awaiting its own cached promise.\"\n    }\n  ],\n  \"notes\": \"The `resetFlights` function should be called when a temporary failure occurs to reset the state for subsequent requests. The `singleFlight` function should also handle retries appropriately.\"\n}",
+          "stage": "plan",
+          "tokens_out": 190,
+          "wall_ms": 14271
+        },
+        {
+          "error": null,
+          "latency_ms": 15869,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nconst pending = new Map<string, Promise<string>>();\n\nexport function singleFlight(\n  key: string,\n  task: () => Promise<string>,\n): Promise<string> {\n  const existing = pending.get(key);\n  if (existing) return existing;\n  const operation = task();\n  pending.set(key, operation);\n  return operation;\n}\n\nexport function resetFlights(): void {\n  pending.clear();\n}\n=======\nconst pending = new Map<string, { promise: Promise<string>; error?: Error }>();\n\nexport async function singleFlight(\n  key: string,\n  task: () => Promise<string>,\n): Promise<string> {\n  const existing = pending.get(key);\n  if (existing) {\n    if (existing.error) throw existing.error;\n    return await existing.promise;\n  }\n  try {\n    const operation = task();\n    pending.set(key, { promise: operation });\n    return await operation;\n  } catch (error) {\n    pending.set(key, { error });\n    throw error;\n  }\n}\n\nexport function resetFlights(): void {\n  pending.clear();\n}\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 224,
+          "wall_ms": 15869
+        },
+        {
+          "error": null,
+          "latency_ms": 11287,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nimport { singleFlight } from './inflight.ts';\n\nexport async function loadUser(\n  key: string,\n  provider: () => Promise<string>,\n): Promise<string> {\n  try {\n    return await singleFlight(key, provider);\n  } catch {\n    return 'fallback';\n  }\n}\n=======\nimport { singleFlight } from './inflight.ts';\n\nexport async function loadUser(\n  key: string,\n  provider: () => Promise<string>,\n): Promise<string> {\n  const result = await singleFlight(key, provider);\n  if (result === 'fallback') {\n    throw new Error('Original failure');\n  }\n  return result;\n}\n>>>>>>> REPLACE\n```",
+          "stage": "edit_2",
+          "tokens_out": 140,
+          "wall_ms": 11287
+        },
+        {
+          "error": null,
+          "latency_ms": 14698,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The validation failure indicates that the temporary provider failure is not being observed and is instead being converted to a fallback, which poisons later loads for the same key. The retry mechanism is also not starting fresh as expected.\",\n  \"files\": [\n    {\n      \"path\": \"src/user_service.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the original failure is observed and that retries start fresh.\"\n    },\n    {\n      \"path\": \"src/inflight.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the singleFlight function to handle temporary provider failures correctly.\"\n    }\n  ],\n  \"notes\": \"The telemetry file is not directly related to the issue, so it will not be modified. The next experiments should focus on isolating the clock and code changes to confirm the root cause of the state drift.\"\n}",
+          "stage": "repair_plan_1",
+          "tokens_out": 181,
+          "wall_ms": 14698
+        },
+        {
+          "error": null,
+          "latency_ms": 13693,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The validation failure indicates that the temporary provider failure is not being observed and is instead being converted to a fallback, which poisons later loads for the same key. The retry mechanism is also not starting fresh as expected.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the original failure is observed and that retries start fresh.\",\n      \"path\": \"src/user_service.ts\"\n    },\n    {\n      \"action\": \"modify\",\n      \"description\": \"Modify the singleFlight function to handle temporary provider failures correctly.\",\n      \"path\": \"src/inflight.ts\"\n    }\n  ],\n  \"notes\": \"The telemetry file is not directly related to the issue, so it will not be modified. The next experiments should focus on isolating the clock and code changes to confirm the root cause of the state drift.\"\n}",
+          "stage": "repair_review_1",
+          "tokens_out": 181,
+          "wall_ms": 13693
+        },
+        {
+          "error": null,
+          "latency_ms": 6773,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n  if (result === 'fallback') {\n    throw new Error('Original failure');\n  }\n=======\n  if (result === 'fallback') {\n    throw new Error('Temporary provider failure');\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_1",
+          "tokens_out": 50,
+          "wall_ms": 6773
+        },
+        {
+          "error": null,
+          "latency_ms": 8411,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n  } catch (error) {\n    pending.set(key, { error });\n    throw error;\n  }\n=======\n  } catch (error) {\n    if (error instanceof TemporaryProviderFailure) {\n      pending.set(key, { promise: Promise.resolve('fallback') });\n      throw error;\n    }\n    pending.set(key, { error });\n    throw error;\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_2",
+          "tokens_out": 83,
+          "wall_ms": 8411
+        },
+        {
+          "error": null,
+          "latency_ms": 12351,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The validation failure indicates that the temporary provider failure is not being handled correctly. The error 'TemporaryProviderFailure' is not defined, which causes the test to fail.\",\n  \"files\": [\n    {\n      \"path\": \"src/inflight.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Add the definition for 'TemporaryProviderFailure' and ensure it is used correctly in the catch block.\"\n    },\n    {\n      \"path\": \"src/user_service.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the fallback logic does not throw an error, as this causes the test to fail.\"\n    }\n  ],\n  \"notes\": \"The 'TemporaryProviderFailure' error should be defined and used correctly in the catch block of the singleFlight function. The fallback logic in loadUser should return a fallback value without throwing an error.\"\n}",
+          "stage": "repair_plan_2",
+          "tokens_out": 183,
+          "wall_ms": 12351
+        },
+        {
+          "error": null,
+          "latency_ms": 10699,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The validation failure indicates that the temporary provider failure is not being handled correctly. The error 'TemporaryProviderFailure' is not defined, which causes the test to fail.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Add the definition for 'TemporaryProviderFailure' and ensure it is used correctly in the catch block.\",\n      \"path\": \"src/inflight.ts\"\n    }\n  ],\n  \"notes\": \"The 'TemporaryProviderFailure' error should be defined and used correctly in the catch block of the singleFlight function.\"\n}",
+          "stage": "repair_review_2",
+          "tokens_out": 122,
+          "wall_ms": 10699
+        },
+        {
+          "error": null,
+          "latency_ms": 23198,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nconst pending = new Map<string, { promise: Promise<string>; error?: Error }>();\n\nexport async function singleFlight(\n  key: string,\n  task: () => Promise<string>,\n): Promise<string> {\n  const existing = pending.get(key);\n  if (existing) {\n    if (existing.error) throw existing.error;\n    return await existing.promise;\n  }\n  try {\n    const operation = task();\n    pending.set(key, { promise: operation });\n    return await operation;\n  } catch (error) {\n    if (error instanceof TemporaryProviderFailure) {\n      pending.set(key, { promise: Promise.resolve('fallback') });\n      throw error;\n    }\n    pending.set(key, { error });\n    throw error;\n  }\n}\n\nexport function resetFlights(): void {\n  pending.clear();\n}\n=======\nconst pending = new Map<string, { promise: Promise<string>; error?: Error }>();\n\nclass TemporaryProviderFailure extends Error {}\n\nexport async function singleFlight(\n  key: string,\n  task: () => Promise<string>,\n): Promise<string> {\n  const existing = pending.get(key);\n  if (existing) {\n    if (existing.error) throw existing.error;\n    return await existing.promise;\n  }\n  try {\n    const operation = task();\n    pending.set(key, { promise: operation });\n    return await operation;\n  } catch (error) {\n    if (error instanceof TemporaryProviderFailure) {\n      pending.set(key, { promise: Promise.resolve('fallback') });\n      throw error;\n    }\n    pending.set(key, { error });\n    throw error;\n  }\n}\n\nexport function resetFlights(): void {\n  pending.clear();\n}\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_2_1",
+          "tokens_out": 344,
+          "wall_ms": 23198
+        },
+        {
+          "error": null,
+          "latency_ms": 12261,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The validation failure indicates that the temporary provider failure is not being observed and retrying is not starting fresh. The issue lies in how the fallback is handled and propagated.\",\n  \"files\": [\n    {\n      \"path\": \"src/user_service.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the fallback error is properly propagated to the caller, allowing retries.\"\n    },\n    {\n      \"path\": \"src/inflight.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Update the singleFlight function to handle temporary provider failures correctly and ensure that the original error remains observable.\"\n    }\n  ],\n  \"notes\": \"The telemetry file is not directly related to the issue, so it is not included in the patch. The changes should be made in src/user_service.ts and src/inflight.ts to address the validation failure.\"\n}",
+          "stage": "repair_plan_3",
+          "tokens_out": 181,
+          "wall_ms": 12261
+        },
+        {
+          "error": null,
+          "latency_ms": 12301,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The validation failure indicates that the temporary provider failure is not being observed and retrying is not starting fresh. The issue lies in how the fallback is handled and propagated.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the fallback error is properly propagated to the caller, allowing retries.\",\n      \"path\": \"src/user_service.ts\"\n    },\n    {\n      \"action\": \"modify\",\n      \"description\": \"Update the singleFlight function to handle temporary provider failures correctly and ensure that the original error remains observable.\",\n      \"path\": \"src/inflight.ts\"\n    }\n  ],\n  \"notes\": \"The telemetry file is not directly related to the issue, so it is not included in the patch. The changes should be made in src/user_service.ts and src/inflight.ts to address the validation failure.\"\n}",
+          "stage": "repair_review_3",
+          "tokens_out": 181,
+          "wall_ms": 12301
+        },
+        {
+          "error": null,
+          "latency_ms": 7253,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n  if (result === 'fallback') {\n    throw new Error('Temporary provider failure');\n  }\n=======\n  if (error instanceof TemporaryProviderFailure) {\n    throw error;\n  } else {\n    throw new Error('Temporary provider failure');\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_3_1",
+          "tokens_out": 60,
+          "wall_ms": 7253
+        },
+        {
+          "error": null,
+          "latency_ms": 10548,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    if (error instanceof TemporaryProviderFailure) {\n      pending.set(key, { promise: Promise.resolve('fallback') });\n      throw error;\n    }\n    pending.set(key, { error });\n    throw error;\n  }\n}\n\nexport function resetFlights(): void {\n  pending.clear();\n}\n=======\n    if (error instanceof TemporaryProviderFailure) {\n      pending.set(key, { promise: Promise.reject(error) });\n      throw error;\n    }\n    pending.set(key, { error });\n    throw error;\n  }\n}\n\nexport function resetFlights(): void {\n  pending.clear();\n}\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_3_2",
+          "tokens_out": 126,
+          "wall_ms": 10548
+        }
+      ],
+      "patch_applied": true,
+      "patch_warnings": [
+        "Rolled back repair because validation regressed below the prior best state."
+      ],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 187,
+        "exit_code": 0,
+        "output": "\u00e2\u0153\u201d concurrent successful loads share one provider call (15.3158ms)\n\u00e2\u201e\u00b9 tests 1\n\u00e2\u201e\u00b9 suites 0\n\u00e2\u201e\u00b9 pass 1\n\u00e2\u201e\u00b9 fail 0\n\u00e2\u201e\u00b9 cancelled 0\n\u00e2\u201e\u00b9 skipped 0\n\u00e2\u201e\u00b9 todo 0\n\u00e2\u201e\u00b9 duration_ms 133.9542",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/public.test.ts"
+        ]
+      },
+      "repair_attempts": [
+        {
+          "applied_files": [
+            "src/user_service.ts",
+            "src/inflight.ts"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The validation failure indicates that the temporary provider failure is not being observed and is instead being converted to a fallback, which poisons later loads for the same key. The retry mechanism is also not starting fresh as expected.",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Ensure that the original failure is observed and that retries start fresh.",
+                "path": "src/user_service.ts"
+              },
+              {
+                "action": "modify",
+                "description": "Modify the singleFlight function to handle temporary provider failures correctly.",
+                "path": "src/inflight.ts"
+              }
+            ],
+            "notes": "The telemetry file is not directly related to the issue, so it will not be modified. The next experiments should focus on isolating the clock and code changes to confirm the root cause of the state drift."
+          },
+          "round": 1,
+          "selected_file": "src/user_service.ts",
+          "selected_files": [
+            "src/user_service.ts",
+            "src/inflight.ts"
+          ],
+          "warnings": []
+        },
+        {
+          "applied_files": [
+            "src/inflight.ts"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The validation failure indicates that the temporary provider failure is not being handled correctly. The error 'TemporaryProviderFailure' is not defined, which causes the test to fail.",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Add the definition for 'TemporaryProviderFailure' and ensure it is used correctly in the catch block.",
+                "path": "src/inflight.ts"
+              }
+            ],
+            "notes": "The 'TemporaryProviderFailure' error should be defined and used correctly in the catch block of the singleFlight function."
+          },
+          "round": 2,
+          "selected_file": "src/inflight.ts",
+          "selected_files": [
+            "src/inflight.ts"
+          ],
+          "warnings": []
+        },
+        {
+          "applied_files": [
+            "src/user_service.ts",
+            "src/inflight.ts"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The validation failure indicates that the temporary provider failure is not being observed and retrying is not starting fresh. The issue lies in how the fallback is handled and propagated.",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Ensure that the fallback error is properly propagated to the caller, allowing retries.",
+                "path": "src/user_service.ts"
+              },
+              {
+                "action": "modify",
+                "description": "Update the singleFlight function to handle temporary provider failures correctly and ensure that the original error remains observable.",
+                "path": "src/inflight.ts"
+              }
+            ],
+            "notes": "The telemetry file is not directly related to the issue, so it is not included in the patch. The changes should be made in src/user_service.ts and src/inflight.ts to address the validation failure."
+          },
+          "rolled_back_after_validation": true,
+          "round": 3,
+          "selected_file": "src/user_service.ts",
+          "selected_files": [
+            "src/user_service.ts",
+            "src/inflight.ts"
+          ],
+          "validation_regression": {
+            "after_quality": 0,
+            "before_quality": 2
+          },
+          "warnings": [
+            "Rolled back repair because validation regressed below the prior best state."
+          ]
+        }
+      ],
+      "score": 80,
+      "selected_file": "",
+      "selected_files": [
+        "src/inflight.ts",
+        "src/user_service.ts"
+      ],
+      "split": "holdout-multifile-typescript",
+      "test_runner": "node_test"
+    }
+  ],
+  "created_at": "2026-07-11T13:35:48.029804+00:00",
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "holdout_case_count": 1,
+  "holdout_score": 80.0,
+  "max_repair_rounds": 3,
+  "model": "qwen2.5-coder:7b",
+  "multifile_holdout_case_count": 1,
+  "multifile_holdout_score": 80.0,
+  "overall_score": 80.0,
+  "premium_calls": 0,
+  "reference_family": "claude-fable-5",
+  "schema": "chili.diagnosis-to-fix-results.v2",
+  "verdict": "needs_improvement"
+}

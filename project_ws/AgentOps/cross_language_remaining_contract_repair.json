@@ -1,0 +1,592 @@
+{
+  "average_case_duration_ms": 56313.0,
+  "blinded_holdout_case_count": 0,
+  "blinded_holdout_score": null,
+  "cases": [
+    {
+      "baseline_hidden_tests": {
+        "duration_ms": 195,
+        "exit_code": 1,
+        "output": "\u00e2\u0153\u2013 caller abort signal reaches adapter and is never retried (1.4856ms)\n\u00e2\u0153\u201d normal provider success is returned without retry (0.8768ms)\n\u00e2\u201e\u00b9 tests 2\n\u00e2\u201e\u00b9 suites 0\n\u00e2\u201e\u00b9 pass 1\n\u00e2\u201e\u00b9 fail 1\n\u00e2\u201e\u00b9 cancelled 0\n\u00e2\u201e\u00b9 skipped 0\n\u00e2\u201e\u00b9 todo 0\n\u00e2\u201e\u00b9 duration_ms 135.7982\n\n\u00e2\u0153\u2013 failing tests:\n\ntest at tests\\hidden-abort.test.ts:6:1\n\u00e2\u0153\u2013 caller abort signal reaches adapter and is never retried (1.4856ms)\n  AssertionError [ERR_ASSERTION]: The validation function is expected to return \"true\". Received false\n  \n  Caught error:\n  \n  Error: signal identity lost\n      at async TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-hidden-app4w5i3/repo/tests/hidden-abort.test.ts:20:3)\n      at async Test.run (node:internal/test_runner/test:1208:7)\n      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: Error: signal identity lost\n        at adapter (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-hidden-app4w5i3/repo/tests/hidden-abort.test.ts:12:45)\n        at callProvider (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-hidden-app4w5i3/repo/src/provider.ts:8:10)\n        at retryRequest (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-hidden-app4w5i3/repo/src/retry.ts:10:20)\n        at async waitForActual (node:assert:646:5)\n        at async strict.rejects (node:assert:769:25)\n        at async TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-hidden-app4w5i3/repo/tests/hidden-abort.test.ts:20:3)\n        at async Test.run (node:internal/test_runner/test:1208:7)\n        at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3),\n    operator: 'rejects',\n    diff: 'simple'\n  }",
+        "passed": false,
+        "runner": "node_test",
+        "test_files": [
+          "tests/hidden-abort.test.ts",
+          "tests/public.test.ts"
+        ]
+      },
+      "baseline_public_tests": {
+        "duration_ms": 197,
+        "exit_code": 0,
+        "output": "\u00e2\u0153\u201d normal provider success is returned without retry (0.7388ms)\n\u00e2\u201e\u00b9 tests 1\n\u00e2\u201e\u00b9 suites 0\n\u00e2\u201e\u00b9 pass 1\n\u00e2\u201e\u00b9 fail 0\n\u00e2\u201e\u00b9 cancelled 0\n\u00e2\u201e\u00b9 skipped 0\n\u00e2\u201e\u00b9 todo 0\n\u00e2\u201e\u00b9 duration_ms 125.9118",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/public.test.ts"
+        ]
+      },
+      "case_id": "ts-abort-chain-402",
+      "changed_files": [
+        "src/provider.ts",
+        "src/retry.ts"
+      ],
+      "checks": {
+        "baseline_hidden_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "hidden_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "selected_files": [
+          "src/provider.ts",
+          "src/retry.ts"
+        ],
+        "warnings": []
+      },
+      "diagnosis_dimension": "dependency",
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-6",
+            "source-7",
+            "source-8",
+            "source-9"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "dependency"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing dependency changes or restores the outcome.",
+            "experiment_id": "isolate-dependency",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "unknown"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing unknown changes or restores the outcome.",
+            "experiment_id": "isolate-unknown",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h2"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "dependency",
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-4",
+              "source-6",
+              "source-7",
+              "source-8",
+              "source-9"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "unknown",
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "source-5"
+            ]
+          }
+        ],
+        "problem_statement": "An aborted provider request continues through a wrapper with a detached signal and is retried as though it were a transient dependency error. Preserve normal retry behavior, but propagate the caller's AbortSignal through the adapter and stop retrying immediately when the dependency reports AbortError.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "baseline_drift": [],
+        "case_id": "ts-abort-chain-402",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by dependency drift.",
+          "confidence": 0.7619,
+          "dimension": "dependency",
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-6",
+            "source-7",
+            "source-8",
+            "source-9"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [
+          "Propagate the caller's exact cancellation signal through every wrapper; cancellation is terminal for retries and must use existing platform error identity without invented dependencies."
+        ],
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by dependency drift.",
+            "confidence": 0.7619,
+            "confirmatory_weight": 2.55,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "dependency",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing dependency does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-4",
+              "source-6",
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "support_weight": 3.2
+          },
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "confidence": 0.4286,
+            "confirmatory_weight": 0.75,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "unknown",
+            "discriminating_evidence": false,
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h2",
+            "status": "provisional",
+            "support_evidence_ids": [
+              "source-5"
+            ],
+            "support_weight": 0.75
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "dimension": "unknown",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-dependency",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_status": "confirmed",
+      "duration_ms": 50198,
+      "evaluation_role": "development_regression",
+      "hidden_tests": {
+        "duration_ms": 190,
+        "exit_code": 0,
+        "output": "\u00e2\u0153\u201d caller abort signal reaches adapter and is never retried (1.312ms)\n\u00e2\u0153\u201d normal provider success is returned without retry (1.083ms)\n\u00e2\u201e\u00b9 tests 2\n\u00e2\u201e\u00b9 suites 0\n\u00e2\u201e\u00b9 pass 2\n\u00e2\u201e\u00b9 fail 0\n\u00e2\u201e\u00b9 cancelled 0\n\u00e2\u201e\u00b9 skipped 0\n\u00e2\u201e\u00b9 todo 0\n\u00e2\u201e\u00b9 duration_ms 128.0542",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/hidden-abort.test.ts",
+          "tests/public.test.ts"
+        ]
+      },
+      "language": "typescript",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 28215,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"An aborted provider request continues through a wrapper with a detached signal and is retried as though it were a transient dependency error. Preserve normal retry behavior, but propagate the caller's AbortSignal through the adapter and stop retrying immediately when the dependency reports AbortError.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by dependency drift.\",\n      \"dimension\":\"dependency\",\n      \"support_evidence_ids\":[\"operator-1\",\"operator-2\",\"source-1\",\"source-2\",\"source-3\",\"source-4\",\"source-6\",\"source-7\",\"source-8\",\"source-9\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing dependency does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\":\"h2\",\n      \"claim\":\"The observed failure is primarily caused by unknown drift.\",\n      \"dimension\":\"unknown\",\n      \"support_evidence_ids\":[\"source-5\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing unknown does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"isolate-dependency\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"dependency\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"state\",\"config\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing dependency changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    },\n    {\n      \"experiment_id\":\"isolate-unknown\",\n      \"hypothesis_ids\":[\"h2\"],\n      \"changed_dimensions\":[\"unknown\"],\n      \"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing unknown changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"confirmed\",\n    \"evidence_ids\":[\"operator-1\",\"operator-2\",\"source-1\",\"source-2\",\"source-3\",\"source-4\",\"source-6\",\"source-7\",\"source-8\",\"source-9\"],\n    \"reason\":\"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 624,
+          "wall_ms": 28215
+        },
+        {
+          "error": null,
+          "latency_ms": 9929,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The issue arises because the `callProvider` function in `src/provider.ts` uses a detached `AbortSignal`, which prevents the caller's signal from being propagated. This leads to retries continuing even when the original request was aborted.\",\n  \"files\": [\n    {\n      \"path\": \"src/provider.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `callProvider` function to use the provided `AbortSignal` instead of a detached one.\"\n    },\n    {\n      \"path\": \"src/retry.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the `retryRequest` function propagates the caller's `AbortSignal` through the adapter and stops retrying immediately when an `AbortError` is reported.\"\n    }\n  ],\n  \"notes\": \"This change ensures that the cancellation signal is propagated correctly, allowing retries to be stopped immediately when the dependency reports an abort error. The existing platform error identity will be used without inventing new dependencies.\"\n}",
+          "stage": "plan",
+          "tokens_out": 211,
+          "wall_ms": 9930
+        },
+        {
+          "error": null,
+          "latency_ms": 3476,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n  const detached = new AbortController();\n  return adapter(detached.signal);\n=======\n  return adapter(signal);\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 31,
+          "wall_ms": 3476
+        },
+        {
+          "error": null,
+          "latency_ms": 6236,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n      return await callProvider(adapter, signal);\n    } catch (error) {\n      lastError = error;\n    }\n  }\n  throw lastError;\n}\n=======\n      try {\n        return await adapter(signal);\n      } catch (error) {\n        if (error.name === 'AbortError') {\n          throw error;\n        }\n        lastError = error;\n      }\n    }\n  }\n  throw lastError;\n}\n>>>>>>> REPLACE\n```",
+          "stage": "edit_2",
+          "tokens_out": 94,
+          "wall_ms": 6236
+        }
+      ],
+      "patch_applied": true,
+      "patch_warnings": [
+        "Rolled back initial patch because validation regressed below the sealed baseline."
+      ],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 178,
+        "exit_code": 0,
+        "output": "\u00e2\u0153\u201d normal provider success is returned without retry (0.9474ms)\n\u00e2\u201e\u00b9 tests 1\n\u00e2\u201e\u00b9 suites 0\n\u00e2\u201e\u00b9 pass 1\n\u00e2\u201e\u00b9 fail 0\n\u00e2\u201e\u00b9 cancelled 0\n\u00e2\u201e\u00b9 skipped 0\n\u00e2\u201e\u00b9 todo 0\n\u00e2\u201e\u00b9 duration_ms 123.2278",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/public.test.ts"
+        ]
+      },
+      "repair_attempts": [],
+      "score": 100,
+      "selected_file": "",
+      "selected_files": [
+        "src/provider.ts",
+        "src/retry.ts"
+      ],
+      "split": "holdout-multifile-typescript",
+      "test_runner": "node_test"
+    },
+    {
+      "baseline_hidden_tests": {
+        "duration_ms": 629,
+        "exit_code": 1,
+        "output": "F\n================================== FAILURES ===================================\n_______________ test_multiple_children_are_not_cross_multiplied _______________\n\n    def test_multiple_children_are_not_cross_multiplied():\n        connection = sqlite3.connect(':memory:')\n        connection.executescript(Path('schema.sql').read_text(encoding='utf-8'))\n        connection.execute(\"INSERT INTO orders VALUES (1, 'acct')\")\n        connection.executemany('INSERT INTO fills VALUES (?, 1, ?)', [(1, 2), (2, 3)])\n        connection.executemany('INSERT INTO fees VALUES (?, 1, ?)', [(1, 0.5), (2, 1.0)])\n        row = connection.execute(Path('report.sql').read_text(encoding='utf-8')).fetchone()\n>       assert row == ('acct', 5, 1.5)\nE       AssertionError: assert ('acct', 10, 3.0) == ('acct', 5, 1.5)\nE         \nE         At index 1 diff: 10 != 5\nE         Use -v to get more diff\n\ntests\\test_hidden_join_aggregate.py:12: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_hidden_join_aggregate.py::test_multiple_children_are_not_cross_multiplied\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed in 0.07s",
+        "passed": false,
+        "runner": "pytest"
+      },
+      "baseline_public_tests": {
+        "duration_ms": 469,
+        "exit_code": 0,
+        "output": ".                                                                        [100%]\n1 passed in 0.02s",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "case_id": "sql-join-aggregate-406",
+      "changed_files": [
+        "report.sql"
+      ],
+      "checks": {
+        "baseline_hidden_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "hidden_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": true,
+        "patch_applied": true,
+        "selected_files": [
+          "report.sql"
+        ],
+        "warnings": []
+      },
+      "diagnosis_dimension": "data",
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-2",
+            "source-1",
+            "source-4",
+            "source-5",
+            "probe-default-fixed-search"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing data changes or restores the outcome.",
+            "experiment_id": "x1",
+            "held_constant_dimensions": [
+              "code",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "operator-2",
+              "source-1",
+              "source-4",
+              "source-5",
+              "probe-default-fixed-search"
+            ]
+          }
+        ],
+        "problem_statement": "An account report is correct when each order has one fill and one fee, but overstates both quantity and fees when either side has multiple child rows. Repair the query so independent one-to-many relationships are aggregated without a Cartesian multiplication.",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "baseline_drift": [],
+        "case_id": "sql-join-aggregate-406",
+        "conclusion": {
+          "claim": "The observed failure is primarily caused by data drift.",
+          "confidence": 0.7101,
+          "dimension": "data",
+          "evidence_ids": [
+            "operator-2",
+            "source-1",
+            "source-4",
+            "source-5",
+            "probe-default-fixed-search"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "confirmed"
+        },
+        "contract_invariants": [
+          "Aggregate each independent child relation to its parent key before joining sibling one-to-many data."
+        ],
+        "decision": "patch_root_cause",
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "blockers": [],
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.7101,
+            "confirmatory_weight": 1.8,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "discriminating_evidence": true,
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h1",
+            "status": "supported",
+            "support_evidence_ids": [
+              "operator-2",
+              "source-1",
+              "source-4",
+              "source-5",
+              "probe-default-fixed-search"
+            ],
+            "support_weight": 2.45
+          }
+        ],
+        "next_experiments": [],
+        "premium_calls": 0,
+        "retractions": [
+          {
+            "hypothesis_id": "h-data",
+            "new_status": "superseded",
+            "previous_status": "confirmed",
+            "reason": "New counter-evidence or a stronger competing explanation invalidated the earlier conclusion."
+          }
+        ],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_status": "confirmed",
+      "duration_ms": 62428,
+      "evaluation_role": "development_regression",
+      "hidden_tests": {
+        "duration_ms": 493,
+        "exit_code": 0,
+        "output": "..                                                                       [100%]\n2 passed in 0.02s",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "language": "sql",
+      "model_calls": [
+        {
+          "error": null,
+          "latency_ms": 20849,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"An account report is correct when each order has one fill and one fee, but overstates both quantity and fees when either side has multiple child rows. Repair the query so independent one-to-many relationships are aggregated without a Cartesian multiplication.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by data drift.\",\n      \"dimension\":\"data\",\n      \"support_evidence_ids\":[\"operator-2\",\"source-1\",\"source-4\",\"source-5\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing data does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"x1\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"data\"],\n      \"held_constant_dimensions\":[\"code\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing data changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"provisional\",\n    \"evidence_ids\":[\"operator-2\",\"source-1\",\"source-4\",\"source-5\"],\n    \"reason\":\"Deterministic evidence gate selected a stronger supported competing hypothesis.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 361,
+          "wall_ms": 20849
+        },
+        {
+          "error": null,
+          "latency_ms": 24085,
+          "ok": true,
+          "response": "{\n  \"schema\":\"chili.diagnostic-packet.v1\",\n  \"problem_statement\":\"An account report is correct when each order has one fill and one fee, but overstates both quantity and fees when either side has multiple child rows. Repair the query so independent one-to-many relationships are aggregated without a Cartesian multiplication.\",\n  \"hypotheses\":[\n    {\n      \"hypothesis_id\":\"h1\",\n      \"claim\":\"The observed failure is primarily caused by data drift.\",\n      \"dimension\":\"data\",\n      \"support_evidence_ids\":[\"operator-2\",\"source-1\",\"source-4\",\"source-5\",\"probe-default-fixed-search\"],\n      \"contradict_evidence_ids\":[],\n      \"falsification\":\"Hold every other dimension constant and show that changing data does not change the outcome.\"\n    }\n  ],\n  \"experiments\":[\n    {\n      \"experiment_id\":\"x1\",\n      \"hypothesis_ids\":[\"h1\"],\n      \"changed_dimensions\":[\"data\"],\n      \"held_constant_dimensions\":[\"code\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\n      \"expected_if_true\":\"Changing data changes or restores the outcome.\",\n      \"expected_if_false\":\"The outcome remains unchanged.\",\n      \"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\n      \"result_evidence_ids\":[],\n      \"safety\":\"isolated\",\n      \"status\":\"planned\",\n      \"auto_execute\":false,\n      \"probe\":{}\n    }\n  ],\n  \"conclusion\":{\n    \"hypothesis_id\":\"h1\",\n    \"status\":\"provisional\",\n    \"evidence_ids\":[\"operator-2\",\"source-1\",\"source-4\",\"source-5\",\"probe-default-fixed-search\"],\n    \"reason\":\"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 373,
+          "wall_ms": 24085
+        },
+        {
+          "error": null,
+          "latency_ms": 6344,
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The query is not aggregating the independent one-to-many relationships correctly, leading to a Cartesian multiplication. This results in overstatement of quantity and fees when an order has multiple child rows.\",\n  \"files\": [\n    {\n      \"path\": \"report.sql\",\n      \"action\": \"modify\",\n      \"description\": \"Aggregate each independent child relation (fills and fees) to its parent key (order_id) before joining sibling one-to-many data.\"\n    }\n  ],\n  \"notes\": \"The schema does not need modification as it correctly defines the relationships. The issue lies in how these relationships are being aggregated in the query.\"\n}",
+          "stage": "plan",
+          "tokens_out": 134,
+          "wall_ms": 6344
+        },
+        {
+          "error": null,
+          "latency_ms": 5612,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nLEFT JOIN fills ON fills.order_id = orders.id\nLEFT JOIN fees ON fees.order_id = orders.id\n=======\nLEFT JOIN (SELECT order_id, SUM(quantity) AS total_quantity FROM fills GROUP BY order_id) fills ON fills.order_id = orders.id\nLEFT JOIN (SELECT order_id, SUM(amount) AS total_fees FROM fees GROUP BY order_id) fees ON fees.order_id = orders.id\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 92,
+          "wall_ms": 5612
+        }
+      ],
+      "patch_applied": true,
+      "patch_warnings": [
+        "Rolled back initial patch because validation regressed below the sealed baseline."
+      ],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 541,
+        "exit_code": 0,
+        "output": ".                                                                        [100%]\n1 passed in 0.02s",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "repair_attempts": [],
+      "score": 100,
+      "selected_file": "report.sql",
+      "selected_files": [
+        "report.sql"
+      ],
+      "split": "holdout-sql",
+      "test_runner": "pytest"
+    }
+  ],
+  "created_at": "2026-07-11T14:58:14.576658+00:00",
+  "development_regression_case_count": 2,
+  "development_regression_score": 100.0,
+  "evaluation_verdict": "development_regression_passed",
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "holdout_case_count": 2,
+  "holdout_score": 100.0,
+  "max_repair_rounds": 3,
+  "model": "qwen2.5-coder:7b",
+  "multifile_holdout_case_count": 1,
+  "multifile_holdout_score": 100.0,
+  "overall_score": 100.0,
+  "premium_calls": 0,
+  "reference_family": "claude-fable-5",
+  "schema": "chili.diagnosis-to-fix-results.v2",
+  "verdict": "shadow_ready"
+}

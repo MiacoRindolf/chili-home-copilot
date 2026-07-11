@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from ..coding_task.envelope import subprocess_safe_env
+from ..coding_task.validator_runner import run_ast_syntax
 from . import diagnostic_runtime_evidence
 
 
@@ -675,21 +676,30 @@ def _execute_one(
             copied: list[str] = []
             for rel in paths:
                 source = _safe_repo_path(root, rel)
-                if source is None or not source.is_file() or source.suffix.lower() != ".py":
+                if source is None or not source.is_file():
                     continue
                 target = temp_root / rel
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, target)
-                copied.append(str(target))
+                copied.append(rel)
             if not copied:
-                code, output = 2, "Compile probe has no existing Python files."
+                code, output = 2, "Compile probe has no existing source files."
             else:
-                code, output, _ = _run(
-                    [sys.executable, "-m", "py_compile", *copied],
-                    cwd=temp_root,
-                    timeout_sec=timeout_sec,
+                syntax = run_ast_syntax(temp_root, changed_files=copied)
+                validated = (
+                    syntax.metadata.get("changed_files")
+                    if isinstance(syntax.metadata, Mapping)
+                    else []
                 )
-                output = output or f"Compiled {len(copied)} Python file(s) successfully."
+                if not validated:
+                    code, output = 2, "Compile probe has no supported source files."
+                else:
+                    code = int(syntax.exit_code)
+                    output = "\n".join(
+                        value
+                        for value in (syntax.stdout, syntax.stderr)
+                        if str(value).strip()
+                    )
         duration_ms = int((time.monotonic() - started) * 1000)
     elif kind == "targeted_test":
         started = time.monotonic()

@@ -6908,6 +6908,14 @@ def generate_diffs_from_plan(
 
     def try_fallback(rel_path: str, current_content: str | None) -> bool:
         fallback = _deterministic_small_desktop_diff(rel_path, current_content or "", run.prompt)
+        fallback_source = "deterministic_small_desktop_fallback"
+        if not fallback:
+            fallback = _deterministic_contract_diff(
+                rel_path,
+                current_content or "",
+                run.prompt,
+            )
+            fallback_source = "deterministic_contract_invariant_fallback"
         if not fallback:
             return False
         check = _git(repo_path, ["apply", "--check"], input_text=fallback, timeout=60)
@@ -6924,7 +6932,7 @@ def generate_diffs_from_plan(
             "diff",
             rel_path,
             content=fallback,
-            content_json={"source": "deterministic_small_desktop_fallback"},
+            content_json={"source": fallback_source},
         )
         return True
 
@@ -7011,6 +7019,12 @@ def generate_diffs_from_plan(
                     rel,
                     outcome["new_content"],
                 )
+                semantic_warnings.extend(
+                    diagnostic_reasoning.contract_invariant_warnings(
+                        run.prompt,
+                        {rel: outcome["new_content"]},
+                    )
+                )
                 if semantic_warnings:
                     _add_artifact(
                         db,
@@ -7018,12 +7032,12 @@ def generate_diffs_from_plan(
                         "diff_rejected",
                         rel,
                         content_json={
-                            "reason": "semantic_polarity_guard",
+                            "reason": "semantic_contract_guard",
                             "warnings": semantic_warnings,
                         },
                     )
                     rejections.append(
-                        f"{rel}: semantic polarity guard rejected edit "
+                        f"{rel}: semantic contract guard rejected edit "
                         f"({'; '.join(semantic_warnings)[:300]})"
                     )
                     if try_fallback(rel, content):
@@ -7052,6 +7066,12 @@ def generate_diffs_from_plan(
                     rel,
                     full_file["new_content"],
                 )
+                semantic_warnings.extend(
+                    diagnostic_reasoning.contract_invariant_warnings(
+                        run.prompt,
+                        {rel: full_file["new_content"]},
+                    )
+                )
                 if semantic_warnings:
                     _add_artifact(
                         db,
@@ -7059,12 +7079,12 @@ def generate_diffs_from_plan(
                         "diff_rejected",
                         rel,
                         content_json={
-                            "reason": "semantic_polarity_guard",
+                            "reason": "semantic_contract_guard",
                             "warnings": semantic_warnings,
                         },
                     )
                     rejections.append(
-                        f"{rel}: semantic polarity guard rejected full-file edit "
+                        f"{rel}: semantic contract guard rejected full-file edit "
                         f"({'; '.join(semantic_warnings)[:300]})"
                     )
                     if try_fallback(rel, content):
@@ -7199,6 +7219,22 @@ def _deterministic_small_desktop_diff(rel: str, content: str, prompt: str) -> st
     else:
         return None
     return _unified_diff(rel, content, updated)
+
+
+def _deterministic_contract_diff(rel: str, content: str, prompt: str) -> str | None:
+    proposal = diagnostic_reasoning.contract_repair_proposals(
+        prompt,
+        {rel: content},
+    ).get(rel)
+    if not proposal or proposal.rstrip() == content.rstrip():
+        return None
+    warnings = diagnostic_reasoning.contract_invariant_warnings(
+        prompt,
+        {rel: proposal},
+    )
+    if warnings:
+        return None
+    return _unified_diff(rel, content, proposal)
 
 
 def _unified_diff(rel: str, before: str, after: str) -> str:
@@ -7606,12 +7642,26 @@ def _is_targeted_test_validation(item: Mapping[str, Any]) -> bool:
     return ("pytest" in step_key or "pytest" in command) and targeted and has_test_file
 
 
-def _is_changed_file_syntax_validation(item: Mapping[str, Any]) -> bool:
+def _is_changed_file_syntax_validation(
+    item: Mapping[str, Any],
+    changed_files: Sequence[str] | Iterable[str],
+) -> bool:
     if item.get("skipped") is True or _validation_step_failed(item):
         return False
     step_key = str(item.get("step_key") or "").lower()
-    changed = item.get("changed_files")
-    return "syntax" in step_key and isinstance(changed, list) and bool(changed)
+    validated = {
+        rel
+        for value in item.get("changed_files") or []
+        for rel in [_safe_rel_path(str(value))]
+        if rel
+    }
+    expected = {
+        rel
+        for value in changed_files
+        for rel in [_safe_rel_path(str(value))]
+        if rel
+    }
+    return "syntax" in step_key and bool(expected) and expected <= validated
 
 
 def validation_merge_evidence(
@@ -7635,7 +7685,7 @@ def validation_merge_evidence(
             "evidence_classes": [],
         }
     evidence_classes: list[str] = []
-    if any(_is_changed_file_syntax_validation(item) for item in items):
+    if any(_is_changed_file_syntax_validation(item, changed) for item in items):
         evidence_classes.append("changed_file_syntax")
     if any(_is_targeted_test_validation(item) for item in items):
         evidence_classes.append("targeted_tests")

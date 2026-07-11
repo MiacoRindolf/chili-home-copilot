@@ -1,0 +1,8 @@
+{
+  "case_id": "sql-partial-unique-405",
+  "expected_dimension": "data",
+  "expected_file": "schema.sql",
+  "hidden_files": {
+    "tests/test_hidden_partial_unique.py": "import sqlite3\nfrom pathlib import Path\n\nimport pytest\n\n\ndef database():\n    connection = sqlite3.connect(':memory:')\n    connection.executescript(Path('schema.sql').read_text(encoding='utf-8'))\n    return connection\n\n\ndef test_duplicate_open_order_is_rejected():\n    connection = database()\n    connection.execute(\"INSERT INTO orders VALUES (1, 'acct', 'AAA', 'open')\")\n    with pytest.raises(sqlite3.IntegrityError):\n        connection.execute(\"INSERT INTO orders VALUES (2, 'acct', 'AAA', 'open')\")\n\n\ndef test_duplicate_closed_history_is_allowed():\n    connection = database()\n    connection.execute(\"INSERT INTO orders VALUES (1, 'acct', 'AAA', 'closed')\")\n    connection.execute(\"INSERT INTO orders VALUES (2, 'acct', 'AAA', 'closed')\")\n    assert connection.execute('SELECT count(*) FROM orders').fetchone()[0] == 2\n"
+  }
+}

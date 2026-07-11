@@ -1,0 +1,8 @@
+{
+  "case_id": "ts-singleflight-401",
+  "expected_dimension": "state",
+  "expected_files": ["src/inflight.ts", "src/user_service.ts"],
+  "hidden_files": {
+    "tests/hidden-singleflight.test.ts": "import test from 'node:test';\nimport assert from 'node:assert/strict';\n\nimport { resetFlights } from '../src/inflight.ts';\nimport { loadUser } from '../src/user_service.ts';\n\ntest('failed operation is observable and does not poison retry', async () => {\n  resetFlights();\n  let calls = 0;\n  const provider = async () => {\n    calls += 1;\n    if (calls === 1) throw new Error('temporary provider failure');\n    return 'recovered';\n  };\n  await assert.rejects(() => loadUser('u-2', provider), /temporary provider failure/);\n  const timeout = Symbol('timeout');\n  const retryResult = await Promise.race([\n    loadUser('u-2', provider),\n    new Promise((resolve) => setTimeout(() => resolve(timeout), 100)),\n  ]);\n  assert.notEqual(retryResult, timeout, 'retry must terminate instead of waiting on its own cached promise');\n  assert.equal(retryResult, 'recovered');\n  assert.equal(calls, 2);\n});\n"
+  }
+}

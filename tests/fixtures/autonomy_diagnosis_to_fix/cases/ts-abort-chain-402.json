@@ -1,0 +1,16 @@
+{
+  "schema": "chili.diagnosis-to-fix-case.v1",
+  "case_id": "ts-abort-chain-402",
+  "language": "typescript",
+  "test_runner": "node_test",
+  "prompt": "An aborted provider request continues through a wrapper with a detached signal and is retried as though it were a transient dependency error. Preserve normal retry behavior, but propagate the caller's AbortSignal through the adapter and stop retrying immediately when the dependency reports AbortError.",
+  "candidate_paths": ["src/provider.ts", "src/retry.ts", "src/metrics.ts"],
+  "max_files": 3,
+  "repo_files": {
+    "package.json": "{\"type\":\"module\"}\n",
+    "src/provider.ts": "export type ProviderAdapter = (signal: AbortSignal) => Promise<string>;\n\nexport async function callProvider(\n  adapter: ProviderAdapter,\n  signal: AbortSignal,\n): Promise<string> {\n  const detached = new AbortController();\n  return adapter(detached.signal);\n}\n",
+    "src/retry.ts": "import { callProvider, type ProviderAdapter } from './provider.ts';\n\nexport async function retryRequest(\n  adapter: ProviderAdapter,\n  signal: AbortSignal,\n): Promise<string> {\n  let lastError: unknown;\n  for (let attempt = 0; attempt < 2; attempt += 1) {\n    try {\n      return await callProvider(adapter, signal);\n    } catch (error) {\n      lastError = error;\n    }\n  }\n  throw lastError;\n}\n",
+    "src/metrics.ts": "export function attemptLabel(attempt: number): string {\n  return `attempt:${attempt}`;\n}\n",
+    "tests/public.test.ts": "import test from 'node:test';\nimport assert from 'node:assert/strict';\n\nimport { retryRequest } from '../src/retry.ts';\n\ntest('normal provider success is returned without retry', async () => {\n  let calls = 0;\n  const controller = new AbortController();\n  const value = await retryRequest(async () => {\n    calls += 1;\n    return 'ok';\n  }, controller.signal);\n  assert.equal(value, 'ok');\n  assert.equal(calls, 1);\n});\n"
+  }
+}

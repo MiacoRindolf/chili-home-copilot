@@ -1,0 +1,14 @@
+{
+  "schema": "chili.diagnosis-to-fix-case.v1",
+  "case_id": "sql-join-aggregate-406",
+  "language": "sql",
+  "test_runner": "pytest",
+  "prompt": "An account report is correct when each order has one fill and one fee, but overstates both quantity and fees when either side has multiple child rows. Repair the query so independent one-to-many relationships are aggregated without a Cartesian multiplication.",
+  "candidate_paths": ["report.sql", "schema.sql"],
+  "max_files": 2,
+  "repo_files": {
+    "schema.sql": "CREATE TABLE orders (id INTEGER PRIMARY KEY, account_id TEXT NOT NULL);\nCREATE TABLE fills (id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL, quantity INTEGER NOT NULL);\nCREATE TABLE fees (id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL, amount REAL NOT NULL);\n",
+    "report.sql": "SELECT\n  orders.account_id,\n  COALESCE(SUM(fills.quantity), 0) AS total_quantity,\n  COALESCE(SUM(fees.amount), 0) AS total_fees\nFROM orders\nLEFT JOIN fills ON fills.order_id = orders.id\nLEFT JOIN fees ON fees.order_id = orders.id\nGROUP BY orders.account_id\nORDER BY orders.account_id;\n",
+    "tests/test_public.py": "import sqlite3\nfrom pathlib import Path\n\n\ndef test_single_fill_and_fee_report():\n    connection = sqlite3.connect(':memory:')\n    connection.executescript(Path('schema.sql').read_text(encoding='utf-8'))\n    connection.execute(\"INSERT INTO orders VALUES (1, 'acct')\")\n    connection.execute('INSERT INTO fills VALUES (1, 1, 3)')\n    connection.execute('INSERT INTO fees VALUES (1, 1, 0.5)')\n    row = connection.execute(Path('report.sql').read_text(encoding='utf-8')).fetchone()\n    assert row == ('acct', 3, 0.5)\n"
+  }
+}

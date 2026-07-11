@@ -1,0 +1,8 @@
+{
+  "case_id": "dart-cache-clock-403",
+  "expected_dimension": "clock",
+  "expected_files": ["lib/cache_entry.dart", "lib/cache.dart"],
+  "hidden_files": {
+    "tests/hidden_cache_test.dart": "import '../lib/cache.dart';\n\nvoid expectEqual(Object? actual, Object? expected, String message) {\n  if (actual != expected) throw StateError('$message: expected=$expected actual=$actual');\n}\n\nvoid main() {\n  var now = DateTime.utc(2099, 1, 1);\n  final expiring = TtlCache<String>(() => now);\n  expiring.put('alpha', 'one', const Duration(seconds: 10));\n  now = now.add(const Duration(seconds: 11));\n  expectEqual(expiring.get('alpha'), null, 'injected clock must expire stale value');\n\n  now = DateTime.utc(2099, 1, 1);\n  final refreshed = TtlCache<String>(() => now);\n  refreshed.put('beta', 'old', const Duration(seconds: 10));\n  now = now.add(const Duration(seconds: 8));\n  refreshed.put('beta', 'new', const Duration(seconds: 10));\n  now = now.add(const Duration(seconds: 5));\n  expectEqual(refreshed.get('beta'), 'new', 'refresh must replace the expiry deadline');\n  print('hidden cache contracts passed');\n}\n"
+  }
+}

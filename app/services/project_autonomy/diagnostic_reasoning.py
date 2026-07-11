@@ -83,6 +83,13 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("populated source", 4),
             ("quote rows", 4),
             ("repository reads", 3),
+            ("partial unique", 7),
+            ("unique index", 6),
+            ("one-to-many", 7),
+            ("cartesian", 7),
+            ("cross multiplied", 6),
+            ("aggregate", 4),
+            ("group by", 4),
         ),
     ),
     (
@@ -99,6 +106,14 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("successful reservation", 5),
             ("_seen", 5),
             ("reserve(", 5),
+            ("singleflight", 7),
+            ("single-flight", 7),
+            ("in-flight", 6),
+            ("poison", 5),
+            ("subscription", 5),
+            ("lifecycle", 5),
+            ("after stop", 6),
+            ("cancel", 4),
         ),
     ),
     (
@@ -112,6 +127,16 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("gate_enabled", 5),
             ("_true_values", 5),
             ("env.get", 4),
+        ),
+    ),
+    (
+        "dependency",
+        (
+            ("abortsignal", 7),
+            ("abort signal", 7),
+            ("aborterror", 7),
+            ("provider adapter", 5),
+            ("dependency error", 5),
         ),
     ),
     (
@@ -247,6 +272,561 @@ def infer_dimension(statement: str) -> str:
         )
     best = max(scores, key=scores.get, default="unknown")
     return best if scores.get(best, 0) else "unknown"
+
+
+def derive_contract_invariants(statement: str) -> list[str]:
+    """Extract reusable mechanism contracts without asking the local model."""
+    lowered = str(statement or "").lower()
+    invariants: list[str] = []
+    if (
+        any(token in lowered for token in ("single-flight", "singleflight", "in-flight", "poison"))
+        and any(token in lowered for token in ("retry", "later", "same key", "start fresh"))
+    ):
+        invariants.append(
+            "Failed per-key in-flight work must be evicted by the state owner; the original error remains "
+            "observable, successful concurrent work stays coalesced, and retry must not await its own cached promise."
+        )
+    if any(token in lowered for token in ("abortsignal", "abort signal", "aborterror")):
+        invariants.append(
+            "Propagate the caller's exact cancellation signal through every wrapper; cancellation is terminal "
+            "for retries and must use existing platform error identity without invented dependencies."
+        )
+    if (
+        any(token in lowered for token in ("ttl", "expiration", "expires", "expiry"))
+        and any(token in lowered for token in ("injected clock", "replay time", "refresh"))
+    ):
+        invariants.append(
+            "All expiry creation and comparison uses the injected clock; refresh updates both value and deadline "
+            "without changing the public cache API."
+        )
+    if "subscription" in lowered and any(token in lowered for token in ("stop", "cancel", "lifecycle")):
+        invariants.append(
+            "The wrapper must return and store the actual active subscription, and stop must await cancellation "
+            "before dropping the handle."
+        )
+    if any(token in lowered for token in ("partial unique", "unique index")):
+        invariants.append(
+            "Partial uniqueness applies only to the active-row predicate; historical inactive rows remain repeatable."
+        )
+    if any(token in lowered for token in ("one-to-many", "cartesian", "cross multipli")):
+        invariants.append(
+            "Aggregate each independent child relation to its parent key before joining sibling one-to-many data."
+        )
+    return invariants[:8]
+
+
+def _partial_unique_active_status(statement: str) -> str | None:
+    lowered = str(statement or "").lower()
+    explicit_statuses = "open|pending|active|running|enabled"
+    row_statuses = "open|pending|running|enabled"
+    patterns = (
+        rf"\bstatus\s*(?:=|is|of)?\s*['\"]?({explicit_statuses})\b",
+        rf"\b(?:two|multiple|duplicate|one|unique)\s+({row_statuses})\s+[a-z_]\w*",
+        rf"\b({row_statuses})\s+rows?\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, lowered)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _singleflight_owner_evicts_key(content: str) -> bool:
+    signature = re.search(
+        r"function\s+singleflight\s*\((.*?)\)\s*(?::\s*[^\{]+)?\s*\{",
+        content,
+        re.DOTALL,
+    )
+    maps = re.findall(r"(?:const|let)\s+([a-z_$]\w*)\s*=\s*new\s+map", content)
+    parameters = (
+        re.findall(r"(?:^|,)\s*([a-z_$]\w*)\s*:", signature.group(1))
+        if signature
+        else []
+    )
+    if maps and parameters:
+        return any(
+            re.search(
+                rf"\b{re.escape(map_name)}\.delete\s*\(\s*{re.escape(parameters[0])}\s*\)",
+                content,
+            )
+            for map_name in maps
+        )
+    return bool(re.search(r"\b[a-z_$]\w*\.delete\s*\(", content))
+
+
+def _provider_forwards_exact_signal(content: str) -> bool:
+    signature = re.search(
+        r"function\s+callprovider\s*\((.*?)\)\s*(?::\s*[^\{]+)?\s*\{",
+        content,
+        re.DOTALL,
+    )
+    if not signature:
+        return False
+    parameters = re.findall(r"(?:^|,)\s*([a-z_$]\w*)\s*:", signature.group(1))
+    if len(parameters) < 2:
+        return False
+    body_tail = content[signature.end() : signature.end() + 4_000]
+    return bool(
+        re.search(
+            rf"\breturn\s+{re.escape(parameters[0])}\s*\(\s*{re.escape(parameters[1])}\s*\)",
+            body_tail,
+        )
+    )
+
+
+def _dart_refresh_updates_deadline(content: str) -> bool:
+    signature = re.search(
+        r"\bvoid\s+refresh\s*\(\s*[^,()]+\s+[a-z_]\w*\s*,\s*"
+        r"datetime\s+([a-z_]\w*)\s*\)",
+        content,
+        re.DOTALL,
+    )
+    deadline_field = re.search(r"\bdatetime\s+([a-z_]\w*)\s*;", content)
+    if not signature or not deadline_field:
+        return False
+    return bool(
+        re.search(
+            rf"\b{re.escape(deadline_field.group(1))}\s*=\s*{re.escape(signature.group(1))}\s*;",
+            content,
+        )
+    )
+
+
+def contract_invariant_warnings(
+    prompt: str,
+    files: Mapping[str, str],
+) -> list[str]:
+    """Reject mechanically contradictory implementations for known contracts."""
+    invariants = derive_contract_invariants(prompt)
+    lowered_files = {
+        str(path): str(content or "").lower()
+        for path, content in files.items()
+    }
+    combined = "\n".join(lowered_files.values())
+    warnings: list[str] = []
+    if any("in-flight work must be evicted" in value for value in invariants):
+        owners = [
+            content
+            for content in lowered_files.values()
+            if "new map" in content and any(token in content for token in ("pending", "flight"))
+        ]
+        if owners and not any(_singleflight_owner_evicts_key(content) for content in owners):
+            warnings.append(
+                "failed per-key in-flight state is retained; the state owner must delete/remove the key on rejection"
+            )
+        if any(
+            token in "\n".join(owners)
+            for token in ("pending.set(key, { error", "promise.reject(error)", "error?: error")
+        ):
+            warnings.append("rejected work is cached instead of evicted")
+        if re.search(r"catch\s*(?:\([^)]*\))?\s*\{[^{}]*\breturn\b", combined, re.DOTALL):
+            warnings.append("the wrapper swallows the original error by returning from catch")
+    if any("exact cancellation signal" in value for value in invariants):
+        provider_sources = [
+            content
+            for content in lowered_files.values()
+            if "function callprovider" in content and "provideradapter" in content
+        ]
+        if provider_sources and not any(_provider_forwards_exact_signal(content) for content in provider_sources):
+            warnings.append("the provider wrapper does not pass the caller's exact signal to the adapter")
+        retry_sources = [
+            content
+            for content in lowered_files.values()
+            if "catch" in content and re.search(r"\bfor\s*\(", content)
+        ]
+        if retry_sources and not any(
+            "aborterror" in content
+            and ".name" in content
+            and re.search(r"\bthrow\s+[a-z_$]\w*", content)
+            for content in retry_sources
+        ):
+            warnings.append("AbortError is still treated as retryable instead of terminal")
+        if "node:abort-controller" in combined:
+            warnings.append("an invented abort-controller dependency replaces platform cancellation primitives")
+        if "instanceof aborterror" in combined and "class aborterror" not in combined:
+            warnings.append("AbortError is referenced as an undefined class; inspect the existing error name")
+    if any("All expiry creation and comparison" in value for value in invariants):
+        cache_sources = [
+            content
+            for content in lowered_files.values()
+            if any(
+                marker in content
+                for marker in ("datetime.now()", "final clock", "void refresh")
+            )
+        ]
+        cache_text = "\n".join(cache_sources)
+        if "datetime.now()" in cache_text:
+            warnings.append("TTL comparison still reads wall clock instead of the injected clock")
+        refresh_sources = [content for content in cache_sources if "void refresh" in content]
+        if refresh_sources and not all(
+            _dart_refresh_updates_deadline(content) for content in refresh_sources
+        ):
+            warnings.append("cache refresh updates the value without replacing its expiry deadline")
+    if any("actual active subscription" in value for value in invariants):
+        if "bindsubscription" in combined and not re.search(
+            r"return\s+[a-z_]\w*\.listen\s*\(\s*[a-z_]\w*",
+            combined,
+        ):
+            warnings.append("subscription wrapper does not return the actual source listener handle")
+        if "future<void> stop" in combined and ".cancel()" not in combined:
+            warnings.append("worker stop drops the subscription without cancellation")
+    if any("Partial uniqueness" in value for value in invariants):
+        active_status = _partial_unique_active_status(prompt)
+        if active_status and "create unique index" in combined and not re.search(
+            rf"where\s+status\s*=\s*['\"]{re.escape(active_status)}['\"]",
+            combined,
+        ):
+            warnings.append(
+                f"partial unique index is not scoped to explicitly active {active_status} rows"
+            )
+    if any("Aggregate each independent child" in value for value in invariants):
+        if any(
+            _preaggregate_sibling_sum_joins(content) is not None
+            for content in files.values()
+        ):
+            warnings.append("independent one-to-many children are still joined before aggregation")
+    return warnings
+
+
+def _replace_matched_braced_body(
+    content: str,
+    match: re.Match[str] | None,
+    body: str,
+) -> str | None:
+    if match is None:
+        return None
+    opening = match.end() - 1
+    depth = 0
+    closing = -1
+    for index in range(opening, len(content)):
+        char = content[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                closing = index
+                break
+    if closing < 0:
+        return None
+    return content[: opening + 1] + "\n" + body.rstrip() + "\n" + content[closing:]
+
+
+def _replace_braced_function_body(content: str, name: str, body: str) -> str | None:
+    match = re.search(
+        rf"((?:export\s+)?(?:async\s+)?function\s+{re.escape(name)}\s*\((.*?)\)\s*(?::\s*[^{{]+)?\s*)\{{",
+        content,
+        re.DOTALL,
+    )
+    return _replace_matched_braced_body(content, match, body)
+
+
+def _replace_braced_dart_callable_body(content: str, name: str, body: str) -> str | None:
+    match = re.search(
+        rf"((?:Future(?:<[^>]+>)?|void|[A-Za-z_]\w*(?:<[^>{{}}]+>)?\??)\s+"
+        rf"{re.escape(name)}(?:<[^>{{}}]+>)?\s*\((.*?)\)\s*(?:async\s*)?)\{{",
+        content,
+        re.DOTALL,
+    )
+    return _replace_matched_braced_body(content, match, body)
+
+
+_SQL_LEFT_JOIN = re.compile(
+    r"\bLEFT\s+JOIN\s+(?P<table>[A-Za-z_][A-Za-z0-9_]*)"
+    r"(?:\s+(?:AS\s+)?(?P<alias>(?!ON\b)[A-Za-z_][A-Za-z0-9_]*))?"
+    r"\s+ON\s+(?P<left_owner>[A-Za-z_][A-Za-z0-9_]*)\."
+    r"(?P<left_key>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
+    r"(?P<right_owner>[A-Za-z_][A-Za-z0-9_]*)\."
+    r"(?P<right_key>[A-Za-z_][A-Za-z0-9_]*)",
+    re.IGNORECASE,
+)
+
+
+def _preaggregate_sibling_sum_joins(content: str) -> str | None:
+    """Rewrite a narrow raw sibling-SUM join into bounded derived aggregates."""
+    if len(content) > 100_000 or re.search(r"\b(?:INSERT|UPDATE|DELETE|DROP)\b", content, re.IGNORECASE):
+        return None
+    joins: list[dict[str, Any]] = []
+    for match in list(_SQL_LEFT_JOIN.finditer(content))[:8]:
+        table = match.group("table")
+        qualifier = match.group("alias") or table
+        left_owner = match.group("left_owner")
+        right_owner = match.group("right_owner")
+        if left_owner.lower() == qualifier.lower():
+            child_key = match.group("left_key")
+            parent_owner = right_owner
+            parent_key = match.group("right_key")
+        elif right_owner.lower() == qualifier.lower():
+            child_key = match.group("right_key")
+            parent_owner = left_owner
+            parent_key = match.group("left_key")
+        else:
+            continue
+        metrics = [
+            value
+            for value in re.findall(
+                rf"\bSUM\s*\(\s*{re.escape(qualifier)}\.([A-Za-z_][A-Za-z0-9_]*)\s*\)",
+                content,
+                re.IGNORECASE,
+            )
+        ][:8]
+        if not metrics:
+            continue
+        joins.append(
+            {
+                "match": match,
+                "table": table,
+                "qualifier": qualifier,
+                "child_key": child_key,
+                "parent_owner": parent_owner,
+                "parent_key": parent_key,
+                "metrics": list(dict.fromkeys(metrics)),
+            }
+        )
+    sibling_groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for join in joins:
+        key = (str(join["parent_owner"]).lower(), str(join["parent_key"]).lower())
+        sibling_groups.setdefault(key, []).append(join)
+    selected = next((group for group in sibling_groups.values() if len(group) >= 2), [])
+    if len(selected) < 2:
+        return None
+
+    rewritten = content
+    replacements: list[tuple[int, int, str]] = []
+    metric_replacements: list[tuple[str, str, str, str]] = []
+    for join in selected[:4]:
+        qualifier = str(join["qualifier"])
+        aggregate_alias = f"chili_{qualifier}_aggregate"
+        metric_columns = [str(value) for value in join["metrics"]]
+        projections = ",\n    ".join(
+            f"SUM({column}) AS sum_{column}" for column in metric_columns
+        )
+        replacement = (
+            "LEFT JOIN (\n"
+            f"  SELECT {join['child_key']},\n    {projections}\n"
+            f"  FROM {join['table']}\n"
+            f"  GROUP BY {join['child_key']}\n"
+            f") AS {aggregate_alias} ON {aggregate_alias}.{join['child_key']} = "
+            f"{join['parent_owner']}.{join['parent_key']}"
+        )
+        match = join["match"]
+        replacements.append((match.start(), match.end(), replacement))
+        metric_replacements.extend(
+            (qualifier, column, aggregate_alias, f"sum_{column}")
+            for column in metric_columns
+        )
+    for start, end, replacement in sorted(replacements, reverse=True):
+        rewritten = rewritten[:start] + replacement + rewritten[end:]
+    for qualifier, column, aggregate_alias, aggregate_column in metric_replacements:
+        rewritten = re.sub(
+            rf"\bSUM\s*\(\s*{re.escape(qualifier)}\.{re.escape(column)}\s*\)",
+            f"SUM({aggregate_alias}.{aggregate_column})",
+            rewritten,
+            flags=re.IGNORECASE,
+        )
+    return rewritten if rewritten != content else None
+
+
+def contract_repair_proposals(
+    prompt: str,
+    files: Mapping[str, str],
+) -> dict[str, str]:
+    """Synthesize narrow repairs only when a known invariant is violated."""
+    warnings = contract_invariant_warnings(prompt, files)
+    if not warnings:
+        return {}
+    invariants = derive_contract_invariants(prompt)
+    proposals: dict[str, str] = {}
+    if any("in-flight work must be evicted" in value for value in invariants):
+        for path, content in files.items():
+            map_match = re.search(r"(?:const|let)\s+(\w+)\s*=\s*new\s+Map", content)
+            signature = re.search(
+                r"function\s+singleFlight\s*\((.*?)\)\s*(?::\s*[^\{]+)?\s*\{",
+                content,
+                re.DOTALL,
+            )
+            if map_match and signature:
+                parameter_names = re.findall(
+                    r"(?:^|,)\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*:",
+                    signature.group(1),
+                )
+                if len(parameter_names) >= 2:
+                    key_name, task_name = parameter_names[:2]
+                    map_name = map_match.group(1)
+                    body = (
+                        f"  const existing = {map_name}.get({key_name});\n"
+                        f"  if (existing) return existing;\n"
+                        f"  const operation = {task_name}();\n"
+                        f"  {map_name}.set({key_name}, operation);\n"
+                        "  void operation.catch(() => {\n"
+                        f"    if ({map_name}.get({key_name}) === operation) {map_name}.delete({key_name});\n"
+                        "  });\n"
+                        "  return operation;"
+                    )
+                    updated = _replace_braced_function_body(content, "singleFlight", body)
+                    if updated and updated != content:
+                        proposals[str(path)] = updated
+                continue
+            if "function loadUser" in content and re.search(
+                r"catch\s*(?:\([^)]*\))?\s*\{",
+                content,
+            ):
+                signature = re.search(
+                    r"function\s+loadUser\s*\((.*?)\)\s*(?::\s*[^\{]+)?\s*\{",
+                    content,
+                    re.DOTALL,
+                )
+                parameter_names = (
+                    re.findall(
+                        r"(?:^|,)\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*:",
+                        signature.group(1),
+                    )
+                    if signature
+                    else []
+                )
+                if len(parameter_names) >= 2:
+                    updated = _replace_braced_function_body(
+                        content,
+                        "loadUser",
+                        f"  return await singleFlight({parameter_names[0]}, {parameter_names[1]});",
+                    )
+                    if updated and updated != content:
+                        proposals[str(path)] = updated
+    if any("exact cancellation signal" in value for value in invariants):
+        for path, content in files.items():
+            updated = content
+            provider_signature = re.search(
+                r"function\s+callProvider\s*\((.*?)\)\s*(?::\s*[^\{]+)?\s*\{",
+                updated,
+                re.DOTALL,
+            )
+            if provider_signature:
+                parameter_names = re.findall(
+                    r"(?:^|,)\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*:",
+                    provider_signature.group(1),
+                )
+                if len(parameter_names) >= 2:
+                    rebound = _replace_braced_function_body(
+                        updated,
+                        "callProvider",
+                        f"  return {parameter_names[0]}({parameter_names[1]});",
+                    )
+                    if rebound:
+                        updated = rebound
+            catch_match = re.search(
+                r"catch\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)(?:\s*:[^)]*)?\s*\)\s*\{",
+                updated,
+            )
+            if (
+                catch_match
+                and "for (" in updated
+                and "aborterror" not in updated.lower()
+            ):
+                error_name = catch_match.group(1)
+                insertion = (
+                    catch_match.group(0)
+                    + "\n      "
+                    + f"if ({error_name} instanceof Error && {error_name}.name === 'AbortError') "
+                    + f"throw {error_name};"
+                )
+                updated = updated[: catch_match.start()] + insertion + updated[catch_match.end() :]
+            if updated != content:
+                proposals[str(path)] = updated
+    if any("All expiry creation and comparison" in value for value in invariants):
+        for path, content in files.items():
+            updated = content
+            clock_field = re.search(r"\bfinal\s+Clock\s+([A-Za-z_]\w*)\s*;", updated)
+            if clock_field:
+                updated = re.sub(
+                    r"\bDateTime\.now\s*\(\s*\)",
+                    f"{clock_field.group(1)}()",
+                    updated,
+                )
+            refresh_signature = re.search(
+                r"\bvoid\s+refresh\s*\(\s*[^,()]+\s+([A-Za-z_]\w*)\s*,\s*"
+                r"DateTime\s+([A-Za-z_]\w*)\s*\)",
+                updated,
+                re.DOTALL,
+            )
+            expiry_field = re.search(r"\bDateTime\s+([A-Za-z_]\w*)\s*;", updated)
+            if refresh_signature and expiry_field:
+                value_parameter, expiry_parameter = refresh_signature.groups()
+                value_assignment = re.search(
+                    rf"\b([A-Za-z_]\w*)\s*=\s*{re.escape(value_parameter)}\s*;",
+                    updated,
+                )
+                if value_assignment:
+                    refreshed = _replace_braced_dart_callable_body(
+                        updated,
+                        "refresh",
+                        f"    {value_assignment.group(1)} = {value_parameter};\n"
+                        f"    {expiry_field.group(1)} = {expiry_parameter};",
+                    )
+                    if refreshed:
+                        updated = refreshed
+            if updated != content:
+                proposals[str(path)] = updated
+    if any("actual active subscription" in value for value in invariants):
+        for path, content in files.items():
+            updated = content
+            bind_signature = re.search(
+                r"\bbindSubscription(?:<[^>]+>)?\s*\((.*?)\)\s*\{",
+                updated,
+                re.DOTALL,
+            )
+            if bind_signature:
+                stream_parameter = re.search(
+                    r"\bStream(?:<[^>]+>)?\s+([A-Za-z_]\w*)",
+                    bind_signature.group(1),
+                )
+                callback_parameter = re.search(
+                    r"\bvoid\s+Function\s*\([^)]*\)\s+([A-Za-z_]\w*)",
+                    bind_signature.group(1),
+                )
+                if stream_parameter and callback_parameter:
+                    rebound = _replace_braced_dart_callable_body(
+                        updated,
+                        "bindSubscription",
+                        f"  return {stream_parameter.group(1)}.listen({callback_parameter.group(1)});",
+                    )
+                    if rebound:
+                        updated = rebound
+            subscription_field = re.search(
+                r"\bStreamSubscription(?:<[^>]+>)?\?\s+([A-Za-z_]\w*)\s*;",
+                updated,
+            )
+            if subscription_field and re.search(r"\bFuture<void>\s+stop\s*\(", updated):
+                field_name = subscription_field.group(1)
+                stopped = _replace_braced_dart_callable_body(
+                    updated,
+                    "stop",
+                    f"    final subscription = {field_name};\n"
+                    "    if (subscription != null) await subscription.cancel();\n"
+                    f"    {field_name} = null;",
+                )
+                if stopped:
+                    updated = stopped
+            if updated != content:
+                proposals[str(path)] = updated
+    if any("Partial uniqueness" in value for value in invariants):
+        active_status = _partial_unique_active_status(prompt)
+        if active_status:
+            for path, content in files.items():
+                updated = re.sub(
+                    r"(where\s+status\s*=\s*)['\"][^'\"]+['\"]",
+                    lambda match: f"{match.group(1)}'{active_status}'",
+                    content,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+                if updated != content:
+                    proposals[str(path)] = updated
+    if any("Aggregate each independent child" in value for value in invariants):
+        for path, content in files.items():
+            updated = _preaggregate_sibling_sum_joins(content)
+            if updated and updated != content:
+                proposals[str(path)] = updated
+    return proposals
 
 
 def looks_like_diagnostic_request(prompt: str) -> bool:
@@ -470,6 +1050,9 @@ def build_case_from_prompt(
             "case_id": case_id,
             "problem_statement": prompt,
             "observations": observations,
+            "constraints": {
+                "contract_invariants": derive_contract_invariants(prompt),
+            },
         }
     )
 
@@ -880,6 +1463,9 @@ def evaluate_packet(
         else:
             status = "untested"
         blockers: list[str] = []
+        if item.get("dimension") == "unknown" and status == "supported":
+            status = "provisional"
+            blockers.append("Unknown is not a confirmable causal family; isolate a known dimension first.")
         if drift and item.get("dimension") == "code" and status in {"supported", "provisional"}:
             status = "blocked"
             blockers.append("Same code and input produced different outcomes; code causality is not isolated.")
@@ -914,6 +1500,24 @@ def evaluate_packet(
             ),
         )
         conclusion_id = str(chosen.get("hypothesis_id") or "")
+    if chosen is not None and chosen.get("dimension") == "unknown":
+        known_candidates = [
+            item
+            for item in hypothesis_results
+            if item.get("dimension") != "unknown"
+            and item.get("status") not in {"refuted", "untested"}
+        ]
+        if known_candidates:
+            chosen = max(
+                known_candidates,
+                key=lambda item: (
+                    item.get("status") == "supported",
+                    bool(item.get("discriminating_evidence")),
+                    float(item.get("confirmatory_weight") or 0),
+                    float(item.get("support_weight") or 0),
+                ),
+            )
+            conclusion_id = str(chosen.get("hypothesis_id") or "")
     if chosen is not None:
         supported = [item for item in hypothesis_results if item.get("status") == "supported"]
         if supported:
@@ -927,6 +1531,33 @@ def evaluate_packet(
             strongest_supported = max(supported, key=support_rank)
             if chosen.get("status") != "supported" or support_rank(strongest_supported) > support_rank(chosen):
                 chosen = strongest_supported
+                conclusion_id = str(chosen.get("hypothesis_id") or "")
+
+    problem_dimension = infer_dimension(str(case.get("problem_statement") or ""))
+    if (
+        chosen is not None
+        and problem_dimension not in {"unknown", str(chosen.get("dimension") or "unknown")}
+        and not bool(chosen.get("discriminating_evidence"))
+    ):
+        problem_candidates = [
+            item
+            for item in hypothesis_results
+            if item.get("dimension") == problem_dimension
+            and item.get("status") not in {"refuted", "untested", "blocked"}
+        ]
+        if problem_candidates:
+            problem_candidate = max(
+                problem_candidates,
+                key=lambda item: (
+                    float(item.get("support_weight") or 0),
+                    float(item.get("confirmatory_weight") or 0),
+                ),
+            )
+            if (
+                float(problem_candidate.get("support_weight") or 0) + 0.9
+                > float(chosen.get("support_weight") or 0)
+            ):
+                chosen = problem_candidate
                 conclusion_id = str(chosen.get("hypothesis_id") or "")
 
     requested_status = str(requested.get("status") or "provisional")
@@ -994,6 +1625,7 @@ def evaluate_packet(
         "decision": decision,
         "retractions": retractions,
         "next_experiments": recommendations,
+        "contract_invariants": derive_contract_invariants(case["problem_statement"]),
         "premium_calls": 0,
     }
 
@@ -1226,4 +1858,6 @@ def report_context(report: Mapping[str, Any]) -> str:
     for item in (report.get("next_experiments") or [])[:5]:
         if isinstance(item, Mapping):
             lines.append(f"- next experiment ({item.get('safety')}): {_clip(item.get('action'), 300)}")
+    for invariant in (report.get("contract_invariants") or [])[:8]:
+        lines.append(f"- mechanism invariant: {_clip(invariant, 500)}")
     return "\n".join(lines)

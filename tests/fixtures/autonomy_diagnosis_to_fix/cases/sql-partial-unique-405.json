@@ -1,0 +1,14 @@
+{
+  "schema": "chili.diagnosis-to-fix-case.v1",
+  "case_id": "sql-partial-unique-405",
+  "language": "sql",
+  "test_runner": "pytest",
+  "prompt": "The order schema should allow repeated closed history while preventing two open rows for the same account and symbol. Production evidence shows the opposite behavior. Repair the partial uniqueness contract without changing table columns or globally deduplicating history.",
+  "candidate_paths": ["schema.sql", "report.sql"],
+  "max_files": 2,
+  "repo_files": {
+    "schema.sql": "CREATE TABLE orders (\n  id INTEGER PRIMARY KEY,\n  account_id TEXT NOT NULL,\n  symbol TEXT NOT NULL,\n  status TEXT NOT NULL\n);\n\nCREATE UNIQUE INDEX uq_active_order\n  ON orders(account_id, symbol)\n  WHERE status = 'closed';\n",
+    "report.sql": "SELECT account_id, symbol, status FROM orders ORDER BY id;\n",
+    "tests/test_public.py": "import sqlite3\nfrom pathlib import Path\n\n\ndef test_distinct_orders_are_accepted():\n    connection = sqlite3.connect(':memory:')\n    connection.executescript(Path('schema.sql').read_text(encoding='utf-8'))\n    connection.execute(\"INSERT INTO orders VALUES (1, 'acct', 'AAA', 'open')\")\n    connection.execute(\"INSERT INTO orders VALUES (2, 'acct', 'BBB', 'closed')\")\n    assert connection.execute('SELECT count(*) FROM orders').fetchone()[0] == 2\n"
+  }
+}

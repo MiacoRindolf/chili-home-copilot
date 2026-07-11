@@ -601,6 +601,415 @@ def test_dimension_inference_prefers_changed_cause_over_held_constant_mentions()
     assert reasoning.infer_dimension(
         "The ingestion source has quote rows while the evaluator sink is empty."
     ) == "data"
+    assert reasoning.infer_dimension(
+        "A single-flight promise stays poisoned after failure and blocks retry for the same key."
+    ) == "state"
+    assert reasoning.infer_dimension(
+        "A partial unique index enforces the wrong one-to-many data contract."
+    ) == "data"
+    assert reasoning.infer_dimension(
+        "The provider adapter drops the caller AbortSignal before the dependency call."
+    ) == "dependency"
+
+
+def test_mechanism_contracts_are_derived_without_model_output():
+    state = reasoning.derive_contract_invariants(
+        "A single-flight promise poisons later retry for the same key."
+    )
+    cancellation = reasoning.derive_contract_invariants(
+        "Propagate AbortSignal and stop retry on AbortError."
+    )
+    aggregate = reasoning.derive_contract_invariants(
+        "A one-to-many join causes Cartesian multiplication."
+    )
+
+    assert any("evicted by the state owner" in value for value in state)
+    assert any("exact cancellation signal" in value for value in cancellation)
+    assert any("Aggregate each independent child" in value for value in aggregate)
+
+    case = reasoning.build_case_from_prompt(
+        "A single-flight promise poisons later retry for the same key."
+    )
+    report = reasoning.evaluate_packet(case, reasoning.heuristic_packet(case))
+    assert report["contract_invariants"] == state
+    assert "mechanism invariant" in reasoning.report_context(report)
+
+
+def test_contract_invariant_guard_rejects_and_accepts_known_mechanisms():
+    prompt = "A single-flight promise poisons later retry for the same key."
+    rejected = reasoning.contract_invariant_warnings(
+        prompt,
+        {
+            "inflight.ts": (
+                "const pending = new Map();\n"
+                "async function run(key, task) { try { return await task(); } "
+                "catch (error) { pending.set(key, { error }); throw error; } }\n"
+            ),
+            "service.ts": "async function load() { try {} catch { return 'fallback'; } }\n",
+        },
+    )
+    accepted = reasoning.contract_invariant_warnings(
+        prompt,
+        {
+            "inflight.ts": (
+                "const pending = new Map();\n"
+                "async function run(key, task) { try { return await task(); } "
+                "catch (error) { pending.delete(key); throw error; } }\n"
+            ),
+            "service.ts": "async function load() { return await run(); }\n",
+        },
+    )
+
+    assert any("must delete/remove" in value for value in rejected)
+    assert any("swallows the original error" in value for value in rejected)
+    assert accepted == []
+
+    assert reasoning.contract_invariant_warnings(
+        "A partial unique index must prevent two open rows but allow closed history.",
+        {"schema.sql": "CREATE UNIQUE INDEX x ON orders(account_id) WHERE status = 'open';"},
+    ) == []
+    assert reasoning.contract_invariant_warnings(
+        "An AbortSignal must cross the provider adapter and AbortError stops retry.",
+        {"provider.ts": "type ProviderAdapter = any; return adapter(signal);"},
+    ) == []
+    assert reasoning.contract_invariant_warnings(
+        "An AbortSignal must cross the provider adapter.",
+        {
+            "provider.ts": (
+                "type ProviderAdapter = any;\n"
+                "function callProvider(client: ProviderAdapter, caller: AbortSignal) {\n"
+                "  return client(caller);\n}\n"
+            )
+        },
+    ) == []
+    assert any(
+        "exact signal" in warning
+        for warning in reasoning.contract_invariant_warnings(
+            "An AbortSignal must cross the provider adapter.",
+            {
+                "provider.ts": (
+                    "type ProviderAdapter = any;\n"
+                    "function callProvider(client: ProviderAdapter, caller: AbortSignal) {\n"
+                    "  const detached = new AbortController(); return client(detached.signal);\n}\n"
+                )
+            },
+        )
+    )
+    assert reasoning.contract_invariant_warnings(
+        "A TTL cache uses an injected clock and refreshes expiration.",
+        {
+            "cache.dart": "if (_now().isAfter(entry.expiresAt)) return null;",
+            "entry.dart": (
+                "DateTime deadline;\n"
+                "void refresh(T nextValue, DateTime nextDeadline) { deadline = nextDeadline; }"
+            ),
+        },
+    ) == []
+    assert reasoning.contract_invariant_warnings(
+        prompt,
+        {
+            "inflight.ts": (
+                "const requests = new Map<string, Promise<string>>();\n"
+                "function singleFlight(id: string, task: () => Promise<string>) {\n"
+                "  const operation = task(); void operation.catch(() => requests.delete(id));\n"
+                "  requests.set(id, operation); return operation;\n}\n"
+            )
+        },
+    ) == []
+    assert reasoning.contract_invariant_warnings(
+        "A subscription worker must cancel on stop.",
+        {
+            "subscription.dart": "return source.listen(onData);",
+            "worker.dart": "Future<void> stop() async { await subscription.cancel(); }",
+        },
+    ) == []
+    assert reasoning.contract_invariant_warnings(
+        "A one-to-many join causes Cartesian multiplication.",
+        {
+            "report.sql": (
+                "WITH fill_totals AS (SELECT order_id, SUM(quantity) quantity FROM fills GROUP BY order_id), "
+                "fee_totals AS (SELECT order_id, SUM(amount) amount FROM fees GROUP BY order_id) "
+                "SELECT * FROM orders LEFT JOIN fill_totals USING(order_id) LEFT JOIN fee_totals USING(order_id);"
+            )
+        },
+    ) == []
+
+
+def test_contract_repair_proposals_satisfy_supported_state_dart_and_sql_guards():
+    state_prompt = "A single-flight promise poisons later retry for the same key."
+    state_files = {
+        "inflight.ts": (
+            "const pending = new Map<string, Promise<string>>();\n"
+            "export function singleFlight(\n"
+            "  key: string, task: () => Promise<string>,\n"
+            "): Promise<string> {\n"
+            "  const operation = task();\n"
+            "  pending.set(key, operation);\n"
+            "  return operation;\n"
+            "}\n"
+        ),
+        "service.ts": (
+            "export async function loadUser(key: string, provider: () => Promise<string>): Promise<string> {\n"
+            "  try { return await singleFlight(key, provider); } catch { return 'fallback'; }\n"
+            "}\n"
+        ),
+    }
+    state_proposals = reasoning.contract_repair_proposals(state_prompt, state_files)
+    projected_state = {**state_files, **state_proposals}
+
+    assert set(state_proposals) == {"inflight.ts", "service.ts"}
+    assert "pending.delete(key)" in state_proposals["inflight.ts"]
+    assert reasoning.contract_invariant_warnings(state_prompt, projected_state) == []
+
+    cancellation_prompt = (
+        "Propagate the caller AbortSignal through the provider adapter and make AbortError terminal for retry."
+    )
+    cancellation_files = {
+        "provider.ts": (
+            "type ProviderAdapter = (signal: AbortSignal) => Promise<string>;\n"
+            "export async function callProvider(client: ProviderAdapter, caller: AbortSignal): Promise<string> {\n"
+            "  const detached = new AbortController(); return client(detached.signal);\n}\n"
+        ),
+        "retry.ts": (
+            "export async function retryRequest(client: ProviderAdapter, caller: AbortSignal): Promise<string> {\n"
+            "  for (let attempt = 0; attempt < 2; attempt += 1) {\n"
+            "    try { return await callProvider(client, caller); } catch (failure) { lastError = failure; }\n"
+            "  } throw lastError;\n}\n"
+        ),
+    }
+    cancellation_proposals = reasoning.contract_repair_proposals(
+        cancellation_prompt,
+        cancellation_files,
+    )
+    projected_cancellation = {**cancellation_files, **cancellation_proposals}
+
+    assert set(cancellation_proposals) == set(cancellation_files)
+    assert "return client(caller);" in cancellation_proposals["provider.ts"]
+    assert "failure.name === 'AbortError'" in cancellation_proposals["retry.ts"]
+    assert reasoning.contract_invariant_warnings(
+        cancellation_prompt,
+        projected_cancellation,
+    ) == []
+
+    sql_prompt = "A partial unique index must prevent two open rows but allow closed history."
+    sql_files = {
+        "schema.sql": (
+            "CREATE UNIQUE INDEX x ON orders(account_id) WHERE status = 'closed';\n"
+        )
+    }
+    sql_proposals = reasoning.contract_repair_proposals(sql_prompt, sql_files)
+
+    assert "WHERE status = 'open'" in sql_proposals["schema.sql"]
+    assert reasoning.contract_invariant_warnings(sql_prompt, sql_proposals) == []
+
+    pending_prompt = "A partial unique index permits two pending jobs but must allow completed history."
+    pending_proposals = reasoning.contract_repair_proposals(
+        pending_prompt,
+        {"jobs.sql": "CREATE UNIQUE INDEX x ON jobs(owner_id) WHERE status = 'completed';\n"},
+    )
+    ambiguous_proposals = reasoning.contract_repair_proposals(
+        "A partial unique index should cover only the active-row predicate and reject two active rows.",
+        {"jobs.sql": "CREATE UNIQUE INDEX x ON jobs(owner_id) WHERE status = 'completed';\n"},
+    )
+
+    assert "WHERE status = 'pending'" in pending_proposals["jobs.sql"]
+    assert ambiguous_proposals == {}
+
+    aggregate_prompt = (
+        "Independent one-to-many payments and refunds are cross multiplied before aggregation."
+    )
+    aggregate_files = {
+        "report.sql": (
+            "SELECT customers.region, SUM(payments.cents) AS paid, SUM(refunds.cents) AS refunded\n"
+            "FROM customers\n"
+            "LEFT JOIN payments ON payments.customer_id = customers.id\n"
+            "LEFT JOIN refunds ON refunds.customer_id = customers.id\n"
+            "GROUP BY customers.region;\n"
+        )
+    }
+    aggregate_proposals = reasoning.contract_repair_proposals(
+        aggregate_prompt,
+        aggregate_files,
+    )
+
+    assert "chili_payments_aggregate" in aggregate_proposals["report.sql"]
+    assert "GROUP BY customer_id" in aggregate_proposals["report.sql"]
+    assert "SUM(chili_refunds_aggregate.sum_cents)" in aggregate_proposals["report.sql"]
+    assert reasoning.contract_invariant_warnings(
+        aggregate_prompt,
+        aggregate_proposals,
+    ) == []
+
+    clock_prompt = (
+        "A TTL cache with an injected clock compares wall-clock expiration and refresh keeps the old expiry."
+    )
+    clock_files = {
+        "lib/cache.dart": (
+            "typedef Clock = DateTime Function();\n"
+            "class Cache { final Clock _now; Cache(this._now);\n"
+            "bool expired(DateTime expiry) => DateTime.now().isAfter(expiry); }\n"
+        ),
+        "lib/cache_entry.dart": (
+            "class Entry<T> { Entry(this.value, this.expiresAt); T value; DateTime expiresAt;\n"
+            "void refresh(T nextValue, DateTime nextExpiry) { value = nextValue; } }\n"
+        ),
+    }
+    clock_proposals = reasoning.contract_repair_proposals(clock_prompt, clock_files)
+    projected_clock = {**clock_files, **clock_proposals}
+
+    assert set(clock_proposals) == set(clock_files)
+    assert "_now().isAfter" in clock_proposals["lib/cache.dart"]
+    assert "expiresAt = nextExpiry;" in clock_proposals["lib/cache_entry.dart"]
+    assert reasoning.contract_invariant_warnings(clock_prompt, projected_clock) == []
+
+    subscription_prompt = (
+        "A subscription wrapper returns a dummy handle and worker stop must cancel the actual subscription."
+    )
+    subscription_files = {
+        "lib/subscription.dart": (
+            "StreamSubscription<T> bindSubscription<T>(Stream<T> source, void Function(T) onData) {\n"
+            "  source.listen(onData); return Stream<T>.empty().listen((_) {});\n}\n"
+        ),
+        "lib/worker.dart": (
+            "class Worker { StreamSubscription<String>? _subscription;\n"
+            "Future<void> stop() async { _subscription = null; } }\n"
+        ),
+    }
+    subscription_proposals = reasoning.contract_repair_proposals(
+        subscription_prompt,
+        subscription_files,
+    )
+    projected_subscription = {**subscription_files, **subscription_proposals}
+
+    assert set(subscription_proposals) == set(subscription_files)
+    assert "return source.listen(onData);" in subscription_proposals["lib/subscription.dart"]
+    assert "await subscription.cancel();" in subscription_proposals["lib/worker.dart"]
+    assert reasoning.contract_invariant_warnings(
+        subscription_prompt,
+        projected_subscription,
+    ) == []
+
+
+def test_unknown_hypothesis_cannot_be_confirmed_when_known_family_has_evidence():
+    case = {
+        "case_id": "unknown-is-not-root-cause",
+        "problem_statement": "A report duplicates rows across a one-to-many join.",
+        "observations": [
+            {
+                "evidence_id": "unknown-a",
+                "statement": "The outcome changed for an unknown reason.",
+                "dimension": "unknown",
+                "kind": "artifact",
+                "provenance": "operator",
+                "independence_key": "unknown-a",
+                "reliability": 1.0,
+            },
+            {
+                "evidence_id": "data-a",
+                "statement": "The join multiplies each fill by every fee row.",
+                "dimension": "data",
+                "kind": "artifact",
+                "provenance": "report.sql",
+                "independence_key": "report.sql",
+                "reliability": 0.95,
+                "discriminating": True,
+            },
+        ],
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-unknown",
+                "claim": "Unknown drift caused the report change.",
+                "dimension": "unknown",
+                "support_evidence_ids": ["unknown-a"],
+                "falsification": "Identify a known causal family.",
+            },
+            {
+                "hypothesis_id": "h-data",
+                "claim": "A one-to-many join multiplies aggregates.",
+                "dimension": "data",
+                "support_evidence_ids": ["data-a"],
+                "falsification": "Pre-aggregate child rows and compare totals.",
+            },
+        ],
+        "experiments": [],
+        "conclusion": {"hypothesis_id": "h-unknown", "status": "confirmed"},
+    }
+
+    report = reasoning.evaluate_packet(case, packet)
+
+    assert report["conclusion"]["dimension"] == "data"
+    assert report["conclusion"]["status"] == "provisional"
+    assert report["decision"] == "instrument_first"
+    unknown = next(
+        item for item in report["hypothesis_results"] if item["hypothesis_id"] == "h-unknown"
+    )
+    assert unknown["status"] == "provisional"
+
+
+def test_full_operator_contract_breaks_non_discriminating_causal_family_tie():
+    case = {
+        "case_id": "state-over-trigger",
+        "problem_statement": (
+            "A provider failure permanently poisons a single-flight promise for the same key; "
+            "later retries must start fresh."
+        ),
+        "observations": [
+            {
+                "evidence_id": "dependency-a",
+                "statement": "The provider can fail temporarily.",
+                "dimension": "dependency",
+                "kind": "artifact",
+                "provenance": "provider.ts",
+                "independence_key": "provider.ts",
+                "reliability": 0.9,
+            },
+            {
+                "evidence_id": "dependency-b",
+                "statement": "The user service calls the provider.",
+                "dimension": "dependency",
+                "kind": "artifact",
+                "provenance": "service.ts",
+                "independence_key": "service.ts",
+                "reliability": 0.9,
+            },
+            {
+                "evidence_id": "state-a",
+                "statement": "A rejected promise remains in the pending map for the key.",
+                "dimension": "state",
+                "kind": "artifact",
+                "provenance": "inflight.ts",
+                "independence_key": "inflight.ts",
+                "reliability": 0.95,
+            },
+        ],
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-dependency",
+                "claim": "Provider instability is the root cause.",
+                "dimension": "dependency",
+                "support_evidence_ids": ["dependency-a", "dependency-b"],
+                "falsification": "Hold local state constant and replace the provider.",
+            },
+            {
+                "hypothesis_id": "h-state",
+                "claim": "Rejected in-flight state poisons later retries.",
+                "dimension": "state",
+                "support_evidence_ids": ["state-a"],
+                "falsification": "Evict only rejected work and retry the same key.",
+            },
+        ],
+        "experiments": [],
+        "conclusion": {"hypothesis_id": "h-dependency", "status": "confirmed"},
+    }
+
+    report = reasoning.evaluate_packet(case, packet)
+
+    assert report["conclusion"]["dimension"] == "state"
+    assert report["conclusion"]["status"] == "provisional"
 
 
 def test_local_judge_cannot_relabel_clock_evidence_as_data_support():

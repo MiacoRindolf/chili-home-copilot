@@ -1,0 +1,8 @@
+{
+  "case_id": "sql-join-aggregate-406",
+  "expected_dimension": "data",
+  "expected_file": "report.sql",
+  "hidden_files": {
+    "tests/test_hidden_join_aggregate.py": "import sqlite3\nfrom pathlib import Path\n\n\ndef test_multiple_children_are_not_cross_multiplied():\n    connection = sqlite3.connect(':memory:')\n    connection.executescript(Path('schema.sql').read_text(encoding='utf-8'))\n    connection.execute(\"INSERT INTO orders VALUES (1, 'acct')\")\n    connection.executemany('INSERT INTO fills VALUES (?, 1, ?)', [(1, 2), (2, 3)])\n    connection.executemany('INSERT INTO fees VALUES (?, 1, ?)', [(1, 0.5), (2, 1.0)])\n    row = connection.execute(Path('report.sql').read_text(encoding='utf-8')).fetchone()\n    assert row == ('acct', 5, 1.5)\n"
+  }
+}

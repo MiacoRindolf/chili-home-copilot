@@ -89,8 +89,34 @@ def test_compile_probe_isolated_from_source_tree(tmp_path):
     )
 
     assert run["results"][0]["status"] == "completed"
-    assert "Compiled 1 Python file" in run["results"][0]["output"]
+    assert "ok app/example.py" in run["results"][0]["output"]
     assert not (repo / "app/__pycache__").exists()
+
+
+def test_compile_probe_supports_typescript_without_mutating_source(tmp_path):
+    repo = _committed_repo(tmp_path)
+    target = repo / "src/example.ts"
+    target.parent.mkdir()
+    target.write_text("export const value: number = 42;\n", encoding="utf-8")
+    _git(repo, "add", "src/example.ts")
+    _git(repo, "commit", "-m", "add typescript example")
+
+    run = diagnostic_probes.execute_safe_probes(
+        repo,
+        [
+            {
+                "probe_id": "compile-typescript",
+                "kind": "compile",
+                "paths": ["src/example.ts"],
+                "dimension": "code",
+                "safety": "isolated",
+            }
+        ],
+    )
+
+    assert run["results"][0]["status"] == "completed"
+    assert "ok src/example.ts" in run["results"][0]["output"]
+    assert target.read_text(encoding="utf-8") == "export const value: number = 42;\n"
 
 
 def test_targeted_test_runs_from_git_snapshot_not_source_tree(tmp_path):

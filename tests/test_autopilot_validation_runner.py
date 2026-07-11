@@ -14,6 +14,7 @@ Regression coverage for the audit findings:
 
 from __future__ import annotations
 
+import shutil
 import textwrap
 from pathlib import Path
 
@@ -71,6 +72,48 @@ def test_ast_syntax_legacy_no_changed_files_still_walks(tmp_path):
     result = run_ast_syntax(tmp_path)
     assert result.exit_code == 0
     assert "a.py" in result.stdout
+
+
+def test_changed_typescript_syntax_uses_node_and_records_exact_coverage(tmp_path):
+    if not shutil.which("node"):
+        return
+    _write(tmp_path, "src/good.ts", "export const value: number = 1;\n")
+    _write(tmp_path, "src/bad.ts", "export const value: = 1;\n")
+
+    good = run_ast_syntax(tmp_path, changed_files=["src/good.ts"])
+    bad = run_ast_syntax(tmp_path, changed_files=["src/bad.ts"])
+
+    assert good.exit_code == 0, good.stdout + good.stderr
+    assert good.metadata["changed_files"] == ["src/good.ts"]
+    assert good.metadata["syntax_languages"] == ["typescript"]
+    assert bad.exit_code != 0
+    assert "SyntaxError" in bad.stdout
+
+
+def test_changed_typescript_syntax_never_executes_repository_code(tmp_path):
+    if not shutil.which("node"):
+        return
+    _write(tmp_path, "src/side_effect.ts", 'throw new Error("must not execute");\n')
+
+    result = run_ast_syntax(tmp_path, changed_files=["src/side_effect.ts"])
+
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert result.metadata["changed_files"] == ["src/side_effect.ts"]
+
+
+def test_changed_dart_syntax_uses_analyzer_when_available(tmp_path):
+    if not shutil.which("dart"):
+        return
+    _write(tmp_path, "lib/good.dart", "int add(int left, int right) => left + right;\n")
+    _write(tmp_path, "lib/bad.dart", "int add( => 1;\n")
+
+    good = run_ast_syntax(tmp_path, changed_files=["lib/good.dart"])
+    bad = run_ast_syntax(tmp_path, changed_files=["lib/bad.dart"])
+
+    assert good.exit_code == 0, good.stdout + good.stderr
+    assert good.metadata["changed_files"] == ["lib/good.dart"]
+    assert good.metadata["syntax_languages"] == ["dart"]
+    assert bad.exit_code != 0
 
 
 # ── run_validation end-to-end (the TypeError regression) ────────────────

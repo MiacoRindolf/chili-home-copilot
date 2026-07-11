@@ -1,0 +1,15 @@
+{
+  "schema": "chili.diagnosis-to-fix-case.v1",
+  "case_id": "dart-cache-clock-403",
+  "language": "dart",
+  "test_runner": "dart",
+  "prompt": "A TTL cache accepts an injected clock for deterministic replay, yet expiration follows the host wall clock. Refreshing an existing key also retains its old deadline. Repair the clock and refresh contracts so replay time controls expiration and a refreshed value receives the new TTL.",
+  "candidate_paths": ["lib/cache_entry.dart", "lib/cache.dart", "lib/cache_metrics.dart"],
+  "max_files": 3,
+  "repo_files": {
+    "lib/cache_entry.dart": "class CacheEntry<T> {\n  CacheEntry(this.value, this.expiresAt);\n\n  T value;\n  DateTime expiresAt;\n\n  void refresh(T nextValue, DateTime nextExpiry) {\n    value = nextValue;\n  }\n}\n",
+    "lib/cache.dart": "import 'cache_entry.dart';\n\ntypedef Clock = DateTime Function();\n\nclass TtlCache<T> {\n  TtlCache(this._now);\n\n  final Clock _now;\n  final Map<String, CacheEntry<T>> _entries = {};\n\n  void put(String key, T value, Duration ttl) {\n    final expiry = _now().add(ttl);\n    final existing = _entries[key];\n    if (existing != null) {\n      existing.refresh(value, expiry);\n    } else {\n      _entries[key] = CacheEntry<T>(value, expiry);\n    }\n  }\n\n  T? get(String key) {\n    final entry = _entries[key];\n    if (entry == null) return null;\n    if (DateTime.now().isAfter(entry.expiresAt)) {\n      _entries.remove(key);\n      return null;\n    }\n    return entry.value;\n  }\n}\n",
+    "lib/cache_metrics.dart": "String cacheOutcome(bool hit) => hit ? 'hit' : 'miss';\n",
+    "tests/public_cache_test.dart": "import '../lib/cache.dart';\n\nvoid main() {\n  var now = DateTime.utc(2099, 1, 1);\n  final cache = TtlCache<String>(() => now);\n  cache.put('alpha', 'one', const Duration(seconds: 10));\n  if (cache.get('alpha') != 'one') {\n    throw StateError('fresh value should be returned');\n  }\n  print('public cache contract passed');\n}\n"
+  }
+}

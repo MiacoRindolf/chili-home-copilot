@@ -5,37 +5,80 @@
     {
       "case": "cases/clock-201.json",
       "oracle": "oracles/clock-201.json",
-      "split": "holdout"
+      "split": "development-regression",
+      "evaluation_role": "development_regression"
     },
     {
       "case": "cases/config-202.json",
       "oracle": "oracles/config-202.json",
-      "split": "holdout"
+      "split": "development-regression",
+      "evaluation_role": "development_regression"
     },
     {
       "case": "cases/data-203.json",
       "oracle": "oracles/data-203.json",
-      "split": "holdout"
+      "split": "development-regression",
+      "evaluation_role": "development_regression"
     },
     {
       "case": "cases/clock-chain-301.json",
       "oracle": "oracles/clock-chain-301.json",
-      "split": "calibration-multifile"
+      "split": "development-regression-multifile-calibration",
+      "evaluation_role": "development_regression"
     },
     {
       "case": "cases/config-chain-302.json",
       "oracle": "oracles/config-chain-302.json",
-      "split": "holdout-multifile"
+      "split": "development-regression-multifile",
+      "evaluation_role": "development_regression"
     },
     {
       "case": "cases/data-contract-303.json",
       "oracle": "oracles/data-contract-303.json",
-      "split": "holdout-multifile"
+      "split": "development-regression-multifile",
+      "evaluation_role": "development_regression"
     },
     {
       "case": "cases/state-dedupe-304.json",
       "oracle": "oracles/state-dedupe-304.json",
-      "split": "holdout-multifile"
+      "split": "development-regression-multifile",
+      "evaluation_role": "development_regression"
+    },
+    {
+      "case": "cases/ts-singleflight-401.json",
+      "oracle": "oracles/ts-singleflight-401.json",
+      "split": "development-regression-multifile-typescript",
+      "evaluation_role": "development_regression"
+    },
+    {
+      "case": "cases/ts-abort-chain-402.json",
+      "oracle": "oracles/ts-abort-chain-402.json",
+      "split": "development-regression-multifile-typescript",
+      "evaluation_role": "development_regression"
+    },
+    {
+      "case": "cases/dart-cache-clock-403.json",
+      "oracle": "oracles/dart-cache-clock-403.json",
+      "split": "development-regression-multifile-dart",
+      "evaluation_role": "development_regression"
+    },
+    {
+      "case": "cases/dart-subscription-404.json",
+      "oracle": "oracles/dart-subscription-404.json",
+      "split": "development-regression-multifile-dart",
+      "evaluation_role": "development_regression"
+    },
+    {
+      "case": "cases/sql-partial-unique-405.json",
+      "oracle": "oracles/sql-partial-unique-405.json",
+      "split": "development-regression-sql",
+      "evaluation_role": "development_regression"
+    },
+    {
+      "case": "cases/sql-join-aggregate-406.json",
+      "oracle": "oracles/sql-join-aggregate-406.json",
+      "split": "development-regression-sql",
+      "evaluation_role": "development_regression"
     }
   ]
 }

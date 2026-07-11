@@ -1826,6 +1826,108 @@ def test_deterministic_small_desktop_diff_updates_presenter_plan_copy():
     assert "Plan: ${_listSummary(changes, limit: 3)}." in diff
 
 
+def test_deterministic_contract_diff_repairs_known_invariant_without_model():
+    source = (
+        "const pending = new Map<string, Promise<string>>();\n"
+        "export function singleFlight(key: string, task: () => Promise<string>): Promise<string> {\n"
+        "  const operation = task();\n"
+        "  pending.set(key, operation);\n"
+        "  return operation;\n"
+        "}\n"
+    )
+
+    diff = orchestrator._deterministic_contract_diff(
+        "src/inflight.ts",
+        source,
+        "A single-flight promise poisons later retry for the same key.",
+    )
+
+    assert diff is not None
+    assert "pending.delete(key)" in diff
+    assert "tests/" not in diff
+
+
+def test_deterministic_contract_diff_repairs_dart_clock_and_lifecycle_invariants():
+    cache_source = (
+        "typedef Clock = DateTime Function();\n"
+        "class Cache { Cache(this._now); final Clock _now;\n"
+        "bool expired(DateTime expiry) => DateTime.now().isAfter(expiry); }\n"
+    )
+    worker_source = (
+        "class Worker { StreamSubscription<String>? _subscription;\n"
+        "Future<void> stop() async { _subscription = null; } }\n"
+    )
+
+    cache_diff = orchestrator._deterministic_contract_diff(
+        "lib/cache.dart",
+        cache_source,
+        "A TTL cache with an injected clock follows wall-clock expiration during replay.",
+    )
+    worker_diff = orchestrator._deterministic_contract_diff(
+        "lib/worker.dart",
+        worker_source,
+        "A subscription worker must cancel its actual handle during stop.",
+    )
+
+    assert cache_diff is not None
+    assert "_now().isAfter" in cache_diff
+    assert worker_diff is not None
+    assert "await subscription.cancel();" in worker_diff
+
+
+def test_deterministic_contract_diff_preaggregates_generic_sibling_relations():
+    source = (
+        "SELECT accounts.region, SUM(charges.cents), SUM(credits.cents)\n"
+        "FROM accounts\n"
+        "LEFT JOIN charges ON charges.account_id = accounts.id\n"
+        "LEFT JOIN credits ON credits.account_id = accounts.id\n"
+        "GROUP BY accounts.region;\n"
+    )
+
+    diff = orchestrator._deterministic_contract_diff(
+        "report.sql",
+        source,
+        "Two independent one-to-many relations are cross multiplied before aggregation.",
+    )
+
+    assert diff is not None
+    assert "chili_charges_aggregate" in diff
+    assert "chili_credits_aggregate" in diff
+    assert "GROUP BY account_id" in diff
+
+
+def test_deterministic_contract_diff_propagates_cancellation_and_stops_retry():
+    provider = (
+        "type ProviderAdapter = (signal: AbortSignal) => Promise<string>;\n"
+        "export async function callProvider(client: ProviderAdapter, caller: AbortSignal): Promise<string> {\n"
+        "  const detached = new AbortController(); return client(detached.signal);\n}\n"
+    )
+    retry = (
+        "async function retryRequest(client: ProviderAdapter, caller: AbortSignal) {\n"
+        "  for (let attempt = 0; attempt < 2; attempt += 1) {\n"
+        "    try { return await callProvider(client, caller); } catch (failure) { lastError = failure; }\n"
+        "  } throw lastError;\n}\n"
+    )
+    prompt = "Propagate the caller AbortSignal and stop retrying immediately on AbortError."
+
+    provider_diff = orchestrator._deterministic_contract_diff(
+        "src/provider.ts",
+        provider,
+        prompt,
+    )
+    retry_diff = orchestrator._deterministic_contract_diff(
+        "src/retry.ts",
+        retry,
+        prompt,
+    )
+
+    assert provider_diff is not None
+    assert "return client(caller);" in provider_diff
+    assert retry_diff is not None
+    assert "failure.name === 'AbortError'" in retry_diff
+    assert "throw failure" in retry_diff
+
+
 def test_heuristic_plan_fallback_prefers_available_deterministic_desktop_patch(tmp_path):
     error_file = tmp_path / "chili_mobile/lib/src/network/network_error_message.dart"
     api_file = tmp_path / "chili_mobile/lib/src/network/chili_api_client.dart"
@@ -2566,6 +2668,24 @@ def test_validation_merge_evidence_requires_non_collect_only_signal():
 
     assert orchestrator.validation_merge_evidence(collect_only, ["app/services/example.py"])["passed"] is False
     assert orchestrator.validation_merge_evidence(syntax_plus_collect, ["app/services/example.py"])["passed"] is True
+
+
+def test_validation_merge_evidence_rejects_partial_syntax_coverage():
+    partial = [
+        {
+            "step_key": "ast_syntax",
+            "exit_code": 0,
+            "changed_files": ["app/first.py"],
+        }
+    ]
+
+    result = orchestrator.validation_merge_evidence(
+        partial,
+        ["app/first.py", "app/second.ts"],
+    )
+
+    assert result["passed"] is False
+    assert result["evidence_classes"] == []
 
 
 def test_behavior_validation_evidence_requires_targeted_tests():

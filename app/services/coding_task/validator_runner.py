@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,14 @@ PHASE1_STEP_KEYS: tuple[str, ...] = (
 )
 
 _MAX_PY_FILES = 200
+_CHANGED_SYNTAX_SUFFIXES = frozenset(
+    {".py", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".dart"}
+)
+_NODE_TYPESCRIPT_PARSE_SCRIPT = (
+    'import { readFileSync } from "node:fs"; '
+    'import { stripTypeScriptTypes } from "node:module"; '
+    'stripTypeScriptTypes(readFileSync(process.argv[1], "utf8"), { mode: "transform" });'
+)
 _PYTEST_SAFE_DB_MESSAGES = (
     "Tests require TEST_DATABASE_URL",
     "TEST_DATABASE_URL must be a PostgreSQL URL",
@@ -117,7 +126,7 @@ def _pytest_safe_database_skip(step_key: str, timed_out: bool, stdout: str, stde
     )
 
 
-def run_ast_syntax(cwd: Path, changed_files: list[str] | None = None) -> StepResult:
+def _run_python_ast_syntax(cwd: Path, changed_files: list[str] | None = None) -> StepResult:
     """Read-only: parse .py files under cwd (bounded count).
 
     When ``changed_files`` is provided, parse ONLY those .py files (resolved
@@ -153,13 +162,13 @@ def run_ast_syntax(cwd: Path, changed_files: list[str] | None = None) -> StepRes
         try:
             src = fp.read_text(encoding="utf-8", errors="replace")
             ast.parse(src, filename=str(fp))
-            buf.append(f"ok {fp.relative_to(cwd)}")
+            buf.append(f"ok {fp.relative_to(cwd).as_posix()}")
         except SyntaxError as e:
             errors += 1
-            buf.append(f"SyntaxError {fp.relative_to(cwd)}: {e}")
+            buf.append(f"SyntaxError {fp.relative_to(cwd).as_posix()}: {e}")
         except OSError as e:
             errors += 1
-            buf.append(f"os_error {fp.relative_to(cwd)}: {e}")
+            buf.append(f"os_error {fp.relative_to(cwd).as_posix()}: {e}")
     out = "\n".join(buf) if buf else "(no .py files under cwd)"
     code = 1 if errors else 0
     full, blen = truncate_text(out + (f"\n{errors} file(s) with syntax errors" if errors else ""))
@@ -171,6 +180,138 @@ def run_ast_syntax(cwd: Path, changed_files: list[str] | None = None) -> StepRes
         "",
         False,
         None,
+    )
+
+
+def _dart_executable() -> str:
+    command = shutil.which("dart") or ""
+    if not command:
+        return ""
+    path = Path(command)
+    if sys.platform == "win32" and path.suffix.lower() in {".bat", ".cmd"}:
+        executable = path.parent / "cache" / "dart-sdk" / "bin" / "dart.exe"
+        if executable.is_file():
+            return str(executable)
+    return command
+
+
+def run_ast_syntax(cwd: Path, changed_files: list[str] | None = None) -> StepResult:
+    """Run bounded, allowlisted syntax checks for changed source files."""
+    if changed_files is None:
+        return _run_python_ast_syntax(cwd)
+
+    root = cwd.resolve()
+    scoped: list[tuple[str, Path]] = []
+    for raw in changed_files:
+        relative = str(raw).replace("\\", "/")
+        if Path(relative).suffix.lower() not in _CHANGED_SYNTAX_SUFFIXES:
+            continue
+        path = (root / relative).resolve()
+        try:
+            safe_relative = path.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if path.is_file():
+            scoped.append((safe_relative, path))
+        if len(scoped) >= _MAX_PY_FILES:
+            break
+
+    python_files = [relative for relative, path in scoped if path.suffix.lower() == ".py"]
+    python_result = (
+        _run_python_ast_syntax(root, changed_files=python_files)
+        if python_files
+        else None
+    )
+    output_lines = [
+        line
+        for line in str(python_result.stdout if python_result else "").splitlines()
+        if line.strip() and not line.startswith("(no .py files")
+    ]
+    errors = 1 if python_result is not None and python_result.exit_code != 0 else 0
+    validated_files = list(python_files)
+    languages = {"python"} if python_files else set()
+    node = shutil.which("node") or ""
+    dart = _dart_executable()
+
+    for relative, path in scoped:
+        suffix = path.suffix.lower()
+        if suffix == ".py":
+            continue
+        if suffix in {".js", ".mjs", ".cjs", ".ts", ".mts", ".cts"}:
+            if not node:
+                errors += 1
+                output_lines.append(f"validator_unavailable {relative}: node")
+                continue
+            validated_files.append(relative)
+            languages.add("typescript" if suffix in {".ts", ".mts", ".cts"} else "javascript")
+            argv = [node, "--check", relative]
+            if suffix in {".ts", ".mts", ".cts"}:
+                # ``node --check`` does not parse stripped TypeScript syntax.
+                # The built-in parser does, without evaluating repository code.
+                argv = [
+                    node,
+                    "--no-warnings",
+                    "--input-type=module",
+                    "--eval",
+                    _NODE_TYPESCRIPT_PARSE_SCRIPT,
+                    relative,
+                ]
+            code, timed_out, stdout, stderr = _run_subprocess_allowlisted(argv, root)
+            if code != 0 or timed_out:
+                errors += 1
+                detail = (stderr or stdout or "syntax check failed").strip()
+                output_lines.append(f"SyntaxError {relative}: {detail}")
+            else:
+                output_lines.append(f"ok {relative}")
+            continue
+        if not dart:
+            errors += 1
+            output_lines.append(f"validator_unavailable {relative}: dart")
+            continue
+        validated_files.append(relative)
+        languages.add("dart")
+        with tempfile.TemporaryDirectory(prefix="chili_dart_analyzer_") as state_dir:
+            appdata = Path(state_dir) / "appdata"
+            localappdata = Path(state_dir) / "localappdata"
+            appdata.mkdir()
+            localappdata.mkdir()
+            code, timed_out, stdout, stderr = _run_subprocess_allowlisted(
+                [dart, "analyze", relative],
+                root,
+                extra_env={
+                    "APPDATA": str(appdata),
+                    "LOCALAPPDATA": str(localappdata),
+                    "DART_DISABLE_ANALYTICS": "true",
+                },
+            )
+        if code != 0 or timed_out:
+            errors += 1
+            detail = (stderr or stdout or "syntax check failed").strip()
+            output_lines.append(f"SyntaxError {relative}: {detail}")
+        else:
+            output_lines.append(f"ok {relative}")
+
+    output = (
+        "\n".join(output_lines)
+        if output_lines
+        else "(no supported source files in validation scope)"
+    )
+    if errors:
+        output += f"\n{errors} validator group(s) reported syntax errors"
+    full, _byte_length = truncate_text(output)
+    return StepResult(
+        "ast_syntax",
+        1 if errors else 0,
+        False,
+        full,
+        "",
+        False,
+        None,
+        {
+            "changed_files": validated_files,
+            "validation_scope": "changed_file_syntax",
+            "syntax_languages": sorted(languages),
+        },
     )
 
 
