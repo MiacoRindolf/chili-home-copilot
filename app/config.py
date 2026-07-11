@@ -7315,6 +7315,16 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_REENTRY_CHASE_CAP_ENABLED"),
         description="Master kill-switch for the anti-chase re-entry gate (live_runner). ON ⇒ after any loss exit (was_loss) at any escalation level, block a re-entry whose price is more than chili_momentum_reentry_chase_cap_r ATR-multiples above the prior losing tranche's high-water-mark (see that field for the full rationale + the SVRE worked example). OFF ⇒ the gate is a no-op (byte-identical, unbounded chase).",
     )
+    chili_momentum_leader_definitive_latch_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LEADER_DEFINITIVE_LATCH_ENABLED"),
+        description="LAST-KNOWN-DEFINITIVE day-leader latch (live_runner; all three leader-read sites: escalation bypass, chase-cap bypass, stopout-cap exemption). Viability freshness decays WHILE THE FSM IS IN A TRADE (nothing refreshes the row in live/managing states), so the post-exit board read returns empty_board and the ripping day-leader loses every ignition bypass exactly at its next leg (JEM 06-30 replay: capped at 3 bullets before the 3.7→5.07 run; the live CLRO-0707 wedge class). ON ⇒ an empty_board read cannot demote: the last DEFINITIVE read stands (latched TRUE on any definitive leader read; cleared only by a REAL demotion — a readable board whose top is a DIFFERENT symbol). Replay-proven 07-10: JEM −$697→+$1,355, VRAX +$12,343 (3-window trio net +$11.1k). OFF ⇒ fail-closed pre-latch behavior (empty board = not leader).",
+    )
+    chili_momentum_chase_cap_leader_bypass_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CHASE_CAP_LEADER_BYPASS_ENABLED"),
+        description="LEADER-IGNITION BYPASS on the anti-chase re-entry gate (the #892 escalation-bypass recipe extended to the chase cap). The chase cap anchors to the PRIOR losing tranche's hwm forever, so after an early bailout (JEM 06-30: in 2.86, bail 2.83) every ignition re-entry on a genuine NEW LEG (3.3→4.89) reads as a 'chase' and the day's winner is vetoed for the rest of the window — while the escalation gate, which HAS the ignition bypass, already said GO. ON ⇒ allow a blocked re-entry through IFF the name is the DAY LEADER (same ~1min-cached board read as the escalation bypass) AND the trigger is STRUCTURAL (defined stop) AND tape_confirms_hold is TRUE (fail-CLOSED tape read: buyers actively lifting, tick-rate at floor). The SVRE fade-chase this guard exists for stays blocked (a fading top is not leader-with-confirming-tape). Any error ⇒ no bypass (the veto stands). OFF ⇒ pure #849-era chase-cap behavior.",
+    )
     # ── G4 (losers-eat-the-winner fix, 2026-07-03): grind-aware exits + same-symbol
     # re-entry escalation. Two kill-switches, everything else derived (leader = the
     # existing within-day p90 live_eligible rank; structure = the 5m EMA-9 / confirmed
