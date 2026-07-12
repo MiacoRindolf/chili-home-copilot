@@ -4,7 +4,7 @@ Date: 2026-07-11
 
 ## Current Verdict
 
-CHILI is now **qualified for local-only development shadow use** on the tested diagnostic and repair contracts. All four untouched independent diagnostic slices remain below the promotion threshold, so it is **not yet proven universally better than Claude Fable 5** on arbitrary complex coding work.
+CHILI is now **qualified for local-only development shadow use** on the tested diagnostic and repair contracts. All five untouched independent diagnostic slices remain below the promotion threshold, so it is **not yet proven universally better than Claude Fable 5** on arbitrary complex coding work.
 
 This distinction is intentional. The current evidence proves that CHILI can diagnose, gather bounded evidence, select owning files, generate local patches, use validation failures as new evidence, repair or roll back its own patch, and pass cross-language development regressions without premium calls. It does not yet provide a blinded, statistically meaningful head-to-head against Fable 5.
 
@@ -30,7 +30,7 @@ This distinction is intentional. The current evidence proves that CHILI can diag
 | Recognized contract repair | Prompt-derived invariants and repository-shape checks for single-flight eviction, cancellation propagation, injected-clock TTL, subscription lifecycle, partial uniqueness, and sibling pre-aggregation | Proven by variant unit tests and six real regression fixtures; deliberately narrow |
 | Production validation repair | Project Autonomy preserves operator/assertion contracts and retries validation locally | Default three rounds, hard maximum five; proven by tests, not yet by a large live inventory |
 | Fable 5 reference accuracy | Active target is `claude-fable-5`; exact candidate responses must bind to provider-native or provider-UI identity evidence | Proven for archive identity and collection controls; no same-task score yet |
-| Independent post-freeze diagnostic holdout | Cases authored only after the tested source SHA was frozen; case/oracle hashes unchanged through the run | Four eight-case slices completed at 88.12/100, 87.5/100, 76.25/100, and 69.38/100; all below the 90 shadow threshold |
+| Independent post-freeze diagnostic holdout | Cases authored only after the tested source SHA was frozen; case/oracle hashes unchanged through the run | Five eight-case slices completed at 88.12/100, 87.5/100, 76.25/100, 69.38/100, and 74.4/100; all below the 90 shadow threshold |
 | Direct blinded Fable 5 head-to-head | Same unseen task set independently run by Fable 5 and CHILI, with human adjudication | Missing |
 | Broad language/repository coverage | Initial Python, TypeScript, Dart, and SQL repair coverage | Partial; large repositories, Go, Rust, and mixed stacks remain incomplete |
 | Universal superiority claim | Statistically defensible quality, safety, latency, and cost advantage across broad tasks | Not proven |
@@ -174,6 +174,26 @@ After preserving the untouched result, commit `8628ddea503814dced347792aaf1c56c0
 
 These are development results. They do not overwrite the untouched 69.38 score and cannot support a parity claim until a new post-freeze slice reproduces the improvement.
 
+### Fifth Independent Post-Freeze Diagnostic Slice
+
+- Frozen implementation: `8628ddea503814dced347792aaf1c56c0d67c243`
+- Evaluation/fixture commit: `2d75f05a0c9e70538d249f99d07a4ef10dc9fb52`
+- Eight independently authored non-trading incidents covering all eight diagnostic dimensions; six confirmed cases and two calibrated-uncertainty cases
+- All 17 case/oracle/manifest files exactly matched their frozen Git blobs after the run; implementation source diff was zero
+- Local model: `qwen2.5-coder:7b`; investigator, skeptic, and judge for every case; **24/24 calls successful** and **24/24 stages accepted**
+- Untouched score: **74.4/100**; verdict: **needs_improvement**
+- Untouched failures: five wrong causal families, baseline drift missed in all five applicable cases, and one confirmed clock cause under-calibrated as provisional
+- Every grounding, safety, premium-independence, and hypothesis-breadth check passed
+- Unsafe final automatic experiments: **0**; premium calls: **0**
+- Average local-call latency: **52.8 seconds**; maximum: **64.8 seconds**; valid retry wall time: **1,274.8 seconds**
+- Reports: `project_ws/AgentOps/FABLE5_CLASS_DIAGNOSTIC_BLINDED_FIFTH_RUN.md`, `project_ws/AgentOps/FABLE5_CLASS_DIAGNOSTIC_BLINDED_FIFTH_RUN_RECEIPT.md`, and `project_ws/AgentOps/fable5_class_diagnostic_blinded_fifth_run.json`
+
+The initial invocation was interrupted by an outer process timeout and produced no result artifact. The exact
+frozen run then completed under a longer wrapper allowance. This adds a separate operational gap: long local
+council runs need atomic per-case checkpoints and resumability. The valid score remains negative evidence. The
+fourth-slice repair generalized only partially to fresh incidents, so its disclosed 100/100 result cannot support
+a broad parity claim.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
@@ -196,11 +216,11 @@ These are development results. They do not overwrite the untouched 69.38 score a
 
 1. The repair suite has only 13 small development repositories: seven Python and six TypeScript/Dart/SQL. It does not represent large-repository, mixed-stack, Go, or Rust superiority.
 2. Provider-attested Fable 5 history exists, but no provider-attested Fable output exists for the same frozen repair cases. Historical answers are excluded from a blinded score because current CHILI development may be contaminated by their fixes and task mechanics.
-3. Four independent eight-case diagnostic slices now total 32 cases and scored 88.12/100, 87.5/100, 76.25/100, and 69.38/100. The numeric diagnostic-count target is met, but every untouched slice is below the 90 shadow threshold and the set does not yet satisfy the required repository/language mix or direct Fable 5 comparison.
+3. Five independent eight-case diagnostic slices now total 40 cases and scored 88.12/100, 87.5/100, 76.25/100, 69.38/100, and 74.4/100. The numeric diagnostic-count target is met, but every untouched slice is below the 90 shadow threshold and the set does not yet satisfy the required repository/language mix or direct Fable 5 comparison.
 4. Runtime evidence currently covers bounded text logs, aggregate/schema PostgreSQL reads, typed-probe timestamps, structured causal timelines, hashed log correlation identities, and explicit cross-service flow edges. It does not yet provide external trace-backend ingestion, metrics backends, container state, process inspection, automatic producer/consumer role inference for arbitrary systems, or a live production proof using a separately provisioned SELECT-only role.
-5. Local 7B output remains stochastic. The second untouched diagnostic slice produced 0/24 usable packets before compact contracts. The fourth untouched slice accepted 24/24 packets yet scored only 69.38, proving that structural usability is not diagnostic quality. The latest exact-commit disclosed replay accepted 24/24 packets but still mislabeled one dependency case and attempted two unsafe automatic experiments that CHILI safely demoted. Other development runs varied between 95 and 100. Five of six final cross-language successes also required recognized deterministic rescue. That demonstrates system resilience, not frontier-model-level free-form reasoning.
+5. Local 7B output remains stochastic. The second untouched diagnostic slice produced 0/24 usable packets before compact contracts. The fourth and fifth untouched slices each accepted 24/24 packets yet scored only 69.38 and 74.4, proving that structural usability is not diagnostic quality. The fifth slice missed five causal-family labels and every applicable baseline-drift flag. The latest exact-commit disclosed replay accepted 24/24 packets but still mislabeled one dependency case and attempted two unsafe automatic experiments that CHILI safely demoted. Other development runs varied between 95 and 100. Five of six final cross-language successes also required recognized deterministic rescue. That demonstrates system resilience, not frontier-model-level free-form reasoning.
 6. Recognized repair synthesis is intentionally narrow. Unknown mechanisms, dependency migrations, frontend visual validation, true concurrency races, and large cross-service refactors remain under-tested.
-7. Final reviewed-code cross-language latency averaged 73.9 seconds/case. Diagnostic calls averaged 51.6 and 61.2 seconds on the two untouched slices; compact development prompts reduced the second suite to 15.7 seconds/call, but that speedup still needs fresh-holdout reproduction.
+7. Final reviewed-code cross-language latency averaged 73.9 seconds/case. Diagnostic calls averaged 51.6, 61.2, and most recently 52.8 seconds on the slower untouched slices. The fifth council required 1,274.8 seconds end to end, and an initial wrapper timeout lost all partial progress. Compact development prompts reduced one disclosed suite to 15.7 seconds/call, but that speedup and durable per-case checkpointing still need fresh-holdout proof.
 8. The 14B local model was not production-usable on current hardware because it offloaded heavily to CPU. The resident 7B model is the measured production lane.
 9. Diagnostic memory is same-repository and lexical. It cannot yet transfer validated mechanisms across unrelated repositories, and unattended full-autopilot runs cannot self-promote their conclusions.
 
