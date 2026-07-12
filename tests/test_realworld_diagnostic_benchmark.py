@@ -74,6 +74,7 @@ def test_heuristic_benchmark_run_is_local_only_and_never_claims_fable_parity(tmp
     result = benchmark.run(args)
 
     assert result["premium_calls"] == 0
+    assert result["model_thinking"] == "heuristic-only"
     assert result["fable5_head_to_head_run"] is False
     assert result["fable5_parity_claim"] is False
     assert result["model_output_gate_passed"] is True
@@ -99,6 +100,7 @@ def test_case_checkpoint_resumes_without_replaying_completed_reasoning(
         num_predict=100,
         num_ctx=2048,
         keep_alive="1m",
+        think=False,
         stages="judge",
         heuristic_only=True,
         report=str(tmp_path / "report.md"),
@@ -126,6 +128,7 @@ def test_case_checkpoint_resumes_without_replaying_completed_reasoning(
 
     saved = json.loads(checkpoint.read_text(encoding="utf-8"))
     assert saved["schema"] == "chili.realworld-diagnostic-checkpoint.v1"
+    assert saved["contract"]["think"] is False
     assert saved["completed_case_ids"] == [case_ids[0]]
     assert [item["case_id"] for item in saved["cases"]] == [case_ids[0]]
 

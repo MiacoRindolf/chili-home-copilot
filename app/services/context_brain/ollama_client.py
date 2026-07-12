@@ -87,6 +87,7 @@ def chat(
     timeout_sec: float = 30.0,
     base_url: Optional[str] = None,
     options: Optional[dict] = None,
+    think: Optional[bool] = None,
 ) -> OllamaResult:
     """One Ollama /api/chat call. Returns an OllamaResult, never raises.
 
@@ -109,6 +110,8 @@ def chat(
         payload["keep_alive"] = str(options["keep_alive"])
     if options and options.get("format"):
         payload["format"] = str(options["format"])
+    if think is not None:
+        payload["think"] = bool(think)
     global _LAST_WORKING_OLLAMA_HOST
     bases = _candidate_hosts(base_url)
     errors: list[str] = []

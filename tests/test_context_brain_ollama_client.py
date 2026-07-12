@@ -26,6 +26,7 @@ def test_chat_forwards_keep_alive_and_generation_options(monkeypatch):
         temperature=0.1,
         timeout_sec=12,
         base_url="http://ollama:11434",
+        think=False,
         options={"num_predict": 180, "num_ctx": 2048, "keep_alive": "15m", "format": "json"},
     )
 
@@ -33,11 +34,31 @@ def test_chat_forwards_keep_alive_and_generation_options(monkeypatch):
     assert captured["timeout"] == 12
     assert captured["payload"]["keep_alive"] == "15m"
     assert captured["payload"]["format"] == "json"
+    assert captured["payload"]["think"] is False
     assert captured["payload"]["options"] == {
         "temperature": 0.1,
         "num_predict": 180,
         "num_ctx": 2048,
     }
+
+
+def test_chat_omits_thinking_control_when_unspecified(monkeypatch):
+    captured = {}
+
+    def fake_post_json(url, payload, timeout):
+        captured["payload"] = payload
+        return {"model": "qwen", "message": {"content": "ok"}, "eval_count": 1}
+
+    monkeypatch.setattr(ollama_client, "_post_json", fake_post_json)
+
+    result = ollama_client.chat(
+        [{"role": "user", "content": "hello"}],
+        "qwen",
+        base_url="http://ollama:11434",
+    )
+
+    assert result.ok is True
+    assert "think" not in captured["payload"]
 
 
 def test_chat_reports_primary_timeout_in_aggregated_error(monkeypatch):

@@ -100,6 +100,7 @@ def _checkpoint_contract(
         "num_predict": int(args.num_predict),
         "num_ctx": int(args.num_ctx),
         "keep_alive": str(args.keep_alive),
+        "think": getattr(args, "think", None),
         "heuristic_only": bool(args.heuristic_only),
     }
     encoded = json.dumps(contract, separators=(",", ":"), sort_keys=True).encode(
@@ -252,6 +253,7 @@ def _markdown(results: Mapping[str, Any]) -> str:
         "",
         f"- Run: {results['created_at']}",
         f"- Local model: `{results['model']}`",
+        f"- Model thinking: **{results['model_thinking']}**",
         f"- Reference family: `{results['reference_model']}`",
         f"- Overall score: **{results['overall_score']:.1f}/100**",
         f"- Holdout score: **{results['holdout_score']:.1f}/100**",
@@ -389,6 +391,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 args.model,
                 temperature=0.1,
                 timeout_sec=args.timeout,
+                think=getattr(args, "think", None),
                 options={
                     "num_predict": args.num_predict,
                     "num_ctx": args.num_ctx,
@@ -485,6 +488,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "schema": "chili.realworld-diagnostic-results.v1",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "model": "heuristic-only" if args.heuristic_only else args.model,
+        "model_thinking": (
+            "heuristic-only"
+            if args.heuristic_only
+            else "enabled"
+            if getattr(args, "think", None) is True
+            else "disabled"
+            if getattr(args, "think", None) is False
+            else "model-default"
+        ),
         "reference_model": manifest.get("reference_model") or "claude-fable-5",
         "benchmark_id": str(manifest.get("benchmark_id") or ""),
         "blinded": bool(manifest.get("blinded")),
@@ -524,6 +536,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-predict", type=int, default=900)
     parser.add_argument("--num-ctx", type=int, default=8192)
     parser.add_argument("--keep-alive", default="20m")
+    parser.add_argument(
+        "--think",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Explicitly enable or disable Ollama thinking mode; omit to use the model default.",
+    )
     parser.add_argument(
         "--stages",
         default="judge",
