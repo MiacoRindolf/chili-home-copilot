@@ -1,0 +1,13 @@
+﻿{
+    "schema":  "chili.eleventh-holdout-run-state.v1",
+    "pid":  16508,
+    "started_at":  "2026-07-12T12:38:48.2077765-07:00",
+    "source_head":  "23dfa014ff995d3c90468b3c383b6a03ede5ec97",
+    "fixture_commit":  "5445302654e31c56e652756817be2415f7208cf0",
+    "fixture_tree":  "667c5986ba0cd91542d08b882d7b24b4456e1d10",
+    "primary_model":  "qwen2.5-coder:7b",
+    "escalation_model":  "qwen2.5-coder:14b",
+    "premium_calls_allowed":  0,
+    "stdout":  "D:\\dev\\chili-home-copilot-codex-fable5-diagnostics\\project_ws\\AgentOps\\fable5_class_diagnosis_to_fix_blinded_eleventh_runner.stdout.log",
+    "stderr":  "D:\\dev\\chili-home-copilot-codex-fable5-diagnostics\\project_ws\\AgentOps\\fable5_class_diagnosis_to_fix_blinded_eleventh_runner.stderr.log"
+}
