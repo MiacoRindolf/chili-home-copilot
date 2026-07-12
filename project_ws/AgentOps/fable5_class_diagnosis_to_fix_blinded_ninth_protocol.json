@@ -1,0 +1,39 @@
+{
+  "schema": "chili.sealed-diagnosis-to-fix-protocol.v1",
+  "created_at_utc": "2026-07-12T06:54:08.4390758Z",
+  "reference_family": "claude-fable-5",
+  "claim_policy": "No Fable 5 parity or superiority claim without authenticated same-task evidence.",
+  "frozen_implementation": {
+    "git_commit": "70c22ded4ec715c680192bf199f185dfa20bcb52",
+    "runner_sha256": "b1b0c24df74503330941c093a782081d8604c9dec74fba59625ff2ef90f6c910",
+    "runner_test_sha256": "a562a84e3081b995bea764c3efa637f99538fa2b827cfa3baa8ef8f0f1de8a1d",
+    "diagnostic_reasoning_sha256": "2ca872a4e0c05ce327614a8cbab51d6327ffffcbf82fab1530d5f75043106a1e"
+  },
+  "fixture_author": {
+    "agent_id": "019f551a-2a07-7830-b570-0f1e96195776",
+    "fork_context": false,
+    "external_directory": "D:\\dev\\chili-holdout-author-ninth-20260711",
+    "prohibited_inputs": [
+      "CHILI source or checkouts",
+      "CHILI git history",
+      "prior benchmark cases or reports",
+      "Claude or Fable transcripts",
+      "parent chat history",
+      "internet sources"
+    ]
+  },
+  "evaluation": {
+    "case_count": 8,
+    "evaluation_role": "blinded_holdout",
+    "model": "qwen2.5-coder:7b",
+    "model_digest_short": "dae161e27b0e",
+    "timeout_seconds_per_model_call": 180,
+    "max_repair_rounds": 3,
+    "premium_calls_allowed": 0,
+    "fixture_validation_before_run": "independent author and context-isolated validator only",
+    "final_oracle_policy": "CHILI runner first reads each separate final oracle only after every model call for that case.",
+    "source_stability_policy": "Do not change benchmark, reasoning, orchestration, or test source until the untouched raw result and hashes are preserved.",
+    "authority_policy": "The first completed untouched run is authoritative. Development reruns may not overwrite it.",
+    "verdict_policy": "Use the runner's sealed-final checks and verdict. A high aggregate cannot excuse a failed case contract."
+  }
+}

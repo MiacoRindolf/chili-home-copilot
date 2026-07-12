@@ -1,0 +1,18 @@
+{
+  "schema": "chili.sealed-evaluation-environment.v1",
+  "captured_at_utc": "2026-07-12T06:54:08.4390758Z",
+  "operating_system": "Windows-11-10.0.26200-SP0",
+  "python": "3.13.11",
+  "node": "24.15.0",
+  "dart": "3.11.1 stable windows_x64",
+  "local_model": {
+    "name": "qwen2.5-coder:7b",
+    "digest_short": "dae161e27b0e",
+    "architecture": "qwen2",
+    "parameters": "7.6B",
+    "context_length": 32768,
+    "quantization": "Q4_K_M"
+  },
+  "network_policy": "Benchmark child processes receive dead localhost proxy settings and stripped credential environment.",
+  "premium_calls_allowed": 0
+}

@@ -8,7 +8,7 @@ CHILI is now **qualified for local-only development shadow use** on the tested d
 
 This distinction is intentional. The current evidence proves that CHILI can diagnose, gather bounded evidence, select owning files, generate local patches, use validation failures as new evidence, repair or roll back its own patch, and pass cross-language development regressions without premium calls. It does not yet provide a blinded, statistically meaningful head-to-head against Fable 5.
 
-The historical diagnosis-to-fix reports used the label `hidden` for tests that were loaded after the initial patch but could then guide bounded repair. Those scores are feedback-guided development evidence, not sealed final-adjudication evidence. Runner schema v3 now separates repair-feedback tests from a final oracle that is first read after every model call; no v3 blinded repair holdout has been scored yet.
+The historical diagnosis-to-fix reports used the label `hidden` for tests that were loaded after the initial patch but could then guide bounded repair. Those scores are feedback-guided development evidence, not sealed final-adjudication evidence. Runner schema v3 now separates repair-feedback tests from a final oracle that is first read after every model call for its case. The first eight-case v3 holdout scored only 53.75/100, with 1/8 sealed-final passes.
 
 ## Requirement Audit
 
@@ -27,7 +27,7 @@ The historical diagnosis-to-fix reports used the label `hidden` for tests that w
 | Runtime database evidence | Schema metadata and aggregate-only PostgreSQL profiles through an explicit read-only DSN, read-only transactions, short timeouts, bounded lookback, safe identifiers, and no raw SQL or raw rows | Proven in `_test` integration and development-regression tests; live production credential proof not performed |
 | No arbitrary diagnostic shell | Probe schema has no command kind; paths, selectors, time, count, and output are bounded | Proven by source and tests |
 | Workspace isolation for dynamic probes | Compile uses temporary copies; pytest uses a validated `git archive` snapshot and credential-stripped environment | Proven for repository isolation; hardened OS sandboxing remains open |
-| Diagnosis-to-fix autonomy | Local diagnosis, exact tracked-file selection, atomic multi-file edit groups, public+repair-feedback validation, assertion-contract extraction, rollback, bounded repair, and isolated final adjudication | Repair loop proven on 13 unsealed development repositories across Python, TypeScript, Dart, and SQL; v3 sealed runner proven by tests, but no blinded sealed holdout yet |
+| Diagnosis-to-fix autonomy | Local diagnosis, exact tracked-file selection, atomic multi-file edit groups, public+repair-feedback validation, assertion-contract extraction, rollback, bounded repair, and isolated final adjudication | Repair loop proven on 13 unsealed development repositories; first independently authored v3 sealed holdout failed at 53.75/100 with 1/8 final passes |
 | Cross-language syntax validation | Python AST, parser-only Node TypeScript/JavaScript validation, and Dart analysis with isolated analyzer state; exact changed-file coverage required | Proven by safety and orchestration tests |
 | Recognized contract repair | Prompt-derived invariants and repository-shape checks for single-flight eviction, cancellation propagation, injected-clock TTL, subscription lifecycle, partial uniqueness, and sibling pre-aggregation | Proven by variant unit tests and six real regression fixtures; deliberately narrow |
 | Production validation repair | Project Autonomy preserves operator/assertion contracts and retries validation locally | Default three rounds, hard maximum five; proven by tests, not yet by a large live inventory |
@@ -90,6 +90,26 @@ The older `hidden` column is also historical terminology. Those assertions were 
 - Interpretation: this proves repeatable coverage for six recognized mechanism families. It measures the autonomous system, not free-form 7B model parity, and it is not unseen generalization evidence.
 
 As with the seven Python cases, the reported cross-language `hidden` tests guided bounded repair. The 100/100 result is retained as development-regression evidence only and is not a sealed-final score.
+
+### First Sealed Diagnosis-to-Fix Holdout
+
+- Frozen implementation: `70c22ded4ec715c680192bf199f185dfa20bcb52`
+- Eight independently authored, CHILI-model-blind incidents; all eight require multi-file repairs
+- Language mix: Python 2, TypeScript 2, Dart 2, SQL 2
+- Local model: `qwen2.5-coder:7b`; three bounded repair rounds; zero premium calls
+- Schema-v3 sealed score: **53.75/100**, `blinded_evaluation_failed`
+- Correct diagnosis family: **1/8**
+- Exact changed-file ownership: **3/8**
+- Public regression pass: **8/8**
+- Repair-feedback pass: **1/8**
+- Sealed final pass: **1/8**
+- Local calls: **106/106 successful**; average repository time **212.4 seconds**; end to end **1,704.2 seconds**
+- The one final-pass case still had the wrong diagnosis family
+- Protocol limitation: staged repair-oracle text was partially exposed to the parent controller after source/settings freeze, but never to the local contestant; the slice is model-blind, not fully controller-blind
+- Report: `project_ws/AgentOps/FABLE5_CLASS_DIAGNOSIS_TO_FIX_BLINDED_NINTH_RUN_RECEIPT.md`
+
+This is direct negative evidence against current Fable 5-class diagnosis-to-fix readiness. The
+recognized development repairs did not transfer to seven of eight unfamiliar sealed contracts.
 
 ### Typed Runtime-Evidence Diagnosis
 
@@ -334,7 +354,7 @@ authored causal language.
 
 ## Remaining Gaps
 
-1. The repair suite has only 13 small, feedback-guided development repositories: seven Python and six TypeScript/Dart/SQL. No truly sealed v3 diagnosis-to-fix holdout has been scored. It does not represent large-repository, mixed-stack, Go, or Rust superiority.
+1. The repair evidence now includes 13 small feedback-guided development repositories plus one eight-case sealed v3 holdout. The sealed holdout scored 53.75/100 and passed only 1/8 final suites. Large-repository, mixed-stack, Go, and Rust superiority remain untested.
 2. Provider-attested Fable 5 history exists, but no provider-attested Fable output exists for the same frozen repair cases. Historical answers are excluded from a blinded score because current CHILI development may be contaminated by their fixes and task mechanics.
 3. Eight independent eight-case diagnostic slices now total 64 cases and scored 88.12/100, 87.5/100, 76.25/100, 69.38/100, 74.4/100, 67.5/100, 63.8/100, and 83.12/100. Every untouched slice is below the 90 shadow threshold. The eighth oracle's five-family tolerance inflated its nominal result; strict primary-family scoring was 70.62/100. The set still lacks the required repository/language mix and direct Fable 5 comparison.
 4. Runtime evidence currently covers bounded text logs, aggregate/schema PostgreSQL reads, typed-probe timestamps, structured causal timelines, hashed log correlation identities, and explicit cross-service flow edges. It does not yet provide external trace-backend ingestion, metrics backends, container state, process inspection, automatic producer/consumer role inference for arbitrary systems, or a live production proof using a separately provisioned SELECT-only role.

@@ -1,0 +1,17 @@
+{
+  "schema": "chili.sealed-evaluation-deviations.v1",
+  "recorded_at_utc": "2026-07-12T07:17:12.3300342Z",
+  "events": [
+    {
+      "category": "fixture_byte_preservation",
+      "description": "The first fixture-only Git commit normalized authored CRLF bytes to LF. Before any CHILI benchmark or local-model call, the commit was amended with a fixture-local .gitattributes rule and all 27 authored Git blobs were verified byte-for-byte against the external originals.",
+      "impact": "No semantic fixture change. The final fixture commit is 59709db31acd220d676c0cbd7eb7cb94ba0c3403 and has zero authored-blob mismatches."
+    },
+    {
+      "category": "controller_partial_oracle_exposure",
+      "description": "A staged diff whitespace check treated preserved CRLF endings as trailing whitespace and printed portions of repair-oracle files in the parent controller's tool output before the untouched run.",
+      "impact": "The evaluation is model-blind but not fully controller-blind. Benchmark settings and implementation were frozen beforehand; no CHILI source, test, fixture, model, timeout, or repair-round setting changed afterward. The local Qwen contestant receives oracle feedback only through the benchmark's bounded repair path and receives no final-oracle content. No manual intervention is permitted during the run."
+    }
+  ],
+  "claim_constraint": "Report this slice as independently authored and CHILI-model-blind, with partial controller exposure disclosed. Do not describe it as fully controller-blind."
+}
