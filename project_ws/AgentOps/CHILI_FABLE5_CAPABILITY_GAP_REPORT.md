@@ -20,6 +20,10 @@ disclosed replay reached 100/100 with 8/8 sealed-final passes, 58 local calls, z
 of case time. This proves complete regression coverage for those disclosed mechanisms. It does not change the
 untouched result or establish transfer to new complex incidents.
 
+After the remaining Vary and tenant-scoped interval SQL families received variant-tested operators, a final
+disclosed replay retained 100/100 while falling to 24 diagnostic-only calls, zero escalation calls, and 10.1
+minutes. This is the current development regression baseline, not an unseen score.
+
 ## Requirement Audit
 
 | Requirement | Authoritative evidence | Status |
@@ -199,6 +203,23 @@ This is the strongest evidence that CHILI is a system rather than a premium-mode
 run was performed by CHILI-owned taxonomy, source-shape operators, guards, rollback, and validators. It remains
 development evidence. A fresh untouched transfer suite is required to determine whether the abstractions generalize
 or merely cover the mechanisms that produced them.
+
+### Tenth-Suite All-Mechanical Development Replay
+
+- Frozen source commit: `6cf5b7e0e7da6840da57dec678f8846796265091`
+- Classification: disclosed development replay
+- Score, sealed-final success, diagnosis, and exact ownership: **100/100 and 8/8 each**
+- Local calls: **24**, all 7B diagnostic stages
+- Mechanical repairs: **8/8**; generative repair rounds and 14B calls: **0**
+- Case-time sum: **605.2 seconds (10.1 minutes)**; average **75.7 seconds/case**
+- Relative to `5905f63`: 85.7% fewer calls and 90.4% less case time
+- Premium calls: **0**
+- Broad focused validation before replay: **295 passed**
+- Receipt: `project_ws/AgentOps/tenth_development_replays_all_mechanical_full_6cf5b7e/DEVELOPMENT_REPLAY_RECEIPT.md`
+
+This result demonstrates the intended architecture: local models assist evidence-based diagnosis, while CHILI owns
+the recognized repair algorithms, source scoping, compiler/adapter recovery, rollback, and proof. The suite is
+fully disclosed, so the result measures regression mastery rather than Fable 5-class generalization.
 
 ### Typed Runtime-Evidence Diagnosis
 
@@ -454,8 +475,8 @@ authored causal language.
 4. Runtime evidence currently covers bounded text logs, aggregate/schema PostgreSQL reads, typed-probe timestamps, structured causal timelines, hashed log correlation identities, and explicit cross-service flow edges. It does not yet provide external trace-backend ingestion, metrics backends, container state, process inspection, automatic producer/consumer role inference for arbitrary systems, or a live production proof using a separately provisioned SELECT-only role.
 5. Local 7B output remains stochastic. The second untouched diagnostic slice produced 0/24 usable packets before compact contracts. The fourth through eighth untouched slices accepted 24/24 packets yet scored only 69.38, 74.4, 67.5, 63.8, and 83.12, proving that structural usability is not diagnostic quality. The untouched tenth suite completed 141/141 local calls but chose the wrong diagnosis family in 5/8 cases and failed 6/8 final contracts. Its disclosed contract-guided replay improved diagnosis to 6/8 but still failed the same 6/8 final contracts. Strong structural reliability, causal labels, exact ownership, and frontier-level repair synthesis remain distinct capabilities.
 6. Recognized repair synthesis is intentionally narrow. Unknown mechanisms, dependency migrations, frontend visual validation, true concurrency races, and large cross-service refactors remain under-tested.
-7. Final reviewed-code cross-language latency averaged 73.9 seconds/case. The first disclosed contract-guided tenth replay averaged 791.8 seconds/case; deterministic-first routing reduced the next disclosed replay to 180.7 seconds/case. The remaining Vary and tenant-grant SQL cases took 399.9 and 631.7 seconds. Adaptive diagnostic routing, operators for those proven families, and a real host-loss recovery proof remain open.
-8. The 14B local model is too slow and unreliable for default routing on current hardware. The first disclosed replay used 39 escalation calls; the mechanical replay reduced this to nine, but both still-generative cases escalated and consumed 40/58 total calls. The specialist remains optional and fail-closed; further evidence-gated routing is required before the workflow is broadly practical.
+7. Final reviewed-code cross-language latency averaged 73.9 seconds/case. The first disclosed contract-guided tenth replay averaged 791.8 seconds/case; the all-mechanical replay reached 75.7 seconds/case. Diagnostic council calls now dominate recognized cases. Adaptive diagnostic routing and a real host-loss recovery proof remain open, and unknown mechanisms can still take the full slow path.
+8. The 14B local model is too slow and unreliable for default routing on current hardware. The first disclosed replay used 39 escalation calls; the all-mechanical replay used none. This eliminates specialist dependence for the eight disclosed mechanisms only. Unknown or variant mechanisms still need a bounded specialist route until a fresh transfer suite proves otherwise.
 9. Diagnostic memory is same-repository and lexical. It cannot yet transfer validated mechanisms across unrelated repositories, and unattended full-autopilot runs cannot self-promote their conclusions.
 
 ## Promotion Gate

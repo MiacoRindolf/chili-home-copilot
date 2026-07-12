@@ -14,6 +14,7 @@ result, and cannot support a Fable 5 parity or superiority claim.
 | `tenth_development_replays_sql_identity_smoke` | 1 | 100.0 | 1 | 1 | 1 | 217.8s | 16 | Base `30bc032` plus evolving uncommitted scoped-identity changes; not exactly reproducible |
 | `tenth_development_replays_contract_guided_full_5905f63` | 8 | 58.12 | 2 | 6 | 5 | 791.8s | 168 | Frozen commit `5905f636ae6128f445fe88057188f40aa246fd32` |
 | `tenth_development_replays_mechanical_contracts_full_2675d4e` | 8 | 100.0 | 8 | 8 | 8 | 180.7s | 58 | Frozen commit `2675d4ef43c27d2e50697514f76a3ca5e0ee5ab1` |
+| `tenth_development_replays_all_mechanical_full_6cf5b7e` | 8 | 100.0 | 8 | 8 | 8 | 75.7s | 24 | Frozen commit `6cf5b7e0e7da6840da57dec678f8846796265091` |
 
 The three evolving-source smoke runs are retained because they causally localized useful mechanisms, but their
 unfrozen intermediate source means they must never be cited as reproducibility evidence. The final full replay has
@@ -29,10 +30,13 @@ an exact source/tree/policy receipt in its own directory.
 | `sql_identity_smoke` | `5d4aadfa01ecf747c4ea5d874fd1d1eac9b2a391eaaf580bb17b7210aeb94269` | `dc712b0d08eaf7e7c2be77d0e29123e69eb31774ebf07e812ca7651df3d36d53` |
 | `contract_guided_full_5905f63` | `89a0b42b38608e5e5d2135b22574de332e9d2c76457099789ae590882a87b93e` | `8b089c3ee6b870574a8c944cb0736fbf97d65e1f047eee3abee658a1b821d4b1` |
 | `mechanical_contracts_full_2675d4e` | `cdc0c0d8ff19c6400cd6e544a316211673cbdd025cec44bd80b9167c71f3db6e` | `fc6e30357e55ac55c1b30aa3a90477cb0990d61fb3642c94152e4e53bf8bdefa` |
+| `all_mechanical_full_6cf5b7e` | `766238471af43cef5a27053447663ec5634e1175fe54aa610e1c85ead0068444` | `c20eb12cbd50b8f832f4fe39ff56d6108033cdc7d0d72ce6276464111d6260cd` |
 
 ## Development Conclusion
 
 Contract guidance first moved causal-family accuracy from 3/8 to 6/8 but left final success at 2/8. Frozen
 mechanical operators plus production-aligned routing later reached 8/8 final success, 8/8 diagnoses, and 8/8 exact
 owners in 24.1 minutes with nine 14B calls. This is a complete disclosed regression result, not unseen
-generalization. Another replay can verify reproducibility only; a separately authored untouched suite is required.
+generalization. Adding guarded Vary and temporal-scope operators then reproduced 8/8 in 10.1 minutes with 24
+diagnostic-only calls and no escalation. Another replay can verify reproducibility only; a separately authored
+untouched suite is required.
