@@ -263,6 +263,14 @@ disclosed cases to 92.5, but the next untouched slice fell to 63.8 with fully us
 safety shell remains valuable, yet causal-family transfer, baseline semantics, and confidence/decision
 calibration are still materially below the requested replacement standard.
 
+A local `qwen3:8b` Q4_K_M challenger was then evaluated on the disclosed seventh slice. Generic top-level Ollama
+thinking control was required: model-default thinking caused two 300-second smoke timeouts, while explicit
+`think=false` completed the valid smoke in 25-37 seconds per call. The full no-think challenger accepted **22/24
+stages**, averaged **35.8 seconds/call**, and finished in **864.8 seconds**, but scored only **61.9/100**. A
+heuristic-only replay also scored exactly **61.9/100**. The larger local model therefore improved throughput, not
+causal quality; it was not promoted. Full details:
+`project_ws/AgentOps/FABLE5_CLASS_DIAGNOSTIC_SEVENTH_MODEL_CHALLENGER.md`.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
