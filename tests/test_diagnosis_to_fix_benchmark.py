@@ -5,6 +5,8 @@ import inspect
 import json
 from pathlib import Path
 
+import pytest
+
 from scripts import autopilot_diagnosis_to_fix_benchmark as benchmark
 
 
@@ -38,7 +40,7 @@ def test_fixture_manifest_keeps_hidden_oracles_out_of_cases_and_labels_evaluatio
     )
 
 
-def test_all_repair_fixtures_pass_public_and_fail_hidden_baseline(tmp_path):
+def test_all_legacy_repair_fixtures_pass_public_and_fail_feedback_and_final(tmp_path):
     args = argparse.Namespace(
         fixture_root=str(FIXTURE_ROOT),
         model="qwen2.5-coder:7b",
@@ -53,9 +55,12 @@ def test_all_repair_fixtures_pass_public_and_fail_hidden_baseline(tmp_path):
 
     result = benchmark.run(args)
 
+    assert result["schema"] == "chili.diagnosis-to-fix-fixture-validation.v2"
     assert result["valid"] is True
     assert all(item["public_passed"] for item in result["cases"])
-    assert all(item["hidden_failed"] for item in result["cases"])
+    assert all(item["feedback_failed"] for item in result["cases"])
+    assert all(item["final_failed"] for item in result["cases"])
+    assert all("hidden_failed" not in item for item in result["cases"])
 
 
 def test_sealed_test_runner_rejects_fixture_supplied_commands():
@@ -92,7 +97,7 @@ def test_node_and_dart_test_discovery_is_bounded_and_public_scoped(tmp_path):
     assert dart_all == ["tests/hidden_cache_test.dart", "tests/public_cache_test.dart"]
 
 
-def test_scoring_requires_real_hidden_repair_and_correct_ownership():
+def test_scoring_requires_real_final_repair_and_correct_ownership():
     oracle = {"expected_dimension": "clock", "expected_file": "session_gate.py"}
     diagnosis = {"report": {"conclusion": {"dimension": "clock"}}}
     patch = {"changed_files": ["session_gate.py"], "patch_applied": True}
@@ -120,12 +125,12 @@ def test_scoring_requires_real_hidden_repair_and_correct_ownership():
     assert all(checks.values())
     assert weak_score < 70
     assert weak_checks["file_selection"] is False
-    assert weak_checks["hidden_tests"] is False
+    assert weak_checks["final_tests"] is False
 
 
 def test_shadow_verdict_requires_every_case_check_not_only_high_average():
-    passing = {"checks": {"diagnosis": True, "hidden_tests": True}}
-    one_miss = {"checks": {"diagnosis": False, "hidden_tests": True}}
+    passing = {"checks": {"diagnosis": True, "final_tests": True}}
+    one_miss = {"checks": {"diagnosis": False, "final_tests": True}}
 
     assert benchmark._verdict([passing, passing]) == "shadow_ready"
     assert benchmark._verdict([passing, one_miss]) == "needs_improvement"
@@ -285,7 +290,7 @@ def test_initial_plan_receives_deterministic_mechanism_invariants():
     assert "evicted by the state owner" in prompt
 
 
-def test_validation_failure_context_keeps_public_and_hidden_failures():
+def test_validation_failure_context_keeps_public_and_feedback_failures():
     context = benchmark._validation_failure_context(
         {
             "passed": False,
@@ -302,7 +307,8 @@ def test_validation_failure_context_keeps_public_and_hidden_failures():
     assert 'assert sink["XYZ"] is not source["XYZ"]' in context
     assert "observed: KeyError" in context
     assert "PUBLIC REGRESSION" in context
-    assert "HELD-OUT BEHAVIOR FAILURE" in context
+    assert "REPAIR-FEEDBACK FAILURE" in context
+    assert "not final adjudication" in context
 
 
 def test_validation_quality_never_prefers_regression_or_timeout():
@@ -314,6 +320,302 @@ def test_validation_quality_never_prefers_regression_or_timeout():
     assert benchmark._validation_quality(passed, assertion_failure) == 2
     assert benchmark._validation_quality(passed, timeout) == 1
     assert benchmark._validation_quality(assertion_failure, assertion_failure) == 0
+
+
+def test_oracle_test_partitions_require_disjoint_sealed_final_contracts():
+    legacy = benchmark._oracle_test_partitions(
+        {"hidden_files": {"tests/test_hidden.py": "assert False\n"}}
+    )
+    sealed = benchmark._oracle_test_partitions(
+        {
+            "feedback_files": {
+                "tests/test_feedback.py": "assert feature() == 'feedback'\n"
+            },
+            "final_files": {
+                "tests/test_final.py": "assert feature() == 'final'\n"
+            },
+        },
+        require_sealed=True,
+    )
+    external = benchmark._oracle_test_partitions(
+        {
+            "feedback_files": {
+                "tests/test_feedback.py": "assert feature() == 'feedback'\n"
+            }
+        },
+        final_oracle={
+            "final_files": {
+                "tests/test_final.py": "assert feature() == 'final'\n"
+            }
+        },
+        require_sealed=True,
+        require_external_final=True,
+    )
+
+    assert legacy["sealed"] is False
+    assert legacy["feedback_files"] == legacy["final_files"]
+    assert sealed["sealed"] is True
+    assert sealed["external_final"] is False
+    assert external["external_final"] is True
+    assert set(sealed["feedback_files"]) == {"tests/test_feedback.py"}
+    assert set(sealed["final_files"]) == {"tests/test_final.py"}
+
+    with pytest.raises(ValueError, match="require disjoint"):
+        benchmark._oracle_test_partitions(
+            {"hidden_files": {"tests/test_hidden.py": "assert False\n"}},
+            require_sealed=True,
+        )
+    with pytest.raises(ValueError, match="separately loaded final_oracle"):
+        benchmark._oracle_test_partitions(
+            {
+                "feedback_files": {
+                    "tests/test_feedback.py": "assert feature() == 'feedback'\n"
+                },
+                "final_files": {
+                    "tests/test_final.py": "assert feature() == 'final'\n"
+                },
+            },
+            require_sealed=True,
+            require_external_final=True,
+        )
+    with pytest.raises(ValueError, match="overlap"):
+        benchmark._oracle_test_partitions(
+            {
+                "feedback_files": {"tests/test_contract.py": "assert False\n"},
+                "final_files": {"tests/test_contract.py": "assert False\n"},
+            }
+        )
+    with pytest.raises(ValueError, match="overlap"):
+        benchmark._oracle_test_partitions(
+            {
+                "feedback_files": {"tests/test_contract.py": "assert False\n"},
+                "final_files": {"tests/TEST_CONTRACT.PY": "assert True\n"},
+            }
+        )
+    with pytest.raises(ValueError, match="under tests"):
+        benchmark._oracle_test_partitions(
+            {
+                "feedback_files": {"src/owner.py": "raise AssertionError\n"},
+                "final_files": {"tests/test_final.py": "assert False\n"},
+            }
+        )
+
+
+def test_oracle_tests_cannot_overwrite_seeded_public_contracts():
+    case = {
+        "repo_files": {
+            "owner.py": "VALUE = 0\n",
+            "tests/test_public.py": "def test_public():\n    assert True\n",
+        }
+    }
+
+    with pytest.raises(ValueError, match="Repair-feedback.*overwrite seeded"):
+        benchmark._validate_oracle_test_paths(
+            case,
+            {
+                "feedback_files": {
+                    "tests/test_public.py": "def test_public():\n    assert False\n"
+                }
+            },
+        )
+    with pytest.raises(ValueError, match="Final adjudication.*overwrite seeded"):
+        benchmark._validate_oracle_test_paths(
+            case,
+            {
+                "final_files": {
+                    "tests/TEST_PUBLIC.PY": "def test_public():\n    assert False\n"
+                }
+            },
+        )
+
+
+def test_oracle_partitions_require_discoverable_tests_and_respect_runner_cap():
+    pytest_case = {
+        "test_runner": "pytest",
+        "repo_files": {"tests/test_public.py": "def test_public():\n    assert True\n"},
+    }
+    with pytest.raises(ValueError, match="no discoverable pytest"):
+        benchmark._validate_oracle_test_paths(
+            pytest_case,
+            {"final_files": {"tests/final_helper.py": "VALUE = 1\n"}},
+        )
+
+    node_case = {
+        "test_runner": "node_test",
+        "repo_files": {
+            **{
+                f"tests/seed-{index}.test.js": "// seeded\n"
+                for index in range(benchmark.MAX_TEST_FILES)
+            },
+        },
+    }
+    with pytest.raises(ValueError, match="test-file cap"):
+        benchmark._validate_oracle_test_paths(
+            node_case,
+            {"final_files": {"tests/final.test.js": "// final\n"}},
+        )
+
+
+def test_final_adjudication_uses_fresh_repo_without_feedback_tests(tmp_path):
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "owner.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (candidate / "tests").mkdir()
+    (candidate / "tests/test_feedback.py").write_text(
+        "raise AssertionError('feedback test must not enter final repo')\n",
+        encoding="utf-8",
+    )
+    case = {
+        "candidate_paths": ["owner.py"],
+        "repo_files": {
+            "owner.py": "VALUE = 0\n",
+            "tests/test_public.py": "from owner import VALUE\n\ndef test_public():\n    assert VALUE >= 0\n",
+        },
+    }
+    final_files = {
+        "tests/test_final.py": (
+            "from pathlib import Path\n"
+            "from owner import VALUE\n\n"
+            "def test_final():\n"
+            "    assert VALUE == 2\n"
+            "    assert not Path('tests/test_feedback.py').exists()\n"
+        )
+    }
+
+    result = benchmark._run_final_adjudication(
+        case,
+        final_files,
+        candidate_repo=candidate,
+    )
+
+    assert result["passed"] is True, result["output"]
+    assert result["isolated_final_repo"] is True
+
+
+def test_final_adjudication_fails_closed_when_candidate_overlay_is_missing(tmp_path):
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    case = {
+        "candidate_paths": ["owner.py"],
+        "repo_files": {
+            "owner.py": "VALUE = 0\n",
+            "tests/test_public.py": "def test_public():\n    assert True\n",
+        },
+    }
+
+    with pytest.raises(RuntimeError, match="cannot overlay candidate source"):
+        benchmark._run_final_adjudication(
+            case,
+            {"tests/test_final.py": "def test_final():\n    assert True\n"},
+            candidate_repo=candidate,
+        )
+
+
+def test_score_uses_final_adjudication_not_green_feedback():
+    oracle = {"expected_dimension": "state", "expected_file": "owner.py"}
+    diagnosis = {"report": {"conclusion": {"dimension": "state"}}}
+    patch = {"changed_files": ["owner.py"], "patch_applied": True}
+    passed = {"passed": True}
+    failed = {"passed": False}
+
+    score, checks = benchmark._score_case(
+        oracle,
+        diagnosis,
+        patch,
+        failed,
+        passed,
+        failed,
+    )
+
+    assert score == 80
+    assert checks["baseline_final_failure"] is True
+    assert checks["final_tests"] is False
+
+
+def test_final_adjudication_occurs_after_repair_loop_and_before_no_more_model_calls():
+    source = inspect.getsource(benchmark.run)
+
+    repair_loop = source.index("for repair_round in range")
+    final_oracle_read = source.index("final_oracle = _read_json")
+    final_start = source.index("final_tests = _run_final_adjudication")
+    model_call_guard = source.index("A model call occurred after final adjudication began")
+
+    assert repair_loop < final_oracle_read < final_start < model_call_guard
+
+
+def test_blinded_run_rejects_missing_external_final_oracle_before_model_access(
+    tmp_path,
+    monkeypatch,
+):
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    (fixture / "manifest.json").write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {
+                        "case": "cases/one.json",
+                        "oracle": "oracles/one.json",
+                        "evaluation_role": "blinded_holdout",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        benchmark.ollama_client,
+        "list_models",
+        lambda: (_ for _ in ()).throw(AssertionError("model registry was accessed")),
+    )
+    args = argparse.Namespace(
+        fixture_root=str(fixture),
+        case=[],
+        validate_fixtures=False,
+        model="local-model",
+    )
+
+    with pytest.raises(SystemExit, match="separate final_oracle"):
+        benchmark.run(args)
+
+
+def test_fixture_paths_are_contained_and_exist_before_model_access(tmp_path, monkeypatch):
+    fixture = tmp_path / "fixture"
+    (fixture / "cases").mkdir(parents=True)
+    (fixture / "oracles").mkdir()
+    (fixture / "cases/one.json").write_text("{}\n", encoding="utf-8")
+    (fixture / "oracles/one.json").write_text("{}\n", encoding="utf-8")
+    (fixture / "manifest.json").write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {
+                        "case": "cases/one.json",
+                        "oracle": "oracles/one.json",
+                        "final_oracle": "final/missing.json",
+                        "evaluation_role": "blinded_holdout",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        benchmark.ollama_client,
+        "list_models",
+        lambda: (_ for _ in ()).throw(AssertionError("model registry was accessed")),
+    )
+    args = argparse.Namespace(
+        fixture_root=str(fixture),
+        case=[],
+        validate_fixtures=False,
+        model="local-model",
+    )
+
+    with pytest.raises(ValueError, match="does not exist"):
+        benchmark.run(args)
+    with pytest.raises(ValueError, match="Unsafe or missing"):
+        benchmark._fixture_path(fixture, "../outside.json", "case")
 
 
 def test_candidate_snapshot_restores_only_manifest_approved_sources(tmp_path):

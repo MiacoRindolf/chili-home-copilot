@@ -1,5 +1,7 @@
 # Autonomous Diagnosis-to-Fix Benchmark
 
+> Evidence classification correction (2026-07-11): the historical `Hidden` column below was repair feedback. Those tests could guide bounded repair after the initial patch and were then scored, so this is not sealed final-adjudication evidence. Runner schema v3 now requires a separate final oracle for blinded holdouts and first reads it after all model calls.
+
 - Run: 2026-07-11T15:21:00.452204+00:00
 - Local model: `qwen2.5-coder:7b`
 - Reference family: `claude-fable-5`
@@ -24,4 +26,4 @@
 
 ## Interpretation
 
-Each repository is created from a development-regression case. The live model sees only the prompt, candidate source, and public tests; oracle labels and hidden tests are loaded after the initial patch. However, these fixtures have informed system development, so they do not measure unseen generalization. Changed-file scoring is derived from the git worktree, and multi-file edit groups roll back when any member edit is rejected. A high score proves this bounded repair contract only; broader Fable 5 parity still requires blinded multi-repository adjudication.
+Each repository is created from a development-regression case. The live model sees only the prompt, candidate source, and public tests for its initial patch; oracle labels and the historical `Hidden` tests are loaded afterward, and those test failures may guide bounded repair. These fixtures have informed system development and do not measure unseen fix generalization. Changed-file scoring is derived from the git worktree, and multi-file edit groups roll back when any member edit is rejected. A high score proves this feedback-guided repair contract only; broader Fable 5 parity still requires sealed, blinded multi-repository adjudication.

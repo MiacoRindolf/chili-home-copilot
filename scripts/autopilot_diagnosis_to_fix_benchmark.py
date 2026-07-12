@@ -1,7 +1,8 @@
-"""Local-only diagnosis-to-fix benchmark with sealed hidden tests.
+"""Local-only diagnosis-to-fix benchmark with sealed final adjudication.
 
 The model sees the case prompt and candidate repository only. Oracle labels and
-hidden tests are loaded after diagnosis, planning, and patch generation finish.
+repair-feedback tests are loaded after the initial patch. For blinded holdouts,
+final tests live in a separate oracle that is first read after every model call.
 """
 from __future__ import annotations
 
@@ -41,12 +42,12 @@ MAX_REPAIR_ROUNDS = 5
 TEST_RUNNERS = frozenset({"pytest", "node_test", "dart"})
 MAX_TEST_FILES = 40
 SCORE_WEIGHTS = {
-    "baseline_hidden_failure": 10,
+    "baseline_final_failure": 10,
     "diagnosis": 20,
     "file_selection": 15,
     "patch_applied": 15,
     "public_tests": 10,
-    "hidden_tests": 20,
+    "final_tests": 20,
     "premium_independence": 10,
 }
 
@@ -65,6 +66,21 @@ def _safe_rel(value: object) -> str:
     return raw
 
 
+def _fixture_path(root: Path, value: object, label: str) -> Path:
+    relative = _safe_rel(value)
+    if not relative:
+        raise ValueError(f"Unsafe or missing {label} fixture path: {value!r}")
+    resolved_root = root.resolve()
+    path = (resolved_root / relative).resolve()
+    try:
+        path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError(f"{label} fixture path escapes fixture root: {value!r}") from exc
+    if not path.is_file():
+        raise ValueError(f"{label} fixture file does not exist: {relative}")
+    return path
+
+
 def _write_files(root: Path, files: Mapping[str, Any]) -> None:
     for raw_path, content in files.items():
         rel = _safe_rel(raw_path)
@@ -74,6 +90,164 @@ def _write_files(root: Path, files: Mapping[str, Any]) -> None:
         target.relative_to(root.resolve())
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(str(content), encoding="utf-8")
+
+
+def _normalize_test_files(files: Mapping[str, Any], label: str) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    canonical_paths: set[str] = set()
+    for raw_path, content in files.items():
+        relative = _safe_rel(raw_path)
+        if not relative or not relative.startswith("tests/"):
+            raise ValueError(
+                f"{label} fixture path must stay under tests/: {raw_path!r}"
+            )
+        canonical = relative.casefold()
+        if canonical in canonical_paths:
+            raise ValueError(
+                f"{label} fixture contains a case-insensitive path collision: "
+                f"{raw_path!r}"
+            )
+        canonical_paths.add(canonical)
+        normalized[relative] = str(content)
+    return normalized
+
+
+def _oracle_test_partitions(
+    oracle: Mapping[str, Any],
+    *,
+    final_oracle: Mapping[str, Any] | None = None,
+    require_sealed: bool = False,
+    require_external_final: bool = False,
+) -> dict[str, Any]:
+    external_final = final_oracle is not None
+    if require_external_final and not external_final:
+        raise ValueError(
+            "Blinded holdouts require a separately loaded final_oracle."
+        )
+    if external_final:
+        if "feedback_files" not in oracle:
+            raise ValueError(
+                "External final adjudication requires feedback_files in the repair oracle."
+            )
+        if "final_files" in oracle:
+            raise ValueError(
+                "Repair oracle must not embed final_files when final_oracle is separate."
+            )
+        feedback_raw = oracle.get("feedback_files")
+        final_raw = final_oracle.get("final_files")
+        sealed = True
+    else:
+        explicit_feedback = "feedback_files" in oracle
+        explicit_final = "final_files" in oracle
+        if explicit_feedback != explicit_final:
+            raise ValueError(
+                "Sealed fixtures must define both feedback_files and final_files."
+            )
+        sealed = explicit_feedback and explicit_final
+        feedback_raw = (
+            oracle.get("feedback_files") if sealed else oracle.get("hidden_files")
+        )
+        final_raw = oracle.get("final_files") if sealed else oracle.get("hidden_files")
+    if require_sealed and not sealed:
+        raise ValueError(
+            "Blinded holdouts require disjoint feedback_files and final_files."
+        )
+    if not isinstance(feedback_raw, Mapping) or not feedback_raw:
+        raise ValueError("Fixture has no repair-feedback test files.")
+    if not isinstance(final_raw, Mapping) or not final_raw:
+        raise ValueError("Fixture has no final adjudication test files.")
+
+    feedback = _normalize_test_files(feedback_raw, "feedback")
+    final = _normalize_test_files(final_raw, "final")
+    if sealed:
+        feedback_paths = {path.casefold(): path for path in feedback}
+        final_paths = {path.casefold(): path for path in final}
+        overlapping_paths = sorted(
+            feedback_paths[path]
+            for path in set(feedback_paths) & set(final_paths)
+        )
+        if overlapping_paths:
+            raise ValueError(
+                "Sealed feedback/final test paths overlap: "
+                + ", ".join(overlapping_paths)
+            )
+        duplicate_payloads = set(feedback.values()) & set(final.values())
+        if duplicate_payloads:
+            raise ValueError(
+                "Sealed feedback/final test payloads must be independently authored."
+            )
+    return {
+        "feedback_files": feedback,
+        "final_files": final,
+        "sealed": sealed,
+        "external_final": external_final,
+    }
+
+
+def _validate_oracle_test_paths(
+    case: Mapping[str, Any],
+    partitions: Mapping[str, Any],
+) -> None:
+    seeded_files = case.get("repo_files") or {}
+    if not isinstance(seeded_files, Mapping):
+        raise ValueError("Case repo_files must be an object.")
+    seeded_paths = {
+        relative.casefold(): relative
+        for raw_path in seeded_files
+        if (relative := _safe_rel(raw_path))
+    }
+    runner = _case_test_runner(case)
+    runner_suffixes = {
+        "pytest": (".py",),
+        "node_test": (
+            ".test.js",
+            ".test.mjs",
+            ".test.cjs",
+            ".test.ts",
+            ".test.mts",
+            ".test.cts",
+        ),
+        "dart": ("_test.dart",),
+    }[runner]
+
+    def discoverable(path: str) -> bool:
+        name = Path(path).name.casefold()
+        if runner == "pytest":
+            return name.endswith(".py") and (
+                name.startswith("test_") or name.endswith("_test.py")
+            )
+        return name.endswith(runner_suffixes)
+
+    seeded_test_count = sum(
+        1 for path in seeded_paths.values() if discoverable(path)
+    )
+    for key, label in (
+        ("feedback_files", "Repair-feedback"),
+        ("final_files", "Final adjudication"),
+    ):
+        files = partitions.get(key)
+        if not isinstance(files, Mapping):
+            continue
+        oracle_paths = {str(path).casefold(): str(path) for path in files}
+        overlap = sorted(
+            oracle_paths[path]
+            for path in set(seeded_paths) & set(oracle_paths)
+        )
+        if overlap:
+            raise ValueError(
+                f"{label} tests must not overwrite seeded case files: "
+                + ", ".join(overlap)
+            )
+        discoverable_count = sum(1 for path in files if discoverable(str(path)))
+        if discoverable_count == 0:
+            raise ValueError(
+                f"{label} partition has no discoverable {runner} test file."
+            )
+        if runner != "pytest" and seeded_test_count + discoverable_count > MAX_TEST_FILES:
+            raise ValueError(
+                f"{label} partition exceeds the bounded {runner} test-file cap "
+                f"of {MAX_TEST_FILES}."
+            )
 
 
 def _run(
@@ -263,13 +437,43 @@ def _run_case_tests(
     }
 
 
+def _run_final_adjudication(
+    case: Mapping[str, Any],
+    final_files: Mapping[str, Any],
+    *,
+    candidate_repo: Path | None = None,
+) -> dict[str, Any]:
+    """Run final tests in a fresh repo that never contains feedback tests."""
+    with tempfile.TemporaryDirectory(prefix="chili-final-adjudication-") as temp:
+        final_repo = Path(temp) / "repo"
+        _init_repo(final_repo, case.get("repo_files") or {})
+        if candidate_repo is not None:
+            for value in case.get("candidate_paths") or []:
+                relative = _safe_rel(value)
+                if not relative:
+                    continue
+                source = candidate_repo / relative
+                target = final_repo / relative
+                if not source.is_file() or not target.is_file():
+                    raise RuntimeError(
+                        f"Final adjudication cannot overlay candidate source: {relative}"
+                    )
+                target.write_text(
+                    source.read_text(encoding="utf-8", errors="replace"),
+                    encoding="utf-8",
+                )
+        _write_files(final_repo, final_files)
+        result = _run_case_tests(final_repo, case, public_only=False)
+    return {**result, "isolated_final_repo": True}
+
+
 def _validation_failure_context(
     public_tests: Mapping[str, Any],
-    hidden_tests: Mapping[str, Any],
+    feedback_tests: Mapping[str, Any],
 ) -> str:
     raw_outputs = [
         str(public_tests.get("output") or ""),
-        str(hidden_tests.get("output") or ""),
+        str(feedback_tests.get("output") or ""),
     ]
     contracts: list[str] = []
     exception_facts: list[str] = []
@@ -339,10 +543,10 @@ def _validation_failure_context(
             "PUBLIC REGRESSION (must be fixed without weakening prior behavior):\n"
             + str(public_tests.get("output") or "")[-3500:]
         )
-    if not hidden_tests.get("passed"):
+    if not feedback_tests.get("passed"):
         sections.append(
-            "HELD-OUT BEHAVIOR FAILURE:\n"
-            + str(hidden_tests.get("output") or "")[-3500:]
+            "REPAIR-FEEDBACK FAILURE (not final adjudication):\n"
+            + str(feedback_tests.get("output") or "")[-3500:]
         )
     return "\n\n".join(sections) or "Validation did not provide failure output."
 
@@ -425,17 +629,17 @@ def _apply_deterministic_contract_repair(
 
 def _validation_quality(
     public_tests: Mapping[str, Any],
-    hidden_tests: Mapping[str, Any],
+    feedback_tests: Mapping[str, Any],
 ) -> int:
     if not bool(public_tests.get("passed")):
         return 0
-    if bool(hidden_tests.get("passed")):
+    if bool(feedback_tests.get("passed")):
         return 3
     try:
-        hidden_exit = int(hidden_tests.get("exit_code"))
+        feedback_exit = int(feedback_tests.get("exit_code"))
     except (TypeError, ValueError):
-        hidden_exit = 1
-    return 1 if hidden_exit == 124 else 2
+        feedback_exit = 1
+    return 1 if feedback_exit == 124 else 2
 
 
 def _plan_prompt(
@@ -502,10 +706,10 @@ def _markdown(results: Mapping[str, Any]) -> str:
         "- Premium calls: **0**",
         f"- Average wall time: **{results['average_case_duration_ms'] / 1000:.1f}s/case**",
         f"- Maximum bounded repair rounds: **{results['max_repair_rounds']}**",
-        "- Fable 5 parity claim: **No**. These are development regressions, not a blinded frontier head-to-head.",
+        "- Fable 5 parity claim: **No**. No authenticated same-task Fable 5 head-to-head is included.",
         "",
-        "| Case | Language | Runner | Evaluation | Split | Score | Diagnosis | Changed files | Patch | Public | Hidden |",
-        "|---|---|---|---|---|---:|---|---|---:|---:|---:|",
+        "| Case | Language | Runner | Evaluation | Split | Score | Diagnosis | Changed files | Patch | Public | Feedback | Final |",
+        "|---|---|---|---|---|---:|---|---|---:|---:|---:|---:|",
     ]
     for item in results["cases"]:
         lines.append(
@@ -513,16 +717,21 @@ def _markdown(results: Mapping[str, Any]) -> str:
             f"{item['evaluation_role']} | {item['split']} | "
             f"{item['score']} | {item['diagnosis_dimension']} | "
             f"{', '.join(item.get('changed_files') or []) or '-'} | {str(item['patch_applied']).lower()} | "
-            f"{str(item['public_tests']['passed']).lower()} | {str(item['hidden_tests']['passed']).lower()} |"
+            f"{str(item['public_tests']['passed']).lower()} | "
+            f"{str(item['feedback_tests']['passed']).lower()} | "
+            f"{str(item['final_tests']['passed']).lower()} |"
         )
     lines.extend(
         [
             "",
             "## Interpretation",
             "",
-            "Each repository is created from a development-regression case. The live model sees only the prompt, "
-            "candidate source, and public tests; oracle labels and hidden tests are loaded after the initial patch. "
-            "However, these fixtures have informed system development, so they do not measure unseen generalization. "
+            "Each repository is created from one benchmark case. The live model sees only the prompt, "
+            "candidate source, and public tests. Repair-feedback tests may guide bounded repair only after the "
+            "initial patch. For sealed entries, final adjudication tests run once in a separate repository after "
+            "all model calls and never enter a repair prompt. "
+            "Development fixtures do not measure unseen generalization; entries labeled blinded_holdout must use "
+            "a separate final oracle. "
             "Changed-file scoring is derived from the git worktree, and multi-file edit groups roll back when any "
             "member edit is rejected. "
             "A high score proves this bounded repair contract only; broader Fable 5 parity still requires "
@@ -1031,7 +1240,8 @@ def _repair_after_failure(
     review_prompt = (
         "Return one corrected repair-plan JSON object only. Act as an adversarial validation judge: the draft "
         "may have misread an assertion or traded one contract for another. Derive every required input/output "
-        "contract from the verbatim PUBLIC and HELD-OUT failure text. The corrected plan must satisfy all of "
+        "contract from the verbatim PUBLIC and REPAIR-FEEDBACK failure text. The final adjudication remains "
+        "sealed and is never available here. The corrected plan must satisfy all of "
         "them simultaneously, preserve already-green behavior, copy mutable data when identity isolation is "
         "asserted, and keep required empty keys when an assertion indexes them. Never edit tests, swallow an "
         "exception, invent a dependency, add an unrequested retry loop, change a public signature without all "
@@ -1043,7 +1253,7 @@ def _repair_after_failure(
         f"Original operator contract (must also remain true):\n{case.get('prompt')}\n\n"
         "Deterministic mechanism invariants (must be implemented by their state/interface owner, not merely "
         f"reviewed):\n{json.dumps(mechanism_invariants, indent=2)}\n\n"
-        f"Validation contracts:\n{failure_output[:12000]}\n\n"
+        f"Repair-feedback validation contracts:\n{failure_output[:12000]}\n\n"
         f"Draft plan:\n{json.dumps(plan, sort_keys=True)}\n\n"
         f"Current candidate contents:\n{context}\n\n"
         "Do not use action=review as a placeholder for a causal owner. If a source file must change to satisfy "
@@ -1103,9 +1313,9 @@ def _score_case(
     oracle: Mapping[str, Any],
     diagnosis: Mapping[str, Any],
     patch: Mapping[str, Any],
-    baseline_hidden: Mapping[str, Any],
+    baseline_final: Mapping[str, Any],
     public_tests: Mapping[str, Any],
-    hidden_tests: Mapping[str, Any],
+    final_tests: Mapping[str, Any],
 ) -> tuple[int, dict[str, bool]]:
     report = diagnosis.get("report") if isinstance(diagnosis.get("report"), Mapping) else {}
     conclusion = report.get("conclusion") if isinstance(report.get("conclusion"), Mapping) else {}
@@ -1126,12 +1336,12 @@ def _score_case(
         if rel
     }
     checks = {
-        "baseline_hidden_failure": not bool(baseline_hidden.get("passed")),
+        "baseline_final_failure": not bool(baseline_final.get("passed")),
         "diagnosis": conclusion.get("dimension") == oracle.get("expected_dimension"),
         "file_selection": bool(expected_files) and changed_files == expected_files,
         "patch_applied": bool(patch.get("patch_applied")) and bool(changed_files),
         "public_tests": bool(public_tests.get("passed")),
-        "hidden_tests": bool(hidden_tests.get("passed")),
+        "final_tests": bool(final_tests.get("passed")),
         "premium_independence": True,
     }
     return sum(SCORE_WEIGHTS[name] for name, passed in checks.items() if passed), checks
@@ -1158,22 +1368,45 @@ def _fixture_entries(root: Path, selected: set[str]) -> tuple[dict[str, Any], li
 
 
 def validate_fixture(root: Path, entry: Mapping[str, Any]) -> dict[str, Any]:
-    case = _read_json(root / str(entry["case"]))
-    oracle = _read_json(root / str(entry["oracle"]))
+    case = _read_json(_fixture_path(root, entry.get("case"), "case"))
+    oracle = _read_json(_fixture_path(root, entry.get("oracle"), "oracle"))
+    final_oracle = (
+        _read_json(_fixture_path(root, entry.get("final_oracle"), "final oracle"))
+        if entry.get("final_oracle")
+        else None
+    )
+    if final_oracle is not None and final_oracle.get("case_id") != case.get("case_id"):
+        raise ValueError("Final oracle case_id does not match the public case.")
+    partitions = _oracle_test_partitions(
+        oracle,
+        final_oracle=final_oracle,
+        require_sealed=entry.get("evaluation_role") == "blinded_holdout",
+        require_external_final=entry.get("evaluation_role") == "blinded_holdout",
+    )
+    _validate_oracle_test_paths(case, partitions)
     with tempfile.TemporaryDirectory(prefix="chili-fixture-validation-") as temp:
         repo = Path(temp) / "repo"
         _init_repo(repo, case.get("repo_files") or {})
         public = _run_case_tests(repo, case, public_only=True)
-        _write_files(repo, oracle.get("hidden_files") or {})
-        hidden = _run_case_tests(repo, case, public_only=False)
+        _write_files(repo, partitions["feedback_files"])
+        feedback = _run_case_tests(repo, case, public_only=False)
+    final = _run_final_adjudication(case, partitions["final_files"])
     return {
         "case_id": case.get("case_id"),
         "test_runner": _case_test_runner(case),
         "public_passed": public["passed"],
-        "hidden_failed": not hidden["passed"],
-        "valid": public["passed"] and not hidden["passed"],
+        "feedback_failed": not feedback["passed"],
+        "final_failed": not final["passed"],
+        "sealed_final_adjudication": bool(partitions["sealed"]),
+        "external_final_oracle": bool(partitions["external_final"]),
+        "valid": public["passed"] and not feedback["passed"] and not final["passed"],
         "public_failure": "" if public["passed"] else str(public.get("output") or "")[-4_000:],
-        "hidden_unexpected_pass": "" if not hidden["passed"] else str(hidden.get("output") or "")[-4_000:],
+        "feedback_unexpected_pass": (
+            "" if not feedback["passed"] else str(feedback.get("output") or "")[-4_000:]
+        ),
+        "final_unexpected_pass": (
+            "" if not final["passed"] else str(final.get("output") or "")[-4_000:]
+        ),
     }
 
 
@@ -1182,10 +1415,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     manifest, entries = _fixture_entries(fixture_root, set(args.case or []))
     if not entries:
         raise SystemExit("No diagnosis-to-fix cases selected.")
+    if any(
+        entry.get("evaluation_role") == "blinded_holdout"
+        and not entry.get("final_oracle")
+        for entry in entries
+    ):
+        raise SystemExit(
+            "Every blinded_holdout entry requires a separate final_oracle path."
+        )
+    for entry in entries:
+        _fixture_path(fixture_root, entry.get("case"), "case")
+        _fixture_path(fixture_root, entry.get("oracle"), "oracle")
+        if entry.get("final_oracle"):
+            _fixture_path(
+                fixture_root,
+                entry.get("final_oracle"),
+                "final oracle",
+            )
     if args.validate_fixtures:
         validations = [validate_fixture(fixture_root, entry) for entry in entries]
         return {
-            "schema": "chili.diagnosis-to-fix-fixture-validation.v1",
+            "schema": "chili.diagnosis-to-fix-fixture-validation.v2",
             "valid": all(item["valid"] for item in validations),
             "cases": validations,
         }
@@ -1195,7 +1445,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     case_results: list[dict[str, Any]] = []
     for entry in entries:
-        case = _read_json(fixture_root / str(entry["case"]))
+        case = _read_json(_fixture_path(fixture_root, entry.get("case"), "case"))
         started = time.monotonic()
         calls: list[dict[str, Any]] = []
         with tempfile.TemporaryDirectory(prefix=f"chili-fix-{case['case_id']}-") as temp:
@@ -1211,8 +1461,31 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             public_tests = _run_case_tests(repo, case, public_only=True)
 
             # Oracle access begins only after the patch and public validation exist.
-            oracle = _read_json(fixture_root / str(entry["oracle"]))
-            with tempfile.TemporaryDirectory(prefix="chili-baseline-hidden-") as baseline_temp:
+            oracle = _read_json(
+                _fixture_path(fixture_root, entry.get("oracle"), "oracle")
+            )
+            if entry.get("final_oracle"):
+                feedback_raw = oracle.get("feedback_files")
+                if not isinstance(feedback_raw, Mapping) or not feedback_raw:
+                    raise ValueError(
+                        "External final adjudication requires repair feedback_files."
+                    )
+                if "final_files" in oracle:
+                    raise ValueError(
+                        "Repair oracle must not contain final_files when final_oracle is separate."
+                    )
+                partitions = {
+                    "feedback_files": _normalize_test_files(
+                        feedback_raw,
+                        "feedback",
+                    ),
+                    "sealed": True,
+                    "external_final": True,
+                }
+            else:
+                partitions = _oracle_test_partitions(oracle)
+            _validate_oracle_test_paths(case, partitions)
+            with tempfile.TemporaryDirectory(prefix="chili-baseline-feedback-") as baseline_temp:
                 baseline_repo = Path(baseline_temp) / "repo"
                 _init_repo(baseline_repo, case.get("repo_files") or {})
                 baseline_public = _run_case_tests(
@@ -1220,13 +1493,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     case,
                     public_only=True,
                 )
-                _write_files(baseline_repo, oracle.get("hidden_files") or {})
-                baseline_hidden = _run_case_tests(baseline_repo, case, public_only=False)
-            _write_files(repo, oracle.get("hidden_files") or {})
-            hidden_tests = _run_case_tests(repo, case, public_only=False)
-            if _validation_quality(public_tests, hidden_tests) < _validation_quality(
+                _write_files(baseline_repo, partitions["feedback_files"])
+                baseline_feedback = _run_case_tests(
+                    baseline_repo,
+                    case,
+                    public_only=False,
+                )
+            _write_files(repo, partitions["feedback_files"])
+            feedback_tests = _run_case_tests(repo, case, public_only=False)
+            if _validation_quality(public_tests, feedback_tests) < _validation_quality(
                 baseline_public,
-                baseline_hidden,
+                baseline_feedback,
             ):
                 _restore_candidate_snapshot(repo, baseline_snapshot)
                 patch["warnings"] = [
@@ -1240,24 +1517,28 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 patch["patch_applied"] = bool(patch["changed_files"])
                 public_tests = _run_case_tests(repo, case, public_only=True)
-                hidden_tests = _run_case_tests(repo, case, public_only=False)
+                feedback_tests = _run_case_tests(repo, case, public_only=False)
             deterministic_contract_repair: dict[str, Any] = {
                 "attempted": False,
                 "patch_applied": False,
                 "selected_files": [],
                 "warnings": [],
             }
-            if not (public_tests["passed"] and hidden_tests["passed"]):
+            if not (public_tests["passed"] and feedback_tests["passed"]):
                 deterministic_contract_repair = _apply_deterministic_contract_repair(
                     repo,
                     case,
                 )
                 if deterministic_contract_repair.get("patch_applied"):
                     public_after_contract = _run_case_tests(repo, case, public_only=True)
-                    hidden_after_contract = _run_case_tests(repo, case, public_only=False)
-                    if public_after_contract["passed"] and hidden_after_contract["passed"]:
+                    feedback_after_contract = _run_case_tests(
+                        repo,
+                        case,
+                        public_only=False,
+                    )
+                    if public_after_contract["passed"] and feedback_after_contract["passed"]:
                         public_tests = public_after_contract
-                        hidden_tests = hidden_after_contract
+                        feedback_tests = feedback_after_contract
                         for relative in deterministic_contract_repair.get("selected_files") or []:
                             if relative not in patch.get("selected_files", []):
                                 patch.setdefault("selected_files", []).append(relative)
@@ -1268,22 +1549,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         deterministic_contract_repair["rolled_back_after_validation"] = True
                         deterministic_contract_repair["warnings"] = [
                             *(deterministic_contract_repair.get("warnings") or []),
-                            "Rolled back deterministic contract repair because sealed validation did not pass.",
+                            "Rolled back deterministic contract repair because repair-feedback validation did not pass.",
                         ]
                         public_tests = _run_case_tests(repo, case, public_only=True)
-                        hidden_tests = _run_case_tests(repo, case, public_only=False)
+                        feedback_tests = _run_case_tests(repo, case, public_only=False)
                 deterministic_contract_repair.pop("_snapshot", None)
             repair_attempts: list[dict[str, Any]] = []
             repair_limit = max(0, min(MAX_REPAIR_ROUNDS, int(args.max_repairs)))
             for repair_round in range(1, repair_limit + 1):
-                if public_tests["passed"] and hidden_tests["passed"]:
+                if public_tests["passed"] and feedback_tests["passed"]:
                     break
                 failure_context = _validation_failure_context(
                     public_tests,
-                    hidden_tests,
+                    feedback_tests,
                 )
                 before_repair = _candidate_snapshot(repo, case)
-                before_quality = _validation_quality(public_tests, hidden_tests)
+                before_quality = _validation_quality(public_tests, feedback_tests)
                 repair = _repair_after_failure(
                     repo,
                     case,
@@ -1320,10 +1601,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                             **public_tests,
                             "output": f"{public_tests['output']}\n\n{rejection}",
                         }
-                    if not hidden_tests["passed"]:
-                        hidden_tests = {
-                            **hidden_tests,
-                            "output": f"{hidden_tests['output']}\n\n{rejection}",
+                    if not feedback_tests["passed"]:
+                        feedback_tests = {
+                            **feedback_tests,
+                            "output": f"{feedback_tests['output']}\n\n{rejection}",
                         }
                     continue
                 patch["changed_files"] = _changed_candidate_files(
@@ -1331,8 +1612,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 patch["patch_applied"] = bool(patch["changed_files"])
                 public_tests = _run_case_tests(repo, case, public_only=True)
-                hidden_tests = _run_case_tests(repo, case, public_only=False)
-                after_quality = _validation_quality(public_tests, hidden_tests)
+                feedback_tests = _run_case_tests(repo, case, public_only=False)
+                after_quality = _validation_quality(public_tests, feedback_tests)
                 if after_quality < before_quality:
                     _restore_candidate_snapshot(repo, before_repair)
                     repair["rolled_back_after_validation"] = True
@@ -1354,7 +1635,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     )
                     patch["patch_applied"] = bool(patch["changed_files"])
                     public_tests = _run_case_tests(repo, case, public_only=True)
-                    hidden_tests = _run_case_tests(repo, case, public_only=False)
+                    feedback_tests = _run_case_tests(repo, case, public_only=False)
             patch["changed_files"] = _changed_candidate_files(
                 repo, case.get("candidate_paths") or []
             )
@@ -1362,13 +1643,51 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             patch["selected_file"] = (
                 patch["changed_files"][0] if len(patch["changed_files"]) == 1 else ""
             )
+            model_calls_before_final = len(calls)
+            if entry.get("final_oracle"):
+                final_oracle = _read_json(
+                    _fixture_path(
+                        fixture_root,
+                        entry.get("final_oracle"),
+                        "final oracle",
+                    )
+                )
+                if final_oracle.get("case_id") != case.get("case_id"):
+                    raise ValueError(
+                        "Final oracle case_id does not match the public case."
+                    )
+                complete_partitions = _oracle_test_partitions(
+                    oracle,
+                    final_oracle=final_oracle,
+                    require_sealed=True,
+                    require_external_final=True,
+                )
+                if complete_partitions["feedback_files"] != partitions["feedback_files"]:
+                    raise RuntimeError(
+                        "Repair feedback changed before final adjudication."
+                    )
+                _validate_oracle_test_paths(case, complete_partitions)
+                partitions = complete_partitions
+            baseline_final = _run_final_adjudication(
+                case,
+                partitions["final_files"],
+            )
+            final_tests = _run_final_adjudication(
+                case,
+                partitions["final_files"],
+                candidate_repo=repo,
+            )
+            if len(calls) != model_calls_before_final:
+                raise RuntimeError(
+                    "A model call occurred after final adjudication began."
+                )
             score, checks = _score_case(
                 oracle,
                 diagnosis,
                 patch,
-                baseline_hidden,
+                baseline_final,
                 public_tests,
-                hidden_tests,
+                final_tests,
             )
             report = diagnosis.get("report") if isinstance(diagnosis.get("report"), Mapping) else {}
             conclusion = report.get("conclusion") if isinstance(report.get("conclusion"), Mapping) else {}
@@ -1393,9 +1712,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "patch_applied": bool(patch.get("patch_applied")),
                     "patch_warnings": patch.get("warnings") or [],
                     "public_tests": public_tests,
-                    "hidden_tests": hidden_tests,
-                    "baseline_hidden_tests": baseline_hidden,
+                    "feedback_tests": feedback_tests,
+                    "final_tests": final_tests,
+                    "baseline_feedback_tests": baseline_feedback,
+                    "baseline_final_tests": baseline_final,
                     "baseline_public_tests": baseline_public,
+                    "sealed_final_adjudication": bool(partitions["sealed"]),
+                    "external_final_oracle": bool(partitions["external_final"]),
+                    "model_calls_before_final": model_calls_before_final,
+                    "model_calls_after_final": 0,
                     "repair_attempts": repair_attempts,
                     "deterministic_contract_repair": deterministic_contract_repair,
                     "model_calls": calls,
@@ -1446,7 +1771,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         else "development_regression_failed"
     )
     results = {
-        "schema": "chili.diagnosis-to-fix-results.v2",
+        "schema": "chili.diagnosis-to-fix-results.v3",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "model": args.model,
         "reference_family": manifest.get("reference_family") or "claude-fable-5",
@@ -1461,6 +1786,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             round(blinded_holdout_score, 2) if blinded_holdout_score is not None else None
         ),
         "blinded_holdout_case_count": len(blinded_holdouts),
+        "sealed_final_case_count": sum(
+            1 for item in case_results if item.get("sealed_final_adjudication")
+        ),
         "average_case_duration_ms": round(average_duration, 2),
         "verdict": _verdict(case_results),
         "evaluation_verdict": evaluation_verdict,

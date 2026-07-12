@@ -8,6 +8,8 @@ CHILI is now **qualified for local-only development shadow use** on the tested d
 
 This distinction is intentional. The current evidence proves that CHILI can diagnose, gather bounded evidence, select owning files, generate local patches, use validation failures as new evidence, repair or roll back its own patch, and pass cross-language development regressions without premium calls. It does not yet provide a blinded, statistically meaningful head-to-head against Fable 5.
 
+The historical diagnosis-to-fix reports used the label `hidden` for tests that were loaded after the initial patch but could then guide bounded repair. Those scores are feedback-guided development evidence, not sealed final-adjudication evidence. Runner schema v3 now separates repair-feedback tests from a final oracle that is first read after every model call; no v3 blinded repair holdout has been scored yet.
+
 ## Requirement Audit
 
 | Requirement | Authoritative evidence | Status |
@@ -25,7 +27,7 @@ This distinction is intentional. The current evidence proves that CHILI can diag
 | Runtime database evidence | Schema metadata and aggregate-only PostgreSQL profiles through an explicit read-only DSN, read-only transactions, short timeouts, bounded lookback, safe identifiers, and no raw SQL or raw rows | Proven in `_test` integration and development-regression tests; live production credential proof not performed |
 | No arbitrary diagnostic shell | Probe schema has no command kind; paths, selectors, time, count, and output are bounded | Proven by source and tests |
 | Workspace isolation for dynamic probes | Compile uses temporary copies; pytest uses a validated `git archive` snapshot and credential-stripped environment | Proven for repository isolation; hardened OS sandboxing remains open |
-| Diagnosis-to-fix autonomy | Local diagnosis, exact tracked-file selection, atomic multi-file edit groups, public+hidden conjunctive validation, assertion-contract extraction, rollback, and bounded repair | Proven on 13 development repositories across Python, TypeScript, Dart, and SQL; no blinded holdout yet |
+| Diagnosis-to-fix autonomy | Local diagnosis, exact tracked-file selection, atomic multi-file edit groups, public+repair-feedback validation, assertion-contract extraction, rollback, bounded repair, and isolated final adjudication | Repair loop proven on 13 unsealed development repositories across Python, TypeScript, Dart, and SQL; v3 sealed runner proven by tests, but no blinded sealed holdout yet |
 | Cross-language syntax validation | Python AST, parser-only Node TypeScript/JavaScript validation, and Dart analysis with isolated analyzer state; exact changed-file coverage required | Proven by safety and orchestration tests |
 | Recognized contract repair | Prompt-derived invariants and repository-shape checks for single-flight eviction, cancellation propagation, injected-clock TTL, subscription lifecycle, partial uniqueness, and sibling pre-aggregation | Proven by variant unit tests and six real regression fixtures; deliberately narrow |
 | Production validation repair | Project Autonomy preserves operator/assertion contracts and retries validation locally | Default three rounds, hard maximum five; proven by tests, not yet by a large live inventory |
@@ -69,6 +71,8 @@ This distinction is intentional. The current evidence proves that CHILI can diag
 
 The older reports use `holdout` in their structural split labels. Because those fixtures subsequently informed system development, they are now classified as development regressions and must not be used as unseen-comparison evidence.
 
+The older `hidden` column is also historical terminology. Those assertions were available as repair feedback after the initial patch and therefore were not a separate final gate. Their scores measure bounded feedback-driven repair, not untouched fix generalization.
+
 ### Cross-Language Diagnosis-to-Fix
 
 - Six repositories: two TypeScript, two Dart, and two SQL; four require coordinated multi-file changes
@@ -84,6 +88,8 @@ The older reports use `holdout` in their structural split labels. Because those 
 - Broad relevant regression coverage after leakage-safe memory integration: **334 passed** in one combined run
 - Reports: `project_ws/AgentOps/CROSS_LANGUAGE_DIAGNOSIS_TO_FIX_FIRST_RUN.md`, `project_ws/AgentOps/CROSS_LANGUAGE_DIAGNOSIS_TO_FIX_PRE_DART_CONTRACT_FULL.md`, `project_ws/AgentOps/CROSS_LANGUAGE_DIAGNOSIS_TO_FIX_PRE_ALL_CONTRACT_FULL.md`, and `project_ws/AgentOps/CROSS_LANGUAGE_DIAGNOSIS_TO_FIX_BENCHMARK.md`
 - Interpretation: this proves repeatable coverage for six recognized mechanism families. It measures the autonomous system, not free-form 7B model parity, and it is not unseen generalization evidence.
+
+As with the seven Python cases, the reported cross-language `hidden` tests guided bounded repair. The 100/100 result is retained as development-regression evidence only and is not a sealed-final score.
 
 ### Typed Runtime-Evidence Diagnosis
 
@@ -321,13 +327,14 @@ authored causal language.
 - Diagnostic memory stores controlled mechanism abstractions only. Retrieval requires same-user/same-repo database scope, approved validation provenance, positive query overlap, and non-superseded promotion; benchmark/evaluation mode disables it entirely.
 - TypeScript validation invokes Node's parser-only type transformation and never evaluates repository source. Dart analysis receives isolated writable state instead of user profile/plugin state.
 - Python true/false constant sets receive a semantic-polarity check before a local patch is accepted.
-- Hidden-test failure is evidence for a bounded repair loop; tests cannot be edited because only manifest-approved source candidates are eligible.
-- Deterministic contract proposals are eligible only for recognized prompt/source shapes, must clear contradiction guards, and are retained only when both public and hidden validation pass; otherwise the candidate snapshot is restored.
+- Repair-feedback failure is evidence for a bounded repair loop; tests cannot be edited because only manifest-approved source candidates are eligible.
+- Deterministic contract proposals are eligible only for recognized prompt/source shapes, must clear contradiction guards, and are retained only when both public and repair-feedback validation pass; otherwise the candidate snapshot is restored.
+- In runner schema v3, blinded entries require a separate final oracle. It is loaded only after the last model call, runs once in a fresh repository without feedback tests, cannot overwrite seeded public tests, and cannot trigger another repair round.
 - Production Project Autonomy defaults to three local validation-repair rounds and enforces a hard maximum of five.
 
 ## Remaining Gaps
 
-1. The repair suite has only 13 small development repositories: seven Python and six TypeScript/Dart/SQL. It does not represent large-repository, mixed-stack, Go, or Rust superiority.
+1. The repair suite has only 13 small, feedback-guided development repositories: seven Python and six TypeScript/Dart/SQL. No truly sealed v3 diagnosis-to-fix holdout has been scored. It does not represent large-repository, mixed-stack, Go, or Rust superiority.
 2. Provider-attested Fable 5 history exists, but no provider-attested Fable output exists for the same frozen repair cases. Historical answers are excluded from a blinded score because current CHILI development may be contaminated by their fixes and task mechanics.
 3. Eight independent eight-case diagnostic slices now total 64 cases and scored 88.12/100, 87.5/100, 76.25/100, 69.38/100, 74.4/100, 67.5/100, 63.8/100, and 83.12/100. Every untouched slice is below the 90 shadow threshold. The eighth oracle's five-family tolerance inflated its nominal result; strict primary-family scoring was 70.62/100. The set still lacks the required repository/language mix and direct Fable 5 comparison.
 4. Runtime evidence currently covers bounded text logs, aggregate/schema PostgreSQL reads, typed-probe timestamps, structured causal timelines, hashed log correlation identities, and explicit cross-service flow edges. It does not yet provide external trace-backend ingestion, metrics backends, container state, process inspection, automatic producer/consumer role inference for arbitrary systems, or a live production proof using a separately provisioned SELECT-only role.
@@ -345,7 +352,7 @@ Do not claim Fable 5 parity or superiority until all of the following are true:
 2. At least 10 tasks require multi-file changes and at least 10 require dynamic diagnosis from failing tests or logs.
 3. The same blinded tasks are run independently by authenticated Fable 5 and CHILI without sharing outputs.
 4. Human adjudicators compare correctness, root-cause quality, unnecessary changes, safety, test quality, latency, and cost without seeing model identity.
-5. CHILI has no premium calls, no safety violations, at least 95% hidden-test repair success, and a statistically defensible win or non-inferiority margin.
+5. CHILI has no premium calls, no safety violations, at least 95% sealed-final repair success, and a statistically defensible win or non-inferiority margin.
 6. Results reproduce across at least three runs to measure local-model variance.
 
 Until that gate is met, the accurate statement is:
