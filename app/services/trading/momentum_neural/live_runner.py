@@ -1451,6 +1451,11 @@ def _submit_live_market_exit(
             limit_price=_exit_limit_str,
             client_order_id=client_order_id,
         )
+        if not _le_side_long(le):
+            # SHORT cover: buy back (BUY_TO_CLOSE). SHORT-P2: the limit still uses
+            # the long-shaped sell formatter; the lane stays gated OFF until P2.
+            _lim_kwargs["side"] = "buy"
+            _lim_kwargs["position_intent"] = "buy_to_close"
         if _ext_kwargs:
             _lim_kwargs["extended_hours"] = True
             _lim_kwargs.update(_ext_kwargs)
@@ -1468,6 +1473,9 @@ def _submit_live_market_exit(
             base_size=_fmt_base_size(quantity),
             client_order_id=client_order_id,
         )
+        if not _le_side_long(le):
+            _mkt_kwargs["side"] = "buy"  # SHORT cover (BUY_TO_CLOSE)
+            _mkt_kwargs["position_intent"] = "buy_to_close"
         if _ext_kwargs:
             _mkt_kwargs.update(_ext_kwargs)
         result = adapter.place_market_order(**_mkt_kwargs) or {}
@@ -2519,11 +2527,13 @@ def _place_scale_out_limit(
         cid = f"chili_ml_sol_{sess.id}_{uuid.uuid4().hex[:12]}"
         res = adapter.place_limit_order_gtc(
             product_id=product_id,
-            side="sell",
+            # SHORT-P2: cover-tranche pricing still long-shaped; gated OFF until P2.
+            side=("sell" if _le_side_long(le) else "buy"),
             base_size=_fmt_base_size(scale_qty),
             limit_price=_fmt_limit_price_sell(float(target_px)),
             client_order_id=cid,
             extended_hours=_ext,
+            **({} if _le_side_long(le) else {"position_intent": "buy_to_close"}),
         ) or {}
         if res.get("ok") and res.get("order_id"):
             le["scale_limit_order_id"] = str(res["order_id"])
@@ -8498,7 +8508,7 @@ def tick_live_session(
                 # placement failure logs + continues (the software stop still manages).
                 # Alpaca-family only; released at the exit chokepoint before any sell.
                 try:
-                    if normalize_execution_family(sess.execution_family) == "alpaca_spot":
+                    if normalize_execution_family(sess.execution_family) == "alpaca_spot" and _le_side_long(le):
                         _pos_dm = le.get("position") or {}
                         _dm_stop = _float_or_none(_pos_dm.get("stop_price"))
                         if _dm_stop is not None and _dm_stop > 0 and float(avg) > _dm_stop:
@@ -9035,12 +9045,13 @@ def tick_live_session(
                                 _rp_res = _governed_place(
                                     adapter, adapter.place_limit_order_gtc, sess=sess,
                                     product_id=product_id,
-                                    side="buy",
+                                    side=("buy" if _le_side_long(le) else "sell"),
                                     base_size=_fmt_base_size(_rp_qty),
                                     limit_price=_fmt_limit_price_buy(_rp_new),
                                     client_order_id=_rp_cid,
                                     time_in_force="gfd",
                                     extended_hours=bool(le.get("entry_session_extended")),
+                                    **({} if _le_side_long(le) else {"position_intent": "sell_to_open"}),
                                 ) or {}
                                 if not _rp_res.get("ok"):
                                     # Governor DEFER or a place reject: stop the inline loop;
@@ -10699,7 +10710,8 @@ def tick_live_session(
         le["entry_session_overnight"] = bool(_entry_overnight)
         _entry_kwargs = dict(
             product_id=product_id,
-            side="buy",
+            # SHORT LANE P1b-2: a short session ENTERS with a sell (SELL_TO_OPEN).
+            side=("buy" if _le_side_long(le) else "sell"),
             base_size=_fmt_base_size(qty),
             limit_price=entry_limit_str,
             client_order_id=cid,
@@ -10711,6 +10723,11 @@ def tick_live_session(
             # 24h-session boundary (acceptable; a resting overnight GTC is the KMRK risk).
             time_in_force="gfd",
         )
+        if not _le_side_long(le):
+            # SHORT ENTRY intent disambiguation (SHORT_SIDE_LANE.md P0 adapter).
+            # SHORT-P2: entry pricing still uses the long-shaped marketable-buy
+            # formatter upstream; the short lane stays gated OFF until P2 inverts it.
+            _entry_kwargs["position_intent"] = "sell_to_open"
         # Pass the overnight signal ONLY for the agentic RH equity rail (the only adapter
         # whose place_*_order accepts ``overnight`` -> all_day_hours). Crypto / robin_stocks /
         # alpaca don't take the kwarg, so they are called exactly as before (no regress).
@@ -13536,11 +13553,13 @@ def tick_live_session(
                             _ll_cid = f"chili_ml_sis_{sess.id}_{uuid.uuid4().hex[:12]}"
                             _ll_kwargs = dict(
                                 product_id=product_id,
-                                side="sell",
+                                side=("sell" if _le_side_long(le) else "buy"),
                                 base_size=_fmt_base_size(_ll_qty),
                                 limit_price=_fmt_limit_price_sell(_ll_px),
                                 client_order_id=_ll_cid,
                             )
+                            if not _le_side_long(le):
+                                _ll_kwargs["position_intent"] = "buy_to_close"  # SHORT-P2 pricing caveat
                             if not sess.symbol.endswith("-USD"):
                                 # EQUITY: a DAY order (auto-cancels at the close — the
                                 # free-option expires daily, never a stale resting GTC);
@@ -13639,6 +13658,7 @@ def tick_live_session(
                     _ant_rem = _float_or_none(le.get("anticipation_remainder_qty"))
                     if (
                         le.get("anticipation_armed")
+                        and _le_side_long(le)  # v1: shorts never add
                         and not le.get("anticipation_add_order_id")
                         and not le.get("anticipation_completed")
                         and _ant_rem is not None and _ant_rem > 0
@@ -13704,7 +13724,7 @@ def tick_live_session(
             # broker call, #769 anchor stays None). Two phases, both FALL THROUGH
             # (never early-return) so the freshly-ratcheted stop-breach check still
             # runs this same tick. (docs/DESIGN/MOMENTUM_LANE.md)
-            if bool(getattr(settings, "chili_momentum_pyramid_enabled", False)):
+            if _le_side_long(le) and bool(getattr(settings, "chili_momentum_pyramid_enabled", False)):
                 try:
                     # PHASE 1 — resolve an IN-FLIGHT add order (mirror entry adopt).
                     # Mutate pos ONLY on a CONFIRMED fill; a partial blends ONLY the
@@ -13895,7 +13915,7 @@ def tick_live_session(
                         # is inert / fail-OPEN). An explicit False (flag ON, evaluated, no
                         # fresh trigger) BLOCKS the add — it can ONLY tighten, never loosen.
                         _discrete_add = None
-                        if _is_equity_pyr and bool(
+                        if _is_equity_pyr and _le_side_long(le) and bool(
                             getattr(settings, "chili_momentum_pyramid_discrete_add_enabled", False)
                         ):
                             try:
@@ -14650,7 +14670,7 @@ def tick_live_session(
             # micro-bar frame from _build_micro_bar_df (NOT the 5d fetch_ohlcv_df) for the
             # structure read; the front-side strength reuses the SAME live OFI/tape reads.
             # This is an ADD lever, NEVER a veto. (docs/DESIGN/MOMENTUM_LANE.md)
-            if bool(getattr(settings, "chili_momentum_pullback_add_enabled", True)):
+            if _le_side_long(le) and bool(getattr(settings, "chili_momentum_pullback_add_enabled", True)):
                 try:
                     # PHASE 1 — resolve an IN-FLIGHT pullback-add order (mirror the pyramid
                     # adopt). Blend ONLY on a CONFIRMED fill via the SHARED helper; the
@@ -15140,7 +15160,7 @@ def tick_live_session(
             # so the stop-breach/exit block below ALWAYS runs this tick. The entire block is in a
             # try/except that swallows to the fall-through — a flag-add NEVER blocks, delays, or
             # loosens an exit. This is an ADD lever, NEVER a veto. (docs/DESIGN/MOMENTUM_LANE.md)
-            if bool(getattr(settings, "chili_momentum_flag_breakout_add_enabled", True)):
+            if _le_side_long(le) and bool(getattr(settings, "chili_momentum_flag_breakout_add_enabled", True)):
                 try:
                     # PHASE 1 — resolve an IN-FLIGHT flag-breakout-add order (mirror the pyramid
                     # adopt). Blend ONLY on a CONFIRMED fill via the SHARED helper; the circuit
