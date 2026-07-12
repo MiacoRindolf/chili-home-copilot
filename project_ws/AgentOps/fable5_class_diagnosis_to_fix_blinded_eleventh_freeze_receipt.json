@@ -1,0 +1,65 @@
+{
+  "schema": "chili.eleventh-holdout-freeze-receipt.v1",
+  "frozen_at": "2026-07-12T12:36:50.9237939-07:00",
+  "branch": "codex/fable5-diagnostic-reasoning",
+  "core_implementation_commit": "6cf5b7e0e7da6840da57dec678f8846796265091",
+  "policy_commit": "c67eacca02e77aed51a6360729af28a60d6f08ff",
+  "fixture_commit": "5445302654e31c56e652756817be2415f7208cf0",
+  "fixture_tree": "667c5986ba0cd91542d08b882d7b24b4456e1d10",
+  "reference_family": "claude-fable-5",
+  "fixture_integrity": {
+    "original_validator_aggregate_sha256": "b00c08f5c399a99179b25959d491f074bbd6c1843e70b14ac840f4354e05c815",
+    "post_adapter_worktree_aggregate_sha256": "afc0821baec0a5b386b79e00433b777c126431973df600054a1ed283ac05261d",
+    "post_adapter_manifest_sha256": "e056d033c7477dcde628d750daf476b48e57692cbb0b8f018a029cd31ddc7801",
+    "validator_receipt_sha256": "a8f10345523463dcd5fbc7ec46f86919d11cb53241c991bc169fa560aeef2d99",
+    "fixture_file_count_excluding_validator_receipt": 40
+  },
+  "policy_integrity": {
+    "protocol_sha256": "526a76f21c3480fe3779fa44234c7c2b20606ccd94008a7b52d0b9fd951df613",
+    "run_policy_sha256": "3ba4271d82df68bff367d3b3e2b41b77e58dad5d0e07db60b33c2ca36c32a355",
+    "deviations_sha256": "ed5bc00fe7937dd159f9c0010270cd7afe0607852d696ce069d76337d044fef3",
+    "environment_sha256": "e389c183a2482477f7551e81131d580f4ab77a1f964f12a1f44da0cfc0016278",
+    "preflight_sha256": "d73a9153280ad36e02b04c0c2bc439d030cb20c59b95ae885dac73e0b0d7f9ba"
+  },
+  "implementation_integrity": {
+    "scripts/autopilot_diagnosis_to_fix_benchmark.py": "5637784a40907da5576d859e4d2182b8209757666154e348692ab605ab2211e8",
+    "tests/test_diagnosis_to_fix_benchmark.py": "975eb82a1375da37d62608b4f865a5c9b659496bfe1c40a01c49afe750c15901",
+    "app/services/project_autonomy/diagnostic_reasoning.py": "f34cbf344da327d32f83a6e7b3bc31946c2cb2c433118ef4c3e5a3239ed75e75",
+    "app/services/project_autonomy/orchestrator.py": "cbc85a4c3e9c223e2e53fd10f16d2c09176937a822d1b13d683db89e2fb2b441",
+    "app/services/coding_task/validator_runner.py": "c0e35a2c277d7e5629061e5f2ca9a3d55b57bc0882f89d789c8d753eb886384c",
+    "app/services/code_brain/agent.py": "d65b8890328bcf6a519370f670f50de41a97bb72cb92c9657f7b27be13d5052e"
+  },
+  "fixture_preflight": {
+    "valid": true,
+    "cases": 12,
+    "public_passed": 12,
+    "feedback_failed": 12,
+    "final_failed": 12,
+    "sealed_final": 12,
+    "external_final_oracle": 12,
+    "outside_disclosed_operator_families": 9,
+    "transfer_variants": 3,
+    "contestant_calls_before_freeze": 0
+  },
+  "fixture_only_adapter": {
+    "count": 1,
+    "scope": "manifest collection key only",
+    "case_or_oracle_body_changed": false,
+    "assertions_or_semantics_changed": false,
+    "difficulty_changed": false
+  },
+  "run_policy": {
+    "primary_model": "qwen2.5-coder:7b",
+    "max_repairs": 2,
+    "escalation_model": "qwen2.5-coder:14b",
+    "max_escalation_repairs": 1,
+    "timeout_seconds": 240,
+    "premium_calls_allowed": 0,
+    "first_complete_result_is_authoritative": true
+  },
+  "controller_blinding": {
+    "fixture_bodies_seen_before_freeze": false,
+    "oracle_bodies_seen_before_freeze": false,
+    "metadata_filenames_and_hashes_seen": true
+  }
+}
