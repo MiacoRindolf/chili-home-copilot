@@ -737,6 +737,84 @@ def test_local_packet_contract_repair_is_grounded_audited_and_fail_closed():
     assert result["report"]["valid"] is True
 
 
+def test_local_packet_cannot_replace_qualified_causal_support_with_correlation():
+    case = {
+        "case_id": "causal-support-retention",
+        "problem_statement": "Large jobs stall on a shared worker pool.",
+        "observations": [
+            {
+                "evidence_id": "broad-control",
+                "statement": (
+                    "Reprocessing matched jobs on a dedicated diagnostic host restores "
+                    "latency while several host resources change together."
+                ),
+                "dimension": "runtime",
+                "kind": "experiment",
+                "provenance": "bounded-control",
+                "independence_key": "bounded-control",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "host-correlation",
+                "statement": "Scheduler wait rises during the affected nightly window.",
+                "dimension": "runtime",
+                "kind": "metric",
+                "provenance": "host-summary",
+                "independence_key": "host-summary",
+                "reliability": 0.97,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "event-gap",
+                "statement": (
+                    "Aggregate metrics cannot show whether any sampled event was "
+                    "runnable but unscheduled."
+                ),
+                "dimension": "runtime",
+                "kind": "artifact",
+                "provenance": "trace-audit",
+                "independence_key": "trace-audit",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+        ],
+        "constraints": {"minimum_hypothesis_dimensions": 1},
+    }
+    correlation_only = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-runtime",
+                "claim": "Shared-host contention causes the long tail.",
+                "dimension": "runtime",
+                "support_evidence_ids": ["host-correlation"],
+                "falsification": "Capture event-level wait classes on both pools.",
+            }
+        ],
+        "conclusion": {
+            "hypothesis_id": "h-runtime",
+            "status": "provisional",
+        },
+    }
+
+    result = reasoning.run_local_diagnostic_debate(
+        case,
+        lambda _stage, _prompt: json.dumps(correlation_only),
+        stages_to_run=("judge",),
+    )
+    stage = result["stages"][0]
+    support = result["packet"]["hypotheses"][0]["support_evidence_ids"]
+
+    assert stage["accepted"] is True
+    assert (
+        "h-runtime:restored_qualified_causal_support"
+        in stage["contract_repairs"]
+    )
+    assert support == ["host-correlation", "broad-control"]
+    assert result["report"]["conclusion"]["status"] == "provisional"
+    assert result["report"]["decision"] == "instrument_first"
+
+
 def test_local_dimension_aliases_preserve_system_layer_meaning():
     packet = reasoning.normalize_packet(
         {

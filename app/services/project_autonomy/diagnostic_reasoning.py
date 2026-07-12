@@ -4520,6 +4520,20 @@ def _repair_candidate_contract(
                 item.get("evidence_lifecycle") or "observed_result"
             ),
             "attribution_gap": bool(item.get("attribution_gap")),
+            "qualified_causal_support": bool(
+                str(item.get("causal_role") or "context") == "support"
+                and str(item.get("evidence_lifecycle") or "observed_result")
+                == "observed_result"
+                and not bool(item.get("attribution_gap"))
+                and (
+                    bool(item.get("discriminating"))
+                    or str(item.get("provenance") or "").startswith(
+                        "diagnostic_probe:"
+                    )
+                    or _record_has_structured_break(item)
+                    or _has_direct_causal_artifact(item)
+                )
+            ),
         }
         for item in case.get("observations") or []
         if isinstance(item, Mapping) and str(item.get("evidence_id") or "")
@@ -4556,6 +4570,17 @@ def _repair_candidate_contract(
             contract.get("causal_role") == "support"
             and contract.get("intervention_scope") == "component"
             and owner not in {"unknown", dimension}
+        )
+
+    def qualified_causal_support_is_compatible(
+        evidence_id: str,
+        dimension: str,
+    ) -> bool:
+        contract = evidence_contracts.get(evidence_id)
+        return bool(
+            contract
+            and contract.get("qualified_causal_support")
+            and support_is_compatible(evidence_id, dimension)
         )
 
     previous_by_id = {
@@ -4595,6 +4620,12 @@ def _repair_candidate_contract(
                 for evidence_id in prior.get("support_evidence_ids") or []
                 if support_is_compatible(str(evidence_id), dimension)
             ]
+        raw_contradictions = list(repaired.get("contradict_evidence_ids") or [])
+        aligned_contradictions = [
+            evidence_id
+            for evidence_id in raw_contradictions
+            if contradiction_is_compatible(str(evidence_id), dimension)
+        ]
         if aligned_support != raw_support:
             dropped_roles = {
                 str((evidence_contracts.get(str(evidence_id)) or {}).get("causal_role") or "")
@@ -4623,13 +4654,38 @@ def _repair_candidate_contract(
             aligned_support = prior_support
             if aligned_support:
                 repairs.append(f"{hypothesis_id}:restored_grounded_support")
-        repaired["support_evidence_ids"] = aligned_support
-        raw_contradictions = list(repaired.get("contradict_evidence_ids") or [])
-        aligned_contradictions = [
+        prior_qualified_support = [
             evidence_id
-            for evidence_id in raw_contradictions
-            if contradiction_is_compatible(str(evidence_id), dimension)
+            for evidence_id in prior_support
+            if qualified_causal_support_is_compatible(
+                str(evidence_id),
+                dimension,
+            )
         ]
+        candidate_qualified_support = [
+            evidence_id
+            for evidence_id in aligned_support
+            if qualified_causal_support_is_compatible(
+                str(evidence_id),
+                dimension,
+            )
+        ]
+        if (
+            prior_qualified_support
+            and not candidate_qualified_support
+            and not aligned_contradictions
+        ):
+            restored = [
+                evidence_id
+                for evidence_id in prior_qualified_support
+                if evidence_id not in aligned_support
+            ]
+            if restored:
+                aligned_support.extend(restored)
+                repairs.append(
+                    f"{hypothesis_id}:restored_qualified_causal_support"
+                )
+        repaired["support_evidence_ids"] = aligned_support
         if aligned_contradictions != raw_contradictions:
             repairs.append(f"{hypothesis_id}:dropped_unqualified_contradiction")
         repaired["contradict_evidence_ids"] = aligned_contradictions
