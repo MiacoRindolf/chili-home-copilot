@@ -2033,6 +2033,191 @@ def test_generic_mechanism_vocabulary_maps_to_causal_families_and_ties_stay_unkn
     assert reasoning.infer_dimension("clock state") == "unknown"
 
 
+def test_evidence_dimension_prefers_changed_variable_over_held_constants():
+    examples = {
+        "dependency": (
+            "Pinning only the prior resolved component restores output without changing "
+            "application code, settings, data, or runtime image."
+        ),
+        "code": (
+            "Reverting only the half-open interval predicate semantics accepts shared "
+            "endpoints and leaves policy and controller output unchanged."
+        ),
+        "data": (
+            "A sealed proof rejects reused producer identities and accepts a "
+            "collision-resistant identity while legacy records remain unchanged."
+        ),
+        "config": (
+            "The effective listener dump shows a rendered server-name value from the "
+            "region-alias environment setting."
+        ),
+        "test_harness": (
+            "An isolated runner can capture injected-input acknowledgments and virtual "
+            "speech-device readiness in the retained trace."
+        ),
+        "clock": (
+            "An offline replay fails with offset-free local values and succeeds when "
+            "the retained UTC instants keep their offsets."
+        ),
+    }
+
+    assert {
+        reasoning.infer_evidence_dimension(statement)
+        for statement in examples.values()
+    } == set(examples)
+    for expected, statement in examples.items():
+        assert reasoning.infer_evidence_dimension(statement) == expected
+
+
+def test_evidence_metadata_is_bounded_visible_and_idempotent():
+    raw = {
+        "evidence_id": "metadata-code",
+        "statement": "A deterministic comparison isolates one implementation change.",
+        "dimension": "unknown",
+        "kind": "artifact",
+        "metadata": {
+            "code": {
+                "good_semantics": "start < other_end and other_start < end",
+                "bad_semantics": "start <= other_end and other_start <= end",
+            },
+            "comparison": {"pairs": 12000, "disagreements": 1204},
+        },
+    }
+
+    once = reasoning.normalize_evidence(raw)
+    twice = reasoning.normalize_evidence(once)
+
+    assert once["dimension"] == "code"
+    assert once["dimension_origin"] == "inferred"
+    assert "code.good_semantics=" in once["structured_context"]
+    assert len(once["structured_context"]) <= 700
+    assert twice["structured_context"] == once["structured_context"]
+    assert twice["dimension"] == once["dimension"]
+    assert twice["dimension_origin"] == once["dimension_origin"]
+
+
+def test_unknown_hypothesis_dimension_recovers_from_specific_claim():
+    packet = reasoning.normalize_packet(
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": "h-listener",
+                    "claim": "The rendered listener configuration uses the wrong server-name value.",
+                    "dimension": "unknown",
+                    "falsification": "Capture the redacted effective listener output.",
+                }
+            ],
+            "conclusion": {
+                "hypothesis_id": "h-listener",
+                "status": "provisional",
+            },
+        }
+    )
+
+    assert packet["hypotheses"][0]["dimension"] == "config"
+
+
+def test_semantic_baseline_pairs_and_comparability_gaps_are_detected():
+    cases = [
+        "Inputs are identical between the final good build and the first bad build.",
+        "Counts match the prior week until the first post-maintenance upload.",
+        "The service unit on new hosts differs from the archived unit on prior hosts.",
+        "The old and current checksums are incomparable after serializer changes.",
+    ]
+
+    findings = reasoning.detect_baseline_drift(
+        [
+            reasoning.normalize_evidence(
+                {
+                    "evidence_id": f"baseline-{index}",
+                    "statement": statement,
+                    "kind": "artifact",
+                    "reliability": 0.99,
+                },
+                index,
+            )
+            for index, statement in enumerate(cases)
+        ]
+    )
+
+    assert {item["finding_type"] for item in findings} == {
+        "semantic_baseline_drift",
+        "baseline_comparability_gap",
+    }
+    assert {item["evidence_ids"][0] for item in findings} == {
+        "baseline-0",
+        "baseline-1",
+        "baseline-2",
+        "baseline-3",
+    }
+    assert reasoning.detect_baseline_drift(
+        [
+            reasoning.normalize_evidence(
+                {
+                    "evidence_id": "ordinary-control",
+                    "statement": (
+                        "The settings digest matches the prior seven days and the "
+                        "latest run remains intermittent."
+                    ),
+                }
+            )
+        ]
+    ) == []
+
+
+def test_omitted_contrastive_proof_can_promote_the_correct_clock_family():
+    case = {
+        "case_id": "clock-proof-completion",
+        "problem_statement": "Elapsed duration is wrong during a repeated local hour.",
+        "observations": [
+            {
+                "evidence_id": "clock-schema",
+                "statement": "The retained row stores offset-free local values.",
+                "kind": "artifact",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "clock-proof",
+                "statement": (
+                    "An offline replay reproduces the fault with offset-free local "
+                    "values and restores elapsed duration with retained UTC instants."
+                ),
+                "kind": "experiment",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+        ],
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-clock",
+                "claim": "Offset-free local time breaks elapsed duration.",
+                "dimension": "clock",
+                "support_evidence_ids": ["clock-schema"],
+                "falsification": "Replay the same rows with offset-aware instants.",
+            }
+        ],
+        "conclusion": {
+            "hypothesis_id": "h-clock",
+            "status": "provisional",
+            "evidence_ids": ["clock-schema"],
+        },
+    }
+
+    report = reasoning.evaluate_packet(case, packet)
+
+    assert report["conclusion"]["dimension"] == "clock"
+    assert report["conclusion"]["status"] == "confirmed"
+    assert report["decision"] == "patch_root_cause"
+    assert any(
+        item.get("origin") == "deterministic_evidence_gate"
+        and item["dimension"] == "clock"
+        for item in report["hypothesis_results"]
+    )
+
+
 def test_ambiguous_counterfactual_experiment_remains_context():
     evidence = reasoning.normalize_evidence(
         {

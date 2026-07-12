@@ -161,6 +161,10 @@ _DIMENSION_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "encoding",
             "unicode",
             "normalization",
+            "identity",
+            "clip_id",
+            "dedup key",
+            "collision",
         ),
     ),
     (
@@ -211,7 +215,6 @@ _DIMENSION_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "certificate",
             "tls",
             "handshake",
-            "endpoint",
             "trust store",
             "peer chain",
             "upstream",
@@ -282,6 +285,13 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("parsing zone", 7),
             ("utc offset", 6),
             ("monotonic duration", 5),
+            ("offset-free local", 9),
+            ("retained utc instant", 9),
+            ("repeated local hour", 9),
+            ("repeated-hour offset", 9),
+            ("elapsed duration", 7),
+            ("retain their offsets", 9),
+            ("negative age", 7),
         ),
     ),
     (
@@ -311,6 +321,14 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("shortened key", 7),
             ("signed source archive", 5),
             ("delivered roster", 6),
+            ("producer identity", 8),
+            ("reused producer identities", 9),
+            ("collision-resistant identity", 10),
+            ("identifier collision", 9),
+            ("duplicate identifier", 8),
+            ("duplicate clip_id", 9),
+            ("identity fields", 8),
+            ("key composition", 8),
         ),
     ),
     (
@@ -377,6 +395,19 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("rendered setting", 6),
             ("leading-slash filter", 8),
             ("topic-matcher", 8),
+            ("server-name value", 8),
+            ("rendered server-name", 9),
+            ("explicit server name", 8),
+            ("derived server name", 8),
+            ("effective listener", 9),
+            ("listener configuration", 8),
+            ("region-alias", 8),
+            ("rendered pre-change output", 7),
+            ("desired template", 7),
+            ("trace_server_name", 9),
+            ("expected_state.server_name", 9),
+            ("actual_state.trace_server_name", 9),
+            ("configuration repository", 7),
         ),
     ),
     (
@@ -402,6 +433,17 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("calendar parsing package", 8),
             ("locked package versions", 8),
             ("transitive lock refresh", 8),
+            ("provider endpoint", 7),
+            ("network endpoint", 7),
+            ("remote endpoint", 6),
+            ("api endpoint", 7),
+            ("tls endpoint", 8),
+            ("resolved component", 9),
+            ("component lock", 8),
+            ("component sets", 8),
+            ("parser version", 9),
+            ("caption parser", 9),
+            ("prior resolved component", 10),
         ),
     ),
     (
@@ -459,6 +501,16 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("scenario cleanup", 6),
             ("proxy rule", 6),
             ("test scenario", 5),
+            ("retained trace", 6),
+            ("assertion timeout", 6),
+            ("injected-input", 7),
+            ("virtual speech-device readiness", 8),
+            ("virtual device readiness", 8),
+            ("trace schema", 8),
+            ("isolated runner", 8),
+            ("automated accessibility gate", 9),
+            ("automated runs", 6),
+            ("diagnostic instrumentation", 9),
         ),
     ),
     (
@@ -485,6 +537,17 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("cursor selection after filtering", 9),
             ("prior paging function", 8),
             ("deployed paging", 8),
+            ("interval helper", 8),
+            ("inline predicate", 9),
+            ("predicate semantics", 10),
+            ("half-open interval", 9),
+            ("boundary predicate", 9),
+            ("generated interval pairs", 9),
+            ("endpoint equality", 9),
+            ("closed-vs-half-open-boundary", 10),
+            ("boundary-focused proof corpus", 9),
+            ("half-open reservation contract", 10),
+            ("code_fingerprint", 7),
         ),
     ),
 )
@@ -635,6 +698,7 @@ _CAUSAL_CONTRADICTION_MARKERS = (
     "match across",
     "matches across",
     "no additional",
+    "no overrun",
     "no parse rejection",
     "no retry",
     "no source",
@@ -692,6 +756,9 @@ _AMBIGUOUS_EXPERIMENT_MARKERS = (
     "does not explain all",
     "cannot distinguish",
     "cannot determine",
+    "both fit the observed",
+    "do not preserve",
+    "does not preserve",
 )
 _DECISIVE_ATTRIBUTION_GAP_MARKERS = (
     "cannot distinguish",
@@ -701,6 +768,30 @@ _DECISIVE_ATTRIBUTION_GAP_MARKERS = (
     "not individually attributable",
     "lacks worker identity",
     "no retained artifact",
+)
+_SEMANTIC_BASELINE_PAIR_PATTERNS = (
+    r"\b(?:final\s+)?good\s+(?:build|release|deployment|host|run)\b.{0,220}"
+    r"\b(?:first\s+)?bad\s+(?:build|release|deployment|host|run)\b",
+    r"\b(?:first\s+)?bad\s+(?:build|release|deployment|host|run)\b.{0,220}"
+    r"\b(?:final\s+)?good\s+(?:build|release|deployment|host|run)\b",
+    r"\b(?:final\s+)?good\b.{0,80}\b(?:first\s+)?bad\b.{0,80}"
+    r"\b(?:build|builds|release|releases|deployment|deployments|host|hosts|run|runs)\b",
+    r"\bprior\s+(?:week|host|deployment|build|release|version)\b.{0,240}"
+    r"\b(?:post-maintenance|post-change|new\s+(?:host|deployment|build|release|version))\b",
+    r"\b(?:post-maintenance|post-change|new(?:ly provisioned)?\s+(?:host|hosts|deployment|build|release|version))\b"
+    r".{0,240}\bprior\s+(?:week|host|hosts|deployment|build|release|version)\b",
+)
+_BASELINE_COMPARABILITY_GAP_MARKERS = (
+    "did not retain a comparable",
+    "does not retain a comparable",
+    "no comparable effective",
+    "preserve neither the old",
+    "old and current checksums incomparable",
+    "old and current checksums are incomparable",
+    "old and current fingerprints incomparable",
+    "old and current fingerprints are incomparable",
+    "pre-change output is unavailable",
+    "pre-change snapshot is unavailable",
 )
 
 
@@ -767,14 +858,87 @@ def _dimension_scores(statement: str) -> dict[str, int]:
     return scores
 
 
-def infer_dimension(statement: str) -> str:
-    scores = _dimension_scores(statement)
+def _select_dimension(scores: Mapping[str, int]) -> str:
     ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
     if not ranked or ranked[0][1] <= 0:
         return "unknown"
     if len(ranked) > 1 and ranked[0][1] == ranked[1][1]:
         return "unknown"
     return ranked[0][0]
+
+
+def infer_dimension(statement: str) -> str:
+    return _select_dimension(_dimension_scores(statement))
+
+
+_HELD_CONSTANT_BOUNDARIES = (
+    " without changing ",
+    " while holding ",
+    " while keeping ",
+    " with all other ",
+    " and leaves ",
+    " while legacy ",
+)
+
+
+def infer_evidence_dimension(statement: str, structured_context: str = "") -> str:
+    """Prefer the manipulated variable over dimensions named as controls.
+
+    Diagnostic proof statements often end with a long list of code, settings,
+    data, and runtime values that stayed fixed. A flat keyword vote can make
+    that held-constant list outrank the one component that was actually varied.
+    """
+    lower = str(statement or "").lower()
+    boundary_positions = [
+        position
+        for marker in _HELD_CONSTANT_BOUNDARIES
+        if (position := lower.find(marker)) >= 0
+    ]
+    focus = lower[: min(boundary_positions)] if boundary_positions else lower
+    full_scores = _dimension_scores(lower)
+    focus_scores = _dimension_scores(focus)
+    context_scores = _dimension_scores(structured_context)
+    combined = {
+        dimension: full_scores.get(dimension, 0)
+        + (2 * focus_scores.get(dimension, 0))
+        + context_scores.get(dimension, 0)
+        for dimension in DIMENSIONS
+        if dimension != "unknown"
+    }
+    return _select_dimension(combined)
+
+
+def _bounded_metadata_summary(raw: Mapping[str, Any]) -> str:
+    existing = _clip(raw.get("structured_context"), 700)
+    metadata = raw.get("metadata")
+    if existing or not isinstance(metadata, Mapping):
+        return existing
+
+    parts: list[str] = []
+
+    def visit(prefix: str, value: object, depth: int) -> None:
+        if len(parts) >= 28:
+            return
+        if isinstance(value, Mapping) and depth < 3:
+            for key in sorted(value, key=lambda item: str(item)):
+                clean_key = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(key)).strip("_")
+                if clean_key:
+                    visit(f"{prefix}.{clean_key}" if prefix else clean_key, value[key], depth + 1)
+            return
+        if (
+            isinstance(value, Sequence)
+            and not isinstance(value, (str, bytes))
+            and depth < 3
+        ):
+            for index, item in enumerate(value[:6]):
+                visit(f"{prefix}[{index}]", item, depth + 1)
+            return
+        rendered = _clip(value, 90)
+        if prefix and rendered:
+            parts.append(f"{prefix}={rendered}")
+
+    visit("", metadata, 0)
+    return _clip("; ".join(parts), 700)
 
 
 def has_attribution_gap(statement: str) -> bool:
@@ -1406,6 +1570,20 @@ def derive_diagnostic_lenses(statement: str) -> list[str]:
 
 def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]:
     statement = _clip(raw.get("statement"), 900)
+    structured_context = _bounded_metadata_summary(raw)
+    metadata = raw.get("metadata") if isinstance(raw.get("metadata"), Mapping) else {}
+
+    def evidence_value(name: str, *aliases: str) -> object:
+        for key in (name, *aliases):
+            value = raw.get(key)
+            if value is not None and value != "" and value != [] and value != {}:
+                return value
+        for key in (name, *aliases):
+            value = metadata.get(key)
+            if value is not None and value != "" and value != [] and value != {}:
+                return value
+        return ""
+
     explicit_dimension = str(raw.get("dimension") or "").strip().lower()
     supplied_origin = str(raw.get("dimension_origin") or "").strip().lower()
     if supplied_origin in {"explicit", "inferred", "unknown"}:
@@ -1420,7 +1598,9 @@ def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]
             explicit_dimension in DIMENSIONS and explicit_dimension != "unknown"
         )
         dimension = (
-            explicit_dimension if has_explicit_dimension else infer_dimension(statement)
+            explicit_dimension
+            if has_explicit_dimension
+            else infer_evidence_dimension(statement, structured_context)
         )
         dimension_origin = (
             "explicit"
@@ -1434,10 +1614,10 @@ def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]
         kind = "observation"
     discriminating = bool(raw.get("discriminating"))
     provenance = _clip(raw.get("provenance") or f"unattributed:{index + 1}", 300)
-    expected_state = str(raw.get("expected_state") or "")
-    actual_state = str(raw.get("actual_state") or raw.get("transition_to") or "")
-    expected_edge_state = str(raw.get("expected_edge_state") or "")
-    actual_edge_state = str(raw.get("actual_edge_state") or "")
+    expected_state = str(evidence_value("expected_state") or "")
+    actual_state = str(evidence_value("actual_state", "transition_to") or "")
+    expected_edge_state = str(evidence_value("expected_edge_state") or "")
+    actual_edge_state = str(evidence_value("actual_edge_state", "edge_state") or "")
     structured_break = bool(
         (expected_state and actual_state and expected_state != actual_state)
         or (
@@ -1498,6 +1678,7 @@ def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]
     return {
         "evidence_id": _clean_id(raw.get("evidence_id"), f"evidence-{index + 1}"),
         "statement": statement,
+        "structured_context": structured_context,
         "dimension": dimension,
         "dimension_origin": dimension_origin,
         "kind": kind,
@@ -1507,36 +1688,48 @@ def normalize_evidence(raw: Mapping[str, Any], index: int = 0) -> dict[str, Any]
         "discriminating": discriminating,
         "causal_role": causal_role,
         "attribution_gap": attribution_gap,
-        "comparison_key": _clip(raw.get("comparison_key"), 160),
-        "code_revision": _clip(raw.get("code_revision"), 100),
-        "input_fingerprint": _clip(raw.get("input_fingerprint"), 160),
-        "environment_fingerprint": _clip(raw.get("environment_fingerprint"), 160),
-        "outcome_fingerprint": _clip(raw.get("outcome_fingerprint"), 200),
-        "experiment_id": _clean_id(raw.get("experiment_id"), "") if raw.get("experiment_id") else "",
-        "observed_at": _clip(raw.get("observed_at"), 80),
-        "sequence": _optional_int(raw.get("sequence")),
-        "entity_id": _clean_id(raw.get("entity_id"), "") if raw.get("entity_id") else "",
-        "event_type": _clean_id(raw.get("event_type"), "") if raw.get("event_type") else "",
-        "expected_state": _clip(raw.get("expected_state"), 160),
-        "actual_state": _clip(raw.get("actual_state"), 160),
-        "transition_from": _clip(raw.get("transition_from"), 160),
-        "transition_to": _clip(raw.get("transition_to"), 160),
+        "comparison_key": _clip(evidence_value("comparison_key"), 160),
+        "code_revision": _clip(evidence_value("code_revision"), 100),
+        "input_fingerprint": _clip(evidence_value("input_fingerprint"), 160),
+        "environment_fingerprint": _clip(evidence_value("environment_fingerprint"), 160),
+        "outcome_fingerprint": _clip(evidence_value("outcome_fingerprint"), 200),
+        "experiment_id": (
+            _clean_id(evidence_value("experiment_id"), "")
+            if evidence_value("experiment_id")
+            else ""
+        ),
+        "observed_at": _clip(evidence_value("observed_at"), 80),
+        "sequence": _optional_int(evidence_value("sequence")),
+        "entity_id": (
+            _clean_id(evidence_value("entity_id"), "")
+            if evidence_value("entity_id")
+            else ""
+        ),
+        "event_type": (
+            _clean_id(evidence_value("event_type"), "")
+            if evidence_value("event_type")
+            else ""
+        ),
+        "expected_state": _clip(expected_state, 160),
+        "actual_state": _clip(actual_state, 160),
+        "transition_from": _clip(evidence_value("transition_from"), 160),
+        "transition_to": _clip(evidence_value("transition_to"), 160),
         "causal_parent_ids": [
             _clean_id(value, "")
             for value in raw.get("causal_parent_ids") or []
             if str(value).strip()
         ][:12],
-        "source_revision": _clip(raw.get("source_revision"), 100),
-        "runtime_revision": _clip(raw.get("runtime_revision"), 100),
+        "source_revision": _clip(evidence_value("source_revision"), 100),
+        "runtime_revision": _clip(evidence_value("runtime_revision"), 100),
         "service_id": _clean_id(raw.get("service_id"), "") if raw.get("service_id") else "",
         "producer_id": _clean_id(raw.get("producer_id"), "") if raw.get("producer_id") else "",
         "consumer_id": _clean_id(raw.get("consumer_id"), "") if raw.get("consumer_id") else "",
         "sink_id": _clean_id(raw.get("sink_id"), "") if raw.get("sink_id") else "",
         "edge_from": _clean_id(raw.get("edge_from"), "") if raw.get("edge_from") else "",
         "edge_to": _clean_id(raw.get("edge_to"), "") if raw.get("edge_to") else "",
-        "expected_edge_state": _clip(raw.get("expected_edge_state"), 120),
-        "actual_edge_state": _clip(raw.get("actual_edge_state"), 120),
-        "artifact_hash": _clip(raw.get("artifact_hash"), 160),
+        "expected_edge_state": _clip(expected_edge_state, 120),
+        "actual_edge_state": _clip(actual_edge_state, 120),
+        "artifact_hash": _clip(evidence_value("artifact_hash", "code_fingerprint"), 160),
         "correlation_fingerprints": correlation_fingerprints,
     }
 
@@ -2214,8 +2407,10 @@ def parse_json_object(text: str) -> dict[str, Any] | None:
 def _normalize_hypothesis(raw: Mapping[str, Any], index: int) -> dict[str, Any]:
     dimension = str(raw.get("dimension") or "unknown").strip().lower()
     dimension = DIMENSION_ALIASES.get(dimension, dimension)
-    if dimension not in DIMENSIONS:
-        dimension = infer_dimension(str(raw.get("claim") or ""))
+    if dimension not in DIMENSIONS or dimension == "unknown":
+        inferred_dimension = infer_dimension(str(raw.get("claim") or ""))
+        if inferred_dimension != "unknown":
+            dimension = inferred_dimension
     return {
         "hypothesis_id": _clean_id(raw.get("hypothesis_id"), f"h{index + 1}"),
         "claim": _clip(raw.get("claim"), 700),
@@ -2328,11 +2523,41 @@ def detect_baseline_drift(observations: Sequence[Mapping[str, Any]]) -> list[dic
     for item in observations:
         evidence_id = str(item.get("evidence_id") or "")
         statement = str(item.get("statement") or "").lower()
+        semantic_pair = any(
+            re.search(pattern, statement)
+            for pattern in _SEMANTIC_BASELINE_PAIR_PATTERNS
+        )
+        if evidence_id and evidence_id not in recorded_ids and semantic_pair:
+            drift.append(
+                {
+                    "comparison_key": str(
+                        item.get("comparison_key") or "semantic-baseline-pair"
+                    ),
+                    "code_revision": str(item.get("code_revision") or "unknown"),
+                    "input_fingerprint": str(
+                        item.get("input_fingerprint") or "controlled-by-statement"
+                    ),
+                    "outcome_fingerprints": [],
+                    "environment_fingerprints": [
+                        str(item.get("environment_fingerprint") or "unknown")
+                    ],
+                    "evidence_ids": [evidence_id],
+                    "finding_type": "semantic_baseline_drift",
+                }
+            )
+            recorded_ids.add(evidence_id)
+            continue
+        comparability_gap = (
+            ("baseline" in statement and bool(item.get("attribution_gap")))
+            or any(
+                marker in statement
+                for marker in _BASELINE_COMPARABILITY_GAP_MARKERS
+            )
+        )
         if (
             not evidence_id
             or evidence_id in recorded_ids
-            or "baseline" not in statement
-            or not bool(item.get("attribution_gap"))
+            or not comparability_gap
         ):
             continue
         drift.append(
@@ -3476,6 +3701,7 @@ def _case_prompt(case: Mapping[str, Any]) -> str:
     observation_keys = (
         "evidence_id",
         "statement",
+        "structured_context",
         "dimension",
         "dimension_origin",
         "kind",

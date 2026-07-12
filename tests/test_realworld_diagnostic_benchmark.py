@@ -4,6 +4,8 @@ import argparse
 import json
 from pathlib import Path
 
+import pytest
+
 from scripts import autopilot_realworld_diagnostic_benchmark as benchmark
 
 
@@ -22,6 +24,11 @@ BLINDED_FOURTH_ROOT = (
     Path(__file__).parent
     / "fixtures"
     / "project_autonomy_diagnostics_blinded4_20260711"
+)
+BLINDED_FIFTH_ROOT = (
+    Path(__file__).parent
+    / "fixtures"
+    / "project_autonomy_diagnostics_blinded5_20260711"
 )
 
 
@@ -65,6 +72,76 @@ def test_heuristic_benchmark_run_is_local_only_and_never_claims_fable_parity(tmp
     assert "Fable 5 parity claim: **No**" in report
     assert "s/call" in report
     assert "three exact Fable 5 incident contracts" not in report
+
+
+def test_case_checkpoint_resumes_without_replaying_completed_reasoning(
+    tmp_path,
+    monkeypatch,
+):
+    manifest = json.loads((FIXTURE_ROOT / "manifest.json").read_text(encoding="utf-8"))
+    case_ids = [Path(item["case"]).stem for item in manifest["cases"][:2]]
+    checkpoint = tmp_path / "diagnostic.checkpoint.json"
+    args = argparse.Namespace(
+        fixture_root=str(FIXTURE_ROOT),
+        model="qwen2.5-coder:7b",
+        case=case_ids,
+        timeout=1.0,
+        num_predict=100,
+        num_ctx=2048,
+        keep_alive="1m",
+        stages="judge",
+        heuristic_only=True,
+        report=str(tmp_path / "report.md"),
+        results_json=str(tmp_path / "results.json"),
+        checkpoint=str(checkpoint),
+        fresh=False,
+        json=False,
+    )
+    original = benchmark.diagnostic_reasoning.run_local_diagnostic_debate
+    attempted: list[str] = []
+
+    def interrupt_after_first(case, *call_args, **call_kwargs):
+        attempted.append(str(case["case_id"]))
+        if len(attempted) == 2:
+            raise RuntimeError("simulated runner interruption")
+        return original(case, *call_args, **call_kwargs)
+
+    monkeypatch.setattr(
+        benchmark.diagnostic_reasoning,
+        "run_local_diagnostic_debate",
+        interrupt_after_first,
+    )
+    with pytest.raises(RuntimeError, match="simulated runner interruption"):
+        benchmark.run(args)
+
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert saved["schema"] == "chili.realworld-diagnostic-checkpoint.v1"
+    assert saved["completed_case_ids"] == [case_ids[0]]
+    assert [item["case_id"] for item in saved["cases"]] == [case_ids[0]]
+
+    incompatible = argparse.Namespace(**vars(args))
+    incompatible.num_ctx += 1
+    with pytest.raises(SystemExit, match="contract does not match"):
+        benchmark.run(incompatible)
+
+    resumed: list[str] = []
+
+    def record_resume(case, *call_args, **call_kwargs):
+        resumed.append(str(case["case_id"]))
+        return original(case, *call_args, **call_kwargs)
+
+    monkeypatch.setattr(
+        benchmark.diagnostic_reasoning,
+        "run_local_diagnostic_debate",
+        record_resume,
+    )
+    result = benchmark.run(args)
+
+    assert resumed == [case_ids[1]]
+    assert [item["case_id"] for item in result["cases"]] == case_ids
+    assert not checkpoint.exists()
+    assert (tmp_path / "report.md").is_file()
+    assert (tmp_path / "results.json").is_file()
 
 
 def test_second_blinded_fixture_keeps_oracles_and_dimensions_out_of_public_cases():
@@ -141,6 +218,34 @@ def test_fourth_blinded_fixture_preserves_manifest_and_public_blinding_contract(
         )
         oracle = json.loads(
             (BLINDED_FOURTH_ROOT / item["oracle"]).read_text(encoding="ascii")
+        )
+        assert case["case_id"] == oracle["case_id"]
+        assert not any(key.startswith(("expected_", "forbid_")) for key in case)
+        assert {observation["dimension"] for observation in case["observations"]} == {
+            "unknown"
+        }
+
+
+def test_fifth_blinded_fixture_preserves_manifest_and_public_blinding_contract():
+    manifest = json.loads(
+        (BLINDED_FIFTH_ROOT / "manifest.json").read_text(encoding="ascii")
+    )
+
+    assert manifest["schema"] == "chili.realworld-diagnostic-manifest.v1"
+    assert manifest["reference_model"] == "claude-fable-5"
+    assert manifest["benchmark_id"] == "fable5-class-diagnostic-blinded-fifth-run-20260711"
+    assert manifest["blinded"] is True
+    assert manifest["immutable_input_count"] == 17
+    assert len(manifest["cases"]) == 8
+    assert {item["evaluation_role"] for item in manifest["cases"]} == {
+        "blinded_holdout_fifth_run"
+    }
+    for item in manifest["cases"]:
+        case = json.loads(
+            (BLINDED_FIFTH_ROOT / item["case"]).read_text(encoding="ascii")
+        )
+        oracle = json.loads(
+            (BLINDED_FIFTH_ROOT / item["oracle"]).read_text(encoding="ascii")
         )
         assert case["case_id"] == oracle["case_id"]
         assert not any(key.startswith(("expected_", "forbid_")) for key in case)

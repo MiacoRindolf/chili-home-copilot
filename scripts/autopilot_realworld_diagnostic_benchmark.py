@@ -6,6 +6,7 @@ after each debate completes, preventing expected labels from entering prompts.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -46,6 +47,65 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"Expected an object in {path}")
     return value
+
+
+def _atomic_write_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
+    _atomic_write_text(path, json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _checkpoint_contract(
+    *,
+    fixture_root: Path,
+    manifest_path: Path,
+    prepared_entries: list[tuple[Mapping[str, Any], Mapping[str, Any], str]],
+    args: argparse.Namespace,
+    requested_stages: tuple[str, ...],
+) -> tuple[str, dict[str, Any]]:
+    reasoning_path = Path(str(diagnostic_reasoning.__file__ or "")).resolve()
+    contract = {
+        "fixture_root": str(fixture_root),
+        "manifest_sha256": _sha256_bytes(manifest_path.read_bytes()),
+        "implementation_sha256": _sha256_bytes(reasoning_path.read_bytes()),
+        "runner_sha256": _sha256_bytes(Path(__file__).resolve().read_bytes()),
+        "case_inputs": [
+            {
+                "case_id": str(case.get("case_id") or ""),
+                "case_path": str(entry.get("case") or ""),
+                "case_sha256": case_hash,
+                "oracle_path": str(entry.get("oracle") or ""),
+                "split": str(entry.get("split") or "unknown"),
+            }
+            for entry, case, case_hash in prepared_entries
+        ],
+        "model": "heuristic-only" if args.heuristic_only else str(args.model),
+        "stages": list(requested_stages),
+        "timeout": float(args.timeout),
+        "num_predict": int(args.num_predict),
+        "num_ctx": int(args.num_ctx),
+        "keep_alive": str(args.keep_alive),
+        "heuristic_only": bool(args.heuristic_only),
+    }
+    encoded = json.dumps(contract, separators=(",", ":"), sort_keys=True).encode(
+        "utf-8"
+    )
+    return _sha256_bytes(encoded), contract
 
 
 def _ids(values: object) -> set[str]:
@@ -235,7 +295,8 @@ def _markdown(results: Mapping[str, Any]) -> str:
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
     fixture_root = Path(args.fixture_root).resolve()
-    manifest = _read_json(fixture_root / "manifest.json")
+    manifest_path = fixture_root / "manifest.json"
+    manifest = _read_json(manifest_path)
     selected_ids = set(args.case or [])
     entries = [
         item
@@ -243,6 +304,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if isinstance(item, Mapping)
         and (not selected_ids or Path(str(item.get("case") or "")).stem in selected_ids)
     ]
+    if not entries:
+        raise SystemExit("No benchmark cases selected.")
+    prepared_entries: list[tuple[Mapping[str, Any], Mapping[str, Any], str]] = []
+    for entry in entries:
+        case_path = fixture_root / str(entry["case"])
+        prepared_entries.append(
+            (entry, _read_json(case_path), _sha256_bytes(case_path.read_bytes()))
+        )
+
     installed = ollama_client.list_models()
     if not args.heuristic_only and args.model not in installed:
         raise SystemExit(
@@ -254,9 +324,53 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         for stage in str(args.stages or "judge").split(",")
         if stage.strip()
     )
-    case_results: list[dict[str, Any]] = []
-    for entry in entries:
-        case = _read_json(fixture_root / str(entry["case"]))
+    report_path = Path(args.report).resolve()
+    result_path = Path(args.results_json).resolve()
+    configured_checkpoint = str(getattr(args, "checkpoint", "") or "").strip()
+    checkpoint_path = (
+        Path(configured_checkpoint).resolve()
+        if configured_checkpoint
+        else result_path.with_suffix(result_path.suffix + ".checkpoint.json")
+    )
+    if bool(getattr(args, "fresh", False)):
+        checkpoint_path.unlink(missing_ok=True)
+    checkpoint_fingerprint, checkpoint_contract = _checkpoint_contract(
+        fixture_root=fixture_root,
+        manifest_path=manifest_path,
+        prepared_entries=prepared_entries,
+        args=args,
+        requested_stages=requested_stages,
+    )
+    selected_case_ids = [
+        str(case.get("case_id") or "") for _entry, case, _hash in prepared_entries
+    ]
+    saved_by_id: dict[str, dict[str, Any]] = {}
+    if checkpoint_path.exists():
+        checkpoint = _read_json(checkpoint_path)
+        if checkpoint.get("schema") != "chili.realworld-diagnostic-checkpoint.v1":
+            raise SystemExit(
+                f"Checkpoint schema is not supported: {checkpoint_path}. Use --fresh to start over."
+            )
+        if str(checkpoint.get("contract_fingerprint") or "") != checkpoint_fingerprint:
+            raise SystemExit(
+                f"Checkpoint contract does not match this run: {checkpoint_path}. Use --fresh to start over."
+            )
+        for item in checkpoint.get("cases") or []:
+            if not isinstance(item, Mapping):
+                raise SystemExit(f"Checkpoint contains an invalid case record: {checkpoint_path}")
+            case_id = str(item.get("case_id") or "")
+            if not case_id or case_id not in selected_case_ids or case_id in saved_by_id:
+                raise SystemExit(f"Checkpoint contains an unexpected case id: {case_id!r}")
+            saved_by_id[case_id] = dict(item)
+
+    case_results: list[dict[str, Any]] = [
+        saved_by_id[case_id]
+        for case_id in selected_case_ids
+        if case_id in saved_by_id
+    ]
+    for entry, case, _case_hash in prepared_entries:
+        if str(case.get("case_id") or "") in saved_by_id:
+            continue
         model_calls: list[dict[str, Any]] = []
 
         def model_call(stage: str, prompt: str) -> str:
@@ -306,22 +420,40 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         oracle = _read_json(fixture_root / str(entry["oracle"]))
         detail = score_debate(case, oracle, debate)
-        case_results.append(
+        case_result = {
+            "case_id": case["case_id"],
+            "split": str(entry.get("split") or "unknown"),
+            "source": str(entry.get("source") or "unknown"),
+            "score_detail": detail,
+            "stages": debate.get("stages") or [],
+            "packet": debate.get("packet") or {},
+            "report": debate.get("report") or {},
+            "model_calls": model_calls,
+            "premium_calls": 0,
+        }
+        case_results.append(case_result)
+        saved_by_id[str(case["case_id"])] = case_result
+        case_results = [
+            saved_by_id[case_id]
+            for case_id in selected_case_ids
+            if case_id in saved_by_id
+        ]
+        _atomic_write_json(
+            checkpoint_path,
             {
-                "case_id": case["case_id"],
-                "split": str(entry.get("split") or "unknown"),
-                "source": str(entry.get("source") or "unknown"),
-                "score_detail": detail,
-                "stages": debate.get("stages") or [],
-                "packet": debate.get("packet") or {},
-                "report": debate.get("report") or {},
-                "model_calls": model_calls,
-                "premium_calls": 0,
-            }
+                "schema": "chili.realworld-diagnostic-checkpoint.v1",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "contract_fingerprint": checkpoint_fingerprint,
+                "contract": checkpoint_contract,
+                "completed_case_ids": [
+                    str(item.get("case_id") or "") for item in case_results
+                ],
+                "cases": case_results,
+            },
         )
 
-    if not case_results:
-        raise SystemExit("No benchmark cases selected.")
+    if len(case_results) != len(prepared_entries):
+        raise SystemExit("Benchmark checkpoint is incomplete after case execution.")
     overall = sum(item["score_detail"]["score"] for item in case_results) / len(case_results)
     holdouts = [item for item in case_results if item["split"] == "holdout"]
     holdout_score = (
@@ -377,12 +509,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         **output_quality,
         "cases": case_results,
     }
-    report_path = Path(args.report).resolve()
-    result_path = Path(args.results_json).resolve()
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    result_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(_markdown(results), encoding="utf-8")
-    result_path.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _atomic_write_text(report_path, _markdown(results))
+    _atomic_write_json(result_path, results)
+    checkpoint_path.unlink(missing_ok=True)
     return results
 
 
@@ -403,6 +532,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--heuristic-only", action="store_true")
     parser.add_argument("--report", default=str(DEFAULT_REPORT))
     parser.add_argument("--results-json", default=str(DEFAULT_RESULTS))
+    parser.add_argument(
+        "--checkpoint",
+        default="",
+        help="Optional checkpoint path. Defaults beside --results-json.",
+    )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Discard a prior compatible checkpoint and start from the first case.",
+    )
     parser.add_argument("--json", action="store_true")
     return parser
 
