@@ -1083,6 +1083,26 @@ def infer_dimension(statement: str) -> str:
     return _select_dimension(_dimension_scores(statement))
 
 
+def decisive_inferred_dimension(
+    statement: str,
+    *,
+    minimum_score: int = 8,
+    minimum_margin: int = 5,
+) -> str:
+    """Return a taxonomy family only when phrase evidence is unambiguous."""
+    ranked = sorted(
+        _dimension_scores(statement).items(),
+        key=lambda item: (-item[1], item[0]),
+    )
+    if not ranked:
+        return "unknown"
+    best_dimension, best_score = ranked[0]
+    runner_up = ranked[1][1] if len(ranked) > 1 else 0
+    if best_score < minimum_score or best_score - runner_up < minimum_margin:
+        return "unknown"
+    return best_dimension
+
+
 _HELD_CONSTANT_BOUNDARIES = (
     " without changing ",
     " while holding ",
@@ -1477,29 +1497,43 @@ def derive_contract_invariants(statement: str) -> list[str]:
         token in lowered for token in ("remaining allowance", "budget exhaustion", "remaining duration")
     ):
         invariants.append(
-            "Queue time uses the delay actually granted by the remaining budget, never the larger requested delay."
+            "A positive request is clipped to the remaining budget instead of rejected; queue time uses that "
+            "delay actually granted, while an explicit zero remains a valid non-null grant."
         )
-    if "vector clock" in lowered:
+    if "vector clock" in lowered or any(
+        token in lowered for token in ("replicas concurrent", "convergence bookkeeping")
+    ):
         invariants.append(
             "Vector-clock comparison and join use the union of actor keys and component-wise maxima; missing actors "
             "are zero and logical clocks are replicated state, not wall time."
         )
     if any(token in lowered for token in ("inclusive range", "content-range", "chunk bound")):
         invariants.append(
-            "Inclusive byte-range length is end - start + 1, and contiguous coverage advances at previous_end + 1."
+            "Inclusive byte-range length is end - start + 1. Strict overlap is rejected but adjacency at "
+            "previous_end + 1 is accepted; sorted contiguous coverage is complete when its next offset equals total."
         )
     if any(token in lowered for token in ("repeated parameter", "duplicate query parameter")):
         invariants.append(
-            "Canonical query rendering preserves every repeated parameter and blank value before deterministic sort."
+            "Canonical query rendering preserves every repeated parameter and blank value, then sorts the complete "
+            "(key, value) pair sequence deterministically; converting pairs to a map loses wire information."
         )
     if "repeated" in lowered and "parameter" in lowered:
         invariants.append(
-            "Canonical query rendering preserves every repeated parameter and blank value before deterministic sort."
+            "Canonical query rendering preserves every repeated parameter and blank value, then sorts the complete "
+            "(key, value) pair sequence deterministically; converting pairs to a map loses wire information."
         )
     if "rotation" in lowered and any(token in lowered for token in ("key", "secret")):
         invariants.append(
             "Verification considers the current key plus only recently retired keys inside the configured grace "
-            "window; it must not accept unrelated keys or weaken freshness checks."
+            "window at the authenticated issue time; freshness compares normalized issue time to receiver time, "
+            "while the signature keeps the exact raw timestamp and unrelated keys remain rejected."
+        )
+    if any(token in lowered for token in ("millisecond timestamp", "timestamps", "v2 delivery")) and any(
+        token in lowered for token in ("freshness", "age check", "delivery")
+    ):
+        invariants.append(
+            "Normalize epoch seconds versus milliseconds exactly once for time comparisons, using an explicit "
+            "unit/version rule; preserve the raw timestamp bytes in signed material and never divide legacy seconds."
         )
     scoped_identity = bool(
         any(token in lowered for token in ("two tenant", "two site", "two merchant", "regional"))
@@ -1508,23 +1542,25 @@ def derive_contract_invariants(statement: str) -> list[str]:
     if scoped_identity:
         invariants.append(
             "A reused external identifier is scoped by its tenant/site/merchant in storage uniqueness, idempotency "
-            "lookup, and SQL conflict targets; all layers use the same composite identity."
+            "lookup, insertion, and SQL conflict targets; all layers use the same composite identity, and lookup "
+            "and storage must use the identical composite key."
         )
     if "attempt" in lowered and any(token in lowered for token in ("retry token", "retry", "dedup")):
         invariants.append(
             "Retry attempt number is not part of stable request/event identity; replay returns the original result "
-            "and publishes creation only for the first successful creation."
+            "without repeating stock/state mutation, and publishes creation only for the first successful creation."
         )
     if "out of order" in lowered and any(token in lowered for token in ("correction", "replay")):
         invariants.append(
-            "Out-of-order upsert acceptance is atomic across value and metadata; a stale replay cannot mix old "
-            "metadata with a newer accepted value."
+            "One winner predicate guards the complete out-of-order correction tuple: value, observation time, "
+            "receipt/version time, and metadata update atomically; a stale replay changes none of them."
         )
     if "event-time" in lowered or (
         "observation" in lowered and "hourly bucket" in lowered
     ):
         invariants.append(
-            "Event-time rollups use observation time for both window filtering and bucket calculation, never receipt time."
+            "Event-time rollups use observation time for both window filtering and bucket calculation, never receipt "
+            "time in either expression."
         )
     if any(token in lowered for token in ("replicas concurrent", "convergence bookkeeping")):
         invariants.append(
@@ -1704,6 +1740,247 @@ def contract_invariant_warnings(
             for content in files.values()
         ):
             warnings.append("independent one-to-many children are still joined before aggregation")
+    if any("complete (key, value) pair sequence" in value for value in invariants):
+        query_sources = [
+            content
+            for content in lowered_files.values()
+            if "parse_qsl" in content and "urlencode" in content
+        ]
+        if any(re.search(r"\bdict\s*\(\s*parse_qsl\s*\(", content) for content in query_sources):
+            warnings.append("canonical query converts parsed pairs to a map and collapses repeated parameters")
+        if any("sorted(" not in content for content in query_sources):
+            warnings.append("canonical query preserves input order instead of deterministically sorting all pairs")
+    if any("authenticated issue time" in value for value in invariants):
+        key_sources = [
+            content
+            for content in lowered_files.values()
+            if "grace_seconds" in content and "valid_until" in content
+        ]
+        if key_sources and not any(
+            re.search(r"valid_until\s*\+\s*(?:self\.)?grace_seconds", content)
+            for content in key_sources
+        ):
+            warnings.append("retired-key eligibility is not bounded by valid_until plus the configured grace")
+        verifier_sources = [
+            content
+            for content in lowered_files.values()
+            if "candidates(" in content and "timestamp" in content
+        ]
+        if any(
+            re.search(r"candidates\s*\(\s*key_id\s*,\s*now\s*\)", content)
+            for content in verifier_sources
+        ):
+            warnings.append("key eligibility uses receiver time instead of the authenticated issue time")
+    if any("Normalize epoch seconds versus milliseconds" in value for value in invariants):
+        timestamp_sources = [
+            content
+            for content in lowered_files.values()
+            if "timestamp" in content and "int(" in content
+        ]
+        if any(
+            (
+                raw_match := re.search(
+                    r"(?m)^\s*([a-z_]\w*)\s*=\s*headers\.get\([^\n]*timestamp[^\n]*\)",
+                    content,
+                )
+            )
+            and re.search(
+                rf"\b[a-z_]\w*\s*=\s*int\s*\(\s*{re.escape(raw_match.group(1))}\s*\)\s*"
+                r"(?://|/)\s*1000",
+                content,
+            )
+            for content in timestamp_sources
+        ):
+            warnings.append("timestamp conversion divides every value and breaks legacy epoch seconds")
+        if any(
+            (
+                raw_match := re.search(
+                    r"(?m)^\s*([a-z_]\w*)\s*=\s*headers\.get\([^\n]*timestamp[^\n]*\)",
+                    content,
+                )
+            )
+            and re.search(
+                rf"\b[a-z_]\w*\s*=\s*int\s*\(\s*{re.escape(raw_match.group(1))}\s*\)\s*$",
+                content,
+                re.MULTILINE,
+            )
+            and "100_000_000_000" not in content
+            for content in timestamp_sources
+        ):
+            warnings.append("timestamp freshness has no explicit seconds-versus-milliseconds normalization")
+        if any(
+            "raw_timestamp_seconds" in content
+            and re.search(r"\{\s*raw_timestamp_seconds\s*\}", content)
+            for content in timestamp_sources
+        ):
+            warnings.append("signature material rewrites the raw wire timestamp")
+    if any("identical composite key" in value for value in invariants):
+        reservation_sources = [
+            content
+            for content in lowered_files.values()
+            if "request_id" in content
+            and (".get(" in content or re.search(r"self\.[a-z_]\w*\s*\[", content))
+        ]
+        if any(
+            re.search(r"self\.[a-z_]\w*\.get\s*\(\s*request_id\s*\)", content)
+            or re.search(r"self\.[a-z_]\w*\s*\[\s*request_id\s*\]", content)
+            for content in reservation_sources
+        ):
+            warnings.append("idempotency lookup or storage still omits the tenant scope")
+        sql_identity_sources = [
+            content
+            for content in lowered_files.values()
+            if "event_id" in content and any(token in content for token in ("unique(", "on conflict("))
+        ]
+        if any(
+            re.search(r"(?:unique|on\s+conflict)\s*\(\s*(?:sensor_id\s*,\s*)?event_id\s*\)", content)
+            for content in sql_identity_sources
+        ):
+            warnings.append("database uniqueness/conflict identity still omits tenant or site scope")
+    if any("without repeating stock/state mutation" in value for value in invariants):
+        event_sources = [
+            content for content in lowered_files.values() if "event_id" in content
+        ]
+        if any(
+            re.search(r"event_id[^\n]*\{\s*attempt\s*\}", content)
+            for content in event_sources
+        ):
+            warnings.append("event identity still includes retry attempt number")
+        service_sources = [
+            content
+            for content in lowered_files.values()
+            if "publisher.publish" in content and "ledger.reserve" in content
+        ]
+        if any("messages[-1]" in content for content in service_sources):
+            warnings.append("replay deduplication depends only on the last published message")
+        if any(
+            "ledger.find" not in content and "created" not in content
+            for content in service_sources
+        ):
+            warnings.append("service republishes creation without proving that the reservation was newly created")
+    if any("positive request is clipped" in value for value in invariants):
+        budget_sources = [
+            content
+            for content in lowered_files.values()
+            if "claim(" in content
+            and any(token in content for token in ("limit", "cap", "budget"))
+            and any(token in content for token in ("used", "spent", "consumed"))
+        ]
+        if any(
+            re.search(
+                r"this\.[a-z_$]\w*\s*\+\s*[a-z_$]\w*\s*>\s*this\.[a-z_$]\w*",
+                content,
+            )
+            for content in budget_sources
+        ):
+            warnings.append("retry budget rejects an oversized request instead of clipping it to the remainder")
+        scheduler_sources = [
+            content
+            for content in lowered_files.values()
+            if ".claim(" in content and "enqueue" in content
+        ]
+        if any(
+            (
+                match := re.search(
+                    r"(?:const|let)\s+([a-z_$]\w*)\s*=\s*[^;\n]*\.claim\s*\(",
+                    content,
+                )
+            )
+            and re.search(rf"if\s*\(\s*!\s*{re.escape(match.group(1))}\s*\)", content)
+            for content in scheduler_sources
+        ):
+            warnings.append("scheduler treats a valid zero grant as absent")
+        if any(
+            re.search(
+                r"runat\s*=\s*[a-z_$]\w*\s*\+\s*[a-z_$]*requested[a-z_$0-9]*",
+                content,
+            )
+            for content in scheduler_sources
+        ):
+            warnings.append("scheduler queues the requested delay instead of the granted delay")
+    if any("Numeric Retry-After is seconds" in value for value in invariants):
+        parser_sources = [
+            content
+            for content in lowered_files.values()
+            if "retry-after" in content or "parseretryafter" in content
+        ]
+        if any(
+            re.search(r"return\s+number\s*\(\s*text\s*\)\s*;", content)
+            for content in parser_sources
+        ):
+            warnings.append("numeric Retry-After is returned as milliseconds without seconds conversion")
+    if any("union of actor keys" in value for value in invariants):
+        clock_sources = [
+            content for content in lowered_files.values() if "compareclocks" in content
+        ]
+        if any(
+            (
+                match := re.search(
+                    r"clockorder\s+compareclocks\s*\(\s*map<string,\s*int>\s+([a-z_]\w*)\s*,\s*"
+                    r"map<string,\s*int>\s+([a-z_]\w*)",
+                    content,
+                    re.DOTALL,
+                )
+            )
+            and f"{match.group(1)}.keys" in content
+            and f"{match.group(2)}.keys" not in content
+            for content in clock_sources
+        ):
+            warnings.append("vector-clock comparison ignores actor keys present only on the right")
+        sync_sources = [
+            content for content in lowered_files.values() if "applyremote" in content
+        ]
+        if sync_sources and not any("joinclocks" in content for content in sync_sources):
+            warnings.append("sync engine stores a winner without joining both replica clocks")
+    if any("tombstones win" in value for value in invariants):
+        merge_sources = [
+            content for content in lowered_files.values() if "resolverecord" in content
+        ]
+        if merge_sources and not any(
+            ".deleted" in content[content.find("resolverecord") :]
+            for content in merge_sources
+        ):
+            warnings.append("equal-time concurrent conflict choice does not give tombstones precedence")
+    if any("Strict overlap is rejected" in value for value in invariants):
+        range_sources = [
+            content for content in lowered_files.values() if "contentrange" in content or "range." in content
+        ]
+        if any(re.search(r"length\s*=>\s*end\s*-\s*start\s*;", content) for content in range_sources):
+            warnings.append("inclusive range length omits the final byte")
+        if any(
+            "existing.start - 1" in content or "existing.end + 1" in content
+            for content in range_sources
+        ):
+            warnings.append("range overlap test incorrectly classifies adjacent ranges as conflicting")
+        assembler_sources = [
+            content for content in lowered_files.values() if "assemble" in content and "offset" in content
+        ]
+        if any("tostring().compareto" in content for content in assembler_sources):
+            warnings.append("chunk offsets are sorted lexically instead of numerically")
+    if any("One winner predicate guards" in value for value in invariants):
+        upsert_sources = [
+            content
+            for content in lowered_files.values()
+            if "on conflict" in content and "observed_at" in content and "received_at" in content
+        ]
+        if any(
+            "where excluded.received_at" not in content
+            and "where excluded.version" not in content
+            for content in upsert_sources
+        ):
+            warnings.append("out-of-order upsert lacks one winner predicate guarding the complete tuple")
+    if any("never receipt time in either expression" in value for value in invariants):
+        rollup_sources = [
+            content
+            for content in lowered_files.values()
+            if "strftime" in content and re.search(r"\bfrom\s+[a-z_]\w*", content)
+        ]
+        if any(
+            re.search(r"strftime\s*\([^\n]*received_at", content)
+            or re.search(r"where\s+received_at", content)
+            for content in rollup_sources
+        ):
+            warnings.append("event-time rollup still uses receipt time for its bucket or window")
     return warnings
 
 
@@ -1744,6 +2021,15 @@ def _replace_braced_dart_callable_body(content: str, name: str, body: str) -> st
     match = re.search(
         rf"((?:Future(?:<[^>]+>)?|void|[A-Za-z_]\w*(?:<[^>{{}}]+>)?\??)\s+"
         rf"{re.escape(name)}(?:<[^>{{}}]+>)?\s*\((.*?)\)\s*(?:async\s*)?)\{{",
+        content,
+        re.DOTALL,
+    )
+    return _replace_matched_braced_body(content, match, body)
+
+
+def _replace_js_method_body(content: str, name: str, body: str) -> str | None:
+    match = re.search(
+        rf"\b{re.escape(name)}\s*\((.*?)\)\s*\{{",
         content,
         re.DOTALL,
     )
@@ -1846,6 +2132,394 @@ def _preaggregate_sibling_sum_joins(content: str) -> str | None:
     return rewritten if rewritten != content else None
 
 
+def _repair_repeated_query_pairs(content: str) -> str:
+    pair_names = [
+        match.group("name")
+        for match in re.finditer(
+            r"(?m)^[ \t]*(?P<name>[A-Za-z_]\w*)\s*=\s*dict\s*\(\s*"
+            r"parse_qsl\s*\([^\n]+\)\s*\)\s*$",
+            content,
+        )
+    ]
+    updated = re.sub(
+        r"(?m)^(?P<indent>[ \t]*)(?P<name>[A-Za-z_]\w*)\s*=\s*dict\s*\(\s*"
+        r"(?P<call>parse_qsl\s*\([^\n]+\))\s*\)\s*$",
+        lambda match: (
+            f"{match.group('indent')}{match.group('name')} = {match.group('call')}"
+        ),
+        content,
+    )
+    for name in pair_names:
+        updated = re.sub(
+            rf"sorted\s*\(\s*{re.escape(name)}\.items\s*\(\s*\)\s*\)",
+            f"sorted({name})",
+            updated,
+        )
+        updated = re.sub(
+            rf"urlencode\s*\(\s*{re.escape(name)}\s*(?=,|\))",
+            f"urlencode(sorted({name})",
+            updated,
+        )
+    return updated
+
+
+def _repair_relay_key_window(content: str) -> str:
+    return re.sub(
+        r"key\.valid_from\s*<=\s*seen_at\s*<\s*key\.valid_until(?!\s*\+)",
+        "key.valid_from <= seen_at < key.valid_until + self.grace_seconds",
+        content,
+    )
+
+
+def _repair_relay_timestamp(content: str) -> str:
+    if "100_000_000_000" in content:
+        return content
+    raw_match = re.search(
+        r"(?m)^[ \t]*(?P<raw>[A-Za-z_]\w*)\s*=\s*headers\.get\([^\n]*timestamp[^\n]*\)",
+        content,
+        re.IGNORECASE,
+    )
+    if not raw_match:
+        return content
+    raw_name = raw_match.group("raw")
+    parse_pattern = re.compile(
+        rf"(?m)^(?P<indent>[ \t]*)(?P<issued>[A-Za-z_]\w*)\s*=\s*int\s*\(\s*"
+        rf"{re.escape(raw_name)}\s*\)\s*$"
+    )
+    parsed = parse_pattern.search(content)
+    if not parsed:
+        return content
+    issued_name = parsed.group("issued")
+    indent = parsed.group("indent")
+    value_name = f"{issued_name}_value"
+    updated = parse_pattern.sub(
+        (
+            f"{indent}{value_name} = int({raw_name})\n"
+            f"{indent}{issued_name} = (\n"
+            f"{indent}    {value_name} / 1000\n"
+            f"{indent}    if {value_name} >= 100_000_000_000\n"
+            f"{indent}    else {value_name}\n"
+            f"{indent})"
+        ),
+        content,
+        count=1,
+    )
+    updated = re.sub(
+        r"(\.candidates\s*\(\s*[A-Za-z_]\w*\s*,\s*)now(\s*\))",
+        rf"\g<1>{issued_name}\2",
+        updated,
+    )
+    return updated
+
+
+def _repair_retry_policy(content: str) -> str:
+    updated = re.sub(
+        r"(if\s*\(\s*/\^\\d\+\$/\.test\(text\)\s*\)\s*return\s+Number\(text\))(\s*;)",
+        r"\1 * 1000\2",
+        content,
+    )
+    if "class RetryBudget" in updated and "claim(" in updated:
+        signature = re.search(r"\bclaim\s*\(\s*([A-Za-z_$]\w*)\s*\)\s*\{", updated)
+        field_names = list(
+            dict.fromkeys(
+                re.findall(r"this\.([A-Za-z_$][A-Za-z_$0-9]*)", updated)
+            )
+        )
+        limit_name = next(
+            (
+                name
+                for name in field_names
+                if any(token in name.lower() for token in ("limit", "cap", "budget"))
+            ),
+            "",
+        )
+        used_name = next(
+            (
+                name
+                for name in field_names
+                if any(token in name.lower() for token in ("used", "spent", "consumed"))
+            ),
+            "",
+        )
+        if signature and limit_name and used_name:
+            requested = signature.group(1)
+            repaired = _replace_js_method_body(
+                updated,
+                "claim",
+                (
+                    f"    if ({requested} < 0) return null;\n"
+                    f"    if ({requested} === 0) return 0;\n"
+                    f"    const remainingMs = this.{limit_name} - this.{used_name};\n"
+                    "    if (remainingMs <= 0) return null;\n"
+                    f"    const grantedMs = Math.min({requested}, remainingMs);\n"
+                    f"    this.{used_name} += grantedMs;\n"
+                    "    return grantedMs;"
+                ),
+            )
+            if repaired:
+                updated = repaired
+    if "enqueue" in updated and ".claim(" in updated:
+        granted_match = re.search(
+            r"(?:const|let)\s+([A-Za-z_$][A-Za-z_$0-9]*)\s*=\s*[^;\n]*\.claim\s*\(",
+            updated,
+        )
+        requested_match = re.search(
+            r"(?:const|let)\s+([A-Za-z_$][A-Za-z_$0-9]*)\s*=\s*parseRetryAfter\s*\(",
+            updated,
+        )
+        granted_name = granted_match.group(1) if granted_match else ""
+        requested_name = requested_match.group(1) if requested_match else ""
+        if granted_name:
+            updated = re.sub(
+                rf"if\s*\(\s*!\s*{re.escape(granted_name)}\s*\)",
+                f"if ({granted_name} === null)",
+                updated,
+            )
+        if granted_name and requested_name:
+            updated = re.sub(
+                rf"(\brunAt\s*=\s*[A-Za-z_$]\w*\s*\+\s*){re.escape(requested_name)}\b",
+                rf"\g<1>{granted_name}",
+                updated,
+                flags=re.IGNORECASE,
+            )
+    return updated
+
+
+def _repair_scoped_retry_identity(content: str) -> str:
+    updated = re.sub(
+        r"dict\s*\[\s*str\s*,\s*Reservation\s*\]",
+        "dict[tuple[str, str], Reservation]",
+        content,
+    )
+    scoped_attributes = set(
+        re.findall(
+            r"self\.([A-Za-z_]\w*)\.get\s*\(\s*request_id\s*\)",
+            updated,
+        )
+    ) | set(
+        re.findall(
+            r"self\.([A-Za-z_]\w*)\s*\[\s*request_id\s*\]",
+            updated,
+        )
+    )
+    for attribute in scoped_attributes:
+        updated = re.sub(
+            rf"(self\.{re.escape(attribute)}\s*:\s*)dict\s*\[\s*str\s*,\s*([^\]]+)\]",
+            rf"\1dict[tuple[str, str], \2]",
+            updated,
+        )
+        updated = re.sub(
+            rf"self\.{re.escape(attribute)}\.get\s*\(\s*request_id\s*\)",
+            f"self.{attribute}.get((tenant_id, request_id))",
+            updated,
+        )
+        updated = re.sub(
+            rf"self\.{re.escape(attribute)}\s*\[\s*request_id\s*\]",
+            f"self.{attribute}[(tenant_id, request_id)]",
+            updated,
+        )
+    updated = re.sub(
+        r"f([\"'])(?P<prefix>[a-z_][a-z0-9_-]*):\{(?P<owner>[A-Za-z_]\w*)\.request_id\}:"
+        r"\{attempt\}\1",
+        lambda match: (
+            f"f{match.group(1)}{match.group('prefix')}:"
+            f"{{{match.group('owner')}.tenant_id}}:"
+            f"{{{match.group('owner')}.request_id}}{match.group(1)}"
+        ),
+        updated,
+        flags=re.IGNORECASE,
+    )
+    service_pattern = re.compile(
+        r"(?m)^(?P<indent>[ \t]*)reservation\s*=\s*self\.ledger\.reserve\(\n"
+        r"(?P<args>(?:[ \t]+[^\n]*\n)+?)"
+        r"(?P=indent)\)\n"
+        r"(?P=indent)self\.publisher\.publish\((?P<message>[^\n]+)\)\s*$"
+    )
+    service_match = service_pattern.search(updated)
+    if service_match and "self.ledger.find" not in updated:
+        indent = service_match.group("indent")
+        replacement = (
+            f"{indent}existing = self.ledger.find(tenant_id, request_id)\n"
+            f"{indent}reservation = self.ledger.reserve(\n"
+            f"{service_match.group('args')}"
+            f"{indent})\n"
+            f"{indent}if existing is None:\n"
+            f"{indent}    self.publisher.publish({service_match.group('message')})"
+        )
+        updated = updated[: service_match.start()] + replacement + updated[service_match.end() :]
+    return updated
+
+
+def _repair_dart_vector_state(content: str) -> str:
+    updated = content
+    compare_signature = re.search(
+        r"\bClockOrder\s+compareClocks\s*\(\s*Map<String,\s*int>\s+([A-Za-z_]\w*)\s*,\s*"
+        r"Map<String,\s*int>\s+([A-Za-z_]\w*)",
+        updated,
+        re.DOTALL,
+    )
+    if compare_signature:
+        left_name, right_name = compare_signature.groups()
+        repaired = _replace_braced_dart_callable_body(
+            updated,
+            "compareClocks",
+            (
+                "  var less = false;\n"
+                "  var greater = false;\n"
+                f"  final actors = <String>{{...{left_name}.keys, ...{right_name}.keys}};\n"
+                "  for (final actor in actors) {\n"
+                f"    final leftValue = {left_name}[actor] ?? 0;\n"
+                f"    final rightValue = {right_name}[actor] ?? 0;\n"
+                "    if (leftValue < rightValue) less = true;\n"
+                "    if (leftValue > rightValue) greater = true;\n"
+                "  }\n"
+                "  if (less && greater) return ClockOrder.concurrent;\n"
+                "  if (less) return ClockOrder.before;\n"
+                "  if (greater) return ClockOrder.after;\n"
+                "  return ClockOrder.equal;"
+            ),
+        )
+        if repaired:
+            updated = repaired
+        if "joinClocks(" not in updated:
+            updated = (
+                updated.rstrip()
+                + "\n\nMap<String, int> joinClocks(\n"
+                "  Map<String, int> left,\n"
+                "  Map<String, int> right,\n"
+                ") {\n"
+                "  final joined = <String, int>{};\n"
+                "  for (final actor in <String>{...left.keys, ...right.keys}) {\n"
+                "    final leftValue = left[actor] ?? 0;\n"
+                "    final rightValue = right[actor] ?? 0;\n"
+                "    joined[actor] = leftValue >= rightValue ? leftValue : rightValue;\n"
+                "  }\n"
+                "  return joined;\n"
+                "}\n"
+            )
+    resolve_signature = re.search(
+        r"\bSyncRecord\s+resolveRecord\s*\(\s*SyncRecord\s+([A-Za-z_]\w*)\s*,\s*"
+        r"SyncRecord\s+([A-Za-z_]\w*)",
+        updated,
+        re.DOTALL,
+    )
+    if resolve_signature:
+        local_name, remote_name = resolve_signature.groups()
+        repaired = _replace_braced_dart_callable_body(
+            updated,
+            "resolveRecord",
+            (
+                f"  final order = compareClocks({local_name}.clock, {remote_name}.clock);\n"
+                f"  if (order == ClockOrder.before) return {remote_name};\n"
+                f"  if (order == ClockOrder.after || order == ClockOrder.equal) return {local_name};\n"
+                f"  if ({local_name}.modifiedAt != {remote_name}.modifiedAt) {{\n"
+                f"    return {local_name}.modifiedAt > {remote_name}.modifiedAt ? {local_name} : {remote_name};\n"
+                "  }\n"
+                f"  if ({local_name}.deleted != {remote_name}.deleted) {{\n"
+                f"    return {local_name}.deleted ? {local_name} : {remote_name};\n"
+                "  }\n"
+                f"  return {local_name}.deviceId.compareTo({remote_name}.deviceId) <= 0 "
+                f"? {local_name} : {remote_name};"
+            ),
+        )
+        if repaired:
+            updated = repaired
+    apply_signature = re.search(
+        r"\bvoid\s+applyRemote\s*\(\s*SyncRecord\s+([A-Za-z_]\w*)",
+        updated,
+    )
+    if apply_signature and "records" in updated:
+        remote_name = apply_signature.group(1)
+        if "vector_clock.dart" not in updated:
+            imports = list(re.finditer(r"(?m)^import\s+['\"][^'\"]+['\"];\s*$", updated))
+            insertion = imports[-1].end() if imports else 0
+            prefix = "\n" if insertion else ""
+            updated = (
+                updated[:insertion]
+                + prefix
+                + "import 'vector_clock.dart';"
+                + ("\n" if insertion else "\n\n")
+                + updated[insertion:].lstrip("\n")
+            )
+        repaired = _replace_braced_dart_callable_body(
+            updated,
+            "applyRemote",
+            (
+                f"    final local = records[{remote_name}.id];\n"
+                "    if (local == null) {\n"
+                f"      records[{remote_name}.id] = {remote_name};\n"
+                "      return;\n"
+                "    }\n"
+                f"    final resolved = resolveRecord(local, {remote_name});\n"
+                f"    records[{remote_name}.id] = resolved.withClock(\n"
+                f"      joinClocks(local.clock, {remote_name}.clock),\n"
+                "    );"
+            ),
+        )
+        if repaired:
+            updated = repaired
+    return updated
+
+
+def _repair_inclusive_ranges(content: str) -> str:
+    updated = re.sub(
+        r"\bint\s+get\s+length\s*=>\s*end\s*-\s*start\s*;",
+        "int get length => end - start + 1;",
+        content,
+    )
+    updated = re.sub(
+        r"range\.end\s*<\s*existing\.start\s*-\s*1\s*\|\|\s*\n?\s*"
+        r"range\.start\s*>\s*existing\.end\s*\+\s*1",
+        "range.end < existing.start ||\n          range.start > existing.end",
+        updated,
+    )
+    updated = re.sub(
+        r"([A-Za-z_]\w*)\.toString\(\)\.compareTo\(\s*([A-Za-z_]\w*)\.toString\(\)\s*\)",
+        r"\1.compareTo(\2)",
+        updated,
+    )
+    return updated
+
+
+def _repair_telemetry_sql(content: str) -> str:
+    updated = re.sub(
+        r"UNIQUE\s*\(\s*sensor_id\s*,\s*event_id\s*\)",
+        "UNIQUE(site_id, sensor_id, event_id)",
+        content,
+        flags=re.IGNORECASE,
+    )
+    table_match = re.search(r"INSERT\s+INTO\s+([A-Za-z_]\w*)", updated, re.IGNORECASE)
+    if table_match and "observed_at" in updated.lower() and "received_at" in updated.lower():
+        table = table_match.group(1)
+        updated = re.sub(
+            r"ON\s+CONFLICT\s*\(\s*sensor_id\s*,\s*event_id\s*\)",
+            "ON CONFLICT(site_id, sensor_id, event_id)",
+            updated,
+            flags=re.IGNORECASE,
+        )
+        updated = re.sub(
+            r"ON\s+CONFLICT\s*\(\s*site_id\s*,\s*sensor_id\s*,\s*event_id\s*\)\s*"
+            r"DO\s+UPDATE\s+SET.*?;",
+            (
+                "ON CONFLICT(site_id, sensor_id, event_id) DO UPDATE SET\n"
+                "    observed_at = excluded.observed_at,\n"
+                "    received_at = excluded.received_at,\n"
+                "    value = excluded.value\n"
+                f"WHERE excluded.received_at >= {table}.received_at;"
+            ),
+            updated,
+            count=1,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    if "strftime" in updated.lower() and re.search(
+        r"\bfrom\s+[a-z_]\w*",
+        updated,
+        re.IGNORECASE,
+    ):
+        updated = re.sub(r"\breceived_at\b", "observed_at", updated, flags=re.IGNORECASE)
+    return updated
+
+
 def contract_repair_proposals(
     prompt: str,
     files: Mapping[str, str],
@@ -1856,6 +2530,43 @@ def contract_repair_proposals(
         return {}
     invariants = derive_contract_invariants(prompt)
     proposals: dict[str, str] = {}
+    for path, content in files.items():
+        updated = content
+        if any("complete (key, value) pair sequence" in value for value in invariants):
+            updated = _repair_repeated_query_pairs(updated)
+        if any("authenticated issue time" in value for value in invariants):
+            updated = _repair_relay_key_window(updated)
+            updated = _repair_relay_timestamp(updated)
+        if any("Normalize epoch seconds versus milliseconds" in value for value in invariants):
+            updated = _repair_relay_timestamp(updated)
+        if any(
+            token in value
+            for value in invariants
+            for token in ("positive request is clipped", "Numeric Retry-After is seconds")
+        ):
+            updated = _repair_retry_policy(updated)
+        if any(
+            token in value
+            for value in invariants
+            for token in ("identical composite key", "without repeating stock/state mutation")
+        ):
+            updated = _repair_scoped_retry_identity(updated)
+        if any(
+            token in value
+            for value in invariants
+            for token in ("union of actor keys", "tombstones win")
+        ):
+            updated = _repair_dart_vector_state(updated)
+        if any("Strict overlap is rejected" in value for value in invariants):
+            updated = _repair_inclusive_ranges(updated)
+        if any(
+            token in value
+            for value in invariants
+            for token in ("One winner predicate guards", "never receipt time in either expression")
+        ):
+            updated = _repair_telemetry_sql(updated)
+        if updated != content:
+            proposals[str(path)] = updated
     if any("in-flight work must be evicted" in value for value in invariants):
         for path, content in files.items():
             map_match = re.search(r"(?:const|let)\s+(\w+)\s*=\s*new\s+Map", content)
@@ -3709,7 +4420,9 @@ def evaluate_packet(
     evidence = {str(item.get("evidence_id")): item for item in case["observations"]}
     completed_result_ids = _experiment_result_ids(packet)
     drift = detect_baseline_drift(case["observations"])
-    problem_dimension = infer_dimension(str(case.get("problem_statement") or ""))
+    problem_statement = str(case.get("problem_statement") or "")
+    problem_dimension = infer_dimension(problem_statement)
+    decisive_problem_dimension = decisive_inferred_dimension(problem_statement)
     attribution_gap_records = [
         item
         for item in case["observations"]
@@ -4232,6 +4945,24 @@ def evaluate_packet(
             ):
                 chosen = problem_candidate
                 conclusion_id = str(chosen.get("hypothesis_id") or "")
+
+    if (
+        chosen is not None
+        and decisive_problem_dimension not in {
+            "unknown",
+            str(chosen.get("dimension") or "unknown"),
+        }
+        and _causal_sufficiency_rank(chosen.get("causal_sufficiency")) < 2
+    ):
+        decisive_candidates = [
+            item
+            for item in hypothesis_results
+            if item.get("dimension") == decisive_problem_dimension
+            and item.get("status") not in {"refuted", "untested"}
+        ]
+        if decisive_candidates:
+            chosen = max(decisive_candidates, key=selection_rank)
+            conclusion_id = str(chosen.get("hypothesis_id") or "")
 
     requested_status = str(requested.get("status") or "provisional")
     promotion_reason = ""

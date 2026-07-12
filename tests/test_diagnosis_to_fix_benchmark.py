@@ -12,6 +12,9 @@ from scripts import autopilot_diagnosis_to_fix_benchmark as benchmark
 
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "autonomy_diagnosis_to_fix"
+TENTH_FIXTURE_ROOT = (
+    Path(__file__).parent / "fixtures" / "autonomy_diagnosis_to_fix_blinded_tenth"
+)
 
 
 def test_fixture_manifest_keeps_hidden_oracles_out_of_cases_and_labels_evaluation_role():
@@ -263,6 +266,71 @@ def test_unaccepted_repair_plan_cannot_revise_diagnostic_conclusion():
 
     assert accepted_score == 100
     assert accepted_checks["diagnosis"] is True
+
+
+def test_repair_plan_label_cannot_overwrite_accepted_causal_family():
+    diagnosis = {
+        "report": {"conclusion": {"dimension": "dependency"}},
+        "accepted_conclusion": {
+            "dimension": "dependency",
+            "stage": "diagnostic_judge",
+            "accepted": True,
+        },
+        "diagnosis_history": [],
+    }
+
+    accepted = benchmark._accept_diagnosis_proposal(
+        diagnosis,
+        "code",
+        stage="repair_1_validated",
+        validation_evidence="one visible assertion improved",
+    )
+
+    assert accepted is False
+    assert diagnosis["accepted_conclusion"]["dimension"] == "dependency"
+    assert diagnosis["diagnosis_history"][-1]["accepted"] is False
+    assert "not independent causal evidence" in diagnosis["diagnosis_history"][-1][
+        "rejection_reason"
+    ]
+
+
+def test_initial_diagnosis_uses_decisive_taxonomy_over_observational_label():
+    diagnosis = {
+        "report": {"conclusion": {"dimension": "code"}},
+        "case": {
+            "problem_statement": (
+                "Numeric Retry-After exceeds the remaining retry budget and queue time "
+                "uses the wrong granted delay."
+            )
+        },
+    }
+
+    benchmark._initialize_accepted_diagnosis(diagnosis)
+
+    assert diagnosis["accepted_conclusion"]["dimension"] == "clock"
+    assert diagnosis["accepted_conclusion"]["stage"] == "decisive_taxonomy_gate"
+
+
+def test_decisive_taxonomy_does_not_override_isolated_causal_evidence():
+    diagnosis = {
+        "report": {
+            "conclusion": {
+                "dimension": "runtime",
+                "causal_sufficiency": "isolated",
+            }
+        },
+        "case": {
+            "problem_statement": (
+                "Numeric Retry-After exceeds the remaining retry budget and queue time "
+                "uses the wrong granted delay."
+            )
+        },
+    }
+
+    benchmark._initialize_accepted_diagnosis(diagnosis)
+
+    assert diagnosis["accepted_conclusion"]["dimension"] == "runtime"
+    assert diagnosis["accepted_conclusion"]["stage"] == "diagnostic_judge"
 
 
 def test_shadow_verdict_requires_every_case_check_not_only_high_average():
@@ -585,6 +653,35 @@ def test_edit_group_gets_one_bounded_compiler_guided_correction(
     assert any("compiler-guided correction" in value for value in outcome["warnings"])
 
 
+def test_safe_dart_compiler_repair_qualifies_undefined_max(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "lib").mkdir(parents=True)
+    target = repo / "lib" / "join.dart"
+    target.write_text(
+        "import 'types.dart';\n\nint join(int left, int right) => max(left, right);\n",
+        encoding="utf-8",
+    )
+    diagnostics = (
+        "ERROR|COMPILE_TIME_ERROR|UNDEFINED_FUNCTION|lib/join.dart|3|"
+        "The function 'max' isn't defined."
+    )
+
+    warnings = benchmark._apply_safe_compiler_repair(
+        repo,
+        "lib/join.dart",
+        diagnostics,
+    )
+
+    repaired = target.read_text(encoding="utf-8")
+    assert warnings
+    assert "import 'dart:math' as math;" in repaired
+    assert "math.max(left, right)" in repaired
+    assert "Map<String, int>" in benchmark._compiler_diagnostic_guidance(
+        "lib/join.dart",
+        "Map<dynamic, dynamic> cannot be assigned",
+    )
+
+
 def test_edit_group_rolls_back_when_result_contradicts_mechanism_contract(
     tmp_path, monkeypatch
 ):
@@ -668,6 +765,127 @@ def test_repair_prompt_source_has_no_state_anchored_schema_or_owner_language():
 
     assert '"dimension":"state"' not in source
     assert "state/interface owner" not in source
+
+
+def test_repair_review_skip_requires_complete_stable_contract_ownership():
+    plan = {
+        "files": [
+            {"path": "producer.py", "action": "modify", "description": "Fix producer."},
+            {"path": "consumer.py", "action": "modify", "description": "Fix consumer."},
+        ],
+        "contract_coverage": [
+            {
+                "contract": "test_alpha preserves every repeated value",
+                "owner_paths": ["producer.py"],
+                "postcondition": "All repeated values survive canonicalization.",
+            },
+            {
+                "contract": "test_beta uses the normalized consumer key",
+                "owner_paths": ["consumer.py"],
+                "postcondition": "Lookup and storage use the same normalized key.",
+            },
+        ],
+    }
+    evidence = {
+        "failed_ids": [
+            "tests/test_contract.py::test_alpha",
+            "tests/test_contract.py::test_beta",
+        ]
+    }
+
+    assert benchmark._repair_plan_has_complete_contract_coverage(
+        plan,
+        ["producer.py", "consumer.py"],
+        evidence,
+    ) is True
+    assert benchmark._repair_plan_has_complete_contract_coverage(
+        {**plan, "contract_coverage": plan["contract_coverage"][:1]},
+        ["producer.py", "consumer.py"],
+        evidence,
+    ) is False
+    assert benchmark._repair_plan_has_complete_contract_coverage(
+        {
+            **plan,
+            "contract_coverage": [
+                {
+                    **plan["contract_coverage"][0],
+                    "owner_paths": ["tests/test_contract.py"],
+                },
+                plan["contract_coverage"][1],
+            ],
+        },
+        ["producer.py", "consumer.py"],
+        evidence,
+    ) is False
+
+
+def test_complete_contract_repair_plan_skips_redundant_model_review(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "owner.py").write_text("VALUE = 1\n", encoding="utf-8")
+    stages: list[str] = []
+
+    def fake_call(*_args, stage, **_kwargs):
+        stages.append(stage)
+        if "repair_review" in stage:
+            raise AssertionError("complete contract plan should not invoke reviewer")
+        return json.dumps(
+            {
+                "dimension": "clock",
+                "analysis": "The owner violates the numeric delay contract.",
+                "files": [
+                    {
+                        "path": "owner.py",
+                        "action": "modify",
+                        "description": "Convert the numeric delay once.",
+                    }
+                ],
+                "contract_coverage": [
+                    {
+                        "contract": "test_numeric_delay converts seconds",
+                        "owner_paths": ["owner.py"],
+                        "postcondition": "Numeric delay is converted exactly once.",
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(benchmark, "_local_call", fake_call)
+    monkeypatch.setattr(
+        benchmark,
+        "_apply_planned_edits",
+        lambda *_args, **_kwargs: {
+            "patch_applied": True,
+            "applied_files": ["owner.py"],
+            "warnings": [],
+        },
+    )
+
+    result = benchmark._repair_after_failure(
+        repo,
+        {
+            "prompt": "Numeric Retry-After delay is interpreted in the wrong clock unit.",
+            "candidate_paths": ["owner.py"],
+            "max_files": 1,
+        },
+        {"report": {"conclusion": {"dimension": "clock"}}},
+        {"selected_files": ["owner.py"]},
+        "tests/test_delay.py::test_numeric_delay FAILED",
+        "local-model",
+        [],
+        1.0,
+        1,
+        contract_evidence={
+            "failed_ids": ["tests/test_delay.py::test_numeric_delay"],
+        },
+    )
+
+    assert stages == ["repair_plan_1"]
+    assert result["plan"]["review_skipped_reason"]
+    assert result["patch_applied"] is True
 
 
 def test_validation_failure_context_keeps_public_and_feedback_failures():
@@ -1225,6 +1443,56 @@ def test_deterministic_contract_repairs_pass_real_sealed_contracts(tmp_path):
         assert hidden["passed"] is True, hidden["output"]
 
 
+@pytest.mark.parametrize(
+    "case_id",
+    [
+        "py_relay_rotation_window",
+        "py_reservation_retry_scope",
+        "ts_retry_budget_clock",
+        "dart_offline_tombstone_join",
+        "dart_resumable_chunk_boundaries",
+        "sql_telemetry_correction_rollup",
+    ],
+)
+def test_disclosed_tenth_contract_operators_pass_feedback_and_final(
+    tmp_path,
+    case_id,
+):
+    case = json.loads(
+        (TENTH_FIXTURE_ROOT / "cases" / f"{case_id}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    oracle = json.loads(
+        (TENTH_FIXTURE_ROOT / "oracles" / f"{case_id}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    final_oracle = json.loads(
+        (TENTH_FIXTURE_ROOT / "final_oracles" / f"{case_id}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    repo = tmp_path / case_id
+    benchmark._init_repo(repo, case["repo_files"])
+    benchmark._write_files(repo, oracle["feedback_files"])
+
+    repair = benchmark._apply_deterministic_contract_repair(repo, case)
+    public = benchmark._run_case_tests(repo, case, public_only=True)
+    feedback = benchmark._run_case_tests(repo, case, public_only=False)
+    final = benchmark._run_final_adjudication(
+        case,
+        final_oracle["final_files"],
+        candidate_repo=repo,
+    )
+
+    assert repair["patch_applied"] is True, repair
+    assert set(repair["selected_files"]) == set(oracle["expected_files"])
+    assert public["passed"] is True, public["output"]
+    assert feedback["passed"] is True, feedback["output"]
+    assert final["passed"] is True, final["output"]
+
+
 def test_initial_patch_generation_does_not_run_repair_reviewer(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1341,6 +1609,43 @@ def test_local_edit_retries_one_stale_search_against_current_file(tmp_path, monk
     assert result["patch_applied"] is True
     assert stages == ["edit", "edit_retry"]
     assert target.read_text(encoding="utf-8") == "export const value = 2;\n"
+
+
+def test_local_edit_reformats_one_mixed_adapter_response(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    target = repo / "scheduler.mjs"
+    target.write_text("export const delay = 1;\n", encoding="utf-8")
+    responses = iter(
+        [
+            "```js\n<<<<<<< SEARCH export const delay = 1;\n=======\n"
+            "export const delay = 2;\n>>>>>>> REPLACE\n```",
+            "<<<<<<< SEARCH\nexport const delay = 1;\n=======\n"
+            "export const delay = 2;\n>>>>>>> REPLACE",
+        ]
+    )
+    stages: list[str] = []
+
+    def fake_call(*_args, stage, **_kwargs):
+        stages.append(stage)
+        return next(responses)
+
+    monkeypatch.setattr(benchmark, "_local_call", fake_call)
+
+    result = benchmark._apply_local_edit(
+        repo,
+        "scheduler.mjs",
+        "Use the granted delay.",
+        "local-model",
+        [],
+        1.0,
+        stage="edit",
+    )
+
+    assert result["patch_applied"] is True
+    assert stages == ["edit", "edit_adapter_retry"]
+    assert any("mixed edit-format" in value for value in result["warnings"])
+    assert target.read_text(encoding="utf-8") == "export const delay = 2;\n"
 
 
 def test_local_edit_recognizes_replacement_already_satisfied(tmp_path, monkeypatch):

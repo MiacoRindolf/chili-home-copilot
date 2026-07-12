@@ -7120,6 +7120,7 @@ def generate_diffs_from_plan(
         for ins in insights_mod.get_insights(db, repo_id=run.repo_id)[:8]
         if ins.get("description")
     ]
+    mechanism_invariants = diagnostic_reasoning.derive_contract_invariants(run.prompt)
     diffs: list[str] = []
     rejections: list[str] = []
 
@@ -7169,6 +7170,12 @@ def generate_diffs_from_plan(
             rejections.append(f"{rel}: edit path is outside the worktree or is a symlink")
             continue
         content = _read_file_content(str(repo_path), rel, max_lines=_EDIT_MAX_FILE_LINES)
+        if mechanism_invariants:
+            desc = (
+                desc
+                + "\n\nMechanism contracts that must all remain true:\n"
+                + json.dumps(mechanism_invariants, indent=2)
+            )
         if validation_context:
             desc = (
                 desc
@@ -7241,6 +7248,7 @@ def generate_diffs_from_plan(
                 continue
             continue
         diff = ""
+        adapter_warnings: list[str] = []
         sr_blocks = code_agent_mod._parse_search_replace_blocks(reply_text)
         if sr_blocks and full_content is not None:
             outcome = code_agent_mod._apply_search_replace(full_content, sr_blocks)
@@ -7275,16 +7283,20 @@ def generate_diffs_from_plan(
                     continue
                 diff = code_agent_mod._unified_diff_text(rel, full_content, outcome["new_content"])
             else:
+                adapter_warnings.extend(str(value) for value in outcome["warnings"])
                 _add_artifact(
                     db, run.run_id, "diff_rejected", rel,
                     content_json={"reason": "sr_blocks_rejected", "warnings": outcome["warnings"]},
                 )
-                rejections.append(
-                    f"{rel}: edit blocks rejected ({'; '.join(outcome['warnings'])[:300]})"
-                )
                 if try_fallback(rel, content):
                     continue
-                continue
+                if not code_agent_mod._retryable_edit_adapter_rejection(
+                    adapter_warnings
+                ):
+                    rejections.append(
+                        f"{rel}: edit blocks rejected ({'; '.join(outcome['warnings'])[:300]})"
+                    )
+                    continue
         if not diff and full_content is not None:
             full_file = code_agent_mod._extract_full_file_replacement(
                 reply_text,
@@ -7331,6 +7343,120 @@ def generate_diffs_from_plan(
                     "model_adapter",
                     f"full_file_{rel}",
                     content_json={"warnings": full_file["warnings"]},
+                )
+            else:
+                adapter_warnings.extend(
+                    str(value) for value in full_file.get("warnings") or []
+                )
+        if (
+            not diff
+            and full_content is not None
+            and code_agent_mod._retryable_edit_adapter_rejection(adapter_warnings)
+        ):
+            retry_started = _time.monotonic()
+            retry_gw = _gw_chat(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Reformat the rejected edit for {rel}. Return only valid SEARCH/REPLACE blocks "
+                            "copied exactly from CURRENT FILE. Do not return a full-file fence, unified diff, "
+                            "or prose. Adapter feedback: "
+                            f"{'; '.join(adapter_warnings)[:1200]}"
+                        ),
+                    }
+                ],
+                purpose="code_dispatch_edit",
+                system_prompt=prompt,
+                trace_id=f"autopilot-edit-adapter-retry-{rel}",
+                user_message=desc,
+                max_tokens=_settings.chili_code_gen_max_tokens,
+                strict_escalation=False,
+                local_only=True,
+                local_model_override=local_model_override,
+                db=None,
+            )
+            retry_text = (
+                (retry_gw.get("reply") or "")
+                if isinstance(retry_gw, dict)
+                else ""
+            )
+            _add_artifact(
+                db,
+                run.run_id,
+                "model_call",
+                f"edit_adapter_retry_{rel}",
+                content_json={
+                    "model": (
+                        retry_gw.get("model")
+                        if isinstance(retry_gw, dict)
+                        else None
+                    )
+                    or "gateway_error",
+                    "requested_local_model": local_model_override
+                    or model_info.get("model"),
+                    "file": rel,
+                    "ok": bool(retry_text.strip()),
+                    "latency_ms": int((_time.monotonic() - retry_started) * 1000),
+                    "engine": "strict_adapter_retry",
+                    "local_only": (
+                        bool(retry_gw.get("local_only"))
+                        if isinstance(retry_gw, dict)
+                        else True
+                    ),
+                    "premium_calls": (
+                        int(retry_gw.get("premium_calls") or 0)
+                        if isinstance(retry_gw, dict)
+                        else 0
+                    ),
+                },
+            )
+            _check_cancel(db, run)
+            retry_blocks = code_agent_mod._parse_search_replace_blocks(retry_text)
+            if retry_blocks:
+                retry_outcome = code_agent_mod._apply_search_replace(
+                    full_content,
+                    retry_blocks,
+                )
+                retry_content = retry_outcome.get("new_content")
+                if isinstance(retry_content, str):
+                    semantic_warnings = code_agent_mod._semantic_replacement_warnings(
+                        rel,
+                        retry_content,
+                    )
+                    semantic_warnings.extend(
+                        diagnostic_reasoning.contract_invariant_warnings(
+                            run.prompt,
+                            {rel: retry_content},
+                        )
+                    )
+                    if not semantic_warnings:
+                        diff = code_agent_mod._unified_diff_text(
+                            rel,
+                            full_content,
+                            retry_content,
+                        )
+                        reply_text = retry_text
+                        _add_artifact(
+                            db,
+                            run.run_id,
+                            "model_adapter",
+                            f"strict_retry_{rel}",
+                            content_json={
+                                "recovered": True,
+                                "initial_warnings": adapter_warnings,
+                            },
+                        )
+                    else:
+                        adapter_warnings.extend(semantic_warnings)
+                else:
+                    adapter_warnings.extend(
+                        str(value)
+                        for value in retry_outcome.get("warnings") or []
+                    )
+            else:
+                adapter_warnings.append(
+                    "strict adapter retry returned no SEARCH/REPLACE blocks"
                 )
         if not diff:
             # Legacy fallback: a raw unified diff reply (cloud models).

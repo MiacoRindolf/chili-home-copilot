@@ -391,6 +391,20 @@ def _parse_search_replace_blocks(reply: str) -> List[tuple]:
     return [(m.group(1), m.group(2)) for m in _SEARCH_REPLACE_RE.finditer(reply or "")]
 
 
+def _retryable_edit_adapter_rejection(warnings: List[str]) -> bool:
+    retryable_markers = (
+        "SEARCH text not found",
+        "full-file fallback rejected embedded SEARCH/REPLACE markers",
+        "full-file fallback rejected a unified diff fence",
+        "full-file fallback requires exactly one fenced block",
+    )
+    return any(
+        marker in str(warning)
+        for warning in warnings
+        for marker in retryable_markers
+    )
+
+
 def _extract_full_file_replacement(
     reply: str,
     file_path: str,

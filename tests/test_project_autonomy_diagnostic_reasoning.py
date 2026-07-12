@@ -2256,6 +2256,242 @@ def test_realworld_boundary_language_yields_mechanical_contract_invariants():
     assert any("tombstones win" in value for value in convergence)
 
 
+def test_retry_contract_operator_transfers_across_field_and_local_names():
+    prompt = (
+        "Numeric Retry-After exceeds the remaining allowance; an explicit zero delay is "
+        "dropped and queue time uses the requested duration."
+    )
+    files = {
+        "lib/parse.mjs": (
+            "export function parseRetryAfter(value, nowMs) {\n"
+            "  const text = String(value).trim();\n"
+            "  if (/^\\d+$/.test(text)) return Number(text);\n"
+            "  return Date.parse(text) - nowMs;\n"
+            "}\n"
+        ),
+        "lib/cap.mjs": (
+            "export class RetryBudget {\n"
+            "  constructor(capMs) { this.capMs = capMs; this.consumedMs = 0; }\n"
+            "  claim(askedMs) {\n"
+            "    if (askedMs < 0 || this.consumedMs + askedMs > this.capMs) return null;\n"
+            "    this.consumedMs += askedMs;\n"
+            "    return askedMs;\n"
+            "  }\n"
+            "}\n"
+        ),
+        "lib/queue.mjs": (
+            "export function queue(retryAfter, nowMs, budget, enqueue) {\n"
+            "  const askedMs = parseRetryAfter(retryAfter, nowMs);\n"
+            "  const allowedMs = budget.claim(askedMs);\n"
+            "  if (!allowedMs) return null;\n"
+            "  const runAt = nowMs + askedMs;\n"
+            "  enqueue(runAt);\n"
+            "  return runAt;\n"
+            "}\n"
+        ),
+    }
+
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+    projected = {path: proposals.get(path, content) for path, content in files.items()}
+
+    assert set(proposals) == set(files)
+    assert "Number(text) * 1000" in projected["lib/parse.mjs"]
+    assert "Math.min(askedMs, remainingMs)" in projected["lib/cap.mjs"]
+    assert "allowedMs === null" in projected["lib/queue.mjs"]
+    assert "nowMs + allowedMs" in projected["lib/queue.mjs"]
+    assert reasoning.contract_invariant_warnings(prompt, projected) == []
+
+
+def test_query_range_and_event_time_operators_preserve_generic_contracts():
+    query_prompt = "Duplicate query parameters and blank values are lost before canonical wire signing."
+    query_files = {
+        "wire/url.py": (
+            "from urllib.parse import parse_qsl, urlencode\n"
+            "def render(url):\n"
+            "    pairs = dict(parse_qsl(url, keep_blank_values=True))\n"
+            "    return urlencode(sorted(pairs.items()))\n"
+        )
+    }
+    query_proposals = reasoning.contract_repair_proposals(query_prompt, query_files)
+    assert "pairs = parse_qsl" in query_proposals["wire/url.py"]
+    assert "urlencode(sorted(pairs))" in query_proposals["wire/url.py"]
+    assert reasoning.contract_invariant_warnings(query_prompt, query_proposals) == []
+
+    range_prompt = "Inclusive Content-Range chunk boundaries reject adjacent independently retried chunks."
+    range_files = {
+        "lib/range.dart": "int get length => end - start;\n",
+        "lib/ledger.dart": (
+            "final separated = range.end < existing.start - 1 ||\n"
+            "    range.start > existing.end + 1;\n"
+        ),
+        "lib/assemble.dart": "offsets.sort((a, b) => a.toString().compareTo(b.toString()));\n",
+    }
+    range_proposals = reasoning.contract_repair_proposals(range_prompt, range_files)
+    assert set(range_proposals) == set(range_files)
+    assert reasoning.contract_invariant_warnings(range_prompt, range_proposals) == []
+
+    sql_prompt = (
+        "Out of order telemetry correction replay mixes metadata, and event-time hourly buckets use receipt time."
+    )
+    sql_files = {
+        "sql/upsert.sql": (
+            "INSERT INTO samples (site_id, sensor_id, event_id, observed_at, received_at, value) "
+            "VALUES (:site_id, :sensor_id, :event_id, :observed_at, :received_at, :value)\n"
+            "ON CONFLICT(site_id, sensor_id, event_id) DO UPDATE SET\n"
+            "observed_at = excluded.observed_at, received_at = MAX(samples.received_at, excluded.received_at),\n"
+            "value = CASE WHEN excluded.received_at >= samples.received_at THEN excluded.value ELSE samples.value END;\n"
+        ),
+        "sql/rollup.sql": (
+            "SELECT strftime('%Y-%m-%dT%H:00:00Z', received_at, 'unixepoch') AS hour "
+            "FROM samples WHERE received_at >= :start AND received_at < :end;\n"
+        ),
+    }
+    sql_proposals = reasoning.contract_repair_proposals(sql_prompt, sql_files)
+    projected_sql = {
+        path: sql_proposals.get(path, content) for path, content in sql_files.items()
+    }
+    assert "WHERE excluded.received_at >= samples.received_at" in projected_sql["sql/upsert.sql"]
+    assert "strftime('%Y-%m-%dT%H:00:00Z', observed_at" in projected_sql["sql/rollup.sql"]
+    assert "WHERE observed_at >= :start" in projected_sql["sql/rollup.sql"]
+    assert reasoning.contract_invariant_warnings(sql_prompt, projected_sql) == []
+
+
+def test_vector_clock_operator_uses_declared_parameter_names():
+    prompt = (
+        "Replicas concurrent after reconnect need convergence bookkeeping and a deletion "
+        "must win an equal-time tie."
+    )
+    files = {
+        "lib/clock.dart": (
+            "enum ClockOrder { before, after, equal, concurrent }\n"
+            "ClockOrder compareClocks(Map<String, int> lhs, Map<String, int> rhs) {\n"
+            "  var less = false; var greater = false;\n"
+            "  for (final actor in lhs.keys) {\n"
+            "    final a = lhs[actor]!; final b = rhs[actor] ?? a;\n"
+            "    if (a < b) less = true; if (a > b) greater = true;\n"
+            "  }\n"
+            "  if (less && greater) return ClockOrder.concurrent;\n"
+            "  if (less) return ClockOrder.before; if (greater) return ClockOrder.after;\n"
+            "  return ClockOrder.equal;\n"
+            "}\n"
+        ),
+        "lib/resolve.dart": (
+            "import 'clock.dart';\n"
+            "class SyncRecord { dynamic clock, modifiedAt, deleted, deviceId; "
+            "SyncRecord withClock(dynamic value) => this; }\n"
+            "SyncRecord resolveRecord(SyncRecord current, SyncRecord incoming) {\n"
+            "  final order = compareClocks(current.clock, incoming.clock);\n"
+            "  if (order == ClockOrder.before) return incoming;\n"
+            "  return current;\n"
+            "}\n"
+        ),
+        "lib/engine.dart": (
+            "import 'resolve.dart';\n"
+            "class Engine { final records = <String, SyncRecord>{};\n"
+            "  void applyRemote(SyncRecord incoming) {\n"
+            "    final local = records[incoming.id];\n"
+            "    if (local == null) { records[incoming.id] = incoming; return; }\n"
+            "    records[incoming.id] = resolveRecord(local, incoming);\n"
+            "  }\n"
+            "}\n"
+        ),
+    }
+
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+    projected = {path: proposals.get(path, content) for path, content in files.items()}
+
+    assert "...lhs.keys, ...rhs.keys" in projected["lib/clock.dart"]
+    assert "current.deleted != incoming.deleted" in projected["lib/resolve.dart"]
+    assert "joinClocks(local.clock, incoming.clock)" in projected["lib/engine.dart"]
+    assert reasoning.contract_invariant_warnings(prompt, projected) == []
+
+
+def test_scoped_retry_operator_transfers_to_alternate_storage_attribute():
+    prompt = (
+        "Two tenants reuse the same client retry token; retries move stock twice and emit duplicate messages "
+        "across attempt numbers."
+    )
+    files = {
+        "holds/ledger.py": (
+            "class Hold: pass\n"
+            "class Ledger:\n"
+            "    def __init__(self):\n"
+            "        self._entries: dict[str, Hold] = {}\n"
+            "    def find(self, tenant_id, request_id):\n"
+            "        return self._entries.get(request_id)\n"
+            "    def reserve(self, tenant_id, request_id, sku, quantity):\n"
+            "        hold = Hold()\n"
+            "        self._entries[request_id] = hold\n"
+            "        return hold\n"
+        ),
+        "holds/events.py": (
+            "def created(hold, attempt):\n"
+            "    return {'event_id': f\"hold:{hold.request_id}:{attempt}\"}\n"
+        ),
+        "holds/service.py": (
+            "class Service:\n"
+            "    def reserve(self, tenant_id, request_id, sku, quantity, attempt):\n"
+            "        reservation = self.ledger.reserve(\n"
+            "            tenant_id, request_id, sku, quantity\n"
+            "        )\n"
+            "        self.publisher.publish(created(reservation, attempt))\n"
+            "        return reservation\n"
+        ),
+    }
+
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+    projected = {path: proposals.get(path, content) for path, content in files.items()}
+
+    assert "self._entries: dict[tuple[str, str], Hold]" in projected["holds/ledger.py"]
+    assert "self._entries.get((tenant_id, request_id))" in projected["holds/ledger.py"]
+    assert "self._entries[(tenant_id, request_id)]" in projected["holds/ledger.py"]
+    assert "{hold.tenant_id}:{hold.request_id}" in projected["holds/events.py"]
+    assert "existing = self.ledger.find(tenant_id, request_id)" in projected["holds/service.py"]
+    assert reasoning.contract_invariant_warnings(prompt, projected) == []
+
+
+def test_relay_operator_preserves_raw_wire_time_with_alternate_local_name():
+    prompt = (
+        "A forwarder wire rollout combines secret rotation, v2 millisecond timestamps, and repeated "
+        "parameters; preserve freshness and age checks."
+    )
+    files = {
+        "relay/url.py": (
+            "from urllib.parse import parse_qsl, urlencode\n"
+            "def canonical(value):\n"
+            "    fields = dict(parse_qsl(value, keep_blank_values=True))\n"
+            "    return urlencode(sorted(fields.items()))\n"
+        ),
+        "relay/ring.py": (
+            "class Ring:\n"
+            "    def candidates(self, key_id, seen_at):\n"
+            "        return [key for key in self.keys if key.key_id == key_id "
+            "and key.valid_from <= seen_at < key.valid_until]\n"
+        ),
+        "relay/check.py": (
+            "def verify(headers, keyring, key_id, now):\n"
+            "    wire_timestamp = headers.get('X-Relay-Timestamp')\n"
+            "    issued = int(wire_timestamp)\n"
+            "    message = f'{wire_timestamp}\\n'.encode()\n"
+            "    return message, keyring.candidates(key_id, now), issued\n"
+        ),
+    }
+    files["relay/ring.py"] = files["relay/ring.py"].replace(
+        "class Ring:\n",
+        "class Ring:\n    grace_seconds = 30\n",
+    )
+
+    proposals = reasoning.contract_repair_proposals(prompt, files)
+    projected = {path: proposals.get(path, content) for path, content in files.items()}
+
+    assert "issued_value = int(wire_timestamp)" in projected["relay/check.py"]
+    assert "if issued_value >= 100_000_000_000" in projected["relay/check.py"]
+    assert "candidates(key_id, issued)" in projected["relay/check.py"]
+    assert "f'{wire_timestamp}\\n'" in projected["relay/check.py"]
+    assert "key.valid_until + self.grace_seconds" in projected["relay/ring.py"]
+    assert reasoning.contract_invariant_warnings(prompt, projected) == []
+
+
 def test_causal_taxonomy_disambiguates_protocol_policy_and_logical_state():
     assert reasoning.infer_dimension(
         "Vary header values use mixed casing and a wildcard response follows the wrong policy."
@@ -2272,6 +2508,18 @@ def test_causal_taxonomy_disambiguates_protocol_policy_and_logical_state():
     assert reasoning.infer_dimension(
         "Inclusive Content-Range boundaries reconstruct bytes out of order."
     ) == "data"
+
+
+def test_decisive_taxonomy_requires_score_and_margin():
+    assert reasoning.decisive_inferred_dimension(
+        "Numeric Retry-After exceeds the remaining retry budget and queue delay."
+    ) == "clock"
+    assert reasoning.decisive_inferred_dimension(
+        "Secret rotation changed the signed wire protocol and retired-key grace window."
+    ) == "dependency"
+    assert reasoning.decisive_inferred_dimension(
+        "The behavior changed and more evidence is needed."
+    ) == "unknown"
 
 
 def test_generic_mechanism_vocabulary_maps_to_causal_families_and_ties_stay_unknown():

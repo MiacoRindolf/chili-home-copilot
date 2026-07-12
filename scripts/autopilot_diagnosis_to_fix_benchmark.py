@@ -774,11 +774,28 @@ def _initialize_accepted_diagnosis(diagnosis: dict[str, Any]) -> None:
     dimension = str(conclusion.get("dimension") or "unknown").strip().lower()
     if dimension not in REPAIR_DIMENSION_RUBRIC:
         dimension = "unknown"
+    case = diagnosis.get("case") if isinstance(diagnosis.get("case"), Mapping) else {}
+    decisive_dimension = diagnostic_reasoning.decisive_inferred_dimension(
+        str(case.get("problem_statement") or "")
+    )
+    causal_sufficiency = str(conclusion.get("causal_sufficiency") or "observational")
+    stage = "diagnostic_judge"
+    validation_evidence = "pre-repair evidence decision"
+    if (
+        decisive_dimension != "unknown"
+        and dimension != decisive_dimension
+        and causal_sufficiency not in {"graph_linked", "isolated"}
+    ):
+        dimension = decisive_dimension
+        stage = "decisive_taxonomy_gate"
+        validation_evidence = (
+            "decisive prompt taxonomy retained because no stronger causal intervention evidence was available"
+        )
     record = {
         "dimension": dimension,
-        "stage": "diagnostic_judge",
+        "stage": stage,
         "accepted": True,
-        "validation_evidence": "pre-repair evidence decision",
+        "validation_evidence": validation_evidence,
     }
     diagnosis["accepted_conclusion"] = dict(record)
     diagnosis["diagnosis_history"] = [record]
@@ -790,10 +807,24 @@ def _accept_diagnosis_proposal(
     *,
     stage: str,
     validation_evidence: str,
-) -> None:
+) -> bool:
     normalized = str(dimension or "").strip().lower()
     if normalized not in REPAIR_DIMENSION_RUBRIC:
-        return
+        return False
+    current = _effective_diagnosis_dimension(diagnosis)
+    if current not in {"", "unknown", normalized}:
+        diagnosis.setdefault("diagnosis_history", []).append(
+            {
+                "dimension": normalized,
+                "stage": stage,
+                "accepted": False,
+                "validation_evidence": validation_evidence[:2_000],
+                "rejection_reason": (
+                    "repair-plan labels are not independent causal evidence for changing family"
+                ),
+            }
+        )
+        return False
     record = {
         "dimension": normalized,
         "stage": stage,
@@ -802,6 +833,7 @@ def _accept_diagnosis_proposal(
     }
     diagnosis["accepted_conclusion"] = dict(record)
     diagnosis.setdefault("diagnosis_history", []).append(record)
+    return True
 
 
 def _effective_diagnosis_dimension(diagnosis: Mapping[str, Any]) -> str:
@@ -1063,6 +1095,57 @@ def _repair_model_schedule(args: argparse.Namespace) -> list[str]:
     )
     return [str(args.model)] * base_limit + [escalation_model] * (
         escalation_limit if escalation_model else 0
+    )
+
+
+def _repair_plan_has_complete_contract_coverage(
+    plan: Mapping[str, Any],
+    candidates: Sequence[str],
+    contract_evidence: Mapping[str, Any] | None,
+) -> bool:
+    allowed = {str(value) for value in candidates if str(value)}
+    coverage = [
+        item
+        for item in plan.get("contract_coverage") or []
+        if isinstance(item, Mapping)
+    ]
+    raw_failed = (contract_evidence or {}).get("failed_ids") or []
+    failed_ids = (
+        [value for value in re.split(r"\s+", raw_failed) if value]
+        if isinstance(raw_failed, str)
+        else [str(value) for value in raw_failed if str(value)]
+    )
+    if not failed_ids or not coverage:
+        return False
+    owner_union: set[str] = set()
+    for item in coverage:
+        contract = str(item.get("contract") or "").strip()
+        postcondition = str(item.get("postcondition") or "").strip()
+        owners = {
+            relative
+            for value in item.get("owner_paths") or []
+            if (relative := _safe_rel(value))
+        }
+        if not contract or len(postcondition) < 8 or not owners or not owners <= allowed:
+            return False
+        owner_union.update(owners)
+    selected = {
+        relative
+        for item in plan.get("files") or []
+        if isinstance(item, Mapping)
+        and code_agent._is_mutating_plan_action(item.get("action"))
+        and (relative := _safe_rel(item.get("path")))
+    }
+    if not owner_union <= selected:
+        return False
+    coverage_text = json.dumps(coverage, sort_keys=True).casefold()
+    named_failures = [
+        re.split(r"::|/|\\", value)[-1].casefold()
+        for value in failed_ids
+    ]
+    return bool(
+        len(coverage) >= len(failed_ids)
+        or all(name and name in coverage_text for name in named_failures)
     )
 
 
@@ -1361,6 +1444,10 @@ def _replacement_already_satisfied(
     )
 
 
+def _retryable_edit_adapter_rejection(warnings: Sequence[str]) -> bool:
+    return code_agent._retryable_edit_adapter_rejection(list(warnings))
+
+
 def _apply_local_edit(
     repo: Path,
     selected: str,
@@ -1407,9 +1494,24 @@ def _apply_local_edit(
             "already_satisfied": True,
             "warnings": ["Planned replacement is already satisfied in the current file."],
         }
-    if not isinstance(new_content, str) and any(
+    stale_search_rejection = any(
         "SEARCH text not found" in warning for warning in initial_warnings
+    )
+    if not isinstance(new_content, str) and _retryable_edit_adapter_rejection(
+        initial_warnings
     ):
+        retry_stage = f"{stage}_retry" if stale_search_rejection else f"{stage}_adapter_retry"
+        retry_instruction = (
+            f"Your previous edit for {selected} was rejected because SEARCH did not match the current file. "
+            "Re-read the exact CURRENT FILE in the system prompt. Return corrected SEARCH/REPLACE blocks "
+            "copied verbatim from that file; do not reuse stale intended code."
+            if stale_search_rejection
+            else (
+                f"Your previous edit for {selected} used an invalid mixed adapter format. Re-read the exact "
+                "CURRENT FILE in the system prompt and return only valid SEARCH/REPLACE blocks. Do not wrap "
+                "a full file around SEARCH markers, do not return a unified diff, and do not add prose."
+            )
+        )
         retry_text = _local_call(
             model,
             [
@@ -1417,14 +1519,12 @@ def _apply_local_edit(
                 {
                     "role": "user",
                     "content": (
-                        f"Your previous edit for {selected} was rejected because SEARCH did not match the "
-                        "current file. Re-read the exact CURRENT FILE in the system prompt. Return corrected "
-                        "SEARCH/REPLACE blocks copied verbatim from that file; do not reuse stale intended code. "
+                        f"{retry_instruction} "
                         f"Adapter feedback: {'; '.join(initial_warnings)[:1200]}"
                     ),
                 },
             ],
-            stage=f"{stage}_retry",
+            stage=retry_stage,
             calls=calls,
             timeout=timeout,
             num_predict=1200,
@@ -1435,7 +1535,11 @@ def _apply_local_edit(
         new_content = outcome.get("new_content")
         if isinstance(new_content, str):
             outcome["warnings"] = [
-                "Recovered from one stale SEARCH rejection using the exact current file.",
+                (
+                    "Recovered from one stale SEARCH rejection using the exact current file."
+                    if stale_search_rejection
+                    else "Recovered from one mixed edit-format rejection using strict SEARCH/REPLACE blocks."
+                ),
                 *(outcome.get("warnings") or []),
             ]
         elif outcome.get("already_satisfied") or _replacement_already_satisfied(
@@ -1546,6 +1650,69 @@ def _plan_file_items(
         if len(selected) >= max_files:
             break
     return selected
+
+
+def _apply_safe_compiler_repair(
+    repo: Path,
+    relative: str,
+    diagnostics: str,
+) -> list[str]:
+    """Apply only mechanically unambiguous compiler fixes before model retry."""
+    path = repo / relative
+    if path.suffix.lower() != ".dart" or not path.is_file():
+        return []
+    content = path.read_text(encoding="utf-8", errors="replace")
+    updated = content
+    warnings: list[str] = []
+    if "The function 'max' isn't defined" in diagnostics and re.search(
+        r"(?<![A-Za-z0-9_.])max\s*\(",
+        updated,
+    ):
+        updated = re.sub(
+            r"(?<![A-Za-z0-9_.])max\s*\(",
+            "math.max(",
+            updated,
+        )
+        if not re.search(
+            r"import\s+['\"]dart:math['\"]\s+as\s+math\s*;",
+            updated,
+        ):
+            directives = list(
+                re.finditer(
+                    r"(?m)^(?:library\s+[^;]+;|import\s+['\"][^'\"]+['\"](?:\s+as\s+\w+)?;)\s*$",
+                    updated,
+                )
+            )
+            insert_at = directives[-1].end() if directives else 0
+            insertion = (
+                "\nimport 'dart:math' as math;"
+                if insert_at
+                else "import 'dart:math' as math;\n"
+            )
+            updated = updated[:insert_at] + insertion + updated[insert_at:]
+            if insert_at:
+                updated = updated[: insert_at + len(insertion)] + "\n" + updated[
+                    insert_at + len(insertion) :
+                ].lstrip("\n")
+        warnings.append("qualified undefined Dart max calls with an explicit dart:math import")
+    if updated == content:
+        return []
+    path.write_text(updated, encoding="utf-8")
+    return warnings
+
+
+def _compiler_diagnostic_guidance(relative: str, diagnostics: str) -> str:
+    guidance: list[str] = []
+    if str(relative).lower().endswith(".dart"):
+        if "The function 'max' isn't defined" in diagnostics:
+            guidance.append(
+                "Qualify max through an existing/imported dart:math alias or use an explicit typed comparison."
+            )
+        if "Map<dynamic, dynamic>" in diagnostics:
+            guidance.append(
+                "Give map literals and join accumulators an explicit Map<String, int> or <String, int> type."
+            )
+    return "\n".join(guidance)
 
 
 def _apply_planned_edits(
@@ -1784,69 +1951,101 @@ def _apply_planned_edits(
                 for rel in applied
                 if rel.casefold() in detail.replace("\\", "/").casefold()
             ] or list(applied)
-            correction_succeeded = True
-            corrected_files: list[str] = []
-            for index, rel in enumerate(diagnostic_paths, start=1):
-                correction = _apply_local_edit(
-                    repo,
-                    rel,
-                    (
-                        "Correct only the compiler/analyzer defects in the current file while preserving the "
-                        "intended behavioral repair and public contracts.\n"
-                        f"Overall request: {case.get('prompt')}\n"
-                        f"Coordinated responsibilities: {plan_summary}\n"
-                        "Use these exact diagnostics:\n"
-                        f"{detail[:7000]}"
-                    ),
-                    model,
-                    calls,
-                    timeout,
-                    stage=f"{stage_prefix}_compiler_correction_{index}",
-                )
-                warnings.extend(
-                    str(value) for value in correction.get("warnings") or []
-                )
-                if correction.get("patch_applied") or correction.get("already_satisfied"):
-                    corrected_files.append(rel)
-                else:
-                    correction_succeeded = False
-                    break
-            if correction_succeeded and corrected_files:
+            safe_corrected: list[str] = []
+            for rel in diagnostic_paths:
+                safe_warnings = _apply_safe_compiler_repair(repo, rel, detail)
+                if safe_warnings:
+                    safe_corrected.append(rel)
+                    warnings.extend(safe_warnings)
+            if safe_corrected:
                 syntax = validator_runner.run_ast_syntax(
                     repo,
                     changed_files=applied,
                 )
-                correction_succeeded = syntax.exit_code == 0 and not syntax.timed_out
-            if correction_succeeded and corrected_files:
-                warnings.append(
-                    "Recovered the edit group with one bounded compiler-guided correction."
-                )
-            else:
-                attempted_diff = current_attempted_diff()
-                for original_rel, content in originals.items():
-                    (repo / original_rel).write_text(content, encoding="utf-8")
-                final_detail = "\n".join(
-                    value
-                    for value in (
-                        str(syntax.stdout or ""),
-                        str(syntax.stderr or ""),
+                if syntax.exit_code == 0 and not syntax.timed_out:
+                    warnings.append(
+                        "Recovered the edit group with one bounded deterministic compiler repair."
                     )
-                    if value.strip()
-                )
-                return {
-                    "patch_applied": False,
-                    "selected_files": paths,
-                    "applied_files": [],
-                    "satisfied_files": satisfied,
-                    "skipped_optional_files": skipped_optional,
-                    "optional_rejected_diffs": optional_rejected_diffs,
-                    "attempted_diff": attempted_diff,
-                    "warnings": [
-                        *warnings,
-                        f"Changed-file syntax validation failed:\n{final_detail[:5000]}",
-                        "Rolled back edit group after compiler-guided correction failed.",
-                    ],
-                }
+                else:
+                    detail = "\n".join(
+                        value
+                        for value in (
+                            str(syntax.stdout or ""),
+                            str(syntax.stderr or ""),
+                        )
+                        if value.strip()
+                    )
+                    diagnostic_paths = [
+                        rel
+                        for rel in applied
+                        if rel.casefold() in detail.replace("\\", "/").casefold()
+                    ] or list(applied)
+            if syntax.exit_code != 0 or syntax.timed_out:
+                correction_succeeded = True
+                corrected_files: list[str] = []
+                for index, rel in enumerate(diagnostic_paths, start=1):
+                    guidance = _compiler_diagnostic_guidance(rel, detail)
+                    correction = _apply_local_edit(
+                        repo,
+                        rel,
+                        (
+                            "Correct only the compiler/analyzer defects in the current file while preserving the "
+                            "intended behavioral repair and public contracts.\n"
+                            f"Overall request: {case.get('prompt')}\n"
+                            f"Coordinated responsibilities: {plan_summary}\n"
+                            f"Compiler-specific guidance:\n{guidance or '(none)'}\n"
+                            "Use these exact diagnostics:\n"
+                            f"{detail[:7000]}"
+                        ),
+                        model,
+                        calls,
+                        timeout,
+                        stage=f"{stage_prefix}_compiler_correction_{index}",
+                    )
+                    warnings.extend(
+                        str(value) for value in correction.get("warnings") or []
+                    )
+                    if correction.get("patch_applied") or correction.get("already_satisfied"):
+                        corrected_files.append(rel)
+                    else:
+                        correction_succeeded = False
+                        break
+                if correction_succeeded and corrected_files:
+                    syntax = validator_runner.run_ast_syntax(
+                        repo,
+                        changed_files=applied,
+                    )
+                    correction_succeeded = syntax.exit_code == 0 and not syntax.timed_out
+                if correction_succeeded and corrected_files:
+                    warnings.append(
+                        "Recovered the edit group with one bounded compiler-guided correction."
+                    )
+                else:
+                    attempted_diff = current_attempted_diff()
+                    for original_rel, content in originals.items():
+                        (repo / original_rel).write_text(content, encoding="utf-8")
+                    final_detail = "\n".join(
+                        value
+                        for value in (
+                            str(syntax.stdout or ""),
+                            str(syntax.stderr or ""),
+                        )
+                        if value.strip()
+                    )
+                    return {
+                        "patch_applied": False,
+                        "selected_files": paths,
+                        "applied_files": [],
+                        "satisfied_files": satisfied,
+                        "skipped_optional_files": skipped_optional,
+                        "optional_rejected_diffs": optional_rejected_diffs,
+                        "attempted_diff": attempted_diff,
+                        "warnings": [
+                            *warnings,
+                            f"Changed-file syntax validation failed:\n{final_detail[:5000]}",
+                            "Rolled back edit group after compiler-guided correction failed.",
+                        ],
+                    }
     applied_optional = [rel for rel in applied if rel in optional_paths]
     if (
         applied_optional
@@ -2078,6 +2277,14 @@ def _repair_after_failure(
         json_mode=True,
     )
     plan = code_agent._parse_plan_json(plan_text) or {}
+    skip_repair_review = bool(
+        mechanism_invariants
+        and _repair_plan_has_complete_contract_coverage(
+            plan,
+            candidates,
+            contract_evidence,
+        )
+    )
     review_prompt = (
         "Return one corrected repair-plan JSON object only. Act as an adversarial validation judge: the draft "
         "may have misread an assertion or traded one contract for another. Derive every required input/output "
@@ -2107,24 +2314,32 @@ def _repair_after_failure(
         "Do not use action=review as a placeholder for a causal owner. If a source file must change to satisfy "
         "an invariant, select action=modify with a concrete responsibility; otherwise omit it."
     )
-    reviewed_text = _local_call(
-        model,
-        [
-            {
-                "role": "system",
-                "content": "You are CHILI's local adversarial repair judge. Return JSON only.",
-            },
-            {"role": "user", "content": review_prompt},
-        ],
-        stage=f"repair_review_{round_index}",
-        calls=calls,
-        timeout=timeout,
-        num_predict=700,
-        json_mode=True,
-    )
-    reviewed = code_agent._parse_plan_json(reviewed_text) or {}
-    if _plan_file_items(reviewed, candidates, max_files):
-        plan = reviewed
+    if skip_repair_review:
+        plan = {
+            **plan,
+            "review_skipped_reason": (
+                "deterministic invariants and complete stable-contract ownership made another generative review redundant"
+            ),
+        }
+    else:
+        reviewed_text = _local_call(
+            model,
+            [
+                {
+                    "role": "system",
+                    "content": "You are CHILI's local adversarial repair judge. Return JSON only.",
+                },
+                {"role": "user", "content": review_prompt},
+            ],
+            stage=f"repair_review_{round_index}",
+            calls=calls,
+            timeout=timeout,
+            num_predict=700,
+            json_mode=True,
+        )
+        reviewed = code_agent._parse_plan_json(reviewed_text) or {}
+        if _plan_file_items(reviewed, candidates, max_files):
+            plan = reviewed
     selected = _plan_file_items(plan, candidates, max_files)
     feedback_context_files = _feedback_exercised_candidates(
         feedback_context,

@@ -2188,6 +2188,70 @@ def test_generate_diffs_reports_rejected_model_output(monkeypatch, tmp_path):
         db.close()
 
 
+def test_generate_diffs_retries_one_mixed_adapter_response(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo_file = tmp_path / "scheduler.mjs"
+        repo_file.write_text("export const delay = 1;\n", encoding="utf-8")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        run = ProjectAutonomyRun(
+            run_id="pa_adapter_retry",
+            prompt="Update the local scheduling delay.",
+            status="running",
+            current_stage="implement",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {"model": "qwen", "available": True},
+        )
+        monkeypatch.setattr(
+            orchestrator.insights_mod,
+            "get_insights",
+            lambda *args, **kwargs: [],
+        )
+        replies = iter(
+            [
+                "```js\n<<<<<<< SEARCH export const delay = 1;\n=======\n"
+                "export const delay = 2;\n>>>>>>> REPLACE\n```",
+                "<<<<<<< SEARCH\nexport const delay = 1;\n=======\n"
+                "export const delay = 2;\n>>>>>>> REPLACE",
+            ]
+        )
+        calls = []
+
+        def fake_gateway(*_args, **kwargs):
+            calls.append(kwargs)
+            return {
+                "reply": next(replies),
+                "model": "qwen",
+                "local_only": True,
+                "premium_calls": 0,
+            }
+
+        monkeypatch.setattr(
+            "app.services.context_brain.llm_gateway.gateway_chat",
+            fake_gateway,
+        )
+
+        diffs = orchestrator.generate_diffs_from_plan(
+            db,
+            run,
+            tmp_path,
+            [{"path": "scheduler.mjs", "description": "Use delay 2."}],
+            local_model_override="qwen2.5-coder:14b",
+        )
+
+        assert len(calls) == 2
+        assert calls[1]["local_only"] is True
+        assert "-export const delay = 1;" in diffs[0]
+        assert "+export const delay = 2;" in diffs[0]
+    finally:
+        db.close()
+
+
 def test_small_desktop_fallback_diff_handles_bad_model_patch(monkeypatch, tmp_path):
     db = _sqlite_autonomy_session()
     try:
