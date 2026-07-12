@@ -1,0 +1,90 @@
+{
+  "schema": "chili.diagnosis-to-fix-manifest.v3",
+  "reference_family": "claude-fable-5",
+  "cases": [
+    {
+      "case": "cases/dart_lifecycle_handoff_epoch.json",
+      "oracle": "oracles/dart_lifecycle_handoff_epoch.json",
+      "final_oracle": "final_oracles/dart_lifecycle_handoff_epoch.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-dart-multifile"
+    },
+    {
+      "case": "cases/dart_offline_rebase_barrier.json",
+      "oracle": "oracles/dart_offline_rebase_barrier.json",
+      "final_oracle": "final_oracles/dart_offline_rebase_barrier.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-dart-multifile"
+    },
+    {
+      "case": "cases/node-cache-locale-order-retry-slot.json",
+      "oracle": "oracles/node-cache-locale-order-retry-slot.json",
+      "final_oracle": "final_oracles/node-cache-locale-order-retry-slot.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-typescript-multifile"
+    },
+    {
+      "case": "cases/node-jsonseq-utf8-channel-sequence.json",
+      "oracle": "oracles/node-jsonseq-utf8-channel-sequence.json",
+      "final_oracle": "final_oracles/node-jsonseq-utf8-channel-sequence.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-typescript-multifile"
+    },
+    {
+      "case": "cases/node-lifecycle-preabort-generation.json",
+      "oracle": "oracles/node-lifecycle-preabort-generation.json",
+      "final_oracle": "final_oracles/node-lifecycle-preabort-generation.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-typescript-multifile"
+    },
+    {
+      "case": "cases/node-policy-empty-overlay-scope-algebra.json",
+      "oracle": "oracles/node-policy-empty-overlay-scope-algebra.json",
+      "final_oracle": "final_oracles/node-policy-empty-overlay-scope-algebra.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-typescript-multifile"
+    },
+    {
+      "case": "cases/py_atomic_idempotent_transfer.json",
+      "oracle": "oracles/py_atomic_idempotent_transfer.json",
+      "final_oracle": "final_oracles/py_atomic_idempotent_transfer.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-python-multifile"
+    },
+    {
+      "case": "cases/py_epoch_fenced_reconnect.json",
+      "oracle": "oracles/py_epoch_fenced_reconnect.json",
+      "final_oracle": "final_oracles/py_epoch_fenced_reconnect.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-python-multifile"
+    },
+    {
+      "case": "cases/py_layered_config_client_rotation.json",
+      "oracle": "oracles/py_layered_config_client_rotation.json",
+      "final_oracle": "final_oracles/py_layered_config_client_rotation.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-python-multifile"
+    },
+    {
+      "case": "cases/py_utf8_stream_envelope.json",
+      "oracle": "oracles/py_utf8_stream_envelope.json",
+      "final_oracle": "final_oracles/py_utf8_stream_envelope.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-python-multifile"
+    },
+    {
+      "case": "cases/sql_out_of_order_document_heads.json",
+      "oracle": "oracles/sql_out_of_order_document_heads.json",
+      "final_oracle": "final_oracles/sql_out_of_order_document_heads.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-sql-multifile"
+    },
+    {
+      "case": "cases/sql_settlement_lifecycle_reassignment.json",
+      "oracle": "oracles/sql_settlement_lifecycle_reassignment.json",
+      "final_oracle": "final_oracles/sql_settlement_lifecycle_reassignment.json",
+      "evaluation_role": "blinded_holdout",
+      "split": "holdout-sealed-sql-multifile"
+    }
+  ]
+}

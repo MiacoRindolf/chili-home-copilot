@@ -1,0 +1,11 @@
+{
+  "case_id": "node-jsonseq-utf8-channel-sequence",
+  "expected_dimension": "data",
+  "expected_files": [
+    "src/json-sequence-parser.mjs",
+    "src/fragment-assembler.mjs"
+  ],
+  "feedback_files": {
+    "tests/audit.feedback.test.mjs": "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\n\nimport { JsonSequenceParser } from \"../src/json-sequence-parser.mjs\";\nimport { readAuditExport } from \"../src/audit-export-reader.mjs\";\n\ntest(\"UTF-8 scalars survive arbitrary byte chunk boundaries\", async () => {\n  const expected = \"café ☕ — 東京\";\n  const bytes = Buffer.from(\"\\x1e\" + JSON.stringify({ channel: \"intl\", sequence: 0, text: expected }) + \"\\n\", \"utf8\");\n  const coffee = bytes.indexOf(Buffer.from(\"☕\", \"utf8\"));\n  const tokyo = bytes.indexOf(Buffer.from(\"東京\", \"utf8\"));\n  const chunks = [\n    bytes.subarray(0, coffee + 1),\n    bytes.subarray(coffee + 1, tokyo + 2),\n    bytes.subarray(tokyo + 2)\n  ];\n\n  const result = await readAuditExport(chunks);\n  assert.deepEqual(result, { intl: expected });\n});\n\ntest(\"incremental parser emits the original scalar rather than replacement text\", () => {\n  const parser = new JsonSequenceParser();\n  const bytes = Buffer.from(\"\\x1e{\\\"channel\\\":\\\"x\\\",\\\"sequence\\\":0,\\\"text\\\":\\\"🙂\\\"}\\n\", \"utf8\");\n  const scalar = bytes.indexOf(Buffer.from(\"🙂\", \"utf8\"));\n  parser.push(bytes.subarray(0, scalar + 2));\n  parser.push(bytes.subarray(scalar + 2));\n  const records = parser.finish();\n  assert.equal(records[0].text, \"🙂\");\n});\n"
+  }
+}

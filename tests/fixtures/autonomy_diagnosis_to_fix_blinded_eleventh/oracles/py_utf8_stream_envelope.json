@@ -1,0 +1,12 @@
+{
+  "case_id": "py_utf8_stream_envelope",
+  "expected_dimension": "unknown",
+  "expected_files": [
+    "relay_protocol/codec.py",
+    "relay_protocol/framing.py",
+    "relay_protocol/gateway.py"
+  ],
+  "feedback_files": {
+    "tests/test_feedback_protocol_boundaries.py": "from relay_protocol.gateway import EventGateway\n\n\ndef test_present_falsey_metadata_survives_the_wire_boundary():\n    endpoint = EventGateway()\n    event = {\n        \"type\": \"checkpoint\",\n        \"body\": {\"cursor\": \"segment-a\"},\n        \"attempt\": 0,\n        \"durable\": False,\n        \"trace\": \"\",\n    }\n    assert endpoint.feed(endpoint.outbound(event)) == [event]\n\n\ndef test_utf8_payload_uses_the_same_frame_contract_as_ascii():\n    endpoint = EventGateway()\n    event = {\n        \"type\": \"label\",\n        \"body\": {\"city\": \"M\\u00fcnchen\", \"marker\": \"\\u03bb\"},\n        \"attempt\": 1,\n    }\n    assert endpoint.feed(endpoint.outbound(event)) == [event]\n\n\ndef test_a_frame_can_arrive_across_unrelated_packet_boundaries():\n    sender = EventGateway()\n    receiver = EventGateway()\n    event = {\"type\": \"snapshot\", \"body\": {\"partition\": \"north\", \"rows\": 8}}\n    wire = sender.outbound(event)\n    observed = []\n    for chunk in (wire[:2], wire[2:7], wire[7:-3], wire[-3:]):\n        observed.extend(receiver.feed(chunk))\n    assert observed == [event]\n"
+  }
+}

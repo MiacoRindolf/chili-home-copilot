@@ -1,0 +1,148 @@
+{
+  "author_role": "independent_benchmark_author",
+  "assigned_root": "D:/dev/chili-fable5-eleventh-author-node",
+  "fixture_count": 4,
+  "frozen": true,
+  "isolation_attestation": {
+    "attested": true,
+    "source_material_used": [
+      "assignment prompt"
+    ],
+    "prohibited_workspace_or_repository_accessed": false,
+    "git_or_existing_chili_material_accessed": false,
+    "conversation_history_or_external_author_material_accessed": false,
+    "internet_used": false,
+    "packages_installed": false,
+    "nonstandard_libraries_used": false,
+    "repository_files_modified_staged_committed_or_reverted": false,
+    "writes_confined_to_assigned_external_root": true,
+    "temporary_baseline_directories_created_under_assigned_root_and_removed": true
+  },
+  "contract_checks": {
+    "language": "typescript",
+    "test_runner": "node_test",
+    "runtime": "node v24.15.0",
+    "case_ids_unique": true,
+    "exact_case_count": true,
+    "candidate_source_count_per_case_between_3_and_4": true,
+    "one_discoverable_public_test_per_case": true,
+    "feedback_and_final_paths_disjoint": true,
+    "feedback_and_final_payloads_disjoint": true,
+    "expected_file_count_equals_max_files_per_case": true,
+    "no_solution_or_intended_patch_included": true,
+    "deterministic_no_network_no_sleep_no_wall_clock_tests": true
+  },
+  "baseline_statuses": [
+    {
+      "case_id": "node-lifecycle-preabort-generation",
+      "public": {
+        "command": "node --test tests/lifecycle.public.test.mjs",
+        "exit_code": 0,
+        "result": "pass"
+      },
+      "public_plus_feedback": {
+        "command": "node --test tests/lifecycle.public.test.mjs tests/lifecycle.feedback.test.mjs",
+        "exit_code": 1,
+        "result": "fail_as_expected",
+        "observed_behavior": "pre-cancelled lifecycle did not remain cancelled through connection setup"
+      },
+      "public_plus_final": {
+        "command": "node --test tests/lifecycle.public.test.mjs tests/lifecycle.final.test.mjs",
+        "exit_code": 1,
+        "result": "fail_as_expected",
+        "observed_behavior": "a superseded receive affected the active replacement generation"
+      },
+      "candidate_files": 3,
+      "required_source_owners": 2,
+      "mechanism_family": "cancellation snapshot and asynchronous generation ownership",
+      "template_likelihood": "moderate"
+    },
+    {
+      "case_id": "node-jsonseq-utf8-channel-sequence",
+      "public": {
+        "command": "node --test tests/audit.public.test.mjs",
+        "exit_code": 0,
+        "result": "pass"
+      },
+      "public_plus_feedback": {
+        "command": "node --test tests/audit.public.test.mjs tests/audit.feedback.test.mjs",
+        "exit_code": 1,
+        "result": "fail_as_expected",
+        "observed_behavior": "a split UTF-8 scalar was not preserved by incremental record parsing"
+      },
+      "public_plus_final": {
+        "command": "node --test tests/audit.public.test.mjs tests/audit.final.test.mjs",
+        "exit_code": 1,
+        "result": "fail_as_expected",
+        "observed_behavior": "parallel channel sequence namespaces interfered during assembly"
+      },
+      "candidate_files": 3,
+      "required_source_owners": 2,
+      "mechanism_family": "byte-decoder carry state and channel-local protocol counters",
+      "template_likelihood": "low"
+    },
+    {
+      "case_id": "node-policy-empty-overlay-scope-algebra",
+      "public": {
+        "command": "node --test tests/policy.public.test.mjs",
+        "exit_code": 0,
+        "result": "pass"
+      },
+      "public_plus_feedback": {
+        "command": "node --test tests/policy.public.test.mjs tests/policy.feedback.test.mjs",
+        "exit_code": 1,
+        "result": "fail_as_expected",
+        "observed_behavior": "a present empty policy overlay acquired platform defaults"
+      },
+      "public_plus_final": {
+        "command": "node --test tests/policy.public.test.mjs tests/policy.final.test.mjs",
+        "exit_code": 1,
+        "result": "fail_as_expected",
+        "observed_behavior": "tenant-wide and route-local scope groups did not retain distinct authorization roles"
+      },
+      "candidate_files": 3,
+      "required_source_owners": 2,
+      "mechanism_family": "presence-sensitive configuration and mixed policy algebra",
+      "template_likelihood": "low"
+    },
+    {
+      "case_id": "node-cache-locale-order-retry-slot",
+      "public": {
+        "command": "node --test tests/catalog.public.test.mjs",
+        "exit_code": 0,
+        "result": "pass"
+      },
+      "public_plus_feedback": {
+        "command": "node --test tests/catalog.public.test.mjs tests/catalog.feedback.test.mjs",
+        "exit_code": 1,
+        "result": "fail_as_expected",
+        "observed_behavior": "distinct locale preference priorities shared a cache identity"
+      },
+      "public_plus_final": {
+        "command": "node --test tests/catalog.public.test.mjs tests/catalog.final.test.mjs",
+        "exit_code": 1,
+        "result": "fail_as_expected",
+        "observed_behavior": "a rejected coalesced load remained the result of a later request"
+      },
+      "candidate_files": 4,
+      "required_source_owners": 2,
+      "mechanism_family": "ordered negotiation identity and rejected asynchronous slot state",
+      "template_likelihood": "low"
+    }
+  ],
+  "sha256": {
+    "cases/node-lifecycle-preabort-generation.json": "a3d05a175fb3a761e629b555e9a935bb688a1fcbb8e9b8016dfb663d9adadeb9",
+    "cases/node-jsonseq-utf8-channel-sequence.json": "f7c473766fd5605b8fdd723379667416d283d1e25e100012109d594d74d3b046",
+    "cases/node-policy-empty-overlay-scope-algebra.json": "a51d908ae1387410a96ca4843b6e2089c048348bc91dba75b9e83d4296affb36",
+    "cases/node-cache-locale-order-retry-slot.json": "e61dc420e22dd3de9e6b7d3668f79b81f220b26a38d46466ed0cad9c8c4cbdb6",
+    "oracles/node-lifecycle-preabort-generation.json": "7f12fcbba4436c446ea62b377d1b10938d5ce1c5a1ed0ef93140247044d51556",
+    "oracles/node-jsonseq-utf8-channel-sequence.json": "dac8dc266cfd6c87889c5c1baf105e4e95b78c4f3e0af12977a7e6dfc6eb713e",
+    "oracles/node-policy-empty-overlay-scope-algebra.json": "65ef66ab4669454c0684c5d416e578689622c9ef7278ba4a3a328708614d6895",
+    "oracles/node-cache-locale-order-retry-slot.json": "3e1c7ea74b69a47e16cbf7106eb5b38e0e6d2cff9f8c7a451fa28493d3847a57",
+    "final_oracles/node-lifecycle-preabort-generation.json": "a221129449d0ffbbfc83b9bd0f67793f696c9a55b69fa9803f627d3e8ced8d27",
+    "final_oracles/node-jsonseq-utf8-channel-sequence.json": "c36fff7eedea1c4dd462fdc1cd0ffcfaef00b7c617a1b205e4b0b00c64c9797c",
+    "final_oracles/node-policy-empty-overlay-scope-algebra.json": "0330b0cb0ae930c0f166745f3da24070acc0fcffa4c87009f58da69ccc913dc6",
+    "final_oracles/node-cache-locale-order-retry-slot.json": "4db3bc02642e4f0e8812be92f9c2e8a16cb9c46dedef1bb91412471443235af5",
+    "manifest.fragment.json": "4ab1f2d83969b78ea51e478c9c05deeb814519073fc966e920c8e5870b69a973"
+  }
+}

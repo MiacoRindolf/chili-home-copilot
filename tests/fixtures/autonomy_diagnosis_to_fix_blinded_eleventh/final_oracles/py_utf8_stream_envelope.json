@@ -1,0 +1,6 @@
+{
+  "case_id": "py_utf8_stream_envelope",
+  "final_files": {
+    "tests/test_final_stream_composition.py": "from relay_protocol.gateway import EventGateway\n\n\ndef collect(receiver, chunks):\n    events = []\n    for chunk in chunks:\n        events.extend(receiver.feed(chunk))\n    return events\n\n\ndef test_one_byte_chunks_preserve_empty_and_zero_metadata():\n    sender = EventGateway()\n    receiver = EventGateway()\n    event = {\n        \"type\": \"audit\",\n        \"body\": {\"region\": \"\\u6771\\u4eac\", \"sequence\": 0},\n        \"attempt\": 0,\n        \"durable\": False,\n    }\n    wire = sender.outbound(event)\n    assert collect(receiver, (wire[index : index + 1] for index in range(len(wire)))) == [\n        event\n    ]\n\n\ndef test_fragmented_then_coalesced_frames_keep_message_boundaries():\n    sender = EventGateway()\n    receiver = EventGateway()\n    first = {\"type\": \"note\", \"body\": {\"text\": \"caf\\u00e9\"}, \"trace\": \"\"}\n    second = {\"type\": \"note\", \"body\": {\"text\": \"plain\"}, \"durable\": False}\n    third = {\"type\": \"note\", \"body\": {\"text\": \"\\U0001f680\"}, \"attempt\": 3}\n    combined = sender.outbound(first) + sender.outbound(second) + sender.outbound(third)\n    cuts = (combined[:5], combined[5:19], combined[19:])\n    assert collect(receiver, cuts) == [first, second, third]\n"
+  }
+}

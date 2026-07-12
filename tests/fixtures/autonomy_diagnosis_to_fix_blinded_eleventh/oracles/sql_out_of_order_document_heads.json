@@ -1,0 +1,11 @@
+{
+  "case_id": "sql_out_of_order_document_heads",
+  "expected_dimension": "unknown",
+  "expected_files": [
+    "sql/002_head_triggers.sql",
+    "sql/read_current.sql"
+  ],
+  "feedback_files": {
+    "tests/test_reconnect_feedback.py": "import sqlite3\nfrom pathlib import Path\n\n\nROOT = Path(__file__).resolve().parents[1]\n\n\ndef test_late_reconnect_batch_does_not_regress_the_visible_head():\n    db = sqlite3.connect(\":memory:\")\n    db.row_factory = sqlite3.Row\n    db.executescript((ROOT / \"sql/001_schema.sql\").read_text())\n    db.executescript((ROOT / \"sql/002_head_triggers.sql\").read_text())\n    db.execute(\"INSERT INTO documents VALUES ('guide', 'Guide')\")\n    db.executemany(\n        \"\"\"INSERT INTO document_versions\n           (document_id, version_id, logical_clock, body, import_batch)\n           VALUES ('guide', ?, ?, ?, ?)\"\"\",\n        [\n            (\"g-4\", 4, \"initial\", \"online-1\"),\n            (\"g-10\", 10, \"approved\", \"online-2\"),\n            (\"g-6\", 6, \"delayed offline edit\", \"reconnect-old\"),\n        ],\n    )\n\n    stored_head = db.execute(\n        \"SELECT version_id, logical_clock FROM document_heads WHERE document_id = 'guide'\"\n    ).fetchone()\n    assert tuple(stored_head) == (\"g-10\", 10)\n\n    visible = db.execute((ROOT / \"sql/read_current.sql\").read_text()).fetchone()\n    assert visible[\"version_id\"] == \"g-10\"\n    assert visible[\"body\"] == \"approved\"\n    assert visible[\"logical_clock\"] == 10\n"
+  }
+}

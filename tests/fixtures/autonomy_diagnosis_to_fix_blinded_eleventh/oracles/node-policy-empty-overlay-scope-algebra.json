@@ -1,0 +1,11 @@
+{
+  "case_id": "node-policy-empty-overlay-scope-algebra",
+  "expected_dimension": "config",
+  "expected_files": [
+    "src/policy-config.mjs",
+    "src/authorize-request.mjs"
+  ],
+  "feedback_files": {
+    "tests/policy.feedback.test.mjs": "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\n\nimport { buildPolicy } from \"../src/policy-config.mjs\";\nimport { ReportService } from \"../src/report-service.mjs\";\n\nconst defaults = {\n  allowedRegions: [\"us-west\", \"us-east\"],\n  requiredScopes: [\"tenant:verified\"]\n};\n\ntest(\"a present empty regional overlay remains deny-all\", () => {\n  const policy = buildPolicy(defaults, { allowedRegions: [] });\n  assert.deepEqual(policy.allowedRegions, []);\n  assert.deepEqual(policy.requiredScopes, [\"tenant:verified\"]);\n});\n\ntest(\"deny-all regional configuration rejects an otherwise complete principal\", () => {\n  const service = new ReportService({ defaults, overlay: { allowedRegions: [] } });\n  const response = service.readSummary({\n    tenant: \"frozen-tenant\",\n    region: \"us-west\",\n    scopes: [\"tenant:verified\", \"report:admin\"]\n  });\n  assert.equal(response.status, 403);\n  assert.equal(response.code, \"region_not_allowed\");\n});\n"
+  }
+}

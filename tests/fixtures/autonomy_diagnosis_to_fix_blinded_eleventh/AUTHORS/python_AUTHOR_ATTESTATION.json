@@ -1,0 +1,105 @@
+{
+  "authoring_root": "D:\\dev\\chili-fable5-eleventh-author-python",
+  "case_count": 4,
+  "isolation_attestation": {
+    "statement": "These fixtures were independently authored from the assignment prompt only. No CHILI workspace, Git repository or history, existing fixture, report, test, source, prior benchmark material, conversation history, or internet resource was read, searched, listed, or inspected.",
+    "forbidden_material_accessed": false,
+    "repository_files_modified": false,
+    "internet_used": false,
+    "packages_installed": false,
+    "fixture_code_uses_language_standard_library_only": true
+  },
+  "validation": {
+    "method": "Each suite combination was materialized in its own temporary directory under the assigned external root and executed with pytest plugin autoload and bytecode writes disabled.",
+    "environment": {
+      "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+      "PYTHONDONTWRITEBYTECODE": "1"
+    },
+    "temporary_directories_removed": true
+  },
+  "baseline_statuses": {
+    "py_epoch_fenced_reconnect": {
+      "public": {
+        "command": "python -m pytest -q -p no:cacheprovider tests/test_public.py",
+        "exit_code": 0,
+        "result": "2 passed in 0.02s"
+      },
+      "public_plus_feedback": {
+        "command": "python -m pytest -q -p no:cacheprovider tests/test_public.py tests/test_feedback_delayed_disconnect.py",
+        "exit_code": 1,
+        "result": "1 failed, 2 passed in 0.07s"
+      },
+      "public_plus_final": {
+        "command": "python -m pytest -q -p no:cacheprovider tests/test_public.py tests/test_final_out_of_order_lifecycle.py",
+        "exit_code": 1,
+        "result": "1 failed, 2 passed in 0.09s"
+      }
+    },
+    "py_utf8_stream_envelope": {
+      "public": {
+        "command": "python -m pytest -q -p no:cacheprovider tests/test_public.py",
+        "exit_code": 0,
+        "result": "2 passed in 0.01s"
+      },
+      "public_plus_feedback": {
+        "command": "python -m pytest -q -p no:cacheprovider tests/test_public.py tests/test_feedback_protocol_boundaries.py",
+        "exit_code": 1,
+        "result": "3 failed, 2 passed in 0.07s"
+      },
+      "public_plus_final": {
+        "command": "python -m pytest -q -p no:cacheprovider tests/test_public.py tests/test_final_stream_composition.py",
+        "exit_code": 1,
+        "result": "2 failed, 2 passed in 0.07s"
+      }
+    },
+    "py_atomic_idempotent_transfer": {
+      "public": {
+        "command": "python -m pytest -q -p no:cacheprovider tests/test_public.py",
+        "exit_code": 0,
+        "result": "2 passed in 0.01s"
+      },
+      "public_plus_feedback": {
+        "command": "python -m pytest -q -p no:cacheprovider tests/test_public.py tests/test_feedback_atomic_failure.py",
+        "exit_code": 1,
+        "result": "4 failed, 2 passed in 0.09s"
+      },
+      "public_plus_final": {
+        "command": "python -m pytest -q -p no:cacheprovider tests/test_public.py tests/test_final_transaction_recovery.py",
+        "exit_code": 1,
+        "result": "2 failed, 2 passed in 0.09s"
+      }
+    },
+    "py_layered_config_client_rotation": {
+      "public": {
+        "command": "python -m pytest -q -p no:cacheprovider tests/test_public.py",
+        "exit_code": 0,
+        "result": "2 passed in 0.02s"
+      },
+      "public_plus_feedback": {
+        "command": "python -m pytest -q -p no:cacheprovider tests/test_public.py tests/test_feedback_reload_dependencies.py",
+        "exit_code": 1,
+        "result": "2 failed, 2 passed in 0.06s"
+      },
+      "public_plus_final": {
+        "command": "python -m pytest -q -p no:cacheprovider tests/test_public.py tests/test_final_effective_snapshot.py",
+        "exit_code": 1,
+        "result": "2 failed, 2 passed in 0.07s"
+      }
+    }
+  },
+  "sha256": {
+    "cases/py_epoch_fenced_reconnect.json": "20a827e7076cc91c375f7865e2bcb380b93687f980d69b900fd948ebc9d84cc3",
+    "cases/py_utf8_stream_envelope.json": "a98aa5de439fbf850a76d261d9c79a97169b5e53c4a8fd41914e9f9c8dc8c2ef",
+    "cases/py_atomic_idempotent_transfer.json": "a4527a79415b1933e6d504255b832804aa6ac5ee7c9219785104d19f279a9fdd",
+    "cases/py_layered_config_client_rotation.json": "3e6a3d1c74bdb5306b30d9bf20b92819d1af24f0769fbfdabeea148e0032c40e",
+    "oracles/py_epoch_fenced_reconnect.json": "7811483c5acb3e513bcd08e2d2ad59235fb4cc10e5fc153388bec9a6202db457",
+    "oracles/py_utf8_stream_envelope.json": "7c88b579bf2089a90af142bf3d32fd2ac7fedd0055f059697bd361bc5ed8694a",
+    "oracles/py_atomic_idempotent_transfer.json": "3ff7e26b6fed8af2de582edf261abaad08d32d0cab2d03c61e8b8118d7980ef6",
+    "oracles/py_layered_config_client_rotation.json": "4f88142bc72ebeaa9129704181a875163cdaab7ac7fb36d4411256c0dfe37fbc",
+    "final_oracles/py_epoch_fenced_reconnect.json": "28b4546545b847bd16f3a7b0ad56df941100116876fdba99284c7c24e8b8a562",
+    "final_oracles/py_utf8_stream_envelope.json": "450a1833dc9a2017edb8b743e3f2010f27ea8d458b3e06a726c7941ddf662ee7",
+    "final_oracles/py_atomic_idempotent_transfer.json": "c74f6e226db62214b6bceab044e18e093dd164148baa20dc7dc9cde06abeffd8",
+    "final_oracles/py_layered_config_client_rotation.json": "29fc17e5891c6f06832ab9003a6457415f6ef6b65a71e4749d8999887a455265",
+    "manifest.fragment.json": "539e41c3b11c8fc1bfa690c7a9e72b973d90f4f29bb289ad88869beb374e5e5b"
+  }
+}

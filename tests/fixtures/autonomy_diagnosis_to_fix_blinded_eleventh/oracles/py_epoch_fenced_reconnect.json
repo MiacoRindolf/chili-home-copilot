@@ -1,0 +1,12 @@
+{
+  "case_id": "py_epoch_fenced_reconnect",
+  "expected_dimension": "unknown",
+  "expected_files": [
+    "lease_runtime/registry.py",
+    "lease_runtime/task_queue.py",
+    "lease_runtime/coordinator.py"
+  ],
+  "feedback_files": {
+    "tests/test_feedback_delayed_disconnect.py": "from lease_runtime.coordinator import WorkerCoordinator\nfrom lease_runtime.registry import LeaseRegistry\nfrom lease_runtime.task_queue import TaskQueue\n\n\ndef test_delayed_disconnect_only_retires_work_from_that_connection():\n    registry = LeaseRegistry()\n    queue = TaskQueue()\n    coordinator = WorkerCoordinator(registry, queue)\n    retired = coordinator.connect(\"worker-19\")\n    queue.add(\"retired-job\", {\"batch\": \"old\"})\n    assert coordinator.assign(\"retired-job\", retired)\n\n    _, replacement = coordinator.replace(\"worker-19\")\n    queue.add(\"replacement-job\", {\"batch\": \"new\"})\n    assert coordinator.assign(\"replacement-job\", replacement)\n\n    assert coordinator.disconnect(retired) == 1\n\n    assert registry.is_active(replacement)\n    assert queue.get(\"retired-job\").state == \"pending\"\n    new_task = queue.get(\"replacement-job\")\n    assert (new_task.state, new_task.owner_generation) == (\n        \"leased\",\n        replacement.generation,\n    )\n    assert not coordinator.complete(\"replacement-job\", retired)\n    assert coordinator.complete(\"replacement-job\", replacement)\n"
+  }
+}

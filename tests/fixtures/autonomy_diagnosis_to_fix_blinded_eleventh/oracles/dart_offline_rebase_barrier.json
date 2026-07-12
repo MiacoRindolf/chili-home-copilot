@@ -1,0 +1,11 @@
+{
+  "case_id": "dart_offline_rebase_barrier",
+  "expected_dimension": "state",
+  "expected_files": [
+    "lib/outbox.dart",
+    "lib/replica.dart"
+  ],
+  "feedback_files": {
+    "tests/offline_reconnect_feedback_test.dart": "import '../lib/model.dart';\nimport '../lib/outbox.dart';\nimport '../lib/replica.dart';\n\nvoid check(bool condition, String message) {\n  if (!condition) throw StateError(message);\n}\n\nvoid main() {\n  final queue = Outbox();\n  queue.enqueue(Mutation(\n    id: 'unsent-ack',\n    key: 'note',\n    value: 'keep me',\n    basedOnRevision: 6,\n  ));\n  check(queue.openSession(101).length == 1, 'initial delivery is available');\n  final afterReconnect = queue.openSession(102);\n  check(\n    afterReconnect.map((item) => item.id).toList().join(',') == 'unsent-ack',\n    'unacknowledged work must be offered to the replacement session',\n  );\n\n  final replica = Replica(\n    revision: 6,\n    values: {'note': 'server copy', 'presence': 'old'},\n  );\n  replica.edit('local-note', 'note', 'offline copy');\n  replica.receiveSnapshot(Snapshot(9, {\n    'note': 'remote copy',\n    'presence': 'new',\n  }));\n  check(\n    replica.visible['note'] == 'offline copy',\n    'a reconnect snapshot must not hide pending local intent',\n  );\n  check(replica.visible['presence'] == 'new', 'remote changes still merge in');\n  check(\n    replica.outbox.pending.single.basedOnRevision == 9,\n    'pending intent is rebased to the received revision',\n  );\n}\n"
+  }
+}

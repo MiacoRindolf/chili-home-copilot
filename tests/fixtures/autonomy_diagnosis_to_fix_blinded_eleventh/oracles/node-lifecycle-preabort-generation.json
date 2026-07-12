@@ -1,0 +1,11 @@
+{
+  "case_id": "node-lifecycle-preabort-generation",
+  "expected_dimension": "state",
+  "expected_files": [
+    "src/abort-link.mjs",
+    "src/session-pump.mjs"
+  ],
+  "feedback_files": {
+    "tests/lifecycle.feedback.test.mjs": "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\n\nimport { linkAbort } from \"../src/abort-link.mjs\";\nimport { ConnectionService } from \"../src/connection-service.mjs\";\n\ntest(\"linking an already-cancelled parent preserves cancellation immediately\", () => {\n  const parent = new AbortController();\n  const reason = new Error(\"drain already active\");\n  parent.abort(reason);\n\n  const linked = linkAbort(parent.signal);\n  assert.equal(linked.signal.aborted, true);\n  assert.equal(linked.signal.reason, reason);\n  linked.dispose();\n});\n\ntest(\"a pre-cancelled connection never opens its transport\", async () => {\n  const parent = new AbortController();\n  const reason = new Error(\"deployment drain\");\n  parent.abort(reason);\n  let opens = 0;\n  const transport = {\n    name: \"should-not-open\",\n    async open() {\n      opens += 1;\n    },\n    async receive() {\n      return null;\n    }\n  };\n\n  const service = new ConnectionService();\n  await assert.rejects(service.connect(transport, parent.signal), (error) => error === reason);\n  assert.equal(opens, 0);\n});\n"
+  }
+}

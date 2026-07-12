@@ -1,0 +1,11 @@
+{
+  "case_id": "node-cache-locale-order-retry-slot",
+  "expected_dimension": "state",
+  "expected_files": [
+    "src/catalog-cache-key.mjs",
+    "src/async-slot-cache.mjs"
+  ],
+  "feedback_files": {
+    "tests/catalog.feedback.test.mjs": "import test from \"node:test\";\nimport assert from \"node:assert/strict\";\n\nimport { catalogCacheKey } from \"../src/catalog-cache-key.mjs\";\nimport { AsyncSlotCache } from \"../src/async-slot-cache.mjs\";\nimport { CatalogService } from \"../src/catalog-service.mjs\";\n\ntest(\"preference lists with different priority produce distinct cache identities\", () => {\n  const frenchFirst = catalogCacheKey({ tenant: \"acme\", preferredLocales: [\"fr\", \"en\"] });\n  const englishFirst = catalogCacheKey({ tenant: \"acme\", preferredLocales: [\"en\", \"fr\"] });\n  assert.notEqual(frenchFirst, englishFirst);\n});\n\ntest(\"reversing locale preference selects the newly preferred available catalog\", async () => {\n  let loads = 0;\n  const service = new CatalogService({\n    cache: new AsyncSlotCache(),\n    availableLocales: [\"en\", \"fr\"],\n    async loadCatalog({ tenant, locale }) {\n      loads += 1;\n      return { tenant, locale, load: loads };\n    }\n  });\n\n  const french = await service.getCatalog({ tenant: \"acme\", preferredLocales: [\"fr\", \"en\"] });\n  const english = await service.getCatalog({ tenant: \"acme\", preferredLocales: [\"en\", \"fr\"] });\n  assert.equal(french.locale, \"fr\");\n  assert.equal(english.locale, \"en\");\n  assert.equal(loads, 2);\n});\n"
+  }
+}

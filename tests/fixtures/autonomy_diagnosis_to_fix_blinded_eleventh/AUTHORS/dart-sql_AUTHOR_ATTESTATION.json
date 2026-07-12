@@ -1,0 +1,179 @@
+{
+  "receipt_version": 1,
+  "authored_on": "2026-07-12",
+  "root": "D:\\dev\\chili-fable5-eleventh-author-dart-sql",
+  "isolation_attestation": {
+    "attested": true,
+    "mode": "write-only fixture authoring",
+    "statement": "These fixtures were authored using only the task prompt and files created under the assigned external root. No CHILI repository, repository history, existing fixture, report, test, source, prior conversation material, Claude/Fable material, or internet resource was read, searched, listed, or inspected. No repository file was modified, staged, committed, or reverted.",
+    "repository_accessed": false,
+    "internet_accessed": false,
+    "third_party_packages_installed": false,
+    "solution_or_intended_patch_included": false,
+    "standard_library_only_fixture_code": true
+  },
+  "inventory": {
+    "case_count": 4,
+    "dart_cases": 2,
+    "sql_cases": 2,
+    "unknown_non_template_cases": [
+      "dart_lifecycle_handoff_epoch",
+      "sql_out_of_order_document_heads"
+    ],
+    "authored_file_count_excluding_receipt": 13
+  },
+  "case_ownership": {
+    "dart_offline_rebase_barrier": {
+      "max_files": 2,
+      "mechanism_family": "offline redelivery plus optimistic snapshot rebase"
+    },
+    "dart_lifecycle_handoff_epoch": {
+      "max_files": 3,
+      "mechanism_family": "shared leases, catch-up handoff, and lifecycle ABA rejection"
+    },
+    "sql_out_of_order_document_heads": {
+      "max_files": 2,
+      "mechanism_family": "monotonic logical heads under late immutable imports"
+    },
+    "sql_settlement_lifecycle_reassignment": {
+      "max_files": 3,
+      "mechanism_family": "materialized transition effects, reassignment, and total reporting"
+    }
+  },
+  "validation": {
+    "isolated_temporary_directories": true,
+    "temporary_directories_removed": true,
+    "dart_version": "3.11.1 stable",
+    "pytest_version": "9.0.2",
+    "required_status_pattern": {
+      "public": "pass",
+      "public_feedback": "expected_fail",
+      "public_final": "expected_fail"
+    },
+    "case_baselines": {
+      "dart_offline_rebase_barrier": {
+        "public": {
+          "commands": [
+            "dart run tests/offline_public_test.dart"
+          ],
+          "exit_code": 0,
+          "status": "pass",
+          "summary": "no output"
+        },
+        "public_feedback": {
+          "commands": [
+            "dart run tests/offline_public_test.dart",
+            "dart run tests/offline_reconnect_feedback_test.dart"
+          ],
+          "exit_code": 255,
+          "status": "expected_fail",
+          "summary": "no output || Unhandled exception: | Bad state: unacknowledged work must be offered to the replacement session"
+        },
+        "public_final": {
+          "commands": [
+            "dart run tests/offline_public_test.dart",
+            "dart run tests/offline_reconnect_final_test.dart"
+          ],
+          "exit_code": 255,
+          "status": "expected_fail",
+          "summary": "no output || Unhandled exception: | Bad state: a replacement transport receives old and newly queued intent in order"
+        }
+      },
+      "dart_lifecycle_handoff_epoch": {
+        "public": {
+          "commands": [
+            "dart run tests/connectivity_public_test.dart"
+          ],
+          "exit_code": 0,
+          "status": "pass",
+          "summary": "no output"
+        },
+        "public_feedback": {
+          "commands": [
+            "dart run tests/connectivity_public_test.dart",
+            "dart run tests/connectivity_handoff_feedback_test.dart"
+          ],
+          "exit_code": 255,
+          "status": "expected_fail",
+          "summary": "no output || Unhandled exception: | Bad state: a nonempty lease set still wants transport"
+        },
+        "public_final": {
+          "commands": [
+            "dart run tests/connectivity_public_test.dart",
+            "dart run tests/connectivity_resume_final_test.dart"
+          ],
+          "exit_code": 255,
+          "status": "expected_fail",
+          "summary": "no output || Unhandled exception: | Bad state: the summary lease remains live after editor exit"
+        }
+      },
+      "sql_out_of_order_document_heads": {
+        "public": {
+          "commands": [
+            "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q"
+          ],
+          "exit_code": 0,
+          "status": "pass",
+          "summary": ".                                                                        [100%] | 1 passed in 0.02s"
+        },
+        "public_feedback": {
+          "commands": [
+            "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q"
+          ],
+          "exit_code": 1,
+          "status": "expected_fail",
+          "summary": "=========================== short test summary info =========================== | FAILED tests/test_reconnect_feedback.py::test_late_reconnect_batch_does_not_regress_the_visible_head | 1 failed, 1 passed in 0.10s"
+        },
+        "public_final": {
+          "commands": [
+            "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q"
+          ],
+          "exit_code": 1,
+          "status": "expected_fail",
+          "summary": "=========================== short test summary info =========================== | FAILED tests/test_archive_restore_final.py::test_interleaved_archive_restore_preserves_each_documents_high_water_mark | 1 failed, 1 passed in 0.09s"
+        }
+      },
+      "sql_settlement_lifecycle_reassignment": {
+        "public": {
+          "commands": [
+            "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q"
+          ],
+          "exit_code": 0,
+          "status": "pass",
+          "summary": ".                                                                        [100%] | 1 passed in 0.03s"
+        },
+        "public_feedback": {
+          "commands": [
+            "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q"
+          ],
+          "exit_code": 1,
+          "status": "expected_fail",
+          "summary": "FAILED tests/test_settlement_feedback.py::test_reassigning_a_posted_line_moves_the_whole_effect | FAILED tests/test_settlement_feedback.py::test_report_keeps_wallets_without_nonvoid_lines | 3 failed, 1 passed in 0.10s"
+        },
+        "public_final": {
+          "commands": [
+            "C:\\Users\\rindo\\miniconda3\\python.exe -m pytest -q"
+          ],
+          "exit_code": 1,
+          "status": "expected_fail",
+          "summary": "=========================== short test summary info =========================== | FAILED tests/test_settlement_correction_final.py::test_correction_handoff_and_void_leave_a_complete_consistent_report | 1 failed, 1 passed in 0.12s"
+        }
+      }
+    }
+  },
+  "sha256": {
+    "cases/dart_lifecycle_handoff_epoch.json": "6688cf916f0090804f10d048e533448d23900f11237c4ec5ba8305bf1249c144",
+    "cases/dart_offline_rebase_barrier.json": "417e1f31d4da67de9ef8df7de879a95207f4347d42ad89fd562592f93e6449c0",
+    "cases/sql_out_of_order_document_heads.json": "a6144a0cd2618246c9f5fe6f7bcd5f25647c6107bba5b307dcd8c90056271462",
+    "cases/sql_settlement_lifecycle_reassignment.json": "b2a6251dc18a461b6be992549ea3b2d2e6eb7cb34f8de43110cb77b6fcf8abf3",
+    "final_oracles/dart_lifecycle_handoff_epoch.json": "8560faa2f19108febb78a30a3d43f054c7c5f8f26ff62a98e52114c8412d05bd",
+    "final_oracles/dart_offline_rebase_barrier.json": "94cdc505f8f476cdef406c731b9e361c31627704ac62aebdd0bee0bbf946487d",
+    "final_oracles/sql_out_of_order_document_heads.json": "f473973c3b2e99a05735a2a751ca7ac77f36a0482afe51729127b25e330bbaee",
+    "final_oracles/sql_settlement_lifecycle_reassignment.json": "fa52d11f972bf8733dd35e3d27ce1c7f465ce99aae3464c1944b6ca2f1b520c1",
+    "manifest.fragment.json": "6374e7abaef792ad213c712d4f55d5ddf018bc843477ed0aeeb3d014762c7636",
+    "oracles/dart_lifecycle_handoff_epoch.json": "d7c69903b70360483e8fade5a865b510eb064be6e024d07cff799c9bdc115b3a",
+    "oracles/dart_offline_rebase_barrier.json": "a6e06e13e122ca515e42a06f6b3b8877cbc202820fc31c18b4ce92647b09b9d5",
+    "oracles/sql_out_of_order_document_heads.json": "ea3d6ce3d7b218bc4398bd4ba93fc8a537789a6f9c014b5057be8fddb0e8c901",
+    "oracles/sql_settlement_lifecycle_reassignment.json": "4e21db8e5def4a979ed3747a1a22d9418c9bec871fd5a463eec4c3a6eb0b9dab"
+  }
+}

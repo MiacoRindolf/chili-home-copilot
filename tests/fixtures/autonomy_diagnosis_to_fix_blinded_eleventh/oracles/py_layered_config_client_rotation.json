@@ -1,0 +1,12 @@
+{
+  "case_id": "py_layered_config_client_rotation",
+  "expected_dimension": "dependency",
+  "expected_files": [
+    "delivery/config.py",
+    "delivery/client_pool.py",
+    "delivery/router.py"
+  ],
+  "feedback_files": {
+    "tests/test_feedback_reload_dependencies.py": "from delivery.client_pool import ClientPool\nfrom delivery.config import load_endpoint\nfrom delivery.router import DeliveryRouter\n\n\ndef test_empty_optional_overrides_leave_base_values_effective():\n    config = load_endpoint(\n        {\n            \"service\": \"webhook\",\n            \"endpoint\": \"https://primary.invalid\",\n            \"token\": \"primary-token\",\n            \"revision\": 6,\n        },\n        {\"DELIVERY_ENDPOINT\": \"\", \"DELIVERY_TOKEN\": \"\"},\n    )\n    assert (config.endpoint, config.token) == (\n        \"https://primary.invalid\",\n        \"primary-token\",\n    )\n\n\ndef test_reload_rotates_existing_and_new_topic_dependencies():\n    pool = ClientPool()\n    initial = load_endpoint(\n        {\n            \"service\": \"webhook\",\n            \"endpoint\": \"https://region-a.invalid\",\n            \"token\": \"token-a\",\n            \"revision\": 1,\n        },\n        {},\n    )\n    router = DeliveryRouter(initial, pool)\n    before = router.deliver(\"orders\", {\"number\": 10})\n    assert (before.endpoint, before.credential) == (\n        \"https://region-a.invalid\",\n        \"token-a\",\n    )\n\n    rotated = load_endpoint(\n        {\n            \"service\": \"webhook\",\n            \"endpoint\": \"https://region-b.invalid\",\n            \"token\": \"token-b\",\n            \"revision\": 2,\n        },\n        {},\n    )\n    router.reload(rotated)\n    recurring = router.deliver(\"orders\", {\"number\": 11})\n    unseen = router.deliver(\"refunds\", {\"number\": 12})\n    assert (recurring.endpoint, recurring.credential) == (\n        \"https://region-b.invalid\",\n        \"token-b\",\n    )\n    assert (unseen.endpoint, unseen.credential) == (\n        \"https://region-b.invalid\",\n        \"token-b\",\n    )\n"
+  }
+}

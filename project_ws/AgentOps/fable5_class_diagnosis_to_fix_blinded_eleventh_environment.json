@@ -1,0 +1,29 @@
+{
+  "schema": "chili.eleventh-holdout-environment.v1",
+  "captured_at": "2026-07-12T12:35:29.8801492-07:00",
+  "operating_system": "Microsoft Windows NT 10.0.26200.0",
+  "powershell": "5.1.26100.8737",
+  "python": "3.13.11",
+  "node": "24.15.0",
+  "dart": "3.11.1 stable windows_x64",
+  "ollama": "0.31.2",
+  "gpu": {
+    "name": "NVIDIA GeForce RTX 2070",
+    "memory_mib": 8192,
+    "driver": "591.86"
+  },
+  "models": {
+    "primary": {
+      "name": "qwen2.5-coder:7b",
+      "ollama_id": "dae161e27b0e",
+      "artifact_size_gb": 4.7
+    },
+    "escalation": {
+      "name": "qwen2.5-coder:14b",
+      "ollama_id": "9ec8897f747e",
+      "artifact_size_gb": 9.0
+    }
+  },
+  "premium_models_available_to_runner": false,
+  "network_required_by_runner": false
+}

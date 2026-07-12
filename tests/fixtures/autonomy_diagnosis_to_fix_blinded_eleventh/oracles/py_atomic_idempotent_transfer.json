@@ -1,0 +1,12 @@
+{
+  "case_id": "py_atomic_idempotent_transfer",
+  "expected_dimension": "data",
+  "expected_files": [
+    "payments/wallet_store.py",
+    "payments/journal.py",
+    "payments/service.py"
+  ],
+  "feedback_files": {
+    "tests/test_feedback_atomic_failure.py": "import pytest\n\nfrom payments.journal import Journal, JournalWriteError\nfrom payments.service import TransferService\nfrom payments.wallet_store import InsufficientFunds, WalletStore\n\n\ndef wallets_with_pair():\n    wallets = WalletStore()\n    wallets.create(\"payer\", 500)\n    wallets.create(\"payee\", 40)\n    return wallets\n\n\ndef test_wallet_atomic_scope_restores_nested_balances():\n    wallets = wallets_with_pair()\n    with pytest.raises(RuntimeError):\n        with wallets.atomic():\n            wallets.move(\"payer\", \"payee\", 125)\n            raise RuntimeError(\"abort unit of work\")\n    assert (wallets.balance(\"payer\"), wallets.balance(\"payee\")) == (500, 40)\n\n\ndef test_journal_adapter_failure_does_not_publish_half_a_transfer():\n    journal = Journal()\n    journal.fail_once_for.add(\"journal-44\")\n    with pytest.raises(JournalWriteError):\n        journal.record_transfer(\"journal-44\", \"payer\", \"payee\", 70)\n    assert journal.entries_for(\"journal-44\") == []\n\n\ndef test_failed_request_can_retry_with_the_same_identity():\n    wallets = wallets_with_pair()\n    journal = Journal()\n    journal.fail_once_for.add(\"retry-44\")\n    service = TransferService(wallets, journal)\n    with pytest.raises(JournalWriteError):\n        service.transfer(\"retry-44\", \"payer\", \"payee\", 70)\n\n    assert (wallets.balance(\"payer\"), wallets.balance(\"payee\")) == (500, 40)\n    assert journal.entries_for(\"retry-44\") == []\n    result = service.transfer(\"retry-44\", \"payer\", \"payee\", 70)\n    assert result[\"status\"] == \"committed\"\n    assert (wallets.balance(\"payer\"), wallets.balance(\"payee\")) == (430, 110)\n    assert [entry[\"delta\"] for entry in journal.entries_for(\"retry-44\")] == [-70, 70]\n\n\ndef test_insufficient_request_identity_is_not_consumed():\n    wallets = wallets_with_pair()\n    journal = Journal()\n    service = TransferService(wallets, journal)\n    with pytest.raises(InsufficientFunds):\n        service.transfer(\"fund-later\", \"payer\", \"payee\", 650)\n    wallets.deposit(\"payer\", 200)\n    result = service.transfer(\"fund-later\", \"payer\", \"payee\", 650)\n    assert result[\"status\"] == \"committed\"\n    assert (wallets.balance(\"payer\"), wallets.balance(\"payee\")) == (50, 690)\n"
+  }
+}

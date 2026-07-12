@@ -1,0 +1,890 @@
+{
+  "schema": "chili.validator-receipt.v1",
+  "validated_on": "2026-07-12",
+  "validator_role": "independent_validator_and_assembler",
+  "output_root": "D:\\dev\\chili-fable5-eleventh-validated",
+  "isolation_attestation": {
+    "statement": "Validation used only the three assigned external author roots and wrote only the assigned external output root. No CHILI workspace or repository, Git history, prior fixture/report/source/test material, conversation history, Claude/Fable material, or internet resource was read, searched, listed, or inspected.",
+    "allowed_input_roots": [
+      "D:\\dev\\chili-fable5-eleventh-author-python",
+      "D:\\dev\\chili-fable5-eleventh-author-node",
+      "D:\\dev\\chili-fable5-eleventh-author-dart-sql"
+    ],
+    "forbidden_material_accessed": false,
+    "repository_or_git_accessed": false,
+    "repository_files_modified_staged_committed_or_reverted": false,
+    "internet_used": false,
+    "writes_confined_to_output_root": true,
+    "temporary_run_directories_confined_to_output_root": true,
+    "temporary_run_directories_removed": true
+  },
+  "runtime": {
+    "python": "3.13.11",
+    "node": "24.15.0",
+    "dart": "3.11.1 stable",
+    "pytest_environment": {
+      "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+      "PYTHONDONTWRITEBYTECODE": "1",
+      "PYTHONNOUSERSITE": "1",
+      "cache_provider_disabled": true
+    }
+  },
+  "author_receipt_verification": [
+    {
+      "lane": "python",
+      "source_receipt": "D:\\dev\\chili-fable5-eleventh-author-python\\AUTHOR_ATTESTATION.json",
+      "copied_as": "AUTHORS/python_AUTHOR_ATTESTATION.json",
+      "valid_json": true,
+      "declared_file_count": 13,
+      "matching_sha256_count": 13,
+      "declared_inventory_exact": true,
+      "receipt_sha256": "2b8b6bfab4078773de655e8faf7ddc6ff1965c58e066272179179d97459a4b93"
+    },
+    {
+      "lane": "node",
+      "source_receipt": "D:\\dev\\chili-fable5-eleventh-author-node\\AUTHOR_ATTESTATION.json",
+      "copied_as": "AUTHORS/node_AUTHOR_ATTESTATION.json",
+      "valid_json": true,
+      "declared_file_count": 13,
+      "matching_sha256_count": 13,
+      "declared_inventory_exact": true,
+      "receipt_sha256": "bab06a7598b3dd1b60d04afe545b32cfcc839c2449b1de394cf8ee88e489b91a"
+    },
+    {
+      "lane": "dart-sql",
+      "source_receipt": "D:\\dev\\chili-fable5-eleventh-author-dart-sql\\AUTHOR_ATTESTATION.json",
+      "copied_as": "AUTHORS/dart-sql_AUTHOR_ATTESTATION.json",
+      "valid_json": true,
+      "declared_file_count": 13,
+      "matching_sha256_count": 13,
+      "declared_inventory_exact": true,
+      "receipt_sha256": "b8e158282df828004279044c6969e5b07a742052837ab6bf4d54020f0ce7be2f"
+    }
+  ],
+  "validation_summary": {
+    "valid_case_count": 12,
+    "language_mix": {
+      "dart": 2,
+      "python": 4,
+      "sql": 2,
+      "typescript": 4
+    },
+    "author_declared_sha256_total": 39,
+    "author_declared_sha256_matching": 39,
+    "public_baselines_passed": 12,
+    "public_plus_feedback_expected_failures": 12,
+    "public_plus_final_expected_failures": 12,
+    "collection_or_setup_errors": 0,
+    "outside_disclosed_operator_families": 9,
+    "transfer_variants": 3,
+    "fixture_only_correction_count": 0
+  },
+  "validation_rules": [
+    {
+      "rule": "all input receipts, manifests, cases, and oracle documents are valid JSON",
+      "status": "pass",
+      "observed": "42 of 42 JSON files"
+    },
+    {
+      "rule": "all declared author SHA-256 values match and declared inventories are exact",
+      "status": "pass",
+      "observed": "39 of 39 declared hashes across 3 lanes"
+    },
+    {
+      "rule": "all embedded paths are normalized safe relative paths",
+      "status": "pass"
+    },
+    {
+      "rule": "case IDs are unique and language mix is exactly 4 Python, 4 TypeScript-compatible Node ESM, 2 Dart, and 2 SQL",
+      "status": "pass"
+    },
+    {
+      "rule": "each case contains exactly one runner-discoverable public baseline test file",
+      "status": "pass",
+      "observed": "12 of 12 cases"
+    },
+    {
+      "rule": "feedback and final oracle files are separate, nonempty, path-disjoint, and payload-disjoint under tests/",
+      "status": "pass"
+    },
+    {
+      "rule": "candidate paths are source-only, contain 2 to 4 paths, and max_files equals expected owner count",
+      "status": "pass"
+    },
+    {
+      "rule": "expected_files exactly identify candidate source owners requiring coordinated repair",
+      "status": "pass",
+      "observed": "all 12 ownership maps reviewed semantically"
+    },
+    {
+      "rule": "tests and oracles require no unsafe operation, internet, secret, destructive action, sleep, or wall-clock behavior",
+      "status": "pass",
+      "observed": "inert .invalid endpoint literals were reviewed as data only"
+    },
+    {
+      "rule": "prompts are noisy but fair and do not state a patch or solution",
+      "status": "pass"
+    },
+    {
+      "rule": "assertions enforce observable semantics rather than implementation strings",
+      "status": "pass"
+    },
+    {
+      "rule": "final checks use materially independent scenarios from feedback checks",
+      "status": "pass",
+      "observed": "12 of 12 cases"
+    },
+    {
+      "rule": "final contracts resist trivial symptom-only one-line patches",
+      "status": "pass",
+      "observed": "12 of 12 cases"
+    },
+    {
+      "rule": "fresh isolated public baselines pass and both hidden combinations fail without collection/setup errors",
+      "status": "pass",
+      "observed": "36 of 36 combinations matched the required pattern"
+    },
+    {
+      "rule": "at least six mechanisms are genuinely outside the disclosed operator families",
+      "status": "pass",
+      "observed": "9 outside; 3 transfer variants"
+    }
+  ],
+  "fixture_only_corrections": {
+    "count": 0,
+    "items": [],
+    "assertions_changed": false,
+    "semantics_changed": false
+  },
+  "per_case": [
+    {
+      "case_id": "dart_lifecycle_handoff_epoch",
+      "language": "dart",
+      "runner": "dart",
+      "expected_dimension": "unknown",
+      "candidate_count": 4,
+      "owner_count": 3,
+      "max_files": 3,
+      "public_baseline_file_count": 1,
+      "feedback_file_count": 1,
+      "final_file_count": 1,
+      "owner_necessity_validated": true,
+      "final_materially_independent": true,
+      "symptom_only_patch_resistant": true,
+      "mechanism": "shared lease lifetime, state replay, and lifecycle ABA rejection",
+      "mechanism_classification": "outside_disclosed_operator_families",
+      "disclosed_family": null,
+      "baseline_exit_summaries": {
+        "public": {
+          "commands": [
+            "dart run tests/connectivity_public_test.dart"
+          ],
+          "exit_code": 0,
+          "invocation_exit_codes": [
+            0
+          ],
+          "summary": "pass; no output",
+          "setup_or_collection_error": false,
+          "status": "pass"
+        },
+        "feedback": {
+          "commands": [
+            "dart run tests/connectivity_public_test.dart",
+            "dart run tests/connectivity_handoff_feedback_test.dart"
+          ],
+          "exit_code": 255,
+          "invocation_exit_codes": [
+            0,
+            255
+          ],
+          "summary": "semantic assertion failure (StateError)",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        },
+        "final": {
+          "commands": [
+            "dart run tests/connectivity_public_test.dart",
+            "dart run tests/connectivity_resume_final_test.dart"
+          ],
+          "exit_code": 255,
+          "invocation_exit_codes": [
+            0,
+            255
+          ],
+          "summary": "semantic assertion failure (StateError)",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        }
+      }
+    },
+    {
+      "case_id": "dart_offline_rebase_barrier",
+      "language": "dart",
+      "runner": "dart",
+      "expected_dimension": "state",
+      "candidate_count": 4,
+      "owner_count": 2,
+      "max_files": 2,
+      "public_baseline_file_count": 1,
+      "feedback_file_count": 1,
+      "final_file_count": 1,
+      "owner_necessity_validated": true,
+      "final_materially_independent": true,
+      "symptom_only_patch_resistant": true,
+      "mechanism": "offline redelivery and optimistic snapshot rebase",
+      "mechanism_classification": "outside_disclosed_operator_families",
+      "disclosed_family": null,
+      "baseline_exit_summaries": {
+        "public": {
+          "commands": [
+            "dart run tests/offline_public_test.dart"
+          ],
+          "exit_code": 0,
+          "invocation_exit_codes": [
+            0
+          ],
+          "summary": "pass; no output",
+          "setup_or_collection_error": false,
+          "status": "pass"
+        },
+        "feedback": {
+          "commands": [
+            "dart run tests/offline_public_test.dart",
+            "dart run tests/offline_reconnect_feedback_test.dart"
+          ],
+          "exit_code": 255,
+          "invocation_exit_codes": [
+            0,
+            255
+          ],
+          "summary": "semantic assertion failure (StateError)",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        },
+        "final": {
+          "commands": [
+            "dart run tests/offline_public_test.dart",
+            "dart run tests/offline_reconnect_final_test.dart"
+          ],
+          "exit_code": 255,
+          "invocation_exit_codes": [
+            0,
+            255
+          ],
+          "summary": "semantic assertion failure (StateError)",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        }
+      }
+    },
+    {
+      "case_id": "node-cache-locale-order-retry-slot",
+      "language": "typescript",
+      "runner": "node_test",
+      "expected_dimension": "state",
+      "candidate_count": 4,
+      "owner_count": 2,
+      "max_files": 2,
+      "public_baseline_file_count": 1,
+      "feedback_file_count": 1,
+      "final_file_count": 1,
+      "owner_necessity_validated": true,
+      "final_materially_independent": true,
+      "symptom_only_patch_resistant": true,
+      "mechanism": "order-sensitive preference identity plus rejected asynchronous slot eviction",
+      "mechanism_classification": "transfer_variant",
+      "disclosed_family": "repeated query canonicalization",
+      "baseline_exit_summaries": {
+        "public": {
+          "commands": [
+            "node --test tests/catalog.public.test.mjs"
+          ],
+          "exit_code": 0,
+          "invocation_exit_codes": [
+            0
+          ],
+          "summary": "node test runner completed with recorded exit code",
+          "setup_or_collection_error": false,
+          "status": "pass"
+        },
+        "feedback": {
+          "commands": [
+            "node --test tests/catalog.public.test.mjs tests/catalog.feedback.test.mjs"
+          ],
+          "exit_code": 1,
+          "invocation_exit_codes": [
+            1
+          ],
+          "summary": "node test runner completed with recorded exit code",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        },
+        "final": {
+          "commands": [
+            "node --test tests/catalog.public.test.mjs tests/catalog.final.test.mjs"
+          ],
+          "exit_code": 1,
+          "invocation_exit_codes": [
+            1
+          ],
+          "summary": "node test runner completed with recorded exit code",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        }
+      }
+    },
+    {
+      "case_id": "node-jsonseq-utf8-channel-sequence",
+      "language": "typescript",
+      "runner": "node_test",
+      "expected_dimension": "data",
+      "candidate_count": 3,
+      "owner_count": 2,
+      "max_files": 2,
+      "public_baseline_file_count": 1,
+      "feedback_file_count": 1,
+      "final_file_count": 1,
+      "owner_necessity_validated": true,
+      "final_materially_independent": true,
+      "symptom_only_patch_resistant": true,
+      "mechanism": "incremental decoder carry state and channel-local protocol counters",
+      "mechanism_classification": "outside_disclosed_operator_families",
+      "disclosed_family": null,
+      "baseline_exit_summaries": {
+        "public": {
+          "commands": [
+            "node --test tests/audit.public.test.mjs"
+          ],
+          "exit_code": 0,
+          "invocation_exit_codes": [
+            0
+          ],
+          "summary": "node test runner completed with recorded exit code",
+          "setup_or_collection_error": false,
+          "status": "pass"
+        },
+        "feedback": {
+          "commands": [
+            "node --test tests/audit.public.test.mjs tests/audit.feedback.test.mjs"
+          ],
+          "exit_code": 1,
+          "invocation_exit_codes": [
+            1
+          ],
+          "summary": "node test runner completed with recorded exit code",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        },
+        "final": {
+          "commands": [
+            "node --test tests/audit.public.test.mjs tests/audit.final.test.mjs"
+          ],
+          "exit_code": 1,
+          "invocation_exit_codes": [
+            1
+          ],
+          "summary": "node test runner completed with recorded exit code",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        }
+      }
+    },
+    {
+      "case_id": "node-lifecycle-preabort-generation",
+      "language": "typescript",
+      "runner": "node_test",
+      "expected_dimension": "state",
+      "candidate_count": 3,
+      "owner_count": 2,
+      "max_files": 2,
+      "public_baseline_file_count": 1,
+      "feedback_file_count": 1,
+      "final_file_count": 1,
+      "owner_necessity_validated": true,
+      "final_materially_independent": true,
+      "symptom_only_patch_resistant": true,
+      "mechanism": "pre-cancellation propagation and asynchronous generation ownership",
+      "mechanism_classification": "outside_disclosed_operator_families",
+      "disclosed_family": null,
+      "baseline_exit_summaries": {
+        "public": {
+          "commands": [
+            "node --test tests/lifecycle.public.test.mjs"
+          ],
+          "exit_code": 0,
+          "invocation_exit_codes": [
+            0
+          ],
+          "summary": "node test runner completed with recorded exit code",
+          "setup_or_collection_error": false,
+          "status": "pass"
+        },
+        "feedback": {
+          "commands": [
+            "node --test tests/lifecycle.public.test.mjs tests/lifecycle.feedback.test.mjs"
+          ],
+          "exit_code": 1,
+          "invocation_exit_codes": [
+            1
+          ],
+          "summary": "node test runner completed with recorded exit code",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        },
+        "final": {
+          "commands": [
+            "node --test tests/lifecycle.public.test.mjs tests/lifecycle.final.test.mjs"
+          ],
+          "exit_code": 1,
+          "invocation_exit_codes": [
+            1
+          ],
+          "summary": "node test runner completed with recorded exit code",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        }
+      }
+    },
+    {
+      "case_id": "node-policy-empty-overlay-scope-algebra",
+      "language": "typescript",
+      "runner": "node_test",
+      "expected_dimension": "config",
+      "candidate_count": 3,
+      "owner_count": 2,
+      "max_files": 2,
+      "public_baseline_file_count": 1,
+      "feedback_file_count": 1,
+      "final_file_count": 1,
+      "owner_necessity_validated": true,
+      "final_materially_independent": true,
+      "symptom_only_patch_resistant": true,
+      "mechanism": "presence-sensitive empty configuration and mixed authorization algebra",
+      "mechanism_classification": "outside_disclosed_operator_families",
+      "disclosed_family": null,
+      "baseline_exit_summaries": {
+        "public": {
+          "commands": [
+            "node --test tests/policy.public.test.mjs"
+          ],
+          "exit_code": 0,
+          "invocation_exit_codes": [
+            0
+          ],
+          "summary": "node test runner completed with recorded exit code",
+          "setup_or_collection_error": false,
+          "status": "pass"
+        },
+        "feedback": {
+          "commands": [
+            "node --test tests/policy.public.test.mjs tests/policy.feedback.test.mjs"
+          ],
+          "exit_code": 1,
+          "invocation_exit_codes": [
+            1
+          ],
+          "summary": "node test runner completed with recorded exit code",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        },
+        "final": {
+          "commands": [
+            "node --test tests/policy.public.test.mjs tests/policy.final.test.mjs"
+          ],
+          "exit_code": 1,
+          "invocation_exit_codes": [
+            1
+          ],
+          "summary": "node test runner completed with recorded exit code",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        }
+      }
+    },
+    {
+      "case_id": "py_atomic_idempotent_transfer",
+      "language": "python",
+      "runner": "pytest",
+      "expected_dimension": "data",
+      "candidate_count": 3,
+      "owner_count": 3,
+      "max_files": 3,
+      "public_baseline_file_count": 1,
+      "feedback_file_count": 1,
+      "final_file_count": 1,
+      "owner_necessity_validated": true,
+      "final_materially_independent": true,
+      "symptom_only_patch_resistant": true,
+      "mechanism": "cross-surface atomic rollback with commit-scoped request identity",
+      "mechanism_classification": "transfer_variant",
+      "disclosed_family": "tenant idempotency/event identity",
+      "baseline_exit_summaries": {
+        "public": {
+          "commands": [
+            "python -m pytest -q -p no:cacheprovider tests/test_public.py"
+          ],
+          "exit_code": 0,
+          "invocation_exit_codes": [
+            0
+          ],
+          "summary": "2 passed in 0.01s",
+          "setup_or_collection_error": false,
+          "status": "pass"
+        },
+        "feedback": {
+          "commands": [
+            "python -m pytest -q -p no:cacheprovider tests/test_public.py tests/test_feedback_atomic_failure.py"
+          ],
+          "exit_code": 1,
+          "invocation_exit_codes": [
+            1
+          ],
+          "summary": "4 failed, 2 passed in 0.09s",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        },
+        "final": {
+          "commands": [
+            "python -m pytest -q -p no:cacheprovider tests/test_public.py tests/test_final_transaction_recovery.py"
+          ],
+          "exit_code": 1,
+          "invocation_exit_codes": [
+            1
+          ],
+          "summary": "2 failed, 2 passed in 0.08s",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        }
+      }
+    },
+    {
+      "case_id": "py_epoch_fenced_reconnect",
+      "language": "python",
+      "runner": "pytest",
+      "expected_dimension": "unknown",
+      "candidate_count": 3,
+      "owner_count": 3,
+      "max_files": 3,
+      "public_baseline_file_count": 1,
+      "feedback_file_count": 1,
+      "final_file_count": 1,
+      "owner_necessity_validated": true,
+      "final_materially_independent": true,
+      "symptom_only_patch_resistant": true,
+      "mechanism": "generation-fenced lease ownership under delayed disconnect callbacks",
+      "mechanism_classification": "outside_disclosed_operator_families",
+      "disclosed_family": null,
+      "baseline_exit_summaries": {
+        "public": {
+          "commands": [
+            "python -m pytest -q -p no:cacheprovider tests/test_public.py"
+          ],
+          "exit_code": 0,
+          "invocation_exit_codes": [
+            0
+          ],
+          "summary": "2 passed in 0.02s",
+          "setup_or_collection_error": false,
+          "status": "pass"
+        },
+        "feedback": {
+          "commands": [
+            "python -m pytest -q -p no:cacheprovider tests/test_public.py tests/test_feedback_delayed_disconnect.py"
+          ],
+          "exit_code": 1,
+          "invocation_exit_codes": [
+            1
+          ],
+          "summary": "1 failed, 2 passed in 0.08s",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        },
+        "final": {
+          "commands": [
+            "python -m pytest -q -p no:cacheprovider tests/test_public.py tests/test_final_out_of_order_lifecycle.py"
+          ],
+          "exit_code": 1,
+          "invocation_exit_codes": [
+            1
+          ],
+          "summary": "1 failed, 2 passed in 0.07s",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        }
+      }
+    },
+    {
+      "case_id": "py_layered_config_client_rotation",
+      "language": "python",
+      "runner": "pytest",
+      "expected_dimension": "dependency",
+      "candidate_count": 3,
+      "owner_count": 3,
+      "max_files": 3,
+      "public_baseline_file_count": 1,
+      "feedback_file_count": 1,
+      "final_file_count": 1,
+      "owner_necessity_validated": true,
+      "final_materially_independent": true,
+      "symptom_only_patch_resistant": true,
+      "mechanism": "effective configuration snapshots and dependency cache rotation",
+      "mechanism_classification": "outside_disclosed_operator_families",
+      "disclosed_family": null,
+      "baseline_exit_summaries": {
+        "public": {
+          "commands": [
+            "python -m pytest -q -p no:cacheprovider tests/test_public.py"
+          ],
+          "exit_code": 0,
+          "invocation_exit_codes": [
+            0
+          ],
+          "summary": "2 passed in 0.01s",
+          "setup_or_collection_error": false,
+          "status": "pass"
+        },
+        "feedback": {
+          "commands": [
+            "python -m pytest -q -p no:cacheprovider tests/test_public.py tests/test_feedback_reload_dependencies.py"
+          ],
+          "exit_code": 1,
+          "invocation_exit_codes": [
+            1
+          ],
+          "summary": "2 failed, 2 passed in 0.06s",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        },
+        "final": {
+          "commands": [
+            "python -m pytest -q -p no:cacheprovider tests/test_public.py tests/test_final_effective_snapshot.py"
+          ],
+          "exit_code": 1,
+          "invocation_exit_codes": [
+            1
+          ],
+          "summary": "2 failed, 2 passed in 0.06s",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        }
+      }
+    },
+    {
+      "case_id": "py_utf8_stream_envelope",
+      "language": "python",
+      "runner": "pytest",
+      "expected_dimension": "unknown",
+      "candidate_count": 3,
+      "owner_count": 3,
+      "max_files": 3,
+      "public_baseline_file_count": 1,
+      "feedback_file_count": 1,
+      "final_file_count": 1,
+      "owner_necessity_validated": true,
+      "final_materially_independent": true,
+      "symptom_only_patch_resistant": true,
+      "mechanism": "UTF-8 byte framing, incremental carry state, and falsey field presence",
+      "mechanism_classification": "outside_disclosed_operator_families",
+      "disclosed_family": null,
+      "baseline_exit_summaries": {
+        "public": {
+          "commands": [
+            "python -m pytest -q -p no:cacheprovider tests/test_public.py"
+          ],
+          "exit_code": 0,
+          "invocation_exit_codes": [
+            0
+          ],
+          "summary": "2 passed in 0.01s",
+          "setup_or_collection_error": false,
+          "status": "pass"
+        },
+        "feedback": {
+          "commands": [
+            "python -m pytest -q -p no:cacheprovider tests/test_public.py tests/test_feedback_protocol_boundaries.py"
+          ],
+          "exit_code": 1,
+          "invocation_exit_codes": [
+            1
+          ],
+          "summary": "3 failed, 2 passed in 0.07s",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        },
+        "final": {
+          "commands": [
+            "python -m pytest -q -p no:cacheprovider tests/test_public.py tests/test_final_stream_composition.py"
+          ],
+          "exit_code": 1,
+          "invocation_exit_codes": [
+            1
+          ],
+          "summary": "2 failed, 2 passed in 0.06s",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        }
+      }
+    },
+    {
+      "case_id": "sql_out_of_order_document_heads",
+      "language": "sql",
+      "runner": "pytest",
+      "expected_dimension": "unknown",
+      "candidate_count": 3,
+      "owner_count": 2,
+      "max_files": 2,
+      "public_baseline_file_count": 1,
+      "feedback_file_count": 1,
+      "final_file_count": 1,
+      "owner_necessity_validated": true,
+      "final_materially_independent": true,
+      "symptom_only_patch_resistant": true,
+      "mechanism": "monotonic logical heads under late immutable-version imports",
+      "mechanism_classification": "transfer_variant",
+      "disclosed_family": "vector-clock/tombstone joins",
+      "baseline_exit_summaries": {
+        "public": {
+          "commands": [
+            "python -m pytest -q -p no:cacheprovider tests/test_public.py"
+          ],
+          "exit_code": 0,
+          "invocation_exit_codes": [
+            0
+          ],
+          "summary": "1 passed in 0.01s",
+          "setup_or_collection_error": false,
+          "status": "pass"
+        },
+        "feedback": {
+          "commands": [
+            "python -m pytest -q -p no:cacheprovider tests/test_public.py tests/test_reconnect_feedback.py"
+          ],
+          "exit_code": 1,
+          "invocation_exit_codes": [
+            1
+          ],
+          "summary": "1 failed, 1 passed in 0.08s",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        },
+        "final": {
+          "commands": [
+            "python -m pytest -q -p no:cacheprovider tests/test_public.py tests/test_archive_restore_final.py"
+          ],
+          "exit_code": 1,
+          "invocation_exit_codes": [
+            1
+          ],
+          "summary": "1 failed, 1 passed in 0.06s",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        }
+      }
+    },
+    {
+      "case_id": "sql_settlement_lifecycle_reassignment",
+      "language": "sql",
+      "runner": "pytest",
+      "expected_dimension": "data",
+      "candidate_count": 4,
+      "owner_count": 3,
+      "max_files": 3,
+      "public_baseline_file_count": 1,
+      "feedback_file_count": 1,
+      "final_file_count": 1,
+      "owner_necessity_validated": true,
+      "final_materially_independent": true,
+      "symptom_only_patch_resistant": true,
+      "mechanism": "materialized transition effects, reassignment, and total reporting",
+      "mechanism_classification": "outside_disclosed_operator_families",
+      "disclosed_family": null,
+      "baseline_exit_summaries": {
+        "public": {
+          "commands": [
+            "python -m pytest -q -p no:cacheprovider tests/test_public.py"
+          ],
+          "exit_code": 0,
+          "invocation_exit_codes": [
+            0
+          ],
+          "summary": "1 passed in 0.02s",
+          "setup_or_collection_error": false,
+          "status": "pass"
+        },
+        "feedback": {
+          "commands": [
+            "python -m pytest -q -p no:cacheprovider tests/test_public.py tests/test_settlement_feedback.py"
+          ],
+          "exit_code": 1,
+          "invocation_exit_codes": [
+            1
+          ],
+          "summary": "3 failed, 1 passed in 0.09s",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        },
+        "final": {
+          "commands": [
+            "python -m pytest -q -p no:cacheprovider tests/test_public.py tests/test_settlement_correction_final.py"
+          ],
+          "exit_code": 1,
+          "invocation_exit_codes": [
+            1
+          ],
+          "summary": "1 failed, 1 passed in 0.07s",
+          "setup_or_collection_error": false,
+          "status": "expected_fail"
+        }
+      }
+    }
+  ],
+  "integrity": {
+    "hash_algorithm": "SHA-256",
+    "receipt_excluded": "VALIDATOR_RECEIPT.json",
+    "suite_file_count_excluding_receipt": 40,
+    "suite_file_sha256": {
+      "AUTHORS/dart-sql_AUTHOR_ATTESTATION.json": "b8e158282df828004279044c6969e5b07a742052837ab6bf4d54020f0ce7be2f",
+      "AUTHORS/node_AUTHOR_ATTESTATION.json": "bab06a7598b3dd1b60d04afe545b32cfcc839c2449b1de394cf8ee88e489b91a",
+      "AUTHORS/python_AUTHOR_ATTESTATION.json": "2b8b6bfab4078773de655e8faf7ddc6ff1965c58e066272179179d97459a4b93",
+      "cases/dart_lifecycle_handoff_epoch.json": "6688cf916f0090804f10d048e533448d23900f11237c4ec5ba8305bf1249c144",
+      "cases/dart_offline_rebase_barrier.json": "417e1f31d4da67de9ef8df7de879a95207f4347d42ad89fd562592f93e6449c0",
+      "cases/node-cache-locale-order-retry-slot.json": "e61dc420e22dd3de9e6b7d3668f79b81f220b26a38d46466ed0cad9c8c4cbdb6",
+      "cases/node-jsonseq-utf8-channel-sequence.json": "f7c473766fd5605b8fdd723379667416d283d1e25e100012109d594d74d3b046",
+      "cases/node-lifecycle-preabort-generation.json": "a3d05a175fb3a761e629b555e9a935bb688a1fcbb8e9b8016dfb663d9adadeb9",
+      "cases/node-policy-empty-overlay-scope-algebra.json": "a51d908ae1387410a96ca4843b6e2089c048348bc91dba75b9e83d4296affb36",
+      "cases/py_atomic_idempotent_transfer.json": "a4527a79415b1933e6d504255b832804aa6ac5ee7c9219785104d19f279a9fdd",
+      "cases/py_epoch_fenced_reconnect.json": "20a827e7076cc91c375f7865e2bcb380b93687f980d69b900fd948ebc9d84cc3",
+      "cases/py_layered_config_client_rotation.json": "3e6a3d1c74bdb5306b30d9bf20b92819d1af24f0769fbfdabeea148e0032c40e",
+      "cases/py_utf8_stream_envelope.json": "a98aa5de439fbf850a76d261d9c79a97169b5e53c4a8fd41914e9f9c8dc8c2ef",
+      "cases/sql_out_of_order_document_heads.json": "a6144a0cd2618246c9f5fe6f7bcd5f25647c6107bba5b307dcd8c90056271462",
+      "cases/sql_settlement_lifecycle_reassignment.json": "b2a6251dc18a461b6be992549ea3b2d2e6eb7cb34f8de43110cb77b6fcf8abf3",
+      "final_oracles/dart_lifecycle_handoff_epoch.json": "8560faa2f19108febb78a30a3d43f054c7c5f8f26ff62a98e52114c8412d05bd",
+      "final_oracles/dart_offline_rebase_barrier.json": "94cdc505f8f476cdef406c731b9e361c31627704ac62aebdd0bee0bbf946487d",
+      "final_oracles/node-cache-locale-order-retry-slot.json": "4db3bc02642e4f0e8812be92f9c2e8a16cb9c46dedef1bb91412471443235af5",
+      "final_oracles/node-jsonseq-utf8-channel-sequence.json": "c36fff7eedea1c4dd462fdc1cd0ffcfaef00b7c617a1b205e4b0b00c64c9797c",
+      "final_oracles/node-lifecycle-preabort-generation.json": "a221129449d0ffbbfc83b9bd0f67793f696c9a55b69fa9803f627d3e8ced8d27",
+      "final_oracles/node-policy-empty-overlay-scope-algebra.json": "0330b0cb0ae930c0f166745f3da24070acc0fcffa4c87009f58da69ccc913dc6",
+      "final_oracles/py_atomic_idempotent_transfer.json": "c74f6e226db62214b6bceab044e18e093dd164148baa20dc7dc9cde06abeffd8",
+      "final_oracles/py_epoch_fenced_reconnect.json": "28b4546545b847bd16f3a7b0ad56df941100116876fdba99284c7c24e8b8a562",
+      "final_oracles/py_layered_config_client_rotation.json": "29fc17e5891c6f06832ab9003a6457415f6ef6b65a71e4749d8999887a455265",
+      "final_oracles/py_utf8_stream_envelope.json": "450a1833dc9a2017edb8b743e3f2010f27ea8d458b3e06a726c7941ddf662ee7",
+      "final_oracles/sql_out_of_order_document_heads.json": "f473973c3b2e99a05735a2a751ca7ac77f36a0482afe51729127b25e330bbaee",
+      "final_oracles/sql_settlement_lifecycle_reassignment.json": "fa52d11f972bf8733dd35e3d27ce1c7f465ce99aae3464c1944b6ca2f1b520c1",
+      "manifest.json": "cdad2e845d7b127d3a6ed6936e44d2dea95b60c18d09d52be70000175e20756c",
+      "oracles/dart_lifecycle_handoff_epoch.json": "d7c69903b70360483e8fade5a865b510eb064be6e024d07cff799c9bdc115b3a",
+      "oracles/dart_offline_rebase_barrier.json": "a6e06e13e122ca515e42a06f6b3b8877cbc202820fc31c18b4ce92647b09b9d5",
+      "oracles/node-cache-locale-order-retry-slot.json": "3e1c7ea74b69a47e16cbf7106eb5b38e0e6d2cff9f8c7a451fa28493d3847a57",
+      "oracles/node-jsonseq-utf8-channel-sequence.json": "dac8dc266cfd6c87889c5c1baf105e4e95b78c4f3e0af12977a7e6dfc6eb713e",
+      "oracles/node-lifecycle-preabort-generation.json": "7f12fcbba4436c446ea62b377d1b10938d5ce1c5a1ed0ef93140247044d51556",
+      "oracles/node-policy-empty-overlay-scope-algebra.json": "65ef66ab4669454c0684c5d416e578689622c9ef7278ba4a3a328708614d6895",
+      "oracles/py_atomic_idempotent_transfer.json": "3ff7e26b6fed8af2de582edf261abaad08d32d0cab2d03c61e8b8118d7980ef6",
+      "oracles/py_epoch_fenced_reconnect.json": "7811483c5acb3e513bcd08e2d2ad59235fb4cc10e5fc153388bec9a6202db457",
+      "oracles/py_layered_config_client_rotation.json": "4f88142bc72ebeaa9129704181a875163cdaab7ac7fb36d4411256c0dfe37fbc",
+      "oracles/py_utf8_stream_envelope.json": "7c88b579bf2089a90af142bf3d32fd2ac7fedd0055f059697bd361bc5ed8694a",
+      "oracles/sql_out_of_order_document_heads.json": "ea3d6ce3d7b218bc4398bd4ba93fc8a537789a6f9c014b5057be8fddb0e8c901",
+      "oracles/sql_settlement_lifecycle_reassignment.json": "4e21db8e5def4a979ed3747a1a22d9418c9bec871fd5a463eec4c3a6eb0b9dab"
+    },
+    "aggregate_serialization": "UTF-8 of sorted(relative_path + TAB + lowercase_file_sha256 + LF)",
+    "aggregate_sha256": "b00c08f5c399a99179b25959d491f074bbd6c1843e70b14ac840f4354e05c815"
+  }
+}

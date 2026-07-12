@@ -1,0 +1,36 @@
+{
+  "schema": "chili.eleventh-holdout-deviations.v1",
+  "scored_run_deviations": [],
+  "fixture_only_prefreeze_adapters": [
+    {
+      "stage": "controller_preflight",
+      "contestant_calls_before_change": 0,
+      "scope": "manifest collection key",
+      "change": "Renamed the top-level manifest key from entries to the frozen runner's cases key",
+      "reason": "The independent assembler used a neutral collection name that the frozen runner does not recognize",
+      "case_bodies_changed": false,
+      "oracle_bodies_changed": false,
+      "assertions_changed": false,
+      "semantics_changed": false,
+      "difficulty_changed": false
+    }
+  ],
+  "original_validator_aggregate_sha256": "b00c08f5c399a99179b25959d491f074bbd6c1843e70b14ac840f4354e05c815",
+  "adapted_fixture_aggregate_sha256": "afc0821baec0a5b386b79e00433b777c126431973df600054a1ed283ac05261d",
+  "adapted_manifest_sha256": "e056d033c7477dcde628d750daf476b48e57692cbb0b8f018a029cd31ddc7801",
+  "controller_blinding": {
+    "fixture_bodies_seen_before_scoring": false,
+    "oracle_bodies_seen_before_scoring": false,
+    "metadata_filenames_and_hashes_seen": true
+  },
+  "final_preflight": {
+    "valid": true,
+    "cases": 12,
+    "public_passed": 12,
+    "feedback_failed": 12,
+    "final_failed": 12,
+    "sealed_final": 12,
+    "external_final_oracle": 12,
+    "contestant_calls": 0
+  }
+}
