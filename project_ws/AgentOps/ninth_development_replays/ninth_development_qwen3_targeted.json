@@ -1,0 +1,2077 @@
+{
+  "average_case_duration_ms": 640086.0,
+  "blinded_holdout_case_count": 2,
+  "blinded_holdout_score": 47.5,
+  "cases": [
+    {
+      "baseline_feedback_tests": {
+        "duration_ms": 592,
+        "exit_code": 1,
+        "output": "F..                                                                      [100%]\n================================== FAILURES ===================================\n________ test_explicit_auto_size_worker_value_beats_site_configuration ________\n\n    def test_explicit_auto_size_worker_value_beats_site_configuration():\n        cli = CliOptions.parse({\"workers\": 0})\n    \n>       assert \"workers\" in cli.values\nE       AssertionError: assert 'workers' in {}\nE        +  where {} = CliOptions(values={}).values\n\ntests\\test_feedback_zero_worker.py:8: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_feedback_zero_worker.py::test_explicit_auto_size_worker_value_beats_site_configuration\n1 failed, 2 passed in 0.08s",
+        "passed": false,
+        "runner": "pytest"
+      },
+      "baseline_final_tests": {
+        "duration_ms": 593,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "F..                                                                      [100%]\n================================== FAILURES ===================================\n______ test_explicit_clear_values_coexist_with_an_unrelated_file_setting ______\n\n    def test_explicit_clear_values_coexist_with_an_unrelated_file_setting():\n        cli = CliOptions.parse({\"audit\": False, \"labels\": []})\n        result = resolve(\n            {\"workers\": 10, \"audit\": True, \"labels\": [\"inherited\"]}, cli\n        )\n    \n>       assert result == {\n            \"workers\": 10,\n            \"audit\": False,\n            \"labels\": [],\n        }\nE       AssertionError: assert {'audit': Tru...'workers': 10} == {'audit': Fal...'workers': 10}\nE         \nE         Omitting 1 identical items, use -vv to show\nE         Differing items:\nE         {'labels': ['inherited']} != {'labels': []}\nE         {'audit': True} != {'audit': False}\nE         Use -v to get more diff\n\ntests\\test_final_false_and_empty_values.py:11: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_final_false_and_empty_values.py::test_explicit_clear_values_coexist_with_an_unrelated_file_setting\n1 failed, 2 passed in 0.08s",
+        "passed": false,
+        "runner": "pytest"
+      },
+      "baseline_public_tests": {
+        "duration_ms": 503,
+        "exit_code": 0,
+        "output": "..                                                                       [100%]\n2 passed in 0.02s",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "case_id": "py-config-explicit-values",
+      "changed_files": [
+        "settings/cli.py"
+      ],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": false,
+        "final_tests": false,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": false,
+        "patch_applied": false,
+        "selected_files": [],
+        "warnings": []
+      },
+      "diagnosis_dimension": "config",
+      "diagnosis_history": [
+        {
+          "dimension": "config",
+          "stage": "repair_1"
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-1",
+            "operator-2"
+          ],
+          "hypothesis_id": "h2",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "code"
+            ],
+            "evidence_required": [
+              "source-1"
+            ],
+            "expected_if_false": "Falsy cli values remain in parsed options.",
+            "expected_if_true": "",
+            "experiment_id": "test-code-filter",
+            "held_constant_dimensions": [
+              "data",
+              "runtime",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h1"
+            ],
+            "probe": {},
+            "result_evidence_ids": [
+              "source-1"
+            ],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "runtime"
+            ],
+            "evidence_required": [
+              "operator-1",
+              "operator-2"
+            ],
+            "expected_if_false": "Cli values propagate to runtime resolution.",
+            "expected_if_true": "",
+            "experiment_id": "test-runtime-propagation",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h2"
+            ],
+            "probe": {},
+            "result_evidence_ids": [
+              "operator-1",
+              "operator-2"
+            ],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "Code filters falsy cli values, excluding explicit inputs.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Check if falsy cli values are retained in parsed options.",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "source-1"
+            ]
+          },
+          {
+            "claim": "Runtime defaults override cli values due to missing propagation.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Verify cli values are passed to runtime resolution logic.",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2"
+            ]
+          },
+          {
+            "claim": "Data drift causes cli values to be absent in parsed records.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Confirm cli values exist in parsed launch records.",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": []
+          },
+          {
+            "claim": "Unknown configuration misalignment affects option precedence.",
+            "contradict_evidence_ids": [],
+            "dimension": "unknown",
+            "falsification": "Isolate unknown variables impacting resolution logic.",
+            "hypothesis_id": "h4",
+            "support_evidence_ids": [
+              "operator-5"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "py-config-explicit-values",
+        "causal_timeline": {
+          "downstream_evidence_ids": [],
+          "earliest_break": {},
+          "events": [
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "probe:default-log-inventory",
+              "event_type": "typed_probe_log_inventory",
+              "evidence_id": "probe-default-log-inventory",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T08:40:56.984899+00:00",
+              "order": 0,
+              "prior_state": "",
+              "sequence": 0,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "probe:default-log-search",
+              "event_type": "typed_probe_log_search",
+              "evidence_id": "probe-default-log-search",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T08:40:56.989112+00:00",
+              "order": 1,
+              "prior_state": "",
+              "sequence": 1,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "probe:default-repo-state",
+              "event_type": "typed_probe_repo_state",
+              "evidence_id": "probe-default-repo-state",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T08:40:57.032368+00:00",
+              "order": 2,
+              "prior_state": "",
+              "sequence": 2,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "runtime",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-1",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 3,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "runtime",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-2",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 4,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-3",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 5,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "runtime",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-4",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 6,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-5",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 7,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-1",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 8,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-2",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 9,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-3",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 10,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-4",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 11,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-5",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 12,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-6",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 13,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-7",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 14,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-8",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 15,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            }
+          ],
+          "ordered_evidence_ids": [
+            "probe-default-log-inventory",
+            "probe-default-log-search",
+            "probe-default-repo-state",
+            "operator-1",
+            "operator-2",
+            "operator-3",
+            "operator-4",
+            "operator-5",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-5",
+            "source-6",
+            "source-7",
+            "source-8"
+          ],
+          "runtime_source_parity": {
+            "comparable_pair_count": 0,
+            "runtime_revision": "",
+            "source_revision": "",
+            "status": "unknown"
+          },
+          "schema": "chili.causal-timeline.v1"
+        },
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "Runtime defaults override cli values due to missing propagation.",
+          "confidence": 0.115,
+          "dimension": "runtime",
+          "evidence_ids": [
+            "operator-1",
+            "operator-2"
+          ],
+          "hypothesis_id": "h2",
+          "promotion_reason": "",
+          "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+          "requested_status": "confirmed",
+          "status": "provisional"
+        },
+        "contract_invariants": [],
+        "decision": "instrument_first",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof",
+          "runtime_source_parity"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Code filters falsy cli values, excluding explicit inputs.",
+            "coarse_reset_support": false,
+            "confidence": 0.1525,
+            "confirmatory_weight": 0,
+            "context_weight": 0.18,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Check if falsy cli values are retained in parsed options.",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "source-1"
+            ],
+            "support_weight": 0.18,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Runtime defaults override cli values due to missing propagation.",
+            "coarse_reset_support": false,
+            "confidence": 0.115,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Verify cli values are passed to runtime resolution logic.",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2"
+            ],
+            "support_weight": 0.13,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Data drift causes cli values to be absent in parsed records.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Confirm cli values exist in parsed launch records.",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [],
+            "support_weight": 0.0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Unknown configuration misalignment affects option precedence.",
+            "coarse_reset_support": false,
+            "confidence": 0.115,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "unknown",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Isolate unknown variables impacting resolution logic.",
+            "hypothesis_id": "h4",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-5"
+            ],
+            "support_weight": 0.13,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Check if falsy cli values are retained in parsed options.",
+            "dimension": "code",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Verify cli values are passed to runtime resolution logic.",
+            "dimension": "runtime",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Confirm cli values exist in parsed launch records.",
+            "dimension": "data",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Isolate unknown variables impacting resolution logic.",
+            "dimension": "unknown",
+            "experiment_id": "falsify-h4",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Runtime context overrides CLI settings.",
+            "confidence": 0.115,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "operator-1",
+              "operator-2"
+            ],
+            "hypothesis_id": "h4",
+            "promotion_reason": "",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Runtime context overrides CLI settings.",
+            "confidence": 0.115,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "operator-1",
+              "operator-2"
+            ],
+            "hypothesis_id": "h4",
+            "promotion_reason": "",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-1"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "CLI parsing filters empty values.",
+            "status": "provisional"
+          },
+          "response_chars": 1209,
+          "retractions": [],
+          "stage": "judge"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Runtime defaults override cli values due to missing propagation.",
+            "confidence": 0.115,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "operator-1",
+              "operator-2"
+            ],
+            "hypothesis_id": "h2",
+            "promotion_reason": "",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "confirmed",
+            "status": "provisional"
+          },
+          "contract_repairs": [
+            "test-code-filter:demoted_unsafe_auto_execute",
+            "test-runtime-propagation:demoted_unsafe_auto_execute"
+          ],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Runtime defaults override cli values due to missing propagation.",
+            "confidence": 0.115,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "operator-1",
+              "operator-2"
+            ],
+            "hypothesis_id": "h2",
+            "promotion_reason": "",
+            "reason": "Deterministic evidence gate selected a stronger supported competing hypothesis.",
+            "requested_status": "confirmed",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-1",
+              "operator-1",
+              "operator-2"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Code explicitly filters falsy cli values, preventing them from overriding defaults.",
+            "status": "confirmed"
+          },
+          "response_chars": 2193,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "provisional",
+      "duration_ms": 546279,
+      "evaluation_role": "blinded_holdout",
+      "external_final_oracle": true,
+      "feedback_tests": {
+        "duration_ms": 589,
+        "exit_code": 1,
+        "output": "F..                                                                      [100%]\n================================== FAILURES ===================================\n________ test_explicit_auto_size_worker_value_beats_site_configuration ________\n\n    def test_explicit_auto_size_worker_value_beats_site_configuration():\n        cli = CliOptions.parse({\"workers\": 0})\n    \n        assert \"workers\" in cli.values\n>       assert resolve({\"workers\": 12}, cli)[\"workers\"] == 0\nE       assert 12 == 0\n\ntests\\test_feedback_zero_worker.py:9: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_feedback_zero_worker.py::test_explicit_auto_size_worker_value_beats_site_configuration\n1 failed, 2 passed in 0.08s\n\nCHILI adapter rejected the attempted edit:\nRepair planner selected no valid source file.\n\nCHILI adapter rejected the attempted edit:\nRepair planner selected no valid source file.",
+        "passed": false,
+        "runner": "pytest"
+      },
+      "final_tests": {
+        "duration_ms": 574,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "F..                                                                      [100%]\n================================== FAILURES ===================================\n______ test_explicit_clear_values_coexist_with_an_unrelated_file_setting ______\n\n    def test_explicit_clear_values_coexist_with_an_unrelated_file_setting():\n        cli = CliOptions.parse({\"audit\": False, \"labels\": []})\n        result = resolve(\n            {\"workers\": 10, \"audit\": True, \"labels\": [\"inherited\"]}, cli\n        )\n    \n>       assert result == {\n            \"workers\": 10,\n            \"audit\": False,\n            \"labels\": [],\n        }\nE       AssertionError: assert {'audit': Tru...'workers': 10} == {'audit': Fal...'workers': 10}\nE         \nE         Omitting 1 identical items, use -vv to show\nE         Differing items:\nE         {'labels': ['inherited']} != {'labels': []}\nE         {'audit': True} != {'audit': False}\nE         Use -v to get more diff\n\ntests\\test_final_false_and_empty_values.py:11: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_final_false_and_empty_values.py::test_explicit_clear_values_coexist_with_an_unrelated_file_setting\n1 failed, 2 passed in 0.07s",
+        "passed": false,
+        "runner": "pytest"
+      },
+      "functional_repair_passed": false,
+      "initial_diagnosis_dimension": "runtime",
+      "language": "python",
+      "model_calls": [
+        {
+          "error": null,
+          "json_object_valid": true,
+          "latency_ms": 80252,
+          "ok": true,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"CLI parsing excludes explicit keys.\",\"dimension\":\"code\",\"support_evidence_ids\":[\"source-1\"],\"falsification\":\"Check if CLI keys are retained in parsed values.\"},{\"hypothesis_id\":\"h2\",\"claim\":\"Resolution logic prioritizes defaults over CLI.\",\"dimension\":\"code\",\"support_evidence_ids\":[\"source-2\"],\"falsification\":\"Verify CLI values override file_values.\"},{\"hypothesis_id\":\"h3\",\"claim\":\"Test cases miss edge cases for empty CLI values.\",\"dimension\":\"test_harness\",\"support_evidence_ids\":[\"source-6\",\"source-7\",\"source-8\"],\"falsification\":\"Validate empty CLI values are handled.\"},{\"hypothesis_id\":\"h4\",\"claim\":\"Runtime context overrides CLI settings.\",\"dimension\":\"runtime\",\"support_evidence_ids\":[\"operator-1\",\"operator-2\"],\"falsification\":\"Isolate runtime to confirm CLI precedence.\"}],\"experiments\":[{\"probe_id\":\"p-code\",\"kind\":\"fixed-string search\",\"paths\":[\"settings/cli.py\"],\"query\":\"exclude key\",\"dimension\":\"code\"},{\"probe_id\":\"p-git\",\"kind\":\"git_diff\",\"paths\":[\"settings/cli.py\",\"settings/resolver.py\"],\"dimension\":\"code\"}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"provisional\",\"evidence_ids\":[\"source-1\"],\"reason\":\"CLI parsing filters empty values.\"}}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 286,
+          "wall_ms": 80252
+        },
+        {
+          "error": null,
+          "json_object_valid": true,
+          "latency_ms": 125818,
+          "ok": true,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"Code filters falsy cli values, excluding explicit inputs.\",\"dimension\":\"code\",\"support_evidence_ids\":[\"source-1\"],\"contradict_evidence_ids\":[],\"falsification\":\"Check if falsy cli values are retained in parsed options.\"},{\"hypothesis_id\":\"h2\",\"claim\":\"Runtime defaults override cli values due to missing propagation.\",\"dimension\":\"runtime\",\"support_evidence_ids\":[\"operator-1\",\"operator-2\"],\"contradict_evidence_ids\":[],\"falsification\":\"Verify cli values are passed to runtime resolution logic.\"},{\"hypothesis_id\":\"h3\",\"claim\":\"Data drift causes cli values to be absent in parsed records.\",\"dimension\":\"data\",\"support_evidence_ids\":[],\"contradict_evidence_ids\":[],\"falsification\":\"Confirm cli values exist in parsed launch records.\"},{\"hypothesis_id\":\"h4\",\"claim\":\"Unknown configuration misalignment affects option precedence.\",\"dimension\":\"unknown\",\"support_evidence_ids\":[\"operator-5\"],\"contradict_evidence_ids\":[],\"falsification\":\"Isolate unknown variables impacting resolution logic.\"}],\"experiments\":[{\"auto_execute\":true,\"changed_dimensions\":[\"code\"],\"evidence_required\":[\"source-1\"],\"expected_if_false\":\"Falsy cli values remain in parsed options.\",\"experiment_id\":\"test-code-filter\",\"held_constant_dimensions\":[\"data\",\"runtime\",\"clock\",\"state\",\"config\",\"dependency\",\"test_harness\"],\"hypothesis_ids\":[\"h1\"],\"probe\":{\"type\":\"code_analysis\",\"target\":\"cli.py:parse\",\"check\":\"truthy_filter\"},\"result_evidence_ids\":[\"source-1\"],\"safety\":\"isolated\"},{\"auto_execute\":true,\"changed_dimensions\":[\"runtime\"],\"evidence_required\":[\"operator-1\",\"operator-2\"],\"expected_if_false\":\"Cli values propagate to runtime resolution.\",\"experiment_id\":\"test-runtime-propagation\",\"held_constant_dimensions\":[\"code\",\"data\",\"clock\",\"state\",\"config\",\"dependency\",\"test_harness\"],\"hypothesis_ids\":[\"h2\"],\"probe\":{\"type\":\"runtime_check\",\"target\":\"worker_rollout\",\"check\":\"cli_value_injection\"},\"result_evidence_ids\":[\"operator-1\",\"operator-2\"],\"safety\":\"isolated\"}],\"conclusion\":{\"evidence_ids\":[\"source-1\",\"operator-1\",\"operator-2\"],\"hypothesis_id\":\"h1\",\"reason\":\"Code explicitly filters falsy cli values, preventing them from overriding defaults.\",\"status\":\"confirmed\"}}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 493,
+          "wall_ms": 125818
+        },
+        {
+          "error": null,
+          "latency_ms": 30652,
+          "ok": true,
+          "response": "",
+          "stage": "plan",
+          "tokens_out": 450,
+          "wall_ms": 30652
+        },
+        {
+          "error": null,
+          "latency_ms": 37560,
+          "ok": true,
+          "response": "{\n  \"dimension\": \"config\",\n  \"analysis\": \"The CLI parser incorrectly filters out falsy values (like 0) during parsing, causing explicit CLI options to be lost. The resolver relies on cli.values containing these options, but the current implementation excludes them, leading to defaults overriding explicit values.\",\n  \"files\": [\n    {\n      \"path\": \"settings/cli.py\",\n      \"action\": \"modify\",\n      \"description\": \"Stop filtering out falsy values in the parse method to ensure explicitly supplied CLI options (even with 0) are retained in cli.values.\"\n    }\n  ],\n  \"notes\": \"The resolver expects cli.values to contain explicit options. By preserving all keys during parsing, the test assertion 'workers' in cli.values will succeed, and the resolver will correctly prioritize CLI values over defaults/site files.\"\n}",
+          "stage": "repair_plan_1",
+          "tokens_out": 171,
+          "wall_ms": 37560
+        },
+        {
+          "error": null,
+          "latency_ms": 58644,
+          "ok": true,
+          "response": "{\n  \"dimension\": \"config\",\n  \"analysis\": \"The CLI parser erroneously excludes falsy values (like 0) from cli.values via the conditional filter, violating the contract that explicitly supplied options must persist. This causes the test assertion to fail as 'workers' disappears from the parsed values. The resolver depends on cli.values containing these keys for precedence resolution.\",\n  \"files\": [\n    {\n      \"path\": \"settings/cli.py\",\n      \"action\": \"modify\",\n      \"description\": \"Remove the truthiness check in the parse method to retain all keys, including those with falsy values like 0, ensuring explicit CLI options survive parsing and satisfy the validation contract that 'workers' must be present in cli.values.\"\n    }\n  ],\n  \"notes\": \"The resolver's logic correctly prioritizes cli.values.get('workers') over defaults, but only if the key exists. By preserving all keys in parsing, the test assertion 'workers' in cli.values will pass, and the resolver will correctly select the explicit CLI value of 0 over site file defaults.\"\n}",
+          "stage": "repair_review_1",
+          "tokens_out": 220,
+          "wall_ms": 58644
+        },
+        {
+          "error": null,
+          "latency_ms": 36854,
+          "ok": true,
+          "response": "<<<<<<< SEARCH\n        # The parser receives only options that were explicitly supplied.\n        return cls({key: value for key, value in raw.items() if value})\n=======\n        # The parser receives only options that were explicitly supplied.\n        return cls({key: value for key, value in raw.items()})\n>>>>>>> REPLACE",
+          "stage": "repair_edit_1_1",
+          "tokens_out": 512,
+          "wall_ms": 36854
+        },
+        {
+          "error": null,
+          "latency_ms": 37780,
+          "ok": true,
+          "response": "",
+          "stage": "repair_plan_2",
+          "tokens_out": 550,
+          "wall_ms": 37780
+        },
+        {
+          "error": null,
+          "latency_ms": 47217,
+          "ok": true,
+          "response": "",
+          "stage": "repair_review_2",
+          "tokens_out": 700,
+          "wall_ms": 47217
+        },
+        {
+          "error": null,
+          "latency_ms": 38005,
+          "ok": true,
+          "response": "",
+          "stage": "repair_plan_3",
+          "tokens_out": 550,
+          "wall_ms": 38005
+        },
+        {
+          "error": null,
+          "latency_ms": 47555,
+          "ok": true,
+          "response": "",
+          "stage": "repair_review_3",
+          "tokens_out": 700,
+          "wall_ms": 47555
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 10,
+      "patch_applied": true,
+      "patch_warnings": [
+        "No valid file selected.",
+        "Repair planner selected no valid source file.",
+        "Repair planner selected no valid source file."
+      ],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 479,
+        "exit_code": 0,
+        "output": "..                                                                       [100%]\n2 passed in 0.01s",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "repair_attempts": [
+        {
+          "after_failure_signature": "fe70f396363bd39164103af712237377c8d4d58cd856e65fea12bcf0d915322f",
+          "applied_files": [
+            "settings/cli.py"
+          ],
+          "attempt_fingerprint": "e9cb19a2808d973c7e9ad040b7cb2706ceffd370d9fbef920dc19f704de00828",
+          "before_failure_signature": "1e8afc41866d125086579e855eeca827e7450ed3a9b1b14dab4c215543c5a230",
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The CLI parser erroneously excludes falsy values (like 0) from cli.values via the conditional filter, violating the contract that explicitly supplied options must persist. This causes the test assertion to fail as 'workers' disappears from the parsed values. The resolver depends on cli.values containing these keys for precedence resolution.",
+            "dimension": "config",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Remove the truthiness check in the parse method to retain all keys, including those with falsy values like 0, ensuring explicit CLI options survive parsing and satisfy the validation contract that 'workers' must be present in cli.values.",
+                "path": "settings/cli.py"
+              }
+            ],
+            "notes": "The resolver's logic correctly prioritizes cli.values.get('workers') over defaults, but only if the key exists. By preserving all keys in parsing, the test assertion 'workers' in cli.values will pass, and the resolver will correctly select the explicit CLI value of 0 over site file defaults."
+          },
+          "round": 1,
+          "satisfied_files": [],
+          "selected_file": "settings/cli.py",
+          "selected_files": [
+            "settings/cli.py"
+          ],
+          "warnings": []
+        },
+        {
+          "before_failure_signature": "fe70f396363bd39164103af712237377c8d4d58cd856e65fea12bcf0d915322f",
+          "patch_applied": false,
+          "plan": {},
+          "round": 2,
+          "selected_file": "",
+          "selected_files": [],
+          "warnings": [
+            "Repair planner selected no valid source file."
+          ]
+        },
+        {
+          "before_failure_signature": "7f3208c505a8a7e19110f1ace93af782f653daa959c62845bcee317213c579a4",
+          "patch_applied": false,
+          "plan": {},
+          "round": 3,
+          "selected_file": "",
+          "selected_files": [],
+          "warnings": [
+            "Repair planner selected no valid source file."
+          ]
+        }
+      ],
+      "score": 65,
+      "sealed_final_adjudication": true,
+      "selected_file": "settings/cli.py",
+      "selected_files": [
+        "settings/cli.py"
+      ],
+      "split": "holdout-sealed-python-multifile",
+      "test_runner": "pytest"
+    },
+    {
+      "baseline_feedback_tests": {
+        "duration_ms": 287,
+        "exit_code": 255,
+        "output": "[tests/profile_feedback_test.dart]\nUnhandled exception:\nBad state: explicit null was decoded as absent\n#0      require (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-feedback-jcqw93qe/repo/tests/profile_feedback_test.dart:6:5)\n#1      main (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-feedback-jcqw93qe/repo/tests/profile_feedback_test.dart:12:3)\n#2      _delayEntrypointInvocation.<anonymous closure> (dart:isolate-patch/isolate_patch.dart:314:19)\n#3      _RawReceivePort._handleMessage (dart:isolate-patch/isolate_patch.dart:193:12)",
+        "passed": false,
+        "runner": "dart",
+        "test_files": [
+          "tests/profile_feedback_test.dart",
+          "tests/profile_public_test.dart"
+        ]
+      },
+      "baseline_final_tests": {
+        "duration_ms": 287,
+        "exit_code": 255,
+        "isolated_final_repo": true,
+        "output": "[tests/profile_final_test.dart]\nUnhandled exception:\nBad state: note was not cleared\n#0      check (file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-304kgq08/repo/tests/profile_final_test.dart:6:5)\n#1      main (file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-304kgq08/repo/tests/profile_final_test.dart:18:3)\n#2      _delayEntrypointInvocation.<anonymous closure> (dart:isolate-patch/isolate_patch.dart:314:19)\n#3      _RawReceivePort._handleMessage (dart:isolate-patch/isolate_patch.dart:193:12)",
+        "passed": false,
+        "runner": "dart",
+        "test_files": [
+          "tests/profile_final_test.dart",
+          "tests/profile_public_test.dart"
+        ]
+      },
+      "baseline_public_tests": {
+        "duration_ms": 286,
+        "exit_code": 0,
+        "output": "[tests/profile_public_test.dart]",
+        "passed": true,
+        "runner": "dart",
+        "test_files": [
+          "tests/profile_public_test.dart"
+        ]
+      },
+      "case_id": "dart-profile-patch-null",
+      "changed_files": [],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": false,
+        "file_selection": false,
+        "final_tests": false,
+        "patch_applied": false,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": false,
+        "patch_applied": false,
+        "selected_files": [],
+        "warnings": []
+      },
+      "diagnosis_dimension": "state",
+      "diagnosis_history": [
+        {
+          "dimension": "data",
+          "stage": "repair_1"
+        },
+        {
+          "dimension": "state",
+          "stage": "repair_2"
+        },
+        {
+          "dimension": "state",
+          "stage": "repair_3"
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "source-7",
+            "source-8",
+            "source-9"
+          ],
+          "hypothesis_id": "h1",
+          "reason": "Code defines PatchField but lacks null handling logic",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-1",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [],
+            "evidence_required": [],
+            "expected_if_false": "",
+            "expected_if_true": "",
+            "experiment_id": "experiment-2",
+            "held_constant_dimensions": [],
+            "hypothesis_ids": [],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "Code mishandles null in PatchField",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Modify PatchField to reject null values",
+            "hypothesis_id": "h1",
+            "support_evidence_ids": [
+              "source-7",
+              "source-8",
+              "source-9"
+            ]
+          },
+          {
+            "claim": "Test harness ignores null keys",
+            "contradict_evidence_ids": [],
+            "dimension": "test_harness",
+            "falsification": "Force test to include null key in patch",
+            "hypothesis_id": "h2",
+            "support_evidence_ids": [
+              "source-2"
+            ]
+          },
+          {
+            "claim": "Repo state lacks null tracking",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Verify repo state includes null values",
+            "hypothesis_id": "h3",
+            "support_evidence_ids": []
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "dart-profile-patch-null",
+        "causal_timeline": {
+          "downstream_evidence_ids": [],
+          "earliest_break": {},
+          "events": [
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "probe:default-log-inventory",
+              "event_type": "typed_probe_log_inventory",
+              "evidence_id": "probe-default-log-inventory",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T08:50:06.993366+00:00",
+              "order": 0,
+              "prior_state": "",
+              "sequence": 0,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "probe:default-log-search",
+              "event_type": "typed_probe_log_search",
+              "evidence_id": "probe-default-log-search",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T08:50:06.999705+00:00",
+              "order": 1,
+              "prior_state": "",
+              "sequence": 1,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "probe:default-repo-state",
+              "event_type": "typed_probe_repo_state",
+              "evidence_id": "probe-default-repo-state",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T08:50:07.047089+00:00",
+              "order": 2,
+              "prior_state": "",
+              "sequence": 2,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-1",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 3,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-2",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 4,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-3",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 5,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-4",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 6,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-1",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 7,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-2",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 8,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-3",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 9,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "code",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-4",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 10,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "code",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-5",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 11,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-6",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 12,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "code",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-7",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 13,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "code",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-8",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 14,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "code",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-9",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 15,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            }
+          ],
+          "ordered_evidence_ids": [
+            "probe-default-log-inventory",
+            "probe-default-log-search",
+            "probe-default-repo-state",
+            "operator-1",
+            "operator-2",
+            "operator-3",
+            "operator-4",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-5",
+            "source-6",
+            "source-7",
+            "source-8",
+            "source-9"
+          ],
+          "runtime_source_parity": {
+            "comparable_pair_count": 0,
+            "runtime_revision": "",
+            "source_revision": "",
+            "status": "unknown"
+          },
+          "schema": "chili.causal-timeline.v1"
+        },
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "Code mishandles null in PatchField",
+          "confidence": 0.1525,
+          "dimension": "code",
+          "evidence_ids": [
+            "source-7",
+            "source-8",
+            "source-9"
+          ],
+          "hypothesis_id": "h1",
+          "promotion_reason": "",
+          "reason": "Code defines PatchField but lacks null handling logic",
+          "requested_status": "provisional",
+          "status": "provisional"
+        },
+        "contract_invariants": [],
+        "decision": "instrument_first",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Code mishandles null in PatchField",
+            "coarse_reset_support": false,
+            "confidence": 0.1525,
+            "confirmatory_weight": 0,
+            "context_weight": 0.18,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Modify PatchField to reject null values",
+            "hypothesis_id": "h1",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "support_weight": 0.18,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Test harness ignores null keys",
+            "coarse_reset_support": false,
+            "confidence": 0.1304,
+            "confirmatory_weight": 0,
+            "context_weight": 0.15,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "test_harness",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Force test to include null key in patch",
+            "hypothesis_id": "h2",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "source-2"
+            ],
+            "support_weight": 0.15,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "Repo state lacks null tracking",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Verify repo state includes null values",
+            "hypothesis_id": "h3",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [],
+            "support_weight": 0.0,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Modify PatchField to reject null values",
+            "dimension": "code",
+            "experiment_id": "falsify-h1",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Force test to include null key in patch",
+            "dimension": "test_harness",
+            "experiment_id": "falsify-h2",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Verify repo state includes null values",
+            "dimension": "state",
+            "experiment_id": "falsify-h3",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Code mishandles PatchField presence flags.",
+            "confidence": 0.1525,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "hypothesis_id": "h-code",
+            "promotion_reason": "",
+            "reason": "Presence flag logic lacks explicit null handling.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [
+            "h-test:dropped_mismatched_support"
+          ],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Code mishandles PatchField presence flags.",
+            "confidence": 0.1525,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "hypothesis_id": "h-code",
+            "promotion_reason": "",
+            "reason": "Presence flag logic lacks explicit null handling.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "hypothesis_id": "h-code",
+            "reason": "Presence flag logic lacks explicit null handling.",
+            "status": "provisional"
+          },
+          "response_chars": 1427,
+          "retractions": [],
+          "stage": "judge"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Code mishandles null in PatchField",
+            "confidence": 0.1525,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Code defines PatchField but lacks null handling logic",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [
+            "h2:dropped_mismatched_support",
+            "h3:dropped_mismatched_support"
+          ],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "Code mishandles null in PatchField",
+            "confidence": 0.1525,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Code defines PatchField but lacks null handling logic",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Code defines PatchField but lacks null handling logic",
+            "status": "provisional"
+          },
+          "response_chars": 1244,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "provisional",
+      "duration_ms": 733893,
+      "evaluation_role": "blinded_holdout",
+      "external_final_oracle": true,
+      "feedback_tests": {
+        "duration_ms": 340,
+        "exit_code": 255,
+        "output": "[tests/profile_feedback_test.dart]\nUnhandled exception:\nBad state: explicit null was decoded as absent\n#0      require (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-dart-profile-patch-null-8rfrivso/repo/tests/profile_feedback_test.dart:6:5)\n#1      main (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-dart-profile-patch-null-8rfrivso/repo/tests/profile_feedback_test.dart:12:3)\n#2      _delayEntrypointInvocation.<anonymous closure> (dart:isolate-patch/isolate_patch.dart:314:19)\n#3      _RawReceivePort._handleMessage (dart:isolate-patch/isolate_patch.dart:193:12)\n\nCHILI adapter rejected the attempted edit:\nfull-file fallback requires exactly one fenced block, found 0\nRolled back multi-file edit group after lib/patch.dart was rejected.\n\nCHILI adapter rejected the attempted edit:\nfull-file fallback requires exactly one fenced block, found 0\nRolled back multi-file edit group after lib/patch.dart was rejected.\n\nCHILI adapter rejected the attempted edit:\nfull-file fallback requires exactly one fenced block, found 0\nRolled back multi-file edit group after lib/patch.dart was rejected.",
+        "passed": false,
+        "runner": "dart",
+        "test_files": [
+          "tests/profile_feedback_test.dart",
+          "tests/profile_public_test.dart"
+        ]
+      },
+      "final_tests": {
+        "duration_ms": 315,
+        "exit_code": 255,
+        "isolated_final_repo": true,
+        "output": "[tests/profile_final_test.dart]\nUnhandled exception:\nBad state: note was not cleared\n#0      check (file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-k_1zz0s5/repo/tests/profile_final_test.dart:6:5)\n#1      main (file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-k_1zz0s5/repo/tests/profile_final_test.dart:18:3)\n#2      _delayEntrypointInvocation.<anonymous closure> (dart:isolate-patch/isolate_patch.dart:314:19)\n#3      _RawReceivePort._handleMessage (dart:isolate-patch/isolate_patch.dart:193:12)",
+        "passed": false,
+        "runner": "dart",
+        "test_files": [
+          "tests/profile_final_test.dart",
+          "tests/profile_public_test.dart"
+        ]
+      },
+      "functional_repair_passed": false,
+      "initial_diagnosis_dimension": "code",
+      "language": "dart",
+      "model_calls": [
+        {
+          "error": null,
+          "json_object_valid": true,
+          "latency_ms": 84019,
+          "ok": true,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h-code\",\"claim\":\"Code mishandles PatchField presence flags.\",\"dimension\":\"code\",\"support_evidence_ids\":[\"source-7\",\"source-8\",\"source-9\"],\"falsification\":\"Modify PatchField logic and verify outcome change.\"},{\"hypothesis_id\":\"h-patch\",\"claim\":\"Patch parsing conflates omission with explicit null.\",\"dimension\":\"data\",\"support_evidence_ids\":[\"operator-1\",\"operator-2\",\"operator-3\"],\"falsification\":\"Audit JSON parsing for presence flag differentiation.\"},{\"hypothesis_id\":\"h-test\",\"claim\":\"Test case lacks presence flag validation.\",\"dimension\":\"test_harness\",\"support_evidence_ids\":[\"source-2\",\"source-5\"],\"falsification\":\"Add presence flag checks to test assertions.\"},{\"hypothesis_id\":\"h-unknown\",\"claim\":\"Uninstrumented drift in decoding logic.\",\"dimension\":\"unknown\",\"support_evidence_ids\":[\"operator-4\",\"source-1\",\"source-3\"],\"falsification\":\"Instrument decoding phase for flag tracking.\"}],\"experiments\":[{\"probe_id\":\"p-patch\",\"kind\":\"git_diff\",\"paths\":[\"lib/patch.dart\"],\"dimension\":\"code\"},{\"probe_id\":\"p-test\",\"kind\":\"bounded_file_excerpt\",\"paths\":[\"tests/profile_public_test.dart\"],\"dimension\":\"test_harness\"},{\"probe_id\":\"p-decode\",\"kind\":\"git_history\",\"paths\":[\"lib/profile_store.dart\"],\"dimension\":\"code\"}],\"conclusion\":{\"hypothesis_id\":\"h-code\",\"status\":\"provisional\",\"evidence_ids\":[\"source-7\",\"source-8\",\"source-9\"],\"reason\":\"Presence flag logic lacks explicit null handling.\"}}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 335,
+          "wall_ms": 84019
+        },
+        {
+          "error": null,
+          "json_object_valid": true,
+          "latency_ms": 90396,
+          "ok": true,
+          "response": "{\"hypotheses\":[{\"hypothesis_id\":\"h1\",\"claim\":\"Code mishandles null in PatchField\",\"dimension\":\"code\",\"support_evidence_ids\":[\"source-7\",\"source-8\",\"source-9\"],\"contradict_evidence_ids\":[],\"falsification\":\"Modify PatchField to reject null values\"},{\"hypothesis_id\":\"h2\",\"claim\":\"Test harness ignores null keys\",\"dimension\":\"test_harness\",\"support_evidence_ids\":[\"source-2\",\"source-5\"],\"contradict_evidence_ids\":[],\"falsification\":\"Force test to include null key in patch\"},{\"hypothesis_id\":\"h3\",\"claim\":\"Repo state lacks null tracking\",\"dimension\":\"state\",\"support_evidence_ids\":[\"source-4\",\"source-5\"],\"contradict_evidence_ids\":[],\"falsification\":\"Verify repo state includes null values\"}],\"experiments\":[{\"probe_id\":\"p-schema\",\"kind\":\"db_profile\",\"table\":\"profile_store\",\"dimension\":\"code\",\"query\":\"SELECT * FROM profile_store WHERE note IS NULL\",\"max_rows\":5},{\"probe_id\":\"p-count\",\"kind\":\"db_profile\",\"table\":\"profile_store\",\"timestamp_column\":\"updated_at\",\"lookback_minutes\":60,\"group_by\":\"note\",\"max_groups\":10,\"filters\":{\"displayName\":\"NULL\"},\"dimension\":\"data\"}],\"conclusion\":{\"hypothesis_id\":\"h1\",\"status\":\"provisional\",\"evidence_ids\":[\"source-7\",\"source-8\",\"source-9\"],\"reason\":\"Code defines PatchField but lacks null handling logic\"}}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 310,
+          "wall_ms": 90396
+        },
+        {
+          "error": null,
+          "latency_ms": 32303,
+          "ok": true,
+          "response": "",
+          "stage": "plan",
+          "tokens_out": 450,
+          "wall_ms": 32303
+        },
+        {
+          "error": null,
+          "latency_ms": 43382,
+          "ok": true,
+          "response": "{\n  \"dimension\":\"data\",\n  \"analysis\":\"The core issue is misinterpreting JSON null as absence rather than explicit clear. The current fromJson logic maps null values to PatchField.absent() (isPresent=false), but the test requires explicit null to set isPresent=true. This violates the wire contract's distinction between omission and explicit clear.\",\n  \"files\":[\n    {\n      \"path\":\"lib/patch.dart\",\n      \"action\":\"modify\",\n      \"description\":\"Update ProfilePatch.fromJson to treat JSON null as explicit clear (isPresent=true) instead of absence (isPresent=false). This preserves the wire contract's distinction between omitted fields and explicit null values.\"\n    }\n  ],\n  \"notes\":\"The repair must maintain the existing PatchField.absent() implementation while adding a new case for JSON null values. This requires modifying the fromJson factory constructor in ProfilePatch to set isPresent=true when the JSON value is null.\"\n}",
+          "stage": "repair_plan_1",
+          "tokens_out": 191,
+          "wall_ms": 43382
+        },
+        {
+          "error": null,
+          "latency_ms": 49204,
+          "ok": true,
+          "response": "",
+          "stage": "repair_review_1",
+          "tokens_out": 700,
+          "wall_ms": 49204
+        },
+        {
+          "error": null,
+          "latency_ms": 81878,
+          "ok": true,
+          "response": "",
+          "stage": "repair_edit_1_1",
+          "tokens_out": 1200,
+          "wall_ms": 81878
+        },
+        {
+          "error": null,
+          "latency_ms": 39026,
+          "ok": true,
+          "response": "",
+          "stage": "repair_plan_2",
+          "tokens_out": 550,
+          "wall_ms": 39026
+        },
+        {
+          "error": null,
+          "latency_ms": 44936,
+          "ok": true,
+          "response": "{\n  \"dimension\": \"state\",\n  \"analysis\": \"contracts and contradiction check\",\n  \"files\": [\n    {\n      \"path\": \"lib/patch.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure explicit nulls in JSON are treated as present with null value, preserving wire contract distinction between omission and explicit clear\"\n    }\n  ],\n  \"notes\": \"The original code used PatchField.absent() for null JSON values, which set isPresent=false. The test requires explicit nulls to be treated as present (isPresent=true) with null value. This change fixes the decoding logic to match the asserted contract.\"\n}",
+          "stage": "repair_review_2",
+          "tokens_out": 134,
+          "wall_ms": 44936
+        },
+        {
+          "error": null,
+          "latency_ms": 83196,
+          "ok": true,
+          "response": "",
+          "stage": "repair_edit_2_1",
+          "tokens_out": 1200,
+          "wall_ms": 83196
+        },
+        {
+          "error": null,
+          "latency_ms": 48288,
+          "ok": true,
+          "response": "{\n  \"dimension\":\"state\",\n  \"analysis\":\"The core issue is misinterpreting explicit null values as absent. The current parsing logic treats null as absent (isPresent=false), but the requirement is to distinguish between omission (absent) and explicit clear (present with null). The test expects null to set isPresent=true while preserving nullability.\",\n  \"files\":[\n    {\n      \"path\":\"lib/patch.dart\",\n      \"action\":\"modify\",\n      \"description\":\"Update ProfilePatch.fromJson to treat JSON null as present(null) instead of absent(). This preserves the wire contract's distinction between omission and explicit clear while maintaining nullability.\"\n    }\n  ],\n  \"notes\":\"The critical fix requires changing how null values are interpreted in the JSON deserialization. The existing logic incorrectly maps null to absent, but the requirement is to mark fields as present with null values when explicitly cleared.\"\n}",
+          "stage": "repair_plan_3",
+          "tokens_out": 181,
+          "wall_ms": 48288
+        },
+        {
+          "error": null,
+          "latency_ms": 50051,
+          "ok": true,
+          "response": "",
+          "stage": "repair_review_3",
+          "tokens_out": 700,
+          "wall_ms": 50051
+        },
+        {
+          "error": null,
+          "latency_ms": 83899,
+          "ok": true,
+          "response": "",
+          "stage": "repair_edit_3_1",
+          "tokens_out": 1200,
+          "wall_ms": 83899
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 12,
+      "patch_applied": false,
+      "patch_warnings": [
+        "No valid file selected.",
+        "full-file fallback requires exactly one fenced block, found 0",
+        "Rolled back multi-file edit group after lib/patch.dart was rejected.",
+        "full-file fallback requires exactly one fenced block, found 0",
+        "Rolled back multi-file edit group after lib/patch.dart was rejected.",
+        "full-file fallback requires exactly one fenced block, found 0",
+        "Rolled back multi-file edit group after lib/patch.dart was rejected."
+      ],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 291,
+        "exit_code": 0,
+        "output": "[tests/profile_public_test.dart]",
+        "passed": true,
+        "runner": "dart",
+        "test_files": [
+          "tests/profile_public_test.dart"
+        ]
+      },
+      "repair_attempts": [
+        {
+          "applied_files": [],
+          "before_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+          "patch_applied": false,
+          "plan": {
+            "analysis": "The core issue is misinterpreting JSON null as absence rather than explicit clear. The current fromJson logic maps null values to PatchField.absent() (isPresent=false), but the test requires explicit null to set isPresent=true. This violates the wire contract's distinction between omission and explicit clear.",
+            "dimension": "data",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Update ProfilePatch.fromJson to treat JSON null as explicit clear (isPresent=true) instead of absence (isPresent=false). This preserves the wire contract's distinction between omitted fields and explicit null values.",
+                "path": "lib/patch.dart"
+              }
+            ],
+            "notes": "The repair must maintain the existing PatchField.absent() implementation while adding a new case for JSON null values. This requires modifying the fromJson factory constructor in ProfilePatch to set isPresent=true when the JSON value is null."
+          },
+          "round": 1,
+          "satisfied_files": [],
+          "selected_file": "lib/patch.dart",
+          "selected_files": [
+            "lib/patch.dart"
+          ],
+          "warnings": [
+            "full-file fallback requires exactly one fenced block, found 0",
+            "Rolled back multi-file edit group after lib/patch.dart was rejected."
+          ]
+        },
+        {
+          "applied_files": [],
+          "before_failure_signature": "58c3a038555c55f2b612911fd5b490de4fb252977b181fc0163bddbc6bd83488",
+          "patch_applied": false,
+          "plan": {
+            "analysis": "contracts and contradiction check",
+            "dimension": "state",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Ensure explicit nulls in JSON are treated as present with null value, preserving wire contract distinction between omission and explicit clear",
+                "path": "lib/patch.dart"
+              }
+            ],
+            "notes": "The original code used PatchField.absent() for null JSON values, which set isPresent=false. The test requires explicit nulls to be treated as present (isPresent=true) with null value. This change fixes the decoding logic to match the asserted contract."
+          },
+          "round": 2,
+          "satisfied_files": [],
+          "selected_file": "lib/patch.dart",
+          "selected_files": [
+            "lib/patch.dart"
+          ],
+          "warnings": [
+            "full-file fallback requires exactly one fenced block, found 0",
+            "Rolled back multi-file edit group after lib/patch.dart was rejected."
+          ]
+        },
+        {
+          "applied_files": [],
+          "before_failure_signature": "18e511cd19fbf8f4d2010be9275fe555f8f8a89b7c4fa4aee208883deb180580",
+          "patch_applied": false,
+          "plan": {
+            "analysis": "The core issue is misinterpreting explicit null values as absent. The current parsing logic treats null as absent (isPresent=false), but the requirement is to distinguish between omission (absent) and explicit clear (present with null). The test expects null to set isPresent=true while preserving nullability.",
+            "dimension": "state",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Update ProfilePatch.fromJson to treat JSON null as present(null) instead of absent(). This preserves the wire contract's distinction between omission and explicit clear while maintaining nullability.",
+                "path": "lib/patch.dart"
+              }
+            ],
+            "notes": "The critical fix requires changing how null values are interpreted in the JSON deserialization. The existing logic incorrectly maps null to absent, but the requirement is to mark fields as present with null values when explicitly cleared."
+          },
+          "round": 3,
+          "satisfied_files": [],
+          "selected_file": "lib/patch.dart",
+          "selected_files": [
+            "lib/patch.dart"
+          ],
+          "warnings": [
+            "full-file fallback requires exactly one fenced block, found 0",
+            "Rolled back multi-file edit group after lib/patch.dart was rejected."
+          ]
+        }
+      ],
+      "score": 30,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "lib/patch.dart"
+      ],
+      "split": "holdout-sealed-dart-multifile",
+      "test_runner": "dart"
+    }
+  ],
+  "created_at": "2026-07-12T09:00:56.535383+00:00",
+  "development_regression_case_count": 0,
+  "development_regression_score": 0.0,
+  "diagnosis_accuracy": 50.0,
+  "diagnosis_correct_count": 1,
+  "diagnostic_stage_acceptance_rate": 100.0,
+  "diagnostic_stage_count": 4,
+  "evaluation_verdict": "blinded_evaluation_failed",
+  "exact_file_set_accuracy": 0.0,
+  "exact_file_set_count": 0,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "functional_solve_count": 0,
+  "functional_solve_rate": 0.0,
+  "holdout_case_count": 2,
+  "holdout_score": 47.5,
+  "max_repair_rounds": 3,
+  "model": "qwen3:8b",
+  "multifile_holdout_case_count": 2,
+  "multifile_holdout_score": 47.5,
+  "overall_score": 47.5,
+  "premium_calls": 0,
+  "reference_family": "claude-fable-5",
+  "schema": "chili.diagnosis-to-fix-results.v4",
+  "sealed_final_case_count": 2,
+  "verdict": "needs_improvement"
+}

@@ -1,0 +1,3510 @@
+{
+  "average_case_duration_ms": 236218.67,
+  "blinded_holdout_case_count": 3,
+  "blinded_holdout_score": 71.67,
+  "cases": [
+    {
+      "baseline_feedback_tests": {
+        "duration_ms": 577,
+        "exit_code": 1,
+        "output": "F..                                                                      [100%]\n================================== FAILURES ===================================\n________ test_explicit_auto_size_worker_value_beats_site_configuration ________\n\n    def test_explicit_auto_size_worker_value_beats_site_configuration():\n        cli = CliOptions.parse({\"workers\": 0})\n    \n>       assert \"workers\" in cli.values\nE       AssertionError: assert 'workers' in {}\nE        +  where {} = CliOptions(values={}).values\n\ntests\\test_feedback_zero_worker.py:8: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_feedback_zero_worker.py::test_explicit_auto_size_worker_value_beats_site_configuration\n1 failed, 2 passed in 0.07s",
+        "passed": false,
+        "runner": "pytest"
+      },
+      "baseline_final_tests": {
+        "duration_ms": 621,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "F..                                                                      [100%]\n================================== FAILURES ===================================\n______ test_explicit_clear_values_coexist_with_an_unrelated_file_setting ______\n\n    def test_explicit_clear_values_coexist_with_an_unrelated_file_setting():\n        cli = CliOptions.parse({\"audit\": False, \"labels\": []})\n        result = resolve(\n            {\"workers\": 10, \"audit\": True, \"labels\": [\"inherited\"]}, cli\n        )\n    \n>       assert result == {\n            \"workers\": 10,\n            \"audit\": False,\n            \"labels\": [],\n        }\nE       AssertionError: assert {'audit': Tru...'workers': 10} == {'audit': Fal...'workers': 10}\nE         \nE         Omitting 1 identical items, use -vv to show\nE         Differing items:\nE         {'labels': ['inherited']} != {'labels': []}\nE         {'audit': True} != {'audit': False}\nE         Use -v to get more diff\n\ntests\\test_final_false_and_empty_values.py:11: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_final_false_and_empty_values.py::test_explicit_clear_values_coexist_with_an_unrelated_file_setting\n1 failed, 2 passed in 0.08s",
+        "passed": false,
+        "runner": "pytest"
+      },
+      "baseline_public_tests": {
+        "duration_ms": 483,
+        "exit_code": 0,
+        "output": "..                                                                       [100%]\n2 passed in 0.02s",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "case_id": "py-config-explicit-values",
+      "changed_files": [
+        "settings/cli.py"
+      ],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": false,
+        "final_tests": false,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": false,
+        "patch_applied": false,
+        "selected_files": [],
+        "warnings": []
+      },
+      "diagnosis_dimension": "config",
+      "diagnosis_history": [
+        {
+          "dimension": "config",
+          "stage": "initial_plan"
+        },
+        {
+          "dimension": "config",
+          "stage": "repair_1"
+        },
+        {
+          "dimension": "config",
+          "stage": "repair_2"
+        },
+        {
+          "dimension": "config",
+          "stage": "repair_3"
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "operator-4"
+          ],
+          "hypothesis_id": "h-runtime",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "runtime"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing runtime changes or restores the outcome.",
+            "experiment_id": "falsify-h-runtime",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-runtime"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "code"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing code changes or restores the outcome.",
+            "experiment_id": "falsify-h-code",
+            "held_constant_dimensions": [
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-code"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-4"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by code drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "support_evidence_ids": []
+          },
+          {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "support_evidence_ids": []
+          },
+          {
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "unknown",
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h-unknown",
+            "support_evidence_ids": [
+              "operator-3",
+              "operator-5",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-4",
+              "source-5",
+              "source-6",
+              "source-7",
+              "source-8",
+              "probe-default-log-inventory",
+              "probe-default-log-search",
+              "probe-default-repo-state"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "py-config-explicit-values",
+        "causal_timeline": {
+          "downstream_evidence_ids": [],
+          "earliest_break": {},
+          "events": [
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "probe:default-log-inventory",
+              "event_type": "typed_probe_log_inventory",
+              "evidence_id": "probe-default-log-inventory",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T09:06:56.928104+00:00",
+              "order": 0,
+              "prior_state": "",
+              "sequence": 0,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "probe:default-log-search",
+              "event_type": "typed_probe_log_search",
+              "evidence_id": "probe-default-log-search",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T09:06:56.932023+00:00",
+              "order": 1,
+              "prior_state": "",
+              "sequence": 1,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "probe:default-repo-state",
+              "event_type": "typed_probe_repo_state",
+              "evidence_id": "probe-default-repo-state",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T09:06:56.974748+00:00",
+              "order": 2,
+              "prior_state": "",
+              "sequence": 2,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "runtime",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-1",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 3,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "runtime",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-2",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 4,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-3",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 5,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "runtime",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-4",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 6,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-5",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 7,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-1",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 8,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-2",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 9,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-3",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 10,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-4",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 11,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-5",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 12,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-6",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 13,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-7",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 14,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-8",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 15,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            }
+          ],
+          "ordered_evidence_ids": [
+            "probe-default-log-inventory",
+            "probe-default-log-search",
+            "probe-default-repo-state",
+            "operator-1",
+            "operator-2",
+            "operator-3",
+            "operator-4",
+            "operator-5",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-5",
+            "source-6",
+            "source-7",
+            "source-8"
+          ],
+          "runtime_source_parity": {
+            "comparable_pair_count": 0,
+            "runtime_revision": "",
+            "source_revision": "",
+            "status": "unknown"
+          },
+          "schema": "chili.causal-timeline.v1"
+        },
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "The observed failure is primarily caused by runtime drift.",
+          "confidence": 0.115,
+          "dimension": "runtime",
+          "evidence_ids": [
+            "operator-1",
+            "operator-2",
+            "operator-4"
+          ],
+          "hypothesis_id": "h-runtime",
+          "promotion_reason": "",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "requested_status": "provisional",
+          "status": "provisional"
+        },
+        "contract_invariants": [],
+        "decision": "instrument_first",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof",
+          "runtime_source_parity"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.115,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-4"
+            ],
+            "support_weight": 0.13,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by code drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [],
+            "support_weight": 0.0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by data drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [],
+            "support_weight": 0.0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.505,
+            "confirmatory_weight": 0,
+            "context_weight": 1.02,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "unknown",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h-unknown",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-3",
+              "operator-5",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-4",
+              "source-5",
+              "source-6",
+              "source-7",
+              "source-8",
+              "probe-default-log-inventory",
+              "probe-default-log-search",
+              "probe-default-repo-state"
+            ],
+            "support_weight": 1.02,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "dimension": "runtime",
+            "experiment_id": "falsify-h-runtime",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "dimension": "code",
+            "experiment_id": "falsify-h-code",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "dimension": "data",
+            "experiment_id": "falsify-h-data",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "dimension": "unknown",
+            "experiment_id": "falsify-h-unknown",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.115,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-4"
+            ],
+            "hypothesis_id": "h-runtime",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.115,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-4"
+            ],
+            "hypothesis_id": "h-runtime",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-4"
+            ],
+            "hypothesis_id": "h-runtime",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "provisional"
+          },
+          "response_chars": 2880,
+          "retractions": [],
+          "stage": "judge"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.115,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-4"
+            ],
+            "hypothesis_id": "h-runtime",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "confidence": 0.115,
+            "dimension": "runtime",
+            "evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-4"
+            ],
+            "hypothesis_id": "h-runtime",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-1",
+              "operator-2",
+              "operator-4"
+            ],
+            "hypothesis_id": "h-runtime",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "provisional"
+          },
+          "response_chars": 3122,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "provisional",
+      "duration_ms": 248055,
+      "evaluation_role": "blinded_holdout",
+      "external_final_oracle": true,
+      "feedback_tests": {
+        "duration_ms": 589,
+        "exit_code": 1,
+        "output": "F..                                                                      [100%]\n================================== FAILURES ===================================\n________ test_explicit_auto_size_worker_value_beats_site_configuration ________\n\n    def test_explicit_auto_size_worker_value_beats_site_configuration():\n        cli = CliOptions.parse({\"workers\": 0})\n    \n        assert \"workers\" in cli.values\n>       assert resolve({\"workers\": 12}, cli)[\"workers\"] == 0\nE       assert 12 == 0\n\ntests\\test_feedback_zero_worker.py:9: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_feedback_zero_worker.py::test_explicit_auto_size_worker_value_beats_site_configuration\n1 failed, 2 passed in 0.09s",
+        "passed": false,
+        "runner": "pytest"
+      },
+      "final_tests": {
+        "duration_ms": 641,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "F..                                                                      [100%]\n================================== FAILURES ===================================\n______ test_explicit_clear_values_coexist_with_an_unrelated_file_setting ______\n\n    def test_explicit_clear_values_coexist_with_an_unrelated_file_setting():\n        cli = CliOptions.parse({\"audit\": False, \"labels\": []})\n        result = resolve(\n            {\"workers\": 10, \"audit\": True, \"labels\": [\"inherited\"]}, cli\n        )\n    \n>       assert result == {\n            \"workers\": 10,\n            \"audit\": False,\n            \"labels\": [],\n        }\nE       AssertionError: assert {'audit': Tru...'workers': 10} == {'audit': Fal...'workers': 10}\nE         \nE         Omitting 1 identical items, use -vv to show\nE         Differing items:\nE         {'audit': True} != {'audit': False}\nE         {'labels': ['inherited']} != {'labels': []}\nE         Use -v to get more diff\n\ntests\\test_final_false_and_empty_values.py:11: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_final_false_and_empty_values.py::test_explicit_clear_values_coexist_with_an_unrelated_file_setting\n1 failed, 2 passed in 0.09s",
+        "passed": false,
+        "runner": "pytest"
+      },
+      "functional_repair_passed": false,
+      "initial_diagnosis_dimension": "runtime",
+      "language": "python",
+      "model_calls": [
+        {
+          "error": null,
+          "json_object_valid": true,
+          "latency_ms": 56661,
+          "ok": true,
+          "response": "{\n  \"hypotheses\": [\n    {\n      \"hypothesis_id\": \"h-runtime\",\n      \"claim\": \"The observed failure is primarily caused by runtime drift.\",\n      \"dimension\": \"runtime\",\n      \"support_evidence_ids\": [\"operator-1\", \"operator-2\", \"operator-4\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing runtime does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-code\",\n      \"claim\": \"The observed failure is primarily caused by code drift.\",\n      \"dimension\": \"code\",\n      \"support_evidence_ids\": [],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing code does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-data\",\n      \"claim\": \"The observed failure is primarily caused by data drift.\",\n      \"dimension\": \"data\",\n      \"support_evidence_ids\": [],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing data does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-unknown\",\n      \"claim\": \"The observed failure is primarily caused by unknown drift.\",\n      \"dimension\": \"unknown\",\n      \"support_evidence_ids\": [\"operator-3\", \"operator-5\", \"source-1\", \"source-2\", \"source-3\", \"source-4\", \"source-5\", \"source-6\", \"source-7\", \"source-8\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing unknown does not change the outcome.\"\n    }\n  ],\n  \"experiments\": [\n    {\n      \"probe_id\": \"p-isolate-runtime\",\n      \"kind\": \"isolated_compile\",\n      \"dimension\": \"runtime\",\n      \"evidence_required\": [\"before fingerprint\", \"after fingerprint\", \"actual outcome\"],\n      \"expected_if_false\": \"The outcome remains unchanged.\",\n      \"expected_if_true\": \"Changing runtime changes or restores the outcome.\",\n      \"experiment_id\": \"isolate-runtime\",\n      \"held_constant_dimensions\": [\"code\", \"data\", \"clock\", \"state\", \"config\", \"dependency\", \"test_harness\"],\n      \"hypothesis_ids\": [\"h-runtime\"]\n    },\n    {\n      \"probe_id\": \"p-isolate-code\",\n      \"kind\": \"isolated_compile\",\n      \"dimension\": \"code\",\n      \"evidence_required\": [\"before fingerprint\", \"after fingerprint\", \"actual outcome\"],\n      \"expected_if_false\": \"The outcome remains unchanged.\",\n      \"expected_if_true\": \"Changing code changes or restores the outcome.\",\n      \"experiment_id\": \"isolate-code\",\n      \"held_constant_dimensions\": [\"data\", \"clock\", \"state\", \"config\", \"dependency\", \"runtime\", \"test_harness\"],\n      \"hypothesis_ids\": [\"h-code\"]\n    }\n  ],\n  \"conclusion\": {\n    \"hypothesis_id\": \"h-runtime\",\n    \"status\": \"provisional\",\n    \"evidence_ids\": [\"operator-1\", \"operator-2\", \"operator-4\"],\n    \"reason\": \"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 715,
+          "wall_ms": 56661
+        },
+        {
+          "error": null,
+          "json_object_valid": true,
+          "latency_ms": 65308,
+          "ok": true,
+          "response": "{\n  \"hypotheses\": [\n    {\n      \"hypothesis_id\": \"h-runtime\",\n      \"claim\": \"The observed failure is primarily caused by runtime drift.\",\n      \"dimension\": \"runtime\",\n      \"support_evidence_ids\": [\"operator-1\", \"operator-2\", \"operator-4\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing runtime does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-code\",\n      \"claim\": \"The observed failure is primarily caused by code drift.\",\n      \"dimension\": \"code\",\n      \"support_evidence_ids\": [],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing code does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-data\",\n      \"claim\": \"The observed failure is primarily caused by data drift.\",\n      \"dimension\": \"data\",\n      \"support_evidence_ids\": [],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing data does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-unknown\",\n      \"claim\": \"The observed failure is primarily caused by unknown drift.\",\n      \"dimension\": \"unknown\",\n      \"support_evidence_ids\": [\"operator-3\", \"operator-5\", \"source-1\", \"source-2\", \"source-3\", \"source-4\", \"source-5\", \"source-6\", \"source-7\", \"source-8\", \"probe-default-log-inventory\", \"probe-default-log-search\", \"probe-default-repo-state\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing unknown does not change the outcome.\"\n    }\n  ],\n  \"experiments\": [\n    {\n      \"auto_execute\": false,\n      \"changed_dimensions\": [\"runtime\"],\n      \"evidence_required\": [\"before fingerprint\", \"after fingerprint\", \"actual outcome\"],\n      \"expected_if_false\": \"The outcome remains unchanged.\",\n      \"expected_if_true\": \"Changing runtime changes or restores the outcome.\",\n      \"experiment_id\": \"falsify-h-runtime\",\n      \"held_constant_dimensions\": [\"code\", \"data\", \"clock\", \"state\", \"config\", \"dependency\", \"test_harness\"],\n      \"hypothesis_ids\": [\"h-runtime\"],\n      \"probe\": {},\n      \"result_evidence_ids\": [],\n      \"safety\": \"isolated\",\n      \"status\": \"planned\"\n    },\n    {\n      \"auto_execute\": false,\n      \"changed_dimensions\": [\"code\"],\n      \"evidence_required\": [\"before fingerprint\", \"after fingerprint\", \"actual outcome\"],\n      \"expected_if_false\": \"The outcome remains unchanged.\",\n      \"expected_if_true\": \"Changing code changes or restores the outcome.\",\n      \"experiment_id\": \"falsify-h-code\",\n      \"held_constant_dimensions\": [\"data\", \"clock\", \"state\", \"config\", \"dependency\", \"runtime\", \"test_harness\"],\n      \"hypothesis_ids\": [\"h-code\"],\n      \"probe\": {},\n      \"result_evidence_ids\": [],\n      \"safety\": \"isolated\",\n      \"status\": \"planned\"\n    }\n  ],\n  \"conclusion\": {\n    \"hypothesis_id\": \"h-runtime\",\n    \"status\": \"provisional\",\n    \"evidence_ids\": [\"operator-1\", \"operator-2\", \"operator-4\"],\n    \"reason\": \"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 775,
+          "wall_ms": 65308
+        },
+        {
+          "error": null,
+          "latency_ms": 9822,
+          "ok": true,
+          "response": "{\n  \"dimension\": \"config\",\n  \"analysis\": \"The issue arises because the CLI options parser does not include values that are present in the parsed launch record, leading to defaults being used instead of explicitly supplied values.\",\n  \"files\": [\n    {\n      \"path\": \"settings/cli.py\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `parse` method to include all values from the raw input, not just those with non-default values.\"\n    }\n  ],\n  \"notes\": \"This change ensures that all explicitly supplied command options survive resolution without disturbing defaults for options that were not supplied.\"\n}",
+          "stage": "plan",
+          "tokens_out": 128,
+          "wall_ms": 9822
+        },
+        {
+          "error": null,
+          "latency_ms": 4516,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n        return cls({key: value for key, value in raw.items() if value})\n=======\n        return cls(raw)\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 34,
+          "wall_ms": 4516
+        },
+        {
+          "error": null,
+          "latency_ms": 10290,
+          "ok": true,
+          "response": "{\n  \"dimension\": \"config\",\n  \"analysis\": \"The observed failure is primarily caused by a precedence issue in the configuration resolution logic. The `resolve` function does not correctly handle the precedence of explicitly supplied values over those from the site file.\",\n  \"files\": [\n    {\n      \"path\": \"settings/resolver.py\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the `resolve` function correctly handles the precedence of explicitly supplied values over those from the site file.\"\n    }\n  ],\n  \"notes\": \"The `resolve` function should prioritize explicitly supplied values in the `cli.values` dictionary before falling back to the site file or default values. This will ensure that explicitly provided worker counts and audit settings are respected.\"\n}",
+          "stage": "repair_plan_1",
+          "tokens_out": 155,
+          "wall_ms": 10290
+        },
+        {
+          "error": null,
+          "latency_ms": 11159,
+          "ok": true,
+          "response": "{\n  \"dimension\": \"config\",\n  \"analysis\": \"The observed failure is primarily caused by a precedence issue in the configuration resolution logic. The `resolve` function does not correctly handle the precedence of explicitly supplied values over those from the site file.\",\n  \"files\": [\n    {\n      \"path\": \"settings/resolver.py\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the `resolve` function correctly handles the precedence of explicitly supplied values over those from the site file.\"\n    }\n  ],\n  \"notes\": \"The `resolve` function should prioritize explicitly supplied values in the `cli.values` dictionary before falling back to the site file or default values. This will ensure that explicitly provided worker counts and audit settings are respected.\"\n}",
+          "stage": "repair_review_1",
+          "tokens_out": 155,
+          "wall_ms": 11159
+        },
+        {
+          "error": null,
+          "latency_ms": 5900,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    \"workers\": cli.values.get(\"workers\") or file_values.get(\"workers\") or DEFAULTS[\"workers\"],\n=======\n    \"workers\": cli.values.get(\"workers\", DEFAULTS[\"workers\"]),\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_1",
+          "tokens_out": 49,
+          "wall_ms": 5900
+        },
+        {
+          "error": null,
+          "latency_ms": 7630,
+          "ok": true,
+          "response": "```diff\n<<<<<<< SEARCH\n    @classmethod\n    def parse(cls, raw: Mapping[str, Any]) -> \"CliOptions\":\n        # The parser receives only options that were explicitly supplied.\n        return cls(raw)\n=======\n    @classmethod\n    def parse(cls, raw: Mapping[str, Any]) -> \"CliOptions\":\n        # Ensure all explicitly supplied values are included in the parsed options.\n        return cls({**DEFAULTS, **raw})\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_2",
+          "tokens_out": 96,
+          "wall_ms": 7630
+        },
+        {
+          "error": null,
+          "latency_ms": 10785,
+          "ok": true,
+          "response": "{\n  \"dimension\": \"config\",\n  \"analysis\": \"The observed failure is primarily caused by a precedence issue in the configuration resolution logic. The `resolve` function does not correctly handle the precedence of explicitly supplied values over those from the site file.\",\n  \"files\": [\n    {\n      \"path\": \"settings/resolver.py\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the `resolve` function correctly handles the precedence of explicitly supplied values over those from the site file.\"\n    }\n  ],\n  \"notes\": \"The `resolve` function should prioritize explicitly supplied values in the `cli.values` dictionary before falling back to values from the `file_values` or default settings. This will ensure that explicitly provided worker counts and audit flags are respected, even when they conflict with those specified in the site file.\"\n}",
+          "stage": "repair_plan_2",
+          "tokens_out": 171,
+          "wall_ms": 10785
+        },
+        {
+          "error": null,
+          "latency_ms": 11218,
+          "ok": true,
+          "response": "{\n  \"dimension\": \"config\",\n  \"analysis\": \"The observed failure is primarily caused by a precedence issue in the configuration resolution logic. The `resolve` function does not correctly handle the precedence of explicitly supplied values over those from the site file.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the `resolve` function correctly handles the precedence of explicitly supplied values over those from the site file.\",\n      \"path\": \"settings/resolver.py\"\n    }\n  ],\n  \"notes\": \"The `resolve` function should prioritize explicitly supplied values in the `cli.values` dictionary before falling back to values from the `file_values` or default settings. This will ensure that explicitly provided worker counts and audit flags are respected, even when they conflict with those specified in the site file.\"\n}",
+          "stage": "repair_review_2",
+          "tokens_out": 171,
+          "wall_ms": 11219
+        },
+        {
+          "error": null,
+          "latency_ms": 2812,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    \"workers\": cli.values.get(\"workers\") or file_values.get(\"workers\") or DEFAULTS[\"workers\"],\n=======\n    \"workers\": cli.values.get(\"workers\", DEFAULTS[\"workers\"]),\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_2_1",
+          "tokens_out": 49,
+          "wall_ms": 2812
+        },
+        {
+          "error": null,
+          "latency_ms": 5308,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    @classmethod\n    def parse(cls, raw: Mapping[str, Any]) -> \"CliOptions\":\n        # The parser receives only options that were explicitly supplied.\n        return cls(raw)\n=======\n    @classmethod\n    def parse(cls, raw: Mapping[str, Any]) -> \"CliOptions\":\n        # Ensure all explicitly supplied values are included in the parsed options.\n        return cls({**DEFAULTS, **raw})\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_2_2",
+          "tokens_out": 95,
+          "wall_ms": 5308
+        },
+        {
+          "error": null,
+          "latency_ms": 11540,
+          "ok": true,
+          "response": "{\n  \"dimension\": \"config\",\n  \"analysis\": \"The observed failure is primarily caused by a precedence issue in the configuration resolution logic. The `resolve` function does not correctly handle the precedence of explicitly supplied values over those from the site file, leading to an incorrect worker count being applied.\",\n  \"files\": [\n    {\n      \"path\": \"settings/resolver.py\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the `resolve` function correctly handles the precedence of explicitly supplied values over those from the site file. Specifically, update the logic to prioritize explicitly supplied values.\"\n    }\n  ],\n  \"notes\": \"The failure is due to a configuration resolution issue where the `resolve` function does not correctly handle the precedence of explicitly supplied values. The repair involves updating the `resolve` function to prioritize explicitly supplied values over those from the site file.\"\n}",
+          "stage": "repair_plan_3",
+          "tokens_out": 180,
+          "wall_ms": 11540
+        },
+        {
+          "error": null,
+          "latency_ms": 11643,
+          "ok": true,
+          "response": "{\n  \"dimension\": \"config\",\n  \"analysis\": \"The observed failure is primarily caused by a precedence issue in the configuration resolution logic. The `resolve` function does not correctly handle the precedence of explicitly supplied values over those from the site file, leading to an incorrect worker count being applied.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the `resolve` function correctly handles the precedence of explicitly supplied values over those from the site file. Specifically, update the logic to prioritize explicitly supplied values.\",\n      \"path\": \"settings/resolver.py\"\n    }\n  ],\n  \"notes\": \"The failure is due to a configuration resolution issue where the `resolve` function does not correctly handle the precedence of explicitly supplied values. The repair involves updating the `resolve` function to prioritize explicitly supplied values over those from the site file.\"\n}",
+          "stage": "repair_review_3",
+          "tokens_out": 180,
+          "wall_ms": 11643
+        },
+        {
+          "error": null,
+          "latency_ms": 5361,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    \"workers\": cli.values.get(\"workers\") or file_values.get(\"workers\") or DEFAULTS[\"workers\"],\n=======\n    \"workers\": cli.values.get(\"workers\", DEFAULTS[\"workers\"]),\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_3_1",
+          "tokens_out": 49,
+          "wall_ms": 5361
+        },
+        {
+          "error": null,
+          "latency_ms": 7420,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n    @classmethod\n    def parse(cls, raw: Mapping[str, Any]) -> \"CliOptions\":\n        # The parser receives only options that were explicitly supplied.\n        return cls(raw)\n=======\n    @classmethod\n    def parse(cls, raw: Mapping[str, Any]) -> \"CliOptions\":\n        # Ensure that the parser receives only options that were explicitly supplied.\n        return cls({k: v for k, v in raw.items() if v is not None})\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_3_2",
+          "tokens_out": 105,
+          "wall_ms": 7420
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 16,
+      "patch_applied": true,
+      "patch_warnings": [
+        "Rolled back repair because validation regressed or made no measurable progress.",
+        "Rejected duplicate repair state already proven regressive or no-progress.",
+        "Rolled back repair because validation regressed or made no measurable progress."
+      ],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 493,
+        "exit_code": 0,
+        "output": "..                                                                       [100%]\n2 passed in 0.01s",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "repair_attempts": [
+        {
+          "after_failure_signature": "7058a5d8fe76ab9cc27e8cc78057ccf7906e86a184d19cc23463b6c507468fae",
+          "applied_files": [
+            "settings/resolver.py",
+            "settings/cli.py"
+          ],
+          "attempt_fingerprint": "c9d421cf4db07ed1665e0a568bd286e38e161a338f727889e1a27c2cab97fd6e",
+          "before_failure_signature": "fe70f396363bd39164103af712237377c8d4d58cd856e65fea12bcf0d915322f",
+          "ownership_augmented_files": [
+            "settings/cli.py"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The observed failure is primarily caused by a precedence issue in the configuration resolution logic. The `resolve` function does not correctly handle the precedence of explicitly supplied values over those from the site file.",
+            "dimension": "config",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Ensure that the `resolve` function correctly handles the precedence of explicitly supplied values over those from the site file.",
+                "path": "settings/resolver.py"
+              }
+            ],
+            "notes": "The `resolve` function should prioritize explicitly supplied values in the `cli.values` dictionary before falling back to the site file or default values. This will ensure that explicitly provided worker counts and audit settings are respected."
+          },
+          "rolled_back_after_validation": true,
+          "round": 1,
+          "satisfied_files": [],
+          "selected_file": "settings/resolver.py",
+          "selected_files": [
+            "settings/resolver.py",
+            "settings/cli.py"
+          ],
+          "validation_regression": {
+            "after_failure_signature": "7058a5d8fe76ab9cc27e8cc78057ccf7906e86a184d19cc23463b6c507468fae",
+            "after_quality": 0,
+            "before_failure_signature": "fe70f396363bd39164103af712237377c8d4d58cd856e65fea12bcf0d915322f",
+            "before_quality": 2
+          },
+          "warnings": [
+            "Rolled back repair because validation regressed or made no measurable progress."
+          ]
+        },
+        {
+          "applied_files": [
+            "settings/resolver.py",
+            "settings/cli.py"
+          ],
+          "attempt_fingerprint": "c9d421cf4db07ed1665e0a568bd286e38e161a338f727889e1a27c2cab97fd6e",
+          "before_failure_signature": "fe70f396363bd39164103af712237377c8d4d58cd856e65fea12bcf0d915322f",
+          "duplicate_attempt": true,
+          "ownership_augmented_files": [
+            "settings/cli.py"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The observed failure is primarily caused by a precedence issue in the configuration resolution logic. The `resolve` function does not correctly handle the precedence of explicitly supplied values over those from the site file.",
+            "dimension": "config",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Ensure that the `resolve` function correctly handles the precedence of explicitly supplied values over those from the site file.",
+                "path": "settings/resolver.py"
+              }
+            ],
+            "notes": "The `resolve` function should prioritize explicitly supplied values in the `cli.values` dictionary before falling back to values from the `file_values` or default settings. This will ensure that explicitly provided worker counts and audit flags are respected, even when they conflict with those specified in the site file."
+          },
+          "rolled_back_after_validation": true,
+          "round": 2,
+          "satisfied_files": [],
+          "selected_file": "settings/resolver.py",
+          "selected_files": [
+            "settings/resolver.py",
+            "settings/cli.py"
+          ],
+          "warnings": [
+            "Rejected duplicate repair state already proven regressive or no-progress."
+          ]
+        },
+        {
+          "after_failure_signature": "cdd953f5e1de73f0cd29a162441f6010c490950213844f60f9495d3f09341907",
+          "applied_files": [
+            "settings/resolver.py",
+            "settings/cli.py"
+          ],
+          "attempt_fingerprint": "b723d34bc632391cebcd31a29ce61bbb84b402b15b80e5dadfed3dd790d9bb2c",
+          "before_failure_signature": "fe70f396363bd39164103af712237377c8d4d58cd856e65fea12bcf0d915322f",
+          "ownership_augmented_files": [
+            "settings/cli.py"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The observed failure is primarily caused by a precedence issue in the configuration resolution logic. The `resolve` function does not correctly handle the precedence of explicitly supplied values over those from the site file, leading to an incorrect worker count being applied.",
+            "dimension": "config",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Ensure that the `resolve` function correctly handles the precedence of explicitly supplied values over those from the site file. Specifically, update the logic to prioritize explicitly supplied values.",
+                "path": "settings/resolver.py"
+              }
+            ],
+            "notes": "The failure is due to a configuration resolution issue where the `resolve` function does not correctly handle the precedence of explicitly supplied values. The repair involves updating the `resolve` function to prioritize explicitly supplied values over those from the site file."
+          },
+          "rolled_back_after_validation": true,
+          "round": 3,
+          "satisfied_files": [],
+          "selected_file": "settings/resolver.py",
+          "selected_files": [
+            "settings/resolver.py",
+            "settings/cli.py"
+          ],
+          "validation_regression": {
+            "after_failure_signature": "cdd953f5e1de73f0cd29a162441f6010c490950213844f60f9495d3f09341907",
+            "after_quality": 0,
+            "before_failure_signature": "fe70f396363bd39164103af712237377c8d4d58cd856e65fea12bcf0d915322f",
+            "before_quality": 2
+          },
+          "warnings": [
+            "Rolled back repair because validation regressed or made no measurable progress."
+          ]
+        }
+      ],
+      "score": 65,
+      "sealed_final_adjudication": true,
+      "selected_file": "settings/cli.py",
+      "selected_files": [
+        "settings/cli.py",
+        "settings/resolver.py"
+      ],
+      "split": "holdout-sealed-python-multifile",
+      "test_runner": "pytest"
+    },
+    {
+      "baseline_feedback_tests": {
+        "duration_ms": 198,
+        "exit_code": 1,
+        "output": "\u2716 default factories do not share nested collections (2.029ms)\n\u2716 constructing a session does not transfer ownership from its caller (0.5972ms)\n\u2714 one workspace can be customized and snapshotted (1.3505ms)\n\u2139 tests 3\n\u2139 suites 0\n\u2139 pass 1\n\u2139 fail 2\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 136.7716\n\n\u2716 failing tests:\n\ntest at tests\\workspace.feedback.test.ts:7:1\n\u2716 default factories do not share nested collections (2.029ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:\n  + actual - expected\n  \n    [\n      'title',\n      'status',\n  +   'priority'\n    ]\n  \n      at TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-feedback-twqs0i7q/repo/tests/workspace.feedback.test.ts:14:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1201:25)\n      at Test.start (node:internal/test_runner/test:1096:17)\n      at startSubtestAfterBootstrap (node:internal/test_runner/harness:385:17) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: [ 'title', 'status', 'priority' ],\n    expected: [ 'title', 'status' ],\n    operator: 'deepStrictEqual',\n    diff: 'simple'\n  }\n\ntest at tests\\workspace.feedback.test.ts:18:1\n\u2716 constructing a session does not transfer ownership from its caller (0.5972ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:\n  + actual - expected\n  \n    {\n      columns: [\n        'title',\n  +     'assignee'\n      ],\n      name: 'Restored',\n      preferences: {\n  +     density: 'compact',\n  -     density: 'comfortable',\n        showHints: false\n      }\n    }\n  \n      at TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-feedback-twqs0i7q/repo/tests/workspace.feedback.test.ts:28:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1201:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:831:18)\n      at Test.postRun (node:internal/test_runner/test:1330:19)\n      at Test.run (node:internal/test_runner/test:1258:12)\n      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: { name: 'Restored', columns: [ 'title', 'assignee' ], preferences: { density: 'compact', showHints: false } },\n    expected: { name: 'Restored', columns: [ 'title' ], preferences: { density: 'comfortable', showHints: false } },\n    operator: 'deepStrictEqual',\n    diff: 'simple'\n  }",
+        "passed": false,
+        "runner": "node_test",
+        "test_files": [
+          "tests/workspace.feedback.test.ts",
+          "tests/workspace.public.test.ts"
+        ]
+      },
+      "baseline_final_tests": {
+        "duration_ms": 195,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "\u2716 reset restores pristine defaults after nested mutations (2.2382ms)\n\u2716 resetting from a snapshot keeps later edits local to the session (0.41ms)\n\u2714 one workspace can be customized and snapshotted (1.3045ms)\n\u2139 tests 3\n\u2139 suites 0\n\u2139 pass 1\n\u2139 fail 2\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 135.3567\n\n\u2716 failing tests:\n\ntest at tests\\workspace.final.test.ts:6:1\n\u2716 reset restores pristine defaults after nested mutations (2.2382ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:\n  + actual - expected\n  \n    {\n      columns: [\n        'title',\n        'status',\n  +     'priority'\n      ],\n      name: 'Untitled',\n      preferences: {\n  +     density: 'compact',\n  -     density: 'comfortable',\n        showHints: true\n      }\n    }\n  \n      at TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-_2ydls85/repo/tests/workspace.final.test.ts:12:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1201:25)\n      at Test.start (node:internal/test_runner/test:1096:17)\n      at startSubtestAfterBootstrap (node:internal/test_runner/harness:385:17) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: { name: 'Untitled', columns: [ 'title', 'status', 'priority' ], preferences: { density: 'compact', showHints: true } },\n    expected: { name: 'Untitled', columns: [ 'title', 'status' ], preferences: { density: 'comfortable', showHints: true } },\n    operator: 'deepStrictEqual',\n    diff: 'simple'\n  }\n\ntest at tests\\workspace.final.test.ts:19:1\n\u2716 resetting from a snapshot keeps later edits local to the session (0.41ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:\n  + actual - expected\n  \n    {\n      columns: [\n        'incident',\n  +     'owner'\n      ],\n      name: 'Ops',\n      preferences: {\n  +     density: 'comfortable',\n  -     density: 'compact',\n        showHints: false\n      }\n    }\n  \n      at TestContext.<anonymous> (file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-_2ydls85/repo/tests/workspace.final.test.ts:30:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1201:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:831:18)\n      at Test.postRun (node:internal/test_runner/test:1330:19)\n      at Test.run (node:internal/test_runner/test:1258:12)\n      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: { name: 'Ops', columns: [ 'incident', 'owner' ], preferences: { density: 'comfortable', showHints: false } },\n    expected: { name: 'Ops', columns: [ 'incident' ], preferences: { density: 'compact', showHints: false } },\n    operator: 'deepStrictEqual',\n    diff: 'simple'\n  }",
+        "passed": false,
+        "runner": "node_test",
+        "test_files": [
+          "tests/workspace.final.test.ts",
+          "tests/workspace.public.test.ts"
+        ]
+      },
+      "baseline_public_tests": {
+        "duration_ms": 180,
+        "exit_code": 0,
+        "output": "\u2714 one workspace can be customized and snapshotted (1.152ms)\n\u2139 tests 1\n\u2139 suites 0\n\u2139 pass 1\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 117.8702",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/workspace.public.test.ts"
+        ]
+      },
+      "case_id": "ts-workspace-state-ownership",
+      "changed_files": [
+        "src/defaults.ts",
+        "src/session.ts"
+      ],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "final_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": false,
+        "patch_applied": false,
+        "selected_files": [],
+        "warnings": []
+      },
+      "diagnosis_dimension": "state",
+      "diagnosis_history": [
+        {
+          "dimension": "state",
+          "stage": "initial_plan"
+        },
+        {
+          "dimension": "state",
+          "stage": "repair_1"
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "operator-4",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-6",
+            "source-7",
+            "source-8"
+          ],
+          "hypothesis_id": "h-state",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "state"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing state changes or restores the outcome.",
+            "experiment_id": "falsify-h-state",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-state"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "runtime"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing runtime changes or restores the outcome.",
+            "experiment_id": "falsify-h-runtime",
+            "held_constant_dimensions": [
+              "code",
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-runtime"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by state drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "state",
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h-state",
+            "support_evidence_ids": [
+              "operator-4",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-6",
+              "source-7",
+              "source-8"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "runtime",
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-3"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by config drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "config",
+            "falsification": "Hold every other dimension constant and show that changing config does not change the outcome.",
+            "hypothesis_id": "h-config",
+            "support_evidence_ids": [
+              "source-5"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by code drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "support_evidence_ids": [
+              "probe-default-git-history"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "ts-workspace-state-ownership",
+        "causal_timeline": {
+          "downstream_evidence_ids": [],
+          "earliest_break": {},
+          "events": [
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "probe:default-repo-state",
+              "event_type": "typed_probe_repo_state",
+              "evidence_id": "probe-default-repo-state",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T09:10:57.422727+00:00",
+              "order": 0,
+              "prior_state": "",
+              "sequence": 0,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "code",
+              "entity_id": "probe:default-git-history",
+              "event_type": "typed_probe_git_history",
+              "evidence_id": "probe-default-git-history",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T09:10:57.463487+00:00",
+              "order": 1,
+              "prior_state": "",
+              "sequence": 1,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "probe:default-fixed-search",
+              "event_type": "typed_probe_search",
+              "evidence_id": "probe-default-fixed-search",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T09:10:57.489706+00:00",
+              "order": 2,
+              "prior_state": "",
+              "sequence": 2,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "runtime",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-1",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 3,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-2",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 4,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "runtime",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-3",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 5,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "state",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-4",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 6,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "state",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-1",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 7,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "state",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-2",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 8,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "state",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-3",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 9,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-4",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 10,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "config",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-5",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 11,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "state",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-6",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 12,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "state",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-7",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 13,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "state",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-8",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 14,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-9",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 15,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            }
+          ],
+          "ordered_evidence_ids": [
+            "probe-default-repo-state",
+            "probe-default-git-history",
+            "probe-default-fixed-search",
+            "operator-1",
+            "operator-2",
+            "operator-3",
+            "operator-4",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-5",
+            "source-6",
+            "source-7",
+            "source-8",
+            "source-9"
+          ],
+          "runtime_source_parity": {
+            "comparable_pair_count": 0,
+            "runtime_revision": "",
+            "source_revision": "",
+            "status": "unknown"
+          },
+          "schema": "chili.causal-timeline.v1"
+        },
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "The observed failure is primarily caused by state drift.",
+          "confidence": 0.3151,
+          "dimension": "state",
+          "evidence_ids": [
+            "operator-4",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-6",
+            "source-7",
+            "source-8"
+          ],
+          "hypothesis_id": "h-state",
+          "promotion_reason": "",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "requested_status": "provisional",
+          "status": "provisional"
+        },
+        "contract_invariants": [],
+        "decision": "instrument_first",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by state drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.3151,
+            "confirmatory_weight": 0,
+            "context_weight": 0.46,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "state",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "hypothesis_id": "h-state",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-4",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-6",
+              "source-7",
+              "source-8"
+            ],
+            "support_weight": 0.46,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by runtime drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.115,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "runtime",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "hypothesis_id": "h-runtime",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-1",
+              "operator-3"
+            ],
+            "support_weight": 0.13,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by config drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.1525,
+            "confirmatory_weight": 0,
+            "context_weight": 0.18,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "config",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing config does not change the outcome.",
+            "hypothesis_id": "h-config",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "source-5"
+            ],
+            "support_weight": 0.18,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by code drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.115,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "probe-default-git-history"
+            ],
+            "support_weight": 0.13,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing state does not change the outcome.",
+            "dimension": "state",
+            "experiment_id": "falsify-h-state",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing runtime does not change the outcome.",
+            "dimension": "runtime",
+            "experiment_id": "falsify-h-runtime",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing config does not change the outcome.",
+            "dimension": "config",
+            "experiment_id": "falsify-h-config",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "dimension": "code",
+            "experiment_id": "falsify-h-code",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.3151,
+            "dimension": "state",
+            "evidence_ids": [
+              "operator-4",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-6",
+              "source-7",
+              "source-8"
+            ],
+            "hypothesis_id": "h-state",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.3151,
+            "dimension": "state",
+            "evidence_ids": [
+              "operator-4",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-6",
+              "source-7",
+              "source-8"
+            ],
+            "hypothesis_id": "h-state",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-4",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-6",
+              "source-7",
+              "source-8"
+            ],
+            "hypothesis_id": "h-state",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "provisional"
+          },
+          "response_chars": 2932,
+          "retractions": [],
+          "stage": "judge"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.3151,
+            "dimension": "state",
+            "evidence_ids": [
+              "operator-4",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-6",
+              "source-7",
+              "source-8"
+            ],
+            "hypothesis_id": "h-state",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by state drift.",
+            "confidence": 0.3151,
+            "dimension": "state",
+            "evidence_ids": [
+              "operator-4",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-6",
+              "source-7",
+              "source-8"
+            ],
+            "hypothesis_id": "h-state",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "operator-4",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-6",
+              "source-7",
+              "source-8"
+            ],
+            "hypothesis_id": "h-state",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "provisional"
+          },
+          "response_chars": 3065,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "provisional",
+      "duration_ms": 183536,
+      "evaluation_role": "blinded_holdout",
+      "external_final_oracle": true,
+      "feedback_tests": {
+        "duration_ms": 195,
+        "exit_code": 0,
+        "output": "\u2714 default factories do not share nested collections (1.286ms)\n\u2714 constructing a session does not transfer ownership from its caller (0.2628ms)\n\u2714 one workspace can be customized and snapshotted (1.5509ms)\n\u2139 tests 3\n\u2139 suites 0\n\u2139 pass 3\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 141.9405",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/workspace.feedback.test.ts",
+          "tests/workspace.public.test.ts"
+        ]
+      },
+      "final_tests": {
+        "duration_ms": 181,
+        "exit_code": 0,
+        "isolated_final_repo": true,
+        "output": "\u2714 reset restores pristine defaults after nested mutations (1.3027ms)\n\u2714 resetting from a snapshot keeps later edits local to the session (0.1742ms)\n\u2714 one workspace can be customized and snapshotted (1.2846ms)\n\u2139 tests 3\n\u2139 suites 0\n\u2139 pass 3\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 124.2278",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/workspace.final.test.ts",
+          "tests/workspace.public.test.ts"
+        ]
+      },
+      "functional_repair_passed": true,
+      "initial_diagnosis_dimension": "state",
+      "language": "typescript",
+      "model_calls": [
+        {
+          "error": null,
+          "json_object_valid": true,
+          "latency_ms": 49097,
+          "ok": true,
+          "response": "{\n  \"hypotheses\": [\n    {\n      \"hypothesis_id\": \"h-state\",\n      \"claim\": \"The observed failure is primarily caused by state drift.\",\n      \"dimension\": \"state\",\n      \"support_evidence_ids\": [\"operator-4\", \"source-1\", \"source-2\", \"source-3\", \"source-6\", \"source-7\", \"source-8\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing state does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-runtime\",\n      \"claim\": \"The observed failure is primarily caused by runtime drift.\",\n      \"dimension\": \"runtime\",\n      \"support_evidence_ids\": [\"operator-1\", \"operator-3\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing runtime does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-config\",\n      \"claim\": \"The observed failure is primarily caused by config drift.\",\n      \"dimension\": \"config\",\n      \"support_evidence_ids\": [\"source-5\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing config does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-unknown\",\n      \"claim\": \"The observed failure is primarily caused by unknown drift.\",\n      \"dimension\": \"unknown\",\n      \"support_evidence_ids\": [\"operator-2\", \"source-4\", \"source-9\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing unknown does not change the outcome.\"\n    }\n  ],\n  \"experiments\": [\n    {\n      \"probe_id\": \"p-isolate-state\",\n      \"kind\": \"isolated_compile\",\n      \"dimension\": \"state\",\n      \"evidence_required\": [\"before fingerprint\", \"after fingerprint\", \"actual outcome\"],\n      \"expected_if_false\": \"The outcome remains unchanged.\",\n      \"expected_if_true\": \"Changing state changes or restores the outcome.\",\n      \"experiment_id\": \"isolate-state\",\n      \"held_constant_dimensions\": [\"code\", \"data\", \"clock\", \"config\", \"dependency\", \"runtime\", \"test_harness\"],\n      \"hypothesis_ids\": [\"h-state\"]\n    },\n    {\n      \"probe_id\": \"p-isolate-runtime\",\n      \"kind\": \"isolated_compile\",\n      \"dimension\": \"runtime\",\n      \"evidence_required\": [\"before fingerprint\", \"after fingerprint\", \"actual outcome\"],\n      \"expected_if_false\": \"The outcome remains unchanged.\",\n      \"expected_if_true\": \"Changing runtime changes or restores the outcome.\",\n      \"experiment_id\": \"isolate-runtime\",\n      \"held_constant_dimensions\": [\"code\", \"data\", \"clock\", \"state\", \"config\", \"dependency\", \"test_harness\"],\n      \"hypothesis_ids\": [\"h-runtime\"]\n    }\n  ],\n  \"conclusion\": {\n    \"hypothesis_id\": \"h-state\",\n    \"status\": \"provisional\",\n    \"evidence_ids\": [\"operator-4\", \"source-1\", \"source-2\", \"source-3\", \"source-6\", \"source-7\", \"source-8\"],\n    \"reason\": \"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 733,
+          "wall_ms": 49097
+        },
+        {
+          "error": null,
+          "json_object_valid": true,
+          "latency_ms": 62617,
+          "ok": true,
+          "response": "{\n  \"hypotheses\": [\n    {\n      \"hypothesis_id\": \"h-state\",\n      \"claim\": \"The observed failure is primarily caused by state drift.\",\n      \"dimension\": \"state\",\n      \"support_evidence_ids\": [\"operator-4\", \"source-1\", \"source-2\", \"source-3\", \"source-6\", \"source-7\", \"source-8\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing state does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-runtime\",\n      \"claim\": \"The observed failure is primarily caused by runtime drift.\",\n      \"dimension\": \"runtime\",\n      \"support_evidence_ids\": [\"operator-1\", \"operator-3\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing runtime does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-config\",\n      \"claim\": \"The observed failure is primarily caused by config drift.\",\n      \"dimension\": \"config\",\n      \"support_evidence_ids\": [\"source-5\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing config does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-code\",\n      \"claim\": \"The observed failure is primarily caused by code drift.\",\n      \"dimension\": \"code\",\n      \"support_evidence_ids\": [\"probe-default-git-history\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing code does not change the outcome.\"\n    }\n  ],\n  \"experiments\": [\n    {\n      \"auto_execute\": false,\n      \"changed_dimensions\": [\"state\"],\n      \"evidence_required\": [\"before fingerprint\", \"after fingerprint\", \"actual outcome\"],\n      \"expected_if_false\": \"The outcome remains unchanged.\",\n      \"expected_if_true\": \"Changing state changes or restores the outcome.\",\n      \"experiment_id\": \"falsify-h-state\",\n      \"held_constant_dimensions\": [\"code\", \"data\", \"clock\", \"config\", \"dependency\", \"runtime\", \"test_harness\"],\n      \"hypothesis_ids\": [\"h-state\"],\n      \"probe\": {},\n      \"result_evidence_ids\": [],\n      \"safety\": \"isolated\",\n      \"status\": \"planned\"\n    },\n    {\n      \"auto_execute\": false,\n      \"changed_dimensions\": [\"runtime\"],\n      \"evidence_required\": [\"before fingerprint\", \"after fingerprint\", \"actual outcome\"],\n      \"expected_if_false\": \"The outcome remains unchanged.\",\n      \"expected_if_true\": \"Changing runtime changes or restores the outcome.\",\n      \"experiment_id\": \"falsify-h-runtime\",\n      \"held_constant_dimensions\": [\"code\", \"data\", \"clock\", \"state\", \"config\", \"dependency\", \"test_harness\"],\n      \"hypothesis_ids\": [\"h-runtime\"],\n      \"probe\": {},\n      \"result_evidence_ids\": [],\n      \"safety\": \"isolated\",\n      \"status\": \"planned\"\n    }\n  ],\n  \"conclusion\": {\n    \"hypothesis_id\": \"h-state\",\n    \"status\": \"provisional\",\n    \"evidence_ids\": [\"operator-4\", \"source-1\", \"source-2\", \"source-3\", \"source-6\", \"source-7\", \"source-8\"],\n    \"reason\": \"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 763,
+          "wall_ms": 62617
+        },
+        {
+          "error": null,
+          "latency_ms": 10792,
+          "ok": true,
+          "response": "{\n  \"dimension\": \"state\",\n  \"analysis\": \"The observed failure is primarily caused by state drift. The issue arises because the state of one workspace session affects another, leading to unexpected behavior when opening multiple editor workspaces in a single desktop process.\",\n  \"files\": [\n    {\n      \"path\": \"src/session.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that each WorkspaceSession instance maintains its own independent state. Modify the constructor and methods to prevent state leakage between instances.\"\n    }\n  ],\n  \"notes\": \"Modify the `WorkspaceSession` class to ensure that each instance has its own isolated state, preventing interference between different workspace sessions.\"\n}",
+          "stage": "plan",
+          "tokens_out": 140,
+          "wall_ms": 10792
+        },
+        {
+          "error": null,
+          "latency_ms": 11201,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n  constructor(seed?: WorkspaceState) {\n    this.state = seed ?? makeDefaultWorkspace();\n  }\n=======\n  constructor() {\n    this.state = makeDefaultWorkspace();\n  }\n>>>>>>> REPLACE\n\n...\n\n<<<<<<< SEARCH\n  reset(seed?: WorkspaceState): void {\n    this.state = seed ?? makeDefaultWorkspace();\n  }\n=======\n  reset(): void {\n    this.state = makeDefaultWorkspace();\n  }\n>>>>>>> REPLACE\n\n...\n\n<<<<<<< SEARCH\n  snapshot(): WorkspaceState {\n    return {\n      ...this.state,\n      columns: [...this.state.columns],\n      preferences: { ...this.state.preferences },\n    };\n  }\n=======\n  snapshot(): WorkspaceState {\n    return structuredClone(this.state);\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 147,
+          "wall_ms": 11201
+        },
+        {
+          "error": null,
+          "latency_ms": 10882,
+          "ok": true,
+          "response": "{\n  \"dimension\": \"state\",\n  \"analysis\": \"The observed failure is primarily caused by state drift. The `WorkspaceSession` class shares the same `state` object across instances, leading to unintended side effects when one instance modifies the state.\",\n  \"files\": [\n    {\n      \"path\": \"src/session.ts\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure each `WorkspaceSession` instance has its own independent state by cloning the initial state.\"\n    }\n  ],\n  \"notes\": \"Modify the constructor to clone the initial state, ensuring that changes in one session do not affect others.\"\n}",
+          "stage": "repair_plan_1",
+          "tokens_out": 128,
+          "wall_ms": 10882
+        },
+        {
+          "error": null,
+          "latency_ms": 11155,
+          "ok": true,
+          "response": "{\n  \"dimension\": \"state\",\n  \"analysis\": \"The observed failure is primarily caused by state drift. The `WorkspaceSession` class shares the same `state` object across instances, leading to unintended side effects when one instance modifies the state.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Ensure each `WorkspaceSession` instance has its own independent state by cloning the initial state.\",\n      \"path\": \"src/session.ts\"\n    }\n  ],\n  \"notes\": \"Modify the constructor to clone the initial state, ensuring that changes in one session do not affect others.\"\n}",
+          "stage": "repair_review_1",
+          "tokens_out": 128,
+          "wall_ms": 11155
+        },
+        {
+          "error": null,
+          "latency_ms": 7803,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n  constructor() {\n    this.state = makeDefaultWorkspace();\n  }\n=======\n  constructor(initialState?: WorkspaceState) {\n    this.state = initialState ? structuredClone(initialState) : makeDefaultWorkspace();\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_1",
+          "tokens_out": 52,
+          "wall_ms": 7803
+        },
+        {
+          "error": null,
+          "latency_ms": 16696,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nexport interface WorkspaceState {\n  name: string;\n  columns: string[];\n  preferences: {\n    density: \"comfortable\" | \"compact\";\n    showHints: boolean;\n  };\n}\n\nconst BASE_WORKSPACE: WorkspaceState = {\n  name: \"Untitled\",\n  columns: [\"title\", \"status\"],\n  preferences: {\n    density: \"comfortable\",\n    showHints: true,\n  },\n};\n\nexport function makeDefaultWorkspace(): WorkspaceState {\n  return { ...BASE_WORKSPACE };\n}\n=======\nexport interface WorkspaceState {\n  name: string;\n  columns: string[];\n  preferences: {\n    density: \"comfortable\" | \"compact\";\n    showHints: boolean;\n  };\n}\n\nconst BASE_WORKSPACE: WorkspaceState = {\n  name: \"Untitled\",\n  columns: [\"title\", \"status\"],\n  preferences: {\n    density: \"comfortable\",\n    showHints: true,\n  },\n};\n\nexport function makeDefaultWorkspace(): WorkspaceState {\n  return structuredClone(BASE_WORKSPACE);\n}\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_2",
+          "tokens_out": 213,
+          "wall_ms": 16697
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 8,
+      "patch_applied": true,
+      "patch_warnings": [],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 184,
+        "exit_code": 0,
+        "output": "\u2714 one workspace can be customized and snapshotted (1.5811ms)\n\u2139 tests 1\n\u2139 suites 0\n\u2139 pass 1\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 130.3506",
+        "passed": true,
+        "runner": "node_test",
+        "test_files": [
+          "tests/workspace.public.test.ts"
+        ]
+      },
+      "repair_attempts": [
+        {
+          "after_failure_signature": "1dcea11e7e7246c87656d7d89e2626fe9d5648088945b132583224e7a3af49f5",
+          "applied_files": [
+            "src/session.ts",
+            "src/defaults.ts"
+          ],
+          "attempt_fingerprint": "a6dad229449d98d95ea840bf380c31994d00d52216abcccc3486e88a63a521dd",
+          "before_failure_signature": "1170aa4e9e1953f9b04150f03697822442574e508e241ef59796a43717fd2e9f",
+          "ownership_augmented_files": [
+            "src/defaults.ts"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The observed failure is primarily caused by state drift. The `WorkspaceSession` class shares the same `state` object across instances, leading to unintended side effects when one instance modifies the state.",
+            "dimension": "state",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Ensure each `WorkspaceSession` instance has its own independent state by cloning the initial state.",
+                "path": "src/session.ts"
+              }
+            ],
+            "notes": "Modify the constructor to clone the initial state, ensuring that changes in one session do not affect others."
+          },
+          "round": 1,
+          "satisfied_files": [],
+          "selected_file": "src/session.ts",
+          "selected_files": [
+            "src/session.ts",
+            "src/defaults.ts"
+          ],
+          "warnings": []
+        }
+      ],
+      "score": 100,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "src/session.ts",
+        "src/defaults.ts"
+      ],
+      "split": "holdout-sealed-typescript-multifile",
+      "test_runner": "node_test"
+    },
+    {
+      "baseline_feedback_tests": {
+        "duration_ms": 270,
+        "exit_code": 255,
+        "output": "[tests/profile_feedback_test.dart]\nUnhandled exception:\nBad state: explicit null was decoded as absent\n#0      require (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-feedback-yyjc7e08/repo/tests/profile_feedback_test.dart:6:5)\n#1      main (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-feedback-yyjc7e08/repo/tests/profile_feedback_test.dart:12:3)\n#2      _delayEntrypointInvocation.<anonymous closure> (dart:isolate-patch/isolate_patch.dart:314:19)\n#3      _RawReceivePort._handleMessage (dart:isolate-patch/isolate_patch.dart:193:12)",
+        "passed": false,
+        "runner": "dart",
+        "test_files": [
+          "tests/profile_feedback_test.dart",
+          "tests/profile_public_test.dart"
+        ]
+      },
+      "baseline_final_tests": {
+        "duration_ms": 248,
+        "exit_code": 255,
+        "isolated_final_repo": true,
+        "output": "[tests/profile_final_test.dart]\nUnhandled exception:\nBad state: note was not cleared\n#0      check (file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-hndspyrc/repo/tests/profile_final_test.dart:6:5)\n#1      main (file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-hndspyrc/repo/tests/profile_final_test.dart:18:3)\n#2      _delayEntrypointInvocation.<anonymous closure> (dart:isolate-patch/isolate_patch.dart:314:19)\n#3      _RawReceivePort._handleMessage (dart:isolate-patch/isolate_patch.dart:193:12)",
+        "passed": false,
+        "runner": "dart",
+        "test_files": [
+          "tests/profile_final_test.dart",
+          "tests/profile_public_test.dart"
+        ]
+      },
+      "baseline_public_tests": {
+        "duration_ms": 250,
+        "exit_code": 0,
+        "output": "[tests/profile_public_test.dart]",
+        "passed": true,
+        "runner": "dart",
+        "test_files": [
+          "tests/profile_public_test.dart"
+        ]
+      },
+      "case_id": "dart-profile-patch-null",
+      "changed_files": [],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": false,
+        "final_tests": false,
+        "patch_applied": false,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": false,
+        "patch_applied": false,
+        "selected_files": [],
+        "warnings": []
+      },
+      "diagnosis_dimension": "data",
+      "diagnosis_history": [
+        {
+          "dimension": "data",
+          "stage": "initial_plan"
+        },
+        {
+          "dimension": "data",
+          "stage": "repair_1"
+        },
+        {
+          "dimension": "data",
+          "stage": "repair_2"
+        },
+        {
+          "dimension": "data",
+          "stage": "repair_3"
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "source-4",
+            "source-5",
+            "source-7",
+            "source-8",
+            "source-9"
+          ],
+          "hypothesis_id": "h-code",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "code"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing code changes or restores the outcome.",
+            "experiment_id": "isolate-code",
+            "held_constant_dimensions": [
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-code"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing data changes or restores the outcome.",
+            "experiment_id": "isolate-data",
+            "held_constant_dimensions": [
+              "code",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-data"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by code drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "support_evidence_ids": [
+              "source-4",
+              "source-5",
+              "source-7",
+              "source-8",
+              "source-9"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "support_evidence_ids": []
+          },
+          {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "support_evidence_ids": []
+          },
+          {
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "unknown",
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h-unknown",
+            "support_evidence_ids": [
+              "operator-3",
+              "operator-1",
+              "operator-2",
+              "operator-4",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-6",
+              "probe-default-log-inventory",
+              "probe-default-log-search",
+              "probe-default-repo-state"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "dart-profile-patch-null",
+        "causal_timeline": {
+          "downstream_evidence_ids": [],
+          "earliest_break": {},
+          "events": [
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "probe:default-log-inventory",
+              "event_type": "typed_probe_log_inventory",
+              "evidence_id": "probe-default-log-inventory",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T09:13:52.696746+00:00",
+              "order": 0,
+              "prior_state": "",
+              "sequence": 0,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "probe:default-log-search",
+              "event_type": "typed_probe_log_search",
+              "evidence_id": "probe-default-log-search",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T09:13:52.701013+00:00",
+              "order": 1,
+              "prior_state": "",
+              "sequence": 1,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "probe:default-repo-state",
+              "event_type": "typed_probe_repo_state",
+              "evidence_id": "probe-default-repo-state",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T09:13:52.740477+00:00",
+              "order": 2,
+              "prior_state": "",
+              "sequence": 2,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-1",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 3,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-2",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 4,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-3",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 5,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-4",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 6,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-1",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 7,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-2",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 8,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-3",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 9,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "code",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-4",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 10,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "code",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-5",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 11,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-6",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 12,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "code",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-7",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 13,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "code",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-8",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 14,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "code",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-9",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 15,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            }
+          ],
+          "ordered_evidence_ids": [
+            "probe-default-log-inventory",
+            "probe-default-log-search",
+            "probe-default-repo-state",
+            "operator-1",
+            "operator-2",
+            "operator-3",
+            "operator-4",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-5",
+            "source-6",
+            "source-7",
+            "source-8",
+            "source-9"
+          ],
+          "runtime_source_parity": {
+            "comparable_pair_count": 0,
+            "runtime_revision": "",
+            "source_revision": "",
+            "status": "unknown"
+          },
+          "schema": "chili.causal-timeline.v1"
+        },
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "The observed failure is primarily caused by code drift.",
+          "confidence": 0.3377,
+          "dimension": "code",
+          "evidence_ids": [
+            "source-4",
+            "source-5",
+            "source-7",
+            "source-8",
+            "source-9"
+          ],
+          "hypothesis_id": "h-code",
+          "promotion_reason": "",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "requested_status": "provisional",
+          "status": "provisional"
+        },
+        "contract_invariants": [],
+        "decision": "instrument_first",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by code drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.3377,
+            "confirmatory_weight": 0,
+            "context_weight": 0.51,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "source-4",
+              "source-5",
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "support_weight": 0.51,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by data drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [],
+            "support_weight": 0.0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [],
+            "support_weight": 0.0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [
+              "operator-3"
+            ],
+            "causal_support_weight": 0.65,
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.5984,
+            "confirmatory_weight": 0,
+            "context_weight": 0.84,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "unknown",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h-unknown",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-3",
+              "operator-1",
+              "operator-2",
+              "operator-4",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-6",
+              "probe-default-log-inventory",
+              "probe-default-log-search",
+              "probe-default-repo-state"
+            ],
+            "support_weight": 1.49,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "dimension": "code",
+            "experiment_id": "falsify-h-code",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "dimension": "data",
+            "experiment_id": "falsify-h-data",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "dimension": "clock",
+            "experiment_id": "falsify-h-clock",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "dimension": "unknown",
+            "experiment_id": "falsify-h-unknown",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.3377,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-4",
+              "source-5",
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "hypothesis_id": "h-code",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.3377,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-4",
+              "source-5",
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "hypothesis_id": "h-code",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-4",
+              "source-5",
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "hypothesis_id": "h-code",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "provisional"
+          },
+          "response_chars": 2192,
+          "retractions": [],
+          "stage": "judge"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.3377,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-4",
+              "source-5",
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "hypothesis_id": "h-code",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.3377,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-4",
+              "source-5",
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "hypothesis_id": "h-code",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-4",
+              "source-5",
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "hypothesis_id": "h-code",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "provisional"
+          },
+          "response_chars": 3114,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "provisional",
+      "duration_ms": 277065,
+      "evaluation_role": "blinded_holdout",
+      "external_final_oracle": true,
+      "feedback_tests": {
+        "duration_ms": 276,
+        "exit_code": 255,
+        "output": "[tests/profile_feedback_test.dart]\nUnhandled exception:\nBad state: explicit null was decoded as absent\n#0      require (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-dart-profile-patch-null-_jcl9n1z/repo/tests/profile_feedback_test.dart:6:5)\n#1      main (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-dart-profile-patch-null-_jcl9n1z/repo/tests/profile_feedback_test.dart:12:3)\n#2      _delayEntrypointInvocation.<anonymous closure> (dart:isolate-patch/isolate_patch.dart:314:19)\n#3      _RawReceivePort._handleMessage (dart:isolate-patch/isolate_patch.dart:193:12)",
+        "passed": false,
+        "runner": "dart",
+        "test_files": [
+          "tests/profile_feedback_test.dart",
+          "tests/profile_public_test.dart"
+        ]
+      },
+      "final_tests": {
+        "duration_ms": 265,
+        "exit_code": 255,
+        "isolated_final_repo": true,
+        "output": "[tests/profile_final_test.dart]\nUnhandled exception:\nBad state: note was not cleared\n#0      check (file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-d52ce0w0/repo/tests/profile_final_test.dart:6:5)\n#1      main (file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-d52ce0w0/repo/tests/profile_final_test.dart:18:3)\n#2      _delayEntrypointInvocation.<anonymous closure> (dart:isolate-patch/isolate_patch.dart:314:19)\n#3      _RawReceivePort._handleMessage (dart:isolate-patch/isolate_patch.dart:193:12)",
+        "passed": false,
+        "runner": "dart",
+        "test_files": [
+          "tests/profile_final_test.dart",
+          "tests/profile_public_test.dart"
+        ]
+      },
+      "functional_repair_passed": false,
+      "initial_diagnosis_dimension": "code",
+      "language": "dart",
+      "model_calls": [
+        {
+          "error": null,
+          "json_object_valid": true,
+          "latency_ms": 40858,
+          "ok": true,
+          "response": "{\n  \"hypotheses\": [\n    {\n      \"hypothesis_id\": \"h-code\",\n      \"claim\": \"The observed failure is primarily caused by code drift.\",\n      \"dimension\": \"code\",\n      \"support_evidence_ids\": [\"source-4\", \"source-5\", \"source-7\", \"source-8\", \"source-9\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing code does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-data\",\n      \"claim\": \"The observed failure is primarily caused by data drift.\",\n      \"dimension\": \"data\",\n      \"support_evidence_ids\": [],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing data does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-clock\",\n      \"claim\": \"The observed failure is primarily caused by clock drift.\",\n      \"dimension\": \"clock\",\n      \"support_evidence_ids\": [],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing clock does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-unknown\",\n      \"claim\": \"The observed failure is primarily caused by unknown drift.\",\n      \"dimension\": \"unknown\",\n      \"support_evidence_ids\": [\"operator-3\", \"operator-1\", \"operator-2\", \"operator-4\", \"source-1\", \"source-2\", \"source-3\", \"source-6\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing unknown does not change the outcome.\"\n    }\n  ],\n  \"experiments\": [\n    {\n      \"probe_id\": \"p-code\",\n      \"kind\": \"isolated_compile\",\n      \"paths\": [\"lib/profile_store.dart\", \"tests/profile_public_test.dart\"],\n      \"dimension\": \"code\"\n    },\n    {\n      \"probe_id\": \"p-data\",\n      \"kind\": \"fixed-string_search\",\n      \"paths\": [\"tests/profile_public_test.dart\"],\n      \"query\": \"note: 'On call'\",\n      \"dimension\": \"data\"\n    }\n  ],\n  \"conclusion\": {\n    \"hypothesis_id\": \"h-code\",\n    \"status\": \"provisional\",\n    \"evidence_ids\": [\"source-4\", \"source-5\", \"source-7\", \"source-8\", \"source-9\"],\n    \"reason\": \"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 570,
+          "wall_ms": 40858
+        },
+        {
+          "error": null,
+          "json_object_valid": true,
+          "latency_ms": 62081,
+          "ok": true,
+          "response": "{\n  \"hypotheses\": [\n    {\n      \"hypothesis_id\": \"h-code\",\n      \"claim\": \"The observed failure is primarily caused by code drift.\",\n      \"dimension\": \"code\",\n      \"support_evidence_ids\": [\"source-4\", \"source-5\", \"source-7\", \"source-8\", \"source-9\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing code does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-data\",\n      \"claim\": \"The observed failure is primarily caused by data drift.\",\n      \"dimension\": \"data\",\n      \"support_evidence_ids\": [],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing data does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-clock\",\n      \"claim\": \"The observed failure is primarily caused by clock drift.\",\n      \"dimension\": \"clock\",\n      \"support_evidence_ids\": [],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing clock does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-unknown\",\n      \"claim\": \"The observed failure is primarily caused by unknown drift.\",\n      \"dimension\": \"unknown\",\n      \"support_evidence_ids\": [\"operator-3\", \"operator-1\", \"operator-2\", \"operator-4\", \"source-1\", \"source-2\", \"source-3\", \"source-6\", \"probe-default-log-inventory\", \"probe-default-log-search\", \"probe-default-repo-state\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing unknown does not change the outcome.\"\n    }\n  ],\n  \"experiments\": [\n    {\n      \"auto_execute\": false,\n      \"changed_dimensions\": [\"code\"],\n      \"evidence_required\": [\"before fingerprint\", \"after fingerprint\", \"actual outcome\"],\n      \"expected_if_false\": \"The outcome remains unchanged.\",\n      \"expected_if_true\": \"Changing code changes or restores the outcome.\",\n      \"experiment_id\": \"isolate-code\",\n      \"held_constant_dimensions\": [\"data\", \"clock\", \"state\", \"config\", \"dependency\", \"runtime\", \"test_harness\"],\n      \"hypothesis_ids\": [\"h-code\"],\n      \"probe\": {},\n      \"result_evidence_ids\": [],\n      \"safety\": \"isolated\",\n      \"status\": \"planned\"\n    },\n    {\n      \"auto_execute\": false,\n      \"changed_dimensions\": [\"data\"],\n      \"evidence_required\": [\"before fingerprint\", \"after fingerprint\", \"actual outcome\"],\n      \"expected_if_false\": \"The outcome remains unchanged.\",\n      \"expected_if_true\": \"Changing data changes or restores the outcome.\",\n      \"experiment_id\": \"isolate-data\",\n      \"held_constant_dimensions\": [\"code\", \"clock\", \"state\", \"config\", \"dependency\", \"runtime\", \"test_harness\"],\n      \"hypothesis_ids\": [\"h-data\"],\n      \"probe\": {},\n      \"result_evidence_ids\": [],\n      \"safety\": \"isolated\",\n      \"status\": \"planned\"\n    }\n  ],\n  \"conclusion\": {\n    \"hypothesis_id\": \"h-code\",\n    \"status\": \"provisional\",\n    \"evidence_ids\": [\"source-4\", \"source-5\", \"source-7\", \"source-8\", \"source-9\"],\n    \"reason\": \"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 781,
+          "wall_ms": 62081
+        },
+        {
+          "error": null,
+          "latency_ms": 13623,
+          "ok": true,
+          "response": "{\n  \"dimension\": \"data\",\n  \"analysis\": \"The bug arises from the handling of explicit null values in the ProfilePatch class. The current implementation does not correctly handle the case where a field is explicitly set to null, leading to the old value being retained instead of being cleared.\",\n  \"files\": [\n    {\n      \"path\": \"lib/patch.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the ProfilePatch class to handle explicit null values by setting the corresponding field to null when a null value is received.\"\n    },\n    {\n      \"path\": \"lib/profile_store.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Update the apply method in ProfileStore to correctly handle the case where a field is explicitly set to null in the ProfilePatch.\"\n    }\n  ],\n  \"notes\": \"This change ensures that when an explicit null value is received, the corresponding field in the Profile object is cleared instead of retaining the old value. This aligns with the wire contract's distinction between omission and an explicit clear.\"\n}",
+          "stage": "plan",
+          "tokens_out": 218,
+          "wall_ms": 13623
+        },
+        {
+          "error": null,
+          "latency_ms": 15393,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n  factory ProfilePatch.fromJson(Map<String, Object?> json) {\n    return ProfilePatch(\n      displayName: json['displayName'] == null\n          ? const PatchField<String>.absent()\n          : PatchField<String>.present(json['displayName'] as String),\n      note: json['note'] == null\n          ? const PatchField<String>.absent()\n          : PatchField<String>.present(json['note'] as String),\n    );\n  }\n=======\n  factory ProfilePatch.fromJson(Map<String, Object?> json) {\n    return ProfilePatch(\n      displayName: json['displayName'] == null\n          ? const PatchField<String>.absent()\n          : json['displayName'] is String\n              ? PatchField<String>.present(json['displayName'])\n              : const PatchField<String>.absent(),\n      note: json['note'] == null\n          ? const PatchField<String>.absent()\n          : json['note'] is String\n              ? PatchField<String>.present(json['note'])\n              : const PatchField<String>.absent(),\n    );\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 223,
+          "wall_ms": 15393
+        },
+        {
+          "error": null,
+          "latency_ms": 8359,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n  void apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.value ?? _current.displayName,\n      note: patch.note.value ?? _current.note,\n    );\n  }\n=======\n  void apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.isPresent ? patch.displayName.value : _current.displayName,\n      note: patch.note.isPresent ? patch.note.value : _current.note,\n    );\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "edit_2",
+          "tokens_out": 99,
+          "wall_ms": 8359
+        },
+        {
+          "error": null,
+          "latency_ms": 12405,
+          "ok": true,
+          "response": "{\n  \"dimension\": \"data\",\n  \"analysis\": \"The issue arises from the way `ProfilePatch.fromJson` handles null values, which leads to an incorrect interpretation of explicit nulls as absent fields. This affects the state of the `ProfileStore` when applying patches.\",\n  \"files\": [\n    {\n      \"path\": \"lib/patch.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that explicit null values are correctly interpreted as present with a null value in `PatchField`. Update the `fromJson` factory method to handle nulls appropriately.\"\n    }\n  ],\n  \"notes\": \"The repair involves modifying the `PatchField` class and its usage in `ProfilePatch.fromJson` to correctly handle explicit null values. This ensures that when an explicit null is received, it is treated as a present field with a null value rather than absent.\"\n}",
+          "stage": "repair_plan_1",
+          "tokens_out": 179,
+          "wall_ms": 12405
+        },
+        {
+          "error": null,
+          "latency_ms": 13505,
+          "ok": true,
+          "response": "{\n  \"dimension\": \"data\",\n  \"analysis\": \"The issue arises from the way `ProfilePatch.fromJson` handles null values, which leads to an incorrect interpretation of explicit nulls as absent fields. This affects the state of the `ProfileStore` when applying patches.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Ensure that explicit null values are correctly interpreted as present with a null value in `PatchField`. Update the `fromJson` factory method to handle nulls appropriately.\",\n      \"path\": \"lib/patch.dart\"\n    }\n  ],\n  \"notes\": \"The repair involves modifying the `PatchField` class and its usage in `ProfilePatch.fromJson` to correctly handle explicit null values. This ensures that when an explicit null is received, it is treated as a present field with a null value rather than absent.\"\n}",
+          "stage": "repair_review_1",
+          "tokens_out": 179,
+          "wall_ms": 13505
+        },
+        {
+          "error": null,
+          "latency_ms": 11355,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n      displayName: json['displayName'] == null\n          ? const PatchField<String>.absent()\n          : PatchField<String>.present(json['displayName'] as String),\n      note: json['note'] == null\n          ? const PatchField<String>.absent()\n          : PatchField<String>.present(json['note'] as String),\n=======\n      displayName: json['displayName'] != null\n          ? PatchField<String>.present(json['displayName'] as String)\n          : PatchField<String>.absent(),\n      note: json['note'] != null\n          ? PatchField<String>.present(json['note'] as String)\n          : PatchField<String>.absent(),\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_1",
+          "tokens_out": 145,
+          "wall_ms": 11355
+        },
+        {
+          "error": null,
+          "latency_ms": 9473,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n  void apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.value ?? _current.displayName,\n      note: patch.note.value ?? _current.note,\n    );\n  }\n=======\n  void apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.isPresent ? patch.displayName.value : _current.displayName,\n      note: patch.note.isPresent ? patch.note.value : _current.note,\n    );\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_2",
+          "tokens_out": 99,
+          "wall_ms": 9473
+        },
+        {
+          "error": null,
+          "latency_ms": 9758,
+          "ok": true,
+          "response": "{\n  \"dimension\": \"data\",\n  \"analysis\": \"The issue arises from the handling of explicit null values in the PatchField class, which incorrectly decodes them as absent. This affects the ProfileStore's ability to correctly apply patches that clear fields.\",\n  \"files\": [\n    {\n      \"path\": \"lib/patch.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Update the PatchField class to handle explicit null values correctly by distinguishing between omitted and explicitly cleared fields.\"\n    }\n  ],\n  \"notes\": \"The failure is primarily caused by a code defect in handling explicit null values. The repair involves modifying the PatchField class to differentiate between absent (omitted) and present (explicitly cleared) values.\"\n}",
+          "stage": "repair_plan_2",
+          "tokens_out": 152,
+          "wall_ms": 9758
+        },
+        {
+          "error": null,
+          "latency_ms": 10465,
+          "ok": true,
+          "response": "{\n  \"dimension\": \"data\",\n  \"analysis\": \"The issue arises from the handling of explicit null values in the PatchField class, which incorrectly decodes them as absent. This affects the ProfileStore's ability to correctly apply patches that clear fields.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Update the PatchField class to handle explicit null values correctly by distinguishing between omitted and explicitly cleared fields.\",\n      \"path\": \"lib/patch.dart\"\n    }\n  ],\n  \"notes\": \"The failure is primarily caused by a code defect in handling explicit null values. The repair involves modifying the PatchField class to differentiate between absent (omitted) and present (explicitly cleared) values.\"\n}",
+          "stage": "repair_review_2",
+          "tokens_out": 152,
+          "wall_ms": 10465
+        },
+        {
+          "error": null,
+          "latency_ms": 9263,
+          "ok": true,
+          "response": "```dart\n<<<<<<< SEARCH\n  const PatchField.absent()\n      : isPresent = false,\n        value = null;\n\n  const PatchField.present(this.value) : isPresent = true;\n=======\n  const PatchField.absent()\n      : isPresent = false,\n        value = null;\n\n  const PatchField.present(this.value) : isPresent = true;\n\n  const PatchField.explicitNull() : isPresent = true, value = null;\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_2_1",
+          "tokens_out": 96,
+          "wall_ms": 9263
+        },
+        {
+          "error": null,
+          "latency_ms": 7954,
+          "ok": true,
+          "response": "```dart\n<<<<<<< SEARCH\n  void apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.value ?? _current.displayName,\n      note: patch.note.value ?? _current.note,\n    );\n  }\n=======\n  void apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.isPresent ? patch.displayName.value : _current.displayName,\n      note: patch.note.isPresent ? patch.note.value : _current.note,\n    );\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_2_2",
+          "tokens_out": 100,
+          "wall_ms": 7954
+        },
+        {
+          "error": null,
+          "latency_ms": 12136,
+          "ok": true,
+          "response": "{\n  \"dimension\": \"data\",\n  \"analysis\": \"The issue arises from the handling of explicit null values in the JSON decoding process. The `PatchField.absent()` constructor is incorrectly used when a field is explicitly set to null, leading to an inconsistent state where the field is marked as absent but still contains a value.\",\n  \"files\": [\n    {\n      \"path\": \"lib/patch.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `PatchField.absent()` constructor to correctly handle explicit null values by setting both `isPresent` and `value` to null.\"\n    }\n  ],\n  \"notes\": \"The repair involves updating the `PatchField.absent()` constructor to ensure that when a field is explicitly set to null, it is marked as absent with a null value. This change will preserve the distinction between omission and an explicit clear in the wire contract.\"\n}",
+          "stage": "repair_plan_3",
+          "tokens_out": 187,
+          "wall_ms": 12136
+        },
+        {
+          "error": null,
+          "latency_ms": 12660,
+          "ok": true,
+          "response": "{\n  \"dimension\": \"data\",\n  \"analysis\": \"The issue arises from the handling of explicit null values in the JSON decoding process. The `PatchField.absent()` constructor is incorrectly used when a field is explicitly set to null, leading to an inconsistent state where the field is marked as absent but still contains a value.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Modify the `PatchField.absent()` constructor to correctly handle explicit null values by setting both `isPresent` and `value` to null.\",\n      \"path\": \"lib/patch.dart\"\n    }\n  ],\n  \"notes\": \"The repair involves updating the `PatchField.absent()` constructor to ensure that when a field is explicitly set to null, it is marked as absent with a null value. This change will preserve the distinction between omission and an explicit clear in the wire contract.\"\n}",
+          "stage": "repair_review_3",
+          "tokens_out": 187,
+          "wall_ms": 12660
+        },
+        {
+          "error": null,
+          "latency_ms": 6044,
+          "ok": true,
+          "response": "```dart\n<<<<<<< SEARCH\n  const PatchField.absent()\n      : isPresent = false,\n        value = null;\n=======\n  const PatchField.absent()\n      : isPresent = true,\n        value = null;\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_3_1",
+          "tokens_out": 50,
+          "wall_ms": 6044
+        },
+        {
+          "error": null,
+          "latency_ms": 7984,
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n  void apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.value ?? _current.displayName,\n      note: patch.note.value ?? _current.note,\n    );\n  }\n=======\n  void apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.isPresent ? patch.displayName.value : _current.displayName,\n      note: patch.note.isPresent ? patch.note.value : _current.note,\n    );\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_3_2",
+          "tokens_out": 99,
+          "wall_ms": 7984
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 17,
+      "patch_applied": false,
+      "patch_warnings": [
+        "Changed-file syntax validation failed:\nSyntaxError lib/patch.dart: Analyzing patch.dart...\n\n  error - patch.dart:26:44 - The argument type 'Object?' can't be assigned to the parameter type 'String?'.  - argument_type_not_assignable\n  error - patch.dart:31:44 - The argument type 'Object?' can't be assigned to the parameter type 'String?'.  - argument_type_not_assignable\n\n2 issues found.\nok lib/profile_store.dart\n1 validator group(s) reported syntax errors",
+        "Rolled back edit group after changed-file syntax validation failed.",
+        "Rolled back repair because validation regressed or made no measurable progress.",
+        "Rolled back repair because validation regressed or made no measurable progress.",
+        "Rolled back repair because validation regressed or made no measurable progress."
+      ],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 269,
+        "exit_code": 0,
+        "output": "[tests/profile_public_test.dart]",
+        "passed": true,
+        "runner": "dart",
+        "test_files": [
+          "tests/profile_public_test.dart"
+        ]
+      },
+      "repair_attempts": [
+        {
+          "after_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+          "applied_files": [
+            "lib/patch.dart",
+            "lib/profile_store.dart"
+          ],
+          "attempt_fingerprint": "e3207274c93503ab87479426d706af63e16ba96a69152217f6d5a01091a25fc3",
+          "before_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+          "ownership_augmented_files": [
+            "lib/profile_store.dart"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The issue arises from the way `ProfilePatch.fromJson` handles null values, which leads to an incorrect interpretation of explicit nulls as absent fields. This affects the state of the `ProfileStore` when applying patches.",
+            "dimension": "data",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Ensure that explicit null values are correctly interpreted as present with a null value in `PatchField`. Update the `fromJson` factory method to handle nulls appropriately.",
+                "path": "lib/patch.dart"
+              }
+            ],
+            "notes": "The repair involves modifying the `PatchField` class and its usage in `ProfilePatch.fromJson` to correctly handle explicit null values. This ensures that when an explicit null is received, it is treated as a present field with a null value rather than absent."
+          },
+          "rolled_back_after_validation": true,
+          "round": 1,
+          "satisfied_files": [],
+          "selected_file": "lib/patch.dart",
+          "selected_files": [
+            "lib/patch.dart",
+            "lib/profile_store.dart"
+          ],
+          "validation_regression": {
+            "after_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+            "after_quality": 2,
+            "before_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+            "before_quality": 2
+          },
+          "warnings": [
+            "Rolled back repair because validation regressed or made no measurable progress."
+          ]
+        },
+        {
+          "after_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+          "applied_files": [
+            "lib/patch.dart",
+            "lib/profile_store.dart"
+          ],
+          "attempt_fingerprint": "d7fe1f621bcca6359242f2b70a714db194d5f1334a25054291a20a3065016896",
+          "before_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+          "ownership_augmented_files": [
+            "lib/profile_store.dart"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The issue arises from the handling of explicit null values in the PatchField class, which incorrectly decodes them as absent. This affects the ProfileStore's ability to correctly apply patches that clear fields.",
+            "dimension": "data",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Update the PatchField class to handle explicit null values correctly by distinguishing between omitted and explicitly cleared fields.",
+                "path": "lib/patch.dart"
+              }
+            ],
+            "notes": "The failure is primarily caused by a code defect in handling explicit null values. The repair involves modifying the PatchField class to differentiate between absent (omitted) and present (explicitly cleared) values."
+          },
+          "rolled_back_after_validation": true,
+          "round": 2,
+          "satisfied_files": [],
+          "selected_file": "lib/patch.dart",
+          "selected_files": [
+            "lib/patch.dart",
+            "lib/profile_store.dart"
+          ],
+          "validation_regression": {
+            "after_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+            "after_quality": 2,
+            "before_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+            "before_quality": 2
+          },
+          "warnings": [
+            "Rolled back repair because validation regressed or made no measurable progress."
+          ]
+        },
+        {
+          "after_failure_signature": "b78d77c03b2a0326fb6722c50a826c911d86c17bbe9d383cf58e0a58befc2feb",
+          "applied_files": [
+            "lib/patch.dart",
+            "lib/profile_store.dart"
+          ],
+          "attempt_fingerprint": "4c8638cbcb1e653162cac3df39497c8e4df1eb2cc3afdd8d92c672bd7329ae4f",
+          "before_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+          "ownership_augmented_files": [
+            "lib/profile_store.dart"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The issue arises from the handling of explicit null values in the JSON decoding process. The `PatchField.absent()` constructor is incorrectly used when a field is explicitly set to null, leading to an inconsistent state where the field is marked as absent but still contains a value.",
+            "dimension": "data",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Modify the `PatchField.absent()` constructor to correctly handle explicit null values by setting both `isPresent` and `value` to null.",
+                "path": "lib/patch.dart"
+              }
+            ],
+            "notes": "The repair involves updating the `PatchField.absent()` constructor to ensure that when a field is explicitly set to null, it is marked as absent with a null value. This change will preserve the distinction between omission and an explicit clear in the wire contract."
+          },
+          "rolled_back_after_validation": true,
+          "round": 3,
+          "satisfied_files": [],
+          "selected_file": "lib/patch.dart",
+          "selected_files": [
+            "lib/patch.dart",
+            "lib/profile_store.dart"
+          ],
+          "validation_regression": {
+            "after_failure_signature": "b78d77c03b2a0326fb6722c50a826c911d86c17bbe9d383cf58e0a58befc2feb",
+            "after_quality": 0,
+            "before_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+            "before_quality": 2
+          },
+          "warnings": [
+            "Rolled back repair because validation regressed or made no measurable progress."
+          ]
+        }
+      ],
+      "score": 50,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "lib/patch.dart",
+        "lib/profile_store.dart"
+      ],
+      "split": "holdout-sealed-dart-multifile",
+      "test_runner": "dart"
+    }
+  ],
+  "created_at": "2026-07-12T09:17:48.607920+00:00",
+  "development_regression_case_count": 0,
+  "development_regression_score": 0.0,
+  "diagnosis_accuracy": 100.0,
+  "diagnosis_correct_count": 3,
+  "diagnostic_stage_acceptance_rate": 100.0,
+  "diagnostic_stage_count": 6,
+  "evaluation_verdict": "blinded_evaluation_failed",
+  "exact_file_set_accuracy": 33.33,
+  "exact_file_set_count": 1,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "functional_solve_count": 1,
+  "functional_solve_rate": 33.33,
+  "holdout_case_count": 3,
+  "holdout_score": 71.67,
+  "max_repair_rounds": 3,
+  "model": "qwen2.5-coder:7b",
+  "multifile_holdout_case_count": 3,
+  "multifile_holdout_score": 71.67,
+  "overall_score": 71.67,
+  "premium_calls": 0,
+  "reference_family": "claude-fable-5",
+  "schema": "chili.diagnosis-to-fix-results.v4",
+  "sealed_final_case_count": 3,
+  "verdict": "needs_improvement"
+}

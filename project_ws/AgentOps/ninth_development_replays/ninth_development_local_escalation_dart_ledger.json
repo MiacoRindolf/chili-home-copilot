@@ -1,0 +1,1482 @@
+{
+  "average_case_duration_ms": 710331.0,
+  "blinded_holdout_case_count": 1,
+  "blinded_holdout_score": 30.0,
+  "cases": [
+    {
+      "baseline_feedback_tests": {
+        "duration_ms": 229,
+        "exit_code": 255,
+        "output": "[tests/profile_feedback_test.dart]\nUnhandled exception:\nBad state: explicit null was decoded as absent\n#0      require (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-feedback-dtq_uk0i/repo/tests/profile_feedback_test.dart:6:5)\n#1      main (file:///C:/Users/rindo/AppData/Local/Temp/chili-baseline-feedback-dtq_uk0i/repo/tests/profile_feedback_test.dart:12:3)\n#2      _delayEntrypointInvocation.<anonymous closure> (dart:isolate-patch/isolate_patch.dart:314:19)\n#3      _RawReceivePort._handleMessage (dart:isolate-patch/isolate_patch.dart:193:12)",
+        "passed": false,
+        "runner": "dart",
+        "test_files": [
+          "tests/profile_feedback_test.dart",
+          "tests/profile_public_test.dart"
+        ]
+      },
+      "baseline_final_tests": {
+        "duration_ms": 308,
+        "exit_code": 255,
+        "isolated_final_repo": true,
+        "output": "[tests/profile_final_test.dart]\nUnhandled exception:\nBad state: note was not cleared\n#0      check (file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-64dcx0tc/repo/tests/profile_final_test.dart:6:5)\n#1      main (file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-64dcx0tc/repo/tests/profile_final_test.dart:18:3)\n#2      _delayEntrypointInvocation.<anonymous closure> (dart:isolate-patch/isolate_patch.dart:314:19)\n#3      _RawReceivePort._handleMessage (dart:isolate-patch/isolate_patch.dart:193:12)",
+        "passed": false,
+        "runner": "dart",
+        "test_files": [
+          "tests/profile_final_test.dart",
+          "tests/profile_public_test.dart"
+        ]
+      },
+      "baseline_public_tests": {
+        "duration_ms": 280,
+        "exit_code": 0,
+        "output": "[tests/profile_public_test.dart]",
+        "passed": true,
+        "runner": "dart",
+        "test_files": [
+          "tests/profile_public_test.dart"
+        ]
+      },
+      "case_id": "dart-profile-patch-null",
+      "changed_files": [],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": false,
+        "file_selection": false,
+        "final_tests": false,
+        "patch_applied": false,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": false,
+        "patch_applied": false,
+        "selected_files": [],
+        "warnings": []
+      },
+      "diagnosis_dimension": "code",
+      "diagnosis_history": [
+        {
+          "dimension": "data",
+          "stage": "initial_plan"
+        },
+        {
+          "dimension": "data",
+          "stage": "repair_1"
+        },
+        {
+          "dimension": "data",
+          "stage": "repair_2"
+        },
+        {
+          "dimension": "data",
+          "stage": "repair_3"
+        },
+        {
+          "dimension": "code",
+          "stage": "repair_4"
+        },
+        {
+          "dimension": "code",
+          "stage": "repair_5"
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "source-4",
+            "source-5",
+            "source-7",
+            "source-8",
+            "source-9"
+          ],
+          "hypothesis_id": "h-code",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "code"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing code changes or restores the outcome.",
+            "experiment_id": "isolate-code",
+            "held_constant_dimensions": [
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-code"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing data changes or restores the outcome.",
+            "experiment_id": "isolate-data",
+            "held_constant_dimensions": [
+              "code",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-data"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by code drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "support_evidence_ids": [
+              "source-4",
+              "source-5",
+              "source-7",
+              "source-8",
+              "source-9"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "support_evidence_ids": []
+          },
+          {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "support_evidence_ids": []
+          },
+          {
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "unknown",
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h-unknown",
+            "support_evidence_ids": [
+              "operator-3",
+              "operator-1",
+              "operator-2",
+              "operator-4",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-6",
+              "probe-default-log-inventory",
+              "probe-default-log-search",
+              "probe-default-repo-state"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "dart-profile-patch-null",
+        "causal_timeline": {
+          "downstream_evidence_ids": [],
+          "earliest_break": {},
+          "events": [
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "probe:default-log-inventory",
+              "event_type": "typed_probe_log_inventory",
+              "evidence_id": "probe-default-log-inventory",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T09:57:40.790159+00:00",
+              "order": 0,
+              "prior_state": "",
+              "sequence": 0,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "probe:default-log-search",
+              "event_type": "typed_probe_log_search",
+              "evidence_id": "probe-default-log-search",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T09:57:40.793895+00:00",
+              "order": 1,
+              "prior_state": "",
+              "sequence": 1,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "probe:default-repo-state",
+              "event_type": "typed_probe_repo_state",
+              "evidence_id": "probe-default-repo-state",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T09:57:40.834898+00:00",
+              "order": 2,
+              "prior_state": "",
+              "sequence": 2,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-1",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 3,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-2",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 4,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-3",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 5,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-4",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 6,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-1",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 7,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-2",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 8,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-3",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 9,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "code",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-4",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 10,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "code",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-5",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 11,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-6",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 12,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "code",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-7",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 13,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "code",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-8",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 14,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "code",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-9",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 15,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            }
+          ],
+          "ordered_evidence_ids": [
+            "probe-default-log-inventory",
+            "probe-default-log-search",
+            "probe-default-repo-state",
+            "operator-1",
+            "operator-2",
+            "operator-3",
+            "operator-4",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-5",
+            "source-6",
+            "source-7",
+            "source-8",
+            "source-9"
+          ],
+          "runtime_source_parity": {
+            "comparable_pair_count": 0,
+            "runtime_revision": "",
+            "source_revision": "",
+            "status": "unknown"
+          },
+          "schema": "chili.causal-timeline.v1"
+        },
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "The observed failure is primarily caused by code drift.",
+          "confidence": 0.3377,
+          "dimension": "code",
+          "evidence_ids": [
+            "source-4",
+            "source-5",
+            "source-7",
+            "source-8",
+            "source-9"
+          ],
+          "hypothesis_id": "h-code",
+          "promotion_reason": "",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "requested_status": "provisional",
+          "status": "provisional"
+        },
+        "contract_invariants": [],
+        "decision": "instrument_first",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by code drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.3377,
+            "confirmatory_weight": 0,
+            "context_weight": 0.51,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "source-4",
+              "source-5",
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "support_weight": 0.51,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by data drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [],
+            "support_weight": 0.0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [],
+            "support_weight": 0.0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [
+              "operator-3"
+            ],
+            "causal_support_weight": 0.65,
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.5984,
+            "confirmatory_weight": 0,
+            "context_weight": 0.84,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "unknown",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h-unknown",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "operator-3",
+              "operator-1",
+              "operator-2",
+              "operator-4",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-6",
+              "probe-default-log-inventory",
+              "probe-default-log-search",
+              "probe-default-repo-state"
+            ],
+            "support_weight": 1.49,
+            "typed_probe_evidence": false
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "dimension": "code",
+            "experiment_id": "falsify-h-code",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "dimension": "data",
+            "experiment_id": "falsify-h-data",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "dimension": "clock",
+            "experiment_id": "falsify-h-clock",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "dimension": "unknown",
+            "experiment_id": "falsify-h-unknown",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.3377,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-4",
+              "source-5",
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "hypothesis_id": "h-code",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.3377,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-4",
+              "source-5",
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "hypothesis_id": "h-code",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-4",
+              "source-5",
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "hypothesis_id": "h-code",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "provisional"
+          },
+          "response_chars": 2208,
+          "retractions": [],
+          "stage": "judge"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.3377,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-4",
+              "source-5",
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "hypothesis_id": "h-code",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by code drift.",
+            "confidence": 0.3377,
+            "dimension": "code",
+            "evidence_ids": [
+              "source-4",
+              "source-5",
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "hypothesis_id": "h-code",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-4",
+              "source-5",
+              "source-7",
+              "source-8",
+              "source-9"
+            ],
+            "hypothesis_id": "h-code",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "provisional"
+          },
+          "response_chars": 3114,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "provisional",
+      "duration_ms": 710331,
+      "evaluation_role": "blinded_holdout",
+      "external_final_oracle": true,
+      "feedback_tests": {
+        "duration_ms": 343,
+        "exit_code": 255,
+        "output": "[tests/profile_feedback_test.dart]\nUnhandled exception:\nBad state: explicit null was decoded as absent\n#0      require (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-dart-profile-patch-null-0hgpoh37/repo/tests/profile_feedback_test.dart:6:5)\n#1      main (file:///C:/Users/rindo/AppData/Local/Temp/chili-fix-dart-profile-patch-null-0hgpoh37/repo/tests/profile_feedback_test.dart:12:3)\n#2      _delayEntrypointInvocation.<anonymous closure> (dart:isolate-patch/isolate_patch.dart:314:19)\n#3      _RawReceivePort._handleMessage (dart:isolate-patch/isolate_patch.dart:193:12)",
+        "passed": false,
+        "runner": "dart",
+        "test_files": [
+          "tests/profile_feedback_test.dart",
+          "tests/profile_public_test.dart"
+        ]
+      },
+      "final_tests": {
+        "duration_ms": 311,
+        "exit_code": 255,
+        "isolated_final_repo": true,
+        "output": "[tests/profile_final_test.dart]\nUnhandled exception:\nBad state: note was not cleared\n#0      check (file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-wzbt00ut/repo/tests/profile_final_test.dart:6:5)\n#1      main (file:///C:/Users/rindo/AppData/Local/Temp/chili-final-adjudication-wzbt00ut/repo/tests/profile_final_test.dart:18:3)\n#2      _delayEntrypointInvocation.<anonymous closure> (dart:isolate-patch/isolate_patch.dart:314:19)\n#3      _RawReceivePort._handleMessage (dart:isolate-patch/isolate_patch.dart:193:12)",
+        "passed": false,
+        "runner": "dart",
+        "test_files": [
+          "tests/profile_final_test.dart",
+          "tests/profile_public_test.dart"
+        ]
+      },
+      "functional_repair_passed": false,
+      "initial_diagnosis_dimension": "code",
+      "language": "dart",
+      "model_calls": [
+        {
+          "error": null,
+          "json_object_valid": true,
+          "latency_ms": 36428,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "{\n  \"hypotheses\": [\n    {\n      \"hypothesis_id\": \"h-code\",\n      \"claim\": \"The observed failure is primarily caused by code drift.\",\n      \"dimension\": \"code\",\n      \"support_evidence_ids\": [\"source-4\", \"source-5\", \"source-7\", \"source-8\", \"source-9\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing code does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-data\",\n      \"claim\": \"The observed failure is primarily caused by data drift.\",\n      \"dimension\": \"data\",\n      \"support_evidence_ids\": [],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing data does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-clock\",\n      \"claim\": \"The observed failure is primarily caused by clock drift.\",\n      \"dimension\": \"clock\",\n      \"support_evidence_ids\": [],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing clock does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-unknown\",\n      \"claim\": \"The observed failure is primarily caused by unknown drift.\",\n      \"dimension\": \"unknown\",\n      \"support_evidence_ids\": [\"operator-3\", \"operator-1\", \"operator-2\", \"operator-4\", \"source-1\", \"source-2\", \"source-3\", \"source-6\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing unknown does not change the outcome.\"\n    }\n  ],\n  \"experiments\": [\n    {\n      \"probe_id\": \"p-isolate-code\",\n      \"kind\": \"isolated_compile\",\n      \"paths\": [\"lib/profile_store.dart\", \"tests/profile_public_test.dart\"],\n      \"dimension\": \"code\"\n    },\n    {\n      \"probe_id\": \"p-isolate-data\",\n      \"kind\": \"fixed-string_search\",\n      \"paths\": [\"tests/profile_public_test.dart\"],\n      \"query\": \"note: 'On call'\",\n      \"dimension\": \"data\"\n    }\n  ],\n  \"conclusion\": {\n    \"hypothesis_id\": \"h-code\",\n    \"status\": \"provisional\",\n    \"evidence_ids\": [\"source-4\", \"source-5\", \"source-7\", \"source-8\", \"source-9\"],\n    \"reason\": \"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 574,
+          "wall_ms": 36428
+        },
+        {
+          "error": null,
+          "json_object_valid": true,
+          "latency_ms": 47718,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "{\n  \"hypotheses\": [\n    {\n      \"hypothesis_id\": \"h-code\",\n      \"claim\": \"The observed failure is primarily caused by code drift.\",\n      \"dimension\": \"code\",\n      \"support_evidence_ids\": [\"source-4\", \"source-5\", \"source-7\", \"source-8\", \"source-9\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing code does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-data\",\n      \"claim\": \"The observed failure is primarily caused by data drift.\",\n      \"dimension\": \"data\",\n      \"support_evidence_ids\": [],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing data does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-clock\",\n      \"claim\": \"The observed failure is primarily caused by clock drift.\",\n      \"dimension\": \"clock\",\n      \"support_evidence_ids\": [],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing clock does not change the outcome.\"\n    },\n    {\n      \"hypothesis_id\": \"h-unknown\",\n      \"claim\": \"The observed failure is primarily caused by unknown drift.\",\n      \"dimension\": \"unknown\",\n      \"support_evidence_ids\": [\"operator-3\", \"operator-1\", \"operator-2\", \"operator-4\", \"source-1\", \"source-2\", \"source-3\", \"source-6\", \"probe-default-log-inventory\", \"probe-default-log-search\", \"probe-default-repo-state\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing unknown does not change the outcome.\"\n    }\n  ],\n  \"experiments\": [\n    {\n      \"auto_execute\": false,\n      \"changed_dimensions\": [\"code\"],\n      \"evidence_required\": [\"before fingerprint\", \"after fingerprint\", \"actual outcome\"],\n      \"expected_if_false\": \"The outcome remains unchanged.\",\n      \"expected_if_true\": \"Changing code changes or restores the outcome.\",\n      \"experiment_id\": \"isolate-code\",\n      \"held_constant_dimensions\": [\"data\", \"clock\", \"state\", \"config\", \"dependency\", \"runtime\", \"test_harness\"],\n      \"hypothesis_ids\": [\"h-code\"],\n      \"probe\": {},\n      \"result_evidence_ids\": [],\n      \"safety\": \"isolated\",\n      \"status\": \"planned\"\n    },\n    {\n      \"auto_execute\": false,\n      \"changed_dimensions\": [\"data\"],\n      \"evidence_required\": [\"before fingerprint\", \"after fingerprint\", \"actual outcome\"],\n      \"expected_if_false\": \"The outcome remains unchanged.\",\n      \"expected_if_true\": \"Changing data changes or restores the outcome.\",\n      \"experiment_id\": \"isolate-data\",\n      \"held_constant_dimensions\": [\"code\", \"clock\", \"state\", \"config\", \"dependency\", \"runtime\", \"test_harness\"],\n      \"hypothesis_ids\": [\"h-data\"],\n      \"probe\": {},\n      \"result_evidence_ids\": [],\n      \"safety\": \"isolated\",\n      \"status\": \"planned\"\n    }\n  ],\n  \"conclusion\": {\n    \"hypothesis_id\": \"h-code\",\n    \"status\": \"provisional\",\n    \"evidence_ids\": [\"source-4\", \"source-5\", \"source-7\", \"source-8\", \"source-9\"],\n    \"reason\": \"Heuristic fallback only; a local investigator should challenge this ranking.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 781,
+          "wall_ms": 47718
+        },
+        {
+          "error": null,
+          "latency_ms": 9994,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "{\n  \"dimension\": \"data\",\n  \"analysis\": \"The bug arises from the handling of explicit null values in the ProfilePatch class. The current implementation does not correctly handle cases where a field is explicitly set to null, leading to the old value being retained instead of being cleared.\",\n  \"files\": [\n    {\n      \"path\": \"lib/patch.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `ProfilePatch` class to handle explicit null values by setting the corresponding field in the `Profile` object to null when a `PatchField` with a value of null is encountered.\"\n    }\n  ],\n  \"notes\": \"The issue is primarily caused by code drift, as the current implementation does not correctly handle explicit null values. By modifying the `ProfilePatch` class, we can ensure that fields explicitly set to null are cleared in the `Profile` object.\"\n}",
+          "stage": "plan",
+          "tokens_out": 185,
+          "wall_ms": 9994
+        },
+        {
+          "error": null,
+          "latency_ms": 10462,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "```dart\n<<<<<<< SEARCH\n  factory ProfilePatch.fromJson(Map<String, Object?> json) {\n    return ProfilePatch(\n      displayName: json['displayName'] == null\n          ? const PatchField<String>.absent()\n          : PatchField<String>.present(json['displayName'] as String),\n      note: json['note'] == null\n          ? const PatchField<String>.absent()\n          : PatchField<String>.present(json['note'] as String),\n    );\n  }\n=======\n  factory ProfilePatch.fromJson(Map<String, Object?> json) {\n    return ProfilePatch(\n      displayName: json['displayName'] == null\n          ? const PatchField<String>.absent()\n          : PatchField<String>.present(json['displayName'] as String? ?? ''),\n      note: json['note'] == null\n          ? const PatchField<String>.absent()\n          : PatchField<String>.present(json['note'] as String? ?? ''),\n    );\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 196,
+          "wall_ms": 10462
+        },
+        {
+          "error": null,
+          "latency_ms": 10191,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "{\n  \"dimension\": \"data\",\n  \"analysis\": \"The issue arises from the handling of explicit null values in the JSON decoding process. The `PatchField.absent()` constructor is incorrectly used when a field is explicitly set to null, leading to an unexpected state where the value is both absent and not null.\",\n  \"files\": [\n    {\n      \"path\": \"lib/patch.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `PatchField.absent()` constructor to correctly handle explicit null values by setting `isPresent` to false and `value` to null.\"\n    }\n  ],\n  \"notes\": \"The repair involves updating the `PatchField.absent()` constructor to ensure that it correctly handles explicit null values. This change will prevent the issue where an explicit null is decoded as absent, preserving the distinction between omission and an explicit clear in the wire contract.\"\n}",
+          "stage": "repair_plan_1",
+          "tokens_out": 185,
+          "wall_ms": 10191
+        },
+        {
+          "error": null,
+          "latency_ms": 10511,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "{\n  \"dimension\": \"data\",\n  \"analysis\": \"The issue arises from the handling of explicit null values in the JSON decoding process. The `PatchField.absent()` constructor is incorrectly used when a field is explicitly set to null, leading to an unexpected state where the value is both absent and not null.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Modify the `PatchField.absent()` constructor to correctly handle explicit null values by setting `isPresent` to false and `value` to null.\",\n      \"path\": \"lib/patch.dart\"\n    }\n  ],\n  \"notes\": \"The repair involves updating the `PatchField.absent()` constructor to ensure that it correctly handles explicit null values. This change will prevent the issue where an explicit null is decoded as absent, preserving the distinction between omission and an explicit clear in the wire contract.\"\n}",
+          "stage": "repair_review_1",
+          "tokens_out": 185,
+          "wall_ms": 10511
+        },
+        {
+          "error": null,
+          "latency_ms": 4438,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n  const PatchField.absent()\n      : isPresent = false,\n        value = null;\n=======\n  const PatchField.absent() : isPresent = false, value = null;\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_1",
+          "tokens_out": 47,
+          "wall_ms": 4438
+        },
+        {
+          "error": null,
+          "latency_ms": 7118,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "```dart\n<<<<<<< SEARCH\n  void apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.value ?? _current.displayName,\n      note: patch.note.value ?? _current.note,\n    );\n  }\n=======\n  void apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.isPresent ? patch.displayName.value : _current.displayName,\n      note: patch.note.isPresent ? patch.note.value : _current.note,\n    );\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_2",
+          "tokens_out": 100,
+          "wall_ms": 7118
+        },
+        {
+          "error": null,
+          "latency_ms": 7749,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "{\n  \"dimension\": \"data\",\n  \"analysis\": \"The issue arises from the handling of explicit null values in the JSON decoding process. The current implementation decodes an explicit null as an absent value, which leads to unexpected behavior when applying patches.\",\n  \"files\": [\n    {\n      \"path\": \"lib/patch.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `fromJson` method in `PatchField` to correctly handle explicit null values by decoding them as present with a null value.\"\n    }\n  ],\n  \"notes\": \"This change ensures that explicit null values are correctly interpreted and applied, preserving the distinction between omission and an explicit clear.\"\n}",
+          "stage": "repair_plan_2",
+          "tokens_out": 141,
+          "wall_ms": 7749
+        },
+        {
+          "error": null,
+          "latency_ms": 7960,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "{\n  \"dimension\": \"data\",\n  \"analysis\": \"The issue arises from the handling of explicit null values in the JSON decoding process. The current implementation decodes an explicit null as an absent value, which leads to unexpected behavior when applying patches.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Modify the `fromJson` method in `PatchField` to correctly handle explicit null values by decoding them as present with a null value.\",\n      \"path\": \"lib/patch.dart\"\n    }\n  ],\n  \"notes\": \"This change ensures that explicit null values are correctly interpreted and applied, preserving the distinction between omission and an explicit clear.\"\n}",
+          "stage": "repair_review_2",
+          "tokens_out": 141,
+          "wall_ms": 7960
+        },
+        {
+          "error": null,
+          "latency_ms": 10485,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "```dart\n<<<<<<< SEARCH\n  factory ProfilePatch.fromJson(Map<String, Object?> json) {\n    return ProfilePatch(\n      displayName: json['displayName'] == null\n          ? const PatchField<String>.absent()\n          : PatchField<String>.present(json['displayName'] as String),\n      note: json['note'] == null\n          ? const PatchField<String>.absent()\n          : PatchField<String>.present(json['note'] as String),\n    );\n  }\n=======\n  factory ProfilePatch.fromJson(Map<String, Object?> json) {\n    return ProfilePatch(\n      displayName: json['displayName'] == null\n          ? const PatchField<String>.present(null)\n          : PatchField<String>.present(json['displayName'] as String),\n      note: json['note'] == null\n          ? const PatchField<String>.present(null)\n          : PatchField<String>.present(json['note'] as String),\n    );\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_2_1",
+          "tokens_out": 192,
+          "wall_ms": 10485
+        },
+        {
+          "error": null,
+          "latency_ms": 5720,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "<<<<<<< SEARCH\n  Profile apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.value ?? _current.displayName,\n      note: patch.note.value ?? _current.note,\n    );\n  }\n=======\n  Profile apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.isPresent ? patch.displayName.value : _current.displayName,\n      note: patch.note.isPresent ? patch.note.value : _current.note,\n    );\n  }\n>>>>>>> REPLACE",
+          "stage": "repair_edit_2_2",
+          "tokens_out": 95,
+          "wall_ms": 5720
+        },
+        {
+          "error": null,
+          "latency_ms": 14357,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "I apologize for the oversight. Let's correct the SEARCH/REPLACE blocks based on the current content of `lib/profile_store.dart`.\n\n## File: lib/profile_store.dart\n```\nimport 'patch.dart';\n\nclass Profile {\n  final String? displayName;\n  final String? note;\n\n  const Profile({required this.displayName, required this.note});\n}\n\nclass ProfileStore {\n  Profile _current;\n\n  ProfileStore(this._current);\n\n  Profile get current => _current;\n\n  void apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.value ?? _current.displayName,\n      note: patch.note.value ?? _current.note,\n    );\n  }\n}\n```\n\n## Required Change\nRepair this directly exercised source boundary so every read-only feedback contract holds while preserving public behavior.\n\nOverall request:\nProfile updates arrive as partial JSON documents. Support can change a display name, but sending an explicit null to clear an optional field leaves the old value in place. Fields omitted from the same request must remain untouched, and logs confirm the null key was present before decoding. Preserve the wire contract's distinction between omission and an explicit clear through parsing and application.\n\n## Output\n```\n<<<<<<< SEARCH\n  void apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.value ?? _current.displayName,\n      note: patch.note.value ?? _current.note,\n    );\n  }\n=======\n  void apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.isPresent ? patch.displayName.value : _current.displayName,\n      note: patch.note.isPresent ? patch.note.value : _current.note,\n    );\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_2_2_retry",
+          "tokens_out": 334,
+          "wall_ms": 14357
+        },
+        {
+          "error": null,
+          "latency_ms": 10828,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "{\n  \"dimension\": \"data\",\n  \"analysis\": \"The failure is caused by the incorrect handling of explicit null values in the decoding and application process. The `PatchField.absent()` constructor should not be used for explicit null values, as it does not distinguish between omitted and explicitly cleared fields.\",\n  \"files\": [\n    {\n      \"path\": \"lib/patch.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `PatchField` class to handle explicit null values correctly. Use a new constructor or method to represent explicit null values.\"\n    },\n    {\n      \"path\": \"lib/profile_store.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Update the `apply` method in `ProfileStore` to use the correct logic for handling explicit null values based on the updated `PatchField` class.\"\n    }\n  ],\n  \"notes\": \"Ensure that the new logic correctly distinguishes between omitted and explicitly cleared fields, and that it does not leave old values in place when an explicit null is received.\"\n}",
+          "stage": "repair_plan_3",
+          "tokens_out": 216,
+          "wall_ms": 10828
+        },
+        {
+          "error": null,
+          "latency_ms": 11166,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "{\n  \"dimension\": \"data\",\n  \"analysis\": \"The failure is caused by the incorrect handling of explicit null values in the decoding and application process. The `PatchField.absent()` constructor should not be used for explicit null values, as it does not distinguish between omitted and explicitly cleared fields.\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Modify the `PatchField` class to handle explicit null values correctly. Use a new constructor or method to represent explicit null values.\",\n      \"path\": \"lib/patch.dart\"\n    },\n    {\n      \"action\": \"modify\",\n      \"description\": \"Update the `apply` method in `ProfileStore` to use the correct logic for handling explicit null values based on the updated `PatchField` class.\",\n      \"path\": \"lib/profile_store.dart\"\n    }\n  ],\n  \"notes\": \"Ensure that the new logic correctly distinguishes between omitted and explicitly cleared fields, and that it does not leave old values in place when an explicit null is received.\"\n}",
+          "stage": "repair_review_3",
+          "tokens_out": 216,
+          "wall_ms": 11166
+        },
+        {
+          "error": null,
+          "latency_ms": 8973,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "```dart\n<<<<<<< SEARCH\nclass PatchField<T> {\n  final bool isPresent;\n  final T? value;\n\n  const PatchField.absent()\n      : isPresent = false,\n        value = null;\n\n  const PatchField.present(this.value) : isPresent = true;\n}\n=======\nclass PatchField<T> {\n  final bool isPresent;\n  final T? value;\n\n  const PatchField.absent()\n      : isPresent = false,\n        value = null;\n\n  const PatchField.present(this.value) : isPresent = true;\n\n  const PatchField.explicitNull() : isPresent = true, value = null;\n}\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_3_1",
+          "tokens_out": 134,
+          "wall_ms": 8973
+        },
+        {
+          "error": null,
+          "latency_ms": 6999,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n  void apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.value ?? _current.displayName,\n      note: patch.note.value ?? _current.note,\n    );\n  }\n=======\n  void apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.isPresent ? patch.displayName.value : _current.displayName,\n      note: patch.note.isPresent ? patch.note.value : _current.note,\n    );\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_3_2",
+          "tokens_out": 99,
+          "wall_ms": 6999
+        },
+        {
+          "error": null,
+          "latency_ms": 68593,
+          "model": "qwen2.5-coder:14b",
+          "ok": true,
+          "response": "{\n  \"dimension\": \"code\",\n  \"analysis\": \"The failure is primarily caused by code drift, specifically in how null values are handled during JSON decoding and application. The current implementation does not correctly distinguish between omitted fields and explicit nulls.\",\n  \"files\": [\n    {\n      \"path\": \"lib/patch.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Update the `fromJson` method to correctly handle explicit nulls by using a new `PatchField.explicitNull` constructor.\"\n    },\n    {\n      \"path\": \"lib/profile_store.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Modify the `apply` method to use the `isPresent` flag to determine whether to apply the patch value or retain the current value.\"\n    }\n  ],\n  \"notes\": \"This repair ensures that explicit nulls are correctly decoded and applied, while omitted fields remain untouched. The changes are limited to the source files directly responsible for handling profile updates.\"\n}",
+          "stage": "repair_plan_4",
+          "tokens_out": 203,
+          "wall_ms": 68593
+        },
+        {
+          "error": null,
+          "latency_ms": 61500,
+          "model": "qwen2.5-coder:14b",
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The failure is primarily caused by code drift, specifically in how null values are handled during JSON decoding and application. The current implementation does not correctly distinguish between omitted fields and explicit nulls.\",\n  \"dimension\": \"code\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Update the `fromJson` method to correctly handle explicit nulls by using a new `PatchField.explicitNull` constructor.\",\n      \"path\": \"lib/patch.dart\"\n    },\n    {\n      \"action\": \"modify\",\n      \"description\": \"Modify the `apply` method to use the `isPresent` flag to determine whether to apply the patch value or retain the current value.\",\n      \"path\": \"lib/profile_store.dart\"\n    }\n  ],\n  \"notes\": \"This repair ensures that explicit nulls are correctly decoded and applied, while omitted fields remain untouched. The changes are limited to the source files directly responsible for handling profile updates.\"\n}",
+          "stage": "repair_review_4",
+          "tokens_out": 203,
+          "wall_ms": 61500
+        },
+        {
+          "error": null,
+          "latency_ms": 79575,
+          "model": "qwen2.5-coder:14b",
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nclass PatchField<T> {\n  final bool isPresent;\n  final T? value;\n\n  const PatchField.absent()\n      : isPresent = false,\n        value = null;\n\n  const PatchField.present(this.value) : isPresent = true;\n}\n=======\nclass PatchField<T> {\n  final bool isPresent;\n  final T? value;\n\n  const PatchField.absent()\n      : isPresent = false,\n        value = null;\n\n  const PatchField.present(this.value) : isPresent = true;\n\n  const PatchField.explicitNull() \n      : isPresent = true,\n        value = null;\n}\n>>>>>>> REPLACE\n\n<<<<<<< SEARCH\n  factory ProfilePatch.fromJson(Map<String, Object?> json) {\n    return ProfilePatch(\n      displayName: json['displayName'] == null\n          ? const PatchField<String>.absent()\n          : PatchField<String>.present(json['displayName'] as String),\n      note: json['note'] == null\n          ? const PatchField<String>.absent()\n          : PatchField<String>.present(json['note'] as String),\n    );\n  }\n=======\n  factory ProfilePatch.fromJson(Map<String, Object?> json) {\n    return ProfilePatch(\n      displayName: json['displayName'] == null\n          ? const PatchField<String>.explicitNull()\n          : PatchField<String>.present(json['displayName'] as String),\n      note: json['note'] == null\n          ? const PatchField<String>.explicitNull()\n          : PatchField<String>.present(json['note'] as String),\n    );\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_4_1",
+          "tokens_out": 323,
+          "wall_ms": 79575
+        },
+        {
+          "error": null,
+          "latency_ms": 27852,
+          "model": "qwen2.5-coder:14b",
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n  void apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.value ?? _current.displayName,\n      note: patch.note.value ?? _current.note,\n    );\n  }\n=======\n  void apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.isPresent ? patch.displayName.value : _current.displayName,\n      note: patch.note.isPresent ? patch.note.value : _current.note,\n    );\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_4_2",
+          "tokens_out": 99,
+          "wall_ms": 27852
+        },
+        {
+          "error": null,
+          "latency_ms": 62954,
+          "model": "qwen2.5-coder:14b",
+          "ok": true,
+          "response": "{\n  \"dimension\": \"code\",\n  \"analysis\": \"The failure is primarily caused by code drift. The issue lies in how null values are handled during decoding and application. Specifically, the `fromJson` method in `lib/patch.dart` incorrectly maps explicit nulls to absent fields, which causes the validation test to fail.\",\n  \"files\": [\n    {\n      \"path\": \"lib/patch.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Update the `fromJson` method to correctly handle explicit nulls by using a new `PatchField.explicitNull` constructor.\"\n    },\n    {\n      \"path\": \"lib/profile_store.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the `apply` method in `ProfileStore` correctly applies explicit null values by checking the presence of the field.\"\n    }\n  ],\n  \"notes\": \"The changes aim to distinguish between omitted fields and explicitly cleared fields, preserving the wire contract's distinction. This should resolve the validation failure by ensuring that explicit nulls are handled correctly during decoding and application.\"\n}",
+          "stage": "repair_plan_5",
+          "tokens_out": 223,
+          "wall_ms": 62954
+        },
+        {
+          "error": null,
+          "latency_ms": 62729,
+          "model": "qwen2.5-coder:14b",
+          "ok": true,
+          "response": "{\n  \"dimension\": \"code\",\n  \"analysis\": \"The failure is primarily caused by code drift. The issue lies in how null values are handled during decoding and application. Specifically, the `fromJson` method in `lib/patch.dart` incorrectly maps explicit nulls to absent fields, which causes the validation test to fail.\",\n  \"files\": [\n    {\n      \"path\": \"lib/patch.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Update the `fromJson` method to correctly handle explicit nulls by using a new `PatchField.explicitNull` constructor.\"\n    },\n    {\n      \"path\": \"lib/profile_store.dart\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that the `apply` method in `ProfileStore` correctly applies explicit null values by checking the presence of the field.\"\n    }\n  ],\n  \"notes\": \"The changes aim to distinguish between omitted fields and explicitly cleared fields, preserving the wire contract's distinction. This should resolve the validation failure by ensuring that explicit nulls are handled correctly during decoding and application.\"\n}",
+          "stage": "repair_review_5",
+          "tokens_out": 223,
+          "wall_ms": 62729
+        },
+        {
+          "error": null,
+          "latency_ms": 78368,
+          "model": "qwen2.5-coder:14b",
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nclass PatchField<T> {\n  final bool isPresent;\n  final T? value;\n\n  const PatchField.absent()\n      : isPresent = false,\n        value = null;\n\n  const PatchField.present(this.value) : isPresent = true;\n}\n=======\nclass PatchField<T> {\n  final bool isPresent;\n  final T? value;\n\n  const PatchField.absent()\n      : isPresent = false,\n        value = null;\n\n  const PatchField.present(this.value) : isPresent = true;\n\n  const PatchField.explicitNull() \n      : isPresent = true,\n        value = null;\n}\n>>>>>>> REPLACE\n\n<<<<<<< SEARCH\n  factory ProfilePatch.fromJson(Map<String, Object?> json) {\n    return ProfilePatch(\n      displayName: json['displayName'] == null\n          ? const PatchField<String>.absent()\n          : PatchField<String>.present(json['displayName'] as String),\n      note: json['note'] == null\n          ? const PatchField<String>.absent()\n          : PatchField<String>.present(json['note'] as String),\n    );\n  }\n=======\n  factory ProfilePatch.fromJson(Map<String, Object?> json) {\n    return ProfilePatch(\n      displayName: json['displayName'] == null\n          ? const PatchField<String>.explicitNull()\n          : PatchField<String>.present(json['displayName'] as String),\n      note: json['note'] == null\n          ? const PatchField<String>.explicitNull()\n          : PatchField<String>.present(json['note'] as String),\n    );\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_5_1",
+          "tokens_out": 323,
+          "wall_ms": 78368
+        },
+        {
+          "error": null,
+          "latency_ms": 28317,
+          "model": "qwen2.5-coder:14b",
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\n  void apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.value ?? _current.displayName,\n      note: patch.note.value ?? _current.note,\n    );\n  }\n=======\n  void apply(ProfilePatch patch) {\n    _current = Profile(\n      displayName: patch.displayName.isPresent ? patch.displayName.value : _current.displayName,\n      note: patch.note.isPresent ? patch.note.value : _current.note,\n    );\n  }\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_5_2",
+          "tokens_out": 99,
+          "wall_ms": 28317
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 25,
+      "patch_applied": false,
+      "patch_warnings": [
+        "Rolled back initial patch because it regressed or made no validated progress.",
+        "Rolled back repair because validation regressed or made no measurable progress.",
+        "Recovered from one stale SEARCH rejection using the exact current file.",
+        "Rolled back repair because validation regressed or made no measurable progress.",
+        "Rolled back repair because validation regressed or made no measurable progress.",
+        "Rolled back repair because validation regressed or made no measurable progress.",
+        "Rejected duplicate repair state already proven regressive or no-progress."
+      ],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 332,
+        "exit_code": 0,
+        "output": "[tests/profile_public_test.dart]",
+        "passed": true,
+        "runner": "dart",
+        "test_files": [
+          "tests/profile_public_test.dart"
+        ]
+      },
+      "repair_attempts": [
+        {
+          "after_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+          "applied_files": [
+            "lib/patch.dart",
+            "lib/profile_store.dart"
+          ],
+          "attempt_fingerprint": "d7053320250dedfef0df9c44ba376a8b8fd883005df4409f94d3741c10a8101a",
+          "attempted_diff": "--- a/lib/patch.dart\n+++ b/lib/patch.dart\n@@ -2,9 +2,7 @@\n   final bool isPresent;\n   final T? value;\n \n-  const PatchField.absent()\n-      : isPresent = false,\n-        value = null;\n+  const PatchField.absent() : isPresent = false, value = null;\n \n   const PatchField.present(this.value) : isPresent = true;\n }\n\n--- a/lib/profile_store.dart\n+++ b/lib/profile_store.dart\n@@ -16,8 +16,8 @@\n \n   void apply(ProfilePatch patch) {\n     _current = Profile(\n-      displayName: patch.displayName.value ?? _current.displayName,\n-      note: patch.note.value ?? _current.note,\n+      displayName: patch.displayName.isPresent ? patch.displayName.value : _current.displayName,\n+      note: patch.note.isPresent ? patch.note.value : _current.note,\n     );\n   }\n }\n",
+          "before_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+          "escalated": false,
+          "model": "qwen2.5-coder:7b",
+          "ownership_augmented_files": [
+            "lib/profile_store.dart"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The issue arises from the handling of explicit null values in the JSON decoding process. The `PatchField.absent()` constructor is incorrectly used when a field is explicitly set to null, leading to an unexpected state where the value is both absent and not null.",
+            "dimension": "data",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Modify the `PatchField.absent()` constructor to correctly handle explicit null values by setting `isPresent` to false and `value` to null.",
+                "path": "lib/patch.dart"
+              }
+            ],
+            "notes": "The repair involves updating the `PatchField.absent()` constructor to ensure that it correctly handles explicit null values. This change will prevent the issue where an explicit null is decoded as absent, preserving the distinction between omission and an explicit clear in the wire contract."
+          },
+          "rolled_back_after_validation": true,
+          "round": 1,
+          "satisfied_files": [],
+          "selected_file": "lib/patch.dart",
+          "selected_files": [
+            "lib/patch.dart",
+            "lib/profile_store.dart"
+          ],
+          "validation_regression": {
+            "after_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+            "after_quality": 2,
+            "before_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+            "before_quality": 2
+          },
+          "warnings": [
+            "Rolled back repair because validation regressed or made no measurable progress."
+          ]
+        },
+        {
+          "after_failure_signature": "cc4073439ba3f1a294bcbe9c23473b72055cd2f9bbfed2dc4d626e722a3b98ad",
+          "applied_files": [
+            "lib/patch.dart",
+            "lib/profile_store.dart"
+          ],
+          "attempt_fingerprint": "4d0fde970d262d9c0c86c700cd6c01ec50b859d0b4e9ca0ba17ee14eac059cb8",
+          "attempted_diff": "--- a/lib/patch.dart\n+++ b/lib/patch.dart\n@@ -21,10 +21,10 @@\n   factory ProfilePatch.fromJson(Map<String, Object?> json) {\n     return ProfilePatch(\n       displayName: json['displayName'] == null\n-          ? const PatchField<String>.absent()\n+          ? const PatchField<String>.present(null)\n           : PatchField<String>.present(json['displayName'] as String),\n       note: json['note'] == null\n-          ? const PatchField<String>.absent()\n+          ? const PatchField<String>.present(null)\n           : PatchField<String>.present(json['note'] as String),\n     );\n   }\n\n--- a/lib/profile_store.dart\n+++ b/lib/profile_store.dart\n@@ -16,8 +16,8 @@\n \n   void apply(ProfilePatch patch) {\n     _current = Profile(\n-      displayName: patch.displayName.value ?? _current.displayName,\n-      note: patch.note.value ?? _current.note,\n+      displayName: patch.displayName.isPresent ? patch.displayName.value : _current.displayName,\n+      note: patch.note.isPresent ? patch.note.value : _current.note,\n     );\n   }\n }\n",
+          "before_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+          "escalated": false,
+          "model": "qwen2.5-coder:7b",
+          "ownership_augmented_files": [
+            "lib/profile_store.dart"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The issue arises from the handling of explicit null values in the JSON decoding process. The current implementation decodes an explicit null as an absent value, which leads to unexpected behavior when applying patches.",
+            "dimension": "data",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Modify the `fromJson` method in `PatchField` to correctly handle explicit null values by decoding them as present with a null value.",
+                "path": "lib/patch.dart"
+              }
+            ],
+            "notes": "This change ensures that explicit null values are correctly interpreted and applied, preserving the distinction between omission and an explicit clear."
+          },
+          "rolled_back_after_validation": true,
+          "round": 2,
+          "satisfied_files": [],
+          "selected_file": "lib/patch.dart",
+          "selected_files": [
+            "lib/patch.dart",
+            "lib/profile_store.dart"
+          ],
+          "validation_regression": {
+            "after_failure_signature": "cc4073439ba3f1a294bcbe9c23473b72055cd2f9bbfed2dc4d626e722a3b98ad",
+            "after_quality": 0,
+            "before_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+            "before_quality": 2
+          },
+          "warnings": [
+            "Recovered from one stale SEARCH rejection using the exact current file.",
+            "Rolled back repair because validation regressed or made no measurable progress."
+          ]
+        },
+        {
+          "after_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+          "applied_files": [
+            "lib/patch.dart",
+            "lib/profile_store.dart"
+          ],
+          "attempt_fingerprint": "d7fe1f621bcca6359242f2b70a714db194d5f1334a25054291a20a3065016896",
+          "attempted_diff": "--- a/lib/patch.dart\n+++ b/lib/patch.dart\n@@ -7,6 +7,8 @@\n         value = null;\n \n   const PatchField.present(this.value) : isPresent = true;\n+\n+  const PatchField.explicitNull() : isPresent = true, value = null;\n }\n \n class ProfilePatch {\n\n--- a/lib/profile_store.dart\n+++ b/lib/profile_store.dart\n@@ -16,8 +16,8 @@\n \n   void apply(ProfilePatch patch) {\n     _current = Profile(\n-      displayName: patch.displayName.value ?? _current.displayName,\n-      note: patch.note.value ?? _current.note,\n+      displayName: patch.displayName.isPresent ? patch.displayName.value : _current.displayName,\n+      note: patch.note.isPresent ? patch.note.value : _current.note,\n     );\n   }\n }\n",
+          "before_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+          "escalated": false,
+          "model": "qwen2.5-coder:7b",
+          "ownership_augmented_files": [],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The failure is caused by the incorrect handling of explicit null values in the decoding and application process. The `PatchField.absent()` constructor should not be used for explicit null values, as it does not distinguish between omitted and explicitly cleared fields.",
+            "dimension": "data",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Modify the `PatchField` class to handle explicit null values correctly. Use a new constructor or method to represent explicit null values.",
+                "path": "lib/patch.dart"
+              },
+              {
+                "action": "modify",
+                "description": "Update the `apply` method in `ProfileStore` to use the correct logic for handling explicit null values based on the updated `PatchField` class.",
+                "path": "lib/profile_store.dart"
+              }
+            ],
+            "notes": "Ensure that the new logic correctly distinguishes between omitted and explicitly cleared fields, and that it does not leave old values in place when an explicit null is received."
+          },
+          "rolled_back_after_validation": true,
+          "round": 3,
+          "satisfied_files": [],
+          "selected_file": "lib/patch.dart",
+          "selected_files": [
+            "lib/patch.dart",
+            "lib/profile_store.dart"
+          ],
+          "validation_regression": {
+            "after_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+            "after_quality": 2,
+            "before_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+            "before_quality": 2
+          },
+          "warnings": [
+            "Rolled back repair because validation regressed or made no measurable progress."
+          ]
+        },
+        {
+          "after_failure_signature": "cc4073439ba3f1a294bcbe9c23473b72055cd2f9bbfed2dc4d626e722a3b98ad",
+          "applied_files": [
+            "lib/patch.dart",
+            "lib/profile_store.dart"
+          ],
+          "attempt_fingerprint": "f0c681dcf83b132b8803c63477ec2fba0a0964da1954178605d1b277a0ca1ce6",
+          "attempted_diff": "--- a/lib/patch.dart\n+++ b/lib/patch.dart\n@@ -7,6 +7,10 @@\n         value = null;\n \n   const PatchField.present(this.value) : isPresent = true;\n+\n+  const PatchField.explicitNull() \n+      : isPresent = true,\n+        value = null;\n }\n \n class ProfilePatch {\n@@ -21,10 +25,10 @@\n   factory ProfilePatch.fromJson(Map<String, Object?> json) {\n     return ProfilePatch(\n       displayName: json['displayName'] == null\n-          ? const PatchField<String>.absent()\n+          ? const PatchField<String>.explicitNull()\n           : PatchField<String>.present(json['displayName'] as String),\n       note: json['note'] == null\n-          ? const PatchField<String>.absent()\n+          ? const PatchField<String>.explicitNull()\n           : PatchField<String>.present(json['note'] as String),\n     );\n   }\n\n--- a/lib/profile_store.dart\n+++ b/lib/profile_store.dart\n@@ -16,8 +16,8 @@\n \n   void apply(ProfilePatch patch) {\n     _current = Profile(\n-      displayName: patch.displayName.value ?? _current.displayName,\n-      note: patch.note.value ?? _current.note,\n+      displayName: patch.displayName.isPresent ? patch.displayName.value : _current.displayName,\n+      note: patch.note.isPresent ? patch.note.value : _current.note,\n     );\n   }\n }\n",
+          "before_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+          "escalated": true,
+          "model": "qwen2.5-coder:14b",
+          "ownership_augmented_files": [],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The failure is primarily caused by code drift, specifically in how null values are handled during JSON decoding and application. The current implementation does not correctly distinguish between omitted fields and explicit nulls.",
+            "dimension": "code",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Update the `fromJson` method to correctly handle explicit nulls by using a new `PatchField.explicitNull` constructor.",
+                "path": "lib/patch.dart"
+              },
+              {
+                "action": "modify",
+                "description": "Modify the `apply` method to use the `isPresent` flag to determine whether to apply the patch value or retain the current value.",
+                "path": "lib/profile_store.dart"
+              }
+            ],
+            "notes": "This repair ensures that explicit nulls are correctly decoded and applied, while omitted fields remain untouched. The changes are limited to the source files directly responsible for handling profile updates."
+          },
+          "rolled_back_after_validation": true,
+          "round": 4,
+          "satisfied_files": [],
+          "selected_file": "lib/patch.dart",
+          "selected_files": [
+            "lib/patch.dart",
+            "lib/profile_store.dart"
+          ],
+          "validation_regression": {
+            "after_failure_signature": "cc4073439ba3f1a294bcbe9c23473b72055cd2f9bbfed2dc4d626e722a3b98ad",
+            "after_quality": 0,
+            "before_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+            "before_quality": 2
+          },
+          "warnings": [
+            "Rolled back repair because validation regressed or made no measurable progress."
+          ]
+        },
+        {
+          "applied_files": [
+            "lib/patch.dart",
+            "lib/profile_store.dart"
+          ],
+          "attempt_fingerprint": "f0c681dcf83b132b8803c63477ec2fba0a0964da1954178605d1b277a0ca1ce6",
+          "attempted_diff": "--- a/lib/patch.dart\n+++ b/lib/patch.dart\n@@ -7,6 +7,10 @@\n         value = null;\n \n   const PatchField.present(this.value) : isPresent = true;\n+\n+  const PatchField.explicitNull() \n+      : isPresent = true,\n+        value = null;\n }\n \n class ProfilePatch {\n@@ -21,10 +25,10 @@\n   factory ProfilePatch.fromJson(Map<String, Object?> json) {\n     return ProfilePatch(\n       displayName: json['displayName'] == null\n-          ? const PatchField<String>.absent()\n+          ? const PatchField<String>.explicitNull()\n           : PatchField<String>.present(json['displayName'] as String),\n       note: json['note'] == null\n-          ? const PatchField<String>.absent()\n+          ? const PatchField<String>.explicitNull()\n           : PatchField<String>.present(json['note'] as String),\n     );\n   }\n\n--- a/lib/profile_store.dart\n+++ b/lib/profile_store.dart\n@@ -16,8 +16,8 @@\n \n   void apply(ProfilePatch patch) {\n     _current = Profile(\n-      displayName: patch.displayName.value ?? _current.displayName,\n-      note: patch.note.value ?? _current.note,\n+      displayName: patch.displayName.isPresent ? patch.displayName.value : _current.displayName,\n+      note: patch.note.isPresent ? patch.note.value : _current.note,\n     );\n   }\n }\n",
+          "before_failure_signature": "13a01acac5d53a6f579d32877fd9a7c3698cc595314433c049ad5d1f4ca31ef8",
+          "duplicate_attempt": true,
+          "escalated": true,
+          "model": "qwen2.5-coder:14b",
+          "ownership_augmented_files": [],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The failure is primarily caused by code drift. The issue lies in how null values are handled during decoding and application. Specifically, the `fromJson` method in `lib/patch.dart` incorrectly maps explicit nulls to absent fields, which causes the validation test to fail.",
+            "dimension": "code",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Update the `fromJson` method to correctly handle explicit nulls by using a new `PatchField.explicitNull` constructor.",
+                "path": "lib/patch.dart"
+              },
+              {
+                "action": "modify",
+                "description": "Ensure that the `apply` method in `ProfileStore` correctly applies explicit null values by checking the presence of the field.",
+                "path": "lib/profile_store.dart"
+              }
+            ],
+            "notes": "The changes aim to distinguish between omitted fields and explicitly cleared fields, preserving the wire contract's distinction. This should resolve the validation failure by ensuring that explicit nulls are handled correctly during decoding and application."
+          },
+          "rolled_back_after_validation": true,
+          "round": 5,
+          "satisfied_files": [],
+          "selected_file": "lib/patch.dart",
+          "selected_files": [
+            "lib/patch.dart",
+            "lib/profile_store.dart"
+          ],
+          "warnings": [
+            "Rejected duplicate repair state already proven regressive or no-progress."
+          ]
+        }
+      ],
+      "score": 30,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "lib/patch.dart",
+        "lib/profile_store.dart"
+      ],
+      "split": "holdout-sealed-dart-multifile",
+      "test_runner": "dart"
+    }
+  ],
+  "created_at": "2026-07-12T10:08:54.323844+00:00",
+  "development_regression_case_count": 0,
+  "development_regression_score": 0.0,
+  "diagnosis_accuracy": 0.0,
+  "diagnosis_correct_count": 0,
+  "diagnostic_stage_acceptance_rate": 100.0,
+  "diagnostic_stage_count": 2,
+  "escalation_model": "qwen2.5-coder:14b",
+  "evaluation_verdict": "blinded_evaluation_failed",
+  "exact_file_set_accuracy": 0.0,
+  "exact_file_set_count": 0,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "functional_solve_count": 0,
+  "functional_solve_rate": 0.0,
+  "holdout_case_count": 1,
+  "holdout_score": 30.0,
+  "max_base_repair_rounds": 3,
+  "max_escalation_repair_rounds": 2,
+  "max_repair_rounds": 5,
+  "model": "qwen2.5-coder:7b",
+  "multifile_holdout_case_count": 1,
+  "multifile_holdout_score": 30.0,
+  "overall_score": 30.0,
+  "premium_calls": 0,
+  "reference_family": "claude-fable-5",
+  "schema": "chili.diagnosis-to-fix-results.v4",
+  "sealed_final_case_count": 1,
+  "verdict": "needs_improvement"
+}

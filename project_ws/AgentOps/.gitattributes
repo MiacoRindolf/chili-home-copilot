@@ -1,2 +1,4 @@
 FABLE5_CLASS_DIAGNOSIS_TO_FIX_BLINDED_NINTH_RUN.md -text
 fable5_class_diagnosis_to_fix_blinded_ninth.json -text
+ninth_development_replays/ninth_development_*.json -text -diff
+ninth_development_replays/NINTH_DEVELOPMENT_*.md -text -diff
