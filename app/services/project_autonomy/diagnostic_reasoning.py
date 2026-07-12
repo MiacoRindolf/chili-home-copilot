@@ -1536,8 +1536,29 @@ def derive_contract_invariants(statement: str) -> list[str]:
             "unit/version rule; preserve the raw timestamp bytes in signed material and never divide legacy seconds."
         )
     scoped_identity = bool(
-        any(token in lowered for token in ("two tenant", "two site", "two merchant", "regional"))
-        and any(token in lowered for token in ("reuse", "sharing", "same client", "same identifier"))
+        any(
+            token in lowered
+            for token in (
+                "two tenant",
+                "two site",
+                "two merchant",
+                "two org",
+                "two organization",
+                "two account",
+                "regional",
+            )
+        )
+        and any(
+            token in lowered
+            for token in (
+                "reuse",
+                "sharing",
+                "share the same",
+                "same client",
+                "same identifier",
+                "same principal",
+            )
+        )
     )
     if scoped_identity:
         invariants.append(
@@ -1740,6 +1761,42 @@ def contract_invariant_warnings(
             for content in files.values()
         ):
             warnings.append("independent one-to-many children are still joined before aggregation")
+    if any("normalize both sides of the lookup" in value for value in invariants):
+        vary_sources = [
+            content
+            for content in lowered_files.values()
+            if re.search(r"\bfunction\s+parsevary\s*\(", content)
+        ]
+        if any(
+            not all(token in content for token in ("trim()", "tolowercase()", "new set"))
+            for content in vary_sources
+        ):
+            warnings.append("Vary fields are not trimmed, case-normalized, and deduplicated")
+        header_sources = [
+            content for content in lowered_files.values() if "headervalue" in content
+        ]
+        if any(re.search(r"headers\s*\[\s*name\s*\]", content) for content in header_sources):
+            warnings.append("request header lookup still depends on exact object-key casing")
+    if any("wildcard Vary response is non-cacheable" in value for value in invariants):
+        cache_sources = [
+            content
+            for content in lowered_files.values()
+            if "parsevary" in content and ".set(" in content
+        ]
+        if any(
+            not (
+                match := re.search(
+                    r"(?:const|let)\s+([a-z_$]\w*)\s*=\s*parsevary\s*\(",
+                    content,
+                )
+            )
+            or not re.search(
+                rf"{re.escape(match.group(1))}\.includes\s*\(\s*['\"]\*['\"]\s*\)",
+                content,
+            )
+            for content in cache_sources
+        ):
+            warnings.append("wildcard Vary response is still inserted into cache storage")
     if any("complete (key, value) pair sequence" in value for value in invariants):
         query_sources = [
             content
@@ -1837,6 +1894,26 @@ def contract_invariant_warnings(
             for content in sql_identity_sources
         ):
             warnings.append("database uniqueness/conflict identity still omits tenant or site scope")
+        scoped_sql_sources = [
+            content
+            for content in lowered_files.values()
+            if any(scope in content for scope in ("tenant_id", "site_id", "merchant_id", "org_id", "account_id"))
+            and any(token in content for token in ("unique index", "on conflict("))
+        ]
+        if any(
+            (
+                match := re.search(
+                    r"(?:on\s+[a-z_]\w*|on\s+conflict)\s*\(([^)]+)\)",
+                    content,
+                )
+            )
+            and not any(
+                scope in match.group(1)
+                for scope in ("tenant_id", "site_id", "merchant_id", "org_id", "account_id")
+            )
+            for content in scoped_sql_sources
+        ):
+            warnings.append("SQL identity target omits the available tenant/site/account scope column")
     if any("without repeating stock/state mutation" in value for value in invariants):
         event_sources = [
             content for content in lowered_files.values() if "event_id" in content
@@ -1981,6 +2058,15 @@ def contract_invariant_warnings(
             for content in rollup_sources
         ):
             warnings.append("event-time rollup still uses receipt time for its bucket or window")
+    if any("exclusive upper bound" in value for value in invariants):
+        temporal_sources = [
+            content
+            for content in lowered_files.values()
+            if "between" in content
+            and any(token in content for token in ("valid_until", "effective_until", "active_until"))
+        ]
+        if temporal_sources:
+            warnings.append("temporal read still uses inclusive BETWEEN at the expiration boundary")
     return warnings
 
 
@@ -2520,6 +2606,121 @@ def _repair_telemetry_sql(content: str) -> str:
     return updated
 
 
+def _repair_vary_pipeline(content: str) -> str:
+    updated = content
+    if re.search(r"\bfunction\s+parseVary\s*\(", updated):
+        repaired = _replace_braced_function_body(
+            updated,
+            "parseVary",
+            (
+                "  if (!value) return [];\n"
+                "  return [...new Set(\n"
+                "    String(value)\n"
+                "      .split(\",\")\n"
+                "      .map((part) => part.trim().toLowerCase())\n"
+                "      .filter((part) => part.length > 0),\n"
+                "  )];"
+            ),
+        )
+        if repaired:
+            updated = repaired
+    if re.search(r"\bfunction\s+headerValue\s*\(", updated):
+        repaired = _replace_braced_function_body(
+            updated,
+            "headerValue",
+            (
+                "  const wanted = String(name).trim().toLowerCase();\n"
+                "  const match = Object.entries(headers ?? {}).find(\n"
+                "    ([key]) => key.trim().toLowerCase() === wanted,\n"
+                "  );\n"
+                "  const value = match?.[1];\n"
+                "  if (Array.isArray(value)) return value.join(\",\");\n"
+                "  return value ?? \"\";"
+            ),
+        )
+        if repaired:
+            updated = repaired
+    if re.search(r"\bfunction\s+makeVariantKey\s*\(", updated):
+        signature = re.search(
+            r"\bfunction\s+makeVariantKey\s*\(\s*([A-Za-z_$]\w*)\s*,\s*"
+            r"([A-Za-z_$]\w*)\s*,\s*([A-Za-z_$]\w*)",
+            updated,
+            re.DOTALL,
+        )
+        if signature:
+            url_name, fields_name, headers_name = signature.groups()
+            repaired = _replace_braced_function_body(
+                updated,
+                "makeVariantKey",
+                (
+                    f"  const dimensions = {fields_name}.map((field) => {{\n"
+                    "    const normalizedField = String(field).trim().toLowerCase();\n"
+                    f"    return `${{normalizedField}}:${{headerValue({headers_name}, normalizedField)}}`;\n"
+                    "  });\n"
+                    f"  return JSON.stringify([{url_name}, ...dimensions]);"
+                ),
+            )
+            if repaired:
+                updated = repaired
+    if "parseVary" in updated and ".set(" in updated and "includes(\"*\")" not in updated:
+        updated = re.sub(
+            r"(?m)^(?P<indent>[ \t]*)const\s+(?P<name>[A-Za-z_$]\w*)\s*=\s*"
+            r"parseVary\([^\n]+\);\s*$",
+            lambda match: (
+                f"{match.group(0)}\n{match.group('indent')}if "
+                f"({match.group('name')}.includes(\"*\")) return;"
+            ),
+            updated,
+            count=1,
+        )
+    return updated
+
+
+def _repair_scoped_temporal_sql(content: str) -> str:
+    updated = content
+    scope_columns = (
+        "tenant_id",
+        "site_id",
+        "merchant_id",
+        "org_id",
+        "account_id",
+    )
+    scope = next((column for column in scope_columns if re.search(rf"\b{column}\b", updated, re.IGNORECASE)), "")
+    if scope:
+        def add_scope(match: re.Match[str]) -> str:
+            columns = [value.strip() for value in match.group("columns").split(",")]
+            if any(value.casefold() == scope.casefold() for value in columns):
+                return match.group(0)
+            return f"{match.group('prefix')}{scope}, {', '.join(columns)})"
+
+        updated = re.sub(
+            r"(?P<prefix>\bON\s+[A-Za-z_]\w*\s*\()(?P<columns>[^)]+)\)",
+            add_scope,
+            updated,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        updated = re.sub(
+            r"(?P<prefix>\bON\s+CONFLICT\s*\()(?P<columns>[^)]+)\)",
+            add_scope,
+            updated,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    updated = re.sub(
+        r":(?P<asof>[A-Za-z_]\w*)\s+BETWEEN\s+"
+        r"(?P<lower>[A-Za-z_]\w*(?:_from|_start))\s+AND\s+"
+        r"(?P<upper>[A-Za-z_]\w*(?:_until|_end|_to))",
+        lambda match: (
+            f"{match.group('lower')} <= :{match.group('asof')} "
+            f"AND :{match.group('asof')} < {match.group('upper')}"
+        ),
+        updated,
+        flags=re.IGNORECASE,
+    )
+    return updated
+
+
 def contract_repair_proposals(
     prompt: str,
     files: Mapping[str, str],
@@ -2532,6 +2733,12 @@ def contract_repair_proposals(
     proposals: dict[str, str] = {}
     for path, content in files.items():
         updated = content
+        if any(
+            token in value
+            for value in invariants
+            for token in ("normalize both sides of the lookup", "wildcard Vary response is non-cacheable")
+        ):
+            updated = _repair_vary_pipeline(updated)
         if any("complete (key, value) pair sequence" in value for value in invariants):
             updated = _repair_repeated_query_pairs(updated)
         if any("authenticated issue time" in value for value in invariants):
@@ -2551,6 +2758,9 @@ def contract_repair_proposals(
             for token in ("identical composite key", "without repeating stock/state mutation")
         ):
             updated = _repair_scoped_retry_identity(updated)
+            updated = _repair_scoped_temporal_sql(updated)
+        if any("exclusive upper bound" in value for value in invariants):
+            updated = _repair_scoped_temporal_sql(updated)
         if any(
             token in value
             for value in invariants

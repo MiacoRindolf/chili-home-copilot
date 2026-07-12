@@ -1448,9 +1448,11 @@ def test_deterministic_contract_repairs_pass_real_sealed_contracts(tmp_path):
     [
         "py_relay_rotation_window",
         "py_reservation_retry_scope",
+        "ts_http_vary_isolation",
         "ts_retry_budget_clock",
         "dart_offline_tombstone_join",
         "dart_resumable_chunk_boundaries",
+        "sql_tenant_grant_intervals",
         "sql_telemetry_correction_rollup",
     ],
 )

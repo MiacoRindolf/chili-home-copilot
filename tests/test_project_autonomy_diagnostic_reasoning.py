@@ -2492,6 +2492,70 @@ def test_relay_operator_preserves_raw_wire_time_with_alternate_local_name():
     assert reasoning.contract_invariant_warnings(prompt, projected) == []
 
 
+def test_vary_and_scoped_interval_operators_transfer_to_alternate_shapes():
+    vary_prompt = (
+        "Vary fields use mixed casing and extra whitespace; wildcard responses remain in cache."
+    )
+    vary_files = {
+        "edge/vary.mjs": (
+            "export function parseVary(raw) { return raw.split(',').filter(Boolean); }\n"
+        ),
+        "edge/key.mjs": (
+            "export function headerValue(headers, name) { return headers[name] ?? ''; }\n"
+            "export function makeVariantKey(path, fields, headers) {\n"
+            "  return JSON.stringify([path, ...fields.map((field) => `${field}:${headerValue(headers, field)}`)]);\n"
+            "}\n"
+        ),
+        "edge/store.mjs": (
+            "class EdgeStore {\n"
+            "  put(path, requestHeaders, response) {\n"
+            "    const fields = parseVary(response.vary);\n"
+            "    this.entries.set(makeVariantKey(path, fields, requestHeaders), response);\n"
+            "  }\n"
+            "}\n"
+        ),
+    }
+    vary_proposals = reasoning.contract_repair_proposals(vary_prompt, vary_files)
+    projected_vary = {
+        path: vary_proposals.get(path, content) for path, content in vary_files.items()
+    }
+    assert "part.trim().toLowerCase()" in projected_vary["edge/vary.mjs"]
+    assert "Object.entries(headers ?? {})" in projected_vary["edge/key.mjs"]
+    assert 'fields.includes("*")' in projected_vary["edge/store.mjs"]
+    assert reasoning.contract_invariant_warnings(vary_prompt, projected_vary) == []
+
+    sql_prompt = (
+        "Two organizations share the same principal identifier, and a permission remains visible at the exact "
+        "instant its active interval expires."
+    )
+    sql_files = {
+        "schema.sql": (
+            "CREATE TABLE grants (org_id TEXT, account_id TEXT, permission TEXT, "
+            "active_from INTEGER, active_until INTEGER);\n"
+            "CREATE UNIQUE INDEX uq_grant ON grants(account_id, permission);\n"
+        ),
+        "upsert.sql": (
+            "INSERT INTO grants (org_id, account_id, permission, active_from, active_until) "
+            "VALUES (:org_id, :account_id, :permission, :active_from, :active_until)\n"
+            "ON CONFLICT(account_id, permission) DO UPDATE SET active_until = excluded.active_until;\n"
+        ),
+        "effective.sql": (
+            "SELECT permission FROM grants WHERE org_id = :org_id AND account_id = :account_id "
+            "AND :instant BETWEEN active_from AND active_until;\n"
+        ),
+    }
+    sql_proposals = reasoning.contract_repair_proposals(sql_prompt, sql_files)
+    projected_sql = {
+        path: sql_proposals.get(path, content) for path, content in sql_files.items()
+    }
+    assert "ON grants(org_id, account_id, permission)" in projected_sql["schema.sql"]
+    assert "ON CONFLICT(org_id, account_id, permission)" in projected_sql["upsert.sql"]
+    assert "active_from <= :instant AND :instant < active_until" in projected_sql[
+        "effective.sql"
+    ]
+    assert reasoning.contract_invariant_warnings(sql_prompt, projected_sql) == []
+
+
 def test_causal_taxonomy_disambiguates_protocol_policy_and_logical_state():
     assert reasoning.infer_dimension(
         "Vary header values use mixed casing and a wildcard response follows the wrong policy."
