@@ -226,6 +226,19 @@ This is the strongest current evidence against broad Fable 5-class generalizatio
 safe, local-only, and structurally reliable, but causal-family transfer, baseline semantics, and uncertainty
 calibration are not yet robust across novel incident language.
 
+After preserving that untouched result, commit `43f6d3e60725370eacfea968046325b1550bbca9` added generic
+operational-fingerprint classification, retained-baseline semantics, event-level comparability and mechanism-gap
+controls, coarse-reset confidence limits, and unresolved-drift harness calibration. The disclosed heuristic replay
+reached **100/100**. The full 24-call local-council replay reached **92.5/100**, with **24/24 successful and
+accepted stages**, five model-selected conclusions, three deterministic evidence-gate selections, no unsafe final
+automatic experiment, and zero premium calls. Two causal-boundary errors remained: `config` was labeled `code`,
+and `runtime` was labeled `state`. Focused validation passed **76 tests** and the broad autonomy slice passed
+**226 tests**. Full details: `project_ws/AgentOps/FABLE5_CLASS_DIAGNOSTIC_SIXTH_SLICE_REPAIR.md`.
+
+This repaired replay is disclosed development evidence. It does not overwrite the untouched 67.5 score, does not
+show post-repair generalization, and does not support a Fable 5 parity claim. A seventh independently authored
+post-repair slice is the next diagnostic gate.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
