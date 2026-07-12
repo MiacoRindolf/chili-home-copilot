@@ -1,0 +1,154 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh6-608",
+  "problem_statement": "A smoke-alarm manufacturer's overnight qualification rig intermittently reports siren-onset latency above the release limit, although independent electrical traces and a second laboratory do not consistently reproduce the late onset.",
+  "observations": [
+    {
+      "evidence_id": "bh6-608-e01",
+      "statement": "The first late result appeared the night after the laboratory controller received its quarterly operating-system update; nine of 180 runs have since failed across both the current firmware and an archived known-good firmware.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Qualification run ledger joined to signed controller-maintenance and firmware records.",
+      "independence_key": "lab_change_timeline",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "runs": 180,
+        "late_results": 9,
+        "firmware_variants": 2
+      }
+    },
+    {
+      "evidence_id": "bh6-608-e02",
+      "statement": "For seven of the nine flagged runs, a separately triggered oscilloscope trace places electrical siren onset within the release limit while the rig report places it 42 to 88 milliseconds later.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Read-only oscilloscope exports captured on an independently calibrated instrument.",
+      "independence_key": "independent_scope_trace",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "flagged_runs_with_scope": 9,
+        "within_limit_on_scope": 7,
+        "report_delta_ms_min": 42,
+        "report_delta_ms_max": 88
+      }
+    },
+    {
+      "evidence_id": "bh6-608-e03",
+      "statement": "Controller logs contain duplicate trigger sequence identifiers near five flagged runs, but four other flagged runs have unique identifiers and two ordinary runs also show duplicates.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Preserved controller logs parsed independently by laboratory quality staff.",
+      "independence_key": "trigger_sequence_log",
+      "reliability": 0.92,
+      "discriminating": true,
+      "metadata": {
+        "flagged_with_duplicate": 5,
+        "flagged_without_duplicate": 4,
+        "ordinary_with_duplicate": 2
+      }
+    },
+    {
+      "evidence_id": "bh6-608-e04",
+      "statement": "A calibrated signal generator programmed for a fixed 120-millisecond edge produced one reported late result in 100 runs, even though the generator's own capture recorded 120 milliseconds on every run.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Device-free bench exercise with the alarm output replaced by a traceable signal generator.",
+      "independence_key": "signal_generator_control",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "runs": 100,
+        "fixed_delay_ms": 120,
+        "false_late_reports": 1
+      }
+    },
+    {
+      "evidence_id": "bh6-608-e05",
+      "statement": "The second laboratory completed 120 runs on the same six alarm units and both firmware artifacts without a late result, using its own controller and capture interface.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Cross-laboratory report with unit serials and artifact hashes reconciled.",
+      "independence_key": "second_lab_control",
+      "reliability": 0.95,
+      "discriminating": true,
+      "metadata": {
+        "runs": 120,
+        "alarm_units": 6,
+        "late_results": 0
+      }
+    },
+    {
+      "evidence_id": "bh6-608-e06",
+      "statement": "Replacing the primary laboratory's USB capture interface reduced the observed rate from five in 80 runs to one in 80 runs, but the small samples overlap statistically and the controller was not independently varied.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Controlled interface swap documented by laboratory quality staff.",
+      "independence_key": "capture_interface_swap",
+      "reliability": 0.9,
+      "discriminating": true,
+      "metadata": {
+        "before_runs": 80,
+        "before_late": 5,
+        "after_runs": 80,
+        "after_late": 1
+      }
+    },
+    {
+      "evidence_id": "bh6-608-e07",
+      "statement": "Bench supply voltage, chamber temperature, acoustic load, unit battery level, and firmware hash remained within their release bands for all flagged and ordinary runs.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Independent chamber, power, and unit telemetry exports retained with the run ledger.",
+      "independence_key": "physical_condition_controls",
+      "reliability": 0.94,
+      "discriminating": true,
+      "metadata": {
+        "flagged_runs_checked": 9,
+        "out_of_band_conditions": 0,
+        "firmware_hash_mismatches": 0
+      }
+    },
+    {
+      "evidence_id": "bh6-608-e08",
+      "statement": "Raw trigger-edge timestamps were rotated before preservation for four flagged runs, and the remaining records do not share one identifier across controller, interface, and report output, preventing event-by-event attribution.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Evidence-completeness review by quality assurance and laboratory operations.",
+      "independence_key": "run_evidence_gap",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "flagged_runs_missing_raw_edges": 4,
+        "shared_run_identifier": false,
+        "event_attribution_complete": false
+      }
+    },
+    {
+      "evidence_id": "bh6-608-e09",
+      "statement": "The approved next qualification block will add a parallel hardware timestamp recorder and one immutable run identifier across the controller, capture interface, oscilloscope, and report, without changing alarm actuation or release thresholds.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Signed laboratory deviation plan approved by product safety and quality assurance.",
+      "independence_key": "parallel_timestamp_plan",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "parallel_recorders": 1,
+        "shared_identifier_planned": true,
+        "actuation_changed": false
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

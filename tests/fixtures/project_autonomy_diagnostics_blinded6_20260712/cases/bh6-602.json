@@ -1,0 +1,152 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh6-602",
+  "problem_statement": "A county emergency shelter began rejecting newly issued volunteer badges as not yet valid for roughly eight minutes, while the same badges worked immediately at the county's other shelters.",
+  "observations": [
+    {
+      "evidence_id": "bh6-602-e01",
+      "statement": "Denials began at 02:10:11, immediately after the Harbor shelter controller resumed service following planned power maintenance; the final pre-maintenance badge event at 01:52:43 was accepted.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "Door-controller audit export aligned to the maintenance work order and UPS event log.",
+      "independence_key": "shelter_event_timeline",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "service_resume_utc": "2026-07-08T02:09:56Z",
+        "first_denial_utc": "2026-07-08T02:10:11Z",
+        "retained": true
+      }
+    },
+    {
+      "evidence_id": "bh6-602-e02",
+      "statement": "A battery-backed GPS logger connected to the controller's maintenance port measured the controller 487 seconds behind UTC after startup; the offset was below one second before shutdown.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Facilities technician export from an independently disciplined logger with a current calibration record.",
+      "independence_key": "gps_logger_measurement",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "post_start_offset_seconds": -487,
+        "pre_shutdown_abs_offset_seconds": 0.7,
+        "calibration_current": true
+      }
+    },
+    {
+      "evidence_id": "bh6-602-e03",
+      "statement": "A retained packet capture shows the shelter gateway accepting a signed synchronization reply advertising a negative 487-second offset at 02:09:48, before the first badge denial.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Ring-buffer capture preserved by network operations before the source was withdrawn.",
+      "independence_key": "synchronization_packet_capture",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "artifact": "harbor-gateway-ring-20260708.pcapng",
+        "reply_utc": "2026-07-08T02:09:48Z",
+        "signature_valid": true
+      }
+    },
+    {
+      "evidence_id": "bh6-602-e04",
+      "statement": "The same six badges were accepted at two other shelters during the Harbor failures, and all three sites held byte-identical badge certificates and revocation lists.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Supervised cross-site badge check with certificate bundle hashes recorded.",
+      "independence_key": "cross_site_badge_control",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "badges_checked": 6,
+        "control_sites": 2,
+        "bundle_hashes_match": true
+      }
+    },
+    {
+      "evidence_id": "bh6-602-e05",
+      "statement": "Re-anchoring the Harbor controller to the county's verified source removed the 487-second offset and all six badges were then accepted without reissuing credentials or restarting the access service.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Approved maintenance action observed jointly by facilities and shelter security.",
+      "independence_key": "verified_source_reanchor",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "credentials_reissued": false,
+        "service_restarted": false,
+        "post_action_acceptances": 6
+      }
+    },
+    {
+      "evidence_id": "bh6-602-e06",
+      "statement": "A disconnected bench reader accepted a copied badge bundle under verified UTC, rejected it when fed the retained negative-offset announcement, and accepted it again after verified UTC was restored.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Three-phase bench replay with door outputs electrically isolated.",
+      "independence_key": "isolated_reader_replay",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "phases": 3,
+        "physical_door_output": "isolated",
+        "changed_factor": "synchronization_announcement"
+      }
+    },
+    {
+      "evidence_id": "bh6-602-e07",
+      "statement": "Monotonic measurements for card read, certificate verification, and lock response remained within their normal ranges throughout the incident, despite the civil timestamp offset.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Controller performance counters exported by the access-service monitor.",
+      "independence_key": "transaction_duration_control",
+      "reliability": 0.94,
+      "discriminating": true,
+      "metadata": {
+        "p95_read_ms": 41,
+        "p95_verify_ms": 18,
+        "p95_lock_response_ms": 63
+      }
+    },
+    {
+      "evidence_id": "bh6-602-e08",
+      "statement": "Controller software hashes, badge policy settings, network routes, and certificate files were unchanged from the previous successful week.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Independent release attestation, network snapshot, and credential inventory.",
+      "independence_key": "unchanged_access_controls",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "software_hash_changed": false,
+        "policy_changed": false,
+        "certificate_files_changed": false
+      }
+    },
+    {
+      "evidence_id": "bh6-602-e09",
+      "statement": "For 24 hours after the faulty source was withdrawn, the Harbor offset stayed below 0.9 seconds and 1,842 badge events completed without a not-yet-valid rejection.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Post-maintenance shelter access report signed by the duty manager.",
+      "independence_key": "post_change_access_proof",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "observation_hours": 24,
+        "badge_events": 1842,
+        "not_yet_valid_rejections": 0
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

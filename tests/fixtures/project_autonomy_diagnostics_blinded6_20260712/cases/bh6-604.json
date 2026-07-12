@@ -1,0 +1,138 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh6-604",
+  "problem_statement": "After an overnight host replacement, handheld baggage scanners at one airport terminal discarded scans during brief wireless gaps instead of buffering them for reconnection, forcing manual reconciliation at three gates.",
+  "observations": [
+    {
+      "evidence_id": "bh6-604-e01",
+      "statement": "The first discarded scan occurred at 04:32 on Terminal C's newly replaced relay hosts; Terminals A and B, still on their prior hosts, buffered the same model of scanner through comparable wireless gaps.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "Airport operations timeline built from relay receipts and independent wireless-controller events.",
+      "independence_key": "terminal_rollout_timeline",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "first_discard_utc": "2026-07-07T04:32:09Z",
+        "affected_terminal": "C",
+        "control_terminals": 2
+      }
+    },
+    {
+      "evidence_id": "bh6-604-e02",
+      "statement": "The effective-settings snapshot from a new Terminal C relay records OFFLINE_GRACE_SECONDS as 0; the approved terminal profile and the prior relay snapshot both record 180.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Signed startup snapshot compared with the approved deployment record and retained prior-host snapshot.",
+      "independence_key": "effective_settings_snapshot",
+      "reliability": 1.0,
+      "discriminating": true,
+      "metadata": {
+        "new_effective_value": 0,
+        "approved_value": 180,
+        "prior_effective_value": 180
+      }
+    },
+    {
+      "evidence_id": "bh6-604-e03",
+      "statement": "Provisioning provenance shows a generic zero-value environment entry applied after the Terminal C profile during host bootstrap, so the later entry became effective before the relay first started.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Immutable bootstrap event stream and rendered launch manifest retained by platform operations.",
+      "independence_key": "bootstrap_provenance",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "profile_order": 17,
+        "generic_entry_order": 23,
+        "relay_start_order": 31
+      }
+    },
+    {
+      "evidence_id": "bh6-604-e04",
+      "statement": "Application artifact hashes, scanner firmware versions, queue schema, and wireless security policies match across all three terminals.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Release attestation, device inventory, and wireless policy export from separate systems.",
+      "independence_key": "cross_terminal_controls",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "terminals_compared": 3,
+        "artifact_hashes_match": true,
+        "firmware_versions_match": true
+      }
+    },
+    {
+      "evidence_id": "bh6-604-e05",
+      "statement": "On an isolated relay, changing only OFFLINE_GRACE_SECONDS from 180 to 0 converted a 90-second disconnection from 27 buffered scans to 27 discarded scans; restoring 180 restored buffering.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Three-phase replay using synthetic bag identifiers and a disabled airline uplink.",
+      "independence_key": "single_setting_replay",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "wireless_gap_seconds": 90,
+        "synthetic_scans": 27,
+        "airline_uplink": "disabled"
+      }
+    },
+    {
+      "evidence_id": "bh6-604-e06",
+      "statement": "Packet captures show scanners retransmitted after each gap as designed, but the new relays had already returned terminal discard acknowledgements; no queue-write attempt appears when the effective value is zero.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Synchronized scanner-side and relay-side captures retained from a supervised gate drill.",
+      "independence_key": "paired_packet_capture",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "capture_sides": 2,
+        "retransmission_seen": true,
+        "queue_write_attempts": 0
+      }
+    },
+    {
+      "evidence_id": "bh6-604-e07",
+      "statement": "A canary relay launched with the approved 180-second value buffered and forwarded 200 synthetic scans across five induced wireless gaps without contacting production airline systems.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Safety-reviewed terminal canary exercise witnessed by baggage operations.",
+      "independence_key": "canary_gap_drill",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "synthetic_scans": 200,
+        "induced_gaps": 5,
+        "discarded_scans": 0
+      }
+    },
+    {
+      "evidence_id": "bh6-604-e08",
+      "statement": "After the generic entry was removed and all relays reported 180 at startup, a monitored 36-hour period included 14 wireless gaps and 8,906 scans with no offline discard.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Post-change relay report reconciled against gate reconciliation logs.",
+      "independence_key": "post_change_terminal_proof",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "observation_hours": 36,
+        "wireless_gaps": 14,
+        "scans": 8906,
+        "offline_discards": 0
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

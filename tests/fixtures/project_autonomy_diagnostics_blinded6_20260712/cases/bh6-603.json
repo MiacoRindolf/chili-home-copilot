@@ -1,0 +1,152 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh6-603",
+  "problem_statement": "A community food bank's refrigerated loading dock remained marked occupied after a coordinator failover, preventing five outbound deliveries from receiving a dock assignment even though the bay was physically empty.",
+  "observations": [
+    {
+      "evidence_id": "bh6-603-e01",
+      "statement": "Dock D4 was reserved for delivery V217 at 14:07:12; the active coordinator lost power at 14:07:14, its standby took over at 14:07:19, and the first false occupied response occurred at 14:08:03.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "Merged coordinator journal, UPS log, and dispatch request ledger with sequence numbers preserved.",
+      "independence_key": "dock_failover_timeline",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "dock": "D4",
+        "reservation": "V217",
+        "failover_gap_seconds": 5
+      }
+    },
+    {
+      "evidence_id": "bh6-603-e02",
+      "statement": "The pre-repair reservation export shows D4 assigned to owner session s-8841 with no expiry, while the post-failover session registry contains no s-8841 entry and no delivery claims that session.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Read-only exports taken by separate storage and dispatch operators before remediation.",
+      "independence_key": "orphan_reservation_export",
+      "reliability": 1.0,
+      "discriminating": true,
+      "metadata": {
+        "artifact": "dock-reservations-pre-repair.json",
+        "owner_session": "s-8841",
+        "owner_present": false
+      }
+    },
+    {
+      "evidence_id": "bh6-603-e03",
+      "statement": "The journal records reservation creation before power loss and a handheld release acknowledgement after takeover, but the acknowledgement references the old coordinator epoch and did not alter the D4 record.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Checksummed append-only journal copied from both coordinator volumes.",
+      "independence_key": "coordinator_journal",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "create_sequence": 991204,
+        "release_sequence": 991211,
+        "epoch_mismatch": true
+      }
+    },
+    {
+      "evidence_id": "bh6-603-e04",
+      "statement": "Door contact, occupancy beam, and camera review all show V217 leaving D4 by 14:07:42 and the bay remaining empty until operators manually held subsequent vehicles.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "Three independently maintained physical-safety records reviewed by dock operations.",
+      "independence_key": "physical_occupancy_controls",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "independent_sensors": 3,
+        "physical_clear_utc": "2026-07-09T14:07:42Z",
+        "bay_empty": true
+      }
+    },
+    {
+      "evidence_id": "bh6-603-e05",
+      "statement": "Restoring the captured reservation export into an isolated coordinator reproduced the occupied response for D4; a clean store under the same build and settings accepted the identical assignment request.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Paired offline replay with gate actuators and dispatch notifications disabled.",
+      "independence_key": "paired_store_replay",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "runs": 2,
+        "external_actions": "disabled",
+        "changed_factor": "reservation_export"
+      }
+    },
+    {
+      "evidence_id": "bh6-603-e06",
+      "statement": "Applying a preconditioned repair to only the ownerless D4 record in the isolated copy allowed all five blocked assignments while leaving the other 13 active dock reservations byte-identical.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Dry-run repair reviewed by a second operator before any live action.",
+      "independence_key": "targeted_record_repair",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "records_changed": 1,
+        "blocked_assignments_recovered": 5,
+        "unrelated_records_changed": 0
+      }
+    },
+    {
+      "evidence_id": "bh6-603-e07",
+      "statement": "Scanner connectivity, coordinator CPU and memory, database replication lag, and dock sensor health remained normal before and after the failover.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Infrastructure and facilities monitors maintained outside the dispatch service.",
+      "independence_key": "platform_health_controls",
+      "reliability": 0.94,
+      "discriminating": true,
+      "metadata": {
+        "replication_lag_ms_max": 37,
+        "sensor_faults": 0,
+        "scanner_disconnects": 0
+      }
+    },
+    {
+      "evidence_id": "bh6-603-e08",
+      "statement": "All 13 legitimate reservations had live owner sessions and bounded expiries; D4 was the only record combining an absent owner with no expiry.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Invariant report generated from the preserved pre-repair export.",
+      "independence_key": "reservation_invariant_report",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "legitimate_reservations": 13,
+        "ownerless_without_expiry": 1,
+        "anomalous_dock": "D4"
+      }
+    },
+    {
+      "evidence_id": "bh6-603-e09",
+      "statement": "After the reviewed repair was applied live, the five deliveries received valid assignments, and two supervised coordinator failovers completed with no ownerless reservations in the following 48 hours.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Signed remediation record and post-change invariant monitor.",
+      "independence_key": "post_repair_failover_proof",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "deliveries_recovered": 5,
+        "supervised_failovers": 2,
+        "observation_hours": 48
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

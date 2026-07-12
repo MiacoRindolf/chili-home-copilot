@@ -1,0 +1,152 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh6-605",
+  "problem_statement": "A county emergency-management intake service stopped generating previews for field teams' HEIC damage photographs after worker hosts were refreshed, although the original photographs continued to upload and remain intact.",
+  "observations": [
+    {
+      "evidence_id": "bh6-605-e01",
+      "statement": "Preview failures began only as jobs moved onto hosts built from the 2026.07 base image; two draining hosts on the prior image continued to preview the same photographs successfully.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "Scheduler placement ledger joined to host-image inventory and preview outcomes.",
+      "independence_key": "host_rotation_timeline",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "new_image": "county-worker-2026.07",
+        "prior_image_controls": 2,
+        "retained": true
+      }
+    },
+    {
+      "evidence_id": "bh6-605-e02",
+      "statement": "The preserved worker stderr reports that the HEIC decoder cannot load libheif.so.1 on every failed job; no decoder exception appears for successful jobs on prior-image hosts.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Write-once incident log bundle collected before any host repair.",
+      "independence_key": "worker_loader_log",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "artifact": "preview-workers-incident-20260710.tar.zst",
+        "missing_object": "libheif.so.1",
+        "failed_jobs_with_message": 146
+      }
+    },
+    {
+      "evidence_id": "bh6-605-e03",
+      "statement": "Signed package inventories show libheif1 present on the prior image and absent from 2026.07 after the image publisher removed the multimedia compatibility group.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Image publisher manifests verified against the county's artifact registry.",
+      "independence_key": "signed_package_inventory",
+      "reliability": 1.0,
+      "discriminating": true,
+      "metadata": {
+        "prior_package_present": true,
+        "new_package_present": false,
+        "publisher_change_ticket": "IMG-2841"
+      }
+    },
+    {
+      "evidence_id": "bh6-605-e04",
+      "statement": "The intake application artifact, launch settings, queue messages, and photograph bytes are identical when a failed job from a new host is replayed successfully on a draining prior-image host.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Paired replay from a copied queue message with publication disabled.",
+      "independence_key": "cross_image_job_replay",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "changed_factor": "host_image",
+        "publication": "disabled",
+        "input_bytes_match": true
+      }
+    },
+    {
+      "evidence_id": "bh6-605-e05",
+      "statement": "JPEG and PNG previews remained successful on both image generations, while all 146 HEIC jobs assigned to new-image hosts failed before pixel decoding began.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Format-stratified preview report derived from intake receipts and worker stage counters.",
+      "independence_key": "format_control_report",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "heic_failures_new_image": 146,
+        "jpeg_failures": 0,
+        "png_failures": 0
+      }
+    },
+    {
+      "evidence_id": "bh6-605-e06",
+      "statement": "Adding the exact prior signed libheif1 package to an isolated 2026.07 image restored previews for a 60-file corpus without changing the intake artifact or any launch setting.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Offline image rebuild and corpus replay with all outbound publication blocked.",
+      "independence_key": "compatibility_package_replay",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "corpus_files": 60,
+        "successful_previews": 60,
+        "outbound_publication": "blocked"
+      }
+    },
+    {
+      "evidence_id": "bh6-605-e07",
+      "statement": "Checksums of every original incident photograph match its upload receipt, and malware scanning, object storage, and queue delivery show no errors during the preview outage.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Independent storage-integrity and security reports retained for the incident window.",
+      "independence_key": "original_integrity_controls",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "originals_checked": 146,
+        "checksum_mismatches": 0,
+        "queue_delivery_errors": 0
+      }
+    },
+    {
+      "evidence_id": "bh6-605-e08",
+      "statement": "A canary host carrying the signed compatibility package completed 500 mixed-format preview jobs under production-like load with no loader error and no output difference from the prior image.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Safety-reviewed canary run using copied photographs and a private output bucket.",
+      "independence_key": "preview_canary",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "jobs": 500,
+        "loader_errors": 0,
+        "output_differences": 0
+      }
+    },
+    {
+      "evidence_id": "bh6-605-e09",
+      "statement": "After the rebuilt image was rolled out, the 146-job backlog drained and 2,311 subsequent previews completed over 24 hours with no missing-object message.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Post-rollout queue reconciliation and worker error summary.",
+      "independence_key": "post_rollout_preview_proof",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "backlog_jobs_recovered": 146,
+        "subsequent_previews": 2311,
+        "observation_hours": 24
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

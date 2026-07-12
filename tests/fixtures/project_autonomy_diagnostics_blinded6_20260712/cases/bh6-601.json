@@ -1,0 +1,137 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh6-601",
+  "problem_statement": "At the Monday 05:50 planning cycle, a regional meal service assigned allergen-controlled totes for Riverbend Residence to the loading stop for Riverbend Rehabilitation, while the printed recipient labels remained correct.",
+  "observations": [
+    {
+      "evidence_id": "bh6-601-e01",
+      "statement": "The first misrouting appeared in the 05:50 plan generated ten minutes after the weekly facility roster was accepted; the preceding 04:50 plan used the prior roster and routed both Riverbend facilities correctly.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "Dispatch audit timeline reconciled with roster-ingest receipts by the morning incident lead.",
+      "independence_key": "dispatch_timeline",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "first_bad_plan_utc": "2026-07-06T05:50:21Z",
+        "roster_receipt_utc": "2026-07-06T05:40:06Z",
+        "retained": true
+      }
+    },
+    {
+      "evidence_id": "bh6-601-e02",
+      "statement": "The retained roster snapshot contains two active rows with facility key RB-044: the long-standing Rehabilitation row and a newly added Residence row. Their names, addresses, and dietary programs are otherwise distinct.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Read-only copy of the exact signed roster object consumed at 05:40.",
+      "independence_key": "signed_roster_snapshot",
+      "reliability": 1.0,
+      "discriminating": true,
+      "metadata": {
+        "artifact": "facility-roster-2026-07-06T0540Z.json.zst",
+        "duplicate_key": "RB-044",
+        "matching_rows": 2
+      }
+    },
+    {
+      "evidence_id": "bh6-601-e03",
+      "statement": "The retained planner index contains one RB-044 destination whose address is the later Residence row, while the route-stop table still associates RB-044 with the established Rehabilitation loading stop.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Planner index and route-stop export captured before operators made corrections.",
+      "independence_key": "planner_index_export",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "index_entries_for_key": 1,
+        "route_stop_entries_for_key": 1,
+        "retained": true
+      }
+    },
+    {
+      "evidence_id": "bh6-601-e04",
+      "statement": "Handheld scan logs independently show all 18 affected totes carried the correct Residence name and allergen profile but resolved to stop RB-044; no tote label was regenerated between packing and dispatch.",
+      "dimension": "unknown",
+      "kind": "observation",
+      "provenance": "Immutable scanner event export from three loading-lane devices.",
+      "independence_key": "loading_lane_scanners",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "affected_totes": 18,
+        "scanner_count": 3,
+        "label_regenerations": 0
+      }
+    },
+    {
+      "evidence_id": "bh6-601-e05",
+      "statement": "An isolated replay using the same planner artifact, route table, and settings produced correct routes with the prior roster and the observed misroutes with the 05:40 roster.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Two-run replay performed against copied inputs with outbound dispatch disabled.",
+      "independence_key": "paired_roster_replay",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "changed_factor": "facility_roster_snapshot",
+        "outbound_actions": "disabled",
+        "runs": 2
+      }
+    },
+    {
+      "evidence_id": "bh6-601-e06",
+      "statement": "Changing only the new Residence row to the unused key RB-071 in a copied roster restored all 18 destinations and produced no route changes for the other 312 totes.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Read-only shadow-plan comparison approved by meal-safety operations.",
+      "independence_key": "single_field_correction",
+      "reliability": 0.99,
+      "discriminating": true,
+      "metadata": {
+        "edited_fields": 1,
+        "affected_routes_restored": 18,
+        "unrelated_route_deltas": 0
+      }
+    },
+    {
+      "evidence_id": "bh6-601-e07",
+      "statement": "Planner artifact hashes, route rules, feature settings, and host image identifiers match the prior seven successful planning cycles.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Release attestation and host inventory exported by separate platform automation.",
+      "independence_key": "release_attestation",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "cycles_compared": 7,
+        "artifact_hash_changed": false,
+        "host_image_changed": false
+      }
+    },
+    {
+      "evidence_id": "bh6-601-e08",
+      "statement": "All 41 facilities whose active roster keys were unique retained their established loading stops, including six facilities added through the same intake workflow during the previous month.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Route-delta report cross-checked by dispatch quality staff.",
+      "independence_key": "unaffected_facility_control",
+      "reliability": 0.95,
+      "discriminating": true,
+      "metadata": {
+        "unique_key_facilities": 41,
+        "new_facility_controls": 6,
+        "control_misroutes": 0
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}

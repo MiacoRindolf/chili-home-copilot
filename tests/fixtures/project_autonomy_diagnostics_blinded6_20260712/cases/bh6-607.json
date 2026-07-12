@@ -1,0 +1,153 @@
+{
+  "schema": "chili.diagnostic-case.v1",
+  "case_id": "bh6-607",
+  "problem_statement": "A city water utility's telemetry relay intermittently stops forwarding pressure readings from one worker after 36 to 60 hours of service, and the queued readings drain after a supervised recycle of that worker.",
+  "observations": [
+    {
+      "evidence_id": "bh6-607-e01",
+      "statement": "Across six incidents, the affected worker had been continuously active for at least 36 hours, but incidents did not align with a particular sensor district, host, hour of day, or deployment event.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Incident ledger correlated with scheduler placement and deployment records.",
+      "independence_key": "worker_age_correlation",
+      "reliability": 0.93,
+      "discriminating": true,
+      "metadata": {
+        "incidents": 6,
+        "minimum_worker_age_hours": 36,
+        "host_correlation": false
+      }
+    },
+    {
+      "evidence_id": "bh6-607-e02",
+      "statement": "Five-minute monitoring samples show 13,800 to 15,200 open handles on affected workers before intervention, versus 900 to 1,400 on healthy peers, but the counter does not distinguish sockets, files, or monitoring handles.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Per-process platform monitor with one retained sample series per incident.",
+      "independence_key": "coarse_handle_metric",
+      "reliability": 0.9,
+      "discriminating": true,
+      "metadata": {
+        "affected_min": 13800,
+        "affected_max": 15200,
+        "healthy_peer_max": 1400,
+        "sample_period_seconds": 300
+      }
+    },
+    {
+      "evidence_id": "bh6-607-e03",
+      "statement": "A supervised recycle restores forwarding within 40 seconds without changing the worker artifact, launch settings, assigned sensors, or host, and the retained queue drains in order.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Operations recovery records for all six incidents with queue sequence reconciliation.",
+      "independence_key": "same_host_worker_recycle",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "recoveries": 6,
+        "maximum_recovery_seconds": 40,
+        "queue_order_violations": 0
+      }
+    },
+    {
+      "evidence_id": "bh6-607-e04",
+      "statement": "Upstream captures during two incidents show pressure readings reaching the load balancer and being acknowledged toward the affected worker, while no corresponding enqueue record appears until after traffic is moved away.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Synchronized utility-network capture and append-only relay intake log.",
+      "independence_key": "upstream_delivery_capture",
+      "reliability": 0.96,
+      "discriminating": true,
+      "metadata": {
+        "captured_incidents": 2,
+        "load_balancer_delivery_seen": true,
+        "pre_recovery_enqueue_seen": false
+      }
+    },
+    {
+      "evidence_id": "bh6-607-e05",
+      "statement": "After production traffic is drained, a synthetic heartbeat sent directly to the affected worker remains slow while the same heartbeat to a fresh worker on the same host is normal.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Read-only heartbeat probe using a reserved non-operational sensor identifier.",
+      "independence_key": "same_host_fresh_worker_control",
+      "reliability": 0.95,
+      "discriminating": true,
+      "metadata": {
+        "affected_latency_ms": 18400,
+        "fresh_latency_ms": 37,
+        "production_writes": false
+      }
+    },
+    {
+      "evidence_id": "bh6-607-e06",
+      "statement": "CPU, resident memory, garbage-collection pause, host disk latency, and network error counters remain within the healthy fleet range during the sampled incident windows.",
+      "dimension": "unknown",
+      "kind": "metric",
+      "provenance": "Host and process monitors maintained independently from relay intake counters.",
+      "independence_key": "resource_control_metrics",
+      "reliability": 0.91,
+      "discriminating": true,
+      "metadata": {
+        "cpu_saturation": false,
+        "memory_pressure": false,
+        "network_errors_elevated": false
+      }
+    },
+    {
+      "evidence_id": "bh6-607-e07",
+      "statement": "No message size, sensor firmware, district, compression mode, or schema revision occurs in more than two of the six incidents, and replayed incident payloads succeed on fresh workers.",
+      "dimension": "unknown",
+      "kind": "experiment",
+      "provenance": "Payload-stratification report plus isolated replay with control-room publication disabled.",
+      "independence_key": "payload_and_source_controls",
+      "reliability": 0.92,
+      "discriminating": true,
+      "metadata": {
+        "incidents": 6,
+        "maximum_shared_factor_incidents": 2,
+        "replay_failures": 0
+      }
+    },
+    {
+      "evidence_id": "bh6-607-e08",
+      "statement": "Current snapshots are too coarse to identify which handle class grows or which request path creates it, and no incident preserved creation stacks or per-queue event-loop delay.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Observability-gap review signed by relay engineering and control-room safety staff.",
+      "independence_key": "observability_gap_review",
+      "reliability": 0.98,
+      "discriminating": true,
+      "metadata": {
+        "handle_classes_available": false,
+        "creation_stacks_available": false,
+        "per_queue_delay_available": false
+      }
+    },
+    {
+      "evidence_id": "bh6-607-e09",
+      "statement": "A one-worker canary plan has been safety-approved to record handle class counts, sampled creation stacks, accept latency, and event-loop delay with automatic disablement at a fixed overhead threshold; it has not yet observed an incident.",
+      "dimension": "unknown",
+      "kind": "artifact",
+      "provenance": "Approved utility change record reviewed by cybersecurity and control-room operations.",
+      "independence_key": "bounded_canary_plan",
+      "reliability": 0.97,
+      "discriminating": true,
+      "metadata": {
+        "canary_workers": 1,
+        "automatic_disablement": true,
+        "incident_captured": false
+      }
+    }
+  ],
+  "constraints": {
+    "minimum_hypothesis_dimensions": 4,
+    "diagnostic_lenses": [
+      "expected_vs_observed",
+      "causal_timeline",
+      "root_cause_vs_downstream_symptom",
+      "safety_boundary",
+      "post_change_proof"
+    ]
+  }
+}
