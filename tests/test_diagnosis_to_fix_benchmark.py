@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -55,7 +56,7 @@ def test_all_legacy_repair_fixtures_pass_public_and_fail_feedback_and_final(tmp_
 
     result = benchmark.run(args)
 
-    assert result["schema"] == "chili.diagnosis-to-fix-fixture-validation.v2"
+    assert result["schema"] == "chili.diagnosis-to-fix-fixture-validation.v3"
     assert result["valid"] is True
     assert all(item["public_passed"] for item in result["cases"])
     assert all(item["feedback_failed"] for item in result["cases"])
@@ -97,6 +98,83 @@ def test_node_and_dart_test_discovery_is_bounded_and_public_scoped(tmp_path):
     assert dart_all == ["tests/hidden_cache_test.dart", "tests/public_cache_test.dart"]
 
 
+def test_multifile_budget_defaults_to_candidate_breadth_and_honors_explicit_cap():
+    assert benchmark._case_max_files({"candidate_paths": ["a.py", "b.py"]}) == 2
+    assert (
+        benchmark._case_max_files(
+            {"candidate_paths": ["a.py", "b.py"], "max_files": 1}
+        )
+        == 1
+    )
+    assert benchmark._case_max_files(
+        {"candidate_paths": [f"owner_{index}.py" for index in range(8)]}
+    ) == 4
+    assert benchmark._plan_dimension({"dimension": "test harness"}) == "test_harness"
+
+
+def test_fixture_ownership_preflight_rejects_impossible_edit_budget():
+    case = {
+        "candidate_paths": ["producer.py", "consumer.py"],
+        "max_files": 1,
+    }
+    oracle = {
+        "expected_files": ["producer.py", "consumer.py"],
+    }
+
+    with pytest.raises(ValueError, match="exceeds max_files budget"):
+        benchmark._validate_expected_ownership(case, oracle)
+
+    case.pop("max_files")
+    benchmark._validate_expected_ownership(case, oracle)
+
+
+def test_subprocess_output_is_decoded_as_utf8(tmp_path):
+    code, output, _duration = benchmark._run(
+        [
+            sys.executable,
+            "-c",
+            "import sys;sys.stdout.buffer.write('caf\\u00e9 \\u2713\\n'.encode('utf-8'))",
+        ],
+        tmp_path,
+    )
+
+    assert code == 0
+    assert output == "caf\u00e9 \u2713"
+
+
+def test_invalid_diagnostic_json_gets_one_compact_retry(monkeypatch):
+    responses = iter(
+        [
+            '{"hypotheses":[',
+            '{"hypotheses":[],"experiments":[],"conclusion":{}}',
+        ]
+    )
+    calls = []
+
+    def fake_local_call(*_args, stage, calls, **_kwargs):
+        response = next(responses)
+        calls.append({"stage": stage, "response": response})
+        return response
+
+    monkeypatch.setattr(benchmark, "_local_call", fake_local_call)
+
+    response = benchmark._diagnostic_json_call(
+        "local-model",
+        "judge",
+        "Diagnose this case.",
+        calls,
+        1.0,
+    )
+
+    assert json.loads(response)["hypotheses"] == []
+    assert [item["stage"] for item in calls] == [
+        "diagnosis_judge",
+        "diagnosis_judge_json_retry",
+    ]
+    assert calls[0]["json_object_valid"] is False
+    assert calls[1]["json_object_valid"] is True
+
+
 def test_scoring_requires_real_final_repair_and_correct_ownership():
     oracle = {"expected_dimension": "clock", "expected_file": "session_gate.py"}
     diagnosis = {"report": {"conclusion": {"dimension": "clock"}}}
@@ -126,6 +204,28 @@ def test_scoring_requires_real_final_repair_and_correct_ownership():
     assert weak_score < 70
     assert weak_checks["file_selection"] is False
     assert weak_checks["final_tests"] is False
+
+
+def test_feedback_grounded_plan_dimension_can_revise_initial_diagnosis():
+    oracle = {"expected_dimension": "config", "expected_file": "owner.py"}
+    diagnosis = {"report": {"conclusion": {"dimension": "runtime"}}}
+    patch = {
+        "diagnosis_dimension": "config",
+        "changed_files": ["owner.py"],
+        "patch_applied": True,
+    }
+
+    score, checks = benchmark._score_case(
+        oracle,
+        diagnosis,
+        patch,
+        {"passed": False},
+        {"passed": True},
+        {"passed": True},
+    )
+
+    assert score == 100
+    assert checks["diagnosis"] is True
 
 
 def test_shadow_verdict_requires_every_case_check_not_only_high_average():
@@ -212,6 +312,78 @@ def test_multifile_edit_group_rolls_back_when_one_member_is_rejected(
     assert outcome["applied_files"] == []
     assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 1\n"
     assert (repo / "second.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+
+
+def test_multifile_edit_group_continues_past_already_satisfied_member(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "first.py").write_text("VALUE = 10\n", encoding="utf-8")
+    (repo / "second.py").write_text("VALUE = 2\n", encoding="utf-8")
+
+    def fake_edit(repo_path, selected, *_args, **_kwargs):
+        if selected == "first.py":
+            return {
+                "patch_applied": False,
+                "already_satisfied": True,
+                "warnings": ["already satisfied"],
+            }
+        (repo_path / selected).write_text("VALUE = 20\n", encoding="utf-8")
+        return {"patch_applied": True, "warnings": []}
+
+    monkeypatch.setattr(benchmark, "_apply_local_edit", fake_edit)
+    outcome = benchmark._apply_planned_edits(
+        repo,
+        {
+            "prompt": "Coordinate both modules.",
+            "candidate_paths": ["first.py", "second.py"],
+        },
+        {},
+        [
+            {"path": "first.py", "description": "Keep producer contract."},
+            {"path": "second.py", "description": "Update consumer."},
+        ],
+        {"report": {}},
+        "local-model",
+        [],
+        1.0,
+        stage_prefix="edit",
+    )
+
+    assert outcome["patch_applied"] is True
+    assert outcome["satisfied_files"] == ["first.py"]
+    assert outcome["applied_files"] == ["second.py"]
+    assert (repo / "second.py").read_text(encoding="utf-8") == "VALUE = 20\n"
+
+
+def test_edit_group_rolls_back_changed_file_syntax_failure(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    owner = repo / "owner.py"
+    owner.write_text("VALUE = 1\n", encoding="utf-8")
+
+    def fake_edit(repo_path, selected, *_args, **_kwargs):
+        (repo_path / selected).write_text("def broken(:\n", encoding="utf-8")
+        return {"patch_applied": True, "warnings": []}
+
+    monkeypatch.setattr(benchmark, "_apply_local_edit", fake_edit)
+    outcome = benchmark._apply_planned_edits(
+        repo,
+        {"prompt": "Repair the owner.", "candidate_paths": ["owner.py"]},
+        {},
+        [{"path": "owner.py", "description": "Repair behavior."}],
+        {"report": {}},
+        "local-model",
+        [],
+        1.0,
+        stage_prefix="edit",
+    )
+
+    assert outcome["patch_applied"] is False
+    assert any("syntax validation failed" in value for value in outcome["warnings"])
+    assert owner.read_text(encoding="utf-8") == "VALUE = 1\n"
 
 
 def test_edit_group_rolls_back_when_result_contradicts_mechanism_contract(
@@ -320,6 +492,63 @@ def test_validation_quality_never_prefers_regression_or_timeout():
     assert benchmark._validation_quality(passed, assertion_failure) == 2
     assert benchmark._validation_quality(passed, timeout) == 1
     assert benchmark._validation_quality(assertion_failure, assertion_failure) == 0
+
+
+def test_validation_progress_rejects_earlier_exception_and_identical_failure():
+    public = {"passed": True, "exit_code": 0}
+    assertion = {
+        "passed": False,
+        "exit_code": 1,
+        "output": (
+            "C:/Temp/chili-fix-one/repo/tests/test_feedback.py:10\n"
+            "1 passed, 1 failed\nAssertionError: expected retained row"
+        ),
+    }
+    earlier_exception = {
+        "passed": False,
+        "exit_code": 1,
+        "output": "1 failed\nsqlite3.IntegrityError: FOREIGN KEY constraint failed",
+    }
+    same_elsewhere = {
+        "passed": False,
+        "exit_code": 1,
+        "output": (
+            "C:/Temp/chili-fix-other/repo/tests/test_feedback.py:99\n"
+            "1 passed, 1 failed\nAssertionError: expected retained row"
+        ),
+    }
+
+    assert benchmark._validation_advanced(
+        public,
+        assertion,
+        public,
+        earlier_exception,
+    ) is False
+    assert benchmark._validation_advanced(
+        public,
+        assertion,
+        public,
+        same_elsewhere,
+    ) is False
+
+
+def test_read_only_feedback_context_is_bounded_and_test_scoped(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_feedback.py").write_text(
+        "assert contract()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "owner.py").write_text("SECRET = True\n", encoding="utf-8")
+
+    context = benchmark._read_only_test_context(
+        tmp_path,
+        ["tests/test_feedback.py", "owner.py", "../outside.py"],
+        max_chars=100,
+    )
+
+    assert "assert contract()" in context
+    assert "read-only repair feedback" in context
+    assert "SECRET" not in context
 
 
 def test_oracle_test_partitions_require_disjoint_sealed_final_contracts():
@@ -777,6 +1006,76 @@ def test_local_edit_retries_one_stale_search_against_current_file(tmp_path, monk
 
     assert result["patch_applied"] is True
     assert stages == ["edit", "edit_retry"]
+    assert target.read_text(encoding="utf-8") == "export const value = 2;\n"
+
+
+def test_local_edit_recognizes_replacement_already_satisfied(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    target = repo / "owner.sql"
+    target.write_text("VALUE TEXT NOT NULL\n", encoding="utf-8")
+    monkeypatch.setattr(
+        benchmark,
+        "_local_call",
+        lambda *_args, **_kwargs: (
+            "<<<<<<< SEARCH\nVALUE INTEGER NOT NULL\n=======\n"
+            "VALUE TEXT NOT NULL\n>>>>>>> REPLACE"
+        ),
+    )
+
+    result = benchmark._apply_local_edit(
+        repo,
+        "owner.sql",
+        "Preserve textual values.",
+        "local-model",
+        [],
+        1.0,
+        stage="edit",
+    )
+
+    assert result["patch_applied"] is False
+    assert result["already_satisfied"] is True
+    assert target.read_text(encoding="utf-8") == "VALUE TEXT NOT NULL\n"
+
+
+def test_local_edit_uses_guarded_full_file_after_repeated_stale_search(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    target = repo / "owner.ts"
+    target.write_text("export const value = 1;\n", encoding="utf-8")
+    responses = iter(
+        [
+            "<<<<<<< SEARCH\nexport const value = 0;\n=======\n"
+            "export const value = 2;\n>>>>>>> REPLACE",
+            "<<<<<<< SEARCH\nexport const value = 3;\n=======\n"
+            "export const value = 2;\n>>>>>>> REPLACE",
+            "```ts\nexport const value = 2;\n```",
+        ]
+    )
+    stages = []
+
+    def fake_call(*_args, stage, **_kwargs):
+        stages.append(stage)
+        return next(responses)
+
+    monkeypatch.setattr(benchmark, "_local_call", fake_call)
+
+    result = benchmark._apply_local_edit(
+        repo,
+        "owner.ts",
+        "Update the value.",
+        "local-model",
+        [],
+        1.0,
+        stage="edit",
+    )
+
+    assert result["patch_applied"] is True
+    assert stages == ["edit", "edit_retry", "edit_full_file_retry"]
+    assert any("guarded full-file" in value for value in result["warnings"])
     assert target.read_text(encoding="utf-8") == "export const value = 2;\n"
 
 
