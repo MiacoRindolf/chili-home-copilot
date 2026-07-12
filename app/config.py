@@ -9458,6 +9458,22 @@ class Settings(BaseSettings):
         default="", validation_alias=AliasChoices("CHILI_ORTEX_API_KEY"),
         description="Ortex short-interest / cost-to-borrow API key for the squeeze-fuel selection tilt. Empty ⇒ no Ortex fetch ⇒ no tilt (fail-open).",
     )
+    # ── SHORT LANE (docs/DESIGN/SHORT_SIDE_LANE.md, P1) ────────────────────────
+    # Master gate for the Alpaca short lane. Default FALSE by design (operator-
+    # approved in the design doc): shorts carry asymmetric squeeze risk, so the
+    # lane stays dark until the P1 paper soak proves the full sell-to-open →
+    # cover lifecycle. OFF ⇒ the long-only lane is byte-identical (no detector
+    # fires, no side threading engages).
+    chili_momentum_short_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SHORT_ENABLED"),
+    )
+    # Per-trigger flag (subordinate to the master): Trigger A — parabolic-
+    # exhaustion top (entry_gates.parabolic_exhaustion_short_signal).
+    chili_momentum_short_trigger_parabolic_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SHORT_TRIGGER_PARABOLIC_ENABLED"),
+    )
     # TIME-OF-DAY risk curve (2026-07-10, greenlit #1): scale per-trade risk by the
     # lane's own measured per-ET-hour expectancy, shrunk toward the Ross discovery-
     # window prior (risk_policy.time_of_day_risk_multiplier). Default ON (no dark

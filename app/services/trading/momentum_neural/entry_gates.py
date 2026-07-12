@@ -10215,3 +10215,75 @@ def run_paper_entry_gates(
         "pullback_high": pb.get("pullback_high"),
     }
     return True, "all_gates_pass", debug
+
+
+# ── SHORT LANE P1 — Trigger A: parabolic-exhaustion top (docs/DESIGN/SHORT_SIDE_LANE.md) ──
+def parabolic_exhaustion_short_signal(
+    *,
+    extension_ok: bool,
+    topping_tail: bool,
+    macd_rollover: bool,
+    rolled_over: bool,
+    ofi_level: float | None,
+    ofi_slope: float | None,
+    settings: Any = settings,
+) -> tuple[bool, dict[str, Any]]:
+    """SHORT Trigger A — the textbook "short the blow-off" confluence, as a PURE
+    function over signals the lane already computes (no new feature engineering):
+
+    - ``extension_ok``: the name has run well past its breakout level — the long
+      lane's `_entry_extension_veto` TRUE condition, used here as the PRECONDITION
+      (only a parabolic name qualifies; a normal uptrend is never shorted).
+    - ``topping_tail`` OR ``macd_rollover``: a climax candle (upper wick > 50% of
+      range and > body — `candles.is_topping_tail`) or momentum decel
+      (`candles.macd_hist_rollover_from_df`) — the exhaustion print.
+    - ``rolled_over``: the FIRST CONFIRMED LOWER-HIGH (`ross_momentum.front_side_
+      state`) — the anti-chase guard: a name still printing HODs is NEVER shorted
+      (the squeeze that kills shorts). This is the same rolled-over structure the
+      long lane treats as backside.
+    - OFI flip: ``ofi_level < 0 AND ofi_slope < 0`` — selling pressure PRESENT and
+      ACCELERATING on the tape (`paper_execution.ofi_level_and_slope`). Missing OFI
+      (None) fails CLOSED — a short needs positive evidence, never a data gap.
+
+    ALL four legs must hold (confluence-AND). Master gate `chili_momentum_short_
+    enabled` (default False until the P1 paper soak proves) + the per-trigger flag;
+    either OFF ⇒ (False, disabled) — the long-only lane is byte-identical.
+    Entry (the caller's job): sell-to-open on the first lower-high after the
+    climax; structural stop ABOVE the swing-high. Pure read — no writes."""
+    dbg: dict[str, Any] = {
+        "trigger": "parabolic_exhaustion_short",
+        "extension_ok": bool(extension_ok),
+        "topping_tail": bool(topping_tail),
+        "macd_rollover": bool(macd_rollover),
+        "rolled_over": bool(rolled_over),
+        "ofi_level": ofi_level,
+        "ofi_slope": ofi_slope,
+    }
+    if not bool(getattr(settings, "chili_momentum_short_enabled", False)):
+        dbg["reason"] = "short_lane_disabled"
+        return False, dbg
+    if not bool(getattr(settings, "chili_momentum_short_trigger_parabolic_enabled", True)):
+        dbg["reason"] = "trigger_disabled"
+        return False, dbg
+    if not extension_ok:
+        dbg["reason"] = "not_extended"
+        return False, dbg
+    if not (topping_tail or macd_rollover):
+        dbg["reason"] = "no_climax_print"
+        return False, dbg
+    if not rolled_over:
+        dbg["reason"] = "no_confirmed_lower_high"
+        return False, dbg
+    try:
+        _lvl = float(ofi_level) if ofi_level is not None else None
+        _slp = float(ofi_slope) if ofi_slope is not None else None
+    except (TypeError, ValueError):
+        _lvl, _slp = None, None
+    if _lvl is None or _slp is None:
+        dbg["reason"] = "ofi_unavailable_fail_closed"
+        return False, dbg
+    if not (_lvl < 0.0 and _slp < 0.0):
+        dbg["reason"] = "ofi_not_flipped"
+        return False, dbg
+    dbg["reason"] = "parabolic_exhaustion_confirmed"
+    return True, dbg
