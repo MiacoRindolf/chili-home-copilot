@@ -30,6 +30,11 @@ BLINDED_FIFTH_ROOT = (
     / "fixtures"
     / "project_autonomy_diagnostics_blinded5_20260711"
 )
+BLINDED_SIXTH_ROOT = (
+    Path(__file__).parent
+    / "fixtures"
+    / "project_autonomy_diagnostics_blinded6_20260712"
+)
 
 
 def test_manifest_uses_fable5_and_keeps_oracles_separate():
@@ -246,6 +251,34 @@ def test_fifth_blinded_fixture_preserves_manifest_and_public_blinding_contract()
         )
         oracle = json.loads(
             (BLINDED_FIFTH_ROOT / item["oracle"]).read_text(encoding="ascii")
+        )
+        assert case["case_id"] == oracle["case_id"]
+        assert not any(key.startswith(("expected_", "forbid_")) for key in case)
+        assert {observation["dimension"] for observation in case["observations"]} == {
+            "unknown"
+        }
+
+
+def test_sixth_blinded_fixture_preserves_manifest_and_public_blinding_contract():
+    manifest = json.loads(
+        (BLINDED_SIXTH_ROOT / "manifest.json").read_text(encoding="ascii")
+    )
+
+    assert manifest["schema"] == "chili.realworld-diagnostic-manifest.v1"
+    assert manifest["reference_model"] == "claude-fable-5"
+    assert manifest["benchmark_id"] == "fable5-class-diagnostic-blinded-sixth-run-20260712"
+    assert manifest["blinded"] is True
+    assert manifest["immutable_input_count"] == 17
+    assert len(manifest["cases"]) == 8
+    assert {item["evaluation_role"] for item in manifest["cases"]} == {
+        "blinded_holdout_sixth_run"
+    }
+    for item in manifest["cases"]:
+        case = json.loads(
+            (BLINDED_SIXTH_ROOT / item["case"]).read_text(encoding="ascii")
+        )
+        oracle = json.loads(
+            (BLINDED_SIXTH_ROOT / item["oracle"]).read_text(encoding="ascii")
         )
         assert case["case_id"] == oracle["case_id"]
         assert not any(key.startswith(("expected_", "forbid_")) for key in case)

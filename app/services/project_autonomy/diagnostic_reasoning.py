@@ -165,6 +165,8 @@ _DIMENSION_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "clip_id",
             "dedup key",
             "collision",
+            "lookup key",
+            "row key",
         ),
     ),
     (
@@ -329,6 +331,13 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("duplicate clip_id", 9),
             ("identity fields", 8),
             ("key composition", 8),
+            ("duplicate key", 10),
+            ("facility key", 9),
+            ("entries for key", 8),
+            ("entries_for_key", 8),
+            ("matching_rows", 8),
+            ("unused key", 7),
+            ("route-stop table", 7),
         ),
     ),
     (
@@ -408,6 +417,13 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("expected_state.server_name", 9),
             ("actual_state.trace_server_name", 9),
             ("configuration repository", 7),
+            ("effective-settings", 9),
+            ("environment entry", 8),
+            ("zero-value environment", 9),
+            ("approved profile", 7),
+            ("became effective", 7),
+            ("effective value", 7),
+            ("reported at startup", 6),
         ),
     ),
     (
@@ -444,6 +460,15 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("parser version", 9),
             ("caption parser", 9),
             ("prior resolved component", 10),
+            ("shared library", 9),
+            ("compatibility package", 9),
+            ("package inventory", 8),
+            ("package inventories", 8),
+            ("package present", 8),
+            ("package absent", 8),
+            ("cannot load lib", 10),
+            ("loader error", 8),
+            ("adding the exact prior", 8),
         ),
     ),
     (
@@ -548,6 +573,15 @@ _DIMENSION_PHRASE_WEIGHTS: tuple[tuple[str, tuple[tuple[str, int], ...]], ...] =
             ("boundary-focused proof corpus", 9),
             ("half-open reservation contract", 10),
             ("code_fingerprint", 7),
+            ("matcher checks", 9),
+            ("does not check", 9),
+            ("one-bound check", 10),
+            ("two-bound", 9),
+            ("interval-overlap check", 10),
+            ("matcher change", 9),
+            ("release comparison", 7),
+            ("release artifact", 8),
+            ("changed_factor=release_artifact", 10),
         ),
     ),
 )
@@ -650,6 +684,9 @@ _CAUSAL_SUPPORT_MARKERS = (
     "instead of",
     "rather than",
     "after removing only",
+    "adding the exact",
+    "restoring the",
+    "replaced by",
     "produces respectively",
     " versus ",
     "with identical",
@@ -668,6 +705,8 @@ _CAUSAL_INTERVENTION_MARKERS = (
     "differs at",
     "differing only",
     "after removing only",
+    "adding the exact",
+    "restoring the",
     "produces respectively",
     "with identical",
 )
@@ -748,6 +787,11 @@ _ATTRIBUTION_GAP_MARKERS = (
     "cannot determine",
     "insufficient to determine",
     "not enough to distinguish",
+    "too coarse to identify",
+    "no incident preserved",
+    "preventing event-by-event attribution",
+    "do not share one identifier",
+    "rotated before preservation",
 )
 _AMBIGUOUS_EXPERIMENT_MARKERS = (
     "depending on the assumed",
@@ -759,6 +803,9 @@ _AMBIGUOUS_EXPERIMENT_MARKERS = (
     "both fit the observed",
     "do not preserve",
     "does not preserve",
+    "not independently varied",
+    "overlap statistically",
+    "using its own controller and capture interface",
 )
 _DECISIVE_ATTRIBUTION_GAP_MARKERS = (
     "cannot distinguish",
@@ -768,6 +815,30 @@ _DECISIVE_ATTRIBUTION_GAP_MARKERS = (
     "not individually attributable",
     "lacks worker identity",
     "no retained artifact",
+    "too coarse to identify",
+    "no incident preserved",
+    "preventing event-by-event attribution",
+    "do not share one identifier",
+)
+_MECHANISM_ATTRIBUTION_GAP_MARKERS = (
+    "cannot distinguish",
+    "cannot separate",
+    "not individually attributable",
+    "lacks worker identity",
+    "too coarse to identify",
+    "no incident preserved",
+    "preventing event-by-event attribution",
+    "do not share one identifier",
+)
+_COARSE_RESET_EXPERIMENT_MARKERS = (
+    "supervised recycle",
+    "fresh worker",
+    "restart the worker",
+    "restart the process",
+    "recreate the worker",
+    "recreate the process",
+    "replace the worker",
+    "replace the process",
 )
 _SEMANTIC_BASELINE_PAIR_PATTERNS = (
     r"\b(?:final\s+)?good\s+(?:build|release|deployment|host|run)\b.{0,220}"
@@ -792,6 +863,23 @@ _BASELINE_COMPARABILITY_GAP_MARKERS = (
     "old and current fingerprints are incomparable",
     "pre-change output is unavailable",
     "pre-change snapshot is unavailable",
+    "rotated before preservation",
+    "do not share one identifier",
+    "preventing event-by-event attribution",
+)
+_RETAINED_BASELINE_MARKERS = (
+    " prior ",
+    " preceding ",
+    " pre-maintenance ",
+    " previous ",
+    " before ",
+)
+_RETAINED_CANDIDATE_MARKERS = (
+    " first ",
+    " began ",
+    " after ",
+    " new ",
+    " resumed ",
 )
 
 
@@ -845,7 +933,8 @@ def _dimension_term_present(statement: str, term: str) -> bool:
 
 
 def _dimension_scores(statement: str) -> dict[str, int]:
-    lower = str(statement or "").lower()
+    raw = str(statement or "")
+    lower = raw.lower()
     scores: dict[str, int] = {}
     for dimension, terms in _DIMENSION_TERMS:
         scores[dimension] = sum(
@@ -855,6 +944,16 @@ def _dimension_scores(statement: str) -> dict[str, int]:
         scores[dimension] = scores.get(dimension, 0) + sum(
             weight for phrase, weight in weighted_phrases if phrase in lower
         )
+    if re.search(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b", raw):
+        scores["config"] = scores.get("config", 0) + 10
+    if re.search(r"\blib[a-z0-9_.+-]+\.so(?:\.\d+)*\b", lower):
+        scores["dependency"] = scores.get("dependency", 0) + 12
+    if re.search(
+        r"\b(?:duplicate|duplicated|reused|colliding)\b.{0,48}\bkey\b"
+        r"|\bchanging only\b.{0,100}\b(?:row|record|identifier|key)\b",
+        lower,
+    ):
+        scores["data"] = scores.get("data", 0) + 9
     return scores
 
 
@@ -888,14 +987,19 @@ def infer_evidence_dimension(statement: str, structured_context: str = "") -> st
     data, and runtime values that stayed fixed. A flat keyword vote can make
     that held-constant list outrank the one component that was actually varied.
     """
-    lower = str(statement or "").lower()
+    raw_statement = str(statement or "")
+    lower = raw_statement.lower()
     boundary_positions = [
         position
         for marker in _HELD_CONSTANT_BOUNDARIES
         if (position := lower.find(marker)) >= 0
     ]
-    focus = lower[: min(boundary_positions)] if boundary_positions else lower
-    full_scores = _dimension_scores(lower)
+    focus = (
+        raw_statement[: min(boundary_positions)]
+        if boundary_positions
+        else raw_statement
+    )
+    full_scores = _dimension_scores(raw_statement)
     focus_scores = _dimension_scores(focus)
     context_scores = _dimension_scores(structured_context)
     combined = {
@@ -2523,7 +2627,13 @@ def detect_baseline_drift(observations: Sequence[Mapping[str, Any]]) -> list[dic
     for item in observations:
         evidence_id = str(item.get("evidence_id") or "")
         statement = str(item.get("statement") or "").lower()
-        semantic_pair = any(
+        padded_statement = f" {statement} "
+        retained_pair = bool(
+            "retained=true" in str(item.get("structured_context") or "").lower()
+            and any(marker in padded_statement for marker in _RETAINED_BASELINE_MARKERS)
+            and any(marker in padded_statement for marker in _RETAINED_CANDIDATE_MARKERS)
+        )
+        semantic_pair = retained_pair or any(
             re.search(pattern, statement)
             for pattern in _SEMANTIC_BASELINE_PAIR_PATTERNS
         )
@@ -2542,7 +2652,11 @@ def detect_baseline_drift(observations: Sequence[Mapping[str, Any]]) -> list[dic
                         str(item.get("environment_fingerprint") or "unknown")
                     ],
                     "evidence_ids": [evidence_id],
-                    "finding_type": "semantic_baseline_drift",
+                    "finding_type": (
+                        "retained_semantic_baseline_drift"
+                        if retained_pair
+                        else "semantic_baseline_drift"
+                    ),
                 }
             )
             recorded_ids.add(evidence_id)
@@ -2613,6 +2727,59 @@ def _is_contrastive_experiment(record: Mapping[str, Any]) -> bool:
         and bool(record.get("discriminating"))
         and str(record.get("causal_role") or "context") == "support"
         and not bool(record.get("attribution_gap"))
+    )
+
+
+def _is_coarse_reset_experiment(record: Mapping[str, Any]) -> bool:
+    if str(record.get("kind") or "") != "experiment":
+        return False
+    lower = str(record.get("statement") or "").lower()
+    return any(marker in lower for marker in _COARSE_RESET_EXPERIMENT_MARKERS)
+
+
+def _is_attribution_resolving_evidence(record: Mapping[str, Any]) -> bool:
+    if bool(record.get("attribution_gap")):
+        return False
+    if str(record.get("provenance") or "").startswith("diagnostic_probe:"):
+        return True
+    if str(record.get("kind") or "") != "experiment":
+        return False
+    if _is_coarse_reset_experiment(record):
+        return False
+    lower = str(record.get("statement") or "").lower()
+    context = str(record.get("structured_context") or "").lower()
+    explicit_single_change = any(
+        marker in lower
+        for marker in (
+            "changing only",
+            "reverting only",
+            "pinning only",
+            "resetting only",
+            "removing only",
+            "adding the exact",
+            "restoring only",
+            "single-change",
+        )
+    )
+    held_constants = any(
+        marker in lower
+        for marker in (
+            "without changing",
+            "while keeping",
+            "while holding",
+            "with all other",
+            "leaving all other",
+        )
+    )
+    return bool(
+        "changed_factor=" in context
+        or explicit_single_change
+        or (
+            held_constants
+            and any(marker in lower for marker in _CAUSAL_INTERVENTION_MARKERS)
+        )
+        or _record_has_structured_break(record)
+        and bool(record.get("correlation_fingerprints"))
     )
 
 
@@ -2980,6 +3147,19 @@ def evaluate_packet(
             for item in attribution_gap_records
         )
     )
+    mechanism_attribution_gap = bool(
+        any(
+            marker in str(case.get("problem_statement") or "").lower()
+            for marker in _MECHANISM_ATTRIBUTION_GAP_MARKERS
+        )
+        or any(
+            any(
+                marker in str(item.get("statement") or "").lower()
+                for marker in _MECHANISM_ATTRIBUTION_GAP_MARKERS
+            )
+            for item in attribution_gap_records
+        )
+    )
     causal_timeline = _structured_causal_timeline(case)
     downstream_evidence_ids = {
         str(value)
@@ -3136,6 +3316,19 @@ def evaluate_packet(
             provenance_break_support=provenance_break_support,
             completed_result_ids=completed_result_ids,
         )
+        coarse_reset_support = any(
+            _is_coarse_reset_experiment(record)
+            for record in causal_support_records
+        )
+        attribution_resolving_support = bool(
+            typed_probe_evidence
+            or earliest_break_graph_qualified
+            or provenance_break_support
+            or any(
+                _is_attribution_resolving_evidence(record)
+                for record in causal_support_records
+            )
+        )
         hypothesis_dimension = str(item.get("dimension") or "unknown")
         aligned_dimension_records = [
             record
@@ -3249,7 +3442,24 @@ def evaluate_packet(
                 "Code causality is not isolated while source/runtime revision parity differs."
             )
         if (
+            mechanism_attribution_gap
+            and status in {"supported", "provisional"}
+            and not attribution_resolving_support
+        ):
+            if coarse_reset_support and dimension not in {"code", "unknown"}:
+                status = "provisional"
+                blockers.append(
+                    "A broad reset localizes the causal family but does not identify the owning mechanism."
+                )
+            else:
+                status = "blocked"
+                attribution_gap_blocked = True
+                blockers.append(
+                    "The retained experiment does not resolve the missing event-level mechanism attribution."
+                )
+        if (
             unresolved_attribution
+            and not mechanism_attribution_gap
             and status in {"supported", "provisional"}
             and _causal_sufficiency_rank(causal_sufficiency) < 2
             and not (dimension == "test_harness" and bool(drift))
@@ -3292,6 +3502,8 @@ def evaluate_packet(
                 "earliest_break_support": earliest_break_support,
                 "earliest_break_graph_qualified": earliest_break_graph_qualified,
                 "provenance_break_support": provenance_break_support,
+                "coarse_reset_support": coarse_reset_support,
+                "attribution_resolving_support": attribution_resolving_support,
                 "downstream_only_support": downstream_only,
                 "attribution_gap_blocked": attribution_gap_blocked,
                 "blockers": blockers,
@@ -3394,7 +3606,7 @@ def evaluate_packet(
             item
             for item in hypothesis_results
             if item.get("dimension") == "test_harness"
-            and item.get("status") not in {"refuted", "untested"}
+            and item.get("status") != "refuted"
         ]
         if harness_candidates and not strong_closed_cause:
             chosen = max(harness_candidates, key=selection_rank)
@@ -3514,6 +3726,7 @@ def evaluate_packet(
         "baseline_drift": drift,
         "attribution_assessment": {
             "unresolved": unresolved_attribution,
+            "mechanism_gap": mechanism_attribution_gap,
             "evidence_ids": [
                 str(item.get("evidence_id") or "")
                 for item in attribution_gap_records

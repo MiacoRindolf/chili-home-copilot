@@ -2069,6 +2069,30 @@ def test_evidence_dimension_prefers_changed_variable_over_held_constants():
         assert reasoning.infer_evidence_dimension(statement) == expected
 
 
+def test_evidence_dimension_distinguishes_keys_settings_packages_and_matchers():
+    examples = {
+        "data": (
+            "Changing only the duplicated facility key to an unused key restores "
+            "the route-stop table lookup."
+        ),
+        "config": (
+            "Changing only OFFLINE_GRACE_SECONDS in the effective-settings snapshot "
+            "restores the approved profile behavior."
+        ),
+        "dependency": (
+            "Adding the exact signed compatibility package restores libheif.so.1 "
+            "without changing the worker image or launch settings."
+        ),
+        "code": (
+            "The release comparison shows the interval matcher replaced a two-bound "
+            "overlap check with a one-bound check."
+        ),
+    }
+
+    for expected, statement in examples.items():
+        assert reasoning.infer_evidence_dimension(statement) == expected
+
+
 def test_evidence_metadata_is_bounded_visible_and_idempotent():
     raw = {
         "evidence_id": "metadata-code",
@@ -2163,6 +2187,144 @@ def test_semantic_baseline_pairs_and_comparability_gaps_are_detected():
             )
         ]
     ) == []
+
+
+def test_retained_before_after_metadata_marks_semantic_baseline_drift():
+    retained = reasoning.normalize_evidence(
+        {
+            "evidence_id": "retained-onset",
+            "statement": (
+                "The first failures appeared on the new image while prior image "
+                "controls completed the same work."
+            ),
+            "metadata": {"retained": True},
+        }
+    )
+    unretained = reasoning.normalize_evidence(
+        {
+            "evidence_id": "unretained-onset",
+            "statement": (
+                "The first failures appeared on the new image while prior image "
+                "controls completed the same work."
+            ),
+        }
+    )
+
+    findings = reasoning.detect_baseline_drift([retained])
+
+    assert findings[0]["finding_type"] == "retained_semantic_baseline_drift"
+    assert reasoning.detect_baseline_drift([unretained]) == []
+
+
+def test_coarse_runtime_reset_with_missing_mechanism_stays_provisional():
+    case = {
+        "case_id": "coarse-runtime-reset",
+        "problem_statement": "A long-running worker stops accepting new events.",
+        "observations": [
+            {
+                "evidence_id": "worker-reset",
+                "statement": (
+                    "A supervised recycle restores forwarding without changing the "
+                    "host, artifact, settings, or assigned inputs."
+                ),
+                "dimension": "runtime",
+                "kind": "experiment",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "missing-owner",
+                "statement": (
+                    "Current snapshots are too coarse to identify which handle class "
+                    "grows, and no incident preserved creation stacks."
+                ),
+                "dimension": "runtime",
+                "kind": "artifact",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+        ],
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-runtime",
+                "claim": "Worker-local runtime state causes the stall.",
+                "dimension": "runtime",
+                "support_evidence_ids": ["worker-reset", "missing-owner"],
+                "falsification": "Capture handle classes and creation paths before recycling.",
+            }
+        ],
+        "conclusion": {
+            "hypothesis_id": "h-runtime",
+            "status": "confirmed",
+            "evidence_ids": ["worker-reset"],
+        },
+    }
+
+    report = reasoning.evaluate_packet(case, packet)
+    result = report["hypothesis_results"][0]
+
+    assert report["attribution_assessment"]["mechanism_gap"] is True
+    assert result["coarse_reset_support"] is True
+    assert result["attribution_resolving_support"] is False
+    assert report["conclusion"]["status"] == "provisional"
+    assert report["decision"] == "instrument_first"
+
+
+def test_event_level_harness_gap_blocks_sparse_experiment_confirmation():
+    case = {
+        "case_id": "harness-event-attribution",
+        "problem_statement": "A qualification rig intermittently reports a late edge.",
+        "observations": [
+            {
+                "evidence_id": "sparse-reproduction",
+                "statement": (
+                    "A fixed signal generator reproduces one false late report in "
+                    "one hundred isolated runs."
+                ),
+                "dimension": "test_harness",
+                "kind": "experiment",
+                "reliability": 0.98,
+                "discriminating": True,
+            },
+            {
+                "evidence_id": "missing-correlation",
+                "statement": (
+                    "Raw edge timestamps were rotated before preservation and the "
+                    "records do not share one identifier, preventing event-by-event attribution."
+                ),
+                "dimension": "test_harness",
+                "kind": "artifact",
+                "reliability": 0.99,
+                "discriminating": True,
+            },
+        ],
+    }
+    packet = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h-harness",
+                "claim": "The qualification harness creates the false late result.",
+                "dimension": "test_harness",
+                "support_evidence_ids": ["sparse-reproduction", "missing-correlation"],
+                "falsification": "Capture one immutable event id across every recorder.",
+            }
+        ],
+        "conclusion": {
+            "hypothesis_id": "h-harness",
+            "status": "confirmed",
+            "evidence_ids": ["sparse-reproduction"],
+        },
+    }
+
+    report = reasoning.evaluate_packet(case, packet)
+
+    assert report["baseline_drift"][0]["finding_type"] == "baseline_comparability_gap"
+    assert report["attribution_assessment"]["mechanism_gap"] is True
+    assert report["conclusion"]["dimension"] == "test_harness"
+    assert report["conclusion"]["status"] == "inconclusive"
+    assert report["decision"] == "instrument_first"
 
 
 def test_omitted_contrastive_proof_can_promote_the_correct_clock_family():
