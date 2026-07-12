@@ -1,6 +1,6 @@
 # CHILI vs Fable 5: Autonomous Coding Capability Gap Report
 
-Date: 2026-07-11
+Date: 2026-07-12
 
 ## Current Verdict
 
@@ -9,6 +9,11 @@ CHILI is now **qualified for local-only development shadow use** on the tested d
 This distinction is intentional. The current evidence proves that CHILI can diagnose, gather bounded evidence, select owning files, generate local patches, use validation failures as new evidence, repair or roll back its own patch, and pass cross-language development regressions without premium calls. It does not yet provide a blinded, statistically meaningful head-to-head against Fable 5.
 
 The historical diagnosis-to-fix reports used the label `hidden` for tests that were loaded after the initial patch but could then guide bounded repair. Those scores are feedback-guided development evidence, not sealed final-adjudication evidence. Runner schema v3 now separates repair-feedback tests from a final oracle that is first read after every model call for its case. The first eight-case v3 holdout scored 53.75/100 with 1/8 final passes. After generic repair-loop hardening, a new independently authored eight-case holdout improved to 68.75/100 and 2/8 final passes, still far below replacement readiness.
+
+A later contract-guided replay of the now-disclosed tenth suite scored 58.12/100 with the same 2/8 sealed-final
+passes, 6/8 correct causal families, and 5/8 exact owner sets. It used zero premium calls but required 105.6
+minutes. This is development evidence only: diagnosis improved, while functional reliability and latency remained
+well below replacement readiness.
 
 ## Requirement Audit
 
@@ -148,6 +153,28 @@ and exact ownership rose from 3/8 to 7/8. It is still decisive negative evidence
 readiness. Six final contracts failed, five diagnosis families were wrong, and the local specialist route imposed
 substantial latency. No same-task authenticated Fable 5 output was collected, so parity remains unmeasured rather
 than implied.
+
+### Tenth-Suite Contract-Guided Development Replay
+
+- Frozen source commit: `5905f636ae6128f445fe88057188f40aa246fd32`
+- Classification: disclosed development replay; not an untouched holdout despite the fixture's historical split label
+- Local route: 7B primary, two 7B repairs, one bounded 14B escalation, zero premium calls
+- Schema-v5 score: **58.12/100**, `needs_improvement`
+- Sealed-final functional success: **2/8 (25%)**
+- Correct diagnosis family: **6/8 (75%)**
+- Exact changed-file set: **5/8 (62.5%)**
+- Successful cases: TypeScript Vary/cache isolation and SQL tenant grant intervals
+- Visible feedback passed but sealed final failed for the tenant-scoped reservation retry case
+- Local calls: **168** total, including **39** 14B calls
+- Total wall time: **6,334.5 seconds (105.6 minutes)**; average **791.8 seconds/case**
+- Premium calls: **0**
+- Receipt: `project_ws/AgentOps/tenth_development_replays_contract_guided_full_5905f63/DEVELOPMENT_REPLAY_RECEIPT.md`
+
+The replay confirms that contract guidance materially improves causal-family recognition, but it does not improve
+sealed functional success beyond the untouched tenth result. Two initially correct families were overwritten during
+repair, one visible-green repair failed an unseen scope interaction, Dart compiler recovery failed, and three
+correctly diagnosed/exact-owner cases still missed boundary semantics. The 7B route also escalated on seven cases
+and remained too slow for an interactive Fable 5 replacement.
 
 ### Typed Runtime-Evidence Diagnosis
 
@@ -397,14 +424,14 @@ authored causal language.
 
 ## Remaining Gaps
 
-1. The repair evidence now includes 13 small feedback-guided development repositories and two independently authored eight-case sealed suites. The ninth scored 53.75/100 with 1/8 final passes; the post-hardening tenth improved to 68.75/100 with 2/8 final passes. Six of eight fresh final contracts still failed. Large-repository, mixed-stack, Go, and Rust superiority remain untested.
+1. The repair evidence now includes 13 small feedback-guided development repositories, two independently authored eight-case sealed suites, and a full disclosed tenth-suite replay. The ninth scored 53.75/100 with 1/8 final passes; the untouched tenth improved to 68.75/100 with 2/8 final passes. The disclosed contract-guided replay scored 58.12/100 and still solved only 2/8 final contracts. Large-repository, mixed-stack, Go, and Rust superiority remain untested.
 2. Provider-attested Fable 5 history exists, but no provider-attested Fable output exists for the same frozen repair cases. Historical answers are excluded from a blinded score because current CHILI development may be contaminated by their fixes and task mechanics.
 3. Eight independent eight-case diagnostic slices now total 64 cases and scored 88.12/100, 87.5/100, 76.25/100, 69.38/100, 74.4/100, 67.5/100, 63.8/100, and 83.12/100. Every untouched slice is below the 90 shadow threshold. The eighth oracle's five-family tolerance inflated its nominal result; strict primary-family scoring was 70.62/100. The set still lacks the required repository/language mix and direct Fable 5 comparison.
 4. Runtime evidence currently covers bounded text logs, aggregate/schema PostgreSQL reads, typed-probe timestamps, structured causal timelines, hashed log correlation identities, and explicit cross-service flow edges. It does not yet provide external trace-backend ingestion, metrics backends, container state, process inspection, automatic producer/consumer role inference for arbitrary systems, or a live production proof using a separately provisioned SELECT-only role.
-5. Local 7B output remains stochastic. The second untouched diagnostic slice produced 0/24 usable packets before compact contracts. The fourth through eighth untouched slices accepted 24/24 packets yet scored only 69.38, 74.4, 67.5, 63.8, and 83.12, proving that structural usability is not diagnostic quality. The fresh tenth repair suite completed 141/141 local calls but still chose the wrong diagnosis family in 5/8 cases and failed 6/8 final contracts. Strong structural reliability and exact ownership therefore remain distinct from frontier-level causal reasoning and synthesis.
+5. Local 7B output remains stochastic. The second untouched diagnostic slice produced 0/24 usable packets before compact contracts. The fourth through eighth untouched slices accepted 24/24 packets yet scored only 69.38, 74.4, 67.5, 63.8, and 83.12, proving that structural usability is not diagnostic quality. The untouched tenth suite completed 141/141 local calls but chose the wrong diagnosis family in 5/8 cases and failed 6/8 final contracts. Its disclosed contract-guided replay improved diagnosis to 6/8 but still failed the same 6/8 final contracts. Strong structural reliability, causal labels, exact ownership, and frontier-level repair synthesis remain distinct capabilities.
 6. Recognized repair synthesis is intentionally narrow. Unknown mechanisms, dependency migrations, frontend visual validation, true concurrency races, and large cross-service refactors remain under-tested.
-7. Final reviewed-code cross-language latency averaged 73.9 seconds/case. Diagnostic calls averaged 51.6, 61.2, 52.8, 50.9, and most recently 71.3 seconds on the slower untouched slices. The untouched seventh council required 1,717.3 seconds end to end; its final disclosed repair run still required 831.4 seconds and varied from 24 to 50 seconds per call. Atomic per-case checkpointing now prevents total progress loss and passed a simulated interruption/resume test, but adaptive stage routing and a real host-loss recovery proof remain open.
-8. The 14B local model is too slow and unreliable for default routing on current hardware. In the fresh tenth suite, 30 escalation calls contributed to a 2,786.5-second run, while only 2/8 final suites passed. It remains limited to an optional final local repair round; adaptive routing must reduce unnecessary specialist calls before the workflow is practical.
+7. Final reviewed-code cross-language latency averaged 73.9 seconds/case. The disclosed contract-guided tenth replay averaged 791.8 seconds/case and required 6,334.5 seconds end to end. Atomic per-case checkpointing now prevents total progress loss and passed a simulated interruption/resume test, but adaptive stage routing, cancellation of redundant generative review, and a real host-loss recovery proof remain open.
+8. The 14B local model is too slow and unreliable for default routing on current hardware. The untouched tenth suite used 30 escalation calls in 2,786.5 seconds; the disclosed replay used 39 escalation calls and expanded to 6,334.5 seconds while still solving only 2/8 final suites. It remains limited to an optional final local repair round; evidence-gated routing must reduce unnecessary specialist calls before the workflow is practical.
 9. Diagnostic memory is same-repository and lexical. It cannot yet transfer validated mechanisms across unrelated repositories, and unattended full-autopilot runs cannot self-promote their conclusions.
 
 ## Promotion Gate

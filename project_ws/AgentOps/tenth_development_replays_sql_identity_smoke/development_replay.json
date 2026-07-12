@@ -1,0 +1,1475 @@
+{
+  "average_case_duration_ms": 217768.0,
+  "blinded_holdout_case_count": 1,
+  "blinded_holdout_score": 100.0,
+  "cases": [
+    {
+      "accepted_diagnosis_conclusion": {
+        "accepted": true,
+        "dimension": "data",
+        "stage": "repair_2_validated",
+        "validation_evidence": "Validation did not provide failure output."
+      },
+      "baseline_feedback_tests": {
+        "duration_ms": 544,
+        "exit_code": 1,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-ttim9vfl\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 4 items\n\ntests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant FAILED [ 25%]\ntests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants FAILED [ 50%]\ntests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective FAILED [ 75%]\ntests/test_public.py::test_grant_is_visible_inside_its_window PASSED     [100%]\n\n================================== FAILURES ===================================\n____________________ test_schema_identity_includes_tenant _____________________\ntests\\test_feedback_grant_boundaries.py:37: in test_schema_identity_includes_tenant\n    db.execute(statement, (\"blue\", \"duplicate\", \"read\", 0, 10))\nE   sqlite3.IntegrityError: UNIQUE constraint failed: access_grants.principal_id, access_grants.capability\n_______________ test_upsert_keeps_same_identity_in_both_tenants _______________\ntests\\test_feedback_grant_boundaries.py:49: in test_upsert_keeps_same_identity_in_both_tenants\n    assert tenants == {\"red\", \"blue\"}\nE   AssertionError: assert {'red'} == {'blue', 'red'}\nE     \nE     Extra items in the right set:\nE     'blue'\nE     \nE     Full diff:\nE       {\nE     -     'blue',\nE           'red',\nE       }\n__________________ test_expiration_boundary_is_not_effective __________________\ntests\\test_feedback_grant_boundaries.py:59: in test_expiration_boundary_is_not_effective\n    assert rows == []\nE   AssertionError: assert [('approve',)] == []\nE     \nE     Left contains one more item: ('approve',)\nE     \nE     Full diff:\nE     - []\nE     + [\nE     +     (\nE     +         'approve',\nE     +     ),\nE     + ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant - sqlite3.IntegrityError: UNIQUE constraint failed: access_grants.principal_id, access_grants.capability\nFAILED tests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants - AssertionError: assert {'red'} == {'blue', 'red'}\n  \n  Extra items in the right set:\n  'blue'\n  \n  Full diff:\n    {\n  -     'blue',\n        'red',\n    }\nFAILED tests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective - AssertionError: assert [('approve',)] == []\n  \n  Left contains one more item: ('approve',)\n  \n  Full diff:\n  - []\n  + [\n  +     (\n  +         'approve',\n  +     ),\n  + ]\n========================= 3 failed, 1 passed in 0.10s =========================",
+        "passed": false,
+        "runner": "pytest"
+      },
+      "baseline_final_tests": {
+        "duration_ms": 541,
+        "exit_code": 1,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-61oy5adq\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_final_import_visibility.py::test_two_tenant_import_respects_each_effective_window FAILED [ 50%]\ntests/test_public.py::test_grant_is_visible_inside_its_window PASSED     [100%]\n\n================================== FAILURES ===================================\n____________ test_two_tenant_import_respects_each_effective_window ____________\ntests\\test_final_import_visibility.py:40: in test_two_tenant_import_respects_each_effective_window\n    assert visible == {\"harbor\": [], \"ridge\": [(\"approve\",)]}\nE   AssertionError: assert {'harbor': [('approve',)], 'ridge': []} == {'harbor': [], 'ridge': [('approve',)]}\nE     \nE     Differing items:\nE     {'harbor': [('approve',)]} != {'harbor': []}\nE     {'ridge': []} != {'ridge': [('approve',)]}\nE     \nE     Full diff:\nE       {\nE     -     'harbor': [],\nE     ?                --\nE     +     'harbor': [\nE     -     'ridge': [\nE               (\nE                   'approve',\nE               ),\nE           ],\nE     +     'ridge': [],\nE       }\n=========================== short test summary info ===========================\nFAILED tests/test_final_import_visibility.py::test_two_tenant_import_respects_each_effective_window - AssertionError: assert {'harbor': [('approve',)], 'ridge': []} == {'harbor': [], 'ridge': [('approve',)]}\n  \n  Differing items:\n  {'harbor': [('approve',)]} != {'harbor': []}\n  {'ridge': []} != {'ridge': [('approve',)]}\n  \n  Full diff:\n    {\n  -     'harbor': [],\n  ?                --\n  +     'harbor': [\n  -     'ridge': [\n            (\n                'approve',\n            ),\n        ],\n  +     'ridge': [],\n    }\n========================= 1 failed, 1 passed in 0.09s =========================",
+        "passed": false,
+        "runner": "pytest"
+      },
+      "baseline_public_tests": {
+        "duration_ms": 515,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-baseline-feedback-ttim9vfl\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 1 item\n\ntests/test_public.py::test_grant_is_visible_inside_its_window PASSED     [100%]\n\n============================== 1 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "case_id": "sql_tenant_grant_intervals",
+      "changed_files": [
+        "sql/effective_access.sql",
+        "sql/schema.sql",
+        "sql/upsert_grant.sql"
+      ],
+      "checks": {
+        "baseline_final_failure": true,
+        "diagnosis": true,
+        "file_selection": true,
+        "final_tests": true,
+        "patch_applied": true,
+        "premium_independence": true,
+        "public_tests": true
+      },
+      "deterministic_contract_repair": {
+        "attempted": false,
+        "patch_applied": false,
+        "selected_files": [],
+        "warnings": []
+      },
+      "diagnosis_dimension": "data",
+      "diagnosis_history": [
+        {
+          "accepted": true,
+          "dimension": "data",
+          "stage": "diagnostic_judge",
+          "validation_evidence": "pre-repair evidence decision"
+        },
+        {
+          "accepted": true,
+          "dimension": "data",
+          "stage": "repair_2_validated",
+          "validation_evidence": "Validation did not provide failure output."
+        }
+      ],
+      "diagnosis_packet": {
+        "conclusion": {
+          "evidence_ids": [
+            "source-5",
+            "source-8"
+          ],
+          "hypothesis_id": "h-data",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "status": "provisional"
+        },
+        "experiments": [
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "data"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing data changes or restores the outcome.",
+            "experiment_id": "isolate-data",
+            "held_constant_dimensions": [
+              "code",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-data"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          },
+          {
+            "auto_execute": false,
+            "changed_dimensions": [
+              "code"
+            ],
+            "evidence_required": [
+              "before fingerprint",
+              "after fingerprint",
+              "actual outcome"
+            ],
+            "expected_if_false": "The outcome remains unchanged.",
+            "expected_if_true": "Changing code changes or restores the outcome.",
+            "experiment_id": "isolate-code",
+            "held_constant_dimensions": [
+              "data",
+              "clock",
+              "state",
+              "config",
+              "dependency",
+              "runtime",
+              "test_harness"
+            ],
+            "hypothesis_ids": [
+              "h-code"
+            ],
+            "probe": {},
+            "result_evidence_ids": [],
+            "safety": "isolated",
+            "status": "planned"
+          }
+        ],
+        "hypotheses": [
+          {
+            "claim": "The observed failure is primarily caused by data drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "data",
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "support_evidence_ids": [
+              "source-5",
+              "source-8"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by code drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "code",
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "support_evidence_ids": [
+              "probe-default-git-history"
+            ]
+          },
+          {
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "clock",
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "support_evidence_ids": []
+          },
+          {
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "contradict_evidence_ids": [],
+            "dimension": "unknown",
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h-unknown",
+            "support_evidence_ids": [
+              "probe-default-fixed-search",
+              "operator-1",
+              "operator-2",
+              "operator-3",
+              "operator-4",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-4",
+              "source-6",
+              "source-7",
+              "source-9",
+              "source-10",
+              "source-11",
+              "source-12",
+              "probe-default-repo-state"
+            ]
+          }
+        ],
+        "problem_statement": "",
+        "schema": "chili.diagnostic-packet.v1"
+      },
+      "diagnosis_report": {
+        "attribution_assessment": {
+          "evidence_ids": [],
+          "mechanism_gap": false,
+          "unresolved": false
+        },
+        "baseline_drift": [],
+        "case_id": "sql_tenant_grant_intervals",
+        "causal_timeline": {
+          "downstream_evidence_ids": [],
+          "earliest_break": {},
+          "events": [
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "probe:default-repo-state",
+              "event_type": "typed_probe_repo_state",
+              "evidence_id": "probe-default-repo-state",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T15:29:24.903610+00:00",
+              "order": 0,
+              "prior_state": "",
+              "sequence": 0,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "code",
+              "entity_id": "probe:default-git-history",
+              "event_type": "typed_probe_git_history",
+              "evidence_id": "probe-default-git-history",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T15:29:24.941927+00:00",
+              "order": 1,
+              "prior_state": "",
+              "sequence": 1,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "completed",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "probe:default-fixed-search",
+              "event_type": "typed_probe_search",
+              "evidence_id": "probe-default-fixed-search",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "2026-07-12T15:29:24.967850+00:00",
+              "order": 2,
+              "prior_state": "",
+              "sequence": 2,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-1",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 3,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-2",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 4,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-3",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 5,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "operator-4",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 6,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-1",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 7,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-2",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 8,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-3",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 9,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-4",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 10,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "data",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-5",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 11,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-6",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 12,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-7",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 13,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "data",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-8",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 14,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-9",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 15,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-10",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 16,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-11",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 17,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            },
+            {
+              "actual_edge_state": "",
+              "actual_state": "",
+              "causal_parent_ids": [],
+              "correlation_fingerprints": [],
+              "dimension": "unknown",
+              "entity_id": "",
+              "event_type": "",
+              "evidence_id": "source-12",
+              "expected_edge_state": "",
+              "expected_state": "",
+              "observed_at": "",
+              "order": 18,
+              "prior_state": "",
+              "sequence": null,
+              "transition_from": "",
+              "transition_to": "",
+              "violations": []
+            }
+          ],
+          "ordered_evidence_ids": [
+            "probe-default-repo-state",
+            "probe-default-git-history",
+            "probe-default-fixed-search",
+            "operator-1",
+            "operator-2",
+            "operator-3",
+            "operator-4",
+            "source-1",
+            "source-2",
+            "source-3",
+            "source-4",
+            "source-5",
+            "source-6",
+            "source-7",
+            "source-8",
+            "source-9",
+            "source-10",
+            "source-11",
+            "source-12"
+          ],
+          "runtime_source_parity": {
+            "comparable_pair_count": 0,
+            "runtime_revision": "",
+            "source_revision": "",
+            "status": "unknown"
+          },
+          "schema": "chili.causal-timeline.v1"
+        },
+        "conclusion": {
+          "blockers": [],
+          "causal_sufficiency": "observational",
+          "claim": "The observed failure is primarily caused by data drift.",
+          "confidence": 0.1525,
+          "dimension": "data",
+          "evidence_ids": [
+            "source-5",
+            "source-8"
+          ],
+          "hypothesis_id": "h-data",
+          "promotion_reason": "",
+          "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+          "requested_status": "provisional",
+          "status": "provisional"
+        },
+        "contract_invariants": [
+          "An ineffective-at-expiration interval has an exclusive upper bound: valid_from <= as_of < valid_until; do not rewrite unrelated revocation semantics.",
+          "A reused external identifier is scoped by its tenant/site/merchant in storage uniqueness, idempotency lookup, and SQL conflict targets; all layers use the same composite identity."
+        ],
+        "decision": "instrument_first",
+        "diagnostic_lenses": [
+          "expected_vs_observed",
+          "causal_timeline",
+          "root_cause_vs_downstream_symptom",
+          "safety_boundary",
+          "post_change_proof"
+        ],
+        "errors": [],
+        "hypothesis_results": [
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by data drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.1525,
+            "confirmatory_weight": 0,
+            "context_weight": 0.18,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "data",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "hypothesis_id": "h-data",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "source-5",
+              "source-8"
+            ],
+            "support_weight": 0.18,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by code drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.115,
+            "confirmatory_weight": 0,
+            "context_weight": 0.13,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "code",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "hypothesis_id": "h-code",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "probe-default-git-history"
+            ],
+            "support_weight": 0.13,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": false,
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "causal_support_evidence_ids": [],
+            "causal_support_weight": 0,
+            "claim": "The observed failure is primarily caused by clock drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.0,
+            "confirmatory_weight": 0,
+            "context_weight": 0.0,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "clock",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": false,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "hypothesis_id": "h-clock",
+            "ownership_weight": 0.0,
+            "provenance_break_support": false,
+            "status": "untested",
+            "support_evidence_ids": [],
+            "support_weight": 0.0,
+            "typed_probe_evidence": false
+          },
+          {
+            "attribution_gap_blocked": false,
+            "attribution_resolving_support": true,
+            "blockers": [
+              "Unknown is not a confirmable causal family; isolate a known dimension first."
+            ],
+            "causal_sufficiency": "isolated",
+            "causal_support_evidence_ids": [
+              "probe-default-fixed-search"
+            ],
+            "causal_support_weight": 0.9,
+            "claim": "The observed failure is primarily caused by unknown drift.",
+            "coarse_reset_support": false,
+            "confidence": 0.6479,
+            "confirmatory_weight": 0.9,
+            "context_weight": 0.94,
+            "contradict_evidence_ids": [],
+            "contradict_weight": 0,
+            "dimension": "unknown",
+            "dimension_alignment_weight": 0,
+            "dimension_mismatch_weight": 0,
+            "discriminating_evidence": true,
+            "downstream_only_support": false,
+            "earliest_break_graph_qualified": false,
+            "earliest_break_support": false,
+            "falsification": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "hypothesis_id": "h-unknown",
+            "ownership_weight": 1.9,
+            "provenance_break_support": false,
+            "status": "provisional",
+            "support_evidence_ids": [
+              "probe-default-fixed-search",
+              "operator-1",
+              "operator-2",
+              "operator-3",
+              "operator-4",
+              "source-1",
+              "source-2",
+              "source-3",
+              "source-4",
+              "source-6",
+              "source-7",
+              "source-9",
+              "source-10",
+              "source-11",
+              "source-12",
+              "probe-default-repo-state"
+            ],
+            "support_weight": 1.84,
+            "typed_probe_evidence": true
+          }
+        ],
+        "next_experiments": [
+          {
+            "action": "Hold every other dimension constant and show that changing data does not change the outcome.",
+            "dimension": "data",
+            "experiment_id": "falsify-h-data",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing code does not change the outcome.",
+            "dimension": "code",
+            "experiment_id": "falsify-h-code",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing clock does not change the outcome.",
+            "dimension": "clock",
+            "experiment_id": "falsify-h-clock",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          },
+          {
+            "action": "Hold every other dimension constant and show that changing unknown does not change the outcome.",
+            "dimension": "unknown",
+            "experiment_id": "falsify-h-unknown",
+            "required_evidence": [
+              "held constants",
+              "changed dimension",
+              "expected outcomes",
+              "actual outcome"
+            ],
+            "safety": "isolated"
+          }
+        ],
+        "premium_calls": 0,
+        "provenance_graph": {},
+        "retractions": [],
+        "schema": "chili.diagnostic-report.v1",
+        "valid": true
+      },
+      "diagnosis_stages": [
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "SQL conflict targets are incorrectly scoped.",
+            "confidence": 0.1525,
+            "dimension": "data",
+            "evidence_ids": [
+              "source-3",
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Conflict targets not correctly scoped.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "SQL conflict targets are incorrectly scoped.",
+            "confidence": 0.1525,
+            "dimension": "data",
+            "evidence_ids": [
+              "source-3",
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Conflict targets not correctly scoped.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [
+            "clock"
+          ],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-3",
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Conflict targets not correctly scoped.",
+            "status": "provisional"
+          },
+          "response_chars": 1503,
+          "retractions": [],
+          "stage": "investigator"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "SQL conflict targets are incorrectly scoped.",
+            "confidence": 0.1525,
+            "dimension": "data",
+            "evidence_ids": [
+              "source-3",
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Conflict targets not correctly scoped.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "SQL conflict targets are incorrectly scoped.",
+            "confidence": 0.1525,
+            "dimension": "data",
+            "evidence_ids": [
+              "source-3",
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "promotion_reason": "",
+            "reason": "Conflict targets not correctly scoped.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-3",
+              "source-4"
+            ],
+            "hypothesis_id": "h1",
+            "reason": "Conflict targets not correctly scoped.",
+            "status": "provisional"
+          },
+          "response_chars": 2174,
+          "retractions": [],
+          "stage": "judge"
+        },
+        {
+          "accepted": true,
+          "conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.1525,
+            "dimension": "data",
+            "evidence_ids": [
+              "source-5",
+              "source-8"
+            ],
+            "hypothesis_id": "h-data",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "contract_repairs": [],
+          "effective_conclusion": {
+            "blockers": [],
+            "causal_sufficiency": "observational",
+            "claim": "The observed failure is primarily caused by data drift.",
+            "confidence": 0.1525,
+            "dimension": "data",
+            "evidence_ids": [
+              "source-5",
+              "source-8"
+            ],
+            "hypothesis_id": "h-data",
+            "promotion_reason": "",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "requested_status": "provisional",
+            "status": "provisional"
+          },
+          "errors": [],
+          "preserved_hypothesis_dimensions": [],
+          "requested_conclusion": {
+            "evidence_ids": [
+              "source-5",
+              "source-8"
+            ],
+            "hypothesis_id": "h-data",
+            "reason": "Heuristic fallback only; a local investigator should challenge this ranking.",
+            "status": "provisional"
+          },
+          "response_chars": 2592,
+          "retractions": [],
+          "stage": "judge"
+        }
+      ],
+      "diagnosis_status": "provisional",
+      "duration_ms": 217768,
+      "evaluation_role": "blinded_holdout",
+      "external_final_oracle": true,
+      "feedback_tests": {
+        "duration_ms": 471,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-sql_tenant_grant_intervals-4r7njd4g\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 4 items\n\ntests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant PASSED [ 25%]\ntests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants PASSED [ 50%]\ntests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective PASSED [ 75%]\ntests/test_public.py::test_grant_is_visible_inside_its_window PASSED     [100%]\n\n============================== 4 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "final_tests": {
+        "duration_ms": 459,
+        "exit_code": 0,
+        "isolated_final_repo": true,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-final-adjudication-rzaz4j2v\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 2 items\n\ntests/test_final_import_visibility.py::test_two_tenant_import_respects_each_effective_window PASSED [ 50%]\ntests/test_public.py::test_grant_is_visible_inside_its_window PASSED     [100%]\n\n============================== 2 passed in 0.04s ==============================",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "functional_repair_passed": true,
+      "initial_diagnosis_dimension": "data",
+      "language": "sql",
+      "model_calls": [
+        {
+          "error": null,
+          "json_object_valid": true,
+          "latency_ms": 22190,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "{\n  \"hypotheses\": [\n    {\n      \"hypothesis_id\": \"h1\",\n      \"claim\": \"SQL conflict targets are incorrectly scoped.\",\n      \"dimension\": \"data\",\n      \"support_evidence_ids\": [\"source-3\", \"source-4\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Query grants with conflicting principal/capability pairs.\"\n    },\n    {\n      \"hypothesis_id\": \"h2\",\n      \"claim\": \"Tenant/site/merchant scope is not correctly enforced.\",\n      \"dimension\": \"data\",\n      \"support_evidence_ids\": [\"source-1\", \"source-5\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Create grants with the same principal/capability but different tenants.\"\n    },\n    {\n      \"hypothesis_id\": \"h3\",\n      \"claim\": \"Effective-time reads are not correctly implemented.\",\n      \"dimension\": \"runtime\",\n      \"support_evidence_ids\": [\"source-7\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Query grants with :as_of outside the valid_from/valid_until range.\"\n    }\n  ],\n  \"experiments\": [\n    {\n      \"probe_id\": \"p-query\",\n      \"kind\": \"targeted_test\",\n      \"selector\": \"tests/test_public.py::test_grant_conflict\",\n      \"dimension\": \"data\"\n    },\n    {\n      \"probe_id\": \"p-scope\",\n      \"kind\": \"targeted_test\",\n      \"selector\": \"tests/test_public.py::test_tenant_scope\",\n      \"dimension\": \"data\"\n    }\n  ],\n  \"conclusion\": {\n    \"hypothesis_id\": \"h1\",\n    \"status\": \"provisional\",\n    \"evidence_ids\": [\"source-3\", \"source-4\"],\n    \"reason\": \"Conflict targets not correctly scoped.\"\n  }\n}",
+          "stage": "diagnosis_investigator",
+          "tokens_out": 406,
+          "wall_ms": 22190
+        },
+        {
+          "error": null,
+          "json_object_valid": true,
+          "latency_ms": 20198,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "{\n  \"hypotheses\": [\n    {\n      \"hypothesis_id\": \"h1\",\n      \"claim\": \"SQL conflict targets are incorrectly scoped.\",\n      \"dimension\": \"data\",\n      \"support_evidence_ids\": [\"source-3\", \"source-4\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Query grants with conflicting principal/capability pairs.\"\n    },\n    {\n      \"hypothesis_id\": \"h2\",\n      \"claim\": \"Tenant/site/merchant scope is not correctly enforced.\",\n      \"dimension\": \"data\",\n      \"support_evidence_ids\": [\"source-1\", \"source-5\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Create grants with the same principal/capability but different tenants.\"\n    },\n    {\n      \"hypothesis_id\": \"h3\",\n      \"claim\": \"Effective-time reads are not correctly implemented.\",\n      \"dimension\": \"runtime\",\n      \"support_evidence_ids\": [\"source-7\"],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Query grants with :as_of outside the valid_from/valid_until range.\"\n    },\n    {\n      \"hypothesis_id\": \"h-clock\",\n      \"claim\": \"The observed failure is primarily caused by clock drift.\",\n      \"dimension\": \"clock\",\n      \"support_evidence_ids\": [],\n      \"contradict_evidence_ids\": [],\n      \"falsification\": \"Hold every other dimension constant and show that changing clock does not change the outcome.\"\n    }\n  ],\n  \"experiments\": [\n    {\n      \"probe_id\": \"p-query\",\n      \"kind\": \"sql_query\",\n      \"query\": \"SELECT capability FROM access_grants WHERE tenant_id = :tenant_id AND principal_id = :principal_id AND :as_of BETWEEN valid_from AND valid_until;\",\n      \"dimension\": \"runtime\"\n    },\n    {\n      \"probe_id\": \"p-conflict\",\n      \"kind\": \"sql_query\",\n      \"query\": \"INSERT INTO access_grants (tenant_id, principal_id, capability, valid_from, valid_until, revoked_at) VALUES (:tenant_id, :principal_id, :capability, :valid_from, :valid_until, :revoked_at) ON CONFLICT(principal_id, capability) DO UPDATE SET capability = excluded.capability;\",\n      \"dimension\": \"data\"\n    }\n  ],\n  \"conclusion\": {\n    \"hypothesis_id\": \"h1\",\n    \"status\": \"provisional\",\n    \"evidence_ids\": [\"source-3\", \"source-4\"],\n    \"reason\": \"Conflict targets not correctly scoped.\"\n  }\n}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 558,
+          "wall_ms": 20198
+        },
+        {
+          "error": null,
+          "json_object_valid": true,
+          "latency_ms": 20657,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "{\"conclusion\":{\"evidence_ids\":[\"source-5\",\"source-8\"],\"hypothesis_id\":\"h-data\",\"reason\":\"Heuristic fallback only; a local investigator should challenge this ranking.\",\"status\":\"provisional\"},\"experiments\":[{\"auto_execute\":false,\"changed_dimensions\":[\"data\"],\"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\"expected_if_false\":\"The outcome remains unchanged.\",\"expected_if_true\":\"Changing data changes or restores the outcome.\",\"experiment_id\":\"isolate-data\",\"held_constant_dimensions\":[\"code\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\"hypothesis_ids\":[\"h-data\"],\"probe\":{},\"result_evidence_ids\":[],\"safety\":\"isolated\",\"status\":\"planned\"},{\"auto_execute\":false,\"changed_dimensions\":[\"code\"],\"evidence_required\":[\"before fingerprint\",\"after fingerprint\",\"actual outcome\"],\"expected_if_false\":\"The outcome remains unchanged.\",\"expected_if_true\":\"Changing code changes or restores the outcome.\",\"experiment_id\":\"isolate-code\",\"held_constant_dimensions\":[\"data\",\"clock\",\"state\",\"config\",\"dependency\",\"runtime\",\"test_harness\"],\"hypothesis_ids\":[\"h-code\"],\"probe\":{},\"result_evidence_ids\":[],\"safety\":\"isolated\",\"status\":\"planned\"}],\"hypotheses\":[{\"claim\":\"The observed failure is primarily caused by data drift.\",\"contradict_evidence_ids\":[],\"dimension\":\"data\",\"falsification\":\"Hold every other dimension constant and show that changing data does not change the outcome.\",\"hypothesis_id\":\"h-data\",\"support_evidence_ids\":[\"source-5\",\"source-8\"]},{\"claim\":\"The observed failure is primarily caused by code drift.\",\"contradict_evidence_ids\":[],\"dimension\":\"code\",\"falsification\":\"Hold every other dimension constant and show that changing code does not change the outcome.\",\"hypothesis_id\":\"h-code\",\"support_evidence_ids\":[\"probe-default-git-history\"]},{\"claim\":\"The observed failure is primarily caused by clock drift.\",\"contradict_evidence_ids\":[],\"dimension\":\"clock\",\"falsification\":\"Hold every other dimension constant and show that changing clock does not change the outcome.\",\"hypothesis_id\":\"h-clock\",\"support_evidence_ids\":[]},{\"claim\":\"The observed failure is primarily caused by unknown drift.\",\"contradict_evidence_ids\":[],\"dimension\":\"unknown\",\"falsification\":\"Hold every other dimension constant and show that changing unknown does not change the outcome.\",\"hypothesis_id\":\"h-unknown\",\"support_evidence_ids\":[\"probe-default-fixed-search\",\"operator-1\",\"operator-2\",\"operator-3\",\"operator-4\",\"source-1\",\"source-2\",\"source-3\",\"source-4\",\"source-6\",\"source-7\",\"source-9\",\"source-10\",\"source-11\",\"source-12\",\"probe-default-repo-state\"]}]}",
+          "stage": "diagnosis_judge",
+          "tokens_out": 572,
+          "wall_ms": 20657
+        },
+        {
+          "error": null,
+          "latency_ms": 9633,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "{\n  \"dimension\": \"data\",\n  \"analysis\": \"The observed failure is primarily caused by data drift. The issue arises from the reuse of external identifiers across tenants without proper scoping, leading to conflicts and loss of usable data.\",\n  \"files\": [\n    {\n      \"path\": \"sql/schema.sql\",\n      \"action\": \"modify\",\n      \"description\": \"Ensure that each tenant's access grants are scoped by their unique identifier.\"\n    },\n    {\n      \"path\": \"sql/upsert_grant.sql\",\n      \"action\": \"modify\",\n      \"description\": \"Update the upsert logic to include a composite identity that includes the tenant ID, ensuring uniqueness across tenants.\"\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"A reused external identifier is scoped by its tenant/site/merchant in storage uniqueness, idempotency lookup, and SQL conflict targets; all layers use the same composite identity.\",\n      \"owner_paths\": [\"sql/schema.sql\", \"sql/upsert_grant.sql\"],\n      \"postcondition\": \"Each access grant is uniquely identified by a combination of tenant ID, principal ID, and capability, preventing conflicts between tenants.\"\n    }\n  ],\n  \"notes\": \"The 'effective_access.sql' file does not need modification as it correctly queries the access grants based on the provided parameters. The issue lies in the schema and upsert logic, which require changes to ensure proper scoping of identifiers.\"\n}",
+          "stage": "plan",
+          "tokens_out": 296,
+          "wall_ms": 9633
+        },
+        {
+          "error": null,
+          "latency_ms": 6275,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nCREATE TABLE access_grants (\n    id INTEGER PRIMARY KEY,\n    tenant_id TEXT NOT NULL,\n    principal_id TEXT NOT NULL,\n    capability TEXT NOT NULL,\n    valid_from INTEGER NOT NULL,\n    valid_until INTEGER NOT NULL,\n    revoked_at INTEGER\n);\nCREATE UNIQUE INDEX uq_grant_identity\n    ON access_grants(principal_id, capability);\n=======\nCREATE TABLE access_grants (\n    id INTEGER PRIMARY KEY,\n    tenant_id TEXT NOT NULL,\n    principal_id TEXT NOT NULL,\n    capability TEXT NOT NULL,\n    valid_from INTEGER NOT NULL,\n    valid_until INTEGER NOT NULL,\n    revoked_at INTEGER,\n    UNIQUE (tenant_id, principal_id, capability)\n);\nCREATE UNIQUE INDEX uq_grant_identity\n    ON access_grants(tenant_id, principal_id, capability);\n>>>>>>> REPLACE\n```",
+          "stage": "edit_1",
+          "tokens_out": 169,
+          "wall_ms": 6275
+        },
+        {
+          "error": null,
+          "latency_ms": 30155,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "I apologize for the oversight. Let's correct the SEARCH and REPLACE blocks based on the current content of `sql/schema.sql`.\n\n## File: sql/schema.sql\n```\nPRAGMA foreign_keys = ON;\n\nCREATE TABLE access_grants (\n    id INTEGER PRIMARY KEY,\n    tenant_id TEXT NOT NULL,\n    principal_id TEXT NOT NULL,\n    capability TEXT NOT NULL,\n    valid_from INTEGER NOT NULL,\n    valid_until INTEGER NOT NULL,\n    revoked_at INTEGER\n);\n\nCREATE UNIQUE INDEX uq_grant_identity\n    ON access_grants(principal_id, capability);\n```\n\n## Required Change\nEnsure that each tenant's access grants are scoped by their unique identifier.\n\nOverall request:\nAn access-grant import for two tenants sharing a principal identifier leaves only one tenant with usable data. Separately, a capability remains visible at the exact instant its grant expires. Single-tenant grants queried well inside their validity window behave normally. Align storage identity, repeatable writes, and effective-time reads without broadening access.\n\nEvidence-gated diagnosis:\nDiagnostic evidence gate:\n- decision: instrument_first\n- conclusion: provisional / data\n- claim: The observed failure is primarily caused by data drift.\n- confidence: 0.1525\n- baseline drift findings: 0\n- conclusion retractions: 0\n- next experiment (isolated): Hold every other dimension constant and show that changing data does not change the outcome.\n- next experiment (isolated): Hold every other dimension constant and show that changing code does not change the outcome.\n- next experiment (isolated): Hold every other dimension constant and show that changing clock does not change the outcome.\n- next experiment (isolated): Hold every other dimension constant and show that changing unknown does not change the outcome.\n- mechanism invariant: An ineffective-at-expiration interval has an exclusive upper bound: valid_from <= as_of < valid_until; do not rewrite unrelated revocation semantics.\n- mechanism invariant: A reused external identifier is scoped by its tenant/site/merchant in storage uniqueness, idempotency lookup, and SQL conflict targets; all layers use the same composite identity.\n- diagnostic lens: expected_vs_observed\n- diagnostic lens: causal_timeline\n- diagnostic lens: root_cause_vs_downstream_symptom\n- diagnostic lens: safety_boundary\n- diagnostic lens: post_change_proof\nStrongest causal evidence:\n- sql/schema.sql:3: 1:PRAGMA foreign_keys = ON; | 3:CREATE TABLE access_grants ( | 4:id INTEGER PRIMARY KEY, | 5:tenant_id TEXT NOT NULL,\n- sql/schema.sql:5: 3:CREATE TABLE access_grants ( | 4:id INTEGER PRIMARY KEY, | 5:tenant_id TEXT NOT NULL, | 6:principal_id TEXT NOT NULL, | 7:capability TEXT NOT NULL,\n\nDeterministic mechanism invariants:\n[\n  \"An ineffective-at-expiration interval has an exclusive upper bound: valid_from <= as_of < valid_until; do not rewrite unrelated revocation semantics.\",\n  \"A reused external identifier is scoped by its tenant/site/merchant in storage uniqueness, idempotency lookup, and SQL conflict targets; all layers use the same composite identity.\"\n]\n\nCoordinated file responsibilities:\n[{\"optional_context_candidate\": false, \"path\": \"sql/schema.sql\", \"responsibility\": \"Ensure that each tenant's access grants are scoped by their unique identifier.\"}, {\"optional_context_candidate\": false, \"path\": \"sql/upsert_grant.sql\", \"responsibility\": \"Update the upsert logic to include a composite identity that includes the tenant ID, ensuring uniqueness across tenants.\"}]\nContract-to-owner postconditions (implement each applicable postcondition exactly):\n[\n  {\n    \"contract\": \"A reused external identifier is scoped by its tenant/site/merchant in storage uniqueness, idempotency lookup, and SQL conflict targets; all layers use the same composite identity.\",\n    \"owner_paths\": [\n      \"sql/schema.sql\",\n      \"sql/upsert_grant.sql\"\n    ],\n    \"postcondition\": \"Each access grant is uniquely identified by a combination of tenant ID, principal ID, and capability, preventing conflicts between tenants.\"\n  }\n]\n\nRelated source context (read-only):\n### sql/upsert_grant.sql\nINSERT INTO access_grants (\n    tenant_id, principal_id, capability, valid_from, valid_until, revoked_at\n) VALUES (\n    :tenant_id, :principal_id, :capability, :valid_from, :valid_until, :revoked_at\n)\nON CONFLICT(principal_id, capability) DO UPDATE SET\n    valid_from = excluded.valid_from,\n    valid_until = excluded.valid_until,\n    revoked_at = excluded.revoked_at;\n\n\n### sql/effective_access.sql\nSELECT capability\nFROM access_grants\nWHERE tenant_id = :tenant_id\n  AND principal_id = :principal_id\n  AND :as_of BETWEEN valid_from AND valid_until\n  AND (revoked_at IS NULL OR revoked_at > :as_of)\nORDER BY capability;\n\nMake the smallest compatible production edit in this file. Preserve public function signatures unless every approved caller is updated. Do not invent dependencies, automatic retries, or error classes that the repository does not define. Preserve semantic polarity exactly: cannot/not/never/undefined are prohibitions, not permission to store, return, or enable the behavior. Do not edit tests.\n\n## Output\nReturn ONLY the edit block(s) in the format above. No other text.",
+          "stage": "edit_1_retry",
+          "tokens_out": 1109,
+          "wall_ms": 30155
+        },
+        {
+          "error": null,
+          "latency_ms": 12090,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "{\n  \"dimension\": \"data\",\n  \"analysis\": \"The observed failure is primarily caused by data drift. The unique constraint on the combination of principal_id and capability in the access_grants table is violated when attempting to insert duplicate identities for different tenants.\",\n  \"files\": [\n    {\n      \"path\": \"sql/schema.sql\",\n      \"action\": \"modify\",\n      \"description\": \"Add a composite index on (tenant_id, principal_id) to ensure uniqueness across tenants.\"\n    },\n    {\n      \"path\": \"sql/upsert_grant.sql\",\n      \"action\": \"review\",\n      \"description\": \"Ensure that the upsert logic respects the unique constraint and handles conflicts appropriately.\"\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"test_schema_identity_includes_tenant\",\n      \"owner_paths\": [\"sql/schema.sql\"],\n      \"postcondition\": \"The database should allow inserting unique identities for different tenants without violating the unique constraint on (tenant_id, principal_id).\"\n    },\n    {\n      \"contract\": \"test_upsert_keeps_same_identity_in_both_tenants\",\n      \"owner_paths\": [\"sql/upsert_grant.sql\", \"sql/schema.sql\"],\n      \"postcondition\": \"The upsert logic should maintain the integrity of the access_grants table by respecting the unique constraint and handling conflicts correctly.\"\n    }\n  ],\n  \"notes\": \"Ensure that the composite index on (tenant_id, principal_id) is added to the schema.sql file. Review the upsert_grant.sql file to ensure it handles conflicts appropriately when inserting or updating records.\"\n}",
+          "stage": "repair_plan_1",
+          "tokens_out": 327,
+          "wall_ms": 12090
+        },
+        {
+          "error": null,
+          "latency_ms": 11318,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "{\n  \"dimension\": \"data\",\n  \"analysis\": \"The observed failure is primarily caused by data drift. The unique constraint on the combination of principal_id and capability in the access_grants table is violated when attempting to insert duplicate identities for different tenants.\",\n  \"files\": [\n    {\n      \"path\": \"sql/schema.sql\",\n      \"action\": \"modify\",\n      \"description\": \"Add a composite index on (tenant_id, principal_id) to ensure uniqueness across tenants.\"\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"test_schema_identity_includes_tenant\",\n      \"owner_paths\": [\"sql/schema.sql\"],\n      \"postcondition\": \"The database should allow inserting unique identities for different tenants without violating the unique constraint on (tenant_id, principal_id).\"\n    },\n    {\n      \"contract\": \"test_upsert_keeps_same_identity_in_both_tenants\",\n      \"owner_paths\": [\"sql/upsert_grant.sql\", \"sql/schema.sql\"],\n      \"postcondition\": \"The upsert logic should maintain the integrity of the access_grants table by respecting the unique constraint and handling conflicts correctly.\"\n    }\n  ],\n  \"notes\": \"Ensure that the composite index on (tenant_id, principal_id) is added to the schema.sql file. Review the upsert_grant.sql file to ensure it handles conflicts appropriately when inserting or updating records.\"\n}",
+          "stage": "repair_review_1",
+          "tokens_out": 284,
+          "wall_ms": 11318
+        },
+        {
+          "error": null,
+          "latency_ms": 8127,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nCREATE TABLE access_grants (\n    id INTEGER PRIMARY KEY,\n    tenant_id TEXT NOT NULL,\n    principal_id TEXT NOT NULL,\n    capability TEXT NOT NULL,\n    valid_from INTEGER NOT NULL,\n    valid_until INTEGER NOT NULL,\n    revoked_at INTEGER\n);\n\nCREATE UNIQUE INDEX uq_grant_identity\n    ON access_grants(principal_id, capability);\n=======\nCREATE TABLE access_grants (\n    id INTEGER PRIMARY KEY,\n    tenant_id TEXT NOT NULL,\n    principal_id TEXT NOT NULL,\n    capability TEXT NOT NULL,\n    valid_from INTEGER NOT NULL,\n    valid_until INTEGER NOT NULL,\n    revoked_at INTEGER\n);\n\nCREATE UNIQUE INDEX uq_grant_identity\n    ON access_grants(tenant_id, principal_id);\nCREATE UNIQUE INDEX uq_grant_capability\n    ON access_grants(principal_id, capability);\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_1",
+          "tokens_out": 176,
+          "wall_ms": 8127
+        },
+        {
+          "error": null,
+          "latency_ms": 8339,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nINSERT INTO access_grants (\n    tenant_id, principal_id, capability, valid_from, valid_until, revoked_at\n) VALUES (\n    :tenant_id, :principal_id, :capability, :valid_from, :valid_until, :revoked_at\n)\nON CONFLICT(principal_id, capability) DO UPDATE SET\n    valid_from = excluded.valid_from,\n    valid_until = excluded.valid_until,\n    revoked_at = excluded.revoked_at;\n=======\nINSERT INTO access_grants (\n    tenant_id, principal_id, capability, valid_from, valid_until, revoked_at\n) VALUES (\n    :tenant_id, :principal_id, :capability, :valid_from, :valid_until, :revoked_at\n)\nON CONFLICT(tenant_id, principal_id, capability) DO UPDATE SET\n    valid_from = excluded.valid_from,\n    valid_until = excluded.valid_until,\n    revoked_at = excluded.revoked_at;\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_2",
+          "tokens_out": 196,
+          "wall_ms": 8339
+        },
+        {
+          "error": null,
+          "latency_ms": 6665,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nSELECT capability\nFROM access_grants\nWHERE tenant_id = :tenant_id\n  AND principal_id = :principal_id\n  AND :as_of BETWEEN valid_from AND valid_until\n  AND (revoked_at IS NULL OR revoked_at > :as_of)\nORDER BY capability;\n=======\nSELECT capability\nFROM access_grants\nWHERE tenant_id = :tenant_id\n  AND principal_id = :principal_id\n  AND :as_of >= valid_from AND :as_of < valid_until\n  AND (revoked_at IS NULL OR revoked_at > :as_of)\nORDER BY capability;\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_1_3",
+          "tokens_out": 129,
+          "wall_ms": 6665
+        },
+        {
+          "error": null,
+          "latency_ms": 14066,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "{\n  \"dimension\": \"data\",\n  \"analysis\": \"The observed failure is primarily caused by data drift. The unique constraint on principal_id and capability is violated when attempting to insert duplicate identities for different tenants.\",\n  \"files\": [\n    {\n      \"path\": \"sql/schema.sql\",\n      \"action\": \"modify\",\n      \"description\": \"Add a composite unique index on tenant_id, principal_id, and capability to ensure uniqueness across all tenants.\"\n    }\n  ],\n  \"contract_coverage\": [\n    {\n      \"contract\": \"test_schema_identity_includes_tenant\",\n      \"owner_paths\": [\"sql/schema.sql\"],\n      \"postcondition\": \"The database should allow inserting unique identities for different tenants without violating the unique constraint on principal_id and capability.\"\n    },\n    {\n      \"contract\": \"test_upsert_keeps_same_identity_in_both_tenants\",\n      \"owner_paths\": [\"sql/schema.sql\", \"sql/upsert_grant.sql\"],\n      \"postcondition\": \"The database should allow upserting identities for different tenants without violating the unique constraint on principal_id and capability.\"\n    },\n    {\n      \"contract\": \"test_expiration_boundary_is_not_effective\",\n      \"owner_paths\": [\"sql/effective_access.sql\"],\n      \"postcondition\": \"The query should return no results when querying an expired grant, regardless of the tenant or principal identity.\"\n    }\n  ],\n  \"notes\": \"This repair focuses on ensuring data integrity by adding a composite unique index that includes tenant_id in addition to principal_id and capability. This change is necessary because the current schema only enforces uniqueness at the level of principal_id and capability, which allows duplicate identities across tenants.\"\n}",
+          "stage": "repair_plan_2",
+          "tokens_out": 341,
+          "wall_ms": 14066
+        },
+        {
+          "error": null,
+          "latency_ms": 14652,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "{\n  \"analysis\": \"The observed failure is primarily caused by data drift. The unique constraint on principal_id and capability is violated when attempting to insert duplicate identities for different tenants.\",\n  \"contract_coverage\": [\n    {\n      \"contract\": \"test_schema_identity_includes_tenant\",\n      \"owner_paths\": [\"sql/schema.sql\"],\n      \"postcondition\": \"The database should allow inserting unique identities for different tenants without violating the unique constraint on principal_id and capability.\"\n    },\n    {\n      \"contract\": \"test_upsert_keeps_same_identity_in_both_tenants\",\n      \"owner_paths\": [\"sql/schema.sql\", \"sql/upsert_grant.sql\"],\n      \"postcondition\": \"The database should allow upserting identities for different tenants without violating the unique constraint on principal_id and capability.\"\n    },\n    {\n      \"contract\": \"test_expiration_boundary_is_not_effective\",\n      \"owner_paths\": [\"sql/effective_access.sql\"],\n      \"postcondition\": \"The query should return no results when querying an expired grant, regardless of the tenant or principal identity.\"\n    }\n  ],\n  \"dimension\": \"data\",\n  \"files\": [\n    {\n      \"action\": \"modify\",\n      \"description\": \"Add a composite unique index on tenant_id, principal_id, and capability to ensure uniqueness across all tenants.\",\n      \"path\": \"sql/schema.sql\"\n    }\n  ],\n  \"notes\": \"This repair focuses on ensuring data integrity by adding a composite unique index that includes tenant_id in addition to principal_id and capability. This change is necessary because the current schema only enforces uniqueness at the level of principal_id and capability, which allows duplicate identities across tenants.\"\n}",
+          "stage": "repair_review_2",
+          "tokens_out": 341,
+          "wall_ms": 14652
+        },
+        {
+          "error": null,
+          "latency_ms": 7783,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nCREATE TABLE access_grants (\n    id INTEGER PRIMARY KEY,\n    tenant_id TEXT NOT NULL,\n    principal_id TEXT NOT NULL,\n    capability TEXT NOT NULL,\n    valid_from INTEGER NOT NULL,\n    valid_until INTEGER NOT NULL,\n    revoked_at INTEGER\n);\n\nCREATE UNIQUE INDEX uq_grant_identity\n    ON access_grants(principal_id, capability);\n=======\nCREATE TABLE access_grants (\n    id INTEGER PRIMARY KEY,\n    tenant_id TEXT NOT NULL,\n    principal_id TEXT NOT NULL,\n    capability TEXT NOT NULL,\n    valid_from INTEGER NOT NULL,\n    valid_until INTEGER NOT NULL,\n    revoked_at INTEGER\n);\n\nCREATE UNIQUE INDEX uq_grant_identity\n    ON access_grants(tenant_id, principal_id, capability);\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_2_1",
+          "tokens_out": 158,
+          "wall_ms": 7783
+        },
+        {
+          "error": null,
+          "latency_ms": 7722,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nINSERT INTO access_grants (\n    tenant_id, principal_id, capability, valid_from, valid_until, revoked_at\n) VALUES (\n    :tenant_id, :principal_id, :capability, :valid_from, :valid_until, :revoked_at\n)\nON CONFLICT(principal_id, capability) DO UPDATE SET\n    valid_from = excluded.valid_from,\n    valid_until = excluded.valid_until,\n    revoked_at = excluded.revoked_at;\n=======\nINSERT INTO access_grants (\n    tenant_id, principal_id, capability, valid_from, valid_until, revoked_at\n) VALUES (\n    :tenant_id, :principal_id, :capability, :valid_from, :valid_until, :revoked_at\n)\nON CONFLICT(tenant_id, principal_id, capability) DO UPDATE SET\n    valid_from = excluded.valid_from,\n    valid_until = excluded.valid_until,\n    revoked_at = excluded.revoked_at;\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_2_2",
+          "tokens_out": 196,
+          "wall_ms": 7722
+        },
+        {
+          "error": null,
+          "latency_ms": 6109,
+          "model": "qwen2.5-coder:7b",
+          "ok": true,
+          "response": "```\n<<<<<<< SEARCH\nSELECT capability\nFROM access_grants\nWHERE tenant_id = :tenant_id\n  AND principal_id = :principal_id\n  AND :as_of BETWEEN valid_from AND valid_until\n  AND (revoked_at IS NULL OR revoked_at > :as_of)\nORDER BY capability;\n=======\nSELECT capability\nFROM access_grants\nWHERE tenant_id = :tenant_id\n  AND principal_id = :principal_id\n  AND :as_of >= valid_from AND :as_of < valid_until\n  AND (revoked_at IS NULL OR revoked_at > :as_of)\nORDER BY capability;\n>>>>>>> REPLACE\n```",
+          "stage": "repair_edit_2_3",
+          "tokens_out": 129,
+          "wall_ms": 6109
+        }
+      ],
+      "model_calls_after_final": 0,
+      "model_calls_before_final": 16,
+      "patch_applied": true,
+      "patch_warnings": [
+        "full-file fallback made no change",
+        "Rolled back multi-file edit group after sql/schema.sql was rejected.",
+        "Restored optional source-owner edits because they regressed a previously green contract.",
+        "Rolled back repair because validation regressed or made no measurable progress."
+      ],
+      "premium_calls": 0,
+      "public_tests": {
+        "duration_ms": 469,
+        "exit_code": 0,
+        "output": "============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-sql_tenant_grant_intervals-4r7njd4g\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 1 item\n\ntests/test_public.py::test_grant_is_visible_inside_its_window PASSED     [100%]\n\n============================== 1 passed in 0.03s ==============================",
+        "passed": true,
+        "runner": "pytest"
+      },
+      "repair_attempts": [
+        {
+          "after_failure_signature": "3216c6b0179b9aa978dc63769d9be9dda58cf5422d36a537d4e492ed6179f2f7",
+          "after_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective",
+              "tests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant",
+              "tests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant - sqlite3.integrityerror: unique constraint failed: access_grants.principal_id, access_grants.capability",
+              "tests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective",
+              "tests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant",
+              "tests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant - sqlite3.integrityerror: unique constraint failed: access_grants.principal_id, access_grants.capability",
+              "tests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants",
+              "tests/test_public.py::test_grant_is_visible_inside_its_window"
+            ],
+            "passed_ids": [
+              "tests/test_public.py::test_grant_is_visible_inside_its_window"
+            ]
+          },
+          "after_validation_output": "NON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert tenants == {\"red\", \"blue\"}\n- assert {'red'} == {'red', 'blue'}\n- assert rows == []\n- assert [('approve',)] == []\n- observed: sqlite3.IntegrityError: UNIQUE constraint failed: access_grants.principal_id, access_grants.capability\n- observed: AssertionError: assert {'red'} == {'red', 'blue'}\n- observed: E   AssertionError: assert {'red'} == {'red', 'blue'}\n- observed: AssertionError: assert [('approve',)] == []\n- observed: E   AssertionError: assert [('approve',)] == []\n- observed: FAILED tests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants - AssertionError: assert {'red'} == {'red', 'blue'}\n- observed: FAILED tests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective - AssertionError: assert [('approve',)] == []\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-sql_tenant_grant_intervals-4r7njd4g\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 4 items\n\ntests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant FAILED [ 25%]\ntests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants FAILED [ 50%]\ntests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective FAILED [ 75%]\ntests/test_public.py::test_grant_is_visible_inside_its_window PASSED     [100%]\n\n================================== FAILURES ===================================\n____________________ test_schema_identity_includes_tenant _____________________\ntests\\test_feedback_grant_boundaries.py:37: in test_schema_identity_includes_tenant\n    db.execute(statement, (\"blue\", \"duplicate\", \"read\", 0, 10))\nE   sqlite3.IntegrityError: UNIQUE constraint failed: access_grants.principal_id, access_grants.capability\n_______________ test_upsert_keeps_same_identity_in_both_tenants _______________\ntests\\test_feedback_grant_boundaries.py:49: in test_upsert_keeps_same_identity_in_both_tenants\n    assert tenants == {\"red\", \"blue\"}\nE   AssertionError: assert {'red'} == {'red', 'blue'}\nE     \nE     Extra items in the right set:\nE     'blue'\nE     \nE     Full diff:\nE       {\nE     -     'blue',\nE           'red',\nE       }\n__________________ test_expiration_boundary_is_not_effective __________________\ntests\\test_feedback_grant_boundaries.py:59: in test_expiration_boundary_is_not_effective\n    assert rows == []\nE   AssertionError: assert [('approve',)] == []\nE     \nE     Left contains one more item: ('approve',)\nE     \nE     Full diff:\nE     - []\nE     + [\nE     +     (\nE     +         'approve',\nE     +     ),\nE     + ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant - sqlite3.IntegrityError: UNIQUE constraint failed: access_grants.principal_id, access_grants.capability\nFAILED tests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants - AssertionError: assert {'red'} == {'red', 'blue'}\n  \n  Extra items in the right set:\n  'blue'\n  \n  Full diff:\n    {\n  -     'blue',\n        'red',\n    }\nFAILED tests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective - AssertionError: assert [('approve',)] == []\n  \n  Left contains one more item: ('approve',)\n  \n  Full diff:\n  - []\n  + [\n  +     (\n  +         'approve',\n  +     ),\n  + ]\n========================= 3 failed, 1 passed in 0.09s =========================",
+          "applied_files": [
+            "sql/schema.sql"
+          ],
+          "attempt_fingerprint": "26096405d3fc98d27fdaf3ddf0220aca682dba69313533eeb1f1ad631bf89ece",
+          "attempted_diff": "--- a/sql/schema.sql\n+++ b/sql/schema.sql\n@@ -11,4 +11,6 @@\n );\n \n CREATE UNIQUE INDEX uq_grant_identity\n+    ON access_grants(tenant_id, principal_id);\n+CREATE UNIQUE INDEX uq_grant_capability\n     ON access_grants(principal_id, capability);\n",
+          "before_failure_signature": "9ec2d42972c21c386733841877ead8f4dfa4f0dbeae511c21fc636aabd29bde0",
+          "before_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective",
+              "tests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant",
+              "tests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant - sqlite3.integrityerror: unique constraint failed: access_grants.principal_id, access_grants.capability",
+              "tests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective",
+              "tests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant",
+              "tests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant - sqlite3.integrityerror: unique constraint failed: access_grants.principal_id, access_grants.capability",
+              "tests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants",
+              "tests/test_public.py::test_grant_is_visible_inside_its_window"
+            ],
+            "passed_ids": [
+              "tests/test_public.py::test_grant_is_visible_inside_its_window"
+            ]
+          },
+          "before_validation_output": "NON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert tenants == {\"red\", \"blue\"}\n- assert {'red'} == {'blue', 'red'}\n- assert rows == []\n- assert [('approve',)] == []\n- observed: sqlite3.IntegrityError: UNIQUE constraint failed: access_grants.principal_id, access_grants.capability\n- observed: AssertionError: assert {'red'} == {'blue', 'red'}\n- observed: E   AssertionError: assert {'red'} == {'blue', 'red'}\n- observed: AssertionError: assert [('approve',)] == []\n- observed: E   AssertionError: assert [('approve',)] == []\n- observed: FAILED tests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants - AssertionError: assert {'red'} == {'blue', 'red'}\n- observed: FAILED tests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective - AssertionError: assert [('approve',)] == []\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-sql_tenant_grant_intervals-4r7njd4g\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 4 items\n\ntests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant FAILED [ 25%]\ntests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants FAILED [ 50%]\ntests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective FAILED [ 75%]\ntests/test_public.py::test_grant_is_visible_inside_its_window PASSED     [100%]\n\n================================== FAILURES ===================================\n____________________ test_schema_identity_includes_tenant _____________________\ntests\\test_feedback_grant_boundaries.py:37: in test_schema_identity_includes_tenant\n    db.execute(statement, (\"blue\", \"duplicate\", \"read\", 0, 10))\nE   sqlite3.IntegrityError: UNIQUE constraint failed: access_grants.principal_id, access_grants.capability\n_______________ test_upsert_keeps_same_identity_in_both_tenants _______________\ntests\\test_feedback_grant_boundaries.py:49: in test_upsert_keeps_same_identity_in_both_tenants\n    assert tenants == {\"red\", \"blue\"}\nE   AssertionError: assert {'red'} == {'blue', 'red'}\nE     \nE     Extra items in the right set:\nE     'blue'\nE     \nE     Full diff:\nE       {\nE     -     'blue',\nE           'red',\nE       }\n__________________ test_expiration_boundary_is_not_effective __________________\ntests\\test_feedback_grant_boundaries.py:59: in test_expiration_boundary_is_not_effective\n    assert rows == []\nE   AssertionError: assert [('approve',)] == []\nE     \nE     Left contains one more item: ('approve',)\nE     \nE     Full diff:\nE     - []\nE     + [\nE     +     (\nE     +         'approve',\nE     +     ),\nE     + ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant - sqlite3.IntegrityError: UNIQUE constraint failed: access_grants.principal_id, access_grants.capability\nFAILED tests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants - AssertionError: assert {'red'} == {'blue', 'red'}\n  \n  Extra items in the right set:\n  'blue'\n  \n  Full diff:\n    {\n  -     'blue',\n        'red',\n    }\nFAILED tests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective - AssertionError: assert [('approve',)] == []\n  \n  Left contains one more item: ('approve',)\n  \n  Full diff:\n  - []\n  + [\n  +     (\n  +         'approve',\n  +     ),\n  + ]\n========================= 3 failed, 1 passed in 0.09s =========================",
+          "escalated": false,
+          "feedback_context_files": [
+            "sql/schema.sql",
+            "sql/upsert_grant.sql",
+            "sql/effective_access.sql"
+          ],
+          "model": "qwen2.5-coder:7b",
+          "ownership_augmented_files": [
+            "sql/upsert_grant.sql",
+            "sql/effective_access.sql"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The observed failure is primarily caused by data drift. The unique constraint on the combination of principal_id and capability in the access_grants table is violated when attempting to insert duplicate identities for different tenants.",
+            "contract_coverage": [
+              {
+                "contract": "test_schema_identity_includes_tenant",
+                "owner_paths": [
+                  "sql/schema.sql"
+                ],
+                "postcondition": "The database should allow inserting unique identities for different tenants without violating the unique constraint on (tenant_id, principal_id)."
+              },
+              {
+                "contract": "test_upsert_keeps_same_identity_in_both_tenants",
+                "owner_paths": [
+                  "sql/upsert_grant.sql",
+                  "sql/schema.sql"
+                ],
+                "postcondition": "The upsert logic should maintain the integrity of the access_grants table by respecting the unique constraint and handling conflicts correctly."
+              }
+            ],
+            "dimension": "data",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Add a composite index on (tenant_id, principal_id) to ensure uniqueness across tenants.",
+                "path": "sql/schema.sql"
+              }
+            ],
+            "notes": "Ensure that the composite index on (tenant_id, principal_id) is added to the schema.sql file. Review the upsert_grant.sql file to ensure it handles conflicts appropriately when inserting or updating records."
+          },
+          "proposed_diagnosis_dimension": "data",
+          "rolled_back_after_validation": true,
+          "round": 1,
+          "satisfied_files": [],
+          "selected_file": "sql/schema.sql",
+          "selected_files": [
+            "sql/schema.sql",
+            "sql/upsert_grant.sql",
+            "sql/effective_access.sql"
+          ],
+          "skipped_optional_files": [
+            "sql/upsert_grant.sql",
+            "sql/effective_access.sql"
+          ],
+          "validation_output": "NON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert tenants == {\"red\", \"blue\"}\n- assert {'red'} == {'red', 'blue'}\n- assert rows == []\n- assert [('approve',)] == []\n- observed: sqlite3.IntegrityError: UNIQUE constraint failed: access_grants.principal_id, access_grants.capability\n- observed: AssertionError: assert {'red'} == {'red', 'blue'}\n- observed: E   AssertionError: assert {'red'} == {'red', 'blue'}\n- observed: AssertionError: assert [('approve',)] == []\n- observed: E   AssertionError: assert [('approve',)] == []\n- observed: FAILED tests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants - AssertionError: assert {'red'} == {'red', 'blue'}\n- observed: FAILED tests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective - AssertionError: assert [('approve',)] == []\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-sql_tenant_grant_intervals-4r7njd4g\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 4 items\n\ntests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant FAILED [ 25%]\ntests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants FAILED [ 50%]\ntests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective FAILED [ 75%]\ntests/test_public.py::test_grant_is_visible_inside_its_window PASSED     [100%]\n\n================================== FAILURES ===================================\n____________________ test_schema_identity_includes_tenant _____________________\ntests\\test_feedback_grant_boundaries.py:37: in test_schema_identity_includes_tenant\n    db.execute(statement, (\"blue\", \"duplicate\", \"read\", 0, 10))\nE   sqlite3.IntegrityError: UNIQUE constraint failed: access_grants.principal_id, access_grants.capability\n_______________ test_upsert_keeps_same_identity_in_both_tenants _______________\ntests\\test_feedback_grant_boundaries.py:49: in test_upsert_keeps_same_identity_in_both_tenants\n    assert tenants == {\"red\", \"blue\"}\nE   AssertionError: assert {'red'} == {'red', 'blue'}\nE     \nE     Extra items in the right set:\nE     'blue'\nE     \nE     Full diff:\nE       {\nE     -     'blue',\nE           'red',\nE       }\n__________________ test_expiration_boundary_is_not_effective __________________\ntests\\test_feedback_grant_boundaries.py:59: in test_expiration_boundary_is_not_effective\n    assert rows == []\nE   AssertionError: assert [('approve',)] == []\nE     \nE     Left contains one more item: ('approve',)\nE     \nE     Full diff:\nE     - []\nE     + [\nE     +     (\nE     +         'approve',\nE     +     ),\nE     + ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant - sqlite3.IntegrityError: UNIQUE constraint failed: access_grants.principal_id, access_grants.capability\nFAILED tests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants - AssertionError: assert {'red'} == {'red', 'blue'}\n  \n  Extra items in the right set:\n  'blue'\n  \n  Full diff:\n    {\n  -     'blue',\n        'red',\n    }\nFAILED tests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective - AssertionError: assert [('approve',)] == []\n  \n  Left contains one more item: ('approve',)\n  \n  Full diff:\n  - []\n  + [\n  +     (\n  +         'approve',\n  +     ),\n  + ]\n========================= 3 failed, 1 passed in 0.09s =========================",
+          "validation_regression": {
+            "after_failure_signature": "3216c6b0179b9aa978dc63769d9be9dda58cf5422d36a537d4e492ed6179f2f7",
+            "after_quality": 2,
+            "before_failure_signature": "9ec2d42972c21c386733841877ead8f4dfa4f0dbeae511c21fc636aabd29bde0",
+            "before_quality": 2
+          },
+          "warnings": [
+            "Restored optional source-owner edits because they regressed a previously green contract.",
+            "Rolled back repair because validation regressed or made no measurable progress."
+          ]
+        },
+        {
+          "after_failure_signature": "c51fa87b76171f994860c7bbcda7fdc455c2aa0928ce68003439f63d552fae07",
+          "after_test_contracts": {
+            "complete": true,
+            "failed_ids": [],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective",
+              "tests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant",
+              "tests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants",
+              "tests/test_public.py::test_grant_is_visible_inside_its_window"
+            ],
+            "passed_ids": [
+              "tests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective",
+              "tests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant",
+              "tests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants",
+              "tests/test_public.py::test_grant_is_visible_inside_its_window"
+            ]
+          },
+          "after_validation_output": "Validation did not provide failure output.",
+          "applied_files": [
+            "sql/schema.sql",
+            "sql/upsert_grant.sql",
+            "sql/effective_access.sql"
+          ],
+          "attempt_fingerprint": "730fb5a8e26e0cf6583e052ab22678e1702539675655f3b4d6b107672f0aab7e",
+          "attempted_diff": "--- a/sql/effective_access.sql\n+++ b/sql/effective_access.sql\n@@ -2,6 +2,6 @@\n FROM access_grants\n WHERE tenant_id = :tenant_id\n   AND principal_id = :principal_id\n-  AND :as_of BETWEEN valid_from AND valid_until\n+  AND :as_of >= valid_from AND :as_of < valid_until\n   AND (revoked_at IS NULL OR revoked_at > :as_of)\n ORDER BY capability;\n\n--- a/sql/schema.sql\n+++ b/sql/schema.sql\n@@ -11,4 +11,4 @@\n );\n \n CREATE UNIQUE INDEX uq_grant_identity\n-    ON access_grants(principal_id, capability);\n+    ON access_grants(tenant_id, principal_id, capability);\n\n--- a/sql/upsert_grant.sql\n+++ b/sql/upsert_grant.sql\n@@ -3,7 +3,7 @@\n ) VALUES (\n     :tenant_id, :principal_id, :capability, :valid_from, :valid_until, :revoked_at\n )\n-ON CONFLICT(principal_id, capability) DO UPDATE SET\n+ON CONFLICT(tenant_id, principal_id, capability) DO UPDATE SET\n     valid_from = excluded.valid_from,\n     valid_until = excluded.valid_until,\n     revoked_at = excluded.revoked_at;\n",
+          "before_failure_signature": "3216c6b0179b9aa978dc63769d9be9dda58cf5422d36a537d4e492ed6179f2f7",
+          "before_test_contracts": {
+            "complete": true,
+            "failed_ids": [
+              "tests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective",
+              "tests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant",
+              "tests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant - sqlite3.integrityerror: unique constraint failed: access_grants.principal_id, access_grants.capability",
+              "tests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants"
+            ],
+            "identity_available": true,
+            "observed_ids": [
+              "tests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective",
+              "tests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant",
+              "tests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant - sqlite3.integrityerror: unique constraint failed: access_grants.principal_id, access_grants.capability",
+              "tests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants",
+              "tests/test_public.py::test_grant_is_visible_inside_its_window"
+            ],
+            "passed_ids": [
+              "tests/test_public.py::test_grant_is_visible_inside_its_window"
+            ]
+          },
+          "before_validation_output": "NON-NEGOTIABLE VALIDATION CONTRACTS (preserve these exact assertions):\n- assert tenants == {\"red\", \"blue\"}\n- assert {'red'} == {'red', 'blue'}\n- assert rows == []\n- assert [('approve',)] == []\n- observed: sqlite3.IntegrityError: UNIQUE constraint failed: access_grants.principal_id, access_grants.capability\n- observed: AssertionError: assert {'red'} == {'red', 'blue'}\n- observed: E   AssertionError: assert {'red'} == {'red', 'blue'}\n- observed: AssertionError: assert [('approve',)] == []\n- observed: E   AssertionError: assert [('approve',)] == []\n- observed: FAILED tests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants - AssertionError: assert {'red'} == {'red', 'blue'}\n- observed: FAILED tests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective - AssertionError: assert [('approve',)] == []\n\nREPAIR-FEEDBACK FAILURE (not final adjudication):\n============================= test session starts =============================\nplatform win32 -- Python 3.13.11, pytest-9.0.2, pluggy-1.5.0 -- C:\\Users\\rindo\\miniconda3\\python.exe\ncachedir: .pytest_cache\nrootdir: C:\\Users\\rindo\\AppData\\Local\\Temp\\chili-fix-sql_tenant_grant_intervals-4r7njd4g\\repo\nplugins: anyio-4.12.1\ncollecting ... collected 4 items\n\ntests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant FAILED [ 25%]\ntests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants FAILED [ 50%]\ntests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective FAILED [ 75%]\ntests/test_public.py::test_grant_is_visible_inside_its_window PASSED     [100%]\n\n================================== FAILURES ===================================\n____________________ test_schema_identity_includes_tenant _____________________\ntests\\test_feedback_grant_boundaries.py:37: in test_schema_identity_includes_tenant\n    db.execute(statement, (\"blue\", \"duplicate\", \"read\", 0, 10))\nE   sqlite3.IntegrityError: UNIQUE constraint failed: access_grants.principal_id, access_grants.capability\n_______________ test_upsert_keeps_same_identity_in_both_tenants _______________\ntests\\test_feedback_grant_boundaries.py:49: in test_upsert_keeps_same_identity_in_both_tenants\n    assert tenants == {\"red\", \"blue\"}\nE   AssertionError: assert {'red'} == {'red', 'blue'}\nE     \nE     Extra items in the right set:\nE     'blue'\nE     \nE     Full diff:\nE       {\nE     -     'blue',\nE           'red',\nE       }\n__________________ test_expiration_boundary_is_not_effective __________________\ntests\\test_feedback_grant_boundaries.py:59: in test_expiration_boundary_is_not_effective\n    assert rows == []\nE   AssertionError: assert [('approve',)] == []\nE     \nE     Left contains one more item: ('approve',)\nE     \nE     Full diff:\nE     - []\nE     + [\nE     +     (\nE     +         'approve',\nE     +     ),\nE     + ]\n=========================== short test summary info ===========================\nFAILED tests/test_feedback_grant_boundaries.py::test_schema_identity_includes_tenant - sqlite3.IntegrityError: UNIQUE constraint failed: access_grants.principal_id, access_grants.capability\nFAILED tests/test_feedback_grant_boundaries.py::test_upsert_keeps_same_identity_in_both_tenants - AssertionError: assert {'red'} == {'red', 'blue'}\n  \n  Extra items in the right set:\n  'blue'\n  \n  Full diff:\n    {\n  -     'blue',\n        'red',\n    }\nFAILED tests/test_feedback_grant_boundaries.py::test_expiration_boundary_is_not_effective - AssertionError: assert [('approve',)] == []\n  \n  Left contains one more item: ('approve',)\n  \n  Full diff:\n  - []\n  + [\n  +     (\n  +         'approve',\n  +     ),\n  + ]\n========================= 3 failed, 1 passed in 0.09s =========================",
+          "escalated": false,
+          "feedback_context_files": [
+            "sql/schema.sql",
+            "sql/upsert_grant.sql",
+            "sql/effective_access.sql"
+          ],
+          "model": "qwen2.5-coder:7b",
+          "ownership_augmented_files": [
+            "sql/upsert_grant.sql",
+            "sql/effective_access.sql"
+          ],
+          "patch_applied": true,
+          "plan": {
+            "analysis": "The observed failure is primarily caused by data drift. The unique constraint on principal_id and capability is violated when attempting to insert duplicate identities for different tenants.",
+            "contract_coverage": [
+              {
+                "contract": "test_schema_identity_includes_tenant",
+                "owner_paths": [
+                  "sql/schema.sql"
+                ],
+                "postcondition": "The database should allow inserting unique identities for different tenants without violating the unique constraint on principal_id and capability."
+              },
+              {
+                "contract": "test_upsert_keeps_same_identity_in_both_tenants",
+                "owner_paths": [
+                  "sql/schema.sql",
+                  "sql/upsert_grant.sql"
+                ],
+                "postcondition": "The database should allow upserting identities for different tenants without violating the unique constraint on principal_id and capability."
+              },
+              {
+                "contract": "test_expiration_boundary_is_not_effective",
+                "owner_paths": [
+                  "sql/effective_access.sql"
+                ],
+                "postcondition": "The query should return no results when querying an expired grant, regardless of the tenant or principal identity."
+              }
+            ],
+            "dimension": "data",
+            "files": [
+              {
+                "action": "modify",
+                "description": "Add a composite unique index on tenant_id, principal_id, and capability to ensure uniqueness across all tenants.",
+                "path": "sql/schema.sql"
+              }
+            ],
+            "notes": "This repair focuses on ensuring data integrity by adding a composite unique index that includes tenant_id in addition to principal_id and capability. This change is necessary because the current schema only enforces uniqueness at the level of principal_id and capability, which allows duplicate identities across tenants."
+          },
+          "proposed_diagnosis_dimension": "data",
+          "round": 2,
+          "satisfied_files": [],
+          "selected_file": "sql/schema.sql",
+          "selected_files": [
+            "sql/schema.sql",
+            "sql/upsert_grant.sql",
+            "sql/effective_access.sql"
+          ],
+          "skipped_optional_files": [],
+          "warnings": []
+        }
+      ],
+      "score": 100,
+      "sealed_final_adjudication": true,
+      "selected_file": "",
+      "selected_files": [
+        "sql/schema.sql",
+        "sql/upsert_grant.sql",
+        "sql/effective_access.sql"
+      ],
+      "split": "holdout-sealed-sql-multifile",
+      "test_runner": "pytest"
+    }
+  ],
+  "created_at": "2026-07-12T15:32:19.939611+00:00",
+  "development_regression_case_count": 0,
+  "development_regression_score": 0.0,
+  "diagnosis_accuracy": 100.0,
+  "diagnosis_correct_count": 1,
+  "diagnostic_stage_acceptance_rate": 100.0,
+  "diagnostic_stage_count": 3,
+  "escalation_model": "qwen2.5-coder:14b",
+  "evaluation_verdict": "blinded_evaluation_passed",
+  "exact_file_set_accuracy": 100.0,
+  "exact_file_set_count": 1,
+  "fable5_head_to_head_run": false,
+  "fable5_parity_claim": false,
+  "functional_solve_count": 1,
+  "functional_solve_rate": 100.0,
+  "holdout_case_count": 1,
+  "holdout_score": 100.0,
+  "max_base_repair_rounds": 2,
+  "max_escalation_repair_rounds": 1,
+  "max_repair_rounds": 3,
+  "maximum_score_without_final_pass": 55,
+  "model": "qwen2.5-coder:7b",
+  "multifile_holdout_case_count": 1,
+  "multifile_holdout_score": 100.0,
+  "overall_score": 100.0,
+  "premium_calls": 0,
+  "reference_family": "claude-fable-5",
+  "schema": "chili.diagnosis-to-fix-results.v5",
+  "score_weights": {
+    "baseline_final_failure": 5,
+    "diagnosis": 15,
+    "file_selection": 10,
+    "final_tests": 45,
+    "patch_applied": 5,
+    "premium_independence": 10,
+    "public_tests": 10
+  },
+  "sealed_final_case_count": 1,
+  "verdict": "shadow_ready"
+}
