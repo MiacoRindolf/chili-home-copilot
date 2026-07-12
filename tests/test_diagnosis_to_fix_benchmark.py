@@ -551,6 +551,21 @@ def test_read_only_feedback_context_is_bounded_and_test_scoped(tmp_path):
     assert "SECRET" not in context
 
 
+def test_feedback_imports_map_to_directly_exercised_candidate_boundaries():
+    context = (
+        "from settings.cli import CliOptions\n"
+        'import { Session } from "../src/session.ts";\n'
+        'final schema = root / "schema.sql";\n'
+    )
+
+    exercised = benchmark._feedback_exercised_candidates(
+        context,
+        ["settings/cli.py", "src/session.ts", "sql/schema.sql", "unused.py"],
+    )
+
+    assert exercised == ["settings/cli.py", "src/session.ts", "sql/schema.sql"]
+
+
 def test_oracle_test_partitions_require_disjoint_sealed_final_contracts():
     legacy = benchmark._oracle_test_partitions(
         {"hidden_files": {"tests/test_hidden.py": "assert False\n"}}

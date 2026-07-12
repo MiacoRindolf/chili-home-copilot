@@ -648,6 +648,31 @@ def _read_only_test_context(
     return "\n\n".join(parts)
 
 
+def _feedback_exercised_candidates(
+    feedback_context: str,
+    candidates: Sequence[str],
+) -> list[str]:
+    lower = str(feedback_context or "").lower()
+    safe = [relative for value in candidates if (relative := _safe_rel(value))]
+    basename_counts: dict[str, int] = {}
+    for relative in safe:
+        basename = Path(relative).name.lower()
+        basename_counts[basename] = basename_counts.get(basename, 0) + 1
+    exercised: list[str] = []
+    for relative in safe:
+        normalized = relative.lower()
+        path_without_suffix = str(Path(normalized).with_suffix("")).replace("\\", "/")
+        module_name = path_without_suffix.replace("/", ".")
+        basename = Path(normalized).name.lower()
+        if (
+            normalized in lower
+            or module_name in lower
+            or (basename_counts.get(basename) == 1 and basename in lower)
+        ):
+            exercised.append(relative)
+    return exercised
+
+
 def _case_max_files(case: Mapping[str, Any]) -> int:
     candidates = {
         relative
@@ -1671,12 +1696,29 @@ def _repair_after_failure(
     if _plan_file_items(reviewed, candidates, max_files):
         plan = reviewed
     selected = _plan_file_items(plan, candidates, max_files)
+    selected_paths = {str(item.get("path") or "") for item in selected}
+    ownership_augmented_files: list[str] = []
+    for relative in _feedback_exercised_candidates(feedback_context, candidates):
+        if relative in selected_paths or len(selected) >= max_files:
+            continue
+        selected.append(
+            {
+                "path": relative,
+                "description": (
+                    "Repair this directly exercised source boundary so every read-only feedback contract holds "
+                    "while preserving public behavior."
+                ),
+            }
+        )
+        selected_paths.add(relative)
+        ownership_augmented_files.append(relative)
     if not selected:
         return {
             "round": round_index,
             "plan": plan,
             "selected_file": "",
             "selected_files": [],
+            "ownership_augmented_files": [],
             "patch_applied": False,
             "warnings": ["Repair planner selected no valid source file."],
         }
@@ -1690,14 +1732,17 @@ def _repair_after_failure(
         calls,
         timeout,
         stage_prefix=f"repair_edit_{round_index}",
-        failure_output=failure_output,
+        failure_output=(
+            f"{failure_output}\n\nREAD-ONLY REPAIR-FEEDBACK TEST CONTRACTS:\n{feedback_context}"
+        )[:20_000],
     )
-    selected_paths = [str(item.get("path") or "") for item in selected]
+    selected_file_paths = [str(item.get("path") or "") for item in selected]
     return {
         "round": round_index,
         "plan": plan,
-        "selected_file": selected_paths[0] if selected_paths else "",
-        "selected_files": selected_paths,
+        "selected_file": selected_file_paths[0] if selected_file_paths else "",
+        "selected_files": selected_file_paths,
+        "ownership_augmented_files": ownership_augmented_files,
         **edit,
     }
 
