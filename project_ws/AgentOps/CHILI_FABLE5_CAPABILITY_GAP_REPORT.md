@@ -271,6 +271,21 @@ heuristic-only replay also scored exactly **61.9/100**. The larger local model t
 causal quality; it was not promoted. Full details:
 `project_ws/AgentOps/FABLE5_CLASS_DIAGNOSTIC_SEVENTH_MODEL_CHALLENGER.md`.
 
+After preserving the untouched result, commits `a637bfbd8c412bc8c4ee495c408d8556e785b18d`, `ddbceba`, and
+`6f64b4fea317c5ab41d739331e867d2a93ebc402` added generic causal-owner separation, evidence lifecycle and
+intervention scope, retained-comparison semantics, evidence-derived status, qualified contradiction filtering,
+cross-stage causal-support retention, grounded-family preservation across changed model IDs, and monotonic
+evidence ranking. The disclosed heuristic replay reached **100/100**. Three complete local-council reruns scored
+**98.75**, **95.62**, and finally **100/100**; all made 24/24 successful local calls, used zero premium calls, and
+ended with zero unsafe automatic experiments. The final run accepted **24/24** stages, passed **8/8** safety
+checks, averaged **34.4 seconds/call**, peaked at **50.1 seconds**, and completed in **831.4 seconds**. Broad
+validation passed **234 tests**. Full details and all three raw artifacts are retained in
+`project_ws/AgentOps/FABLE5_CLASS_DIAGNOSTIC_SEVENTH_SLICE_REPAIR.md`.
+
+These disclosed repair results do not overwrite the untouched 63.8 score. The 98.75-to-95.62 variance also
+shows that one perfect replay is insufficient for a replacement claim. A new post-repair untouched slice is the
+next authoritative diagnostic gate.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
@@ -295,9 +310,9 @@ causal quality; it was not promoted. Full details:
 2. Provider-attested Fable 5 history exists, but no provider-attested Fable output exists for the same frozen repair cases. Historical answers are excluded from a blinded score because current CHILI development may be contaminated by their fixes and task mechanics.
 3. Seven independent eight-case diagnostic slices now total 56 cases and scored 88.12/100, 87.5/100, 76.25/100, 69.38/100, 74.4/100, 67.5/100, and 63.8/100. The numeric diagnostic-count target is met, but every untouched slice is below the 90 shadow threshold, the latest result is the lowest, and the set does not yet satisfy the required repository/language mix or direct Fable 5 comparison.
 4. Runtime evidence currently covers bounded text logs, aggregate/schema PostgreSQL reads, typed-probe timestamps, structured causal timelines, hashed log correlation identities, and explicit cross-service flow edges. It does not yet provide external trace-backend ingestion, metrics backends, container state, process inspection, automatic producer/consumer role inference for arbitrary systems, or a live production proof using a separately provisioned SELECT-only role.
-5. Local 7B output remains stochastic. The second untouched diagnostic slice produced 0/24 usable packets before compact contracts. The fourth through seventh untouched slices accepted 24/24 packets yet scored only 69.38, 74.4, 67.5, and 63.8, proving that structural usability is not diagnostic quality. The sixth repair replay reached 92.5/100, but the next fresh slice exposed six family errors, four drift misses, three decision errors, and four status errors. Other disclosed development runs varied between 95 and 100, and five of six final cross-language successes required recognized deterministic rescue. That demonstrates system resilience, not frontier-model-level free-form reasoning.
+5. Local 7B output remains stochastic. The second untouched diagnostic slice produced 0/24 usable packets before compact contracts. The fourth through seventh untouched slices accepted 24/24 packets yet scored only 69.38, 74.4, 67.5, and 63.8, proving that structural usability is not diagnostic quality. The sixth repair replay reached 92.5/100, but the next fresh slice exposed six family errors, four drift misses, three decision errors, and four status errors. Seventh-slice disclosed reruns then varied from 98.75 to 95.62 before reaching 100 after two additional generic council-contract repairs. Five of six final cross-language successes also required recognized deterministic rescue. That demonstrates system resilience, not frontier-model-level free-form reasoning.
 6. Recognized repair synthesis is intentionally narrow. Unknown mechanisms, dependency migrations, frontend visual validation, true concurrency races, and large cross-service refactors remain under-tested.
-7. Final reviewed-code cross-language latency averaged 73.9 seconds/case. Diagnostic calls averaged 51.6, 61.2, 52.8, 50.9, and most recently 71.3 seconds on the slower untouched slices. The seventh council required 1,717.3 seconds end to end. Atomic per-case checkpointing now prevents total progress loss and passed a simulated interruption/resume test, but adaptive stage routing and a real host-loss recovery proof remain open.
+7. Final reviewed-code cross-language latency averaged 73.9 seconds/case. Diagnostic calls averaged 51.6, 61.2, 52.8, 50.9, and most recently 71.3 seconds on the slower untouched slices. The untouched seventh council required 1,717.3 seconds end to end; its final disclosed repair run still required 831.4 seconds and varied from 24 to 50 seconds per call. Atomic per-case checkpointing now prevents total progress loss and passed a simulated interruption/resume test, but adaptive stage routing and a real host-loss recovery proof remain open.
 8. The 14B local model was not production-usable on current hardware because it offloaded heavily to CPU. The resident 7B model is the measured production lane.
 9. Diagnostic memory is same-repository and lexical. It cannot yet transfer validated mechanisms across unrelated repositories, and unattended full-autopilot runs cannot self-promote their conclusions.
 
