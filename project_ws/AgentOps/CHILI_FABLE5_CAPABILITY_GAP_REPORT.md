@@ -4,7 +4,7 @@ Date: 2026-07-11
 
 ## Current Verdict
 
-CHILI is now **qualified for local-only development shadow use** on the tested diagnostic and repair contracts. All seven untouched independent diagnostic slices remain below the promotion threshold, so it is **not yet proven universally better than Claude Fable 5** on arbitrary complex coding work.
+CHILI is now **qualified for local-only development shadow use** on the tested diagnostic and repair contracts. All eight untouched independent diagnostic slices remain below the promotion threshold, so it is **not yet proven universally better than Claude Fable 5** on arbitrary complex coding work.
 
 This distinction is intentional. The current evidence proves that CHILI can diagnose, gather bounded evidence, select owning files, generate local patches, use validation failures as new evidence, repair or roll back its own patch, and pass cross-language development regressions without premium calls. It does not yet provide a blinded, statistically meaningful head-to-head against Fable 5.
 
@@ -30,7 +30,7 @@ This distinction is intentional. The current evidence proves that CHILI can diag
 | Recognized contract repair | Prompt-derived invariants and repository-shape checks for single-flight eviction, cancellation propagation, injected-clock TTL, subscription lifecycle, partial uniqueness, and sibling pre-aggregation | Proven by variant unit tests and six real regression fixtures; deliberately narrow |
 | Production validation repair | Project Autonomy preserves operator/assertion contracts and retries validation locally | Default three rounds, hard maximum five; proven by tests, not yet by a large live inventory |
 | Fable 5 reference accuracy | Active target is `claude-fable-5`; exact candidate responses must bind to provider-native or provider-UI identity evidence | Proven for archive identity and collection controls; no same-task score yet |
-| Independent post-freeze diagnostic holdout | Cases authored only after the tested source SHA was frozen; case/oracle hashes unchanged through the run | Seven eight-case slices completed at 88.12/100, 87.5/100, 76.25/100, 69.38/100, 74.4/100, 67.5/100, and 63.8/100; all below the 90 shadow threshold |
+| Independent post-freeze diagnostic holdout | Cases authored only after the tested source SHA was frozen; case/oracle hashes unchanged through the run | Eight eight-case slices completed at 88.12/100, 87.5/100, 76.25/100, 69.38/100, 74.4/100, 67.5/100, 63.8/100, and 83.12/100; all below the 90 shadow threshold. The eighth oracle was dimension-lenient; strict primary-family scoring is 70.62/100 |
 | Durable local benchmark execution | Atomic per-case checkpoints bound to source, runner, public inputs, model, stages, and inference parameters; incompatible resumes fail closed | Proven by simulated interruption and compatible resume; real host-loss recovery remains untested |
 | Direct blinded Fable 5 head-to-head | Same unseen task set independently run by Fable 5 and CHILI, with human adjudication | Missing |
 | Broad language/repository coverage | Initial Python, TypeScript, Dart, and SQL repair coverage | Partial; large repositories, Go, Rust, and mixed stacks remain incomplete |
@@ -286,6 +286,27 @@ These disclosed repair results do not overwrite the untouched 63.8 score. The 98
 shows that one perfect replay is insufficient for a replacement claim. A new post-repair untouched slice is the
 next authoritative diagnostic gate.
 
+### Eighth Independent Post-Freeze Diagnostic Slice
+
+- Frozen implementation: `1bbcf216ee758fe78ce67a5c2050030860daa5e8`
+- Fixture-only commit: `2df59bee2506b0cebb47147e1feb4206195691a6`
+- Runner-manifest adapter commit: `5dad7cc59926c888042fe3bdcd4b0e48ee0df7e4`
+- Eight context-isolated, independently authored non-trading incidents with 78 unique public observations; one primary family per diagnostic dimension, six confirmed cases, and two calibrated-uncertainty cases
+- Author process used `fork_context=false`, a separate external directory, and explicit no-CHILI/no-history/no-prior-output restrictions; all public observation dimensions were `unknown`
+- An independent fixture-only validator returned semantic PASS with nonfatal adjacent-family ambiguities. It separately noted that artifact contents cannot prove process isolation; the orchestration record supplies that evidence
+- The initial runner preflight made zero model calls and failed on author-supplied manifest key names. A manifest-only adapter changed no case or oracle bytes; all 16 case/oracle hashes remained exact through scoring
+- Local model: `qwen2.5-coder:7b`; **24/24 calls successful**, **24/24 stages accepted**, zero premium calls, and **8/8 final safety checks passed**
+- Frozen-oracle untouched score: **83.12/100**; verdict: `needs_improvement`
+- The oracle allowed five adjacent dimensions per case. A post-seal strict audit against `primary_causal_dimension` scored **70.62/100**, with only **3/8** primary families correct
+- Author-intended failures: five primary families, all four true drift findings, two decisions, and three statuses
+- Average local-call latency: **33.5 seconds**; maximum: **46.5 seconds**; wall time: **809.5 seconds**
+- Reports: `project_ws/AgentOps/FABLE5_CLASS_DIAGNOSTIC_BLINDED_EIGHTH_RUN.md`, `project_ws/AgentOps/FABLE5_CLASS_DIAGNOSTIC_BLINDED_EIGHTH_RUN_RECEIPT.md`, and `project_ws/AgentOps/fable5_class_diagnostic_blinded_eighth_run.json`
+
+This fresh result is negative evidence against current Fable 5-class generalization. The nominal score recovered
+from the seventh untouched 63.8 but remained below 90, while strict primary-family scoring exposed transfer
+failures hidden by a permissive oracle. The disclosed seventh 100 therefore did not generalize to independently
+authored causal language.
+
 ## Safety Boundaries
 
 - Automatic probes cannot represent Docker, broker, deployment, process restart, database mutation, network mutation, or arbitrary shell execution.
@@ -308,9 +329,9 @@ next authoritative diagnostic gate.
 
 1. The repair suite has only 13 small development repositories: seven Python and six TypeScript/Dart/SQL. It does not represent large-repository, mixed-stack, Go, or Rust superiority.
 2. Provider-attested Fable 5 history exists, but no provider-attested Fable output exists for the same frozen repair cases. Historical answers are excluded from a blinded score because current CHILI development may be contaminated by their fixes and task mechanics.
-3. Seven independent eight-case diagnostic slices now total 56 cases and scored 88.12/100, 87.5/100, 76.25/100, 69.38/100, 74.4/100, 67.5/100, and 63.8/100. The numeric diagnostic-count target is met, but every untouched slice is below the 90 shadow threshold, the latest result is the lowest, and the set does not yet satisfy the required repository/language mix or direct Fable 5 comparison.
+3. Eight independent eight-case diagnostic slices now total 64 cases and scored 88.12/100, 87.5/100, 76.25/100, 69.38/100, 74.4/100, 67.5/100, 63.8/100, and 83.12/100. Every untouched slice is below the 90 shadow threshold. The eighth oracle's five-family tolerance inflated its nominal result; strict primary-family scoring was 70.62/100. The set still lacks the required repository/language mix and direct Fable 5 comparison.
 4. Runtime evidence currently covers bounded text logs, aggregate/schema PostgreSQL reads, typed-probe timestamps, structured causal timelines, hashed log correlation identities, and explicit cross-service flow edges. It does not yet provide external trace-backend ingestion, metrics backends, container state, process inspection, automatic producer/consumer role inference for arbitrary systems, or a live production proof using a separately provisioned SELECT-only role.
-5. Local 7B output remains stochastic. The second untouched diagnostic slice produced 0/24 usable packets before compact contracts. The fourth through seventh untouched slices accepted 24/24 packets yet scored only 69.38, 74.4, 67.5, and 63.8, proving that structural usability is not diagnostic quality. The sixth repair replay reached 92.5/100, but the next fresh slice exposed six family errors, four drift misses, three decision errors, and four status errors. Seventh-slice disclosed reruns then varied from 98.75 to 95.62 before reaching 100 after two additional generic council-contract repairs. Five of six final cross-language successes also required recognized deterministic rescue. That demonstrates system resilience, not frontier-model-level free-form reasoning.
+5. Local 7B output remains stochastic. The second untouched diagnostic slice produced 0/24 usable packets before compact contracts. The fourth through eighth untouched slices accepted 24/24 packets yet scored only 69.38, 74.4, 67.5, 63.8, and 83.12, proving that structural usability is not diagnostic quality. The sixth repair replay reached 92.5/100, but the next fresh slice exposed six family errors, four drift misses, three decision errors, and four status errors. Seventh-slice disclosed reruns then varied from 98.75 to 95.62 before reaching 100 after two additional generic council-contract repairs; the fresh eighth slice still reached only 3/8 strict primary families and missed all four true drift findings. Five of six final cross-language successes also required recognized deterministic rescue. That demonstrates system resilience, not frontier-model-level free-form reasoning.
 6. Recognized repair synthesis is intentionally narrow. Unknown mechanisms, dependency migrations, frontend visual validation, true concurrency races, and large cross-service refactors remain under-tested.
 7. Final reviewed-code cross-language latency averaged 73.9 seconds/case. Diagnostic calls averaged 51.6, 61.2, 52.8, 50.9, and most recently 71.3 seconds on the slower untouched slices. The untouched seventh council required 1,717.3 seconds end to end; its final disclosed repair run still required 831.4 seconds and varied from 24 to 50 seconds per call. Atomic per-case checkpointing now prevents total progress loss and passed a simulated interruption/resume test, but adaptive stage routing and a real host-loss recovery proof remain open.
 8. The 14B local model was not production-usable on current hardware because it offloaded heavily to CPU. The resident 7B model is the measured production lane.
