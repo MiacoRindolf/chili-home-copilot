@@ -899,6 +899,7 @@ def _attempt_ledger_context(attempts: Sequence[Mapping[str, Any]]) -> str:
                 "after_failure": item.get("after_failure_signature") or "",
                 "attempted_diff": str(item.get("attempted_diff") or "")[:3_000],
                 "adapter_rejection": str(item.get("adapter_rejection") or "")[:1_500],
+                "validation_output": str(item.get("validation_output") or "")[:3_500],
                 "warnings": [str(value) for value in item.get("warnings") or []][-3:],
             }
         )
@@ -2189,6 +2190,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     feedback_tests,
                 )
                 if not advanced:
+                    repair["validation_output"] = _validation_failure_context(
+                        public_tests,
+                        feedback_tests,
+                    )[:6_000]
                     _restore_candidate_snapshot(repo, before_repair)
                     repair["rolled_back_after_validation"] = True
                     repair["validation_regression"] = {

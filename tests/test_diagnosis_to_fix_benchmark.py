@@ -563,6 +563,7 @@ def test_attempt_ledger_preserves_rejected_diff_and_adapter_evidence():
                 "selected_files": ["owner.py"],
                 "attempted_diff": attempted_diff,
                 "adapter_rejection": "SEARCH text was stale",
+                "validation_output": "PUBLIC REGRESSION: omitted value changed",
                 "warnings": ["rejected"],
             }
         ]
@@ -571,6 +572,7 @@ def test_attempt_ledger_preserves_rejected_diff_and_adapter_evidence():
     assert "-VALUE = 1" in ledger
     assert "+VALUE = 2" in ledger
     assert "SEARCH text was stale" in ledger
+    assert "omitted value changed" in ledger
 
 
 def test_read_only_feedback_context_is_bounded_and_test_scoped(tmp_path):
