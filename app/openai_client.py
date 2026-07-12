@@ -729,10 +729,24 @@ def is_local_code_configured() -> bool:
     return _local_code_configured()
 
 
+def _configured_local_code_models() -> set[str]:
+    return {
+        value.strip()
+        for value in (
+            settings.chili_code_local_model,
+            settings.chili_code_local_escalation_model,
+        )
+        if value and value.strip()
+    }
+
+
 def _is_local_code_model(model: str | None) -> bool:
-    if not model or not (settings.chili_code_local_model or "").strip():
-        return False
-    return model.strip() == settings.chili_code_local_model.strip()
+    return bool(model and model.strip() in _configured_local_code_models())
+
+
+def is_local_code_model(model: str | None) -> bool:
+    """Return whether a model is explicitly allowed on the local-only code lane."""
+    return _is_local_code_model(model)
 
 
 def _ollama_openai_base_url() -> str:

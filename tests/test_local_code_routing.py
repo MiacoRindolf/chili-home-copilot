@@ -22,6 +22,7 @@ from app.services.context_brain import llm_gateway
 
 
 LOCAL_MODEL = "qwen2.5-coder:7b"
+LOCAL_ESCALATION_MODEL = "qwen2.5-coder:14b"
 FRONTIER_MODEL = "claude-fable-5"
 
 
@@ -29,6 +30,11 @@ FRONTIER_MODEL = "claude-fable-5"
 def local_configured(monkeypatch):
     monkeypatch.setattr(settings, "ollama_host", "http://127.0.0.1:11434")
     monkeypatch.setattr(settings, "chili_code_local_model", LOCAL_MODEL)
+    monkeypatch.setattr(
+        settings,
+        "chili_code_local_escalation_model",
+        LOCAL_ESCALATION_MODEL,
+    )
     monkeypatch.setattr(settings, "chili_code_local_first", True)
     monkeypatch.setattr(openai_client, "_safe_log_llm_call", lambda **_k: None)
     return monkeypatch
@@ -128,6 +134,75 @@ def test_chat_local_only_success_reports_zero_premium(local_configured):
     assert result["local_only"] is True
     assert result["premium_calls"] == 0
     assert result["premium_cost_usd"] == 0.0
+
+
+def test_chat_local_only_allows_configured_local_escalation_model(local_configured):
+    monkeypatch = local_configured
+    seen: list[str] = []
+
+    def fake_call_provider(api_key, base_url, model, messages, prompt, trace_id, **kwargs):
+        seen.append(model)
+        return _reply("bounded local escalation result", model=model)
+
+    monkeypatch.setattr(openai_client, "_call_provider", fake_call_provider)
+    monkeypatch.setattr(openai_client, "_chat_groq", lambda *a, **k: pytest.fail("groq reached"))
+    monkeypatch.setattr(openai_client, "_chat_openai", lambda *a, **k: pytest.fail("openai reached"))
+    monkeypatch.setattr(openai_client, "_chat_gemini", lambda *a, **k: pytest.fail("gemini reached"))
+
+    result = openai_client.chat(
+        [{"role": "user", "content": "repair the remaining contract"}],
+        model_override=LOCAL_ESCALATION_MODEL,
+        local_only=True,
+    )
+
+    assert result["model"] == LOCAL_ESCALATION_MODEL
+    assert result["premium_calls"] == 0
+    assert seen == [LOCAL_ESCALATION_MODEL]
+
+
+def test_chat_local_only_rejects_unconfigured_model_override(local_configured):
+    monkeypatch = local_configured
+    monkeypatch.setattr(
+        openai_client,
+        "_chat_local",
+        lambda *a, **k: pytest.fail("unconfigured model reached Ollama lane"),
+    )
+
+    result = openai_client.chat(
+        [{"role": "user", "content": "repair"}],
+        model_override="operator-unapproved-model",
+        local_only=True,
+    )
+
+    assert result["model"] == "local_unavailable"
+    assert result["premium_calls"] == 0
+
+
+def test_gateway_local_override_is_forwarded_only_on_local_lane(local_configured):
+    monkeypatch = local_configured
+    captured = {}
+    monkeypatch.setattr(
+        llm_gateway,
+        "_open_db_session",
+        lambda: (_ for _ in ()).throw(RuntimeError("no database")),
+    )
+
+    def fake_passthrough(messages, **kwargs):
+        captured.update(kwargs)
+        return {"reply": "local", "model": kwargs["model_override"], "local_only": True}
+
+    monkeypatch.setattr(llm_gateway, "_passthrough", fake_passthrough)
+
+    result = llm_gateway.gateway_chat(
+        [{"role": "user", "content": "repair"}],
+        purpose="code_dispatch_edit",
+        local_only=True,
+        local_model_override=LOCAL_ESCALATION_MODEL,
+    )
+
+    assert result["model"] == LOCAL_ESCALATION_MODEL
+    assert captured["model_override"] == LOCAL_ESCALATION_MODEL
+    assert captured["local_only"] is True
 
 
 def test_weak_local_reply_escalates(local_configured):

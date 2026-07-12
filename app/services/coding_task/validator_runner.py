@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import re
 import shutil
 import subprocess
 import sys
@@ -91,6 +92,8 @@ def _run_subprocess_allowlisted(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             creationflags=creationflags,
         )
     except FileNotFoundError:
@@ -436,7 +439,12 @@ def _infer_test_files(cwd: Path, changed_files: list[str]) -> list[str]:
     return candidates[:20]  # bounded
 
 
-def run_pytest_targeted(cwd: Path, changed_files: list[str] | None = None) -> StepResult:
+def run_pytest_targeted(
+    cwd: Path,
+    changed_files: list[str] | None = None,
+    *,
+    selected_test_files: list[str] | None = None,
+) -> StepResult:
     """Run pytest on test files related to changed source files.
 
     Falls back to full collection test if no targeted tests are found.
@@ -446,12 +454,30 @@ def run_pytest_targeted(cwd: Path, changed_files: list[str] | None = None) -> St
     pc = Path(tempfile.gettempdir()) / f"chili_pytest_{uuid.uuid4().hex}"
     pc.mkdir(parents=True, exist_ok=True)
 
-    test_files = _infer_test_files(cwd, changed_files or []) if changed_files else []
+    if selected_test_files is None:
+        test_files = _infer_test_files(cwd, changed_files or []) if changed_files else []
+    else:
+        root = cwd.resolve()
+        test_files = []
+        for raw in selected_test_files:
+            relative = str(raw).replace("\\", "/").lstrip("/")
+            path = (root / relative).resolve()
+            try:
+                safe_relative = path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if (
+                safe_relative.startswith("tests/")
+                and path.is_file()
+                and path.suffix.lower() == ".py"
+                and safe_relative not in test_files
+            ):
+                test_files.append(safe_relative)
+        test_files = test_files[:20]
 
     if test_files:
         argv = [
             sys.executable, "-m", "pytest",
-            "-x",  # stop on first failure for faster feedback
             "--tb=short",
             "-q",
             "-o", f"cache_dir={pc}",
@@ -467,18 +493,59 @@ def run_pytest_targeted(cwd: Path, changed_files: list[str] | None = None) -> St
     code, to, out, err = _run_subprocess_allowlisted(argv, cwd, timeout=300)
     if code == 127 or (code == 1 and "No module named pytest" in (err or "")):
         return StepResult("pytest_targeted", 0, to, out or "", err or "", True, "pytest not available",
-                          {"tests_executed": False, "tests_selected": test_files})
+                          {
+                              "tests_executed": False,
+                              "tests_selected": test_files,
+                              "test_files": test_files,
+                              "targeted": bool(test_files),
+                              "validation_scope": "targeted_tests" if test_files else "collect_only",
+                              "command": " ".join(argv),
+                          })
     if _pytest_safe_database_guard_triggered(out, err):
         result = _pytest_safe_database_skip("pytest_targeted", to, out, err)
-        result.metadata = {"tests_executed": False, "tests_selected": test_files}
+        result.metadata = {
+            "tests_executed": False,
+            "tests_selected": test_files,
+            "test_files": test_files,
+            "targeted": bool(test_files),
+            "validation_scope": "targeted_tests" if test_files else "collect_only",
+            "command": " ".join(argv),
+        }
         return result
     out_t, _ = truncate_text(out or "")
     err_t, _ = truncate_text(err or "")
-    ok = code in (0, 5)  # 5 = no tests collected
+    combined_output = f"{out or ''}\n{err or ''}".lower()
+    zero_test_markers = (
+        "no tests ran",
+        "collected 0 items",
+        "0 tests collected",
+    )
+    tests_executed = bool(test_files) and code == 0 and not any(
+        marker in combined_output for marker in zero_test_markers
+    )
+    # Exit 5 is acceptable only for the collect-only fallback. A targeted
+    # selection that collected nothing is a failed evidence contract.
+    ok = code == 0 or (not test_files and code == 5)
     # Honesty marker: "passed" with zero tests actually run is NOT the same
     # as passing tests. Surfaced so the orchestrator/UI can show it.
-    return StepResult("pytest_targeted", 0 if ok else code, to, out_t, err_t, False, None,
-                      {"tests_executed": bool(test_files), "tests_selected": test_files})
+    return StepResult(
+        "pytest_targeted",
+        0 if ok else (code or 5),
+        to,
+        out_t,
+        err_t,
+        False,
+        None,
+        {
+            "tests_executed": tests_executed,
+            "tests_selected": test_files,
+            "test_files": test_files,
+            "targeted": bool(test_files),
+            "validation_scope": "targeted_tests" if test_files else "collect_only",
+            "command": " ".join(argv),
+            "zero_tests_collected": bool(test_files) and not tests_executed,
+        },
+    )
 
 
 def run_mypy_check(cwd: Path) -> StepResult:

@@ -691,6 +691,7 @@ def gateway_chat(
     user_name: str = "you",
     db: Optional[Session] = None,
     local_only: bool | None = None,
+    local_model_override: Optional[str] = None,
 ) -> dict:
     """Single entry point for every LLM call in CHILI.
 
@@ -703,6 +704,7 @@ def gateway_chat(
     """
     started_at = time.monotonic()
     effective_local_only = _local_only_code_routing(purpose, local_only)
+    requested_local_model = (local_model_override or "").strip()
     own_db = False
     if db is None:
         try:
@@ -721,7 +723,11 @@ def gateway_chat(
                     user_message=user_message,
                     max_tokens=max_tokens,
                     strict_escalation=False,
-                    model_override=(settings.chili_code_local_model or "").strip(),
+                    model_override=(
+                        requested_local_model
+                        if openai_client.is_local_code_model(requested_local_model)
+                        else (settings.chili_code_local_model or "").strip()
+                    ),
                     local_only=True,
                 )
             return _gateway_error_result()
@@ -746,7 +752,11 @@ def gateway_chat(
             )
             strict_escalation = False
         model_override = (
-            (settings.chili_code_local_model or "").strip()
+            (
+                requested_local_model
+                if openai_client.is_local_code_model(requested_local_model)
+                else (settings.chili_code_local_model or "").strip()
+            )
             if effective_local_only
             else (
                 _purpose_model_override(policy.purpose, policy)

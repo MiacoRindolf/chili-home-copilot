@@ -10,6 +10,8 @@ The orchestrator is intentionally local-first and safety-first:
 """
 from __future__ import annotations
 
+import ast
+import hashlib
 import json
 import os
 import re
@@ -2524,6 +2526,16 @@ _VALIDATION_REPAIR_ROUNDS = max(
     min(
         5,
         int(os.environ.get("CHILI_PROJECT_AUTOPILOT_VALIDATION_REPAIR_ROUNDS") or "3"),
+    ),
+)
+_LOCAL_ESCALATION_REPAIR_ROUNDS = max(
+    0,
+    min(
+        _VALIDATION_REPAIR_ROUNDS,
+        int(
+            os.environ.get("CHILI_PROJECT_AUTOPILOT_LOCAL_ESCALATION_REPAIR_ROUNDS")
+            or "1"
+        ),
     ),
 )
 _OLLAMA_KEEP_ALIVE = os.environ.get("CHILI_PROJECT_AUTOPILOT_OLLAMA_KEEP_ALIVE") or "15m"
@@ -7082,6 +7094,7 @@ def generate_diffs_from_plan(
     files: list[dict[str, Any]],
     *,
     validation_context: str | None = None,
+    local_model_override: str | None = None,
 ) -> list[str]:
     model_info = select_local_model()
     if not model_info.get("model"):
@@ -7128,6 +7141,17 @@ def generate_diffs_from_plan(
         _check_cancel(db, run)
         rel = str(item.get("path") or "")
         desc = str(item.get("description") or "")
+        safe_edit_path = _safe_edit_worktree_path(repo_path, rel)
+        if safe_edit_path is None:
+            _add_artifact(
+                db,
+                run.run_id,
+                "diff_rejected",
+                rel or "unsafe_path",
+                content_json={"reason": "edit_path_outside_worktree_or_symlink"},
+            )
+            rejections.append(f"{rel}: edit path is outside the worktree or is a symlink")
+            continue
         content = _read_file_content(str(repo_path), rel, max_lines=_EDIT_MAX_FILE_LINES)
         if validation_context:
             desc = (
@@ -7171,6 +7195,7 @@ def generate_diffs_from_plan(
             max_tokens=_settings.chili_code_gen_max_tokens,
             strict_escalation=False,
             local_only=True,
+            local_model_override=local_model_override,
             # Own session inside the gateway — never share the run session
             # (rollback-on-error would discard pending run state).
             db=None,
@@ -7183,6 +7208,7 @@ def generate_diffs_from_plan(
             f"edit_{rel}",
             content_json={
                 "model": (gw.get("model") if isinstance(gw, dict) else None) or "gateway_error",
+                "requested_local_model": local_model_override or model_info.get("model"),
                 "file": rel,
                 "ok": bool(reply_text.strip()),
                 "latency_ms": int((_time.monotonic() - _t0) * 1000),
@@ -7307,6 +7333,18 @@ def generate_diffs_from_plan(
                 },
             )
             rejections.append(f"{rel}: model returned neither edit blocks nor a unified diff")
+            if try_fallback(rel, content):
+                continue
+            continue
+        if not _diff_paths_are_scoped(diff, rel):
+            _add_artifact(
+                db,
+                run.run_id,
+                "diff_rejected",
+                rel,
+                content_json={"reason": "diff_touches_outside_current_file"},
+            )
+            rejections.append(f"{rel}: generated diff touches another path")
             if try_fallback(rel, content):
                 continue
             continue
@@ -7448,12 +7486,56 @@ def _extract_diff(text: str) -> str | None:
     return raw + ("\n" if not raw.endswith("\n") else "")
 
 
+def _diff_paths_are_scoped(diff_text: str, expected_path: str) -> bool:
+    expected = _safe_rel_path(expected_path)
+    if not expected:
+        return False
+    paths: set[str] = set()
+    unsafe = False
+
+    def add_path(raw: str) -> None:
+        nonlocal unsafe
+        value = raw.strip().split("\t", 1)[0].strip()
+        if value == "/dev/null":
+            return
+        if (
+            value.startswith(("/", '"', "'"))
+            or value.endswith(('"', "'"))
+            or _WINDOWS_ABSOLUTE_PATH_RE.match(value)
+        ):
+            unsafe = True
+            return
+        if value.startswith(("a/", "b/")):
+            value = value[2:]
+        rel = _safe_rel_path(value)
+        if not rel or rel != value.replace("\\", "/").strip().lstrip("/"):
+            unsafe = True
+            return
+        paths.add(rel)
+
+    for line in (diff_text or "").splitlines():
+        if line.startswith("diff --git "):
+            match = re.fullmatch(r"diff --git a/(\S+) b/(\S+)", line)
+            if not match:
+                unsafe = True
+                continue
+            add_path(match.group(1))
+            add_path(match.group(2))
+        elif line.startswith(("--- ", "+++ ")):
+            add_path(line[4:])
+        elif line.startswith(("rename from ", "rename to ", "copy from ", "copy to ")):
+            add_path(line.split(" ", 2)[2])
+    return not unsafe and paths == {expected}
+
+
 def _git(cwd: Path, args: list[str], *, input_text: str | None = None, timeout: int = 120) -> subprocess.CompletedProcess[str]:
     if input_text is None:
         return subprocess.run(
             ["git"] + args,
             cwd=str(cwd),
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=timeout,
             env=subprocess_safe_env(),
@@ -7533,6 +7615,21 @@ def _apply_diffs(worktree: Path, diffs: list[str]) -> None:
 def _changed_files(worktree: Path) -> list[str]:
     proc = _git(worktree, ["diff", "--name-only"], timeout=60)
     files = []
+    for line in (proc.stdout or "").splitlines():
+        rel = _safe_rel_path(line)
+        if rel:
+            files.append(rel)
+    files.extend(_untracked_files(worktree))
+    return sorted(dict.fromkeys(files))
+
+
+def _untracked_files(worktree: Path) -> list[str]:
+    proc = _git(
+        worktree,
+        ["ls-files", "--others", "--exclude-standard"],
+        timeout=60,
+    )
+    files: list[str] = []
     for line in (proc.stdout or "").splitlines():
         rel = _safe_rel_path(line)
         if rel:
@@ -7661,11 +7758,24 @@ def _step_result_payload(result: StepResult) -> dict[str, Any]:
     return payload
 
 
-def run_validation(worktree: Path, changed_files: list[str]) -> list[dict[str, Any]]:
+def run_validation(
+    worktree: Path,
+    changed_files: list[str],
+    *,
+    pinned_test_files: Sequence[str] | Iterable[str] | None = None,
+) -> list[dict[str, Any]]:
     results: list[StepResult] = [
         run_ast_syntax(worktree, changed_files=changed_files),
         run_ruff_check(worktree),
-        run_pytest_targeted(worktree, changed_files),
+        run_pytest_targeted(
+            worktree,
+            changed_files,
+            selected_test_files=(
+                [str(value) for value in pinned_test_files]
+                if pinned_test_files is not None
+                else None
+            ),
+        ),
         run_mypy_check(worktree),
     ]
     scripts = _package_scripts(worktree)
@@ -7673,7 +7783,17 @@ def run_validation(worktree: Path, changed_files: list[str]) -> list[dict[str, A
     if npm:
         for script in ("lint", "test", "build"):
             if script in scripts:
-                results.append(_run_allowlisted(["npm", "run", script], worktree, timeout=300))
+                result = _run_allowlisted(["npm", "run", script], worktree, timeout=300)
+                if script == "test":
+                    result.metadata = {
+                        "tests_executed": result.exit_code == 0 and not result.skipped,
+                        "tests_selected": ["package.json"],
+                        "test_files": ["package.json"],
+                        "targeted": True,
+                        "validation_scope": "repository_test_script",
+                        "command": "npm run test",
+                    }
+                results.append(result)
     else:
         for script in ("lint", "test", "build"):
             if script in scripts:
@@ -7821,6 +7941,8 @@ def _is_collect_only_validation(item: Mapping[str, Any]) -> bool:
 
 def _is_targeted_test_validation(item: Mapping[str, Any]) -> bool:
     if item.get("skipped") is True or _validation_step_failed(item) or _is_collect_only_validation(item):
+        return False
+    if item.get("tests_executed") is not True:
         return False
     step_key = str(item.get("step_key") or "").lower()
     command = str(item.get("command") or "").lower()
@@ -8031,7 +8153,7 @@ def semantic_patch_review_gate(
     tests = [
         str(test)
         for item in validation
-        if isinstance(item, Mapping)
+        if isinstance(item, Mapping) and _is_targeted_test_validation(item)
         for test in (item.get("test_files") or [])
     ]
     has_contract_tests = any(
@@ -8055,11 +8177,642 @@ def semantic_patch_review_gate(
     }
 
 
+def automatic_merge_gate_evidence(
+    plan: Mapping[str, Any] | None,
+    worktree: Path,
+    changed_files: Sequence[str] | Iterable[str],
+    validation: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    supplied_changed = sorted(
+        rel
+        for value in changed_files
+        for rel in [_safe_rel_path(str(value))]
+        if rel
+    )
+    changed = _changed_files(worktree)
+    validation_items = [dict(item) for item in validation if isinstance(item, Mapping)]
+    diff = _git(worktree, ["diff", "--no-ext-diff"], timeout=60)
+    numstat = _git(worktree, ["diff", "--numstat"], timeout=60)
+    name_status = _git(worktree, ["diff", "--name-status"], timeout=60)
+    untracked = set(_untracked_files(worktree))
+    diff_text = diff.stdout or ""
+    numstat_text = numstat.stdout or ""
+    name_status_text = name_status.stdout or ""
+    untracked_capture_ok = True
+    for rel in changed:
+        if rel not in untracked:
+            continue
+        path = _safe_worktree_path(worktree, rel)
+        if path is None or not path.is_file():
+            untracked_capture_ok = False
+            continue
+        raw = path.read_bytes()
+        if b"\0" in raw:
+            diff_text += f"\nBinary files /dev/null and b/{rel} differ\n"
+            added_lines = 0
+        else:
+            content = raw.decode("utf-8", errors="replace")
+            diff_text += "".join(
+                difflib.unified_diff(
+                    [],
+                    content.splitlines(keepends=True),
+                    fromfile="/dev/null",
+                    tofile=f"b/{rel}",
+                )
+            )
+            added_lines = len(content.splitlines())
+        numstat_text += f"{added_lines}\t0\t{rel}\n"
+        name_status_text += f"A\t{rel}\n"
+    gates: list[dict[str, Any]] = [
+        {
+            "gate": "git_evidence_capture",
+            "passed": all(
+                proc.returncode == 0 for proc in (diff, numstat, name_status)
+            ) and untracked_capture_ok,
+            "reason": (
+                "Git diff evidence captured."
+                if all(proc.returncode == 0 for proc in (diff, numstat, name_status))
+                and untracked_capture_ok
+                else "Git diff evidence could not be captured; automatic merge fails closed."
+            ),
+        },
+        {"gate": "change_blast_radius", **change_blast_radius_gate(plan, changed)},
+        {
+            "gate": "patch_self_review",
+            **patch_self_review_gate(
+                plan,
+                changed,
+                numstat_text=numstat_text if numstat.returncode == 0 else "",
+                name_status_text=name_status_text if name_status.returncode == 0 else "",
+            ),
+        },
+        {
+            "gate": "validation_merge_evidence",
+            **validation_merge_evidence(validation_items, changed),
+        },
+        {
+            "gate": "semantic_patch_review",
+            **semantic_patch_review_gate(
+                plan,
+                changed,
+                diff_text=diff_text if diff.returncode == 0 else "",
+                validation=validation_items,
+            ),
+        },
+    ]
+    if _required_domain_invariants(changed):
+        gates.append(
+            {
+                "gate": "domain_behavior_evidence",
+                **domain_behavior_validation_evidence(validation_items, changed),
+            }
+        )
+    blockers = [
+        f"{gate['gate']}: {gate.get('reason') or 'gate failed'}"
+        for gate in gates
+        if not bool(gate.get("passed"))
+    ]
+    return {
+        "schema": "chili.automatic-merge-gates.v1",
+        "passed": not blockers,
+        "gates": gates,
+        "blockers": blockers,
+        "changed_files": changed,
+        "supplied_changed_files": supplied_changed,
+        "changed_inventory_refreshed": supplied_changed != changed,
+    }
+
+
+_REPAIR_SOURCE_SUFFIXES = frozenset(
+    {".py", ".js", ".jsx", ".ts", ".tsx", ".dart", ".sql"}
+)
+
+
+def _validation_test_files(
+    validation: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
+) -> list[str]:
+    selected: list[str] = []
+    for item in validation:
+        if not isinstance(item, Mapping) or not _validation_step_failed(item):
+            continue
+        values = item.get("test_files") or item.get("tests_selected") or []
+        for value in values if isinstance(values, list) else []:
+            rel = _safe_rel_path(str(value))
+            if rel and rel not in selected:
+                selected.append(rel)
+    return selected[:12]
+
+
+def _safe_worktree_path(worktree: Path, relative: str) -> Path | None:
+    rel = _safe_rel_path(relative)
+    if not rel:
+        return None
+    root = worktree.resolve()
+    path = (root / rel).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return None
+    return path
+
+
+def _safe_edit_worktree_path(worktree: Path, relative: str) -> Path | None:
+    rel = _safe_rel_path(relative)
+    if not rel or (worktree / rel).is_symlink():
+        return None
+    return _safe_worktree_path(worktree, rel)
+
+
+def _read_validation_test_contracts(
+    worktree: Path | None,
+    validation: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
+    *,
+    max_chars: int = 12_000,
+) -> list[dict[str, str]]:
+    if worktree is None:
+        return []
+    contracts: list[dict[str, str]] = []
+    remaining = max_chars
+    for rel in _validation_test_files(validation):
+        path = _safe_edit_worktree_path(worktree, rel)
+        if path is None or not path.is_file() or remaining <= 0:
+            continue
+        content = path.read_text(encoding="utf-8", errors="replace")[: min(5_000, remaining)]
+        contracts.append({"path": rel, "content": content})
+        remaining -= len(content)
+    return contracts
+
+
+def _is_test_source_path(relative: str) -> bool:
+    lower = relative.lower().replace("\\", "/")
+    name = Path(lower).name
+    return (
+        lower.startswith(("test/", "tests/"))
+        or "/test/" in lower
+        or "/tests/" in lower
+        or name.startswith("test_")
+        or ".test." in name
+        or ".spec." in name
+    )
+
+
+def _repair_source_paths(worktree: Path) -> list[str]:
+    tracked = _git(worktree, ["ls-files"], timeout=60)
+    raw_paths = (tracked.stdout or "").splitlines() if tracked.returncode == 0 else []
+    if not raw_paths:
+        raw_paths = [
+            path.relative_to(worktree).as_posix()
+            for path in worktree.rglob("*")
+            if path.is_file()
+        ][:5_000]
+    paths: list[str] = []
+    for value in raw_paths:
+        rel = _safe_rel_path(value)
+        path = _safe_edit_worktree_path(worktree, rel or "")
+        if (
+            rel
+            and path is not None
+            and path.is_file()
+            and Path(rel).suffix.lower() in _REPAIR_SOURCE_SUFFIXES
+            and not _is_test_source_path(rel)
+        ):
+            paths.append(rel)
+    return sorted(dict.fromkeys(paths))[:5_000]
+
+
+def validation_source_owner_candidates(
+    worktree: Path,
+    validation: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
+    plan_files: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]] = (),
+    *,
+    limit: int = 2,
+) -> list[dict[str, Any]]:
+    """Map failed read-only test contracts to bounded source owners."""
+    contracts = _read_validation_test_contracts(worktree, validation)
+    if not contracts:
+        return []
+    existing = {
+        rel
+        for item in plan_files
+        if isinstance(item, Mapping)
+        for rel in [_safe_rel_path(str(item.get("path") or ""))]
+        if rel
+    }
+    sources = _repair_source_paths(worktree)
+    scores: dict[str, tuple[int, str]] = {}
+
+    def note(relative: str, score: int, evidence: str) -> None:
+        if relative in existing or relative not in sources:
+            return
+        current = scores.get(relative)
+        if current is None or score > current[0]:
+            scores[relative] = (score, evidence)
+
+    source_set = set(sources)
+    for contract in contracts:
+        test_rel = contract["path"]
+        content = contract["content"]
+        lower = content.lower().replace("\\", "/")
+        for relative in sources:
+            normalized = relative.lower()
+            if normalized in lower:
+                note(relative, 100, f"{test_rel} names the source path")
+
+        if Path(test_rel).suffix.lower() == ".py":
+            try:
+                tree = ast.parse(content, filename=test_rel)
+            except SyntaxError:
+                tree = None
+            modules: set[str] = set()
+            if tree is not None:
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        modules.update(alias.name for alias in node.names)
+                    elif isinstance(node, ast.ImportFrom) and node.module:
+                        modules.add(node.module)
+            for module in modules:
+                base = module.replace(".", "/")
+                for candidate in (f"{base}.py", f"{base}/__init__.py"):
+                    if candidate in source_set:
+                        note(candidate, 90, f"{test_rel} imports {module}")
+
+        for spec in re.findall(
+            r"(?:from\s+|require\s*\(\s*|import\s+)[\"']([^\"']+)[\"']",
+            content,
+        ):
+            if spec.startswith("."):
+                base = Path(test_rel).parent / spec
+                for suffix in ("", ".ts", ".tsx", ".js", ".jsx", ".dart"):
+                    candidate_path = _safe_worktree_path(worktree, f"{base.as_posix()}{suffix}")
+                    if candidate_path is None or not candidate_path.is_file():
+                        continue
+                    candidate = candidate_path.relative_to(worktree.resolve()).as_posix()
+                    if candidate in source_set:
+                        note(candidate, 90, f"{test_rel} imports {spec}")
+            elif spec.startswith("package:"):
+                package_path = spec.partition(":")[2].partition("/")[2]
+                for relative in sources:
+                    if package_path and relative.endswith(f"/lib/{package_path}"):
+                        note(relative, 85, f"{test_rel} imports {spec}")
+
+    ranked = sorted(scores.items(), key=lambda item: (-item[1][0], item[0]))
+    return [
+        {"path": relative, "score": score, "evidence": evidence}
+        for relative, (score, evidence) in ranked[: max(0, min(2, limit))]
+    ]
+
+
+def repair_files_with_source_owners(
+    files: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
+    owner_candidates: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
+    *,
+    allow_expand: bool,
+    max_new_files: int = 2,
+) -> list[dict[str, Any]]:
+    expanded = [dict(item) for item in files if isinstance(item, Mapping)]
+    seen = {
+        rel
+        for item in expanded
+        for rel in [_safe_rel_path(str(item.get("path") or ""))]
+        if rel
+    }
+    if not allow_expand:
+        return expanded
+    added = 0
+    for item in owner_candidates:
+        rel = _safe_rel_path(str(item.get("path") or "")) if isinstance(item, Mapping) else None
+        if (
+            not rel
+            or rel in seen
+            or len(expanded) >= _MAX_FILES_PER_EDIT
+            or added >= max(0, min(2, max_new_files))
+        ):
+            continue
+        expanded.append(
+            {
+                "path": rel,
+                "action": "modify",
+                "description": (
+                    "Repair source owner identified by failing test import evidence: "
+                    + str(item.get("evidence") or rel)
+                ),
+            }
+        )
+        seen.add(rel)
+        added += 1
+    return expanded
+
+
+def repair_mutable_files(
+    files: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
+    immutable_paths: Sequence[str] | Iterable[str],
+) -> list[dict[str, Any]]:
+    immutable = {
+        rel
+        for value in immutable_paths
+        for rel in [_safe_rel_path(str(value))]
+        if rel
+    }
+    return [
+        dict(item)
+        for item in files
+        if isinstance(item, Mapping)
+        and _safe_rel_path(str(item.get("path") or "")) not in immutable
+    ]
+
+
+def _repair_file_snapshot(
+    worktree: Path,
+    files: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    snapshot: dict[str, dict[str, Any]] = {}
+    for item in files:
+        if not isinstance(item, Mapping):
+            continue
+        rel = _safe_rel_path(str(item.get("path") or ""))
+        path = _safe_edit_worktree_path(worktree, rel or "")
+        if not rel or path is None:
+            raise AutonomyBlocked(
+                f"Repair snapshot path is outside the worktree or is a symlink: {rel or 'unknown'}"
+            )
+        snapshot[rel] = {
+            "exists": path.is_file(),
+            "content": path.read_bytes() if path.is_file() else b"",
+            "mode": path.stat().st_mode if path.is_file() else None,
+        }
+    return snapshot
+
+
+def _repair_snapshot_entries(
+    files: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
+    extra_paths: Sequence[str] | Iterable[str] = (),
+) -> list[dict[str, Any]]:
+    entries = [dict(item) for item in files if isinstance(item, Mapping)]
+    seen = {
+        rel
+        for item in entries
+        for rel in [_safe_rel_path(str(item.get("path") or ""))]
+        if rel
+    }
+    for value in extra_paths:
+        rel = _safe_rel_path(str(value))
+        if rel and rel not in seen:
+            entries.append({"path": rel})
+            seen.add(rel)
+    return entries
+
+
+def _safe_lexical_worktree_path(worktree: Path, relative: str) -> Path | None:
+    rel = _safe_rel_path(relative)
+    if not rel:
+        return None
+    root = worktree.resolve()
+    raw = root / rel
+    try:
+        raw.parent.resolve().relative_to(root)
+    except ValueError:
+        return None
+    return raw
+
+
+def _restore_repair_worktree_snapshot(
+    worktree: Path,
+    snapshot: Mapping[str, Mapping[str, Any]],
+) -> None:
+    for rel in sorted(set(_changed_files(worktree)) - set(snapshot)):
+        raw = _safe_lexical_worktree_path(worktree, rel)
+        if raw is None:
+            raise AutonomyBlocked(f"Unexpected repair path escaped the worktree: {rel}")
+        tracked = _git(worktree, ["ls-files", "--error-unmatch", "--", rel], timeout=30)
+        if tracked.returncode == 0:
+            restored = _git(worktree, ["checkout-index", "-f", "--", rel], timeout=60)
+            if restored.returncode != 0:
+                raise AutonomyBlocked(f"Could not restore unexpected tracked repair path: {rel}")
+        elif raw.is_file() or raw.is_symlink():
+            raw.unlink(missing_ok=True)
+    _restore_repair_file_snapshot(worktree, snapshot)
+
+
+def _restore_repair_file_snapshot(
+    worktree: Path,
+    snapshot: Mapping[str, Mapping[str, Any]],
+) -> None:
+    for rel, state in snapshot.items():
+        path = _safe_edit_worktree_path(worktree, rel)
+        if path is None:
+            raise AutonomyBlocked(
+                f"Repair restore path is outside the worktree or is a symlink: {rel}"
+            )
+        if not bool(state.get("exists")):
+            path.unlink(missing_ok=True)
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(bytes(state.get("content") or b""))
+        mode = state.get("mode")
+        if isinstance(mode, int):
+            try:
+                path.chmod(mode)
+            except OSError:
+                pass
+
+
+def _repair_snapshot_fingerprint(snapshot: Mapping[str, Mapping[str, Any]]) -> str:
+    digest = hashlib.sha256()
+    for rel in sorted(snapshot):
+        state = snapshot[rel]
+        digest.update(rel.encode("utf-8", errors="replace"))
+        digest.update(b"\0" + (b"1" if state.get("exists") else b"0") + b"\0")
+        digest.update(bytes(state.get("content") or b""))
+    return digest.hexdigest()
+
+
+def _repair_snapshot_diff(
+    before: Mapping[str, Mapping[str, Any]],
+    after: Mapping[str, Mapping[str, Any]],
+    *,
+    max_chars: int = 8_000,
+) -> str:
+    chunks: list[str] = []
+    for rel in sorted(set(before) | set(after)):
+        old = bytes(before.get(rel, {}).get("content") or b"").decode("utf-8", errors="replace")
+        new = bytes(after.get(rel, {}).get("content") or b"").decode("utf-8", errors="replace")
+        if old == new and bool(before.get(rel, {}).get("exists")) == bool(after.get(rel, {}).get("exists")):
+            continue
+        chunks.append(
+            "".join(
+                difflib.unified_diff(
+                    old.splitlines(keepends=True),
+                    new.splitlines(keepends=True),
+                    fromfile=f"a/{rel}",
+                    tofile=f"b/{rel}",
+                )
+            )
+        )
+    return "\n".join(chunks)[:max_chars]
+
+
+def _reported_validation_count(output: str, label: str) -> int:
+    values = [
+        int(match.group(1))
+        for pattern in (
+            rf"\b(\d+)\s+{re.escape(label)}(?:ed)?\b",
+            rf"\b{re.escape(label)}\s*[:=]\s*(\d+)\b",
+        )
+        for match in re.finditer(pattern, output, flags=re.IGNORECASE)
+    ]
+    return max(values, default=0)
+
+
+def validation_progress_evidence(
+    validation: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    items = [dict(item) for item in validation if isinstance(item, Mapping)]
+    executed = [item for item in items if item.get("skipped") is not True]
+    failed = [item for item in executed if _validation_step_failed(item)]
+    output = "\n".join(
+        f"{item.get('stdout') or ''}\n{item.get('stderr') or ''}" for item in executed
+    )
+    test_scopes = sorted(
+        (
+            str(item.get("step_key") or "validation"),
+            tuple(sorted(str(value) for value in (item.get("test_files") or []))),
+        )
+        for item in executed
+        if "test" in str(item.get("step_key") or "").lower()
+    )
+    return {
+        "passed": not failed,
+        "failed_steps": sorted(str(item.get("step_key") or "validation") for item in failed),
+        "passed_steps": sorted(
+            str(item.get("step_key") or "validation")
+            for item in executed
+            if not _validation_step_failed(item)
+        ),
+        "timed_out": sum(bool(item.get("timed_out")) for item in failed),
+        "syntax_failures": sum(
+            "syntax" in str(item.get("step_key") or "").lower() for item in failed
+        ),
+        "reported_passed_tests": _reported_validation_count(output, "pass"),
+        "reported_failed_tests": _reported_validation_count(output, "fail"),
+        "test_scopes": test_scopes,
+    }
+
+
+def validation_failure_signature(
+    validation: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
+) -> str:
+    chunks: list[str] = []
+    for item in validation:
+        if not isinstance(item, Mapping) or not _validation_step_failed(item):
+            continue
+        chunks.extend(
+            [
+                str(item.get("step_key") or "validation"),
+                str(item.get("stdout") or ""),
+                str(item.get("stderr") or ""),
+            ]
+        )
+    normalized = "\n".join(chunks).lower()
+    normalized = re.sub(r"[a-z]:[/\\][^\s:]+", "<path>", normalized)
+    normalized = re.sub(r"\b\d+(?:\.\d+)?\s*(?:ms|s|sec|seconds)\b", "<time>", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return hashlib.sha256(normalized[:20_000].encode("utf-8", errors="replace")).hexdigest()
+
+
+def validation_repair_decision(
+    before: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
+    after: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    before_evidence = validation_progress_evidence(before)
+    after_evidence = validation_progress_evidence(after)
+    regressed_steps = sorted(
+        set(before_evidence["passed_steps"]) & set(after_evidence["failed_steps"])
+    )
+    accepted = False
+    reason = "no_measurable_validation_progress"
+    if after_evidence["test_scopes"] != before_evidence["test_scopes"]:
+        reason = "validation_test_scope_changed"
+    elif after_evidence["passed"]:
+        accepted, reason = True, "validation_passed"
+    elif regressed_steps:
+        reason = "previously_passing_validation_regressed"
+    elif set(after_evidence["failed_steps"]) < set(before_evidence["failed_steps"]):
+        accepted, reason = True, "fewer_validation_steps_failed"
+    elif after_evidence["syntax_failures"] < before_evidence["syntax_failures"]:
+        accepted, reason = True, "syntax_failure_resolved"
+    elif after_evidence["timed_out"] < before_evidence["timed_out"]:
+        accepted, reason = True, "validation_timeout_resolved"
+    elif (
+        before_evidence["reported_failed_tests"] > 0
+        and after_evidence["reported_failed_tests"] < before_evidence["reported_failed_tests"]
+    ):
+        accepted, reason = True, "fewer_tests_failed"
+    elif after_evidence["reported_passed_tests"] > before_evidence["reported_passed_tests"]:
+        accepted, reason = True, "more_tests_passed"
+    return {
+        "accepted": accepted,
+        "reason": reason,
+        "regressed_steps": regressed_steps,
+        "before": before_evidence,
+        "after": after_evidence,
+    }
+
+
+def _repair_attempt_context(
+    attempts: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "round": item.get("round"),
+            "model": item.get("model"),
+            "decision": item.get("decision"),
+            "rolled_back": bool(item.get("rolled_back")),
+            "attempt_fingerprint": item.get("attempt_fingerprint"),
+            "before_failure_signature": item.get("before_failure_signature"),
+            "after_failure_signature": item.get("after_failure_signature"),
+            "attempted_diff": str(item.get("attempted_diff") or "")[:3_000],
+            "validation_output": str(item.get("validation_output") or "")[:3_500],
+            "adapter_rejection": str(item.get("adapter_rejection") or "")[:1_500],
+        }
+        for item in list(attempts)[-5:]
+    ]
+
+
+def local_repair_model_route(
+    repair_round: int,
+    max_rounds: int,
+    *,
+    installed_models: Sequence[str] | Iterable[str] | None = None,
+) -> dict[str, Any]:
+    from ...config import settings as _settings
+
+    primary = str(_settings.chili_code_local_model or "").strip()
+    escalation = str(_settings.chili_code_local_escalation_model or "").strip()
+    installed = set(installed_models if installed_models is not None else ollama_client.list_models())
+    escalation_start = max_rounds - _LOCAL_ESCALATION_REPAIR_ROUNDS + 1
+    use_escalation = bool(
+        _LOCAL_ESCALATION_REPAIR_ROUNDS
+        and escalation
+        and escalation != primary
+        and repair_round >= escalation_start
+        and escalation in installed
+        and escalation not in _active_model_cooldowns()
+    )
+    return {
+        "model": escalation if use_escalation else primary,
+        "tier": "local_escalation" if use_escalation else "local_primary",
+        "premium_calls_allowed": 0,
+        "escalation_available": escalation in installed if escalation else False,
+    }
+
+
 def validation_repair_context(
     validation: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
     *,
     changed_files: Sequence[str] | Iterable[str] = (),
     plan_files: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]] = (),
+    worktree: Path | None = None,
+    prior_attempts: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     failed_steps: list[dict[str, Any]] = []
     assertion_contracts: list[str] = []
@@ -8100,22 +8853,38 @@ def validation_repair_context(
                 "stderr_tail": truncate_text(str(item.get("stderr") or ""), 1800)[0],
             }
         )
+    test_contracts = _read_validation_test_contracts(worktree, validation)
+    owner_candidates = (
+        validation_source_owner_candidates(worktree, validation, plan_files)
+        if worktree is not None
+        else []
+    )
     return {
-        "schema": "chili.validation-repair-context.v1",
+        "schema": "chili.validation-repair-context.v2",
         "changed_files": [rel for value in changed_files for rel in [_safe_rel_path(str(value))] if rel],
         "plan_files": [dict(item) for item in plan_files if isinstance(item, Mapping)],
         "assertion_contracts": assertion_contracts[:20],
         "exception_facts": exception_facts[:12],
         "failed_steps": failed_steps,
+        "read_only_test_contracts": test_contracts,
+        "source_owner_candidates": owner_candidates,
+        "prior_repair_attempts": _repair_attempt_context(prior_attempts),
     }
 
 
 def validation_repair_context_text(context: Mapping[str, Any]) -> str:
     changed_text = ", ".join(str(value) for value in context.get("changed_files") or []) or "none"
     lines = [
-        "schema: chili.validation-repair-context.v1",
+        "schema: chili.validation-repair-context.v2",
         "changed_files: " + changed_text,
     ]
+    immutable_contracts = [
+        str(value) for value in context.get("immutable_test_contracts") or []
+    ]
+    if immutable_contracts:
+        lines.append(
+            "immutable_test_contracts: " + ", ".join(immutable_contracts)
+        )
     contracts = [str(value) for value in context.get("assertion_contracts") or []]
     facts = [str(value) for value in context.get("exception_facts") or []]
     if contracts or facts:
@@ -8137,6 +8906,23 @@ def validation_repair_context_text(context: Mapping[str, Any]) -> str:
             lines.append("stdout_tail:\n" + stdout_tail)
         if stderr_tail:
             lines.append("stderr_tail:\n" + stderr_tail)
+    contracts = context.get("read_only_test_contracts") or []
+    if contracts:
+        lines.append("read_only_test_contracts (never edit these files):")
+        for item in contracts:
+            if not isinstance(item, Mapping):
+                continue
+            lines.append(f"### {item.get('path')}\n{item.get('content') or ''}")
+    owners = context.get("source_owner_candidates") or []
+    if owners:
+        lines.append("source_owner_candidates:")
+        for item in owners:
+            if isinstance(item, Mapping):
+                lines.append(f"- {item.get('path')}: {item.get('evidence')}")
+    attempts = context.get("prior_repair_attempts") or []
+    if attempts:
+        lines.append("prior_repair_attempts (do not repeat rolled-back edits):")
+        lines.append(json.dumps(attempts, indent=2, sort_keys=True))
     return "\n".join(lines).strip()
 
 
@@ -8528,11 +9314,17 @@ def _run_implementation_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRe
     run.status = "validating"
     _record_step(db, run, "validate", "Running allowlisted validation commands", detail={"files": changed_files})
     validation = run_validation(worktree, changed_files)
+    changed_files = _changed_files(worktree)
+    run.files_json = _json_text(changed_files)
     run.validation_json = _json_text(validation)
     run.commands_json = _json_text([{"step_key": item.get("step_key"), "exit_code": item.get("exit_code")} for item in validation])
     _add_artifact(db, run.run_id, "validation", "validation_results", content_json=validation, commit=False)
     db.commit()
 
+    repair_attempts: list[dict[str, Any]] = []
+    rejected_fingerprints: set[str] = set()
+    pinned_test_files = _validation_test_files(validation)
+    owner_expansion_paths: set[str] = set()
     if not validation_passed(validation):
         for repair_round in range(1, _VALIDATION_REPAIR_ROUNDS + 1):
             _record_step(
@@ -8547,8 +9339,65 @@ def _run_implementation_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRe
                 validation,
                 changed_files=changed_files,
                 plan_files=files,
+                worktree=worktree,
+                prior_attempts=repair_attempts,
             )
+            remaining_owner_budget = max(0, 2 - len(owner_expansion_paths))
+            owner_candidates = list(
+                repair_packet.get("source_owner_candidates") or []
+            )[:remaining_owner_budget]
+            expanded_files = repair_files_with_source_owners(
+                files,
+                owner_candidates,
+                allow_expand=run.execution_mode == EXECUTION_MODE_FULL_AUTOPILOT,
+                max_new_files=remaining_owner_budget,
+            )
+            added_paths = [
+                str(item.get("path") or "")
+                for item in expanded_files
+                if str(item.get("path") or "")
+                not in {str(existing.get("path") or "") for existing in files}
+            ]
+            if added_paths:
+                owner_expansion_paths.update(added_paths)
+                acquire_file_leases(db, run, int(repo.id), added_paths, holder="architect")
+                files = expanded_files
+                plan_entries = plan.get("files") if isinstance(plan.get("files"), list) else []
+                planned_paths = {
+                    str(item.get("path") or "")
+                    for item in plan_entries
+                    if isinstance(item, Mapping)
+                }
+                plan_entries.extend(
+                    dict(item) for item in files if str(item.get("path") or "") not in planned_paths
+                )
+                plan["files"] = plan_entries
+                run.plan_json = _json_text(plan)
+                _add_artifact(
+                    db,
+                    run.run_id,
+                    "repair_scope",
+                    f"source_owner_expansion_{repair_round}",
+                    content_json={
+                        "added_paths": added_paths,
+                        "evidence": owner_candidates,
+                        "execution_mode": run.execution_mode,
+                    },
+                    commit=False,
+                )
+                repair_packet = validation_repair_context(
+                    validation,
+                    changed_files=changed_files,
+                    plan_files=files,
+                    worktree=worktree,
+                    prior_attempts=repair_attempts,
+                )
+                repair_packet["source_owner_candidates"] = owner_candidates
+            contract_paths = set(pinned_test_files)
+            editable_files = repair_mutable_files(files, contract_paths)
+            repair_packet["immutable_test_contracts"] = sorted(contract_paths)
             repair_context = validation_repair_context_text(repair_packet)
+            route = local_repair_model_route(repair_round, _VALIDATION_REPAIR_ROUNDS)
             _add_artifact(
                 db,
                 run.run_id,
@@ -8557,18 +9406,174 @@ def _run_implementation_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRe
                 content_json=repair_packet,
                 commit=False,
             )
-            repair_diffs = generate_diffs_from_plan(
-                db,
-                run,
-                worktree,
+            before_validation = [dict(item) for item in validation]
+            snapshot_entries = _repair_snapshot_entries(
                 files,
-                validation_context=repair_context,
+                [*pinned_test_files, *_changed_files(worktree)],
             )
-            if not repair_diffs:
+            before_snapshot = _repair_file_snapshot(worktree, snapshot_entries)
+            contract_entries = _repair_snapshot_entries([], pinned_test_files)
+            before_contract_snapshot = _repair_file_snapshot(worktree, contract_entries)
+            before_signature = validation_failure_signature(before_validation)
+            if not editable_files:
+                attempt = {
+                    "round": repair_round,
+                    "model": route.get("model"),
+                    "model_tier": route.get("tier"),
+                    "decision": "no_mutable_source_files",
+                    "rolled_back": False,
+                    "before_failure_signature": before_signature,
+                    "after_failure_signature": before_signature,
+                    "adapter_rejection": "All planned repair files are immutable test contracts.",
+                }
+                repair_attempts.append(attempt)
+                _add_artifact(
+                    db,
+                    run.run_id,
+                    "repair_attempt",
+                    f"repair_attempt_{repair_round}",
+                    content_json=attempt,
+                    commit=False,
+                )
+                db.commit()
                 break
+            try:
+                repair_diffs = generate_diffs_from_plan(
+                    db,
+                    run,
+                    worktree,
+                    editable_files,
+                    validation_context=repair_context,
+                    local_model_override=str(route.get("model") or "") or None,
+                )
+            except AutonomyBlocked as exc:
+                attempt = {
+                    "round": repair_round,
+                    "model": route.get("model"),
+                    "model_tier": route.get("tier"),
+                    "decision": "adapter_rejected",
+                    "rolled_back": False,
+                    "before_failure_signature": before_signature,
+                    "after_failure_signature": before_signature,
+                    "adapter_rejection": str(exc),
+                }
+                repair_attempts.append(attempt)
+                _add_artifact(
+                    db,
+                    run.run_id,
+                    "repair_attempt",
+                    f"repair_attempt_{repair_round}",
+                    content_json=attempt,
+                    commit=False,
+                )
+                db.commit()
+                continue
+            if not repair_diffs:
+                continue
             _apply_diffs(worktree, repair_diffs)
-            changed_files = _changed_files(worktree)
-            validation = run_validation(worktree, changed_files)
+            attempted_snapshot = _repair_file_snapshot(worktree, snapshot_entries)
+            attempted_diff = _repair_snapshot_diff(before_snapshot, attempted_snapshot)
+            attempt_fingerprint = _repair_snapshot_fingerprint(attempted_snapshot)
+            after_apply_contract_snapshot = _repair_file_snapshot(
+                worktree,
+                contract_entries,
+            )
+            if _repair_snapshot_fingerprint(
+                after_apply_contract_snapshot
+            ) != _repair_snapshot_fingerprint(before_contract_snapshot):
+                _restore_repair_worktree_snapshot(worktree, before_snapshot)
+                rejected_fingerprints.add(attempt_fingerprint)
+                attempt = {
+                    "round": repair_round,
+                    "model": route.get("model"),
+                    "model_tier": route.get("tier"),
+                    "decision": "immutable_test_contract_modified",
+                    "rolled_back": True,
+                    "attempt_fingerprint": attempt_fingerprint,
+                    "before_failure_signature": before_signature,
+                    "after_failure_signature": before_signature,
+                    "attempted_diff": attempted_diff,
+                }
+                repair_attempts.append(attempt)
+                _add_artifact(
+                    db,
+                    run.run_id,
+                    "repair_attempt",
+                    f"repair_attempt_{repair_round}",
+                    content_json=attempt,
+                    commit=False,
+                )
+                db.commit()
+                continue
+            if attempt_fingerprint in rejected_fingerprints:
+                _restore_repair_worktree_snapshot(worktree, before_snapshot)
+                attempt = {
+                    "round": repair_round,
+                    "model": route.get("model"),
+                    "model_tier": route.get("tier"),
+                    "decision": "duplicate_rejected_attempt",
+                    "rolled_back": True,
+                    "attempt_fingerprint": attempt_fingerprint,
+                    "before_failure_signature": before_signature,
+                    "after_failure_signature": before_signature,
+                    "attempted_diff": attempted_diff,
+                }
+                repair_attempts.append(attempt)
+                _add_artifact(
+                    db,
+                    run.run_id,
+                    "repair_attempt",
+                    f"repair_attempt_{repair_round}",
+                    content_json=attempt,
+                    commit=False,
+                )
+                db.commit()
+                continue
+            attempted_changed_files = _changed_files(worktree)
+            attempted_validation = run_validation(
+                worktree,
+                attempted_changed_files,
+                pinned_test_files=pinned_test_files,
+            )
+            attempted_changed_files = _changed_files(worktree)
+            after_validation_contract_snapshot = _repair_file_snapshot(
+                worktree,
+                contract_entries,
+            )
+            after_signature = validation_failure_signature(attempted_validation)
+            decision = validation_repair_decision(before_validation, attempted_validation)
+            if _repair_snapshot_fingerprint(
+                after_validation_contract_snapshot
+            ) != _repair_snapshot_fingerprint(before_contract_snapshot):
+                decision = {
+                    **decision,
+                    "accepted": False,
+                    "reason": "immutable_test_contract_modified_during_validation",
+                }
+            accepted = bool(decision.get("accepted"))
+            attempt = {
+                "round": repair_round,
+                "model": route.get("model"),
+                "model_tier": route.get("tier"),
+                "decision": decision.get("reason"),
+                "rolled_back": not accepted,
+                "attempt_fingerprint": attempt_fingerprint,
+                "before_failure_signature": before_signature,
+                "after_failure_signature": after_signature,
+                "attempted_diff": attempted_diff,
+                "validation_output": _validation_failure_text(attempted_validation),
+                "validation_progress": decision,
+                "changed_files": attempted_changed_files,
+            }
+            repair_attempts.append(attempt)
+            if accepted:
+                changed_files = attempted_changed_files
+                validation = attempted_validation
+            else:
+                rejected_fingerprints.add(attempt_fingerprint)
+                _restore_repair_worktree_snapshot(worktree, before_snapshot)
+                changed_files = _changed_files(worktree)
+                validation = before_validation
             run.files_json = _json_text(changed_files)
             run.validation_json = _json_text(validation)
             run.commands_json = _json_text(
@@ -8585,13 +9590,41 @@ def _run_implementation_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRe
                 run.run_id,
                 "validation",
                 f"repair_validation_results_{repair_round}",
-                content_json=validation,
+                content_json={
+                    "attempted_validation": attempted_validation,
+                    "retained_validation": validation,
+                    "decision": decision,
+                },
+                commit=False,
+            )
+            _add_artifact(
+                db,
+                run.run_id,
+                "repair_attempt",
+                f"repair_attempt_{repair_round}",
+                content_json=attempt,
                 commit=False,
             )
             db.commit()
             if validation_passed(validation):
                 break
 
+    changed_files = _changed_files(worktree)
+    run.files_json = _json_text(changed_files)
+    merge_gate_evidence = (
+        automatic_merge_gate_evidence(plan, worktree, changed_files, validation)
+        if validation_passed(validation)
+        else None
+    )
+    if merge_gate_evidence is not None:
+        _add_artifact(
+            db,
+            run.run_id,
+            "merge_gate",
+            "automatic_merge_gate_evidence",
+            content_json=merge_gate_evidence,
+            commit=False,
+        )
     commit_sha = _commit_if_needed(worktree, run)
     _add_artifact(db, run.run_id, "commit", "integration_commit", content_json={"commit_sha": commit_sha, "branch": branch})
 
@@ -8617,6 +9650,25 @@ def _run_implementation_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRe
                 error_message=_validation_failure_text(validation),
                 merge_status="blocked",
                 merge_message="Validation failed after repair.",
+            ),
+            include_events=True,
+        )
+
+    if merge_gate_evidence is not None and not merge_gate_evidence.get("passed"):
+        _record_learning(db, run, outcome="blocked", plan=plan, validation=validation)
+        return run_payload(
+            db,
+            _finish(
+                db,
+                run,
+                status="blocked",
+                stage="validate",
+                title="Autopilot blocked by merge evidence",
+                error_message="\n".join(
+                    str(value) for value in merge_gate_evidence.get("blockers") or []
+                )[:ERROR_SNIPPET_LIMIT],
+                merge_status="blocked",
+                merge_message="Automatic merge gates rejected the retained patch.",
             ),
             include_events=True,
         )

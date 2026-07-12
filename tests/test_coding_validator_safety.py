@@ -77,3 +77,81 @@ def test_pytest_targeted_skips_when_safe_test_database_is_not_configured(tmp_pat
     assert result.skipped is True
     assert result.skip_reason == "safe TEST_DATABASE_URL not configured"
     assert "TEST_DATABASE_URL" in result.stderr
+
+
+def test_pytest_targeted_reports_full_contract_scope_without_first_failure(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "app" / "example.py").write_text("value = 1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_example.py").write_text(
+        "def test_example():\n    assert True\n",
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, cwd, **kwargs):
+        captured["argv"] = argv
+        return 0, False, "1 passed", ""
+
+    with patch(
+        "app.services.coding_task.validator_runner._run_subprocess_allowlisted",
+        side_effect=fake_run,
+    ):
+        result = run_pytest_targeted(tmp_path, ["app/example.py"])
+
+    argv = captured["argv"]
+    assert "-x" not in argv
+    assert result.metadata["tests_executed"] is True
+    assert result.metadata["test_files"] == ["tests/test_example.py"]
+    assert result.metadata["targeted"] is True
+    assert result.metadata["validation_scope"] == "targeted_tests"
+
+
+def test_pytest_targeted_fails_closed_when_selected_files_collect_zero_tests(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "app" / "example.py").write_text("value = 1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_example.py").write_text("# no tests\n", encoding="utf-8")
+
+    with patch(
+        "app.services.coding_task.validator_runner._run_subprocess_allowlisted",
+        return_value=(5, False, "no tests ran", ""),
+    ):
+        result = run_pytest_targeted(tmp_path, ["app/example.py"])
+
+    assert result.exit_code == 5
+    assert result.metadata["tests_executed"] is False
+    assert result.metadata["zero_tests_collected"] is True
+
+
+def test_pytest_targeted_pins_original_repair_contract(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "app" / "new_owner.py").write_text("value = 1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_new_owner.py").write_text(
+        "def test_new():\n    assert True\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_original.py").write_text(
+        "def test_original():\n    assert True\n",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_run(argv, cwd, **kwargs):
+        captured["argv"] = argv
+        return 0, False, "1 passed", ""
+
+    with patch(
+        "app.services.coding_task.validator_runner._run_subprocess_allowlisted",
+        side_effect=fake_run,
+    ):
+        result = run_pytest_targeted(
+            tmp_path,
+            ["app/new_owner.py"],
+            selected_test_files=["tests/test_original.py"],
+        )
+
+    assert "tests/test_original.py" in captured["argv"]
+    assert "tests/test_new_owner.py" not in captured["argv"]
+    assert result.metadata["test_files"] == ["tests/test_original.py"]

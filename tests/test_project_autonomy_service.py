@@ -12,6 +12,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
 from app import migrations
+from app.config import settings
 from app.models import (
     ProjectAutonomyArchitectReview,
     ProjectAutonomyArtifact,
@@ -2174,11 +2175,13 @@ def test_generate_diffs_reports_rejected_model_output(monkeypatch, tmp_path):
                 run,
                 tmp_path,
                 [{"path": "foo.txt", "description": "make a small change"}],
+                local_model_override="qwen2.5-coder:14b",
             )
 
         assert "neither edit blocks nor a unified diff" in str(exc.value)
         assert gateway_args["local_only"] is True
         assert gateway_args["strict_escalation"] is False
+        assert gateway_args["local_model_override"] == "qwen2.5-coder:14b"
     finally:
         db.close()
 
@@ -2730,6 +2733,7 @@ def test_behavior_validation_evidence_requires_targeted_tests():
             "step_key": "pytest_targeted",
             "exit_code": 0,
             "targeted": True,
+            "tests_executed": True,
             "test_files": ["tests/test_example.py"],
             "validation_scope": "targeted_tests",
         }
@@ -2755,12 +2759,156 @@ def test_blast_radius_and_patch_self_review_gates_block_unplanned_or_large_chang
     )
 
 
+def test_automatic_merge_gate_evidence_runs_real_scope_and_validation_gates(tmp_path):
+    target = tmp_path / "app/services/example.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    assert orchestrator._git(tmp_path, ["init"]).returncode == 0
+    assert orchestrator._git(tmp_path, ["add", "."]).returncode == 0
+    assert (
+        orchestrator._git(
+            tmp_path,
+            [
+                "-c",
+                "user.name=CHILI Test",
+                "-c",
+                "user.email=chili-test@example.invalid",
+                "commit",
+                "-m",
+                "baseline",
+            ],
+        ).returncode
+        == 0
+    )
+    target.write_text("VALUE = 2\n", encoding="utf-8")
+    validation = [
+        {
+            "step_key": "ast_syntax",
+            "exit_code": 0,
+            "changed_files": ["app/services/example.py"],
+        }
+    ]
+
+    allowed = orchestrator.automatic_merge_gate_evidence(
+        {"files": [{"path": "app/services/example.py", "action": "modify"}]},
+        tmp_path,
+        ["app/services/example.py"],
+        validation,
+    )
+    unplanned = orchestrator.automatic_merge_gate_evidence(
+        {"files": [{"path": "app/services/other.py", "action": "modify"}]},
+        tmp_path,
+        ["app/services/example.py"],
+        validation,
+    )
+
+    assert allowed["passed"] is True
+    assert {gate["gate"] for gate in allowed["gates"]} >= {
+        "git_evidence_capture",
+        "change_blast_radius",
+        "patch_self_review",
+        "validation_merge_evidence",
+        "semantic_patch_review",
+    }
+    assert unplanned["passed"] is False
+    assert any("change_blast_radius" in blocker for blocker in unplanned["blockers"])
+
+
+def test_new_untracked_files_are_visible_to_scope_and_patch_size_gates(tmp_path):
+    baseline = tmp_path / "README.md"
+    baseline.write_text("baseline\n", encoding="utf-8")
+    assert orchestrator._git(tmp_path, ["init"]).returncode == 0
+    assert orchestrator._git(tmp_path, ["add", "."]).returncode == 0
+    assert (
+        orchestrator._git(
+            tmp_path,
+            [
+                "-c",
+                "user.name=CHILI Test",
+                "-c",
+                "user.email=chili-test@example.invalid",
+                "commit",
+                "-m",
+                "baseline",
+            ],
+        ).returncode
+        == 0
+    )
+    target = tmp_path / "app/services/new_owner.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("\n".join(f"VALUE_{index} = {index}" for index in range(301)), encoding="utf-8")
+
+    changed = orchestrator._changed_files(tmp_path)
+    evidence = orchestrator.automatic_merge_gate_evidence(
+        {"files": [{"path": "app/services/new_owner.py", "action": "create"}]},
+        tmp_path,
+        changed,
+        [
+            {
+                "step_key": "ast_syntax",
+                "exit_code": 0,
+                "changed_files": ["app/services/new_owner.py"],
+            }
+        ],
+    )
+
+    assert changed == ["app/services/new_owner.py"]
+    assert evidence["passed"] is False
+    assert any("patch_self_review" in blocker for blocker in evidence["blockers"])
+
+
+def test_merge_gate_refreshes_files_created_during_validation(tmp_path):
+    planned = tmp_path / "app/planned.py"
+    planned.parent.mkdir(parents=True)
+    planned.write_text("VALUE = 1\n", encoding="utf-8")
+    assert orchestrator._git(tmp_path, ["init"]).returncode == 0
+    assert orchestrator._git(tmp_path, ["add", "."]).returncode == 0
+    assert (
+        orchestrator._git(
+            tmp_path,
+            [
+                "-c",
+                "user.name=CHILI Test",
+                "-c",
+                "user.email=chili-test@example.invalid",
+                "commit",
+                "-m",
+                "baseline",
+            ],
+        ).returncode
+        == 0
+    )
+    planned.write_text("VALUE = 2\n", encoding="utf-8")
+    generated = tmp_path / "build/generated.txt"
+    generated.parent.mkdir(parents=True)
+    generated.write_text("created by validation\n", encoding="utf-8")
+
+    evidence = orchestrator.automatic_merge_gate_evidence(
+        {"files": [{"path": "app/planned.py", "action": "modify"}]},
+        tmp_path,
+        ["app/planned.py"],
+        [
+            {
+                "step_key": "ast_syntax",
+                "exit_code": 0,
+                "changed_files": ["app/planned.py", "build/generated.txt"],
+            }
+        ],
+    )
+
+    assert evidence["changed_inventory_refreshed"] is True
+    assert evidence["changed_files"] == ["app/planned.py", "build/generated.txt"]
+    assert evidence["passed"] is False
+    assert any("change_blast_radius" in blocker for blocker in evidence["blockers"])
+
+
 def test_domain_behavior_validation_evidence_requires_trading_invariant_tests():
     generic = [
         {
             "step_key": "pytest_targeted",
             "exit_code": 0,
             "targeted": True,
+            "tests_executed": True,
             "test_files": ["tests/test_trading_runtime.py"],
             "test_selection": [
                 {
@@ -2776,6 +2924,7 @@ def test_domain_behavior_validation_evidence_requires_trading_invariant_tests():
             "step_key": "pytest_targeted",
             "exit_code": 0,
             "targeted": True,
+            "tests_executed": True,
             "test_files": ["tests/test_pdt_intraday_margin_cutover.py"],
             "test_selection": [
                 {
@@ -2803,6 +2952,7 @@ def test_semantic_patch_review_blocks_public_contract_change():
                 "step_key": "pytest_targeted",
                 "exit_code": 0,
                 "targeted": True,
+                "tests_executed": True,
                 "test_files": ["tests/test_orders_unit.py"],
             }
         ],
@@ -2824,6 +2974,7 @@ def test_implementation_blocks_public_contract_change_without_contract_tests():
                 "step_key": "pytest_targeted",
                 "exit_code": 0,
                 "targeted": True,
+                "tests_executed": True,
                 "test_files": ["tests/test_orders_api_contract.py"],
             }
         ],
@@ -2854,7 +3005,7 @@ def test_validation_repair_context_text_preserves_targeted_failure():
 
     text = orchestrator.validation_repair_context_text(context)
 
-    assert "schema: chili.validation-repair-context.v1" in text
+    assert "schema: chili.validation-repair-context.v2" in text
     assert "pytest tests/test_example.py -q" in text
     assert "FAILED tests/test_example.py::test_behavior" in text
     assert "non_negotiable_validation_contracts:" in text
@@ -2875,9 +3026,322 @@ def test_validation_failure_text_uses_structured_contract_summary():
         ]
     )
 
-    assert text.startswith("schema: chili.validation-repair-context.v1")
+    assert text.startswith("schema: chili.validation-repair-context.v2")
     assert 'assert sink["XYZ"] == []' in text
     assert "observed: KeyError: 'XYZ'" in text
+
+
+def test_validation_repair_context_reads_tests_and_maps_source_owner(tmp_path):
+    owner = tmp_path / "app/services/owner.py"
+    wrong = tmp_path / "app/services/wrong.py"
+    test_file = tmp_path / "tests/test_owner.py"
+    owner.parent.mkdir(parents=True)
+    test_file.parent.mkdir(parents=True)
+    owner.write_text("def build():\n    return 1\n", encoding="utf-8")
+    wrong.write_text("def unrelated():\n    return 0\n", encoding="utf-8")
+    test_file.write_text(
+        "from app.services.owner import build\n\n"
+        "def test_build():\n    assert build() == 2\n",
+        encoding="utf-8",
+    )
+    validation = [
+        {
+            "step_key": "pytest_targeted",
+            "exit_code": 1,
+            "stdout": "1 failed",
+            "test_files": ["tests/test_owner.py"],
+        }
+    ]
+
+    context = orchestrator.validation_repair_context(
+        validation,
+        changed_files=["app/services/wrong.py"],
+        plan_files=[{"path": "app/services/wrong.py"}],
+        worktree=tmp_path,
+    )
+    text = orchestrator.validation_repair_context_text(context)
+
+    assert context["read_only_test_contracts"][0]["path"] == "tests/test_owner.py"
+    assert "assert build() == 2" in text
+    assert context["source_owner_candidates"] == [
+        {
+            "path": "app/services/owner.py",
+            "score": 90,
+            "evidence": "tests/test_owner.py imports app.services.owner",
+        }
+    ]
+    assert "never edit these files" in text
+
+
+def test_repair_file_scope_expands_only_for_full_autopilot_policy():
+    files = [{"path": "app/services/wrong.py", "action": "modify"}]
+    owners = [
+        {
+            "path": "app/services/owner.py",
+            "score": 90,
+            "evidence": "tests/test_owner.py imports app.services.owner",
+        }
+    ]
+
+    approval_scope = orchestrator.repair_files_with_source_owners(
+        files,
+        owners,
+        allow_expand=False,
+    )
+    autopilot_scope = orchestrator.repair_files_with_source_owners(
+        files,
+        owners,
+        allow_expand=True,
+    )
+
+    assert [item["path"] for item in approval_scope] == ["app/services/wrong.py"]
+    assert [item["path"] for item in autopilot_scope] == [
+        "app/services/wrong.py",
+        "app/services/owner.py",
+    ]
+
+    exhausted = orchestrator.repair_files_with_source_owners(
+        files,
+        owners,
+        allow_expand=True,
+        max_new_files=0,
+    )
+    assert [item["path"] for item in exhausted] == ["app/services/wrong.py"]
+
+
+def test_repair_mutable_files_enforces_read_only_test_contracts():
+    files = [
+        {"path": "app/services/owner.py", "action": "modify"},
+        {"path": "tests/test_owner.py", "action": "modify"},
+    ]
+
+    mutable = orchestrator.repair_mutable_files(files, ["tests/test_owner.py"])
+
+    assert [item["path"] for item in mutable] == ["app/services/owner.py"]
+
+
+def test_repair_snapshot_restores_rejected_file_bytes(tmp_path):
+    target = tmp_path / "app/owner.py"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"value = 1\r\n")
+    files = [{"path": "app/owner.py"}]
+    before = orchestrator._repair_file_snapshot(tmp_path, files)
+
+    target.write_bytes(b"value = broken\n")
+    attempted = orchestrator._repair_file_snapshot(tmp_path, files)
+    diff = orchestrator._repair_snapshot_diff(before, attempted)
+    orchestrator._restore_repair_file_snapshot(tmp_path, before)
+
+    assert "value = broken" in diff
+    assert target.read_bytes() == b"value = 1\r\n"
+
+
+def test_repair_worktree_restore_removes_unexpected_validation_changes(tmp_path):
+    planned = tmp_path / "app/planned.py"
+    unrelated = tmp_path / "app/unrelated.py"
+    planned.parent.mkdir(parents=True)
+    planned.write_text("value = 1\n", encoding="utf-8")
+    unrelated.write_text("stable = True\n", encoding="utf-8")
+    assert orchestrator._git(tmp_path, ["init"]).returncode == 0
+    assert orchestrator._git(tmp_path, ["add", "."]).returncode == 0
+    assert (
+        orchestrator._git(
+            tmp_path,
+            [
+                "-c",
+                "user.name=CHILI Test",
+                "-c",
+                "user.email=chili-test@example.invalid",
+                "commit",
+                "-m",
+                "baseline",
+            ],
+        ).returncode
+        == 0
+    )
+    planned.write_text("value = 2\n", encoding="utf-8")
+    before = orchestrator._repair_file_snapshot(
+        tmp_path,
+        orchestrator._repair_snapshot_entries(
+            [{"path": "app/planned.py"}],
+            orchestrator._changed_files(tmp_path),
+        ),
+    )
+
+    planned.write_text("value = broken\n", encoding="utf-8")
+    unrelated.write_text("stable = False\n", encoding="utf-8")
+    generated = tmp_path / "build/generated.txt"
+    generated.parent.mkdir(parents=True)
+    generated.write_text("unexpected\n", encoding="utf-8")
+    orchestrator._restore_repair_worktree_snapshot(tmp_path, before)
+
+    assert planned.read_text(encoding="utf-8") == "value = 2\n"
+    assert unrelated.read_text(encoding="utf-8") == "stable = True\n"
+    assert generated.exists() is False
+
+
+def test_validation_repair_decision_keeps_progress_and_rejects_regression():
+    before = [
+        {"step_key": "ast_syntax", "exit_code": 0, "stdout": "ok"},
+        {
+            "step_key": "pytest_targeted",
+            "exit_code": 1,
+            "stdout": "2 failed, 1 passed",
+        },
+    ]
+    progress = [
+        {"step_key": "ast_syntax", "exit_code": 0, "stdout": "ok"},
+        {
+            "step_key": "pytest_targeted",
+            "exit_code": 1,
+            "stdout": "1 failed, 2 passed",
+        },
+    ]
+    regression = [
+        {"step_key": "ast_syntax", "exit_code": 1, "stdout": "SyntaxError"},
+        {"step_key": "pytest_targeted", "exit_code": 0, "stdout": "3 passed"},
+    ]
+
+    improved = orchestrator.validation_repair_decision(before, progress)
+    regressed = orchestrator.validation_repair_decision(before, regression)
+    unchanged = orchestrator.validation_repair_decision(before, before)
+
+    assert improved["accepted"] is True
+    assert improved["reason"] == "fewer_tests_failed"
+    assert regressed["accepted"] is False
+    assert regressed["reason"] == "previously_passing_validation_regressed"
+    assert unchanged["accepted"] is False
+    assert unchanged["reason"] == "no_measurable_validation_progress"
+
+
+def test_validation_repair_decision_rejects_changed_test_scope_even_when_green():
+    before = [
+        {
+            "step_key": "pytest_targeted",
+            "exit_code": 1,
+            "tests_executed": True,
+            "test_files": ["tests/test_original.py"],
+            "stdout": "1 failed",
+        }
+    ]
+    different_green_suite = [
+        {
+            "step_key": "pytest_targeted",
+            "exit_code": 0,
+            "tests_executed": True,
+            "test_files": ["tests/test_new_owner.py"],
+            "stdout": "1 passed",
+        }
+    ]
+
+    decision = orchestrator.validation_repair_decision(before, different_green_suite)
+
+    assert decision["accepted"] is False
+    assert decision["reason"] == "validation_test_scope_changed"
+
+
+def test_raw_model_diff_cannot_touch_multiple_files():
+    scoped = "--- a/app/owner.py\n+++ b/app/owner.py\n@@ -1 +1 @@\n-old\n+new\n"
+    escaped = (
+        scoped
+        + "--- a/app/other.py\n+++ b/app/other.py\n@@ -1 +1 @@\n-old\n+new\n"
+    )
+
+    assert orchestrator._diff_paths_are_scoped(scoped, "app/owner.py") is True
+    assert orchestrator._diff_paths_are_scoped(escaped, "app/owner.py") is False
+    assert (
+        orchestrator._diff_paths_are_scoped(
+            "--- a/app/owner.py\n+++ /app/owner.py\n@@ -1 +1 @@\n-old\n+new\n",
+            "app/owner.py",
+        )
+        is False
+    )
+
+
+def test_source_owner_discovery_rejects_external_symlink(tmp_path):
+    outside = tmp_path.parent / f"outside-{tmp_path.name}.py"
+    outside.write_text("SECRET = 'outside'\n", encoding="utf-8")
+    link = tmp_path / "app/services/owner.py"
+    test_file = tmp_path / "tests/test_owner.py"
+    link.parent.mkdir(parents=True)
+    test_file.parent.mkdir(parents=True)
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        outside.unlink(missing_ok=True)
+        pytest.skip("symlink creation is unavailable on this host")
+    test_file.write_text(
+        "from app.services.owner import SECRET\n\n"
+        "def test_owner():\n    assert SECRET\n",
+        encoding="utf-8",
+    )
+    try:
+        candidates = orchestrator.validation_source_owner_candidates(
+            tmp_path,
+            [
+                {
+                    "step_key": "pytest_targeted",
+                    "exit_code": 1,
+                    "test_files": ["tests/test_owner.py"],
+                }
+            ],
+        )
+        assert candidates == []
+        assert orchestrator._safe_edit_worktree_path(
+            tmp_path,
+            "app/services/owner.py",
+        ) is None
+    finally:
+        outside.unlink(missing_ok=True)
+
+
+def test_validation_repair_context_retains_rejected_attempt_evidence():
+    context = orchestrator.validation_repair_context(
+        [{"step_key": "pytest_targeted", "exit_code": 1, "stdout": "1 failed"}],
+        prior_attempts=[
+            {
+                "round": 1,
+                "model": "qwen2.5-coder:7b",
+                "decision": "no_measurable_validation_progress",
+                "rolled_back": True,
+                "attempted_diff": "- old\n+ wrong",
+                "validation_output": "still 1 failed",
+            }
+        ],
+    )
+
+    text = orchestrator.validation_repair_context_text(context)
+
+    assert "do not repeat rolled-back edits" in text
+    assert "qwen2.5-coder:7b" in text
+    assert "+ wrong" in text
+
+
+def test_local_repair_model_route_escalates_only_on_final_bounded_round(monkeypatch):
+    monkeypatch.setattr(orchestrator, "_LOCAL_ESCALATION_REPAIR_ROUNDS", 1)
+    monkeypatch.setattr(orchestrator, "_active_model_cooldowns", lambda: {})
+    monkeypatch.setattr(settings, "chili_code_local_model", "local-7b")
+    monkeypatch.setattr(
+        settings,
+        "chili_code_local_escalation_model",
+        "local-14b",
+    )
+    installed = ["local-7b", "local-14b"]
+
+    primary = orchestrator.local_repair_model_route(2, 3, installed_models=installed)
+    escalation = orchestrator.local_repair_model_route(3, 3, installed_models=installed)
+    unavailable = orchestrator.local_repair_model_route(
+        3,
+        3,
+        installed_models=["local-7b"],
+    )
+
+    assert primary["model"] == "local-7b"
+    assert primary["tier"] == "local_primary"
+    assert escalation["model"] == "local-14b"
+    assert escalation["tier"] == "local_escalation"
+    assert escalation["premium_calls_allowed"] == 0
+    assert unavailable["model"] == "local-7b"
 
 
 def test_plan_files_excludes_advisory_non_mutating_entries():

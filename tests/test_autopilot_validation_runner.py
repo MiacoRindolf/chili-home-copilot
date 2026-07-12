@@ -131,6 +131,8 @@ def test_run_validation_does_not_crash_with_changed_files(tmp_path):
     assert "pytest_targeted" in by_key
     # Honesty marker is surfaced into the orchestrator payload.
     assert "tests_executed" in by_key["pytest_targeted"]
+    assert "test_files" in by_key["pytest_targeted"]
+    assert "validation_scope" in by_key["pytest_targeted"]
 
 
 # ── TEST_DATABASE_URL passthrough (fail-closed) ──────────────────────────

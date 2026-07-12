@@ -407,6 +407,14 @@ class Settings(BaseSettings):
         default="qwen2.5-coder:7b",
         validation_alias=AliasChoices("CHILI_CODE_LOCAL_MODEL"),
     )
+    chili_code_local_escalation_model: str = Field(
+        default="qwen2.5-coder:14b",
+        validation_alias=AliasChoices("CHILI_CODE_LOCAL_ESCALATION_MODEL"),
+        description=(
+            "Optional larger Ollama coder used only by bounded local repair escalation. "
+            "An empty value disables local escalation."
+        ),
+    )
     # Default production policy: local model or a clean failure. Cloud fallback
     # requires an explicit operator opt-in and is never needed by Autopilot.
     chili_code_premium_fallback_enabled: bool = Field(
